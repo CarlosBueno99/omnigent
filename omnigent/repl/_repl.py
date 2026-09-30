@@ -1392,6 +1392,7 @@ class _SessionsChatReplAdapter:
         self._last_streamed_item_id: str | None = None
         self._last_streamed_status: str | None = None
         self._replayed_item_ids: set[str] = set()
+        self._replayed_status: str | None = None
         self._stream_task: asyncio.Task[None] | None = None
         self._recover_task: asyncio.Task[None] | None = None
         self._recover_lock = asyncio.Lock()
@@ -2226,6 +2227,10 @@ class _SessionsChatReplAdapter:
         never hangs even when the adapter is used without
         ``run_repl()`` (e.g. integration tests).
 
+        After a reconnect, the new subscription's first event triggers
+        :meth:`_reconcile_stream_gap`, which replays from REST whatever
+        the gap dropped.
+
         Cancelled on REPL exit via ``_stream_task.cancel()``.
         """
         from omnigent.server.schemas import OutputItemDoneEvent as _ItemDoneEv
@@ -2234,6 +2239,12 @@ class _SessionsChatReplAdapter:
         _dbg = bool(os.environ.get("OMNIGENT_SESSIONS_ADAPTER_DEBUG"))
         backoff = 0.5
         max_backoff = 5.0
+        # Each pump task streams one session; never carry another
+        # session's cursor or status into this one.
+        self._last_streamed_item_id = None
+        self._last_streamed_status = None
+        self._replayed_item_ids = set()
+        self._replayed_status = None
         reconnecting = False
         assert self._session_id is not None
         while True:
@@ -2244,13 +2255,20 @@ class _SessionsChatReplAdapter:
                         file=sys.stderr,
                         flush=True,
                     )
-                if reconnecting:
-                    # A narrow race remains (an event between the snapshot and
-                    # the new subscription); the next reconnect reconciles it.
-                    await self._reconcile_stream_gap()
+                reconcile_pending = reconnecting
                 reconnecting = True
                 async for event in self._client.sessions.stream(self._session_id):
+                    if reconcile_pending:
+                        # The server registers the live-tail slot before it
+                        # sends anything, so REST state read now is never
+                        # ahead of the tail; anything seen twice is deduped.
+                        reconcile_pending = False
+                        await self._reconcile_stream_gap()
                     if isinstance(event, _StatusEv):
+                        if event.status == self._replayed_status:
+                            self._replayed_status = None
+                            continue  # live copy of the reconciled status
+                        self._replayed_status = None
                         self._last_streamed_status = event.status
                         if event.status in ("idle", "waiting", "failed"):
                             turn_done = getattr(self, "_turn_done", None)
@@ -2327,12 +2345,17 @@ class _SessionsChatReplAdapter:
 
         if self._on_event is None or self._session_id is None:
             return
+        session_id = self._session_id
         try:
-            if self._last_streamed_item_id is not None:
-                missed = await self._client.sessions.list_items(
-                    self._session_id, after=self._last_streamed_item_id
+            cursor = self._last_streamed_item_id
+            while cursor is not None:
+                page = await self._client.sessions.list_items(
+                    session_id,
+                    limit=_LIST_ITEMS_PAGE_SIZE,
+                    after=cursor,
+                    order="asc",
                 )
-                for item in missed:
+                for item in page:
                     item_id = item.get("id")
                     if isinstance(item_id, str) and item_id:
                         self._last_streamed_item_id = item_id
@@ -2341,23 +2364,32 @@ class _SessionsChatReplAdapter:
                     if item.get("type") == "message" and item.get("role") == "user":
                         continue
                     self._on_event(_ItemDoneEv(type="response.output_item.done", item=item))
-            snapshot = await self._client.sessions.get(self._session_id)
+                if len(page) < _LIST_ITEMS_PAGE_SIZE or self._last_streamed_item_id == cursor:
+                    break
+                cursor = self._last_streamed_item_id
+        except StaleCursorError:
+            # The cursor item is gone (history cleared); what followed it
+            # cannot be recovered, so resume from the live tail.
+            self._last_streamed_item_id = None
+        except Exception as exc:  # noqa: BLE001 — reconciliation is best-effort
+            _log.info("stream gap item reconciliation failed: %s", exc)
+        try:
+            snapshot = await self._client.sessions.get(session_id)
             status = getattr(snapshot, "status", None)
             if isinstance(status, str) and status != self._last_streamed_status:
                 self._last_streamed_status = status
+                self._replayed_status = status
                 if status in ("idle", "waiting", "failed"):
                     turn_done = getattr(self, "_turn_done", None)
                     if turn_done is not None:
                         turn_done.set()
                 self._on_event(
-                    _StatusEv(
-                        type="session.status",
-                        conversation_id=self._session_id,
-                        status=status,
+                    _StatusEv.model_validate(
+                        {"type": "session.status", "conversation_id": session_id, "status": status}
                     )
                 )
         except Exception as exc:  # noqa: BLE001 — reconciliation is best-effort
-            _log.info("stream gap reconciliation failed: %s", exc)
+            _log.info("stream gap status reconciliation failed: %s", exc)
 
     async def send(
         self,
@@ -6103,10 +6135,11 @@ async def _update_context_ring_estimate(
     # cl100k_base. Both values are read from the session at call
     # time, not captured at task-spawn time, so they stay current.
     llm = getattr(session, "llm_model", None) or session.model
-    tokens = count_tokens(
-        [dict(i) for i in effective],
-        llm,
-    )
+    try:
+        tokens = count_tokens([dict(i) for i in effective], llm)
+    except Exception:  # noqa: BLE001 — background estimate at the REPL UI boundary: a stale ring beats an unhandled-task traceback
+        _log.debug("context ring estimate failed", exc_info=True)
+        return
     host.update_context_usage(tokens, context_window)
 
 
