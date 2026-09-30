@@ -17,13 +17,14 @@
 const { defaultSchemeFor } = require("./url");
 
 /**
- * v1 accepted SPA path. `/c/<conversationId>` — a single path segment after
- * `/c/`, with an optional trailing slash. Anything else (other routes,
- * nested paths, empty id) is dropped silently: an unrecognized deep link
- * must never crash or mis-navigate, and the SPA's own router stays the
- * authority on what a valid conversation id is.
+ * v1 accepted SPA paths. `/c/<conversationId>` — a single path segment after
+ * `/c/`, with an optional trailing slash — or the server-home root `/`, which
+ * `omnigent start` opens. Anything else (other routes, nested paths, empty
+ * id) is dropped silently: an unrecognized deep link must never crash or
+ * mis-navigate, and the SPA's own router stays the authority on what a valid
+ * conversation id is.
  */
-const DEEP_LINK_PATH_RE = /^\/c\/[^/]+\/?$/;
+const DEEP_LINK_PATH_RE = /^\/$|^\/c\/[^/]+\/?$/;
 
 /**
  * Parse an `omnigent://` deep link into a server origin + an in-app path.
@@ -36,8 +37,8 @@ const DEEP_LINK_PATH_RE = /^\/c\/[^/]+\/?$/;
  *
  * @param {string} raw e.g. ``"omnigent://localhost:8000/c/conv_abc"``.
  * @returns {{ origin: string, path: string } | null} ``null`` for anything
- *   that isn't a valid `omnigent://.../c/<id>` link (wrong scheme, no host,
- *   non-`/c/` path, unparseable input).
+ *   that isn't a valid `omnigent://.../c/<id>` or `omnigent://.../` link
+ *   (wrong scheme, no host, other path, unparseable input).
  */
 function parseOmnigentDeepLink(raw) {
   let url;
@@ -49,7 +50,9 @@ function parseOmnigentDeepLink(raw) {
   if (url.protocol !== "omnigent:") return null;
   // No host → a bare `omnigent://` or `omnigent:`; nothing to connect to.
   if (url.host === "") return null;
-  const path = url.pathname;
+  // A non-special scheme keeps an EMPTY pathname for `omnigent://host` —
+  // treat it as the server-home root so host-only links work.
+  const path = url.pathname === "" ? "/" : url.pathname;
   if (!DEEP_LINK_PATH_RE.test(path)) return null;
   // Infer the http(s) scheme from the host the same way the setup page does,
   // so a deep link to `localhost` is http and to a remote host is https. The

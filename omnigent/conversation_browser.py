@@ -19,6 +19,34 @@ from omnigent.util.server_url import WORKSPACE_UI_PATH, ServerUrl
 # is the inverse, for a URL copied out of the browser's address bar.
 _CONVERSATION_PATH_RE = re.compile(r"/c/[^/]+/?$")
 
+# Hosts the desktop app opens over http; all others use https (see LOCAL_HOSTS
+# in web/electron/src/url.js).
+_DEEP_LINK_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def deep_link_url(url: str) -> str | None:
+    """
+    Convert an http(s) Omnigent web URL to an ``omnigent://`` deep link.
+
+    The link carries only the host and the conversation route: the desktop app
+    infers the scheme and discovers any workspace mount itself, so mount
+    prefixes and the ``?o=`` org selector are dropped.
+
+    :param url: Absolute browser URL, e.g.
+        ``"https://ws.databricks.com/omnigent/c/conv_abc?o=123"``.
+    :returns: The deep link, e.g. ``"omnigent://ws.databricks.com/c/conv_abc"``
+        (``omnigent://<host>/`` without a conversation route), or ``None`` when
+        *url* is not http(s) or uses a scheme the desktop app would not infer.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    if parsed.scheme != ("http" if parsed.hostname in _DEEP_LINK_HTTP_HOSTS else "https"):
+        return None
+    match = _CONVERSATION_PATH_RE.search(parsed.path)
+    path = match.group(0) if match is not None else "/"
+    return urllib.parse.urlunsplit(("omnigent", parsed.netloc, path, "", ""))
+
 
 def strip_conversation_path(url: str) -> str:
     """
@@ -85,7 +113,7 @@ def conversation_url(base_url: str, conversation_id: str) -> str:
     return f"{base_url.rstrip('/')}{base_path}/c/{encoded_id}"
 
 
-def open_conversation_url(url: str) -> bool:
+def open_conversation_url(url: str, *, desktop: bool = False) -> bool:
     """
     Open a conversation URL in the user's default browser.
 
@@ -96,8 +124,25 @@ def open_conversation_url(url: str) -> bool:
 
     :param url: Absolute browser URL, e.g.
         ``"http://127.0.0.1:6767/c/conv_abc123"``.
+    :param desktop: When ``True``, hand the desktop app (web/electron) an
+        ``omnigent://`` deep link first, falling back to the browser.
     :returns: ``True`` when an opener accepted the URL, otherwise
         ``False``.
+    :raises OSError: If the platform opener cannot be executed.
+    """
+    if desktop:
+        deep_link = deep_link_url(url)
+        if deep_link is not None and _open_with_platform_opener(deep_link):
+            return True
+    return _open_with_platform_opener(url)
+
+
+def _open_with_platform_opener(url: str) -> bool:
+    """
+    Hand *url* to the platform opener.
+
+    :param url: URL to open, e.g. ``"http://127.0.0.1:6767/c/conv_abc123"``.
+    :returns: ``True`` when the opener accepted the URL.
     :raises OSError: If the platform opener cannot be executed.
     """
     if sys.platform == "darwin":

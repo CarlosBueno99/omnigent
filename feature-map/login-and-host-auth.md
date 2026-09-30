@@ -89,7 +89,8 @@ be able to write resources without a separate Omnigent account.
 **CLI sign-in:** `omnigent login <server-url>`.
 
 **Host:** `omnigent host <server-url>` (or `--server`), `omnigent host ""` for a
-local server, `--background`, `--no-open`, `--non-interactive`, and the
+local server, `--background`, `--no-open`, `--open-in-desktop`,
+`--non-interactive`, and the
 management commands `status`, `stop`, `stop-session`, `reset-id`, `enable`,
 and `disable`.
 

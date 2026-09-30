@@ -351,3 +351,74 @@ def test_announce_conversation_url_defaults_to_stderr(
     out, err = capsys.readouterr()
     assert out == ""
     assert err.strip() == f"{browser.SESSION_URL_ANNOUNCE_PREFIX}http://127.0.0.1:6767/c/x"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # A plain conversation link keeps host + route only.
+        ("http://127.0.0.1:6767/c/conv_abc", "omnigent://127.0.0.1:6767/c/conv_abc"),
+        # Workspace mount and org selector are dropped — the desktop shell
+        # infers the scheme and discovers the mount itself.
+        (
+            "https://ws.databricks.com/omnigent/c/conv_abc?o=123",
+            "omnigent://ws.databricks.com/c/conv_abc",
+        ),
+        # A local --base-path prefix is likewise not part of the deep link.
+        (
+            "http://127.0.0.1:6767/proxy/6767/c/conv_abc",
+            "omnigent://127.0.0.1:6767/c/conv_abc",
+        ),
+        # Server-home URLs (what `omnigent start` opens) map to the root link.
+        ("http://127.0.0.1:6767", "omnigent://127.0.0.1:6767/"),
+        ("https://ws.databricks.com/omnigent/", "omnigent://ws.databricks.com/"),
+        # The desktop shell would infer the wrong scheme, so keep the browser URL.
+        ("http://10.0.0.5:6767/c/conv_abc", None),
+        ("https://localhost:6767/c/conv_abc", None),
+        ("http://[::1]:6767/", "omnigent://[::1]:6767/"),
+        # Non-http(s) input has no deep link.
+        ("omnigent://x/c/y", None),
+        ("not a url", None),
+    ],
+)
+def test_deep_link_url(url: str, expected: str | None) -> None:
+    """Web UI URLs rewrite to omnigent:// deep links carrying host + SPA route.
+
+    :param url: Input browser URL.
+    :param expected: Expected deep link, or None.
+    :returns: None.
+    """
+    assert browser.deep_link_url(url) == expected
+
+
+def test_open_conversation_url_desktop_falls_back_to_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deep link no app accepts (desktop app not installed) opens the web URL.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :returns: None.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        """
+        Reject ``omnigent://`` URLs the way ``open`` does with no handler.
+
+        :param args: Opener argv, e.g. ``["open", "omnigent://h/c/x"]``.
+        :param kwargs: Ignored subprocess options.
+        :returns: A completed process; non-zero for deep links.
+        """
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 1 if args[1].startswith("omnigent:") else 0)
+
+    monkeypatch.setattr(browser.sys, "platform", "darwin")
+    monkeypatch.setattr(browser.subprocess, "run", fake_run)
+
+    opened = browser.open_conversation_url("http://127.0.0.1:6767/c/conv_abc", desktop=True)
+
+    assert opened is True
+    assert calls == [
+        ["open", "omnigent://127.0.0.1:6767/c/conv_abc"],
+        ["open", "http://127.0.0.1:6767/c/conv_abc"],
+    ]

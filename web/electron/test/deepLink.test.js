@@ -68,12 +68,23 @@ describe("parseOmnigentDeepLink", () => {
     assert.equal(parseOmnigentDeepLink("omnigent:///c/x"), null);
   });
 
+  it("accepts the server-home root path", () => {
+    // `omnigent start` opens the host UI root, not a conversation.
+    assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000/"), {
+      origin: "http://localhost:8000",
+      path: "/",
+    });
+    assert.deepEqual(parseOmnigentDeepLink("omnigent://localhost:8000"), {
+      origin: "http://localhost:8000",
+      path: "/",
+    });
+  });
+
   it("rejects non-/c/<id> paths", () => {
     assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/inbox"), null);
     assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/settings/appearance"), null);
     assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/c/"), null); // empty id
     assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/c/a/b"), null); // nested path
-    assert.equal(parseOmnigentDeepLink("omnigent://localhost:8000/"), null);
   });
 
   it("rejects unparseable / non-string input", () => {

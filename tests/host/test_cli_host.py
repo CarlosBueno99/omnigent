@@ -2370,7 +2370,7 @@ def test_host_web_ui_open_gates(
         patch("omnigent.host.connect.run_host_process", lambda server_url, **kwargs: None),
         patch(
             "omnigent.conversation_browser.open_conversation_url",
-            lambda url: opened.append(url) or True,
+            lambda url, **_: opened.append(url) or True,
         ),
     ):
         result = CliRunner().invoke(
@@ -2398,7 +2398,7 @@ def test_host_remote_web_ui_open_preference(
         patch("omnigent.host.connect.run_host_process", lambda server_url, **kwargs: None),
         patch(
             "omnigent.conversation_browser.open_conversation_url",
-            lambda url: opened.append(url) or True,
+            lambda url, **_: opened.append(url) or True,
         ),
     ):
         result = CliRunner().invoke(
@@ -2444,7 +2444,7 @@ def test_background_host_web_ui_open_preference(
 
     with patch(
         "omnigent.conversation_browser.open_conversation_url",
-        lambda url: opened.append(url) or True,
+        lambda url, **_: opened.append(url) or True,
     ):
         result = CliRunner().invoke(
             cli, [*command, *extra_args], env={"OMNIGENT_HOST_NO_OPEN": no_open_env}

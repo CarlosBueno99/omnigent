@@ -1181,8 +1181,9 @@ The link names a server by **host** (with port if non-default) and carries no
 uses (`http` for loopback, `https` for a remote host), so a deep link and a
 pasted URL can never disagree. The Databricks workspace mount (`/omnigent`)
 is **not** in the link; it is server-determined and discovered the same way a
-pasted workspace URL is. v1 accepts only `/c/<session_id>`; other paths are
-ignored.
+pasted workspace URL is. v1 accepts `/c/<session_id>` and the server-home root
+`/`; other paths are ignored. `omnigent start --open-in-desktop` emits these
+links.
 
 **Window handling** (the careful part):
 

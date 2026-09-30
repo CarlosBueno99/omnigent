@@ -22,11 +22,18 @@ from tests.e2e.omnigent.test_host_ctrl_c_stop_server import (
 
 
 @pytest.mark.parametrize(
-    ("extra_args", "no_open_env", "expect_open"),
+    ("extra_args", "extra_env", "expect_open"),
     [
-        pytest.param([], None, True, id="default-opens"),
-        pytest.param(["--no-open"], None, False, id="flag-suppresses"),
-        pytest.param([], "1", False, id="env-suppresses"),
+        pytest.param([], {}, "http://127.0.0.1:{port}", id="default-opens"),
+        pytest.param(["--no-open"], {}, None, id="flag-suppresses"),
+        pytest.param([], {"OMNIGENT_HOST_NO_OPEN": "1"}, None, id="env-suppresses"),
+        pytest.param(["--open-in-desktop"], {}, "omnigent://127.0.0.1:{port}/", id="flag-desktop"),
+        pytest.param(
+            [],
+            {"OMNIGENT_HOST_OPEN_IN_DESKTOP": "1"},
+            "omnigent://127.0.0.1:{port}/",
+            id="env-desktop",
+        ),
     ],
 )
 def test_host_browser_preference(
@@ -35,16 +42,16 @@ def test_host_browser_preference(
     mock_credentials_env: dict[str, str],
     tmp_path: Path,
     extra_args: list[str],
-    no_open_env: str | None,
-    expect_open: bool,
+    extra_env: dict[str, str],
+    expect_open: str | None,
 ) -> None:
-    """A host comes online with or without a browser tab, as requested."""
+    """A host comes online with no tab, a browser tab, or a desktop deep link."""
     home = tmp_path / "home"
     env = _connect_env(mock_credentials_env, home)
     env["OMNIGENT_CONFIG_HOME"] = str(tmp_path / "config")
     env.pop("OMNIGENT_HOST_NO_OPEN", None)
-    if no_open_env is not None:
-        env["OMNIGENT_HOST_NO_OPEN"] = no_open_env
+    env.pop("OMNIGENT_HOST_OPEN_IN_DESKTOP", None)
+    env.update(extra_env)
 
     # Record browser launches without opening a real browser on macOS or Linux.
     browser_log = tmp_path / "browser.log"
@@ -68,7 +75,7 @@ def test_host_browser_preference(
     try:
         _, port = _boot_connect_and_get_server(child, home)
         opened = browser_log.read_text().splitlines() if browser_log.exists() else []
-        assert opened == ([f"http://127.0.0.1:{port}"] if expect_open else [])
+        assert opened == ([expect_open.format(port=port)] if expect_open else [])
 
         child.sendcontrol("c")
         child.expect_exact(_PROMPT_MARKER, timeout=_PROMPT_TIMEOUT)
