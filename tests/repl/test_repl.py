@@ -3354,3 +3354,91 @@ def test_describe_active_credential_declines_own_auth_acp_harnesses() -> None:
     # resolver: qwen consumes the openai family at spawn.
     qwen_cred = describe_active_credential(config, "qwen")
     assert qwen_cred is not None and qwen_cred.provider_name == "openai"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Stream-gap reconciliation: /stream does not replay, so events a
+# proxy idle-cut drops must be recovered from REST on reconnect.
+# ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stream_pump_reconciles_output_and_status_missed_during_reconnect() -> None:
+    """A turn that ends while /stream is reconnecting still renders and ends.
+
+    Failure meaning: the REPL shows "streaming…" forever and never prints the
+    final answer when the server-side turn finished during a reconnect gap.
+    """
+    import asyncio
+    import contextlib
+    import types
+
+    import httpx
+
+    from omnigent.repl._repl import _SessionsChatReplAdapter
+    from omnigent.server.schemas import OutputItemDoneEvent, SessionStatusEvent
+
+    final = {"id": "m2", "type": "message", "role": "assistant", "content": "done"}
+    subscriptions = 0
+    rendered: list[object] = []
+    reconnected = asyncio.Event()
+
+    async def _stream(session_id: str):
+        nonlocal subscriptions
+        subscriptions += 1
+        if subscriptions == 1:
+            yield SessionStatusEvent(
+                type="session.status", conversation_id=session_id, status="running"
+            )
+            yield OutputItemDoneEvent(
+                type="response.output_item.done",
+                item={"id": "m1", "type": "message", "role": "assistant", "content": "hi"},
+            )
+            raise httpx.RemoteProtocolError("idle cut")
+        # A late live copy of an item reconciliation already rendered.
+        yield OutputItemDoneEvent(type="response.output_item.done", item=final)
+        reconnected.set()
+        await asyncio.Event().wait()
+
+    async def _list_items(session_id: str, *, after: str | None = None, **_: object):
+        assert after == "m1"
+        user = {"id": "u2", "type": "message", "role": "user", "content": "next"}
+        return [user, final]
+
+    async def _get(session_id: str):
+        return types.SimpleNamespace(status="idle")
+
+    adapter = object.__new__(_SessionsChatReplAdapter)
+    adapter._session_id = "conv_gap"
+    adapter._client = types.SimpleNamespace(
+        sessions=types.SimpleNamespace(stream=_stream, list_items=_list_items, get=_get)
+    )
+    adapter._on_event = rendered.append
+    adapter._runner_recover = None
+    adapter._last_streamed_item_id = None
+    adapter._last_streamed_status = None
+    adapter._replayed_item_ids = set()
+    adapter._turn_done = asyncio.Event()
+
+    pump = asyncio.create_task(adapter._stream_pump())
+    try:
+        await asyncio.wait_for(reconnected.wait(), timeout=10)
+        await asyncio.sleep(0)
+    finally:
+        pump.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pump
+
+    def _describe(event: object) -> tuple[str, str]:
+        if isinstance(event, SessionStatusEvent):
+            return ("status", event.status)
+        assert isinstance(event, OutputItemDoneEvent)
+        return ("item", str(event.item["id"]))
+
+    assert [_describe(e) for e in rendered] == [
+        ("status", "running"),
+        ("item", "m1"),
+        ("item", "m2"),
+        ("status", "idle"),
+    ], "missed output must render once, user echoes skipped, then the idle status"
+    assert adapter._turn_done.is_set()

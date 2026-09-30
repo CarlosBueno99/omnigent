@@ -1387,6 +1387,11 @@ class _SessionsChatReplAdapter:
         # event — always, regardless of whether send() is active.
         # Set by run_repl() to the rendering callback.
         self._on_event: Callable[[object], None] | None = None
+        # Last item / status the pump delivered: the /stream endpoint does not
+        # replay, so a reconnect reconciles everything after these from REST.
+        self._last_streamed_item_id: str | None = None
+        self._last_streamed_status: str | None = None
+        self._replayed_item_ids: set[str] = set()
         self._stream_task: asyncio.Task[None] | None = None
         self._recover_task: asyncio.Task[None] | None = None
         self._recover_lock = asyncio.Lock()
@@ -2223,11 +2228,13 @@ class _SessionsChatReplAdapter:
 
         Cancelled on REPL exit via ``_stream_task.cancel()``.
         """
+        from omnigent.server.schemas import OutputItemDoneEvent as _ItemDoneEv
         from omnigent.server.schemas import SessionStatusEvent as _StatusEv
 
         _dbg = bool(os.environ.get("OMNIGENT_SESSIONS_ADAPTER_DEBUG"))
         backoff = 0.5
         max_backoff = 5.0
+        reconnecting = False
         assert self._session_id is not None
         while True:
             try:
@@ -2237,15 +2244,24 @@ class _SessionsChatReplAdapter:
                         file=sys.stderr,
                         flush=True,
                     )
+                if reconnecting:
+                    # A narrow race remains (an event between the snapshot and
+                    # the new subscription); the next reconnect reconciles it.
+                    await self._reconcile_stream_gap()
+                reconnecting = True
                 async for event in self._client.sessions.stream(self._session_id):
-                    if isinstance(event, _StatusEv) and event.status in (
-                        "idle",
-                        "waiting",
-                        "failed",
-                    ):
-                        turn_done = getattr(self, "_turn_done", None)
-                        if turn_done is not None:
-                            turn_done.set()
+                    if isinstance(event, _StatusEv):
+                        self._last_streamed_status = event.status
+                        if event.status in ("idle", "waiting", "failed"):
+                            turn_done = getattr(self, "_turn_done", None)
+                            if turn_done is not None:
+                                turn_done.set()
+                    elif isinstance(event, _ItemDoneEv):
+                        item_id = event.item.get("id")
+                        if isinstance(item_id, str) and item_id:
+                            if item_id in self._replayed_item_ids:
+                                continue  # already rendered by reconciliation
+                            self._last_streamed_item_id = item_id
                     if self._on_event is not None:
                         self._on_event(event)
                 # Clean close (server sent [DONE]). Reopen.
@@ -2296,6 +2312,52 @@ class _SessionsChatReplAdapter:
                     )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
+
+    async def _reconcile_stream_gap(self) -> None:
+        """Deliver what a /stream reconnect gap dropped.
+
+        The endpoint does not replay history, so a turn that finished while the
+        pump was reconnecting (e.g. an idle-timeout on a proxy between client
+        and server) would never render its output or end its spinner. Replays
+        items created after the last one the pump delivered, then the current
+        session status if it changed. Best-effort: failures just log.
+        """
+        from omnigent.server.schemas import OutputItemDoneEvent as _ItemDoneEv
+        from omnigent.server.schemas import SessionStatusEvent as _StatusEv
+
+        if self._on_event is None or self._session_id is None:
+            return
+        try:
+            if self._last_streamed_item_id is not None:
+                missed = await self._client.sessions.list_items(
+                    self._session_id, after=self._last_streamed_item_id
+                )
+                for item in missed:
+                    item_id = item.get("id")
+                    if isinstance(item_id, str) and item_id:
+                        self._last_streamed_item_id = item_id
+                        self._replayed_item_ids.add(item_id)
+                    # User turns are rendered from session.input.* events.
+                    if item.get("type") == "message" and item.get("role") == "user":
+                        continue
+                    self._on_event(_ItemDoneEv(type="response.output_item.done", item=item))
+            snapshot = await self._client.sessions.get(self._session_id)
+            status = getattr(snapshot, "status", None)
+            if isinstance(status, str) and status != self._last_streamed_status:
+                self._last_streamed_status = status
+                if status in ("idle", "waiting", "failed"):
+                    turn_done = getattr(self, "_turn_done", None)
+                    if turn_done is not None:
+                        turn_done.set()
+                self._on_event(
+                    _StatusEv(
+                        type="session.status",
+                        conversation_id=self._session_id,
+                        status=status,
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 — reconciliation is best-effort
+            _log.info("stream gap reconciliation failed: %s", exc)
 
     async def send(
         self,
