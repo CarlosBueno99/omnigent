@@ -252,6 +252,15 @@ Cross-harness journeys:
   `tests/harnesses/codex_native/session/test_terminal_prepare.py::test_prepare_codex_terminal_resumes_with_launch_provider`
   covers the CLI resume call site with configured and unpinned launches.
 - **`chat-render`, `steer`, per harness:** use the matrix.
+- **`chat-render`, Claude web delivery beneath a truncated title:**
+  `tests/e2e_ui/chat/test_claude_truncated_title_delivery.py::test_web_message_reaches_claude_beneath_a_truncated_title`
+  uses real Claude Code 2.1.296+ and tmux with scripted model replies. It renames and
+  narrows the native terminal until the title consumes its opening rule, then
+  sends from web chat and verifies one persisted reply, the same terminal
+  process, and reload. Run through the verification instance with recording.
+  Machine-managed Claude settings require an isolated container for the mock
+  provider. Older CLI renderers wrap this fixture's title and are skipped
+  explicitly. Terminal-only input does not use the web delivery readiness gate.
 - **`chat-render`, Claude shell commands from the web composer:**
   `tests/browser_ui/chat/test_native_shell_settlement.py::test_shell_mirror_settles_its_bubble_before_the_next_prompt`
   drives the built SPA at desktop and phone widths with controlled backend
