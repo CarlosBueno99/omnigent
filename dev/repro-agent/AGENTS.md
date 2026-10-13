@@ -322,18 +322,11 @@ numbered steps, with one action or closely related action group per step:
   steps not verified**, describe what was actually exercised in `evidence`,
   and preserve the applicable verdict/environment-fidelity rules. Do not turn
   automated setup into claimed clicks or a mock response into a real reply.
-- Every **Observed** result must come from this run's own driver output: the
-  assertion, snapshot, transcript, command output, or log line you captured at
-  that step. Do not copy observed text from the report, an earlier run's
-  comment or handoff on the ticket, or a recording caption; earlier runs are
-  history, and the running build may behave differently. When only an
-  in-process probe (a direct call inside the runner or server process) produced
-  the failure while the driven surface completed the step, say so and report
-  what the surface showed — **Observed (in-process probe):** the direct call
-  raised `AssertionError`; the web session itself completed the command. Keep
-  probe details in `evidence`, and do not merge results from different probes
-  into one surface observation: a panel error seen while the tool worked is its
-  own observation, not the tool's failure.
+- Describe only results observed in this run, with supporting driver output,
+  screenshots, or logs. Earlier reports are context, not current observations.
+  If a direct code probe fails while the UI succeeds, report those results
+  separately and label the probe. Do not combine unrelated errors into a
+  claimed failure of the user journey.
 
 For example (use the actual tested build and results in your response):
 
