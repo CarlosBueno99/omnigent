@@ -2279,3 +2279,26 @@ async def test_config_sync_last_writer_wins_and_unchanged_reports_are_acked(db_u
     await _report_config(host_a, 2, {"providers": {"work": {"kind": "key"}}}, changed=True)
     await _assert_no_output(host_a)
     assert config_store.get("alice@example.com") == SyncedConfig({"model": "from-machine-b"}, 2)
+
+
+async def test_config_sync_concurrent_reports_from_one_user_settle_in_revision_order(
+    db_uri: str,
+) -> None:
+    registry = HostRegistry()
+    config_store = UserConfigStore(db_uri)
+    config_store.save("alice@example.com", _SETTINGS_A)
+    app = _sync_app(db_uri, registry, config_store, authed_user="alice@example.com")
+    host_a = await _connect_sync_host(app, registry, _SYNC_HOST_A, "machine-a")
+    host_b = await _connect_sync_host(app, registry, _SYNC_HOST_B, "machine-b")
+
+    # Both machines edit at revision 1 before either hears about the other.
+    await _report_config(host_a, 1, {"model": "from-machine-a"}, changed=True)
+    await _report_config(host_b, 1, {"model": "from-machine-b"}, changed=True)
+
+    seen = {"a": [await _receive_config_update(host_a) for _ in range(2)]}
+    seen["b"] = [await _receive_config_update(host_b) for _ in range(2)]
+    final = config_store.get("alice@example.com")
+    assert final.revision == 3
+    for updates in seen.values():
+        assert [update.revision for update in updates] == [2, 3]
+        assert updates[-1].settings == final.settings

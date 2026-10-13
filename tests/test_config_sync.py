@@ -131,3 +131,17 @@ def test_validate_accepts_extracted_settings() -> None:
 def test_validate_rejects_non_portable_or_malformed_settings(value: object) -> None:
     with pytest.raises(ValueError):
         validate_synced_settings(value)
+
+
+def test_apply_canonicalizes_synced_harness_ids() -> None:
+    merged = apply_synced_settings(
+        {"harness": {"claude-sdk": {"command": "/opt/claude"}}},
+        {"harness": {"claude": {"args": ["--verbose"]}}},
+    )
+    assert merged == {"harness": {"claude-sdk": {"command": "/opt/claude", "args": ["--verbose"]}}}
+
+
+def test_validate_canonicalizes_and_merges_alias_harness_ids() -> None:
+    assert validate_synced_settings(
+        {"harness": {"default": "codex", "claude": {"args": ["a"]}, "claude-sdk": {"args": ["b"]}}}
+    ) == {"harness": {"claude-sdk": {"args": ["b"]}, "default": "codex"}}

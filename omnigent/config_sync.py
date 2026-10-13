@@ -146,7 +146,7 @@ def _apply_harness(local: object, synced: object) -> dict[str, object]:
             if key == "default":
                 default = value
             elif isinstance(key, str) and isinstance(value, Mapping):
-                result.setdefault(key, {}).update(value)
+                result.setdefault(_canonical(key), {}).update(value)
     harness: dict[str, object] = {key: entry for key, entry in result.items() if entry}
     if default is not None:
         harness["default"] = default
@@ -162,6 +162,8 @@ def validate_synced_settings(value: object) -> SyncedSettings:
     """
     if not isinstance(value, Mapping):
         raise ValueError("synced settings must be a JSON object")
+    if len(json.dumps(value, default=str)) > MAX_SYNCED_SETTINGS_BYTES:
+        raise ValueError(f"synced settings exceed {MAX_SYNCED_SETTINGS_BYTES} bytes")
     result: SyncedSettings = {}
     for key, item in value.items():
         if key in SYNCED_MODEL_KEYS:
@@ -176,22 +178,22 @@ def validate_synced_settings(value: object) -> SyncedSettings:
             result[key] = _validate_harness(item)
         else:
             raise ValueError(f"unexpected synced setting {key!r}")
-    if len(json.dumps(result)) > MAX_SYNCED_SETTINGS_BYTES:
-        raise ValueError(f"synced settings exceed {MAX_SYNCED_SETTINGS_BYTES} bytes")
     return result
 
 
 def _validate_harness(value: object) -> dict[str, object]:
+    """Check a ``harness`` mapping and write its per-harness ids in canonical form."""
     if not isinstance(value, Mapping):
         raise ValueError("synced setting 'harness' must be a JSON object")
-    result: dict[str, object] = {}
+    default: str | None = None
+    entries: dict[str, dict[str, object]] = {}
     for key, item in value.items():
         if not isinstance(key, str) or not key:
             raise ValueError("synced harness ids must be non-empty strings")
         if key == "default":
             if not isinstance(item, str) or not item:
                 raise ValueError("synced setting 'harness.default' must be a non-empty string")
-            result[key] = item
+            default = item
             continue
         if not isinstance(item, Mapping):
             raise ValueError(f"synced setting 'harness.{key}' must be a JSON object")
@@ -206,7 +208,10 @@ def _validate_harness(value: object) -> dict[str, object]:
             entry[field] = list(field_value)
         if not entry:
             raise ValueError(f"synced setting 'harness.{key}' has no portable fields")
-        result[key] = entry
+        entries.setdefault(_canonical(key), {}).update(entry)
+    result: dict[str, object] = dict(entries)
+    if default is not None:
+        result["default"] = default
     return result
 
 

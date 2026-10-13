@@ -5,10 +5,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from playwright.sync_api import Page, expect
 
 from tests._helpers.host import Host, isolated_host
@@ -39,6 +42,19 @@ def _mock_providers(mock_llm_server_url: str) -> dict[str, object]:
             },
         },
     }
+
+
+def _wait_for_config(
+    machine: Host, predicate: Callable[[dict[str, object]], bool], *, timeout: float = 30
+) -> None:
+    """Settings arrive shortly after a host connects; wait for them instead of racing them."""
+    path = machine.home / ".omnigent" / "config.yaml"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and predicate(yaml.safe_load(path.read_text()) or {}):
+            return
+        time.sleep(0.5)
+    raise AssertionError(f"{machine.name}: config.yaml never received the synced settings")
 
 
 def _config_list(machine: Host, cwd: Path) -> str:
@@ -110,6 +126,7 @@ def test_codex_startup_setting_made_on_one_machine_is_shown_for_the_users_other_
     ):
         machine_a.wait_online(client, timeout=120)
         machine_b.wait_online(client, timeout=120)
+        _wait_for_config(machine_b, lambda cfg: cfg.get("model") == MACHINE_A_MODEL)
         defaults_a = _config_list(machine_a, tmp_path)
         defaults_b = _config_list(machine_b, tmp_path)
         assert f"model={MACHINE_A_MODEL}" in defaults_a, defaults_a

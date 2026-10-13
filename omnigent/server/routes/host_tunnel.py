@@ -98,6 +98,10 @@ _HEARTBEAT_FAILURE_LOG_INTERVAL_S = 60.0
 _DISCONNECT_CLEANUP_TIMEOUT_S = 5.0
 # WebSocket close codes a host sends on purpose: 1000 normal, 1001 going away.
 _CLEAN_CLOSE_CODES = frozenset({1000, 1001})
+# One lock per (workspace, owner) keeps a user's hosts from reconciling their
+# settings concurrently on this replica, so acks and fan-outs leave in revision order.
+# custom-lint: disable-next=workspace-scoped-cache -- key includes the workspace id
+_config_sync_locks: dict[tuple[int, str | None], asyncio.Lock] = {}
 
 RunnerExitedCallback = Callable[[str, str, str], Awaitable[None]]
 """Async ``(host_id, runner_id, error)`` hook for a ``host.runner_exited`` report."""
@@ -1167,26 +1171,34 @@ async def _sync_user_config(
     except ValueError as exc:
         _logger.warning("Host %s sent invalid synced settings; ignoring: %s", host_id, exc)
         return
-    try:
-        current = await asyncio.to_thread(store.get, conn.owner)
-        adopt = (frame.changed and (frame.revision > 0 or current.revision == 0)) or (
-            current.revision == 0 and frame.revision > 0
-        )
-        if adopt and settings != current.settings:
-            current = await asyncio.to_thread(store.save, conn.owner, settings)
-            update = encode_host_frame(HostConfigUpdateFrame(current.revision, current.settings))
-            for peer in host_registry.connections_for_owner(conn.owner, conn.workspace_id):
-                if peer is conn or CAP_CONFIG_SYNC not in peer.hello.capabilities:
-                    continue
-                with contextlib.suppress(ConnectionError):
-                    host_registry.send_text(peer, update)
-    except Exception:
-        _logger.exception("Host %s synced settings could not be reconciled", host_id)
-        return
-    with contextlib.suppress(ConnectionError):
-        host_registry.send_text(
-            conn, encode_host_frame(HostConfigUpdateFrame(current.revision, current.settings))
-        )
+    lock = _config_sync_locks.setdefault((conn.workspace_id, conn.owner), asyncio.Lock())
+    async with lock:
+        try:
+            current = await asyncio.to_thread(
+                store.get, conn.owner, workspace_id=conn.workspace_id
+            )
+            adopt = (frame.changed and (frame.revision > 0 or current.revision == 0)) or (
+                current.revision == 0 and frame.revision > 0
+            )
+            if adopt and settings != current.settings:
+                current = await asyncio.to_thread(
+                    store.save, conn.owner, settings, workspace_id=conn.workspace_id
+                )
+                update = encode_host_frame(
+                    HostConfigUpdateFrame(current.revision, current.settings)
+                )
+                for peer in host_registry.connections_for_owner(conn.owner, conn.workspace_id):
+                    if peer is conn or CAP_CONFIG_SYNC not in peer.hello.capabilities:
+                        continue
+                    with contextlib.suppress(ConnectionError):
+                        host_registry.send_text(peer, update)
+        except Exception:
+            _logger.exception("Host %s synced settings could not be reconciled", host_id)
+            return
+        with contextlib.suppress(ConnectionError):
+            host_registry.send_text(
+                conn, encode_host_frame(HostConfigUpdateFrame(current.revision, current.settings))
+            )
 
 
 async def _heartbeat_loop(

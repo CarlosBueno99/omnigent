@@ -14,9 +14,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from omnigent.config import global_config_path, load_global_config, save_global_config
+from omnigent.config import global_config_path, load_global_config, write_global_config
 from omnigent.config_sync import (
-    SYNCED_TOP_LEVEL_KEYS,
     SyncedSettings,
     apply_synced_settings,
     synced_settings,
@@ -84,8 +83,12 @@ def save_sync_state(state: ConfigSyncState, config_path: Path | None = None) -> 
         "settings": state.settings,
     }
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def build_sync_frame(server_url: str, config_path: Path | None = None) -> HostConfigSyncFrame:
@@ -108,22 +111,32 @@ def apply_config_update(
 ) -> bool:
     """Write the server's settings into the local config and record the revision.
 
+    A local edit made since the last sync that the server has not adopted yet is
+    kept, so neither an acknowledgement of an earlier report nor a peer's update
+    can erase it; the next report carries it instead. Callers serialize this
+    with their own reads of ``config.yaml``; the file is read once and the
+    merged result written back atomically.
+
     :returns: Whether ``config.yaml`` changed.
     :raises ValueError: If the frame's settings are malformed.
     """
     settings = validate_synced_settings(frame.settings)
     path = config_path or global_config_path()
     cfg = load_global_config(path)
-    merged = apply_synced_settings(cfg, settings)
-    changed = merged != cfg
-    if changed:
-        save_global_config(
-            {key: merged[key] for key in SYNCED_TOP_LEVEL_KEYS if key in merged},
-            unset_keys=tuple(key for key in SYNCED_TOP_LEVEL_KEYS if key not in merged),
-            path=path,
-        )
+    previous = load_sync_state(server_url, path)
     state = ConfigSyncState(server_url, frame.revision, settings)
-    if load_sync_state(server_url, path) != state:
+    pending_local_edit = (
+        previous is not None
+        and synced_settings(cfg) != previous.settings
+        and settings != synced_settings(cfg)
+    )
+    changed = False
+    if not pending_local_edit:
+        merged = apply_synced_settings(cfg, settings)
+        changed = merged != cfg
+        if changed:
+            write_global_config(merged, path)
+    if previous != state:
         save_sync_state(state, path)
     return changed
 

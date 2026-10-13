@@ -11,7 +11,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from sqlalchemy import LargeBinary, select, type_coerce
+from sqlalchemy import LargeBinary, select, type_coerce, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -80,6 +80,24 @@ def _row_query(user_id: str, workspace_id: int) -> Select[tuple[bytes]]:
     )
 
 
+def _insert_placeholder(dialect: str, key: dict[str, object]) -> Insert:
+    """Insert an empty revision-0 row unless one exists, so it can be locked."""
+    values = {**key, "value": _encode_synced_config(SyncedConfig())}
+    if dialect == "mysql":
+        return mysql_insert(SqlPreference).values(**values).prefix_with("IGNORE")
+    if dialect == "sqlite":
+        return (
+            sqlite_insert(SqlPreference)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["workspace_id", "user_id", "key"])
+        )
+    return (
+        pg_insert(SqlPreference)
+        .values(**values)
+        .on_conflict_do_nothing(index_elements=["workspace_id", "user_id", "key"])
+    )
+
+
 class UserConfigStore:
     """Read and replace a user's synced settings."""
 
@@ -95,69 +113,59 @@ class UserConfigStore:
             self._engine, query_name_prefix="omnigent.user_config_store", immediate=True
         )
 
-    def get(self, user_id: str | None) -> SyncedConfig:
-        """Return the user's synced settings in the current workspace.
+    def get(self, user_id: str | None, *, workspace_id: int | None = None) -> SyncedConfig:
+        """Return the user's synced settings.
 
         :param user_id: Owner of the settings, or ``None`` on a single-user server.
+        :param workspace_id: Tenant partition; defaults to the request-bound
+            :func:`current_workspace_id`.
         :returns: The stored settings, or revision 0 with no settings.
         """
         preference_user_id = RESERVED_USER_LOCAL if user_id is None else user_id
+        scope = current_workspace_id() if workspace_id is None else workspace_id
         with self._session("read_synced_config") as session:
-            raw = session.scalar(_row_query(preference_user_id, current_workspace_id()))
+            raw = session.scalar(_row_query(preference_user_id, scope))
         return _decode_synced_config(raw)
 
-    def save(self, user_id: str | None, settings: SyncedSettings) -> SyncedConfig:
+    def save(
+        self, user_id: str | None, settings: SyncedSettings, *, workspace_id: int | None = None
+    ) -> SyncedConfig:
         """Store *settings* as the next revision; identical settings keep the current one.
 
         :param user_id: Owner of the settings, or ``None`` on a single-user server.
         :param settings: Validated settings (see
             :func:`omnigent.config_sync.validate_synced_settings`).
-        :returns: The stored settings and their revision.
+        :param workspace_id: Tenant partition; defaults to the request-bound
+            :func:`current_workspace_id`.
+        :returns: The stored settings and their revision, as written.
         """
         preference_user_id = RESERVED_USER_LOCAL if user_id is None else user_id
+        scope = current_workspace_id() if workspace_id is None else workspace_id
+        key: dict[str, object] = {
+            "workspace_id": scope,
+            "user_id": preference_user_id,
+            "key": _SYNCED_CONFIG_KEY,
+        }
 
         def write(session: Session) -> SyncedConfig:
             require_active_account(session, user_id)
-            workspace_id = current_workspace_id()
-            raw = session.scalar(_row_query(preference_user_id, workspace_id).with_for_update())
+            # A missing row cannot be locked, so concurrent first saves would both
+            # compute revision 1; the placeholder gives FOR UPDATE a row to serialize on.
+            session.execute(_insert_placeholder(self._engine.dialect.name, key))
+            raw = session.scalar(_row_query(preference_user_id, scope).with_for_update())
             current = _decode_synced_config(raw)
             if current.settings == settings:
                 return current
             updated = SyncedConfig(dict(settings), current.revision + 1)
-            encoded = _encode_synced_config(updated)
-            values = {
-                "workspace_id": workspace_id,
-                "user_id": preference_user_id,
-                "key": _SYNCED_CONFIG_KEY,
-                "value": encoded,
-            }
-            dialect = self._engine.dialect.name
-            stmt: Insert
-            if dialect == "mysql":
-                stmt = (
-                    mysql_insert(SqlPreference)
-                    .values(**values)
-                    .on_duplicate_key_update(value=encoded)
+            session.execute(
+                update(SqlPreference)
+                .where(
+                    SqlPreference.workspace_id == scope,
+                    SqlPreference.user_id == preference_user_id,
+                    SqlPreference.key == _SYNCED_CONFIG_KEY,
                 )
-            elif dialect == "sqlite":
-                stmt = (
-                    sqlite_insert(SqlPreference)
-                    .values(**values)
-                    .on_conflict_do_update(
-                        index_elements=["workspace_id", "user_id", "key"],
-                        set_={"value": encoded},
-                    )
-                )
-            else:
-                stmt = (
-                    pg_insert(SqlPreference)
-                    .values(**values)
-                    .on_conflict_do_update(
-                        index_elements=["workspace_id", "user_id", "key"],
-                        set_={"value": encoded},
-                    )
-                )
-            session.execute(stmt)
+                .values(value=_encode_synced_config(updated))
+            )
             return updated
 
         return run_write_transaction(self._session_immediate, "save_synced_config", write)

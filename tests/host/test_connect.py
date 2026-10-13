@@ -2426,6 +2426,8 @@ async def test_fast_capability_discovery_is_included_in_hello(
     serve_task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
     try:
         await asyncio.wait_for(tunnel.first_send.wait(), timeout=1.0)
+        # The settings report follows the hello after a worker-thread read.
+        await asyncio.wait_for(tunnel.second_send.wait(), timeout=2.0)
     finally:
         await _cancel(serve_task)
 
@@ -9178,21 +9180,25 @@ async def test_config_sync_loop_reports_local_edits_and_polls_only_once_acked(
 
     task = asyncio.create_task(host._config_sync_loop(ws, initial))
     try:
-        # Unanswered, the report may have reached a server that predates config
-        # sync: nothing is re-sent while the local settings stay the same.
-        await asyncio.sleep(0.2)
-        assert ws.sent == []
+        # Unanswered, the report is repeated a bounded number of times: the
+        # server may predate config sync, or its first reconciliation failed.
+        await _poll_until(lambda: len(ws.sent) == 2)
+        await asyncio.sleep(0.3)
+        assert len(ws.sent) == 2
+        assert all(decode_host_frame(raw) == initial for raw in ws.sent)
 
+        # A local edit is still reported.
         (synced_config_home / "config.yaml").write_text("model: edited-locally\n")
-        await _poll_until(lambda: len(ws.sent) == 1)
-        assert decode_host_frame(ws.sent[0]) == HostConfigSyncFrame(
+        await _poll_until(lambda: len(ws.sent) == 3)
+        assert decode_host_frame(ws.sent[2]) == HostConfigSyncFrame(
             0, {"model": "edited-locally"}, True
         )
-        await asyncio.sleep(0.2)
-        assert len(ws.sent) == 1
+        await asyncio.sleep(0.3)
+        assert len(ws.sent) == 3
 
+        # Once answered, the host keeps polling for the user's other machines' changes.
         host._config_sync_acked = True
-        await _poll_until(lambda: len(ws.sent) >= 3)
+        await _poll_until(lambda: len(ws.sent) >= 5)
         assert decode_host_frame(ws.sent[-1]) == HostConfigSyncFrame(
             0, {"model": "edited-locally"}, True
         )
@@ -9241,4 +9247,53 @@ async def test_malformed_config_update_leaves_the_local_config_alone(
     assert (synced_config_home / "config.yaml").read_text() == _SYNCED_CONFIG_YAML
     assert not (synced_config_home / "config-sync.json").exists()
     assert "Ignoring malformed synced settings" in caplog.text
+    _cleanup_host(host)
+
+
+async def test_config_sync_report_and_update_share_one_lock(
+    monkeypatch: pytest.MonkeyPatch, synced_config_home: Path
+) -> None:
+    host = _make_host_process()
+    observed: list[bool] = []
+
+    def recording(wrapped: Callable[..., object]) -> Callable[..., object]:
+        def call(*args: object, **kwargs: object) -> object:
+            observed.append(host._config_sync_lock.locked())
+            return wrapped(*args, **kwargs)
+
+        return call
+
+    import omnigent.host.config_sync as config_sync
+
+    monkeypatch.setattr(config_sync, "build_sync_frame", recording(config_sync.build_sync_frame))
+    monkeypatch.setattr(
+        config_sync, "apply_config_update", recording(config_sync.apply_config_update)
+    )
+
+    assert host._build_config_sync_report() is not None
+    host._handle_config_update(HostConfigUpdateFrame(1, {"model": "from-server"}))
+
+    assert observed == [True, True]
+    assert not host._config_sync_lock.locked()
+    _cleanup_host(host)
+
+
+def test_oversized_local_settings_are_not_reported_and_warn_once(
+    synced_config_home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (synced_config_home / "config.yaml").write_text(
+        "harness:\n  codex-native:\n    args:\n"
+        + "".join(f"      - {'x' * 200}\n" for _ in range(100))
+    )
+    host = _make_host_process()
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.host.connect"):
+        assert host._build_config_sync_report() is None
+        assert host._build_config_sync_report() is None
+
+    assert caplog.text.count("local settings were not reported") == 1
+    (synced_config_home / "config.yaml").write_text("model: small-again\n")
+    assert host._build_config_sync_report() == HostConfigSyncFrame(
+        0, {"model": "small-again"}, True
+    )
     _cleanup_host(host)
