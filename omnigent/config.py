@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import stat
@@ -168,6 +169,17 @@ def global_config_lock(path: Path | None = None) -> Iterator[None]:
     with resolved.with_name(resolved.name + ".lock").open("a") as lock_file:
         if fcntl is not None:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
+        elif msvcrt is not None:
+            # msvcrt locks a byte range; the file is otherwise empty, so lock its first byte.
+            while True:
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)  # pyrefly: ignore[missing-attribute]
+                    break
+                except OSError as exc:
+                    # LK_LOCK gives up after ten seconds with EACCES/EDEADLOCK; keep waiting on
+                    # those only, and surface any other failure.
+                    if exc.errno not in (errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)):
+                        raise
         try:
             yield
         finally:
@@ -190,9 +202,16 @@ def write_global_config(cfg: Mapping[str, object], path: Path | None = None) -> 
     )
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(handle, "w") as config_file:
+        try:
+            config_file = os.fdopen(handle, "w")
+        except BaseException:
+            os.close(handle)
+            raise
+        with config_file:
             yaml.safe_dump(dict(cfg), config_file, default_flow_style=False, sort_keys=True)
-        if resolved.exists():
+            config_file.flush()
+            os.fsync(config_file.fileno())
+        with contextlib.suppress(FileNotFoundError):
             os.chmod(tmp, stat.S_IMODE(resolved.stat().st_mode))
         os.replace(tmp, resolved)
     except BaseException:

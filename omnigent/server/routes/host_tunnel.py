@@ -502,7 +502,10 @@ def create_host_tunnel_router(
                     # Shield teardown from ASGI cancellation, but do not let a
                     # stalled dependency hold shutdown indefinitely.
                     try:
-                        for task in (sender_task, ping_task, receive_task, heartbeat_task):
+                        pending_syncs = list(conn.config_sync_tasks)
+                        for task in (
+                            sender_task, ping_task, receive_task, heartbeat_task, *pending_syncs
+                        ):
                             task.cancel()
                         with anyio.move_on_after(
                             _DISCONNECT_CLEANUP_TIMEOUT_S, shield=True
@@ -513,6 +516,7 @@ def create_host_tunnel_router(
                                     ping_task,
                                     receive_task,
                                     heartbeat_task,
+                                    *pending_syncs,
                                     return_exceptions=True,
                                 )
                             finally:
@@ -835,7 +839,21 @@ async def _receive_loop(
 
         if isinstance(frame, HostConfigSyncFrame):
             if user_config_store is not None:
-                await _sync_user_config(conn, frame, host_id, user_config_store, host_registry)
+                # Reconcile off this loop: waiting for another of the user's hosts must
+                # not delay the result frames and readiness updates behind it.
+                conn.config_sync_task = asyncio.create_task(
+                    _sync_user_config_after(
+                        conn.config_sync_task,
+                        conn,
+                        frame,
+                        host_id,
+                        user_config_store,
+                        host_registry,
+                    ),
+                    name=f"host-config-sync:{host_id}",
+                )
+                conn.config_sync_tasks.add(conn.config_sync_task)
+                conn.config_sync_task.add_done_callback(conn.config_sync_tasks.discard)
             continue
 
         if isinstance(frame, HostLaunchRunnerResultFrame):
@@ -1140,6 +1158,22 @@ async def _receive_loop(
             host_id,
             type(frame).__name__,
         )
+
+
+async def _sync_user_config_after(
+    previous: asyncio.Task[None] | None,
+    conn: HostConnection,
+    frame: HostConfigSyncFrame,
+    host_id: str,
+    store: UserConfigStore,
+    host_registry: HostRegistry,
+) -> None:
+    """Reconcile one report after this connection's earlier one, keeping them ordered."""
+    if previous is not None:
+        # Only ordering matters here: the earlier reconcile contains its own
+        # failures, and a disconnect cancels every link of the chain directly.
+        await asyncio.wait([previous])
+    await _sync_user_config(conn, frame, host_id, store, host_registry)
 
 
 async def _sync_user_config(

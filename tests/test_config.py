@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -251,7 +252,8 @@ def test_write_global_config_leaves_no_temp_file_behind_on_failure(tmp_path: Pat
     assert sorted(p.name for p in path.parent.iterdir()) == ["config.yaml"]
     assert load_global_config(path) == {"model": "m"}
     write_global_config({"model": "n"}, path)
-    assert path.stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert path.stat().st_mode & 0o777 == 0o600
     assert sorted(p.name for p in path.parent.iterdir()) == ["config.yaml"]
 
 
@@ -279,3 +281,25 @@ def test_global_config_lock_serializes_writers(tmp_path: Path) -> None:
     worker.join(2.0)
     assert (path.parent / "config.yaml.lock").exists()
     assert order == ["first", "first-done", "second"]
+
+
+def test_write_global_config_keeps_the_previous_file_readable_until_the_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.config import write_global_config
+
+    path = tmp_path / ".omnigent" / "config.yaml"
+    write_global_config({"model": "old"}, path)
+    observed: list[dict[str, object]] = []
+    real_dump = yaml.safe_dump
+
+    def observing_dump(data, stream=None, **kwargs):
+        observed.append(load_global_config(path))
+        return real_dump(data, stream, **kwargs)
+
+    monkeypatch.setattr(_config_module.yaml, "safe_dump", observing_dump)
+    write_global_config({"model": "new"}, path)
+
+    # Another process reading during the write sees the complete old file, never a torn one.
+    assert observed == [{"model": "old"}]
+    assert load_global_config(path) == {"model": "new"}

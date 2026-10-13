@@ -9314,3 +9314,31 @@ def test_oversized_local_settings_are_not_reported_and_warn_once(
         assert host._build_config_sync_report() is None
     assert caplog.text.count("could not read the local config") == 1
     _cleanup_host(host)
+
+
+async def test_config_updates_apply_in_arrival_order_even_when_the_first_is_slow(
+    monkeypatch: pytest.MonkeyPatch, synced_config_home: Path
+) -> None:
+    import omnigent.host.config_sync as config_sync
+    from omnigent.config import load_global_config
+
+    real_apply = config_sync.apply_config_update
+    applied: list[int] = []
+
+    def slow_first(frame: HostConfigUpdateFrame, server_url: str, config_path: Path | None = None):
+        if not applied:
+            time.sleep(0.3)
+        applied.append(frame.revision)
+        return real_apply(frame, server_url, config_path)
+
+    monkeypatch.setattr(config_sync, "apply_config_update", slow_first)
+    host, ws = _make_host_process(), _RecordingWS()
+
+    host._start_frame_task(ws, encode_host_frame(HostConfigUpdateFrame(2, {"model": "second"})))
+    host._start_frame_task(ws, encode_host_frame(HostConfigUpdateFrame(3, {"model": "third"})))
+    await _drain_frame_tasks(host)
+
+    assert applied == [2, 3]
+    assert load_global_config(synced_config_home / "config.yaml")["model"] == "third"
+    assert config_sync.build_sync_frame(host._server_url).revision == 3
+    _cleanup_host(host)

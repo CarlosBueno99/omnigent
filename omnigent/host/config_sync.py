@@ -1,9 +1,10 @@
 """Keep this host's portable user settings in step with the server.
 
 The host reads its own ``config.yaml`` and the ``config-sync.json`` sidecar
-beside it, which records the revision and settings last exchanged with one
-server. See :mod:`omnigent.config_sync` for which keys travel and how the
-server reconciles them.
+beside it, which records, per server, the revision and settings last exchanged
+with it; daemons for different servers can share one config home. See
+:mod:`omnigent.config_sync` for which keys travel and how the server reconciles
+them.
 """
 
 from __future__ import annotations
@@ -59,35 +60,58 @@ def load_sync_state(server_url: str, config_path: Path | None = None) -> ConfigS
         another server.
     """
     path = sync_state_path(config_path)
+    servers = _read_servers(path)
+    entry = servers.get(server_url)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        revision = entry.get("revision")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("revision must be a non-negative int")
+        state = ConfigSyncState(
+            server_url, revision, validate_synced_settings(entry.get("settings"))
+        )
+    except ValueError as exc:
+        _warn_unreadable(path, exc)
+        return None
+    _UNREADABLE_STATE_WARNED.pop(path, None)
+    return state
+
+
+def _read_servers(path: Path) -> dict[str, object]:
+    """Return the sidecar's per-server entries; unreadable content reads as none."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None
+        return {}
     except (OSError, ValueError) as exc:
-        _logger.warning("Ignoring unreadable %s: %s", path, exc)
-        return None
-    if not isinstance(raw, dict) or raw.get("server_url") != server_url:
-        return None
-    try:
-        revision = raw.get("revision")
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
-            raise ValueError("revision must be a non-negative int")
-        return ConfigSyncState(server_url, revision, validate_synced_settings(raw.get("settings")))
-    except ValueError as exc:
+        _warn_unreadable(path, exc)
+        return {}
+    servers = raw.get("servers") if isinstance(raw, dict) else None
+    return dict(servers) if isinstance(servers, dict) else {}
+
+
+def _warn_unreadable(path: Path, exc: Exception) -> None:
+    cause = f"{type(exc).__name__}: {exc}"
+    if _UNREADABLE_STATE_WARNED.get(path) != cause:
+        _UNREADABLE_STATE_WARNED[path] = cause
         _logger.warning("Ignoring unreadable %s: %s", path, exc)
         return None
 
 
 def save_sync_state(state: ConfigSyncState, config_path: Path | None = None) -> None:
-    """Record *state* atomically in the sidecar."""
+    """Record *state* for its server in the sidecar, keeping other servers' entries.
+
+    Callers hold :func:`omnigent.config.global_config_lock`, which also covers
+    this read-modify-write.
+    """
     path = sync_state_path(config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "server_url": state.server_url,
-        "revision": state.revision,
-        "settings": state.settings,
-    }
-    tmp = path.with_name(path.name + ".tmp")
+    servers = _read_servers(path)
+    servers[state.server_url] = {"revision": state.revision, "settings": state.settings}
+    payload = {"servers": servers}
+    handle, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
     try:
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(tmp, path)

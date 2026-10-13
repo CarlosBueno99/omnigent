@@ -19,11 +19,8 @@ def store(db_uri: str) -> UserConfigStore:
     return UserConfigStore(db_uri)
 
 
-def test_get_without_a_row_is_revision_zero(store: UserConfigStore) -> None:
-    assert store.get("alice@example.com") == SyncedConfig({}, 0)
-
-
 def test_save_bumps_the_revision_only_when_settings_change(store: UserConfigStore) -> None:
+    assert store.get("alice@example.com") == SyncedConfig({}, 0)
     assert store.save("alice@example.com", {}) == SyncedConfig({}, 0)
     first = store.save("alice@example.com", _SETTINGS)
     assert first == SyncedConfig(_SETTINGS, 1)

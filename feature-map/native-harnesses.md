@@ -141,7 +141,8 @@ user against one server and seed `model` and `harness.codex-native.args` on the
 first only. Check that `omnigent config list` on the second machine and its
 Codex Startup configuration in Settings → Harnesses show the first machine's
 values, then change them on the first machine with `omnigent config set --global`
-and check that the second follows within a few seconds:
+and check that the second follows within a few seconds (a host connected to a
+different server replica catches up on its minute poll instead):
 `tests/e2e_ui/settings/test_host_config_follows_user.py::test_codex_startup_setting_made_on_one_machine_is_shown_for_the_users_other_machine`,
 `tests/server/integration/test_host_tunnel_route.py::test_config_sync_seeds_the_store_and_fans_out_to_the_owners_hosts`.
 

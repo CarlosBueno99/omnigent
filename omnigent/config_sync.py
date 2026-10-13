@@ -41,6 +41,7 @@ MAX_SYNCED_SETTINGS_BYTES = 16 * 1024
 
 
 def _canonical(harness: str) -> str:
+    # Deferred like harness_startup_config: config loading must not pull in harness discovery.
     from omnigent.harness_aliases import canonicalize_harness
 
     return canonicalize_harness(harness) or harness
@@ -146,7 +147,13 @@ def _apply_harness(local: object, synced: object) -> dict[str, object]:
             if key == "default":
                 default = value
             elif isinstance(key, str) and isinstance(value, Mapping):
-                result.setdefault(_canonical(key), {}).update(value)
+                result.setdefault(_canonical(key), {}).update(
+                    {
+                        field: item
+                        for field, item in value.items()
+                        if field in _SYNCED_HARNESS_FIELDS
+                    }
+                )
     harness: dict[str, object] = {key: entry for key, entry in result.items() if entry}
     if default is not None:
         harness["default"] = default

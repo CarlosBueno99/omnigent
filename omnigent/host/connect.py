@@ -4901,8 +4901,8 @@ class HostProcess:
         probes = 1 if sent is not None else 0
         while True:
             await asyncio.sleep(CONFIG_SYNC_CHECK_INTERVAL_S)
-            now = loop.time()
             frame = await asyncio.to_thread(self._build_config_sync_report)
+            now = loop.time()
             if frame is None:
                 continue
             poll_due = now >= next_poll and (

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from omnigent.config_sync import (
@@ -94,10 +96,15 @@ def test_apply_empty_settings_removes_portable_keys_only() -> None:
     assert apply_synced_settings({"harness": "codex"}, {}) == {}
 
 
-def test_apply_merges_alias_and_canonical_harness_entries() -> None:
+@pytest.mark.parametrize(
+    "local_id,synced_id",
+    [("claude", "claude-sdk"), ("claude-sdk", "claude")],
+    ids=["local-alias", "synced-alias"],
+)
+def test_apply_merges_alias_and_canonical_harness_entries(local_id: str, synced_id: str) -> None:
     merged = apply_synced_settings(
-        {"harness": {"claude": {"command": "/opt/claude", "args": ["old"]}}},
-        {"harness": {"claude-sdk": {"args": ["new"]}}},
+        {"harness": {local_id: {"command": "/opt/claude", "args": ["old"]}}},
+        {"harness": {synced_id: {"args": ["new"]}}},
     )
     assert merged == {"harness": {"claude-sdk": {"command": "/opt/claude", "args": ["new"]}}}
 
@@ -133,14 +140,6 @@ def test_validate_rejects_non_portable_or_malformed_settings(value: object) -> N
         validate_synced_settings(value)
 
 
-def test_apply_canonicalizes_synced_harness_ids() -> None:
-    merged = apply_synced_settings(
-        {"harness": {"claude-sdk": {"command": "/opt/claude"}}},
-        {"harness": {"claude": {"args": ["--verbose"]}}},
-    )
-    assert merged == {"harness": {"claude-sdk": {"command": "/opt/claude", "args": ["--verbose"]}}}
-
-
 def test_validate_canonicalizes_and_merges_alias_harness_ids() -> None:
     assert validate_synced_settings(
         {"harness": {"default": "codex", "claude": {"args": ["a"]}, "claude-sdk": {"args": ["b"]}}}
@@ -150,3 +149,17 @@ def test_validate_canonicalizes_and_merges_alias_harness_ids() -> None:
 def test_validate_measures_the_size_cap_in_bytes() -> None:
     with pytest.raises(ValueError, match="exceed"):
         validate_synced_settings({"model": "é" * (MAX_SYNCED_SETTINGS_BYTES // 2 + 1)})
+
+
+def test_validate_size_cap_is_an_exact_byte_boundary() -> None:
+    padding = MAX_SYNCED_SETTINGS_BYTES - len(json.dumps({"model": ""}).encode("utf-8"))
+    assert validate_synced_settings({"model": "x" * padding}) == {"model": "x" * padding}
+    with pytest.raises(ValueError, match="exceed"):
+        validate_synced_settings({"model": "x" * (padding + 1)})
+
+
+def test_apply_ignores_non_portable_harness_fields_even_without_validation() -> None:
+    merged = apply_synced_settings(
+        {}, {"harness": {"codex-native": {"args": ["ok"], "command": "/evil/codex"}}}
+    )
+    assert merged == {"harness": {"codex-native": {"args": ["ok"]}}}

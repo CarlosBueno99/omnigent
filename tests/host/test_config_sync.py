@@ -60,22 +60,47 @@ def test_build_sync_frame_compares_against_the_last_sync(config_path: Path) -> N
     assert frame == HostConfigSyncFrame(4, {**_PORTABLE, "model": "edited-locally"}, True)
 
 
-def test_sync_state_for_another_server_or_corrupt_file_is_ignored(config_path: Path) -> None:
+def test_sync_state_is_kept_per_server_and_corrupt_entries_are_ignored(config_path: Path) -> None:
     _write(config_path, _LOCAL)
-    save_sync_state(ConfigSyncState("https://other.example.test", 9, _PORTABLE), config_path)
+    other = "https://other.example.test"
+    save_sync_state(ConfigSyncState(other, 9, {"model": "other-fleet"}), config_path)
     assert load_sync_state(_SERVER, config_path) is None
     assert build_sync_frame(_SERVER, config_path).revision == 0
+
+    # A daemon for this server records its own entry without disturbing the other's.
+    save_sync_state(ConfigSyncState(_SERVER, 4, _PORTABLE), config_path)
+    assert load_sync_state(_SERVER, config_path) == ConfigSyncState(_SERVER, 4, _PORTABLE)
+    assert load_sync_state(other, config_path) == ConfigSyncState(
+        other, 9, {"model": "other-fleet"}
+    )
+    assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(4, _PORTABLE, False)
 
     sync_state_path(config_path).write_text("{not json")
     assert load_sync_state(_SERVER, config_path) is None
     sync_state_path(config_path).write_text(
-        json.dumps({"server_url": _SERVER, "revision": -1, "settings": {}})
+        json.dumps({"servers": {_SERVER: {"revision": -1, "settings": {}}}})
     )
     assert load_sync_state(_SERVER, config_path) is None
     sync_state_path(config_path).write_text(
-        json.dumps({"server_url": _SERVER, "revision": 1, "settings": {"providers": {}}})
+        json.dumps({"servers": {_SERVER: {"revision": 1, "settings": {"providers": {}}}}})
     )
     assert load_sync_state(_SERVER, config_path) is None
+
+
+def test_local_edit_survives_an_update_for_another_servers_daemon(config_path: Path) -> None:
+    other = "https://other.example.test"
+    _write(config_path, _LOCAL)
+    save_sync_state(ConfigSyncState(_SERVER, 4, _PORTABLE), config_path)
+    # The other server's daemon applies its state, then the user edits locally.
+    apply_config_update(HostConfigUpdateFrame(2, {"model": "other-fleet"}), other, config_path)
+    _write(config_path, {**_LOCAL, "model": "edited-locally"})
+
+    # This server's daemon still knows its own history, so the edit is a pending change.
+    assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(
+        4, {**_PORTABLE, "model": "edited-locally"}, True
+    )
+    assert apply_config_update(HostConfigUpdateFrame(5, _PORTABLE), _SERVER, config_path) is False
+    assert yaml.safe_load(config_path.read_text())["model"] == "edited-locally"
 
 
 def test_apply_config_update_writes_portable_keys_and_records_the_revision(
