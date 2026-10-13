@@ -84,7 +84,9 @@ def _insert_placeholder(dialect: str, key: dict[str, object]) -> Insert:
     """Insert an empty revision-0 row unless one exists, so it can be locked."""
     values = {**key, "value": _encode_synced_config(SyncedConfig())}
     if dialect == "mysql":
-        return mysql_insert(SqlPreference).values(**values).prefix_with("IGNORE")
+        # A no-op upsert tolerates only the duplicate key, unlike INSERT IGNORE.
+        stmt = mysql_insert(SqlPreference).values(**values)
+        return stmt.on_duplicate_key_update(key=stmt.inserted.key)
     if dialect == "sqlite":
         return (
             sqlite_insert(SqlPreference)
@@ -139,6 +141,7 @@ class UserConfigStore:
             :func:`current_workspace_id`.
         :returns: The stored settings and their revision, as written.
         """
+        validated = validate_synced_settings(settings)
         preference_user_id = RESERVED_USER_LOCAL if user_id is None else user_id
         scope = current_workspace_id() if workspace_id is None else workspace_id
         key: dict[str, object] = {
@@ -154,9 +157,9 @@ class UserConfigStore:
             session.execute(_insert_placeholder(self._engine.dialect.name, key))
             raw = session.scalar(_row_query(preference_user_id, scope).with_for_update())
             current = _decode_synced_config(raw)
-            if current.settings == settings:
+            if current.settings == validated:
                 return current
-            updated = SyncedConfig(dict(settings), current.revision + 1)
+            updated = SyncedConfig(validated, current.revision + 1)
             session.execute(
                 update(SqlPreference)
                 .where(

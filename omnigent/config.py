@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
-from collections.abc import Mapping
+import stat
+import tempfile
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import TypeAlias
 
 import yaml
+
+try:
+    import fcntl
+except ImportError:  # Windows has no advisory file locks; writers stay atomic but unserialized.
+    fcntl = None  # type: ignore[assignment]
 
 _log = logging.getLogger(__name__)
 _cwd_missing_warned = False
@@ -132,16 +140,39 @@ def save_global_config(
     :param path: Config path override (defaults to :func:`global_config_path`).
     """
     resolved = path or global_config_path()
-    cfg = load_global_config(resolved)
-    for key, value in settings.items():
-        if key in deep_merge_keys and isinstance(value, Mapping):
-            existing = cfg.get(key)
-            merged = dict(existing) if isinstance(existing, Mapping) else {}
-            merged.update(value)
-            cfg[key] = merged
-        else:
-            cfg[key] = value
-    write_global_config(cfg, resolved)
+    with global_config_lock(resolved):
+        cfg = load_global_config(resolved)
+        for key, value in settings.items():
+            if key in deep_merge_keys and isinstance(value, Mapping):
+                existing = cfg.get(key)
+                merged = dict(existing) if isinstance(existing, Mapping) else {}
+                merged.update(value)
+                cfg[key] = merged
+            else:
+                cfg[key] = value
+        write_global_config(cfg, resolved)
+
+
+@contextlib.contextmanager
+def global_config_lock(path: Path | None = None) -> Iterator[None]:
+    """Serialize read-modify-write cycles of the user-level config across processes.
+
+    The CLI, the host daemon and runners all rewrite ``config.yaml``; holding
+    this advisory lock (``config.yaml.lock`` beside it) from load to write keeps
+    one writer from discarding another's change.
+
+    :param path: Config path override (defaults to :func:`global_config_path`).
+    """
+    resolved = path or global_config_path()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    with resolved.with_name(resolved.name + ".lock").open("a") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def write_global_config(cfg: Mapping[str, object], path: Path | None = None) -> None:
@@ -152,13 +183,19 @@ def write_global_config(cfg: Mapping[str, object], path: Path | None = None) -> 
     """
     resolved = path or global_config_path()
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic replace so a crash mid-write can't truncate the user's config.
-    tmp = resolved.with_name(resolved.name + ".tmp")
+    # A private temp file plus an atomic replace: concurrent writers cannot install
+    # each other's partial output and a crash cannot truncate the user's config.
+    handle, tmp_name = tempfile.mkstemp(
+        prefix=f"{resolved.name}.", suffix=".tmp", dir=resolved.parent
+    )
+    tmp = Path(tmp_name)
     try:
-        with tmp.open("w") as config_file:
+        with os.fdopen(handle, "w") as config_file:
             yaml.safe_dump(dict(cfg), config_file, default_flow_style=False, sort_keys=True)
+        if resolved.exists():
+            os.chmod(tmp, stat.S_IMODE(resolved.stat().st_mode))
         os.replace(tmp, resolved)
-    except OSError:
+    except BaseException:
         tmp.unlink(missing_ok=True)
         raise
 
@@ -214,6 +251,7 @@ def set_github_account_preference(
 
 __all__ = [
     "github_account_preference",
+    "global_config_lock",
     "global_config_path",
     "load_effective_config",
     "load_global_config",

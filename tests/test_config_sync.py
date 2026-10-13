@@ -145,3 +145,8 @@ def test_validate_canonicalizes_and_merges_alias_harness_ids() -> None:
     assert validate_synced_settings(
         {"harness": {"default": "codex", "claude": {"args": ["a"]}, "claude-sdk": {"args": ["b"]}}}
     ) == {"harness": {"claude-sdk": {"args": ["b"]}, "default": "codex"}}
+
+
+def test_validate_measures_the_size_cap_in_bytes() -> None:
+    with pytest.raises(ValueError, match="exceed"):
+        validate_synced_settings({"model": "é" * (MAX_SYNCED_SETTINGS_BYTES // 2 + 1)})

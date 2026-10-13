@@ -535,6 +535,9 @@ class HostRegistry:
         # server re-learns it from the reconnect handshake.
         self._gateway_inference: dict[str, dict[str, bool]] = {}
         self._interactive_shells: dict[str, list[str]] = {}
+        # One lock per (workspace, owner) serializes a user's settings reconciliation on
+        # this replica; dropped once their last connection is gone and nothing holds it.
+        self._config_sync_locks: dict[tuple[int, str | None], asyncio.Lock] = {}
         self.launch_authorizer: (
             Callable[[str, str, str | None, str | None, bool, str | None], None] | None
         ) = None
@@ -659,7 +662,31 @@ class HostRegistry:
         _fail_pending_mcp_tools(removed)
         _fail_pending_skills(removed)
         _fail_pending_mcp_servers(removed)
+        self._release_config_sync_lock(removed)
         return True
+
+    def config_sync_lock(self, owner: str | None, workspace_id: int | None = None) -> asyncio.Lock:
+        """Return the lock that serializes one user's settings reconciliation here.
+
+        :param owner: Authenticated owner, or ``None`` on a single-user server.
+        :param workspace_id: Tenant partition; defaults to
+            :func:`current_workspace_id`.
+        :returns: The same lock for every call with the same owner and workspace
+            while any of their hosts is connected.
+        """
+        ws_id = current_workspace_id() if workspace_id is None else workspace_id
+        with self._lock:
+            return self._config_sync_locks.setdefault((ws_id, owner), asyncio.Lock())
+
+    def _release_config_sync_lock(self, removed: HostConnection) -> None:
+        """Drop the owner's reconcile lock once no connection of theirs remains."""
+        key = (removed.workspace_id, removed.owner)
+        with self._lock:
+            if any((conn.workspace_id, conn.owner) == key for conn in self._hosts.values()):
+                return
+            lock = self._config_sync_locks.get(key)
+            if lock is not None and not lock.locked():
+                del self._config_sync_locks[key]
 
     def mark_frame_seen(self, conn: HostConnection) -> bool:
         """Record that a frame arrived for ``conn``.

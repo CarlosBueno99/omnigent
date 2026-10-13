@@ -162,7 +162,7 @@ def validate_synced_settings(value: object) -> SyncedSettings:
     """
     if not isinstance(value, Mapping):
         raise ValueError("synced settings must be a JSON object")
-    if len(json.dumps(value, default=str)) > MAX_SYNCED_SETTINGS_BYTES:
+    if len(json.dumps(value, default=str).encode("utf-8")) > MAX_SYNCED_SETTINGS_BYTES:
         raise ValueError(f"synced settings exceed {MAX_SYNCED_SETTINGS_BYTES} bytes")
     result: SyncedSettings = {}
     for key, item in value.items():

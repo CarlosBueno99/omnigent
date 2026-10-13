@@ -9132,14 +9132,24 @@ async def test_host_publishes_stored_workspace_at_startup(
 _SYNCED_CONFIG_YAML = "model: mock-model-from-machine-a\nproviders:\n  work:\n    kind: key\n"
 
 
-@pytest.fixture
-def synced_config_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Point the host at a private config home holding one portable setting."""
-    home = tmp_path / "config-home"
-    home.mkdir()
-    (home / "config.yaml").write_text(_SYNCED_CONFIG_YAML)
+@pytest.fixture(autouse=True)
+def _isolated_config_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    """Keep every host under test away from the real ~/.omnigent/config.yaml.
+
+    Lives outside ``tmp_path`` so directory-listing tests keep their expected entries.
+    """
+    home = tmp_path_factory.mktemp("config-home")
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(home))
     return home
+
+
+@pytest.fixture
+def synced_config_home(_isolated_config_home: Path) -> Path:
+    """The isolated config home holding one portable setting."""
+    (_isolated_config_home / "config.yaml").write_text(_SYNCED_CONFIG_YAML)
+    return _isolated_config_home
 
 
 async def _poll_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
@@ -9296,4 +9306,11 @@ def test_oversized_local_settings_are_not_reported_and_warn_once(
     assert host._build_config_sync_report() == HostConfigSyncFrame(
         0, {"model": "small-again"}, True
     )
+
+    # A config that cannot be read at all is logged once per cause as well.
+    (synced_config_home / "config.yaml").write_text("model: [unterminated\n")
+    with caplog.at_level(logging.ERROR, logger="omnigent.host.connect"):
+        assert host._build_config_sync_report() is None
+        assert host._build_config_sync_report() is None
+    assert caplog.text.count("could not read the local config") == 1
     _cleanup_host(host)

@@ -14,7 +14,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from omnigent.config import global_config_path, load_global_config, write_global_config
+from omnigent.config import (
+    global_config_lock,
+    global_config_path,
+    load_global_config,
+    write_global_config,
+)
 from omnigent.config_sync import (
     SyncedSettings,
     apply_synced_settings,
@@ -122,22 +127,23 @@ def apply_config_update(
     """
     settings = validate_synced_settings(frame.settings)
     path = config_path or global_config_path()
-    cfg = load_global_config(path)
-    previous = load_sync_state(server_url, path)
-    state = ConfigSyncState(server_url, frame.revision, settings)
-    pending_local_edit = (
-        previous is not None
-        and synced_settings(cfg) != previous.settings
-        and settings != synced_settings(cfg)
-    )
-    changed = False
-    if not pending_local_edit:
-        merged = apply_synced_settings(cfg, settings)
-        changed = merged != cfg
-        if changed:
-            write_global_config(merged, path)
-    if previous != state:
-        save_sync_state(state, path)
+    with global_config_lock(path):
+        cfg = load_global_config(path)
+        previous = load_sync_state(server_url, path)
+        state = ConfigSyncState(server_url, frame.revision, settings)
+        pending_local_edit = (
+            previous is not None
+            and synced_settings(cfg) != previous.settings
+            and settings != synced_settings(cfg)
+        )
+        changed = False
+        if not pending_local_edit:
+            merged = apply_synced_settings(cfg, settings)
+            changed = merged != cfg
+            if changed:
+                write_global_config(merged, path)
+        if previous != state:
+            save_sync_state(state, path)
     return changed
 
 

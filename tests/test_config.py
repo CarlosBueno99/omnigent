@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 import omnigent.config as _config_module
 from omnigent.config import (
@@ -235,3 +236,46 @@ def test_load_local_config_explicit_path_unaffected_by_missing_cwd(
     result = load_local_config(path=cfg_file)
 
     assert result == {"profile": "explicit"}
+
+
+def test_write_global_config_leaves_no_temp_file_behind_on_failure(tmp_path: Path) -> None:
+    from omnigent.config import write_global_config
+
+    path = tmp_path / ".omnigent" / "config.yaml"
+    write_global_config({"model": "m"}, path)
+    path.chmod(0o600)
+
+    with pytest.raises(yaml.YAMLError):
+        write_global_config({"model": object()}, path)
+
+    assert sorted(p.name for p in path.parent.iterdir()) == ["config.yaml"]
+    assert load_global_config(path) == {"model": "m"}
+    write_global_config({"model": "n"}, path)
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert sorted(p.name for p in path.parent.iterdir()) == ["config.yaml"]
+
+
+def test_global_config_lock_serializes_writers(tmp_path: Path) -> None:
+    import threading
+
+    from omnigent.config import global_config_lock
+
+    path = tmp_path / ".omnigent" / "config.yaml"
+    order: list[str] = []
+    entered = threading.Event()
+
+    def hold() -> None:
+        with global_config_lock(path):
+            entered.set()
+            order.append("first")
+            threading.Event().wait(0.2)
+            order.append("first-done")
+
+    worker = threading.Thread(target=hold)
+    worker.start()
+    assert entered.wait(2.0)
+    with global_config_lock(path):
+        order.append("second")
+    worker.join(2.0)
+    assert (path.parent / "config.yaml.lock").exists()
+    assert order == ["first", "first-done", "second"]

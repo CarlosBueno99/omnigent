@@ -98,10 +98,6 @@ _HEARTBEAT_FAILURE_LOG_INTERVAL_S = 60.0
 _DISCONNECT_CLEANUP_TIMEOUT_S = 5.0
 # WebSocket close codes a host sends on purpose: 1000 normal, 1001 going away.
 _CLEAN_CLOSE_CODES = frozenset({1000, 1001})
-# One lock per (workspace, owner) keeps a user's hosts from reconciling their
-# settings concurrently on this replica, so acks and fan-outs leave in revision order.
-# custom-lint: disable-next=workspace-scoped-cache -- key includes the workspace id
-_config_sync_locks: dict[tuple[int, str | None], asyncio.Lock] = {}
 
 RunnerExitedCallback = Callable[[str, str, str], Awaitable[None]]
 """Async ``(host_id, runner_id, error)`` hook for a ``host.runner_exited`` report."""
@@ -1171,9 +1167,9 @@ async def _sync_user_config(
     except ValueError as exc:
         _logger.warning("Host %s sent invalid synced settings; ignoring: %s", host_id, exc)
         return
-    lock = _config_sync_locks.setdefault((conn.workspace_id, conn.owner), asyncio.Lock())
-    async with lock:
-        try:
+    try:
+        # One user's hosts reconcile one at a time, so acks and fan-outs leave in revision order.
+        async with host_registry.config_sync_lock(conn.owner, conn.workspace_id):
             current = await asyncio.to_thread(
                 store.get, conn.owner, workspace_id=conn.workspace_id
             )
@@ -1192,13 +1188,13 @@ async def _sync_user_config(
                         continue
                     with contextlib.suppress(ConnectionError):
                         host_registry.send_text(peer, update)
-        except Exception:
-            _logger.exception("Host %s synced settings could not be reconciled", host_id)
-            return
-        with contextlib.suppress(ConnectionError):
-            host_registry.send_text(
-                conn, encode_host_frame(HostConfigUpdateFrame(current.revision, current.settings))
-            )
+            with contextlib.suppress(ConnectionError):
+                host_registry.send_text(
+                    conn,
+                    encode_host_frame(HostConfigUpdateFrame(current.revision, current.settings)),
+                )
+    except Exception:
+        _logger.exception("Host %s synced settings could not be reconciled", host_id)
 
 
 async def _heartbeat_loop(

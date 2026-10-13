@@ -4875,8 +4875,11 @@ class HostProcess:
                 self._config_sync_report_error = str(exc)
                 _logger.warning("Host config sync: local settings were not reported: %s", exc)
             return None
-        except Exception:
-            _logger.exception("Host config sync: could not read the local config")
+        except Exception as exc:
+            cause = f"{type(exc).__name__}: {exc}"
+            if self._config_sync_report_error != cause:
+                self._config_sync_report_error = cause
+                _logger.exception("Host config sync: could not read the local config")
             return None
         self._config_sync_report_error = None
         return frame
@@ -4905,11 +4908,13 @@ class HostProcess:
             poll_due = now >= next_poll and (
                 self._config_sync_acked or probes < CONFIG_SYNC_PROBE_ATTEMPTS
             )
-            if sent is None or (frame.changed and frame.settings != sent.settings) or poll_due:
+            local_edit = sent is not None and frame.changed and frame.settings != sent.settings
+            if sent is None or local_edit or poll_due:
                 await ws.send(encode_host_frame(frame))
                 sent = frame
                 next_poll = now + CONFIG_SYNC_POLL_INTERVAL_S
-                if not self._config_sync_acked:
+                # Local edits are always reported and do not use up the probe budget.
+                if not local_edit and not self._config_sync_acked:
                     probes += 1
 
     def _handle_config_update(self, frame: HostConfigUpdateFrame) -> None:

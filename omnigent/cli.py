@@ -58,6 +58,7 @@ from omnigent.cli_sandbox import lakebox as _lakebox_alias_group
 from omnigent.cli_sandbox import sandbox as _sandbox_group
 from omnigent.config import (
     _merge_effective_config,
+    global_config_lock,
     global_config_path,
     load_global_config,
     load_local_config,
@@ -1160,22 +1161,24 @@ def _save_global_config(  # type: ignore[explicit-any]
         it, e.g. ``("providers",)`` to add one provider entry without
         dropping the rest.
     """
-    cfg = _load_global_config()
-    for key, value in settings.items():
-        if key in deep_merge_keys and isinstance(value, Mapping):
-            existing = cfg.get(key)
-            merged = dict(existing) if isinstance(existing, Mapping) else {}
-            merged.update(value)
-            cfg[key] = merged
-        else:
-            cfg[key] = value
-    for key in unset_keys:
-        cfg.pop(key, None)
     path = _effective_global_config_path()
-    _normalize_harness_scalar_on_write(cfg, path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=True)
+    # The host daemon rewrites this file too; hold the shared lock from load to write.
+    with global_config_lock(path):
+        cfg = _load_global_config()
+        for key, value in settings.items():
+            if key in deep_merge_keys and isinstance(value, Mapping):
+                existing = cfg.get(key)
+                merged = dict(existing) if isinstance(existing, Mapping) else {}
+                merged.update(value)
+                cfg[key] = merged
+            else:
+                cfg[key] = value
+        for key in unset_keys:
+            cfg.pop(key, None)
+        _normalize_harness_scalar_on_write(cfg, path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=True)
 
 
 def _materialize_bundled_example(name: str) -> Path:

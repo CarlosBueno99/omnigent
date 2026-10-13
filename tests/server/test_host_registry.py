@@ -662,3 +662,28 @@ def test_connections_for_owner_filters_by_owner_and_workspace() -> None:
     assert registry.connections_for_owner(None) == []
     assert registry.deregister(alice_a.host_id)
     assert registry.connections_for_owner("alice") == [alice_b]
+
+
+async def test_config_sync_lock_is_shared_per_owner_and_released_with_the_last_connection() -> (
+    None
+):
+    registry = HostRegistry()
+    alice_a = registry.register(uuid.uuid4().hex, FakeWebSocket(), _make_hello("a"), owner="alice")
+    alice_b = registry.register(uuid.uuid4().hex, FakeWebSocket(), _make_hello("b"), owner="alice")
+    bob = registry.register(uuid.uuid4().hex, FakeWebSocket(), _make_hello("c"), owner="bob")
+
+    lock = registry.config_sync_lock("alice")
+    assert registry.config_sync_lock("alice", workspace_id=0) is lock
+    assert registry.config_sync_lock("bob") is not lock
+    with workspace_scope(7):
+        assert registry.config_sync_lock("alice") is not lock
+
+    registry.deregister(alice_a.host_id)
+    assert registry.config_sync_lock("alice") is lock
+    async with lock:
+        registry.deregister(alice_b.host_id)
+        # A reconcile still holding the lock keeps it until it finishes.
+        assert registry.config_sync_lock("alice") is lock
+    registry.deregister(bob.host_id)
+    assert registry.config_sync_lock("bob") is not registry.config_sync_lock("alice")
+    assert registry.config_sync_lock("alice") is lock
