@@ -115,6 +115,7 @@ def save_global_config(
     settings: Mapping[str, object],
     *,
     deep_merge_keys: tuple[str, ...] = (),
+    unset_keys: tuple[str, ...] = (),
     path: Path | None = None,
 ) -> None:
     """Merge *settings* into the user-level config and write it back atomically.
@@ -124,11 +125,12 @@ def save_global_config(
     ``_save_global_config`` minus its harness-scalar normalization. Every key in
     *settings* replaces its existing value wholesale, except keys in
     *deep_merge_keys*, whose mapping value is merged one level deep into the
-    existing mapping for that key.
+    existing mapping for that key. Keys in *unset_keys* are removed.
 
     :param settings: Key/value pairs to set.
     :param deep_merge_keys: Keys whose mapping value is merged one level deep
         rather than replacing the existing mapping.
+    :param unset_keys: Top-level keys to remove, e.g. ``("model",)``.
     :param path: Config path override (defaults to :func:`global_config_path`).
     """
     resolved = path or global_config_path()
@@ -141,6 +143,8 @@ def save_global_config(
             cfg[key] = merged
         else:
             cfg[key] = value
+    for key in unset_keys:
+        cfg.pop(key, None)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     # Atomic replace so a crash mid-write can't truncate the user's config.
     tmp = resolved.with_name(resolved.name + ".tmp")

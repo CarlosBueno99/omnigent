@@ -11358,6 +11358,9 @@ def config_grp() -> None:
     server) are used by ``omnigent run``. Project-level config
     (``.omnigent/config.yaml`` in the cwd, like ``.git/config``) overrides
     user-level config (``~/.omnigent/config.yaml``, like ``~/.gitconfig``).
+    User-level model, auto_open_conversation and harness defaults follow
+    you to your other machines connected to the same server by
+    ``omnigent host``.
 
     \b
     Subcommands:

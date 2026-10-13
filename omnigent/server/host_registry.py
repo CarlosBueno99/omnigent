@@ -700,6 +700,24 @@ class HostRegistry:
         with self._lock:
             return [hid for (ws, hid) in self._hosts if ws == ws_id]
 
+    def connections_for_owner(
+        self, owner: str | None, workspace_id: int | None = None
+    ) -> list[HostConnection]:
+        """Return the live connections one user holds in a workspace.
+
+        :param owner: Authenticated owner, or ``None`` on a single-user server.
+        :param workspace_id: Tenant partition; defaults to
+            :func:`current_workspace_id`.
+        :returns: Every connection registered to *owner*, in registration order.
+        """
+        ws_id = current_workspace_id() if workspace_id is None else workspace_id
+        with self._lock:
+            return [
+                conn
+                for (ws, _hid), conn in self._hosts.items()
+                if ws == ws_id and conn.owner == owner
+            ]
+
     def is_host_telemetry_opted_out(self, host_id: str, workspace_id: int | None = None) -> bool:
         """Return whether the host has opted out of telemetry.
 

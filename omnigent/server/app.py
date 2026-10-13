@@ -4140,6 +4140,7 @@ def create_app(
         from omnigent.server.routes.plugins import create_plugins_router
         from omnigent.server.routes.skill_content import create_skill_content_router
         from omnigent.server.routes.skills import create_skills_router
+        from omnigent.stores.user_config_store import UserConfigStore
 
         async def _on_hosts_changed(_host_id: str, owner: str | None) -> None:
             announce_hosts_changed(owner)
@@ -4154,6 +4155,7 @@ def create_app(
                 on_host_connect=_on_hosts_changed,
                 on_host_disconnect=_on_hosts_changed,
                 on_host_update=_on_hosts_changed,
+                user_config_store=UserConfigStore(host_store.storage_location),
             ),
             prefix="/v1",
             tags=["hosts"],

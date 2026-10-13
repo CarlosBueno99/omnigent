@@ -645,3 +645,20 @@ def test_legacy_prefixed_id_resolves_to_bare_registration() -> None:
     # Deregistering by any spelling removes the entry.
     registry.deregister(prefixed)
     assert registry.get(bare) is None
+
+
+def test_connections_for_owner_filters_by_owner_and_workspace() -> None:
+    registry = HostRegistry()
+    alice_a = registry.register(uuid.uuid4().hex, FakeWebSocket(), _make_hello("a"), owner="alice")
+    alice_b = registry.register(uuid.uuid4().hex, FakeWebSocket(), _make_hello("b"), owner="alice")
+    registry.register(uuid.uuid4().hex, FakeWebSocket(), _make_hello("c"), owner="bob")
+    with workspace_scope(7):
+        alice_ws7 = registry.register(
+            uuid.uuid4().hex, FakeWebSocket(), _make_hello("d"), owner="alice"
+        )
+
+    assert registry.connections_for_owner("alice") == [alice_a, alice_b]
+    assert registry.connections_for_owner("alice", workspace_id=7) == [alice_ws7]
+    assert registry.connections_for_owner(None) == []
+    assert registry.deregister(alice_a.host_id)
+    assert registry.connections_for_owner("alice") == [alice_b]
