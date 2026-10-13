@@ -501,10 +501,9 @@ class HostConnection:
     pending_import_local: dict[str, asyncio.Queue[tuple[str, dict[str, Any]]]] = field(
         default_factory=dict,
     )
-    # This host's settings reports reconcile in order on a background chain, so a
-    # wait for another host's reconcile never stalls this tunnel's other frames.
-    # ``config_sync_task`` is the chain's tail; every live link stays in the set so
-    # a disconnect cancels all of them.
+    # Settings reports reconcile in order on a background chain so waits never stall
+    # this tunnel's other frames; ``config_sync_task`` is the tail, and every live
+    # link stays in the set so a disconnect cancels them all.
     config_sync_task: asyncio.Task[None] | None = None
     config_sync_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 

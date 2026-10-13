@@ -303,3 +303,20 @@ def test_write_global_config_keeps_the_previous_file_readable_until_the_replace(
     # Another process reading during the write sees the complete old file, never a torn one.
     assert observed == [{"model": "old"}]
     assert load_global_config(path) == {"model": "new"}
+
+
+def test_write_global_config_writes_through_a_symlinked_config(tmp_path: Path) -> None:
+    from omnigent.config import write_global_config
+
+    target = tmp_path / "dotfiles" / "omnigent.yaml"
+    target.parent.mkdir()
+    target.write_text("model: from-dotfiles\n")
+    link = tmp_path / ".omnigent" / "config.yaml"
+    link.parent.mkdir()
+    link.symlink_to(target)
+
+    write_global_config({"model": "updated"}, link)
+
+    assert link.is_symlink() and link.resolve() == target.resolve()
+    assert yaml.safe_load(target.read_text()) == {"model": "updated"}
+    assert sorted(p.name for p in target.parent.iterdir()) == ["omnigent.yaml"]

@@ -185,6 +185,10 @@ def global_config_lock(path: Path | None = None) -> Iterator[None]:
         finally:
             if fcntl is not None:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                # Closing the handle releases the lock anyway; never mask the body's error.
+                with contextlib.suppress(OSError):
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)  # pyrefly: ignore[missing-attribute]
 
 
 def write_global_config(cfg: Mapping[str, object], path: Path | None = None) -> None:
@@ -193,7 +197,8 @@ def write_global_config(cfg: Mapping[str, object], path: Path | None = None) -> 
     :param cfg: The complete config mapping to write.
     :param path: Config path override (defaults to :func:`global_config_path`).
     """
-    resolved = path or global_config_path()
+    # Write through a symlink (dotfile-managed configs) rather than replacing it.
+    resolved = Path(os.path.realpath(path or global_config_path()))
     resolved.parent.mkdir(parents=True, exist_ok=True)
     # A private temp file plus an atomic replace: concurrent writers cannot install
     # each other's partial output and a crash cannot truncate the user's config.
@@ -217,6 +222,18 @@ def write_global_config(cfg: Mapping[str, object], path: Path | None = None) -> 
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+    _fsync_directory(resolved.parent)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Make a rename durable on POSIX; other platforms have no directory fsync."""
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    handle = os.open(directory, os.O_DIRECTORY)
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
 
 
 def _github_accounts(cfg: _Config) -> dict[str, object]:

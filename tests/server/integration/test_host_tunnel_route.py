@@ -2199,8 +2199,9 @@ async def _receive_config_update(comm: ApplicationCommunicator) -> HostConfigUpd
 
 
 async def _assert_no_output(comm: ApplicationCommunicator, *, within: float = 0.3) -> None:
-    with pytest.raises(asyncio.TimeoutError):
-        await comm.receive_output(timeout=within)
+    """Check that nothing reached the host; a timed-out ``receive_output`` would cancel its app."""
+    await asyncio.sleep(within)
+    assert comm.output_queue.empty(), await comm.receive_output(timeout=0.1)
 
 
 async def test_config_sync_seeds_the_store_and_fans_out_to_the_owners_hosts(db_uri: str) -> None:
@@ -2302,3 +2303,46 @@ async def test_config_sync_concurrent_reports_from_one_user_settle_in_revision_o
     for updates in seen.values():
         assert [update.revision for update in updates] == [2, 3]
         assert updates[-1].settings == final.settings
+
+
+async def test_config_sync_ignores_managed_sandbox_hosts(db_uri: str) -> None:
+    registry = HostRegistry()
+    store = HostStore(db_uri)
+    config_store = UserConfigStore(db_uri)
+    app = FastAPI()
+    app.include_router(
+        create_host_tunnel_router(
+            registry,
+            store,
+            auth_provider=_FixedAuthProvider("alice@example.com"),
+            local_single_user=False,
+            user_config_store=config_store,
+        ),
+        prefix="/v1",
+    )
+    laptop = await _connect_sync_host(app, registry, _SYNC_HOST_A, "laptop")
+    _register_managed(store, host_id=_SYNC_HOST_B, token="sandbox-token")
+    sandbox = ApplicationCommunicator(
+        app, _managed_scope(f"/v1/hosts/{_SYNC_HOST_B}/tunnel", "sandbox-token")
+    )
+    await sandbox.send_input({"type": "websocket.connect"})
+    assert (await sandbox.receive_output(timeout=budget(1.0)))["type"] == "websocket.accept"
+    hello = HostHelloFrame(
+        version="0.1.0-test",
+        frame_protocol_version=1,
+        name=f"managed-{_SYNC_HOST_B}",
+        capabilities=[CAP_CONFIG_SYNC],
+    )
+    await sandbox.send_input({"type": "websocket.receive", "text": encode_host_frame(hello)})
+    await asyncio.wait_for(_wait_registered(registry, _SYNC_HOST_B), timeout=budget(2.0))
+    assert registry.get(_SYNC_HOST_B).registered_with_managed_token
+
+    # A sandbox template never becomes the user's settings, and gets no acknowledgement.
+    await _report_config(sandbox, 0, {"model": "template-model"}, changed=True)
+    await _assert_no_output(sandbox)
+    assert config_store.get("alice@example.com") == SyncedConfig({}, 0)
+
+    # The user's own machine seeds the store; the sandbox is left out of the fan-out.
+    await _report_config(laptop, 0, _SETTINGS_A, changed=True)
+    assert await _receive_config_update(laptop) == HostConfigUpdateFrame(1, _SETTINGS_A)
+    await _assert_no_output(sandbox)

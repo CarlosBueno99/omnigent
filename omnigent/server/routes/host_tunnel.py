@@ -838,7 +838,9 @@ async def _receive_loop(
             continue
 
         if isinstance(frame, HostConfigSyncFrame):
-            if user_config_store is not None:
+            # A server-provisioned sandbox carries an operator template, not the
+            # user's own settings; it neither seeds nor receives them.
+            if user_config_store is not None and not conn.registered_with_managed_token:
                 # Reconcile off this loop: waiting for another of the user's hosts must
                 # not delay the result frames and readiness updates behind it.
                 conn.config_sync_task = asyncio.create_task(
@@ -1198,27 +1200,30 @@ async def _sync_user_config(
     """
     try:
         settings = validate_synced_settings(frame.settings)
-    except ValueError as exc:
+    except Exception as exc:  # noqa: BLE001 — a bad report must never escape the chain task
         _logger.warning("Host %s sent invalid synced settings; ignoring: %s", host_id, exc)
         return
     try:
         # One user's hosts reconcile one at a time, so acks and fan-outs leave in revision order.
-        async with host_registry.config_sync_lock(conn.owner, conn.workspace_id):
-            current = await asyncio.to_thread(
-                store.get, conn.owner, workspace_id=conn.workspace_id
+        async with host_registry.reconcile_config_sync(conn.owner, conn.workspace_id):
+            current, adopted = await asyncio.to_thread(
+                store.reconcile,
+                conn.owner,
+                settings,
+                revision=frame.revision,
+                changed=frame.changed,
+                workspace_id=conn.workspace_id,
             )
-            adopt = (frame.changed and (frame.revision > 0 or current.revision == 0)) or (
-                current.revision == 0 and frame.revision > 0
-            )
-            if adopt and settings != current.settings:
-                current = await asyncio.to_thread(
-                    store.save, conn.owner, settings, workspace_id=conn.workspace_id
-                )
+            if adopted:
                 update = encode_host_frame(
                     HostConfigUpdateFrame(current.revision, current.settings)
                 )
                 for peer in host_registry.connections_for_owner(conn.owner, conn.workspace_id):
-                    if peer is conn or CAP_CONFIG_SYNC not in peer.hello.capabilities:
+                    if (
+                        peer is conn
+                        or peer.registered_with_managed_token
+                        or CAP_CONFIG_SYNC not in peer.hello.capabilities
+                    ):
                         continue
                     with contextlib.suppress(ConnectionError):
                         host_registry.send_text(peer, update)

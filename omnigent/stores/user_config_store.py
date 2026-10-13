@@ -173,5 +173,62 @@ class UserConfigStore:
 
         return run_write_transaction(self._session_immediate, "save_synced_config", write)
 
+    def reconcile(
+        self,
+        user_id: str | None,
+        settings: SyncedSettings,
+        *,
+        revision: int,
+        changed: bool,
+        workspace_id: int | None = None,
+    ) -> tuple[SyncedConfig, bool]:
+        """Decide and apply a host's report in one locked transaction.
+
+        A host that synced before (``revision > 0``) and changed locally wins; any
+        host seeds an empty store, including one whose server state was lost; a
+        never-synced host defers to settings the user already has. Deciding under
+        the row lock keeps two replicas from both seeding.
+
+        :param user_id: Owner of the settings, or ``None`` on a single-user server.
+        :param settings: The host's reported settings (validated here).
+        :param revision: Revision the host last applied; ``0`` before any sync.
+        :param changed: Whether the host's settings changed since that revision.
+        :param workspace_id: Tenant partition; defaults to the request-bound
+            :func:`current_workspace_id`.
+        :returns: The stored state after the decision, and whether it was adopted.
+        """
+        validated = validate_synced_settings(settings)
+        preference_user_id = RESERVED_USER_LOCAL if user_id is None else user_id
+        scope = current_workspace_id() if workspace_id is None else workspace_id
+        key: dict[str, object] = {
+            "workspace_id": scope,
+            "user_id": preference_user_id,
+            "key": _SYNCED_CONFIG_KEY,
+        }
+
+        def write(session: Session) -> tuple[SyncedConfig, bool]:
+            require_active_account(session, user_id)
+            session.execute(_insert_placeholder(self._engine.dialect.name, key))
+            raw = session.scalar(_row_query(preference_user_id, scope).with_for_update())
+            current = _decode_synced_config(raw)
+            adopt = (changed and (revision > 0 or current.revision == 0)) or (
+                current.revision == 0 and revision > 0
+            )
+            if not adopt or current.settings == validated:
+                return current, False
+            updated = SyncedConfig(validated, current.revision + 1)
+            session.execute(
+                update(SqlPreference)
+                .where(
+                    SqlPreference.workspace_id == scope,
+                    SqlPreference.user_id == preference_user_id,
+                    SqlPreference.key == _SYNCED_CONFIG_KEY,
+                )
+                .values(value=_encode_synced_config(updated))
+            )
+            return updated, True
+
+        return run_write_transaction(self._session_immediate, "reconcile_synced_config", write)
+
 
 __all__ = ["SyncedConfig", "UserConfigStore"]

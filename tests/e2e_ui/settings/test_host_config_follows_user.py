@@ -58,6 +58,10 @@ def _wait_for_config(
 
 
 def _config_list(machine: Host, cwd: Path) -> str:
+    return _omnigent(machine, cwd, "config", "list")
+
+
+def _omnigent(machine: Host, cwd: Path, *args: str) -> str:
     env = {
         **os.environ,
         "HOME": str(machine.home),
@@ -65,7 +69,7 @@ def _config_list(machine: Host, cwd: Path) -> str:
         "OMNIGENT_DATA_DIR": str(machine.home / ".omnigent"),
     }
     result = subprocess.run(
-        [sys.executable, "-m", "omnigent", "config", "list"],
+        [sys.executable, "-m", "omnigent", *args],
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -145,3 +149,8 @@ def test_codex_startup_setting_made_on_one_machine_is_shown_for_the_users_other_
             f"machine-b Codex startup arguments shown in Settings: {shown_b!r}\n"
             f"machine-b `omnigent config list`:\n{defaults_b}"
         )
+
+        # A change made while both machines stay connected follows the user too.
+        _omnigent(machine_a, tmp_path, "config", "set", "--global", "model=changed-on-machine-a")
+        _wait_for_config(machine_b, lambda cfg: cfg.get("model") == "changed-on-machine-a")
+        assert "model=changed-on-machine-a" in _config_list(machine_b, tmp_path)

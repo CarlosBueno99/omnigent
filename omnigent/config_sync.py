@@ -33,9 +33,7 @@ SyncedSettings: TypeAlias = dict[str, object]
 
 SYNCED_MODEL_KEYS: tuple[str, ...] = ("model", "opencode_model")
 SYNCED_FLAG_KEYS: tuple[str, ...] = ("auto_open_conversation",)
-# Top-level ``config.yaml`` keys the sync owns; ``harness`` is owned only for
-# its ``default`` and per-harness ``args`` fields.
-SYNCED_TOP_LEVEL_KEYS: tuple[str, ...] = (*SYNCED_MODEL_KEYS, *SYNCED_FLAG_KEYS, "harness")
+# ``harness`` is synced only for its ``default`` and per-harness ``args`` fields.
 _SYNCED_HARNESS_FIELDS: frozenset[str] = frozenset({"args"})
 MAX_SYNCED_SETTINGS_BYTES = 16 * 1024
 
@@ -224,7 +222,6 @@ def _validate_harness(value: object) -> dict[str, object]:
 
 __all__ = [
     "MAX_SYNCED_SETTINGS_BYTES",
-    "SYNCED_TOP_LEVEL_KEYS",
     "SyncedSettings",
     "apply_synced_settings",
     "synced_settings",

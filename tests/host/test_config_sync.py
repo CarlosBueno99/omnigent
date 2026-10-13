@@ -173,3 +173,48 @@ def test_apply_config_update_on_a_never_synced_host_adopts_the_servers_settings(
 
     assert yaml.safe_load(config_path.read_text())["model"] == _PORTABLE["model"]
     assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(3, _PORTABLE, False)
+
+
+def test_first_ack_keeps_an_edit_made_while_the_report_was_in_flight(config_path: Path) -> None:
+    _write(config_path, _LOCAL)
+    # The initial report (no sidecar yet) carries machine-a's settings.
+    assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(0, _PORTABLE, True)
+    _write(config_path, {**_LOCAL, "model": "edited-before-ack"})
+
+    # The acknowledgement of that report must not erase the edit made meanwhile.
+    assert apply_config_update(HostConfigUpdateFrame(1, _PORTABLE), _SERVER, config_path) is False
+    assert yaml.safe_load(config_path.read_text())["model"] == "edited-before-ack"
+    edited = {**_PORTABLE, "model": "edited-before-ack"}
+    assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(1, edited, True)
+
+
+def test_unchanged_never_synced_host_adopts_established_settings_after_its_report(
+    config_path: Path,
+) -> None:
+    _write(config_path, {**_LOCAL, "model": "stale-local-default"})
+    build_sync_frame(_SERVER, config_path)
+
+    assert apply_config_update(HostConfigUpdateFrame(3, _PORTABLE), _SERVER, config_path) is True
+
+    assert yaml.safe_load(config_path.read_text())["model"] == _PORTABLE["model"]
+    assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(3, _PORTABLE, False)
+
+
+def test_failed_sidecar_write_rolls_the_config_back(
+    config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import omnigent.host.config_sync as config_sync
+
+    _write(config_path, _LOCAL)
+    save_sync_state(ConfigSyncState(_SERVER, 4, _PORTABLE), config_path)
+
+    def failing_save(state: ConfigSyncState, path: Path | None = None) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config_sync, "save_sync_state", failing_save)
+    with pytest.raises(OSError, match="disk full"):
+        apply_config_update(HostConfigUpdateFrame(5, {"model": "from-peer"}), _SERVER, config_path)
+
+    # Config and sidecar stay consistent, so the next report is not a fabricated local edit.
+    assert yaml.safe_load(config_path.read_text()) == _LOCAL
+    assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(4, _PORTABLE, False)

@@ -76,3 +76,32 @@ def test_save_preserves_other_preferences(store: UserConfigStore, db_uri: str) -
     with Session(engine) as session:
         theme = session.get(SqlPreference, (0, "local", "theme"))
         assert theme is not None and theme.value == '"dark"'
+
+
+def test_reconcile_decides_under_the_row_lock(store: UserConfigStore) -> None:
+    # A never-synced host seeds an empty store.
+    assert store.reconcile("alice@example.com", _SETTINGS, revision=0, changed=True) == (
+        SyncedConfig(_SETTINGS, 1),
+        True,
+    )
+    # A second never-synced host defers to what the user already has, even when it
+    # read revision 0 before the first host's write landed.
+    assert store.reconcile("alice@example.com", {"model": "stale"}, revision=0, changed=True) == (
+        SyncedConfig(_SETTINGS, 1),
+        False,
+    )
+    # A synced host's edit wins; an unchanged report changes nothing.
+    assert store.reconcile("alice@example.com", {"model": "edited"}, revision=1, changed=True) == (
+        SyncedConfig({"model": "edited"}, 2),
+        True,
+    )
+    assert store.reconcile(
+        "alice@example.com", {"model": "edited"}, revision=2, changed=False
+    ) == (SyncedConfig({"model": "edited"}, 2), False)
+    # A host that synced before re-seeds a lost store.
+    assert store.reconcile("bob@example.com", _SETTINGS, revision=7, changed=False) == (
+        SyncedConfig(_SETTINGS, 1),
+        True,
+    )
+    with pytest.raises(ValueError):
+        store.reconcile("alice@example.com", {"providers": {}}, revision=2, changed=True)
