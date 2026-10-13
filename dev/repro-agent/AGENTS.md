@@ -610,20 +610,12 @@ add a second layer just to satisfy a checklist. Keep the original reproduction
 source and output available for that audit. You do not implement the fix or run
 its before/after proof.
 
-**Keep assertions ahead of the cleanup that destroys their evidence, and prove
-the test can reach them.** Read files, sockets, or state owned by a fixture,
-context manager, or `close()`/teardown step while that owner is still alive:
-inside the `try` or `with` block, before the `finally` or fixture exit that
-tears it down. `TerminalInstance.close()` deletes the caller-supplied
-`private_dir`, so an `argv.json` written there must be read before `close()`,
-as the nearby real-tmux tests do. On the unfixed build the failure often
-happens before the assertion runs, so a failing run proves nothing about the
-assertion path. Before handing off, exercise that path once: run the same test
-body in a way that reaches the assertion on the unfixed build — an input below
-the failure threshold, or the failing call stubbed to succeed — and confirm it
-passes for the right reason; then restore the real test and re-confirm it
-fails. Record both runs in `evidence`. A test that no correct fix can pass
-misjudges every candidate and costs a reconciliation round.
+**Check assertions before cleanup destroys their evidence.** Read temporary
+files and inspect live state before their owning fixture or context exits.
+A failing run may stop before the assertion, hiding an unrelated test defect.
+Where feasible, use a passing control to exercise the same assertion and cleanup
+path, then rerun the original failing case. Record both results and any untested
+assertion path in `evidence`; a mocked control does not prove the product fix.
 
 **Checkpoint the handoff before long finishing work.** As soon as Step 2 settles
 the overall verdict, atomically write the complete Output JSON object to
