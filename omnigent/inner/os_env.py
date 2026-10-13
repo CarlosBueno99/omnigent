@@ -402,14 +402,10 @@ class _HelperProcessClient:
         # helper itself. Cleared in :meth:`_stop_egress_proxy_locked`.
         self._egress_relay_port: int | None = None
         self._proc: subprocess.Popen[str] | None = None
-        # PDEATHSIG (bwrap's ``--die-with-parent``) fires when the *thread* that
-        # spawned the helper exits, not the client: ``run_sync_on_thread`` runs
-        # every request on a fresh short-lived thread, so a helper spawned inline
-        # is SIGKILLed as soon as that request returns and the next request pays a
-        # full restart (issue #8956; ``omnigent/sandbox/copy_on_write.py`` dodges
-        # the same mechanism by letting a pipe own the keeper's lifetime). The
-        # helper is therefore started from this owned thread, which parks until
-        # ``_stop_locked`` / ``close`` retires it.
+        # PDEATHSIG (bwrap's ``--die-with-parent``) tracks *thread* lifetime, so
+        # the helper is spawned by an owned thread that parks until teardown:
+        # keep the helper's spawning thread alive until ``close()``. See
+        # :meth:`_start_helper_from_owned_thread_locked` (issue #8956).
         self._spawn_thread: threading.Thread | None = None
         self._spawn_thread_exit: threading.Event | None = None
         # Parent-held containment handle from the sandbox backend's
@@ -482,12 +478,10 @@ class _HelperProcessClient:
     def _start_helper_from_owned_thread_locked(self) -> None:
         """Start the helper from a thread that outlives the triggering request.
 
-        bwrap's ``--die-with-parent`` sets ``PR_SET_PDEATHSIG``, which is bound to
-        the *thread* that called ``clone`` — so spawning inline from a request
-        thread means the helper dies (SIGKILL) as soon as that request returns and
-        the sandbox is torn down on every call (issue #8956). This thread starts
-        the helper and then parks; the parked thread is the helper's parent for as
-        long as the client lives, and ``_stop_locked`` retires it.
+        Keep the helper's spawning thread alive until teardown; PDEATHSIG tracks
+        thread lifetime, and ``run_sync_on_thread`` runs every request on a fresh
+        short-lived thread (issue #8956). The thread starts the helper, then parks
+        until ``_stop_locked`` retires it.
 
         Caller must hold :attr:`_lock`.
         """
@@ -509,9 +503,19 @@ class _HelperProcessClient:
             name="omnigent-os-env-helper-spawn",
             daemon=True,
         )
+        try:
+            thread.start()
+        except BaseException:
+            # Publish ownership only once the thread is actually running. An
+            # unstarted thread left behind here makes the next
+            # ``_retire_spawn_thread_locked`` raise "cannot join thread before it
+            # is started", which poisons every later request and aborts
+            # ``close()`` before it finishes tearing the environment down.
+            self._spawn_thread = None
+            self._spawn_thread_exit = None
+            raise
         self._spawn_thread = thread
         self._spawn_thread_exit = exit_event
-        thread.start()
         started.wait()
         if failure:
             self._retire_spawn_thread_locked()

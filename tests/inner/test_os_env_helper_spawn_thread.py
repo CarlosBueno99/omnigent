@@ -140,6 +140,20 @@ def test_helper_is_spawned_from_a_thread_that_outlives_the_request(
         assert len(spawned_on) == 1, "a second request started another helper process"
         assert client._proc.pid == first_pid, "the helper was replaced between requests"
         assert client._proc.poll() is None, "the helper is no longer running"
+
+        # A helper that dies on its own leaves its owner thread parked even though
+        # the process is gone. The next request must retire that thread, not leak
+        # it, and must start the replacement from a new owner thread.
+        client._proc.kill()
+        client._proc.wait(timeout=5)
+
+        assert "error" not in _request(client, target), "no helper after the previous one died"
+        assert len(spawned_on) == 2, "the replacement helper reused the dead one's owner thread"
+        assert not spawner.is_alive(), (
+            "the dead helper's owner thread is still parked; these accumulate across restarts"
+        )
+        assert spawned_on[1].is_alive(), "the replacement's owner thread did not stay alive"
+        assert client._proc.poll() is None, "the replacement helper is not running"
     finally:
         client.close()
 
@@ -151,6 +165,9 @@ def test_close_retires_the_owned_spawn_thread(tmp_path: Path) -> None:
     as the PDEATHSIG parent), so ``close()`` has to release it — otherwise every
     stopped environment leaks a thread for the process lifetime.
 
+    This asserts against *this* client's thread rather than every thread with the
+    helper's name, so an unrelated live client cannot make it pass or fail.
+
     :returns: None.
     """
     workspace = tmp_path / "ws"
@@ -158,19 +175,20 @@ def test_close_retires_the_owned_spawn_thread(tmp_path: Path) -> None:
     target = workspace / "notes.txt"
     target.write_text("hello\n")
 
+    owned: threading.Thread | None = None
     client = _HelperProcessClient(cwd=workspace, shell_path="/bin/sh", sandbox=_inactive_policy())
     try:
         assert "error" not in _request(client, target)
-        assert any(t.name == _HELPER_SPAWN_THREAD_NAME for t in threading.enumerate()), (
-            "no owned spawn thread is running for the helper"
-        )
+        owned = client._spawn_thread
+        assert owned is not None, "no owned spawn thread is running for the helper"
+        assert owned.name == _HELPER_SPAWN_THREAD_NAME
+        assert owned.is_alive(), "the owned spawn thread is not running"
+        assert client._spawn_thread_exit is not None, "the owner thread's exit event was lost"
     finally:
         client.close()
 
-    live = [
-        t for t in threading.enumerate() if t.name == _HELPER_SPAWN_THREAD_NAME and t.is_alive()
-    ]
-    assert not live, "the helper's spawn thread outlived close()"
+    assert not owned.is_alive(), "the helper's spawn thread outlived close()"
+    assert client._spawn_thread is None, "close() left the retired owner thread published"
 
 
 @pytest.mark.skipif(
@@ -210,5 +228,88 @@ def test_consecutive_requests_reuse_one_helper_under_bwrap(tmp_path: Path) -> No
         assert client._proc.pid == first_pid, "the second request restarted the helper"
         assert client._tmpdir == first_scratch, "the helper's scratch directory changed"
         assert client._proc.poll() is None, "the helper exited before the second request returned"
+    finally:
+        client.close()
+
+
+def test_failed_thread_start_leaves_the_client_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed helper-thread start must not poison the client, or its close().
+
+    ``thread.start()`` raises under thread-resource exhaustion. If the client has
+    already published that unstarted thread as its owner thread, the next
+    retirement ``join()``s it and raises ``RuntimeError: cannot join thread before
+    it is started`` — so every later request fails the same way, and ``close()``
+    aborts before retiring the egress proxy and the scratch directory.
+
+    :returns: None.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = workspace / "notes.txt"
+    target.write_text("hello\n")
+
+    real_start = threading.Thread.start
+    failed: list[threading.Thread] = []
+
+    def _start_failing_once(thread: threading.Thread) -> None:
+        if thread.name == _HELPER_SPAWN_THREAD_NAME and not failed:
+            failed.append(thread)
+            raise RuntimeError("can't start new thread")
+        real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", _start_failing_once)
+
+    client = _HelperProcessClient(cwd=workspace, shell_path="/bin/sh", sandbox=_inactive_policy())
+    try:
+        # The failure reaches the caller instead of being swallowed.
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            _request(client, target)
+
+        # And nothing unstarted is left published for a later retirement to choke
+        # on: this is the state that used to break every subsequent request.
+        assert client._spawn_thread is None, "an unstarted thread was left as the owner thread"
+        assert client._spawn_thread_exit is None, "a stale owner exit event was left published"
+
+        # A retry starts a fresh owner thread and serves the request.
+        assert "error" not in _request(client, target)
+        assert client._proc is not None
+        assert client._proc.poll() is None, "the helper is not running after the retry"
+        assert client._spawn_thread is not None, "the retry did not start an owner thread"
+        assert client._spawn_thread.is_alive(), "the retry's owner thread is not alive"
+    finally:
+        client.close()
+
+    assert client._spawn_thread is None
+
+
+def test_failure_inside_the_owner_thread_is_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Helper startup failing inside the owner thread must retire it, not park it.
+
+    Distinct from failing to create the thread: here the owner thread runs, the
+    helper's own startup raises, and the failure has to reach the requesting
+    thread while the owner thread is retired instead of parked forever.
+
+    :returns: None.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = workspace / "notes.txt"
+    target.write_text("hello\n")
+
+    client = _HelperProcessClient(cwd=workspace, shell_path="/bin/sh", sandbox=_inactive_policy())
+
+    def _boom() -> None:
+        raise RuntimeError("helper argv rejected")
+
+    monkeypatch.setattr(client, "_start_locked", _boom)
+    try:
+        with pytest.raises(RuntimeError, match="helper argv rejected"):
+            _request(client, target)
+        assert client._spawn_thread is None, "the failed owner thread was left parked"
+        assert client._spawn_thread_exit is None, "the failed owner thread's exit event leaked"
     finally:
         client.close()
