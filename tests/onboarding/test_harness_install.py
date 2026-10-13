@@ -719,6 +719,46 @@ def test_try_install_rejects_nonzero_exit_with_resolved_binary(
     assert reason == f"installer exited with code {returncode}"
 
 
+def test_try_install_rejects_nonzero_exit_even_when_a_supported_binary_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed installer is reported even if a supported CLI still resolves.
+
+    Callers install only when readiness rejects the CLI, so a supported binary
+    after a failed installer is a partial or concurrent install: the installer's
+    exit code is reported and ``PATH`` is left alone.
+    """
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(
+        hi.shutil,
+        "which",
+        lambda name: "/usr/bin/npm" if name == "npm" else None,
+    )
+    monkeypatch.setattr(hi, "resolve_cli_binary", lambda _name: "/opt/codex/bin/codex")
+    calls: list[list[str]] = []
+
+    def _run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if len(argv) >= 2 and argv[1] == "--version":
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="codex-cli 0.137.0\n", stderr=""
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=1)
+
+    monkeypatch.setattr(hi.subprocess, "run", _run)
+    spec = hi.harness_install_spec(OPENAI_FAMILY)
+    assert spec is not None
+    assert hi._harness_cli_version_satisfies(spec, "/opt/codex/bin/codex")
+    calls.clear()
+
+    installed, reason = hi.try_install_harness_cli(OPENAI_FAMILY)
+
+    assert installed is False
+    assert reason == "installer exited with code 1"
+    assert [argv[1:2] for argv in calls] == [["install"]]
+    assert os.environ["PATH"] == "/usr/bin"
+
+
 @pytest.mark.parametrize("version", ["0.0.1", "dev-SNAPSHOT"])
 def test_try_install_rejects_incompatible_or_unparseable_version(
     monkeypatch: pytest.MonkeyPatch, version: str
