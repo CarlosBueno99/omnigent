@@ -101,6 +101,7 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
     monkeypatch.setattr(tunnel_mod, "_send_connection_error", _send_error_then_hold)
 
     comm_a = await connect(app)
+    a_finished = False
     try:
         await comm_a.send_input({"type": "websocket.receive", "text": _make_hello()})
 
@@ -133,6 +134,7 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
             closed = await comm_a.receive_output(timeout=2.0)
             assert closed["type"] == "websocket.close"
             await comm_a.wait(timeout=2.0)
+            a_finished = True
 
             assert successor_registry.get(_HOST_ID) is not None, (
                 "the reconnected host must still be registered"
@@ -151,9 +153,10 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
     finally:
         # Unblock A if an earlier assertion fails, then let its handler finish.
         reconnect_done.set()
-        with contextlib.suppress(Exception):
+        if not a_finished:
             await comm_a.send_input({"type": "websocket.disconnect", "code": 1000})
-            await comm_a.wait(timeout=2.0)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await comm_a.wait(timeout=2.0)
 
 
 async def test_stale_registered_cleanup_cannot_offline_newer_connection_on_other_replica(
@@ -178,31 +181,39 @@ async def test_stale_registered_cleanup_cannot_offline_newer_connection_on_other
         return communicator
 
     comm_a = await connect(first_app)
-    await comm_a.send_input(
-        {"type": "websocket.receive", "text": _make_hello(connection_id="conn-a")}
-    )
-    await asyncio.wait_for(_wait_registered(first_registry, _HOST_ID), timeout=2.0)
-
-    # The host reconnects through another replica while the first still holds A.
-    comm_b = await connect(second_app)
+    a_finished = False
     try:
-        await comm_b.send_input(
-            {"type": "websocket.receive", "text": _make_hello(connection_id="conn-b")}
+        await comm_a.send_input(
+            {"type": "websocket.receive", "text": _make_hello(connection_id="conn-a")}
         )
-        await asyncio.wait_for(_wait_registered(second_registry, _HOST_ID), timeout=2.0)
-        assert first_registry.get(_HOST_ID) is not None
+        await asyncio.wait_for(_wait_registered(first_registry, _HOST_ID), timeout=2.0)
 
-        await comm_a.send_input({"type": "websocket.disconnect", "code": 1000})
-        await comm_a.wait(timeout=2.0)
-        assert first_registry.get(_HOST_ID) is None
+        # The host reconnects through another replica while the first still holds A.
+        comm_b = await connect(second_app)
+        try:
+            await comm_b.send_input(
+                {"type": "websocket.receive", "text": _make_hello(connection_id="conn-b")}
+            )
+            await asyncio.wait_for(_wait_registered(second_registry, _HOST_ID), timeout=2.0)
+            assert first_registry.get(_HOST_ID) is not None
 
-        host = first_store.get_host(_HOST_ID)
-        assert host is not None
-        assert host.status == "online", (
-            "a superseded connection's disconnect on another replica "
-            "must not mark the live host offline"
-        )
-        assert host_is_live(host), "the reconnected host must still be live"
+            await comm_a.send_input({"type": "websocket.disconnect", "code": 1000})
+            await comm_a.wait(timeout=2.0)
+            a_finished = True
+            assert first_registry.get(_HOST_ID) is None
+
+            host = first_store.get_host(_HOST_ID)
+            assert host is not None
+            assert host.status == "online", (
+                "a superseded connection's disconnect on another replica "
+                "must not mark the live host offline"
+            )
+            assert host_is_live(host), "the reconnected host must still be live"
+        finally:
+            await comm_b.send_input({"type": "websocket.disconnect", "code": 1000})
+            await comm_b.wait(timeout=2.0)
     finally:
-        await comm_b.send_input({"type": "websocket.disconnect", "code": 1000})
-        await comm_b.wait(timeout=2.0)
+        if not a_finished:
+            await comm_a.send_input({"type": "websocket.disconnect", "code": 1000})
+            with contextlib.suppress(asyncio.TimeoutError):
+                await comm_a.wait(timeout=2.0)

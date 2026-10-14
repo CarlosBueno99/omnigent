@@ -630,8 +630,7 @@ class HostStore:
         """
         Mark a host offline regardless of which connection wrote its row.
 
-        The tunnel's disconnect cleanup uses :meth:`set_offline_if_generation`
-        instead. No-op if the host does not exist.
+        The tunnel uses :meth:`set_offline_if_generation`; no-op for unknown hosts.
 
         :param host_id: Host identifier, e.g.
             ``"host_a1b2c3d4..."``.
