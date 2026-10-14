@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import io
 import logging
@@ -11,6 +12,7 @@ import signal
 import sys
 import tarfile
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -626,6 +628,72 @@ async def test_tunnel_boot_hands_its_auth_resolution_to_create_app(
         await entry_mod._run_tunnel_from_env()
 
     assert seen == {"auth_token_factory": None, "auth_resolved": True}
+
+
+@pytest.mark.asyncio
+async def test_fatal_tunnel_rejection_still_stops_listener_and_lifespan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tunnel that fails before connecting must not skip the runner teardown.
+
+    Otherwise ``asyncio.run`` cancels the still-running direct-attach listener
+    and its lifespan traceback lands above the concise exit reason in the log.
+    """
+    from types import SimpleNamespace
+
+    import omnigent.runner._entry as entry_mod
+
+    events: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: object) -> AsyncIterator[None]:
+        events.append("lifespan enter")
+        try:
+            yield
+        finally:
+            events.append("lifespan exit")
+
+    class _Listener:
+        port = 43210
+
+        async def stop(self) -> None:
+            events.append("listener stop")
+
+    async def _start_listener(_app: object) -> _Listener:
+        return _Listener()
+
+    async def _reject_tunnel(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(
+            f"{RUNNER_TUNNEL_REJECTION_PREFIX}(HTTP 401 persisted across 3 attempts)"
+        )
+
+    app = SimpleNamespace(
+        router=SimpleNamespace(lifespan_context=_lifespan),
+        state=SimpleNamespace(terminal_attach_handler=object()),
+    )
+    monkeypatch.setattr(entry_mod, "_runner_auth_factory", None)
+    monkeypatch.setattr(entry_mod, "_server_url_from_env", lambda: "http://runner.test")
+    monkeypatch.setattr(entry_mod, "_make_auth_token_factory", lambda: None)
+    monkeypatch.setattr(entry_mod, "_runner_tunnel_binding_token_from_env", lambda: None)
+    monkeypatch.setattr(entry_mod, "_runner_parent_pid_from_env", lambda: None)
+    monkeypatch.setattr(entry_mod, "_load_runner_idle_timeout_s_from_config", lambda: 0)
+    monkeypatch.setattr(entry_mod, "_install_signal_handlers", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(entry_mod, "create_app", lambda **_kwargs: app)
+    monkeypatch.setattr(entry_mod.gc, "freeze", lambda: None)
+    monkeypatch.setattr("omnigent.runner.identity.get_stable_runner_id", lambda: "runner-test-id")
+    monkeypatch.setattr("omnigent.runner.transports.ws_tunnel.serve.serve_tunnel", _reject_tunnel)
+    monkeypatch.setattr(
+        "omnigent.runner.direct_attach.start_direct_attach_listener", _start_listener
+    )
+    monkeypatch.setattr(
+        "omnigent.runner.direct_attach.create_direct_attach_app",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    with pytest.raises(RuntimeError, match=RUNNER_TUNNEL_REJECTION_PREFIX):
+        await entry_mod._run_tunnel_from_env()
+
+    assert events == ["lifespan enter", "listener stop", "lifespan exit"]
 
 
 def test_make_auth_token_factory_none_without_creds_or_binding_token(

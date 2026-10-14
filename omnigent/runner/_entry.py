@@ -1955,17 +1955,21 @@ async def _run_tunnel_from_env() -> None:
             )
         for task in wait_tasks:
             task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await stop_task
-        with contextlib.suppress(asyncio.CancelledError):
-            await tunnel_task
-        if idle_task is not None:
+        try:
             with contextlib.suppress(asyncio.CancelledError):
-                await idle_task
-        if direct_attach_listener is not None:
-            with contextlib.suppress(Exception):
-                await direct_attach_listener.stop()
-        await _lifespan_cm.__aexit__(None, None, None)
+                await stop_task
+            # A failed tunnel re-raises here; the listener and lifespan below
+            # must still stop, or asyncio.run cancels them and logs a traceback.
+            with contextlib.suppress(asyncio.CancelledError):
+                await tunnel_task
+            if idle_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await idle_task
+        finally:
+            if direct_attach_listener is not None:
+                with contextlib.suppress(Exception):
+                    await direct_attach_listener.stop()
+            await _lifespan_cm.__aexit__(None, None, None)
 
 
 def _install_signal_handlers(
