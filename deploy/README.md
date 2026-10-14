@@ -133,7 +133,7 @@ deploy/
 > **On Databricks?** The fully managed
 > [Omnigent on Databricks](https://docs.databricks.com/aws/en/omnigent/)
 > (Beta) is the recommended path: Databricks operates the server for
-> you, wired to workspace identity, Foundation Models, AI Gateway, and
+> you, wired to workspace identity, Foundation Models, Unity Gateway, and
 > MLflow Tracing. Enable the **Omnigent** preview in your workspace
 > settings. The self-managed Databricks Apps bundle above is for when
 > you need control the managed service does not expose yet.
@@ -420,6 +420,63 @@ overrides this auto-selection.
 > `403` even though the host connects. Framework-level; applies to every sandbox
 > provider (Modal / Daytona / Islo / Kubernetes / …).
 
+### Ending accounts sessions
+
+An `accounts` session lasts `OMNIGENT_ACCOUNTS_SESSION_TTL_HOURS` (default 8).
+To end one user's sessions sooner, change the password (Account menu → Change
+password) or have an admin reset it (Members → Reset). Either one invalidates
+the browser sessions, CLI logins, refresh tokens, and unused sign-in links
+issued to that user so far. A password change keeps the browser that made it
+signed in.
+
+The user's scheduled tasks and host registrations are kept, but that does not
+mean they keep running. A host that is already connected keeps its connection,
+and still looks online, but launches on it fail, including scheduled runs,
+until it reconnects:
+
+- A host signed in with the user's credentials (`omnigent host` after
+  `omnigent login`) cannot reconnect with them. Run `omnigent login`, then
+  restart the host.
+- A managed host, which the server starts in a sandbox, connects with its own
+  launch token rather than the user's credentials. It needs no login: once it
+  reconnects with that token, before the token expires, launches work again.
+
+CLIs need `omnigent login` too.
+
+Servers running a release without this behaviour keep the user's sessions when
+they change or reset a password. During a rolling upgrade, repeat a change made
+while such instances were still serving.
+
+Rotating `OMNIGENT_ACCOUNTS_COOKIE_SECRET` signs out every user at once: it
+invalidates all session tokens, CLI logins, and refresh tokens. Unused sign-in
+and invite links are looked up by value, not signed with the secret, so they
+keep working until they expire (sign-in links after
+`OMNIGENT_ACCOUNTS_MAGIC_TTL_MINUTES`, default 10; invites after
+`OMNIGENT_ACCOUNTS_INVITE_TTL_HOURS`, default 72).
+
+### Browser origin allowlist
+
+Independent of the auth mode above, the server also checks the browser
+`Origin` header on WebSocket handshakes and file-upload POSTs — the only
+signal that tells the user's own web UI apart from some other page open in
+the same browser. Set `OMNIGENT_WS_ALLOWED_ORIGINS` (comma-separated) to
+trust origins beyond the server's own host, e.g. when the web UI is reached
+through a proxy, tunnel, or a domain the server doesn't know about itself.
+
+An entry's host may start with `*.` to trust every subdomain of a domain in
+one entry, instead of listing each hostname individually — useful when many
+or rotating subdomains all serve the same deploy (per-workspace subdomains,
+preview environments, a tunnel provider's generated hostnames, …):
+
+```dotenv
+OMNIGENT_WS_ALLOWED_ORIGINS=https://*.example.com
+```
+
+This matches `https://foo.example.com` and `https://a.b.example.com` (any
+subdomain depth), but not the bare `https://example.com` itself. See
+[`tailscale/README.md`](tailscale/README.md) for a worked example
+using Tailscale's per-device hostnames.
+
 ### Single sign-on (OIDC)
 
 The built-in `accounts` flow needs no setup beyond the deploy itself. To let
@@ -442,6 +499,12 @@ docker compose up -d        # restart to apply
 
 Your team signs in with their existing accounts, and there are no passwords
 for you to manage. Nothing else about the app changes.
+
+Generic OIDC also supports public PKCE clients without a client secret,
+PS256-signed identity tokens, and operator-configured authorization/token/JWKS
+endpoints. See [public clients and explicit endpoints](docker/README.md#public-pkce-clients-and-explicit-endpoints)
+for configuration and security considerations. Existing client-secret login
+remains the default.
 
 > [!TIP]
 > The only outside step is creating an app with your provider (e.g. Google
@@ -530,6 +593,7 @@ start.
 ```yaml
 branding:
   app_name: "Acme Agent"        # tab title, sidebar wordmark, login screen
+  server_name: "Acme Engineering"  # this server's name in the desktop app's server list
   heading: "How can I help?"     # landing hero; "" hides it, omit to keep the default
   logo:                          # a bare string sets `main`; or per-variant:
     main: logo.png               # branding-assets/logo.png
@@ -553,6 +617,13 @@ sign-in. Any unset field keeps its built-in default, so a partial block is fine.
 The small "Powered by Omnigent" credit under the landing composer appears only
 once you set custom branding; `powered_by: false` hides it even then. It always
 shows the Omnigent mascot, never your logo.
+
+`server_name` names this particular server, so people who connect the desktop
+app to several servers can tell them apart. It is published in the
+unauthenticated `GET /.well-known/omnigent.json` manifest, not in `/v1/info`.
+Desktop builds that read it always show the host next to it, and an MDM-provided
+name (`omnigentServerName`) takes precedence. When unset, the desktop shows the
+host; it does not fall back to `app_name`.
 
 ## Adding a new deploy target
 

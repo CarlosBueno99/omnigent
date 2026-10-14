@@ -129,11 +129,60 @@ describe("markdown links to workspace files", () => {
     expect(openFile).toHaveBeenCalledWith("docs/notes.md");
   });
 
+  it("preserves a root-level filename with a cited line through sanitization", () => {
+    renderMarkdown("[README.md](README.md:12:3)", ["README.md"]);
+
+    expect(screen.queryByText(/\[blocked\]/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "README.md" }));
+    expect(openFile).toHaveBeenCalledWith("README.md", { line: 12, column: 3 });
+  });
+
   it("leaves an external link as a real anchor", () => {
     renderMarkdown("[docs](https://example.com/page)");
 
     const link = screen.getByRole("link", { name: "docs" });
     expect(link).toHaveAttribute("href", "https://example.com/page");
+  });
+
+  it("adds a PR icon while preserving descriptive link text and its destination", () => {
+    const href = "https://github.com/acme/app/pull/42#discussion_r123";
+    renderMarkdown(`[Fix rendering](${href})`);
+
+    const link = screen.getByRole("link", { name: "Fix rendering" });
+    expect(link).toHaveAttribute("href", href);
+    expect(link).toHaveAttribute("title", href);
+    expect(link.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("shortens an autolinked PR URL without changing its destination", () => {
+    const href = "https://github.com/acme/app/pull/42";
+    renderMarkdown(href);
+
+    expect(screen.getByRole("link", { name: "app#42" })).toHaveAttribute("href", href);
+  });
+
+  it("preserves formatting and surrounding prose in a descriptive PR link", () => {
+    const href = "https://github.com/acme/app/pull/42";
+    renderMarkdown(`See [**Fix** rendering on narrow screens](${href}) before merging.`);
+
+    const link = screen.getByRole("link", { name: "Fix rendering on narrow screens" });
+    expect(link).toHaveAttribute("href", href);
+    expect(link.querySelector('[data-streamdown="strong"]')).toHaveTextContent("Fix");
+    expect(link.parentElement).toHaveTextContent(
+      "See Fix rendering on narrow screens before merging.",
+    );
+  });
+
+  it.each([
+    "https://github.com/acme/app/pull/42/files",
+    "https://github.com.example.com/acme/app/pull/42",
+    "https://example.com/acme/app/pull/42",
+  ])("preserves ordinary URL labels for %s", (href) => {
+    renderMarkdown(href);
+
+    const link = screen.getByRole("link", { name: href });
+    expect(link).toHaveAttribute("href", href);
+    expect(link.querySelector("svg")).toBeNull();
   });
 
   // Overriding the `a` slot replaces Streamdown's link component, so its
@@ -148,7 +197,7 @@ describe("markdown links to workspace files", () => {
 
     const link = screen.getByText(name).closest("a");
     expect(link).toHaveAttribute("data-streamdown", "link");
-    expect(link).toHaveClass("wrap-anywhere", "font-medium", "text-primary", "underline");
+    expect(link).toHaveClass("wrap-anywhere", "font-medium", "text-link", "underline");
   });
 
   it("keeps the source hast node out of the DOM", () => {
@@ -179,45 +228,128 @@ describe("markdown links to workspace files", () => {
   });
 });
 
-// `path:line` is how agents habitually cite a file. The position is not part of
-// the filename, so resolving the span verbatim matched nothing on disk and the
-// citation rendered as inert inline code.
+// A markdown link destination is a URL, so a filename with spaces arrives
+// percent-encoded (`My%20Notes.md`). The stored path must be the real filename
+// — but an encoded `#` or `:` in a filename must never be decoded into citation
+// syntax, or the opener would open the sibling `report.md` at line 12 instead.
+describe("percent-encoded file links", () => {
+  it("opens a link whose filename has spaces", () => {
+    renderMarkdown("[notes](docs/My%20Notes.md)", ["docs/My Notes.md"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "notes" }));
+    expect(openFile).toHaveBeenCalledWith("docs/My Notes.md");
+  });
+
+  it("opens a link whose filename has spaces at its cited line", () => {
+    renderMarkdown("[notes](docs/My%20Notes.md#L12)", ["docs/My Notes.md"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "notes" }));
+    expect(openFile).toHaveBeenCalledWith("docs/My Notes.md", { line: 12 });
+  });
+
+  it.each([
+    ["docs/report.md%23L12", "docs/report.md#L12"],
+    ["docs/report.md%3A12", "docs/report.md:12"],
+  ])("never opens the sibling of a literal filename linked as %s", (href, literal) => {
+    // Both the literal filename and the file a decoded citation would point at
+    // exist. Opening `docs/report.md` at line 12 here would be the wrong file.
+    renderMarkdown(`[report](${href})`, ["docs/report.md", literal]);
+
+    expect(screen.queryByRole("button", { name: "report" })).toBeNull();
+    expect(screen.getByText("report")).toBeInTheDocument();
+    expect(openFile).not.toHaveBeenCalled();
+  });
+});
+
+// Agents emit both compiler-style `path:line[:column]` and source-link-style
+// `path#Lline[-Lend]` citations. Every path presentation supported by chat must
+// preserve the first cited line while still resolving to a workspace-relative
+// filename.
 describe("cited positions", () => {
-  it("opens an inline-code path that carries a line number", () => {
-    renderMarkdown("`docs/notes.md:12` has the detail", ["docs/notes.md"]);
+  it.each([
+    ["relative colon", "`docs/notes.md:12`", "docs/notes.md:12", "docs/notes.md", 12],
+    ["relative line+column", "`docs/notes.md:12:7`", "docs/notes.md:12:7", "docs/notes.md", 12, 7],
+    ["relative hash line", "`docs/notes.md#L13`", "docs/notes.md#L13", "docs/notes.md", 13],
+    [
+      "relative hash line+column",
+      "`docs/notes.md#L14C3`",
+      "docs/notes.md#L14C3",
+      "docs/notes.md",
+      14,
+      3,
+    ],
+    [
+      "relative hash range",
+      "`docs/notes.md#L15-L20`",
+      "docs/notes.md#L15-L20",
+      "docs/notes.md",
+      15,
+    ],
+    [
+      "absolute",
+      `\`${WORKSPACE}/docs/notes.md:16\``,
+      `${WORKSPACE}/docs/notes.md:16`,
+      "docs/notes.md",
+      16,
+    ],
+    ["home-relative", "`~/ws/docs/notes.md#L17`", "~/ws/docs/notes.md#L17", "docs/notes.md", 17],
+    [
+      "root basename",
+      `\`${WORKSPACE}/README.md#L18\``,
+      `${WORKSPACE}/README.md#L18`,
+      "README.md",
+      18,
+    ],
+  ])(
+    "opens an inline-code %s citation at its first line",
+    (_label, markdown, name, path, line, column?: number) => {
+      renderMarkdown(markdown, [path]);
 
-    // The span still shows what the agent wrote; only the target drops :12.
-    fireEvent.click(screen.getByRole("button", { name: "docs/notes.md:12" }));
+      fireEvent.click(screen.getByRole("button", { name }));
+      expect(openFile).toHaveBeenCalledWith(path, { line, ...(column ? { column } : {}) });
+    },
+  );
+
+  it.each([
+    ["relative colon", "docs/notes.md:21", "docs/notes.md", 21],
+    ["relative hash range", "docs/notes.md#L22-L30", "docs/notes.md", 22],
+    ["absolute hash line", `${WORKSPACE}/docs/notes.md#L23`, "docs/notes.md", 23],
+    ["home-relative line+column", "~/ws/docs/notes.md:24:9", "docs/notes.md", 24, 9],
+    ["file URI hash line", `file://${WORKSPACE}/docs/notes.md#L25`, "docs/notes.md", 25],
+  ])(
+    "opens a markdown %s citation at its first line",
+    (_label, href, path, line, column?: number) => {
+      renderMarkdown(`[target](${href})`, [path]);
+
+      fireEvent.click(screen.getByRole("button", { name: "target" }));
+      expect(openFile).toHaveBeenCalledWith(path, { line, ...(column ? { column } : {}) });
+    },
+  );
+
+  it("opens a path without a position as a plain open", () => {
+    renderMarkdown("see `docs/notes.md` for detail", ["docs/notes.md"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "docs/notes.md" }));
     expect(openFile).toHaveBeenCalledWith("docs/notes.md");
   });
 
-  it("opens an absolute inline-code path with a line number", () => {
-    // The shape from the report: an absolute path under the workspace root.
-    renderMarkdown(`\`${WORKSPACE}/docs/notes.md:1\` contains hi`, ["docs/notes.md"]);
+  it.each(["docs/notes.md:0", "docs/notes.md#L0"])(
+    "degrades an invalid zero position to a plain open: %s",
+    (citation) => {
+      renderMarkdown(`\`${citation}\``, ["docs/notes.md"]);
+      fireEvent.click(screen.getByRole("button", { name: citation }));
+      expect(openFile).toHaveBeenCalledWith("docs/notes.md");
+    },
+  );
 
-    fireEvent.click(screen.getByRole("button", { name: `${WORKSPACE}/docs/notes.md:1` }));
-    expect(openFile).toHaveBeenCalledWith("docs/notes.md");
-  });
-
-  it("opens a path citing both line and column", () => {
-    renderMarkdown("`docs/notes.md:12:7` is the spot", ["docs/notes.md"]);
-
-    fireEvent.click(screen.getByRole("button", { name: "docs/notes.md:12:7" }));
-    expect(openFile).toHaveBeenCalledWith("docs/notes.md");
-  });
-
-  it("opens a markdown link whose href carries a line number", () => {
-    renderMarkdown("[notes.md](docs/notes.md:12)", ["docs/notes.md"]);
-
-    fireEvent.click(screen.getByRole("button", { name: "notes.md" }));
-    expect(openFile).toHaveBeenCalledWith("docs/notes.md");
-  });
-
-  it("leaves a trailing-colon span that is not a position alone", () => {
-    // "Note:" style prose must not be mistaken for a path with a position.
-    renderMarkdown("`docs/notes.md:abc` is not a position", ["docs/notes.md"]);
-
-    expect(screen.queryByRole("button", { name: "docs/notes.md:abc" })).toBeNull();
+  it.each([
+    "docs/notes.md:abc",
+    "docs/notes.md#heading",
+    "docs/notes.md#Lx",
+    "docs/notes.md?line=12",
+  ])("leaves an unsupported suffix inert: %s", (citation) => {
+    renderMarkdown(`\`${citation}\``, ["docs/notes.md"]);
+    expect(screen.queryByRole("button", { name: citation })).toBeNull();
   });
 });
 
@@ -227,6 +359,15 @@ describe("cited positions", () => {
 // before this, such links dropped to dead text that did nothing when
 // clicked, and gave a touch user (no hover title) no feedback at all.
 describe("links to files outside the workspace", () => {
+  it("renders the absolute temporary-file link from the reported Codex output", async () => {
+    const path = "/tmp/liteswap-search-OiTI1v/prod-recent-candidate-owner.md";
+    fetchMock.mockResolvedValue(dirListing([path]));
+    renderMarkdown(`[Investigation details](${path})`, [], FILE_VIEWER_WITH_SESSION);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Investigation details" }));
+    expect(openFile).toHaveBeenCalledWith(path);
+  });
+
   it("linkifies an outside-workspace markdown link and opens it host-absolute", async () => {
     fetchMock.mockResolvedValue(dirListing(["/etc/hosts"]));
     renderMarkdown("[/etc/hosts](/etc/hosts)", [], FILE_VIEWER_WITH_SESSION);
@@ -296,17 +437,18 @@ describe("dead file links give feedback instead of a silent no-op", () => {
     expect(toastMock).not.toHaveBeenCalled();
   });
 
-  it("keeps a bare-basename link inert — a skipped check is not proof of absence", () => {
-    // `[README.md](README.md)` in a live session: the path-shape heuristic
-    // skips the listing (bare basename, untrusted resolution), so nothing
-    // was ever verified. The link must stay plain text — not grow the
-    // dead-link affordance and toast a false "not found" about a real,
-    // openable root-level file.
-    renderMarkdown("[README.md](README.md)", [], FILE_VIEWER_WITH_SESSION);
+  it("verifies and opens an explicit root-level file citation", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        object: "list",
+        data: [{ name: "README.md", path: "README.md", type: "file", bytes: 5 }],
+        has_more: false,
+      }),
+    );
+    renderMarkdown("[README.md](README.md:12)", [], FILE_VIEWER_WITH_SESSION);
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "README.md" })).toBeNull();
-    expect(screen.getByText("README.md")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
+    expect(openFile).toHaveBeenCalledWith("README.md", { line: 12 });
     expect(toastMock).not.toHaveBeenCalled();
   });
 

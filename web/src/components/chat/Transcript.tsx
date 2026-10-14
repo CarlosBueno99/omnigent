@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 import { getCurrentAuthorId } from "@/lib/identity";
 import { hasCommandModifier } from "@/lib/hotkeys";
 import { isSystemUserContent } from "@/lib/systemMessage";
+import { isTerminalCommandInput } from "@/lib/blocks";
 import {
   type Bubble,
   type BubbleCache,
@@ -25,6 +26,11 @@ import { useChatStore } from "@/store/chatStore";
 import { TranscriptScrollbar } from "@/pages/TranscriptScrollbar";
 import { TurnRail, type Turn } from "@/pages/TurnRail";
 import { StreamBudgetBanner } from "@/components/StreamBudgetBanner";
+import { ArcaShutdownBanner } from "@/components/ArcaShutdownBanner";
+import { useArcaShutdownBanner } from "@/hooks/useArcaShutdownBanner";
+import { useSearchParams } from "@/lib/routing";
+import { MESSAGE_QUERY_PARAM } from "@/lib/messageDeepLink";
+import { useMessageDeepLink } from "@/hooks/useMessageDeepLink";
 import { useUserMessageNav } from "@/hooks/useUserMessageNav";
 import { ChatPlanAccordion } from "@/shell/ChatPlanAccordion";
 import { RunnerStartingIndicator, McpStartupIndicator } from "@/pages/ChatIndicators";
@@ -39,7 +45,6 @@ import {
   KeepBottomOnViewportResize,
   LatestTurnSpacer,
   ScrollToBottomOnSend,
-  UserMessageNavConnected,
   WorkingIndicator,
   bubbleKey,
   buildPendingBubbles,
@@ -56,6 +61,7 @@ import {
 import { SCROLL_RESTORE_BUDGET_MS } from "@/shell/useScrollRestore";
 
 export interface TranscriptProps {
+  hostId: string | null | undefined;
   /** Ref callback for the conversation wrapper element (SelectionPopup scope +
    *  JumpToTopButton hover ancestor). Owned by the parent, forwarded here. */
   setConversationEl: (el: HTMLDivElement | null) => void;
@@ -101,6 +107,7 @@ export function isNativeFindShortcut(
  * dialogs bail out via React's normal prop-equality check.
  */
 function TranscriptImpl({
+  hostId,
   setConversationEl,
   containerEl,
   scroller,
@@ -165,8 +172,8 @@ function TranscriptImpl({
     const ids = new Set<string>();
     for (const block of blocks) {
       if (
-        block.type === "user_message" &&
-        !isSystemUserContent(block.content) &&
+        ((block.type === "user_message" && !isSystemUserContent(block.content)) ||
+          isTerminalCommandInput(block)) &&
         block.ctx.itemId !== null
       ) {
         ids.add(block.ctx.itemId);
@@ -219,6 +226,8 @@ function TranscriptImpl({
     return () => window.removeEventListener("keydown", handleFind);
   }, [display.conversationId]);
   const disableVirtualization = nativeFindConversationId === display.conversationId;
+  const [searchParams] = useSearchParams();
+  const messageId = searchParams.get(MESSAGE_QUERY_PARAM);
 
   // Virtualizer-derived geometry (scroll handle, active turn, range nonce),
   // published by VirtualBubbleList. The rail reads the active turn and the
@@ -250,6 +259,11 @@ function TranscriptImpl({
     [display.bubbles],
   );
   const nav = useUserMessageNav(userMessageIds, ensureItemVisible);
+  useMessageDeepLink(conversationId ?? null, {
+    ensureMessageVisible: ensureItemVisible,
+    ready: display.conversationId === conversationId && !!scroller?.el && !!scrollToItemRef.current,
+    rangeNonce: spacerMeasureNonce,
+  });
 
   // One rail tick per real user turn, paired with a preview of the reply that
   // followed. Mirrors the transcript's loaded window and grows lazily.
@@ -299,26 +313,34 @@ function TranscriptImpl({
   }, [nav]);
 
   const showWorkingIndicator = shouldShowWorkingIndicator(display.showsWorking, display.bubbles);
+  const arcaWarning = useArcaShutdownBanner();
+  const showArcaBanner = arcaWarning.showForHost(hostId);
+  const hasPinnedBanner = display.hasTasks || showArcaBanner;
   return (
     <>
       {/* Task tracker pinned above the thread. Sibling of the viewport (not an
       overlay) so it shrinks the scroll area rather than covering messages.
       Self-hides with no tasks. */}
       <ChatPlanAccordion className="mt-14 md:mt-12" />
+      {showArcaBanner && <ArcaShutdownBanner warning={arcaWarning} hasTasks={display.hasTasks} />}
       {/* Wrapper div gives us a ref to scope the SelectionPopup to the
       conversation area without requiring Conversation to forward refs. */}
       <div
         ref={setConversationEl}
         className="@container/chat relative flex min-h-0 flex-1 overflow-hidden"
       >
-        <Conversation className={cn(!display.hasTasks && "chat-scroll-fade", "flex-1")}>
+        <Conversation
+          className={cn(
+            hasPinnedBanner ? "chat-scroll-composer-fade" : "chat-scroll-fade",
+            "flex-1",
+          )}
+        >
           <ConversationContent
             scrollClassName="transcript-hide-native-scrollbar"
             className={cn(
-              "chat-conversation-content mx-auto w-full gap-4 px-4 pb-6",
-              display.hasTasks ? "pt-4" : "pt-20",
-              // Keep the rail inset in sync with the column's responsive width.
-              "md:pl-[clamp(1rem,(var(--chat-column-width)+6rem-100cqi)*0.5+1rem,1.5rem)]",
+              "chat-conversation-content mx-auto w-full gap-4 px-4 pb-6 md:px-[clamp(0px,calc((var(--chat-column-width)+3.5rem-100cqi)*0.5),1.75rem)]",
+              hasPinnedBanner ? "pt-4" : "pt-20",
+              showArcaBanner && "chat-content-under-arca-banner",
               CHAT_COLUMN_WIDTH,
             )}
           >
@@ -360,6 +382,7 @@ function TranscriptImpl({
                   conversationId={display.conversationId}
                   hasTasks={display.hasTasks}
                   disableVirtualization={disableVirtualization}
+                  messageId={messageId}
                   onGeometryChange={onGeometryChange}
                 />
                 {/* Pending elicitation cards, floated to the bottom of the chat
@@ -400,13 +423,6 @@ function TranscriptImpl({
             />
           </ConversationContent>
           <ConversationScrollButton />
-          <UserMessageNavConnected
-            goPrev={nav.goPrev}
-            goNext={nav.goNext}
-            canPrev={nav.canPrev}
-            canNext={nav.canNext}
-            hidden={userMessageIds.length === 0}
-          />
         </Conversation>
         {/* Constant-height scrollbar. Sibling of Conversation so it escapes the
         chat-scroll-fade mask. */}
@@ -546,6 +562,7 @@ export function VirtualBubbleList({
   conversationId,
   hasTasks,
   disableVirtualization,
+  messageId,
   onGeometryChange,
 }: {
   bubbles: Bubble[];
@@ -556,6 +573,7 @@ export function VirtualBubbleList({
   conversationId: string | null | undefined;
   hasTasks: boolean;
   disableVirtualization: boolean;
+  messageId?: string | null;
   /** Publishes virtualizer-derived geometry up to the rail/spacer. */
   onGeometryChange: (geometry: TranscriptGeometry) => void;
 }) {
@@ -806,7 +824,7 @@ export function VirtualBubbleList({
   // Mid-scroll mode resolves the saved bubble through the virtualizer on every
   // frame, so estimate-to-measure corrections preserve its viewport position.
   useLayoutEffect(() => {
-    if (!scrollEl || !conversationId) return;
+    if (!scrollEl || !conversationId || messageId) return;
     const c = ctxRef.current;
     const saved = transcriptViewCache.get(conversationId);
     restoringRef.current = conversationId;
@@ -867,11 +885,19 @@ export function VirtualBubbleList({
     pinAnchor();
     frame = requestAnimationFrame(tick);
     return finish;
-  }, [conversationId, scrollEl]);
+  }, [conversationId, scrollEl, messageId]);
 
   const scrollToItem = useCallback((itemId: string): boolean => {
-    const index = bubblesRef.current.findIndex((b) => b.kind === "user" && b.itemId === itemId);
+    const index = bubblesRef.current.findIndex(
+      (b) =>
+        (b.kind === "user" && b.itemId === itemId) ||
+        (b.kind === "assistant" && b.responseId === itemId),
+    );
     if (index < 0) return false;
+    const c = ctxRef.current;
+    c.stopScroll();
+    c.state.isAtBottom = false;
+    c.state.escapedFromLock = true;
     virtualizerRef.current.scrollToIndex(index, { align: "center" });
     return true;
   }, []);

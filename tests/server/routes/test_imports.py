@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from omnigent.db.utils import builtin_agent_id
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.server.auth import LEVEL_OWNER, UnifiedAuthProvider
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.routes.imports import (
     LocalImportRequest,
@@ -23,6 +24,7 @@ from omnigent.server.routes.imports import (
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.host_store import HostStore
+from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 
 
 def _seed_claude_agent(db_uri: str) -> str:
@@ -34,6 +36,65 @@ def _seed_claude_agent(db_uri: str) -> str:
         bundle_location="builtin://claude-native-ui",
     )
     return agent_id
+
+
+@pytest.mark.parametrize(
+    "owner,caller,expected_status",
+    [
+        ("alice@example.com", "alice@example.com", 201),
+        ("alice@example.com", "bob@example.com", 403),
+        (None, "alice@example.com", 404),
+    ],
+)
+async def test_import_checks_host_ownership_before_persisting(
+    db_uri: str, owner: str | None, caller: str, expected_status: int
+) -> None:
+    _seed_claude_agent(db_uri)
+    host_id = "0123456789abcdef0123456789abcdef"
+    host_store = HostStore(db_uri)
+    if owner is not None:
+        host_store.upsert_on_connect(host_id, "laptop", owner)
+    conversation_store = SqlAlchemyConversationStore(db_uri)
+    app = FastAPI()
+    app.include_router(
+        create_imports_router(
+            conversation_store,
+            SqlAlchemyAgentStore(db_uri),
+            host_store=host_store,
+            auth_provider=UnifiedAuthProvider(source="header", local_single_user=False),
+        ),
+        prefix="/v1",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as import_client:
+        response = await import_client.post(
+            "/v1/imports",
+            headers={"X-Forwarded-Email": caller},
+            json={
+                "source": "claude",
+                "external_session_id": "owned-host-import",
+                "workspace": "/workspace",
+                "host_id": host_id,
+                "items": [
+                    {
+                        "type": "message",
+                        "response_id": "claude:turn-1",
+                        "data": {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "Hello"}],
+                        },
+                    }
+                ],
+            },
+        )
+    assert response.status_code == expected_status, response.text
+    conversation = conversation_store.find_conversation_by_external_session_id("owned-host-import")
+    if expected_status == 201:
+        assert conversation is not None
+        assert conversation.host_id == host_id
+    else:
+        assert conversation is None
 
 
 async def test_import_session_creates_normal_session_and_blocks_duplicate(
@@ -317,6 +378,68 @@ async def test_force_import_replaces_existing_session(
     assert [item["content"][0]["text"] for item in items.json()["data"]] == ["new prompt"]
 
 
+@pytest.mark.parametrize("host_owner,expected_status", [(None, 404), ("bob@example.com", 403)])
+async def test_rejected_force_import_preserves_existing_session(
+    db_uri: str, host_owner: str | None, expected_status: int
+) -> None:
+    _seed_claude_agent(db_uri)
+    caller = "alice@example.com"
+    host_id = "0123456789abcdef0123456789abcdef"
+    host_store = HostStore(db_uri)
+    if host_owner is not None:
+        host_store.upsert_on_connect(host_id, "laptop", host_owner)
+    conversation_store = SqlAlchemyConversationStore(db_uri)
+    permission_store = SqlAlchemyPermissionStore(db_uri)
+    app = FastAPI()
+    app.include_router(
+        create_imports_router(
+            conversation_store,
+            SqlAlchemyAgentStore(db_uri),
+            host_store=host_store,
+            permission_store=permission_store,
+            auth_provider=UnifiedAuthProvider(source="header", local_single_user=False),
+        ),
+        prefix="/v1",
+    )
+    payload = {
+        "source": "claude",
+        "external_session_id": "claude-force-rejected",
+        "workspace": "/repo/old",
+        "items": [
+            {
+                "type": "message",
+                "response_id": "claude:old",
+                "data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "original prompt"}],
+                },
+            }
+        ],
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-Forwarded-Email": caller},
+    ) as import_client:
+        created = await import_client.post("/v1/imports", json=payload)
+        assert created.status_code == 201, created.text
+        session_id = created.json()["session_id"]
+        original = conversation_store.get_conversation(session_id)
+        original_items = conversation_store.list_items(session_id).data
+        assert original is not None
+        assert len(original_items) == 1
+
+        rejected = await import_client.post(
+            "/v1/imports",
+            json={**payload, "force": True, "host_id": host_id, "workspace": "/repo/new"},
+        )
+
+    assert rejected.status_code == expected_status, rejected.text
+    assert conversation_store.get_conversation(session_id) == original
+    assert conversation_store.list_items(session_id).data == original_items
+    assert permission_store.get_permission_level(caller, session_id) == LEVEL_OWNER
+
+
 async def test_import_session_rejects_empty_history(client: httpx.AsyncClient) -> None:
     """An empty parser result cannot create a permanently claimed session."""
     response = await client.post(
@@ -381,6 +504,11 @@ async def test_stream_local_sessions_yields_each_then_stops_on_done() -> None:
 
     class _Reg:
         def send_text(self, host_conn: object, frame: str) -> None:
+            from omnigent.host.frames import HostImportLocalFrame, decode_host_frame
+
+            decoded = decode_host_frame(frame)
+            assert isinstance(decoded, HostImportLocalFrame)
+            assert decoded.allow_session_chunks is True
             (queue,) = conn.pending_import_local.values()
             for session in canned:
                 queue.put_nowait(("session", session))
@@ -398,6 +526,30 @@ async def test_stream_local_sessions_yields_each_then_stops_on_done() -> None:
 
     assert [s["external_session_id"] for s in got] == ["c1", "c2"]
     # The per-request queue is removed once the stream ends.
+    assert conn.pending_import_local == {}
+
+
+async def test_stream_local_sessions_treats_chunk_progress_as_liveness() -> None:
+    """Chunk heartbeats reset the wait without yielding malformed sessions."""
+    conn = SimpleNamespace(host_id="h1", pending_import_local={})
+
+    class _Reg:
+        def send_text(self, host_conn: object, frame: str) -> None:
+            (queue,) = conn.pending_import_local.values()
+            queue.put_nowait(("progress", {}))
+            queue.put_nowait(("done", {"status": "ok", "error": None}))
+
+    got = [
+        session
+        async for session in _stream_local_sessions_from_host(
+            host_registry=_Reg(),  # type: ignore[arg-type]
+            host_conn=conn,  # type: ignore[arg-type]
+            source="claude",
+            limit=1,
+        )
+    ]
+
+    assert got == []
     assert conn.pending_import_local == {}
 
 
@@ -430,6 +582,7 @@ async def test_stream_local_sessions_sends_exact_session_id() -> None:
     assert got == []
     assert sent[0].source == "codex"
     assert sent[0].session_id == "session-exact"
+    assert sent[0].allow_session_chunks is True
 
 
 async def test_stream_local_sessions_surfaces_host_failed_count() -> None:
@@ -655,16 +808,188 @@ async def test_local_import_stream_emits_ndjson_session_then_done(
     events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
     session_events = [e for e in events if e["event"] == "session"]
     assert [e["title"] for e in session_events] == ["Streamed 1", "Streamed 2"]
-    # The terminal line carries the tally.
+    # The terminal line carries the tally plus the (here empty) failures list.
     assert events[-1] == {
         "event": "done",
         "imported": 2,
         "already_imported": 0,
         "failed": 0,
+        "failures": [],
     }
     # Each streamed session was actually persisted.
     for e in session_events:
         assert conversation_store.get_conversation(e["session_id"]) is not None
+
+
+async def test_local_import_stream_reports_failure_reasons(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed sessions surface a per-session reason, not just a count.
+
+    Covers both failure origins: a session the server can't normalize (malformed
+    frame) and one the host couldn't read (reported on the done frame). Each gets
+    a ``failed`` line, the tally counts them, and ``done.failures`` lists reasons.
+    """
+    from omnigent.server.routes import imports as imports_module
+
+    _seed_claude_agent(db_uri)
+
+    async def _fake_stream(**kwargs: object):
+        stats = kwargs.get("stats")
+        yield {
+            "external_session_id": "ok-1",
+            "workspace": None,
+            "items": [
+                {
+                    "type": "message",
+                    "response_id": "claude:1",
+                    "data": {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                }
+            ],
+            "title": "Good one",
+            "source": "claude",
+        }
+        # Malformed: items is not a list → server-side failure with a reason.
+        yield {
+            "external_session_id": "bad-1",
+            "workspace": None,
+            "items": "not-a-list",
+            "title": None,
+            "source": "claude",
+        }
+        # A session the host enumerated but couldn't read (no frame, only a
+        # reason on the terminal done frame).
+        if isinstance(stats, dict):
+            stats["host_failed"] = 1
+            stats["host_failures"] = [
+                {
+                    "external_session_id": "unreadable-1",
+                    "source": "codex",
+                    "reason": "No visible messages to import.",
+                }
+            ]
+
+    monkeypatch.setattr(imports_module, "_stream_local_sessions_from_host", _fake_stream)
+
+    host_conn = SimpleNamespace(
+        host_id="host_0123456789abcdef0123456789abcdef", pending_import_local={}
+    )
+    app = FastAPI()
+    app.include_router(
+        imports_module.create_imports_router(
+            SqlAlchemyConversationStore(db_uri),
+            SqlAlchemyAgentStore(db_uri),
+            host_registry=SimpleNamespace(get=lambda _host_id: host_conn),  # type: ignore[arg-type]
+            host_store=SimpleNamespace(  # type: ignore[arg-type]
+                get_host=lambda _host_id: SimpleNamespace(user_id=None)
+            ),
+        ),
+        prefix="/v1",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.post(
+            "/v1/imports/local/stream",
+            json={
+                "host_id": "host_0123456789abcdef0123456789abcdef",
+                "source": "all",
+                "limit": 5,
+            },
+        )
+
+    assert resp.status_code == 200
+    events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+    assert [e["title"] for e in events if e["event"] == "session"] == ["Good one"]
+    failed = [e for e in events if e["event"] == "failed"]
+    assert {f["reason"] for f in failed} == {
+        "This session's transcript was malformed or too large to import.",
+        "No visible messages to import.",
+    }
+    # The host-read failure keeps its source-session identity through the wire.
+    assert {(f["external_session_id"], f["source"]) for f in failed} == {
+        ("bad-1", "claude"),
+        ("unreadable-1", "codex"),
+    }
+    done = events[-1]
+    assert done["event"] == "done"
+    assert (done["imported"], done["failed"]) == (1, 2)
+    assert len(done["failures"]) == 2
+
+
+async def test_local_import_id_collision_counts_as_already_imported(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A create that collides on the deterministic id is already-imported, not failed.
+
+    A concurrent batch can persist the session (and its external id) after this
+    batch's pre-check missed but before its create, so the create then hits the
+    deterministic conversation id. That is the same source session, so it must
+    count as already-imported and never as a failure or a duplicate.
+    """
+    from omnigent.server.routes import imports as imports_module
+    from omnigent.server.routes.imports import _import_conversation_id
+
+    agent_id = _seed_claude_agent(db_uri)
+    store = SqlAlchemyConversationStore(db_uri)
+    # Occupy the deterministic id but leave the external id unindexed, so the
+    # pre-check misses and only the create surfaces the collision (the race).
+    store.create_conversation(
+        agent_id=agent_id,
+        title="pre-existing",
+        conversation_id=_import_conversation_id("claude", "race-1"),
+    )
+
+    async def _fake_stream(**_kwargs: object):
+        yield {
+            "external_session_id": "race-1",
+            "workspace": None,
+            "items": [
+                {
+                    "type": "message",
+                    "response_id": "claude:1",
+                    "data": {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                }
+            ],
+            "title": "Racing",
+            "source": "claude",
+        }
+
+    monkeypatch.setattr(imports_module, "_stream_local_sessions_from_host", _fake_stream)
+
+    host_conn = SimpleNamespace(
+        host_id="host_0123456789abcdef0123456789abcdef", pending_import_local={}
+    )
+    app = FastAPI()
+    app.include_router(
+        imports_module.create_imports_router(
+            store,
+            SqlAlchemyAgentStore(db_uri),
+            host_registry=SimpleNamespace(get=lambda _host_id: host_conn),  # type: ignore[arg-type]
+            host_store=SimpleNamespace(  # type: ignore[arg-type]
+                get_host=lambda _host_id: SimpleNamespace(user_id=None)
+            ),
+        ),
+        prefix="/v1",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.post(
+            "/v1/imports/local",
+            json={
+                "host_id": "host_0123456789abcdef0123456789abcdef",
+                "source": "claude",
+                "limit": 5,
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["imported"], body["already_imported"], body["failed"]) == (0, 1, 0)
+    assert body["failures"] == []
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])
@@ -715,8 +1040,11 @@ async def test_local_import_endpoints_redact_host_error(
 
     if stream:
         events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
-        error_payload = events[0]
-        assert error_payload["event"] == "error"
+        # A degenerate session yielded before the raise surfaces as a benign
+        # ``failed`` line; the host read error is a separate ``error`` line.
+        error_events = [e for e in events if e["event"] == "error"]
+        assert len(error_events) == 1
+        error_payload = error_events[0]
     else:
         assert response.status_code == 409
         error_payload = response.json()["error"]

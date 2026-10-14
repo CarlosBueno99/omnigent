@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import contextvars
 import copy
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -16,11 +18,11 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from importlib import import_module, resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypeAlias, cast, get_args
 
 import click
 import psutil
@@ -31,7 +33,7 @@ from rich.console import Console
 from rich.table import Table
 
 from omnigent._platform import IS_WINDOWS, resolve_repo_symlink
-from omnigent._startup_events import capture_cli_entry
+from omnigent._startup_events import capture_cli_entry, record_startup_event
 from omnigent.cli_common import (
     RESUME_PICKER_SENTINEL as _RESUME_PICKER_SENTINEL,
 )
@@ -96,6 +98,7 @@ from omnigent.process_logging import (
     LOG_LEVEL_ENV_VAR,
     LOG_TO_STDERR_ENV_VAR,
     data_dir,
+    ensure_stdio_survives_unencodable_output,
     env_truthy,
     process_log_dir_reference,
 )
@@ -124,7 +127,7 @@ def _load_config(path: str | None) -> dict[str, Any]:  # type: ignore[explicit-a
     """
     if path is None:
         return {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
@@ -236,7 +239,7 @@ def _build_default_databricks_routing_client(
     cfg: Any,  # type: ignore[explicit-any]  # parsed server config
     settings: Any,  # type: ignore[explicit-any]  # RoutingSettings
 ) -> Any | None:  # type: ignore[explicit-any]  # ExternalRoutingClient | None
-    """Route through the workspace's AI Gateway when no ``routing:`` block exists.
+    """Route through the workspace's Unity Gateway when no ``routing:`` block exists.
 
     A Databricks-backed deployment gets smart routing without extra
     config: the client points at that workspace's routing API and authenticates
@@ -387,7 +390,7 @@ def _build_routing_backends(
 ) -> Any:  # type: ignore[explicit-any]  # RoutingBackends
     """Build BOTH routing backends from configuration alone — no opt-in env needed.
 
-    They are not alternatives. The external client's picks are AI Gateway catalog
+    They are not alternatives. The external client's picks are Unity Gateway catalog
     ids, so a harness whose inference runs off something else is served by the
     built-in judge instead (see :mod:`omnigent.server.routing_backend`).
 
@@ -398,7 +401,7 @@ def _build_routing_backends(
     * anything else — no external side, the built-in judge only.
 
     With no ``routing:`` block at all, a Databricks-backed deployment gets its
-    own workspace AI Gateway as the external side. Managed deployments override
+    own workspace Unity Gateway as the external side. Managed deployments override
     ``RuntimeCaps.routing_backends`` themselves.
 
     :param cfg: The parsed server ``--config`` mapping.
@@ -594,7 +597,7 @@ def _migrate_legacy_state_dir() -> None:
     legacy_pid_file = legacy_src / "host.pid"
     if legacy_pid_file.exists():
         try:
-            first_line = legacy_pid_file.read_text().strip().splitlines()[0]
+            first_line = legacy_pid_file.read_text(encoding="utf-8").strip().splitlines()[0]
             legacy_pid = int(first_line)
         except (ValueError, OSError, IndexError):
             legacy_pid = None
@@ -869,8 +872,8 @@ def _peek_default_agent_harness(target: str) -> str | None:
     if not path.is_file():
         return None
     try:
-        raw = yaml.safe_load(path.read_text()) or {}
-    except (OSError, yaml.YAMLError):
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -1185,7 +1188,7 @@ def _save_global_config(  # type: ignore[explicit-any]
     path = _effective_global_config_path()
     _normalize_harness_scalar_on_write(cfg, path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=True)
 
 
@@ -1273,7 +1276,7 @@ def _save_local_config(
         cfg.pop(key, None)
     _normalize_harness_scalar_on_write(cfg, path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=True)
 
 
@@ -1753,6 +1756,7 @@ _HARNESS_COMMANDS: frozenset[str] = frozenset(
         "antigravity",
         "claude",
         "codex",
+        "copilot",
         "cursor",
         "debby",
         "devin",
@@ -1775,10 +1779,10 @@ _HARNESS_COMMANDS: frozenset[str] = frozenset(
 _ACCENT_RGB = (244, 59, 166)
 
 # Command names that are pure aliases of another command (the same Click
-# object registered under a second name, e.g. ``antigravity`` -> ``agy``).
+# object registered under a second name, e.g. ``update`` -> ``upgrade``).
 # Kept runnable/registered but omitted from the ``--help`` listing so the
 # alias isn't shown as a duplicate line.
-_ALIAS_COMMANDS: frozenset[str] = frozenset({"antigravity"})
+_ALIAS_COMMANDS: frozenset[str] = frozenset({"update", "antigravity"})
 
 
 def _harness_extra_checks() -> dict[str, Callable[[], bool]]:
@@ -1790,9 +1794,11 @@ def _harness_extra_checks() -> dict[str, Callable[[], bool]]:
     The predicates use ``importlib.util.find_spec`` (no heavy import).
     Commands absent from this map are always listed.
     """
+    from omnigent.onboarding.copilot_auth import copilot_sdk_installed
     from omnigent.onboarding.cursor_auth import cursor_sdk_installed
 
     return {
+        "copilot": copilot_sdk_installed,
         "cursor": cursor_sdk_installed,
     }
 
@@ -1854,7 +1860,7 @@ class _OmnigentCLI(click.Group):
             cmd = self.get_command(ctx, subcommand)
             if cmd is None or cmd.hidden:
                 continue
-            # Skip pure aliases (e.g. ``antigravity`` -> ``agy``) so the
+            # Skip pure aliases (e.g. ``update`` -> ``upgrade``) so the
             # listing doesn't show a duplicate line; still runnable.
             if subcommand in _ALIAS_COMMANDS:
                 continue
@@ -2092,12 +2098,14 @@ def cli() -> None:
 # Keep in sync with ``@cli.command()`` decorations below.
 _CLICK_SUBCOMMANDS: frozenset[str] = frozenset(
     {
+        "agent",
         "agy",
         "antigravity",
         "attach",
         "claude",
         "codex",
         "config",
+        "copilot",
         "cursor",
         "debby",
         "debug",
@@ -2143,9 +2151,9 @@ def _should_skip_update_check(argv: list[str]) -> bool:
 
     Skipped for help / version requests, internal TUI subcommands
     (``pane-split`` / ``pane-picker``, invoked by the terminal UI rather
-    than the user), and ``upgrade`` (and its deprecated ``update`` spelling)
-    itself (pointing the user at ``omni upgrade`` while they are running it
-    is noise).
+    than the user), and ``upgrade`` (and its ``update`` alias) itself
+    (pointing the user at ``omni upgrade`` while they are running it is
+    noise).
 
     :param argv: CLI arguments without the program name, e.g.
         ``["run", "agent.yaml"]``.
@@ -2226,40 +2234,6 @@ def _enforce_wrapper_guard() -> None:
         raise SystemExit(2)
 
 
-def _ensure_stdio_survives_unencodable_output() -> None:
-    """Keep stdio writes from aborting when the stream encoding is legacy.
-
-    A shell on a legacy non-UTF-8 encoding (Windows ANSI codepage like
-    cp1252, a C/latin-1 locale, or an explicit ``PYTHONIOENCODING``) hands
-    Python stdio streams that can't encode the CLI's decorative glyphs
-    (emoji, ``✓``, ``←``, …), so a plain ``print`` raises
-    ``UnicodeEncodeError`` mid-command. Reconfigure such streams so the
-    unencodable character degrades to a stand-in instead of killing the
-    command: on Windows switch to UTF-8 outright (modern terminals render
-    it, and it preserves the glyphs); elsewhere keep the stream's own
-    encoding and only relax the error handler, so output stays in the
-    encoding the consumer asked for. ``PYTHONUTF8`` can't help here since
-    PEP 540 reads it only at interpreter startup.
-    """
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        encoding = (getattr(stream, "encoding", "") or "").lower().replace("_", "-")
-        if encoding in {"utf-8", "utf8"}:
-            continue
-        # Trade-off: errors="replace" is process-wide, so any genuinely
-        # unencodable output (not just decorative glyphs) degrades to "?"
-        # instead of raising — acceptable for a CLI's human-facing stdio.
-        # Detached/replaced streams (or a test's capture object) can't be
-        # reconfigured; the glyph fallback still guards the actual writes.
-        with contextlib.suppress(ValueError, OSError):
-            if sys.platform == "win32":
-                reconfigure(encoding="utf-8", errors="replace")
-            else:
-                reconfigure(errors="replace")
-
-
 @capture_cli_entry
 def main() -> None:
     """
@@ -2304,7 +2278,7 @@ def main() -> None:
     # Legacy-codepage stdio (Windows ANSI, C locale, PYTHONIOENCODING)
     # can't encode the CLI's glyphs; harden the streams before any command
     # renders so the write degrades instead of aborting.
-    _ensure_stdio_survives_unencodable_output()
+    ensure_stdio_survives_unencodable_output()
 
     # Relocate pre-rename ~/.omniagents state before anything reads ~/.omnigent
     # (update-check cache, diagnostics logs, config). No-op once migrated.
@@ -2698,6 +2672,47 @@ def _normalize_daemon_target(server_url: str | None) -> str:
     return _normalize_daemon_target_impl(server_url)
 
 
+def _daemon_host_status_probe(
+    record: _HostDaemonRecord, *, timeout_s: float = 2.0
+) -> _HostHttpResult | None:
+    """
+    Fetch the server's view of a daemon's host row.
+
+    :param record: Daemon record to probe.
+    :param timeout_s: Per-request HTTP timeout in seconds, e.g. ``2.0``.
+    :returns: The HTTP result — status ``0`` means the request never got an
+        HTTP answer and the body carries the transport failure — or ``None``
+        when the record has no host id or no server URL to probe.
+    """
+    from omnigent.harnesses.claude_native.bridge import url_component
+
+    host_id = record.host_id or _load_existing_host_id()
+    if host_id is None:
+        return None
+    base_url = _daemon_base_url(record)
+    if base_url is None:
+        return None
+    return _host_http_json(
+        base_url=base_url,
+        method="GET",
+        path=f"/v1/hosts/{url_component(host_id)}",
+        timeout_s=timeout_s,
+        host_id=host_id,
+    )
+
+
+def _host_status_reports_online(result: _HostHttpResult | None) -> bool:
+    """
+    Report whether a host-row probe result says the host is online.
+
+    :param result: Probe result from :func:`_daemon_host_status_probe`.
+    :returns: ``True`` only on a 200 whose body reports ``"online"``.
+    """
+    if result is None or result.status_code != 200 or not isinstance(result.body, dict):
+        return False
+    return result.body.get("status") == "online"
+
+
 def _daemon_host_online(record: _HostDaemonRecord, *, timeout_s: float = 2.0) -> bool:
     """
     Probe whether a daemon's host is currently online on its server.
@@ -2716,24 +2731,7 @@ def _daemon_host_online(record: _HostDaemonRecord, *, timeout_s: float = 2.0) ->
         as ``"online"``; ``False`` if the host id is unknown, the server
         is unreachable, or the host reports offline.
     """
-    from omnigent.harnesses.claude_native.bridge import url_component
-
-    host_id = record.host_id or _load_existing_host_id()
-    if host_id is None:
-        return False
-    base_url = _daemon_base_url(record)
-    if base_url is None:
-        return False
-    result = _host_http_json(
-        base_url=base_url,
-        method="GET",
-        path=f"/v1/hosts/{url_component(host_id)}",
-        timeout_s=timeout_s,
-        host_id=host_id,
-    )
-    if result.status_code != 200 or not isinstance(result.body, dict):
-        return False
-    return result.body.get("status") == "online"
+    return _host_status_reports_online(_daemon_host_status_probe(record, timeout_s=timeout_s))
 
 
 def _daemon_registry_dir() -> Path:
@@ -2815,8 +2813,8 @@ def _read_daemon_record(path: Path) -> _HostDaemonRecord | None:
     :returns: Parsed daemon record, or ``None`` if unreadable or malformed.
     """
     try:
-        raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -2946,7 +2944,7 @@ def _load_existing_host_id() -> str | None:
 
     try:
         identity = load_host_identity_if_present()
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return None
     return identity.host_id if identity is not None else None
 
@@ -3292,6 +3290,23 @@ def _describe_pid(pid: int) -> str:
         return f"pid={pid}"
 
 
+def _pid_is_foreign(pid: int) -> bool:
+    """Whether *pid* is owned by another user, so this account cannot signal it.
+
+    ``os.kill(pid, 0)`` delivers no signal but runs the same permission check
+    a real signal would: ``PermissionError`` (EPERM) means the process belongs
+    to another user. Any other outcome (delivered, or the pid is gone) is not
+    treated as foreign.
+    """
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _pid_is_recorded_daemon(record: _HostDaemonRecord) -> bool:
     """Whether *record*'s pid still names the recorded daemon, not a recycled pid.
 
@@ -3376,10 +3391,24 @@ def _claim_foreground_daemon_record(
     if conflict is not None:
         # server_url is None in local mode; "" makes the hint say --server "".
         stop_command = _host_stop_command(conflict.server_url or "")
-        raise click.ClickException(
+        detail = (
             "A host daemon is already running for this server "
             f"({_describe_pid(conflict.pid)}, target={conflict.target}). "
-            f"Run `{cli_invocation()} host status` to inspect it or `{stop_command}` "
+        )
+        if _pid_is_foreign(conflict.pid):
+            # Another user owns the daemon: `host stop` on this account can only
+            # clear the shared registry record, not signal the process — and a
+            # service-managed daemon respawns. Point at remedies that work
+            # instead of a stop that cannot.
+            raise click.ClickException(
+                detail + "It is owned by another user, so it cannot be stopped from this "
+                f"account: `{stop_command}` only clears the shared registry record "
+                "(and a service-managed daemon respawns). Ask that user to stop it, "
+                "or set OMNIGENT_DATA_DIR to a directory only you use to run your "
+                "own host."
+            )
+        raise click.ClickException(
+            detail + f"Run `{cli_invocation()} host status` to inspect it or `{stop_command}` "
             "to stop it first."
         )
     previous = _find_daemon_record(record.target)
@@ -3457,25 +3486,46 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         rather than continue this command mid-restart. ``False`` for a
         plain reuse, a transparent tunnel-health heal, or a first spawn.
     """
+    ensure_started_at = time.monotonic()
     target = _normalize_daemon_target(server_url)
+    existing_before = _find_daemon_record(target)
+    process_was_running = existing_before is not None and _daemon_owner_is_live(existing_before)
+
+    def _record_host_state(action: str, *, running_before: bool = process_was_running) -> None:
+        record_startup_event(
+            "host_state_observed",
+            details={
+                "host_mode": "remote" if server_url else "local",
+                "host_process_state_at_launch": "running" if running_before else "not_running",
+                "host_process_action": action,
+                "host_ensure_elapsed_ms": round((time.monotonic() - ensure_started_at) * 1000, 3),
+            },
+        )
+
     decision = _reuse_existing_daemon_record(target)
     if decision.reuse:
+        _record_host_state("reused")
         return False
     if not decision.config_changed and _local_daemon_serves_target(target, server_url):
+        _record_host_state("reused_local_daemon", running_before=True)
         return False
 
     _HOST_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
     mode_args = ["--local"] if not server_url else ["--server", server_url]
-    args = [sys.executable, "-m", "omnigent.host._daemon_entry", *mode_args]
+    # Match runner/zygote startup: keep workspace code out of runtime imports
+    # without changing the caller's working directory or agent workspace.
+    args = [sys.executable, "-P", "-m", "omnigent.host._daemon_entry", *mode_args]
     config_sig = server_config_signature(include_features=not server_url)
     daemon_env = _build_host_daemon_env(server_url=server_url)
     daemon_env[DAEMON_CONFIG_SIG_ENV_VAR] = config_sig
     expected_host_id = _load_existing_host_id()
     spawned = _spawn_host_daemon_process(args=args, env=daemon_env)
     if spawned is None:
+        _record_host_state("start_failed")
         return False
     claimed = _wait_for_daemon_claim(target, spawned)
     if claimed is None:
+        _record_host_state("start_timeout")
         _stop_spawned_host_daemon_process(spawned)
         _delete_spawned_daemon_record(target, spawned)
         # The spawned daemon (or a concurrent winner) never wrote its record:
@@ -3487,6 +3537,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         )
     expected_host_id = expected_host_id or _load_existing_host_id()
     if expected_host_id is not None and claimed.host_id != expected_host_id:
+        _record_host_state("start_identity_mismatch")
         _stop_spawned_host_daemon_process(spawned)
         _delete_spawned_daemon_record(target, spawned)
         actual_host_id = claimed.host_id or "<missing>"
@@ -3496,6 +3547,13 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
             "Check OMNIGENT_HOST_ID, OMNIGENT_HOST_NAME, and OMNIGENT_CONFIG_HOME. "
             f"See {spawned.log_path}."
         )
+    if claimed.pid != spawned.pid:
+        action = "started_concurrently_during_launch"
+    elif process_was_running:
+        action = "restarted_during_launch"
+    else:
+        action = "started_during_launch"
+    _record_host_state(action)
     return decision.config_changed
 
 
@@ -3541,12 +3599,23 @@ def _build_host_daemon_env(
     )
 
     if not server_url:
+        from omnigent.telemetry.environment import CI_ENV_VARS
+
+        # The local server detects CI and usage opt-outs in its own environment.
+        local_server_env_vars = (
+            _LOCAL_DAEMON_ENV_ALLOWLIST
+            | CI_ENV_VARS
+            | {
+                "DISABLE_TELEMETRY",
+                "DO_NOT_TRACK",
+            }
+        )
         daemon_env_prefixes = (*_RUNNER_ENV_ALLOWLIST_PREFIXES, *_LOCAL_DAEMON_ENV_PREFIXES)
         env = {
             key: value
             for key, value in os.environ.items()
             if key in _RUNNER_ENV_ALLOWLIST
-            or key in _LOCAL_DAEMON_ENV_ALLOWLIST
+            or key in local_server_env_vars
             or key in _HOST_DAEMON_PROXY_ENV_ALLOWLIST
             or key in identity_env_vars
             or key.startswith(daemon_env_prefixes)
@@ -3587,7 +3656,7 @@ def _read_host_pid_file() -> tuple[int, str] | None:
     if not _HOST_PID_PATH.exists():
         return None
     try:
-        lines = _HOST_PID_PATH.read_text().strip().splitlines()
+        lines = _HOST_PID_PATH.read_text(encoding="utf-8").strip().splitlines()
         if len(lines) < 2:
             return None
         return int(lines[0]), lines[1]
@@ -3752,7 +3821,8 @@ def _ensure_backend(server: str | None) -> str:
             concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
         ):
             auth_future = pool.submit(_ensure_databricks_server_auth, server)
-            daemon_future = pool.submit(_ensure_host_daemon, server)
+            daemon_context = contextvars.copy_context()
+            daemon_future = pool.submit(daemon_context.run, _ensure_host_daemon, server)
             # Raise auth errors before daemon errors: a login failure is
             # more actionable than a daemon-connect failure that would
             # have been caused by the same missing credentials.
@@ -4182,6 +4252,17 @@ def _assert_server_port_bindable(host: str, port: int) -> None:
         "loopback port and prints its URL."
     ),
 )
+@click.option(
+    "--base-path",
+    default=None,
+    help=(
+        "Public URL path prefix when serving behind a subpath reverse proxy, "
+        "e.g. --base-path /proxy/6767 for code-server's port proxy "
+        "(alternative to OMNIGENT_WEB_BASE_PATH). The Web UI prefixes its "
+        "API/WebSocket/asset URLs with this, and the server accepts requests "
+        "with or without the prefix. Default: served at the origin root."
+    ),
+)
 @click.pass_context
 def server(
     ctx: click.Context,
@@ -4196,6 +4277,7 @@ def server(
     auto_open: bool,
     admin_password: str | None,
     background: bool,
+    base_path: str | None,
 ) -> None:
     """Start the Omnigent server, or manage the background server.
 
@@ -4231,12 +4313,25 @@ def server(
     :param background: When True, spawn the server as a detached background
         process (the managed local server) instead of running it in the
         foreground.
+    :param base_path: Optional public URL path prefix from ``--base-path``,
+        e.g. ``"/proxy/6767"``. Folded into the ``OMNIGENT_WEB_BASE_PATH`` env
+        var that ``create_app`` reads; ``None`` leaves the env var untouched.
     :returns: None.
     """
     if ctx.invoked_subcommand is not None:
         # A subcommand (stop/status) handles this invocation; the body
         # below is the server path for the bare ``server`` group.
         return
+
+    # --base-path is sugar for OMNIGENT_WEB_BASE_PATH, which create_app reads.
+    # An env var (not a create_app kwarg) so the same toggle reaches every
+    # startup path (Docker entrypoint, canonical local server, e2e harness)
+    # that builds the app outside this command. Assigned (not setdefault) so an
+    # explicit flag wins over an inherited value and a --background reuse detects
+    # the change. Folded in before the --background branch below so a detached
+    # server (which spawns inheriting this process's environ) picks it up too.
+    if base_path:
+        os.environ["OMNIGENT_WEB_BASE_PATH"] = base_path
 
     if background:
         # `omnigent server --background` is the canonical spelling for the
@@ -4508,6 +4603,20 @@ def server(
 
             databricks_store = DatabricksConnectionStore(db_uri, dbx_cipher)
 
+    from omnigent.server.mcp_registry import McpRegistry, McpRegistryConfig
+
+    mcp_registry = None
+    registry_config = McpRegistryConfig.from_env()
+    if registry_config is not None:
+        from omnigent.stores.credential_store import build_secret_cipher
+        from omnigent.stores.credential_store.sqlalchemy_store import CredentialStore
+
+        registry_cipher = build_secret_cipher()
+        mcp_registry = McpRegistry(
+            registry_config,
+            CredentialStore(db_uri, registry_cipher) if registry_cipher else None,
+        )
+
     # Accounts mode ergonomics: when accounts mode is selected
     # (OMNIGENT_AUTH_ENABLED=1 without OIDC config, or an explicit
     # OMNIGENT_AUTH_PROVIDER=accounts), supply sensible defaults
@@ -4577,6 +4686,7 @@ def server(
         sandbox_config=sandbox_config,
         github_config=github_config,
         github_store=github_store,
+        mcp_registry=mcp_registry,
         databricks_config=databricks_config,
         databricks_store=databricks_store,
         server_config=title_server_config,
@@ -4644,9 +4754,8 @@ def server(
             # read that loss as ours, not as the runners dying.
             _shutdown_state.mark_server_shutting_down()
             _session_stream.shutdown_all()
-            # Yield to the event loop so generators can consume _DONE,
-            # flush their final "data: [DONE]\n\n" chunk, and exit before
-            # super().shutdown() calls connection.shutdown() / transport.close().
+            # Yield so streams consume _DONE and exit before transports close.
+            # No [DONE] reaches browsers: they must reconnect after restart.
             # Without this pause the generators write to an already-closing
             # transport, leaving connections open past the graceful window.
             await _asyncio.sleep(0)
@@ -4841,6 +4950,13 @@ def server_status(json_output: bool) -> None:
 @cli.command("start")
 @click.option("--server", default=None, help="Omnigent server URL to host on.")
 @click.option(
+    "--no-open",
+    is_flag=True,
+    envvar="OMNIGENT_HOST_NO_OPEN",
+    show_envvar=True,
+    help="Skip opening the host web UI in a browser. Sign-in may still open a browser.",
+)
+@click.option(
     "--non-interactive",
     "non_interactive",
     is_flag=True,
@@ -4851,7 +4967,7 @@ def server_status(json_output: bool) -> None:
         "launching the browser login flow. Use this in scripts and CI."
     ),
 )
-def start(server: str | None, non_interactive: bool) -> None:
+def start(server: str | None, no_open: bool, non_interactive: bool) -> None:
     """Start Omnigent on this machine, in the background.
 
     The on switch, and the counterpart of ``omnigent stop``: brings up the
@@ -4867,6 +4983,7 @@ def start(server: str | None, non_interactive: bool) -> None:
     :param server: Omnigent server URL to host on, e.g.
         ``"https://example.databricksapps.com"``. ``None`` falls back to
         config; empty string forces local mode.
+    :param no_open: When ``True``, skip automatically opening the host web UI.
     :param non_interactive: When ``True``, never launch the browser login for
         an un-authed remote server — fail with the ``omnigent login`` hint
         instead.
@@ -4876,6 +4993,7 @@ def start(server: str | None, non_interactive: bool) -> None:
         _resolve_host_server(server),
         stop_command=f"{cli_invocation()} stop",
         non_interactive=non_interactive,
+        no_open=no_open,
     )
 
 
@@ -4955,7 +5073,7 @@ def _write_uninstall_manifest(ledger: InstallLedger) -> Path:
     """Write the ledger fields the POSIX uninstaller needs as tab records."""
     fd, manifest_name = tempfile.mkstemp(prefix="omnigent-uninstall-ledger-", suffix=".tsv")
     manifest = Path(manifest_name)
-    with os.fdopen(fd, "w") as handle:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
         for profile in ledger.entries.profiles:
             handle.write(
                 "\t".join(
@@ -5885,34 +6003,11 @@ def upgrade(
     )
 
 
-@click.pass_context
-def _update_deprecated(ctx: click.Context, **kwargs: object) -> None:
-    """Warn that ``update`` is deprecated, then run the ``upgrade`` flow.
-
-    :param ctx: The click context, used to invoke ``upgrade``.
-    :param kwargs: ``upgrade``'s own parsed options, forwarded verbatim.
-    :returns: None.
-    """
-    click.echo(
-        f"omnigent: `update` is deprecated; use `{cli_invocation(name='omni')} upgrade`.",
-        err=True,
-    )
-    ctx.invoke(upgrade, **kwargs)
-
-
-# Deprecated rather than deleted: the desktop About window shipped this same
-# ``omni update`` hint, and ``server start`` was deleted outright in v0.7.0
-# (#3105) then restored (#3578) when older clients hard-failed on it.
-cli.add_command(
-    click.Command(
-        "update",
-        params=list(upgrade.params),
-        callback=_update_deprecated,
-        hidden=True,
-        # Static: a module-level f-string would freeze the wrapper spelling.
-        help="Deprecated spelling of `upgrade`. Use `upgrade` instead.",
-    )
-)
+# ``omni update`` is an alias for ``omni upgrade`` — mistyping the latter as
+# the former is common, and silently doing nothing is annoying. Registering
+# the same Command object under a second name shares the exact callback,
+# options, and semantics; there is no duplicated implementation to drift.
+cli.add_command(upgrade, name="update")
 
 
 def _bundle(source: Path) -> bytes:
@@ -5985,9 +6080,11 @@ def _resolve_bundle_env_vars(source: Path) -> dict[str, str]:
 
     - ``config.yaml``: ``llm.connection.*`` and
       ``executor.connection.*`` values, ``executor.auth``
-      ``api_key`` / ``base_url`` (when ``type: api_key``), and
-      ``tools.builtins[*]`` dict-entry values (except ``name``)
-    - ``tools/mcp/*.yaml``: ``headers.*`` and ``env.*`` values
+      ``api_key`` / ``base_url`` (when ``type: api_key``),
+      ``tools.builtins[*]`` dict-entry values (except ``name``), and
+      inline ``tools.<name>`` MCP servers' ``url``, ``headers.*`` and
+      ``env.*`` values
+    - ``tools/mcp/*.yaml``: ``url``, ``headers.*`` and ``env.*`` values
 
     These mirror the server-side parser's ``${VAR}`` expansion
     sites. Resolving here, against the client's own environment,
@@ -6007,7 +6104,7 @@ def _resolve_bundle_env_vars(source: Path) -> dict[str, str]:
     # ── config.yaml ──────────────────────────────────
     config_path = source / "config.yaml"
     if config_path.exists():
-        raw = yaml.safe_load(config_path.read_text())
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         if isinstance(raw, dict):
             changed = _expand_config_env_vars(raw, expand_env_vars)
             if changed:
@@ -6017,24 +6114,13 @@ def _resolve_bundle_env_vars(source: Path) -> dict[str, str]:
                 )
 
     # ── tools/mcp/*.yaml ─────────────────────────────
-    # ``headers`` (HTTP transport auth) and ``env`` (stdio transport
-    # process env) are both secret-bearing and both expanded by the
-    # server-side parser, so resolve both client-side.
     mcp_dir = source / "tools" / "mcp"
     if mcp_dir.is_dir():
         for yaml_file in sorted(mcp_dir.glob("*.yaml")):
-            raw = yaml.safe_load(yaml_file.read_text())
+            raw = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 continue
-            changed = False
-            for field in ("headers", "env"):
-                value = raw.get(field)
-                if isinstance(value, dict):
-                    raw[field] = expand_env_vars(
-                        {str(k): str(v) for k, v in value.items()},
-                    )
-                    changed = True
-            if changed:
+            if _expand_mcp_server_env_vars(raw, expand_env_vars):
                 arcname = str(yaml_file.relative_to(source))
                 resolved[arcname] = yaml.dump(
                     raw,
@@ -6151,6 +6237,8 @@ def _expand_config_env_vars(  # type: ignore[explicit-any]  # raw is parsed YAML
     - ``executor.auth`` — ``api_key`` / ``base_url`` when
       ``type == "api_key"``
     - ``tools.builtins[*]`` — dict-entry values except ``name``
+    - ``tools.<name>`` inline MCP servers — ``url``, ``headers`` and
+      ``env`` values
 
     :param raw: The parsed config.yaml dict (modified in-place).
     :param expand_fn: Callable that expands env var references
@@ -6195,6 +6283,81 @@ def _expand_config_env_vars(  # type: ignore[explicit-any]  # raw is parsed YAML
             or changed
         )
 
+    return _expand_inline_mcp_env_vars(raw.get("tools"), expand_fn) or changed
+
+
+def _expand_inline_mcp_env_vars(
+    raw_tools: object,
+    expand_fn: Callable[[dict[str, str]], dict[str, str]],
+) -> bool:
+    """
+    Expand ``${VAR}`` references in inline ``type: mcp`` entries of
+    config.yaml's ``tools:`` block, modifying them in-place.
+
+    Selects the same entries the parser's ``_parse_inline_mcp_servers``
+    expands: mappings with ``type: mcp`` under a non-reserved key that
+    declare a ``command`` or ``url``.
+
+    :param raw_tools: The raw ``tools:`` value from config.yaml, e.g.
+        ``{"search": {"type": "mcp", "url": "${SEARCH_URL}"}}``.
+        Non-dict values are ignored.
+    :param expand_fn: Callable that expands env var references
+        in a string-to-string dict.
+    :returns: ``True`` if any values were expanded.
+    """
+    from omnigent.spec.parser import _TOOLS_CONFIG_KEYS
+
+    if not isinstance(raw_tools, dict):
+        return False
+    changed = False
+    for key, entry in raw_tools.items():
+        if key in _TOOLS_CONFIG_KEYS or not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "")) != "mcp":
+            continue
+        if entry.get("command") is None and entry.get("url") is None:
+            continue
+        changed = _expand_mcp_server_env_vars(entry, expand_fn) or changed
+    return changed
+
+
+def _expand_mcp_server_env_vars(  # type: ignore[explicit-any]  # raw is parsed YAML
+    raw: dict[str, Any],
+    expand_fn: Callable[[dict[str, str]], dict[str, str]],
+) -> bool:
+    """
+    Expand ``${VAR}`` references in one MCP server declaration's
+    ``url``, ``headers`` and ``env``, modifying *raw* in-place.
+
+    These are the fields the parser expands for MCP servers. The
+    server re-parses uploaded bundles without expansion, so they are
+    resolved here from the uploading user's environment instead.
+
+    :param raw: One MCP server mapping from ``tools/mcp/*.yaml`` or an
+        inline ``tools.<name>`` entry, e.g.
+        ``{"url": "${MCP_URL}", "headers": {"Authorization": "Bearer ${TOKEN}"}}``.
+    :param expand_fn: Callable that expands env var references
+        in a string-to-string dict.
+    :returns: ``True`` if expansion changed any value; literal-only
+        fields are left untouched so the file can ship unmodified.
+    :raises OmnigentError: If a ``${VAR}`` reference cannot be
+        resolved from the environment.
+    """
+    changed = False
+    url = raw.get("url")
+    if url is not None:
+        expanded_url = expand_fn({"url": str(url)})["url"]
+        if expanded_url != str(url):
+            raw["url"] = expanded_url
+            changed = True
+    for field in ("headers", "env"):
+        value = raw.get(field)
+        if isinstance(value, dict):
+            original = {str(k): str(v) for k, v in value.items()}
+            expanded = expand_fn(original)
+            if expanded != original:
+                raw[field] = expanded
+                changed = True
     return changed
 
 
@@ -6282,6 +6445,20 @@ def debby(run_args: tuple[str, ...]) -> None:
       omnigent debby -p "name ideas for a CLI that runs agents"
     """
     _run_bundled_agent("debby", run_args)
+
+
+@cli.command(
+    context_settings={
+        "ignore_unknown_options": True,
+        "allow_extra_args": True,
+    }
+)
+@click.argument("run_args", nargs=-1, type=click.UNPROCESSED)
+def copilot(run_args: tuple[str, ...]) -> None:
+    """Launch GitHub Copilot with Omnigent.
+
+    Shorthand for ``omnigent run --harness copilot``; every ``run`` option is forwarded."""
+    _run_harness_shorthand("copilot", run_args)
 
 
 @cli.command()
@@ -6373,10 +6550,10 @@ class _SessionImportResult:
 @click.option(
     "--last",
     "recent_session_count",
-    type=click.IntRange(min=1, max=100),
+    type=click.IntRange(min=1, max=1000),
     default=None,
     metavar="N",
-    help="Import the N most recently modified parent sessions (maximum 100).",
+    help="Import the N most recently modified parent sessions (maximum 1000).",
 )
 @click.option(
     "--server",
@@ -6983,6 +7160,12 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
     item authorship is re-attributed to the importing user (original
     ``created_by`` is not carried over).
 
+    A session from a native harness with an import source is labeled as an
+    import, so the unbound copy reads offline and the web UI offers to
+    reconnect it (a host picker for Claude, Codex, Pi, and OpenCode). Harnesses
+    that carry fork history (Claude, Codex, Pi, Qwen, and OpenCode) also keep
+    the conversation on first launch; Kimi and Kiro start fresh.
+
     \b
     Examples:
       omnigent session import -i my_session.jsonl
@@ -6993,7 +7176,11 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
 
     from omnigent.chat import _remote_headers
     from omnigent.db.utils import builtin_agent_id
+    from omnigent.harness_capabilities import ForkHistory
+    from omnigent.harness_plugins import harness_capabilities
     from omnigent.native.native_coding_agents import native_coding_agent_for_harness
+    from omnigent.session_import.models import IMPORT_SOURCE_LABEL_KEY, ImportSource
+    from omnigent.stores.conversation_store import FORK_CARRY_HISTORY_LABEL_KEY
 
     src_path = Path(input_path)
     if not src_path.is_file():
@@ -7044,6 +7231,15 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
     native_agent = native_coding_agent_for_harness(harness)
     if native_agent is not None:
         fallback_agent_id = builtin_agent_id(native_agent.agent_name)
+    # The source label makes the unbound copy read offline so the web UI offers
+    # to reconnect it; carry-history, for harnesses that can carry fork history,
+    # makes the first native launch reuse the copied items instead of starting fresh.
+    labels: dict[str, str] = {}
+    if native_agent is not None and native_agent.key in get_args(ImportSource):
+        labels[IMPORT_SOURCE_LABEL_KEY] = native_agent.key
+        caps = harness_capabilities().get(native_agent.harness)
+        if caps is not None and caps.fork_history is not ForkHistory.NONE:
+            labels[FORK_CARRY_HISTORY_LABEL_KEY] = "1"
 
     cfg = _load_effective_config()
     base_url = _resolve_attach_server(server, cfg.get("server"))
@@ -7068,6 +7264,8 @@ def session_import(input_path: str, title: str | None, server: str | None) -> No
         }
         if resolved_title:
             body["title"] = resolved_title
+        if labels:
+            body["labels"] = labels
         for key in (
             "workspace",
             "harness_override",
@@ -7336,7 +7534,7 @@ def _materialize_harness_launcher_file(
     }
     if canonical in _OS_ENV_HARNESSES:
         raw["os_env"] = {"type": "caller_process", "sandbox": {"type": "none"}}
-    yaml_path.write_text(yaml.safe_dump(raw, default_flow_style=False))
+    yaml_path.write_text(yaml.safe_dump(raw, default_flow_style=False), encoding="utf-8")
     return yaml_path
 
 
@@ -8712,22 +8910,112 @@ def _background_host_log_detail(log_path: str | None) -> str:
     return detail
 
 
+def _registration_target_display(record: _HostDaemonRecord) -> str:
+    """Return the user-facing URL of the server a daemon must register with.
+
+    The result reaches terminal output and persistent exception text, and a
+    configured server URL may carry basic-auth userinfo
+    (``https://user:token@host``) that daemon-target normalization preserves.
+    Strip the userinfo the same way ``omnigent.cli_auth._safe_log_url`` does,
+    so registration diagnostics never echo embedded credentials. The query is
+    kept: ``ServerUrl`` strips arbitrary queries from the API base, and the
+    display form only re-adds the non-secret ``?o=<workspace>`` selector.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    from omnigent.util.server_url import display_server_url
+
+    base_url = _daemon_base_url(record)
+    if not base_url:
+        return "the configured server"
+    display = display_server_url(base_url)
+    try:
+        parts = urlsplit(display)
+        host = parts.hostname
+    except ValueError:
+        return "the configured server"
+    if not parts.scheme or not host:
+        return "the configured server"
+    # Drop only the userinfo, keeping the rest of the authority verbatim so
+    # an IPv6 literal retains its brackets (``http://[::1]:6767``).
+    netloc = parts.netloc.rpartition("@")[2]
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, ""))
+
+
+def _background_registration_timeout(
+    record: _HostDaemonRecord,
+    *,
+    server_responded: bool,
+    transport_error: str | None,
+) -> click.ClickException:
+    """Build the error for a registration wait that exhausted its grace.
+
+    :param record: Registry record of the daemon that never registered.
+    :param server_responded: Whether any status probe got an HTTP answer.
+    :param transport_error: Last probe transport failure, e.g.
+        ``"ConnectError: [Errno 111] Connection refused"``.
+    :returns: The exception to raise — an unreachable server is named
+        together with its transport failure instead of the generic
+        registration-timeout wording.
+    """
+    from omnigent.cli_diagnostics import SUPPRESS_RECOVERY_HINT_ATTR
+
+    target = _registration_target_display(record)
+    log_detail = _background_host_log_detail(record.log_path)
+    if not server_responded and transport_error is not None:
+        exc = click.ClickException(
+            f"Could not reach the Omnigent server at {target} within "
+            f"{_BACKGROUND_HOST_REGISTRATION_GRACE_S:.0f}s ({transport_error}). "
+            "Check that the server is running and that your `server` config "
+            f"points at the right URL.{log_detail}"
+        )
+        # A server nothing answered at cannot be a stale-host HTTP 401
+        # tunnel rejection, so the recovery hint would mislead here.
+        setattr(exc, SUPPRESS_RECOVERY_HINT_ATTR, True)
+        return exc
+    return click.ClickException(
+        "The host daemon started but did not register with the server at "
+        f"{target} within {_BACKGROUND_HOST_REGISTRATION_GRACE_S:.0f}s."
+        f"{log_detail}"
+    )
+
+
 def _confirm_background_host_registered(record: _HostDaemonRecord) -> None:
     """Wait until the detached daemon completes server registration."""
     deadline = time.monotonic() + _BACKGROUND_HOST_REGISTRATION_GRACE_S
+    announced = False
+    server_responded = False
+    last_transport_error: str | None = None
     while True:
         if not _pid_alive(record.pid):
             raise click.ClickException(
                 "The host daemon exited before registering with the server."
                 f"{_background_host_log_detail(record.log_path)}"
             )
-        if _daemon_host_online(record, timeout_s=1.0):
+        result = _daemon_host_status_probe(record, timeout_s=1.0)
+        if result is not None and result.status_code == 0:
+            last_transport_error = str(result.body)
+        elif result is not None:
+            server_responded = True
+        if _host_status_reports_online(result):
             return
+        if not announced:
+            # Not registered on the first probe: name what the otherwise
+            # silent wait is for before polling out the grace period. On
+            # stderr, like the nearby progress output, so scripts capturing
+            # the command's result never receive the waiting line.
+            click.echo(
+                "Waiting for the host daemon to register with "
+                f"{_registration_target_display(record)} "
+                f"(up to {_BACKGROUND_HOST_REGISTRATION_GRACE_S:.0f}s)...",
+                err=True,
+            )
+            announced = True
         if time.monotonic() >= deadline:
-            raise click.ClickException(
-                "The host daemon started but did not register with the server "
-                f"within {_BACKGROUND_HOST_REGISTRATION_GRACE_S:.0f}s."
-                f"{_background_host_log_detail(record.log_path)}"
+            raise _background_registration_timeout(
+                record,
+                server_responded=server_responded,
+                transport_error=last_transport_error,
             )
         time.sleep(0.2)
 
@@ -8741,19 +9029,27 @@ def _maybe_open_host_web_ui(
     server_url: str,
     *,
     non_interactive: bool,
+    no_open: bool,
     cfg: dict[str, Any] | None = None,  # type: ignore[explicit-any]
 ) -> None:
     """Open the host web UI when interactive and enabled."""
-    if non_interactive or not _stdin_is_tty():
+    if no_open or non_interactive or not _stdin_is_tty():
         return
     if cfg is None:
         cfg = _load_effective_config()
     if _resolve_auto_open_conversation_setting(cfg) is False:
         return
     from omnigent.conversation_browser import open_conversation_url
+    from omnigent.host.local_server import local_server_base_path
     from omnigent.util.server_url import display_server_url
 
     web_url = display_server_url(server_url)
+    # A local server started with --base-path serves the UI under that prefix;
+    # opening the bare root renders blank (BrowserRouter basename mismatch).
+    # No-op for a remote --server or an unconfigured/root local server.
+    base_path = local_server_base_path(server_url)
+    if base_path:
+        web_url = web_url.rstrip("/") + base_path
     try:
         opened = open_conversation_url(web_url)
     except OSError:
@@ -8767,6 +9063,7 @@ def _run_background_host(
     *,
     stop_command: str,
     non_interactive: bool,
+    no_open: bool,
 ) -> None:
     """Spawn (or reuse) the detached host daemon and report it.
 
@@ -8788,6 +9085,7 @@ def _run_background_host(
         matches how it was invoked.
     :param non_interactive: When ``True``, never launch the browser login —
         fail with the ``omnigent login`` hint instead.
+    :param no_open: When ``True``, skip automatically opening the host web UI.
     :raises click.ClickException: If the daemon cannot be spawned, exits
         immediately, fails to register, or (local mode) never serves its local
         Omnigent server.
@@ -8846,7 +9144,7 @@ def _run_background_host(
     click.echo()
     click.echo(_cli_style("Stop it with:", dim=True))
     click.echo(f"  {_cli_style(stop_command, bold=True)}")
-    _maybe_open_host_web_ui(server_url, non_interactive=non_interactive)
+    _maybe_open_host_web_ui(server_url, non_interactive=non_interactive, no_open=no_open)
 
 
 def _echo_host_field(label: str, value: str) -> None:
@@ -8881,6 +9179,13 @@ def _host_stop_command(explicit_server: str | None) -> str:
 @cli.group("host", cls=_HostGroup, invoke_without_command=True)
 @click.option("--server", default=None, help="Remote omnigent server URL.")
 @click.option(
+    "--no-open",
+    is_flag=True,
+    envvar="OMNIGENT_HOST_NO_OPEN",
+    show_envvar=True,
+    help="Skip opening the host web UI in a browser. Sign-in may still open a browser.",
+)
+@click.option(
     "--background",
     "background",
     is_flag=True,
@@ -8908,6 +9213,7 @@ def host(
     ctx: click.Context,
     server: str | None,
     background: bool,
+    no_open: bool,
     non_interactive: bool,
 ) -> None:
     """
@@ -8919,6 +9225,7 @@ def host(
       omnigent host --server https://omnigent-app.databricksapps.com
       omnigent host ""   # spawn + connect to a local server
       omnigent host --background   # spawn detached, return immediately
+      omnigent host --no-open   # connect without opening the web UI
       omnigent host enable   # install and start a per-user system service
       omnigent host disable  # stop and remove the per-user system service
 
@@ -8941,6 +9248,7 @@ def host(
         to config; empty string selects local mode.
     :param background: When ``True``, spawn the daemon detached and return
         instead of running the daemon loop in the foreground.
+    :param no_open: When ``True``, skip automatically opening the host web UI.
     :param non_interactive: When ``True``, never launch the browser login
         for an un-authed remote server — fail with the ``omnigent login``
         hint instead.
@@ -8968,6 +9276,7 @@ def host(
             server,
             stop_command=_host_stop_command(explicit_server),
             non_interactive=non_interactive,
+            no_open=no_open,
         )
         return
 
@@ -9006,7 +9315,7 @@ def host(
         # (or a headless invocation) fails loud with the command to run.
         if remote_mode:
             _ensure_databricks_server_auth(server, non_interactive=non_interactive)
-        _maybe_open_host_web_ui(server, non_interactive=non_interactive, cfg=cfg)
+        _maybe_open_host_web_ui(server, non_interactive=non_interactive, no_open=no_open, cfg=cfg)
         run_host_process(server_url=server, daemon_target=target)
         stopped_cleanly = True
     except KeyboardInterrupt:
@@ -9069,6 +9378,30 @@ def _daemon_base_url(record: _HostDaemonRecord) -> str | None:
     return (record.server_url or record.target).rstrip("/")
 
 
+def _local_daemon_serving_remote(server_url: str) -> _HostDaemonRecord | None:
+    """Return the live local-mode daemon serving *server_url*, if any.
+
+    ``host --server <url>`` refuses to start when a local-mode daemon already
+    resolved to serve ``<url>`` (see :func:`_live_daemon_conflict`). ``host
+    stop`` / ``host status --server <url>`` must be able to act on that same
+    daemon, otherwise they report "No matching host daemon found" for the very
+    daemon ``host`` calls "already running".
+
+    :param server_url: Requested remote server URL, e.g.
+        ``"https://example.databricksapps.com"``.
+    :returns: The serving local-mode record, or ``None``.
+    """
+    local_record = _find_daemon_record(_LOCAL_DAEMON_MARKER)
+    if (
+        local_record is not None
+        and local_record.resolved_server_url is not None
+        and local_record.resolved_server_url.rstrip("/") == server_url.rstrip("/")
+        and _daemon_owner_is_live(local_record)
+    ):
+        return local_record
+    return None
+
+
 def _selected_daemon_records(
     *,
     server: str | None,
@@ -9090,9 +9423,20 @@ def _selected_daemon_records(
         raise click.ClickException("Use either --server or --all, not both.")
     if all_targets or (server is None and default_all):
         return _list_daemon_records()
-    target = _normalize_daemon_target(_resolve_host_server(server))
+    resolved = _resolve_host_server(server)
+    target = _normalize_daemon_target(resolved)
     record = _find_daemon_record(target)
-    return [] if record is None else [record]
+    if record is not None:
+        return [record]
+    # No server-target record — but `host --server <url>` also treats a
+    # local-mode daemon serving <url> as "already running". Match it here so a
+    # user who runs the exact `host stop --server <url>` the start error points
+    # them at is not told "No matching host daemon found".
+    if resolved is not None:
+        local = _local_daemon_serving_remote(resolved)
+        if local is not None:
+            return [local]
+    return []
 
 
 # Per-process header cache keyed on base_url. _remote_headers() resolves
@@ -9247,6 +9591,7 @@ def _daemon_session_request_params(
     params: dict[str, str | int] = {
         "limit": 1000,
         "include_archived": "true",
+        "visibility": "all",
     }
     if connected_only:
         params["connected"] = "true"
@@ -10216,7 +10561,19 @@ def _stop_daemon_sessions(
     return stopped
 
 
-def _signal_daemon_pid(record: _HostDaemonRecord, sig: int) -> bool:
+# `_signal_daemon_pid` outcomes.
+_SIGNAL_DELIVERED = "delivered"  # the signal reached the process
+_SIGNAL_GONE = "gone"  # the process had already exited — nothing to kill
+_SIGNAL_FOREIGN = "foreign"  # owned by another user (EPERM) — cannot signal it
+
+# `_terminate_daemon` outcomes, so `host stop` reports what actually happened
+# instead of claiming a stop it did not perform.
+_STOP_TERMINATED = "terminated"  # a daemon we own was signalled (or already gone)
+_STOP_DROPPED_STALE = "dropped_stale"  # dead / recycled pid — record dropped
+_STOP_DROPPED_FOREIGN = "dropped_foreign"  # owned by another user — record dropped
+
+
+def _signal_daemon_pid(record: _HostDaemonRecord, sig: int) -> str:
     """
     Signal a daemon's recorded PID, tolerating a stale foreign entry.
 
@@ -10237,16 +10594,17 @@ def _signal_daemon_pid(record: _HostDaemonRecord, sig: int) -> bool:
 
     :param record: Daemon record whose PID should be signalled.
     :param sig: Signal number to send, e.g. ``signal.SIGTERM``.
-    :returns: ``True`` if the record is stale and the caller should drop it
-        and stop (either the PID is not ours, or it already exited); ``False``
-        if the signal was delivered and termination should proceed as usual.
+    :returns: :data:`_SIGNAL_DELIVERED` when the signal reached the process,
+        :data:`_SIGNAL_GONE` when the process had already exited, or
+        :data:`_SIGNAL_FOREIGN` when the PID is owned by another user (EPERM)
+        and cannot be signalled from this account.
     """
     try:
         os.kill(record.pid, sig)
     except ProcessLookupError:
         # The process exited between the liveness check and the signal —
         # nothing left to kill, so the record is stale.
-        return True
+        return _SIGNAL_GONE
     except PermissionError:
         # Not our daemon: the record points at another user's process (PID
         # reuse, or a daemon started under a different account). Drop the
@@ -10256,16 +10614,20 @@ def _signal_daemon_pid(record: _HostDaemonRecord, sig: int) -> bool:
             f"{record.pid} is owned by another user and is not this daemon.",
             err=True,
         )
-        return True
-    return False
+        return _SIGNAL_FOREIGN
+    return _SIGNAL_DELIVERED
 
 
-def _terminate_daemon(record: _HostDaemonRecord, *, force: bool) -> None:
+def _terminate_daemon(record: _HostDaemonRecord, *, force: bool) -> str:
     """
     Terminate one local daemon process.
 
     :param record: Daemon record whose process should terminate.
     :param force: Send SIGKILL after the SIGTERM grace period.
+    :returns: :data:`_STOP_TERMINATED` when a daemon we own was stopped (or had
+        already exited), :data:`_STOP_DROPPED_STALE` when only a dead/recycled
+        record was dropped, or :data:`_STOP_DROPPED_FOREIGN` when the record
+        named another user's process that we could not signal.
     :raises click.ClickException: If the process stays alive.
     """
     if not _pid_is_recorded_daemon(record):
@@ -10278,25 +10640,33 @@ def _terminate_daemon(record: _HostDaemonRecord, *, force: bool) -> None:
                 err=True,
             )
         _delete_daemon_record(record)
-        return
-    if _signal_daemon_pid(record, signal.SIGTERM):
+        return _STOP_DROPPED_STALE
+    outcome = _signal_daemon_pid(record, signal.SIGTERM)
+    if outcome == _SIGNAL_FOREIGN:
         _delete_daemon_record(record)
-        return
+        return _STOP_DROPPED_FOREIGN
+    if outcome == _SIGNAL_GONE:
+        _delete_daemon_record(record)
+        return _STOP_TERMINATED
     deadline = time.monotonic() + _HOST_DAEMON_STOP_GRACE_S
     while time.monotonic() < deadline:
         if not _pid_alive(record.pid):
             _delete_daemon_record(record)
-            return
+            return _STOP_TERMINATED
         time.sleep(0.1)
     if force:
-        if _signal_daemon_pid(record, getattr(signal, "SIGKILL", signal.SIGTERM)):
+        outcome = _signal_daemon_pid(record, getattr(signal, "SIGKILL", signal.SIGTERM))
+        if outcome == _SIGNAL_FOREIGN:
             _delete_daemon_record(record)
-            return
+            return _STOP_DROPPED_FOREIGN
+        if outcome == _SIGNAL_GONE:
+            _delete_daemon_record(record)
+            return _STOP_TERMINATED
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             if not _pid_alive(record.pid):
                 _delete_daemon_record(record)
-                return
+                return _STOP_TERMINATED
             time.sleep(0.1)
     raise click.ClickException(
         f"Daemon {record.pid} for {_host_display_url(record.target)!r} did not exit; "
@@ -10341,14 +10711,35 @@ def host_stop(
     if not records:
         click.echo("No matching host daemon found.")
         return
+    stopped_local_daemon = False
     for record in records:
         stopped = 0
         if not daemon_only and not force:
             stopped = _stop_daemon_sessions(record)
-        _terminate_daemon(record, force=force)
+        outcome = _terminate_daemon(record, force=force)
+        target = _host_display_url(record.target)
+        if outcome == _STOP_DROPPED_FOREIGN:
+            click.echo(
+                f"Cleared the registry record for {target} — pid={record.pid} is owned "
+                f"by another user and could not be stopped from this account; "
+                f"sessions_stopped={stopped}."
+            )
+        elif outcome == _STOP_DROPPED_STALE:
+            click.echo(
+                f"Cleared a stale registry record for {target} — pid={record.pid} was "
+                f"not a live daemon; sessions_stopped={stopped}."
+            )
+        else:
+            click.echo(f"Stopped {target} daemon pid={record.pid}; sessions_stopped={stopped}.")
+        if record.target == _LOCAL_DAEMON_MARKER and outcome != _STOP_DROPPED_FOREIGN:
+            stopped_local_daemon = True
+    if stopped_local_daemon:
+        # `host stop` only stops hosting; the local server keeps running (so its
+        # web UI / history survive). Point users at the full stop so a wedged
+        # server doesn't look like it survived a restart.
         click.echo(
-            f"Stopped {_host_display_url(record.target)} daemon "
-            f"pid={record.pid}; sessions_stopped={stopped}."
+            "This stops hosting only — the local Omnigent server (web UI / history) "
+            f"stays up. Run `{cli_invocation()} stop` to stop it too."
         )
 
 
@@ -11166,6 +11557,385 @@ if _sandbox_providers():
 #
 # ``migrate-accounts-to-oidc`` remaps user identities when switching the
 # built-in accounts provider to OIDC.
+
+
+_AGENT_SERVER_OPTION = click.option(
+    "--server",
+    default=None,
+    help=(
+        "Omnigent server URL. "
+        "Defaults to the configured server, or a local server already running."
+    ),
+)
+
+
+def _agent_cli_error(message: str) -> click.ClickException:
+    """An ``omnigent agent`` error; the stale-host recovery hint can't fix these."""
+    from omnigent.cli_diagnostics import SUPPRESS_RECOVERY_HINT_ATTR
+
+    exc = click.ClickException(message)
+    setattr(exc, SUPPRESS_RECOVERY_HINT_ATTR, True)
+    return exc
+
+
+@contextlib.contextmanager
+def _agent_api_client(server: str | None) -> Iterator[Any]:  # type: ignore[explicit-any]  # httpx imported lazily
+    """Yield an authenticated client for ``/v1/agents`` on the resolved server."""
+    import httpx
+
+    from omnigent.chat import _remote_headers
+
+    configured = _load_effective_config().get("server")
+    chosen = server if server is not None else configured
+    resolved = (
+        None
+        if isinstance(chosen, str) and _is_local_server_request(chosen)
+        else _resolve_attach_server_url(server, configured)
+    )
+    if resolved is None:
+        resolved = ServerUrl(ensure_local_omnigent_server().url)
+    base_url = resolved.api_base
+    with httpx.Client(
+        base_url=base_url,
+        headers=_remote_headers(server_url=base_url, host_id=None, org_id=resolved.org_id),
+        timeout=60.0,
+        trust_env=_trust_env_for(base_url),
+    ) as client:
+        # Older servers lack user agents; say so rather than failing with a
+        # 405 or reporting an empty list.
+        info = client.get("/v1/info")
+        if not (info.is_success and info.json().get("agent_install") is True):
+            raise _agent_cli_error(
+                f"{base_url} does not support installing agents; upgrade the server "
+                "to use `omnigent agent`."
+            )
+        yield client
+
+
+def _raise_for_agent_api(resp: Any) -> None:  # type: ignore[explicit-any]  # httpx.Response
+    """Turn a failed ``/v1/agents`` response into a clean CLI error."""
+    if resp.is_success:
+        return
+    try:
+        body = resp.json()
+        detail = body.get("error", {}).get("message") or body.get("detail") or resp.text
+    except (ValueError, AttributeError):  # non-JSON, or JSON of an unexpected shape
+        detail = resp.text
+    raise _agent_cli_error(f"{resp.status_code}: {detail}")
+
+
+@cli.group("agent")
+def agent_grp() -> None:
+    """Install reusable agents so they stay in the new-session picker.
+
+    Installed agents are stored on the server under your account, so they
+    appear on every host you use, beside the built-ins, without a restart.
+    """
+
+
+_GITHUB_SOURCE_RE = re.compile(
+    r"^(?:github:|https://github\.com/)?"
+    r"(?P<owner>\w[\w.-]*)/(?P<repo>\w[\w.-]*?)(?:\.git)?"
+    r"(?:/tree/(?P<tree_ref>[^/@]+))?(?P<subpath>(?:/\w[\w.-]*)*)/?(?:@(?P<name>[\w.-]+))?$"
+)
+
+
+def _parse_github_source(source: str) -> tuple[str, str | None, str, str | None] | None:
+    """``(clone_url, ref, subpath, agent_name)`` for ``owner/repo[/path][@agent]`` or a URL.
+
+    As in ``npx skills add``, ``@name`` picks one agent; a ref comes from ``/tree/<ref>``
+    (a branch or tag without ``/``; commit SHAs can't be shallow-cloned by name).
+    """
+    m = _GITHUB_SOURCE_RE.match(source)
+    if m is None:
+        return None
+    url = f"https://github.com/{m['owner']}/{m['repo']}.git"
+    return url, m["tree_ref"], m["subpath"].strip("/"), m["name"]
+
+
+def _find_agent_dirs(root: Path) -> list[Path]:
+    """Outermost directories under ``root`` holding a ``config.yaml`` (nested ones are workers)."""
+    found: list[Path] = []
+    for cfg in sorted(root.rglob("config.yaml"), key=lambda p: (len(p.parts), p)):
+        if ".git" in cfg.parts or any(d in cfg.parents for d in found):
+            continue
+        if cfg.is_symlink():
+            # Checked before anything reads it, so even --list can't follow it.
+            raise _agent_cli_error(
+                f"{_printable(cfg.relative_to(root).as_posix())} is a symlink; refusing to "
+                "read an agent config through a symlink from a remote repo."
+            )
+        found.append(cfg.parent)
+    return found
+
+
+def _agent_dir_name(agent_dir: Path) -> str:
+    """The agent's ``name`` from its ``config.yaml``, else the directory name."""
+    try:
+        name = yaml.safe_load((agent_dir / "config.yaml").read_text()).get("name")
+    except (yaml.YAMLError, AttributeError, OSError, ValueError):  # ValueError: bad UTF-8
+        name = None
+    return name if isinstance(name, str) and name else agent_dir.name
+
+
+def _printable(text: str) -> str:
+    """Escape control characters so repo-supplied text can't rewrite the terminal."""
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in text)
+
+
+_LFS_POINTER = b"version https://git-lfs.github.com/spec/"
+
+
+def _bundle_untrusted_dir(source: Path) -> bytes:
+    """Tar an agent directory from a remote repo as is.
+
+    Unlike :func:`_bundle`, ``${VAR}`` references are left unexpanded so a
+    repo can't pull this shell's secrets into its config, and symlinks are
+    refused so it can't pull in files from outside the checkout. ``.git`` is
+    skipped, and Git LFS pointers (never downloaded) are refused.
+    """
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for file_path in sorted(source.rglob("*")):
+            rel = file_path.relative_to(source)
+            if ".git" in rel.parts:
+                continue
+            if file_path.is_symlink():
+                raise _agent_cli_error(
+                    f"{_printable(str(rel))} is a symlink; refusing to install "
+                    "an agent with symlinks from a remote repo."
+                )
+            if file_path.is_file():
+                with file_path.open("rb") as fh:
+                    if fh.read(len(_LFS_POINTER)) == _LFS_POINTER:
+                        raise _agent_cli_error(
+                            f"{_printable(str(rel))} is stored in Git LFS, which "
+                            "`omnigent agent add` doesn't download."
+                        )
+                tf.add(str(file_path), arcname=str(rel))
+    return buf.getvalue()
+
+
+def _clone_github_source(clone_url: str, ref: str | None, dest: Path) -> None:
+    """Shallow-clone without submodules, hooks, or credential prompts."""
+    cmd = ["git", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
+           "-c", "protocol.https.allow=always", "clone", "--depth", "1",
+           "--no-recurse-submodules", "--quiet"]  # fmt: skip
+    if ref:
+        cmd += ["--branch", ref]
+    try:
+        proc = subprocess.run(
+            [*cmd, "--", clone_url, str(dest)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_LFS_SKIP_SMUDGE": "1"},
+            check=False,
+            timeout=300,
+        )
+    except FileNotFoundError:
+        raise _agent_cli_error("Installing from GitHub needs git on your PATH.") from None
+    except subprocess.TimeoutExpired:
+        raise _agent_cli_error(f"Timed out cloning {clone_url}.") from None
+    if proc.returncode != 0:
+        hint = (
+            "\n(Only branch and tag names work as a ref, not commit SHAs.)"
+            if ref and re.fullmatch(r"[0-9a-f]{7,40}", ref)
+            else ""
+        )
+        raise _agent_cli_error(f"Could not clone {clone_url}: {proc.stderr.strip()}{hint}")
+
+
+def _upload_agent(client: Any, bundle_bytes: bytes) -> None:  # type: ignore[explicit-any]  # httpx.Client
+    resp = client.post(
+        "/v1/agents",
+        files={"bundle": ("bundle.tar.gz", bundle_bytes, "application/gzip")},
+    )
+    _raise_for_agent_api(resp)
+    agent = resp.json()
+    name = _printable(str(agent["name"]))
+    click.echo(f"Installed {name} (version {agent['version']}, id {agent['id']})")
+    if agent["version"] > 1:
+        # Terminal (TUI) harnesses keep the agent they launched with.
+        click.echo(
+            "Sessions using it pick up this version on their next turn; "
+            "terminal sessions do when they relaunch."
+        )
+
+
+@agent_grp.command("add")
+@click.argument("source")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation for a GitHub repo.")
+@click.option(
+    "--list", "list_only", is_flag=True, help="List a GitHub repo's agents; install none."
+)
+@_AGENT_SERVER_OPTION
+def agent_add(source: str, yes: bool, list_only: bool, server: str | None) -> None:
+    """Install SOURCE: an agent directory, YAML file, .tar.gz bundle, or GitHub repo.
+
+    Re-adding an agent with the same name replaces your copy in place.
+    Workers, skills, guardrails, and supporting files in the directory are
+    all kept. For a directory, ``${VAR}`` references are resolved from this
+    shell, as ``omnigent run`` does; a YAML file or tarball is uploaded as is.
+
+    A GitHub repo (``owner/repo[/path][@agent]`` or a github.com URL) is
+    shallow-cloned and every agent directory in it (or just ``@agent``) is
+    installed after you confirm. Its ``${VAR}`` references are not resolved
+    from this shell. A ``/tree/<ref>`` must be a branch or tag without ``/``.
+
+    \b
+    Examples:
+      omnigent agent add ./orion
+      omnigent agent add ./orion.tar.gz --server https://myserver.com
+      omnigent agent add acme/agents --list
+      omnigent agent add acme/agents@orion
+      omnigent agent add https://github.com/acme/agents/tree/main/orion
+    """
+    path = Path(source)
+    github = None if path.exists() else _parse_github_source(source)
+    if github is None:
+        if not path.exists():
+            raise click.BadParameter(
+                f"{source!r} is neither a local path nor a GitHub repo.", param_hint="SOURCE"
+            )
+        if list_only:
+            raise click.UsageError("--list only applies to a GitHub repo.")
+        with _agent_api_client(server) as client:
+            _upload_agent(client, _bundle(path))
+        return
+
+    clone_url, ref, subpath, wanted = github
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Never resolved: a symlinked TMPDIR would make discovered paths disagree with it.
+        checkout = Path(tmpdir) / "repo"
+        try:
+            _clone_github_source(clone_url, ref, checkout)
+        except click.ClickException as exc:
+            if not source.startswith(("github:", "https://")):
+                exc.message += f"\n(If {source!r} is a local path, it doesn't exist.)"
+            raise
+        # The parser rejects `..`, so only a symlinked component can leave the subpath.
+        root = checkout / subpath
+        if any(
+            p.is_symlink()
+            for p in (root, *root.parents)
+            if p != checkout and p.is_relative_to(checkout)
+        ):
+            raise _agent_cli_error(f"{subpath!r} goes through a symlink in {clone_url}.")
+        if not root.is_dir():
+            raise _agent_cli_error(f"{subpath!r} is not a directory in {clone_url}.")
+        agents = [(_agent_dir_name(d), d) for d in _find_agent_dirs(root)]
+        if not agents:
+            raise _agent_cli_error(f"No agent (a directory with config.yaml) in {source}.")
+        by_name: dict[str, list[Path]] = {}
+        for n, d in agents:
+            by_name.setdefault(n.lower(), []).append(d)
+        dupes = [ds for ds in by_name.values() if len(ds) > 1]
+        if dupes:
+            where = "; ".join(
+                ", ".join(d.relative_to(checkout).as_posix() for d in ds) for ds in dupes
+            )
+            raise _agent_cli_error(f"Agents in {source} share a name: {_printable(where)}.")
+        if wanted:
+            match = [(n, d) for n, d in agents if n.lower() == wanted.lower()]
+            if not match:
+                found = _printable(", ".join(n for n, _ in agents))
+                raise _agent_cli_error(f"No agent named {wanted!r} in {source}; found: {found}.")
+            agents = match
+        click.echo(f"Found {len(agents)} agent(s) in {source}:")
+        for n, d in agents:
+            click.echo(f"  {_printable(n)}  ({_printable(d.relative_to(checkout).as_posix())})")
+        if list_only:
+            return
+        if not yes:
+            click.confirm("Install them? Only install agents from repos you trust", abort=True)
+        bundles = {n: _bundle_untrusted_dir(d) for n, d in agents}
+        failed: list[str] = []
+        with _agent_api_client(server) as client:
+            for n, bundle_bytes in bundles.items():
+                # One conflict (e.g. a built-in's name) shouldn't skip the rest.
+                try:
+                    _upload_agent(client, bundle_bytes)
+                except click.ClickException as exc:
+                    click.echo(f"Skipped {_printable(n)}: {_printable(exc.message)}", err=True)
+                    failed.append(n)
+        if failed:
+            raise _agent_cli_error(f"{len(failed)} of {len(bundles)} agent(s) not installed.")
+
+
+def _list_agents(client: Any) -> list[dict[str, Any]]:  # type: ignore[explicit-any]  # httpx.Client + JSON rows
+    """Page through the caller's own agents (``GET /v1/agents?scope=user``), newest first."""
+    rows: list[dict[str, Any]] = []  # type: ignore[explicit-any]  # JSON rows
+    after: str | None = None
+    while True:
+        params = {"scope": "user", "limit": 50, **({"after": after} if after else {})}
+        resp = client.get("/v1/agents", params=params)
+        _raise_for_agent_api(resp)
+        page = resp.json()
+        rows.extend(page["data"])
+        next_after = page.get("last_id")
+        if not page.get("has_more") or not next_after or next_after == after:
+            return rows
+        after = next_after
+
+
+@agent_grp.command("list")
+@_AGENT_SERVER_OPTION
+def agent_list(server: str | None) -> None:
+    """List your agents (installed with ``omnigent agent add`` or uploaded)."""
+    with _agent_api_client(server) as client:
+        rows = _list_agents(client)
+    if not rows:
+        click.echo("No agents yet. Install one with: omnigent agent add <path>")
+        return
+    table = _host_table("Your agents")
+    table.add_column("Name", style="bold", overflow="fold")
+    table.add_column("Version", justify="right", no_wrap=True)
+    table.add_column("Harness", no_wrap=True)
+    # The id is what `omnigent agent remove` takes when two agents share a name.
+    table.add_column("ID", no_wrap=True, min_width=32)
+    for agent in rows:
+        table.add_row(
+            agent["name"], str(agent["version"]), agent.get("harness") or "-", agent["id"]
+        )
+    _host_console().print(table)
+
+
+@agent_grp.command("remove")
+@click.argument("agent")
+@click.option("--yes", "-y", is_flag=True, help="Remove without asking, even if sessions use it.")
+@_AGENT_SERVER_OPTION
+def agent_remove(agent: str, yes: bool, server: str | None) -> None:
+    """Remove your AGENT, given by name or by the id ``omnigent agent list`` shows.
+
+    Sessions using it keep running while they can, then must be forked into
+    another agent to continue, so you are asked to confirm first.
+    """
+    with _agent_api_client(server) as client:
+        rows = _list_agents(client)
+        matches = [a for a in rows if a["id"] == agent] or [a for a in rows if a["name"] == agent]
+        if not matches:
+            raise _agent_cli_error(f"You have no agent named {agent!r}.")
+        if len(matches) > 1:
+            ids = ", ".join(a["id"] for a in matches)
+            raise _agent_cli_error(
+                f"You have {len(matches)} agents named {agent!r}; remove one by id: {ids}"
+            )
+        name = matches[0]["name"]
+        path = f"/v1/agents/{matches[0]['id']}"
+        resp = client.delete(path, params={"force": "true"} if yes else None)
+        if resp.status_code == 409 and "sessions_in_use" in resp.json():
+            count = resp.json()["sessions_in_use"]
+            click.confirm(
+                f"{count} session(s) still use {name}; removing it will break them. "
+                "Remove anyway?",
+                abort=True,
+            )
+            resp = client.delete(path, params={"force": "true"})
+        _raise_for_agent_api(resp)
+    click.echo(f"Removed {name}")
 
 
 @cli.group("debug")
@@ -12390,7 +13160,7 @@ def login(server_url: str) -> None:
     # hosted omnigent) means Databricks fronts the server. This
     # lets one CLI command handle every posture without a flag.
     try:
-        probe = _httpx.get(f"{server}/v1/me", timeout=10.0)
+        probe = _httpx.get(f"{server}/v1/me", timeout=10.0, trust_env=_trust_env_for(server))
     except _httpx.HTTPError as exc:
         raise click.ClickException(
             f"Could not reach {server}/v1/me: {exc}\nIs the server running?"
@@ -12427,20 +13197,36 @@ def login(server_url: str) -> None:
         _remember_default_server(server)
         return
 
-    # Fall through: OIDC mode (or unknown — let the ticket endpoint's
-    # error message guide the user).
+    if probe.status_code != 401:
+        # Not an Omnigent auth answer (an env proxy's block page, a gateway
+        # error): falling into the OIDC ticket flow would blame the wrong
+        # endpoint, so fail on the probe itself.
+        raise click.ClickException(
+            f"Unexpected response from {server}/v1/me: HTTP {probe.status_code}. "
+            "This is not an Omnigent auth answer; the server may be erroring, "
+            "or something other than the server may have replied."
+            f"{_proxy_interference_hint(server)}"
+        )
+
+    # Fall through: OIDC mode (or a 401 without a recognized login_url —
+    # older OIDC servers and auth middlewares answer 401 without the JSON
+    # ``login_url`` payload, so the ticket flow stays the compatibility
+    # path for any 401 and its endpoint's error message guides the user).
     import webbrowser
 
     from omnigent.cli_auth import store_token
 
     # Step 1: Request a CLI login ticket.
     try:
-        resp = _httpx.post(f"{server}/auth/cli-login", timeout=10.0)
+        resp = _httpx.post(
+            f"{server}/auth/cli-login", timeout=10.0, trust_env=_trust_env_for(server)
+        )
         resp.raise_for_status()
     except _httpx.HTTPError as exc:
         raise click.ClickException(
             f"Could not reach {server}/auth/cli-login: {exc}\n"
             f"Is the server running with OMNIGENT_AUTH_PROVIDER=oidc?"
+            f"{_proxy_interference_hint(server)}"
         ) from exc
 
     data = resp.json()
@@ -12460,7 +13246,7 @@ def login(server_url: str) -> None:
     while _time.time() < deadline:
         _time.sleep(2)
         try:
-            poll_resp = _httpx.get(poll_url, timeout=10.0)
+            poll_resp = _httpx.get(poll_url, timeout=10.0, trust_env=_trust_env_for(server))
         except _httpx.HTTPError:
             continue
 
@@ -12494,6 +13280,54 @@ def login(server_url: str) -> None:
 
 
 _CLI_LOGIN_TIMEOUT_SECONDS = 300  # 5 minutes
+
+# The proxy env vars httpx consults for each target scheme: only the
+# matching scheme's proxy (or the scheme-agnostic ALL_PROXY) can route a
+# request, so a hint must never blame e.g. HTTPS_PROXY for an http:// target.
+_PROXY_ENV_VARS_BY_SCHEME = {
+    "http": ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"),
+    "https": ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"),
+}
+
+
+def _proxy_interference_hint(base_url: str) -> str:
+    """A NO_PROXY hint when an env-configured proxy could answer for *base_url*.
+
+    Tracks httpx's actual routing: only proxy variables that apply to the
+    target's scheme count, and ``NO_PROXY`` entries — bare hostnames or
+    port-qualified ``host:port`` forms — that exclude the target suppress
+    the hint.
+
+    :param base_url: Server base URL, e.g. ``"http://omni.internal:6767"``.
+    :returns: A newline-prefixed hint, or ``""`` when no env proxy applies.
+    """
+    if not _trust_env_for(base_url):
+        return ""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(base_url)
+    scheme = (parts.scheme or "http").lower()
+    relevant_vars = _PROXY_ENV_VARS_BY_SCHEME.get(scheme, ("ALL_PROXY", "all_proxy"))
+    if not any(os.environ.get(var) for var in relevant_vars):
+        return ""
+    # Runtime-only stdlib helper (present in CPython, absent from typeshed);
+    # it implements the NO_PROXY list matching we need here.
+    from urllib.request import proxy_bypass_environment  # type: ignore[missing-module-attribute]
+
+    # NO_PROXY may already exclude this host (as a bare hostname or a
+    # port-qualified host:port entry, both of which httpx honors), in which
+    # case the answer really came from the server and blaming a proxy would
+    # misdirect. Pass host:port only when the URL carries an explicit port,
+    # mirroring httpx's port matching.
+    host = parts.hostname
+    bypass_target = f"{host}:{parts.port}" if host and parts.port else host
+    if bypass_target and proxy_bypass_environment(bypass_target):
+        return ""
+    return (
+        "\nA proxy from your environment (HTTP_PROXY/HTTPS_PROXY) may be "
+        "answering instead of the server; add the server host to NO_PROXY "
+        "to bypass it."
+    )
 
 
 def _accounts_login(server: str) -> None:
@@ -12533,6 +13367,7 @@ def _accounts_login(server: str) -> None:
             f"{server}/auth/login",
             json={"username": username, "password": password, "issue_refresh": True},
             timeout=10.0,
+            trust_env=_trust_env_for(server),
         )
     except _httpx.HTTPError as exc:
         raise click.ClickException(f"Could not reach {server}/auth/login: {exc}") from exc
@@ -12836,8 +13671,8 @@ def _bundled_agent_brain_harness(name: str) -> str | None:
     if not config_path.is_file():
         return None
     try:
-        raw = yaml.safe_load(config_path.read_text()) or {}
-    except (OSError, yaml.YAMLError):
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -13154,6 +13989,22 @@ def _run_bundled_agent(name: str, run_args: tuple[str, ...]) -> None:
     )
 
 
+def _run_harness_shorthand(harness: str, run_args: tuple[str, ...]) -> None:
+    """Forward a harness shorthand (``omnigent copilot``) to ``run --harness``, the
+    way :func:`_run_bundled_agent` forwards ``polly``; an explicit ``--harness`` in
+    *run_args* is a usage error rather than a silent override."""
+    if any(arg == "--harness" or arg.startswith("--harness=") for arg in run_args):
+        raise click.UsageError(
+            f"`{cli_invocation()} {harness}` always uses the {harness} harness; drop "
+            f"--harness, or use `{cli_invocation()} run --harness <name>` to pick another."
+        )
+    run.main(
+        args=["--harness", harness, *run_args],
+        prog_name="omnigent run",
+        standalone_mode=False,
+    )
+
+
 # Native coding-agent (TUI) subcommands (claude/codex/pi/…) live in
 # omnigent.cli_native; register them on the group here, at module bottom, so the
 # shared launch helpers their bodies close over are already defined.
@@ -13161,4 +14012,8 @@ _register_native_commands(cli)
 
 
 if __name__ == "__main__":
+    # Omnigent is already loaded from the selected installation. Restore the
+    # workspace path for local tools, matching the console entry point.
+    if (_cwd := os.getcwd()) not in sys.path:
+        sys.path.insert(0, _cwd)
     cli()

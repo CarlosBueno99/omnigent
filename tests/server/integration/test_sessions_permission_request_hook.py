@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import json
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -43,22 +44,10 @@ from omnigent.server._elicitation_registry import (
     _PreResolvedHarnessElicitation,
 )
 from omnigent.server.routes import sessions as sessions_route
+from tests.server.helpers import create_session_for_agent as _create_session
 from tests.server.helpers import create_test_agent, start_session_stream_collector
 
 pytestmark = pytest.mark.asyncio
-
-
-async def _create_session(client: httpx.AsyncClient, agent_id: str) -> str:
-    """
-    Create a minimal session and return its id.
-
-    :param client: Test HTTP client.
-    :param agent_id: Agent to bind.
-    :returns: New session id.
-    """
-    resp = await client.post("/v1/sessions", json={"agent_id": agent_id})
-    assert resp.status_code == 201, f"create failed: {resp.status_code} {resp.text}"
-    return resp.json()["id"]
 
 
 async def _drain_until_elicitation(
@@ -99,6 +88,7 @@ async def _post_approval(
     elicitation_id: str,
     action: str,
     content: dict[str, Any] | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> httpx.Response:
     """
     Resolve a published elicitation through the session event API.
@@ -110,11 +100,15 @@ async def _post_approval(
     :param action: MCP ``ElicitResult.action`` literal,
         e.g. ``"accept"`` or ``"decline"``.
     :param content: Optional MCP ``ElicitResult.content`` payload.
+    :param meta: Optional MCP ``_meta`` payload, e.g. a persistence
+        choice ``{"persist": "always"}``.
     :returns: The HTTP response from the session event route.
     """
     data: dict[str, Any] = {"elicitation_id": elicitation_id, "action": action}
     if content is not None:
         data["content"] = content
+    if meta is not None:
+        data["_meta"] = meta
     return await client.post(
         f"/v1/sessions/{session_id}/events",
         json={
@@ -2870,7 +2864,7 @@ async def test_codex_command_approval_hook_accepts_execpolicy_amendment(
             "startedAtMs": 1,
             "approvalId": None,
             "reason": "test command approval",
-            "command": ".venv/bin/python -m pytest tests/test_codex_native.py -q",
+            "command": (".venv/bin/python -m pytest tests/harnesses/codex_native/session/ -q"),
             "cwd": "/tmp/workspace",
             "commandActions": [],
             "availableDecisions": [
@@ -2938,7 +2932,7 @@ async def test_codex_command_approval_hook_rejects_malformed_execpolicy_amendmen
             "startedAtMs": 1,
             "approvalId": None,
             "reason": "test command approval",
-            "command": ".venv/bin/python -m pytest tests/test_codex_native.py -q",
+            "command": (".venv/bin/python -m pytest tests/harnesses/codex_native/session/ -q"),
             "cwd": "/tmp/workspace",
             "commandActions": [],
             "availableDecisions": [
@@ -4032,65 +4026,76 @@ async def test_codex_hook_gap_verdict_returned_on_repost(
     later — the click dropped, the codex sub-agent still blocked.
     """
     from omnigent.runtime import pending_elicitations
+    from omnigent.server.routes._sessions import orchestration
+
+    grace_started = asyncio.Event()
+    release_grace = asyncio.Event()
+
+    async def _wait_for_grace(delay: float) -> None:
+        if delay == sessions_route._HARNESS_ELICITATION_REPARK_GRACE_S:
+            grace_started.set()
+            await release_grace.wait()
+        else:
+            await asyncio.sleep(delay)
 
     async def _disconnect_immediately(_request: Any) -> None:
-        """
-        Sever every hook long-poll straight away.
-
-        :param _request: Ignored FastAPI request.
-        :returns: None.
-        """
-        await asyncio.sleep(0.01)
+        """Sever each hook poll without a timing dependency."""
+        return
 
     monkeypatch.setattr(
         sessions_route,
         "_poll_request_disconnect",
         _disconnect_immediately,
     )
+    # Hold the real deferred cleanup until the gap verdict has been consumed.
+    # Replace only this module's asyncio binding, leaving other sleeps intact.
     monkeypatch.setattr(
-        sessions_route,
-        "_HARNESS_ELICITATION_REPARK_GRACE_S",
-        0.25,
+        orchestration,
+        "asyncio",
+        SimpleNamespace(**{**vars(asyncio), "sleep": _wait_for_grace}),
     )
     pending_elicitations.reset_for_tests()
     agent = await create_test_agent(client, "test-codex-gap-verdict")
     session_id = await _create_session(client, agent["id"])
 
-    drain_task = asyncio.create_task(_drain_until_elicitation(session_id))
-    await asyncio.sleep(0.05)
-    first = await client.post(
-        f"/v1/sessions/{session_id}/hooks/codex-elicitation-request",
-        json=_CODEX_REPARK_PAYLOAD,
-    )
-    assert first.status_code == 200, first.text
-    assert first.content == b""
-    event = await drain_task
+    collector = await start_session_stream_collector(session_id)
+    try:
+        first = await client.post(
+            f"/v1/sessions/{session_id}/hooks/codex-elicitation-request",
+            json=_CODEX_REPARK_PAYLOAD,
+        )
+        assert first.status_code == 200, first.text
+        assert first.content == b""
+        event = await collector.next_event()
+        assert event["type"] == "response.elicitation_request"
+        await asyncio.wait_for(grace_started.wait(), timeout=5.0)
+        assert pending_elicitations.count_for(session_id) == 1
+        assert event["elicitation_id"] not in sessions_route._harness_elicitation_registry
 
-    # Verdict arrives while NO poll is parked (the gap).
-    verdict = await _post_approval(
-        client,
-        session_id,
-        event["elicitation_id"],
-        "accept",
-        content={"ok": "go"},
-    )
-    assert verdict.status_code == 202, verdict.text
-    assert pending_elicitations.count_for(session_id) == 0
+        # Verdict arrives while no poll is parked and cleanup is still waiting.
+        verdict = await _post_approval(
+            client,
+            session_id,
+            event["elicitation_id"],
+            "accept",
+            content={"ok": "go"},
+        )
+        assert verdict.status_code == 202, verdict.text
+        assert pending_elicitations.count_for(session_id) == 0
 
-    # The retry consumes the tombstone and returns the verdict in the
-    # codex result shape without re-publishing the prompt; an empty
-    # body here means the tombstone was dropped and the click lost.
-    second = await client.post(
-        f"/v1/sessions/{session_id}/hooks/codex-elicitation-request",
-        json=_CODEX_REPARK_PAYLOAD,
-    )
-    assert second.status_code == 200, second.text
-    assert second.json() == {"action": "accept", "content": {"ok": "go"}, "_meta": None}
-    # Drain the severed poll's deferred clear so it doesn't outlive the
-    # test's event loop (it no-ops the index either way).
-    for task in set(sessions_route._deferred_elicitation_clear_tasks):
-        await asyncio.wait_for(task, timeout=5.0)
-    pending_elicitations.reset_for_tests()
+        # The retry must consume the saved verdict instead of publishing again.
+        second = await client.post(
+            f"/v1/sessions/{session_id}/hooks/codex-elicitation-request",
+            json=_CODEX_REPARK_PAYLOAD,
+        )
+        assert second.status_code == 200, second.text
+        assert second.json() == {"action": "accept", "content": {"ok": "go"}, "_meta": None}
+    finally:
+        release_grace.set()
+        for task in set(sessions_route._deferred_elicitation_clear_tasks):
+            await asyncio.wait_for(task, timeout=5.0)
+        await collector.stop()
+        pending_elicitations.reset_for_tests()
 
 
 # ── Antigravity elicitation hook tests ──────────────────────────────────────
@@ -4151,6 +4156,60 @@ async def test_antigravity_elicitation_hook_accept_round_trip(
     assert resp.json() == {
         "action": "accept",
         "content": {"selectedOptionIds": ["1"]},
+    }
+
+
+async def test_antigravity_elicitation_hook_accept_persist_round_trip(
+    client: httpx.AsyncClient,
+) -> None:
+    """
+    Antigravity elicitation hook: an always-allow accept keeps ``_meta.persist``.
+
+    When a web approver picks one of agy's always-allow entries, the verdict
+    carries ``_meta.persist``. The hook must return that metadata verbatim so
+    the bridge types agy's persist menu entry rather than a one-time approve.
+
+    :param client: Test HTTP client.
+    :returns: None.
+    """
+    agent = await create_test_agent(client, "test-agy-elicit-persist")
+    session_id = await _create_session(client, agent["id"])
+    elicitation_id = "elicit_agy_00000000000000000000000000000003"
+    params_body = {
+        "mode": "form",
+        "message": "Antigravity wants to run a command",
+        "phase": "agy_permission",
+        "policy_name": "agy_native_permission",
+    }
+
+    drain_task = asyncio.create_task(_drain_until_elicitation(session_id))
+    await asyncio.sleep(0.05)
+    hook_task = asyncio.create_task(
+        client.post(
+            f"/v1/sessions/{session_id}/hooks/antigravity-elicitation-request",
+            json={"elicitation_id": elicitation_id, "params": params_body},
+        )
+    )
+
+    event = await drain_task
+    assert event["elicitation_id"] == elicitation_id
+    assert event["params"]["phase"] == "agy_permission"
+
+    verdict = await _post_approval(
+        client,
+        session_id,
+        elicitation_id,
+        "accept",
+        meta={"persist": "always"},
+    )
+    assert verdict.status_code == 202, verdict.text
+
+    resp = await hook_task
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "action": "accept",
+        "content": None,
+        "_meta": {"persist": "always"},
     }
 
 

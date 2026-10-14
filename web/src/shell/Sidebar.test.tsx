@@ -1,3 +1,8 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/hooks/useScopeCache", () => import("@/test/mockScopeCache"));
+import { SidebarDataProvider } from "@/hooks/useSidebarData";
+import { sidebarConfig, type SidebarConfig } from "@/lib/sidebarConfig";
 // Integration tests for the Sidebar's session list. The search box no
 // longer carries a filter funnel (agent-type filter + "Show archived"
 // toggle were removed). The sidebar fetches a single session list with
@@ -9,9 +14,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useEffect } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ALT_KEY, ARIA_MOD_KEY, MOD_KEY } from "@/components/KeyboardShortcut";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
+import type * as PullRequestsModule from "@/hooks/usePullRequests";
 import {
   markConversationSeen,
   resetReadStateForTests,
@@ -39,7 +45,9 @@ const {
   conversationsRef,
   pinnedIdsRef,
   projectSessionsMock,
+  projectSessionsLoadingRef,
   useHostsMock,
+  usePullRequestInfoMock,
 } = vi.hoisted(() => ({
   projectsMock: [] as string[],
   projectRowsRef: { current: undefined as { id: string; name: string }[] | undefined },
@@ -66,7 +74,15 @@ const {
   // serves exactly those rows instead of deriving from the global list — used to
   // prove a folder fetches its members independently of the global window.
   projectSessionsMock: { current: {} as Record<string, unknown[]> },
+  projectSessionsLoadingRef: { current: false },
   useHostsMock: vi.fn(),
+  usePullRequestInfoMock: vi.fn(),
+}));
+
+// The session tooltip reads repo / PR / branch from the session's GitHub info.
+vi.mock("@/hooks/usePullRequests", async (importOriginal) => ({
+  ...(await importOriginal<typeof PullRequestsModule>()),
+  usePullRequestInfo: usePullRequestInfoMock,
 }));
 
 vi.mock("@/hooks/useHosts", () => ({
@@ -79,86 +95,64 @@ vi.mock("@/hooks/useHosts", () => ({
 
 // Mutation hooks are only invoked on row actions; stub them. useConversations
 // is the data source under test, so it's a controllable mock.
-vi.mock("@/hooks/useConversations", () => ({
-  useConversations: vi.fn(),
-  useLeaveSession: () => ({ mutate: vi.fn(), isPending: false }),
-  useArchiveConversation: () => ({ mutate: vi.fn() }),
-  useBulkArchiveConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
-  useBulkDeleteConversations: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
-  useBulkMoveToProject: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
-  useBulkStopSessions: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
-  useConnectedConversations: () => [],
-  useStopAndDeleteConversation: () => ({ mutate: vi.fn() }),
-  // Pins are server-authoritative now. Derive the pinned set from the seeded
-  // ref intersected with the loaded conversations, so tests that seed via
-  // `seedPins` exercise the Pinned section without a separate fixture.
-  usePinnedConversations: () => {
-    const idSet = new Set(pinnedIdsRef.current);
-    return {
-      data: {
-        conversations: conversationsRef.current.filter((c) => idSet.has(c.id)),
-        filterHonored: true,
-      },
-      isSuccess: true,
-    };
-  },
-  // Reflect the toggle into the seeded ref so a test that clicks quick-pin then
-  // re-renders sees the updated Pinned set.
-  useTogglePinnedConversation: () => ({
-    mutate: ({ id, pinned }: { id: string; pinned: boolean }) => {
-      const ids = pinnedIdsRef.current;
-      pinnedIdsRef.current = pinned
-        ? [id, ...ids.filter((x) => x !== id)]
-        : ids.filter((x) => x !== id);
+vi.mock("@/hooks/useConversations", async () => {
+  const { conversationHooksMock } = await import("@/test/sidebarMockHelpers");
+  return {
+    ...conversationHooksMock(),
+    usePinnedConversations: () => {
+      const idSet = new Set(pinnedIdsRef.current);
+      return {
+        data: {
+          conversations: conversationsRef.current.filter((c) => idSet.has(c.id)),
+          filterHonored: true,
+        },
+        isSuccess: true,
+      };
     },
-  }),
-  setConversationPinned: vi.fn(() => Promise.resolve({})),
-  PINNED_CONVERSATIONS_KEY: ["pinned-conversations"],
-  useRenameConversation: () => ({ mutate: vi.fn() }),
-  useStopSession: () => ({ mutate: vi.fn() }),
-  // Project feature: the sidebar reads the project list to build project
-  // sections, and rows fire useMoveToProject from the kebab menu. Both must
-  // be stubbed or the Sidebar throws on render.
-  // Tests push project NAMES into projectsMock; expose them as first-class
-  // {id, name} folders (synthetic id per name) to match useProjects' shape.
-  useProjects: () => ({
-    data: projectRowsRef.current ?? projectsMock.map((name: string) => ({ id: `p_${name}`, name })),
-  }),
-  // Each project folder fetches its own sessions (server-side ?project=). Derive
-  // them from the global-list fixture by label so existing tests keep seeding
-  // project sessions there. Single page, no pagination, in this mock.
-  useProjectSessions: (project: string, enabled: boolean) => {
-    const override = projectSessionsMock.current[project];
-    const rows = !enabled
-      ? []
-      : (override ??
-        conversationsRef.current.filter(
-          (c) => (c.labels?.omni_project ?? null) === project && c.archived !== true,
-        ));
-    return {
-      data: enabled
-        ? {
-            pages: [{ data: rows, first_id: null, last_id: null, has_more: false }],
-            pageParams: [undefined],
-          }
-        : undefined,
-      isLoading: false,
-      isError: false,
-      error: null,
-      fetchNextPage: vi.fn(),
-      hasNextPage: false,
-      isFetchingNextPage: false,
-    };
-  },
-  useMoveToProject: () => ({ mutate: moveToProjectSpy }),
-  useDeleteProject: () => ({ mutate: deleteProjectSpy, isPending: false, isError: false }),
-  useRenameProject: () => ({ mutate: renameProjectSpy, isPending: false, isError: false }),
-  useCreateProject: () => ({ mutate: createProjectSpy, isPending: false, isError: false }),
-  useProjectConfig: () => ({ data: undefined, isLoading: false }),
-  useUpdateProjectConfig: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
-  fetchProjectSessionIds: fetchProjectSessionIdsMock,
-  PROJECT_LABEL_KEY: "omni_project",
-}));
+    useTogglePinnedConversation: () => ({
+      mutate: ({ id, pinned }: { id: string; pinned: boolean }) => {
+        const ids = pinnedIdsRef.current;
+        pinnedIdsRef.current = pinned
+          ? [id, ...ids.filter((x) => x !== id)]
+          : ids.filter((x) => x !== id);
+      },
+    }),
+    useProjects: () => ({
+      data:
+        projectRowsRef.current ?? projectsMock.map((name: string) => ({ id: `p_${name}`, name })),
+    }),
+    useProjectSessions: (project: string, enabled: boolean) => {
+      const override = projectSessionsMock.current[project];
+      const loading = enabled && projectSessionsLoadingRef.current;
+      const rows = !enabled
+        ? []
+        : (override ??
+          conversationsRef.current.filter(
+            (c) => (c.labels?.omni_project ?? null) === project && c.archived !== true,
+          ));
+      return {
+        data:
+          enabled && !loading
+            ? {
+                pages: [{ data: rows, first_id: null, last_id: null, has_more: false }],
+                pageParams: [undefined],
+              }
+            : undefined,
+        isLoading: loading,
+        isError: false,
+        error: null,
+        fetchNextPage: vi.fn(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      };
+    },
+    useMoveToProject: () => ({ mutate: moveToProjectSpy }),
+    useDeleteProject: () => ({ mutate: deleteProjectSpy, isPending: false, isError: false }),
+    useRenameProject: () => ({ mutate: renameProjectSpy, isPending: false, isError: false }),
+    useCreateProject: () => ({ mutate: createProjectSpy, isPending: false, isError: false }),
+    fetchProjectSessionIds: fetchProjectSessionIdsMock,
+  };
+});
 // Header / dialog children that pull their own context — stub to keep the
 // test scoped to the conversation list + funnel.
 vi.mock("@/components/PermissionsModal", () => ({ PermissionsModal: () => null }));
@@ -237,18 +231,21 @@ function renderSidebar(
   info?: ServerInfo,
   extensions: ExtensionCatalogItem[] = [],
   onClose = vi.fn(),
+  config: SidebarConfig = sidebarConfig,
 ) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const sidebar = <Sidebar open={open} onClose={onClose} onOpenSearch={onOpenSearch} />;
   return render(
     <QueryClientProvider client={qc}>
-      <ExtensionCatalogProvider extensions={extensions}>
-        <TooltipProvider>
-          <MemoryRouter initialEntries={[initialEntry]}>
-            {info ? <CapabilitiesProvider info={info}>{sidebar}</CapabilitiesProvider> : sidebar}
-          </MemoryRouter>
-        </TooltipProvider>
-      </ExtensionCatalogProvider>
+      <CapabilitiesProvider info={info ?? "loading"}>
+        <SidebarDataProvider config={config}>
+          <ExtensionCatalogProvider extensions={extensions}>
+            <TooltipProvider>
+              <MemoryRouter initialEntries={[initialEntry]}>{sidebar}</MemoryRouter>
+            </TooltipProvider>
+          </ExtensionCatalogProvider>
+        </SidebarDataProvider>
+      </CapabilitiesProvider>
     </QueryClientProvider>,
   );
 }
@@ -261,6 +258,9 @@ function selectSessionFilter(value: "all" | "mine" | "shared" | "archived") {
     ctrlKey: false,
     pointerType: "mouse",
   });
+  // With sidebar_grouping_ui on, the Display options sit in a submenu.
+  const displayMenu = screen.queryByTestId("session-display-menu");
+  if (displayMenu) fireEvent.keyDown(displayMenu, { key: "ArrowRight" });
   fireEvent.click(screen.getByTestId(`session-filter-${value}`));
 }
 
@@ -287,6 +287,8 @@ beforeEach(() => {
   useConvMock.mockReset();
   useHostsMock.mockReset();
   useHostsMock.mockReturnValue({ data: [] });
+  usePullRequestInfoMock.mockReset();
+  usePullRequestInfoMock.mockReturnValue({ data: undefined });
   localStorage.clear();
   resetReadStateForTests();
   clearSessionDrafts();
@@ -298,6 +300,7 @@ beforeEach(() => {
   fetchProjectSessionIdsMock.mockReset();
   fetchProjectSessionIdsMock.mockResolvedValue([]);
   projectSessionsMock.current = {};
+  projectSessionsLoadingRef.current = false;
   pinnedIdsRef.current = [];
   // Default to a multi-user server so the tab-based tests see the tabs.
   isServerLocalMock.mockReturnValue(false);
@@ -513,6 +516,61 @@ describe("Sidebar session list", () => {
     expect(error).not.toHaveClass("text-sm");
   });
 
+  it.each([
+    ["shared", "loading"],
+    ["shared", "error"],
+    ["all", "loading"],
+    ["all", "error"],
+    ["archived", "loading"],
+    ["archived", "error"],
+  ] as const)("keeps pins and expanded projects mounted during %s %s", (view, state) => {
+    projectsMock.push("Work");
+    mockConversations([
+      conv("pinned-session", "Claude Code"),
+      conv("filed-session", "Claude Code", { labels: { omni_project: "Work" } }),
+    ]);
+    seedPins(["pinned-session"]);
+    const original = useConvMock.getMockImplementation()!;
+    const retry = vi.fn();
+    const mineRetry = vi.fn();
+    useConvMock.mockImplementation((...args) => {
+      const query = original(...args);
+      if (args[4] !== (view === "archived" ? "archived" : "shared")) {
+        return { ...query, refetch: mineRetry };
+      }
+      return {
+        ...query,
+        data: undefined,
+        isLoading: state === "loading",
+        isError: state === "error",
+        error: state === "error" ? new Error("unavailable") : null,
+        refetch: retry,
+      } as ReturnType<typeof useConversations>;
+    });
+    renderSidebar();
+    fireEvent.click(screen.getByRole("button", { name: "Work" }));
+    const pinned = screen.getByText("pinned-session");
+    const filed = screen.getByText("filed-session");
+    const filter = screen.getByTestId("session-filter");
+
+    selectSessionFilter(view);
+
+    expect(screen.getByText("pinned-session")).toBe(pinned);
+    expect(screen.getByText("filed-session")).toBe(filed);
+    expect(screen.getByTestId("session-filter")).toBe(filter);
+    const sessions = screen.getByRole("button", { name: "Sessions" }).closest("section")!;
+    expect(within(sessions).getByRole("status")).toHaveTextContent(
+      state === "loading" ? "Loading…" : /could not be loaded|Failed to load/,
+    );
+    if (state === "error") {
+      fireEvent.click(within(sessions).getByRole("button", { name: "Retry" }));
+      expect(retry).toHaveBeenCalledOnce();
+    }
+    selectSessionFilter("mine");
+    expect(screen.getByText("pinned-session")).toBe(pinned);
+    expect(screen.getByText("filed-session")).toBe(filed);
+  });
+
   it("reveals a thin, theme-aware scrollbar only while scrolling", () => {
     vi.useFakeTimers();
     try {
@@ -520,7 +578,7 @@ describe("Sidebar session list", () => {
       renderSidebar();
 
       const scroller = screen.getByLabelText("Conversations").querySelector("nav")!;
-      expect(scroller).toHaveClass("overflow-y-auto", "md:mr-1", "[scrollbar-width:thin]");
+      expect(scroller).toHaveClass("overflow-y-auto", "px-2", "[scrollbar-width:thin]");
       expect(scroller.className).toContain("[&::-webkit-scrollbar]:w-2");
       expect(scroller).not.toHaveClass("[scrollbar-width:none]");
       expect(scroller.className).not.toContain("[&::-webkit-scrollbar]:hidden");
@@ -687,6 +745,69 @@ describe("Sidebar session list", () => {
     expect(screen.getByTestId("session-filter-shared")).toHaveAttribute("aria-checked", "true");
   });
 
+  it("withholds the conversation list until identity is ready", () => {
+    mockConversations([conv("conv_mine", "Claude Code")]);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = (identityReady: boolean) => (
+      <QueryClientProvider client={qc}>
+        <SidebarDataProvider identityReady={identityReady}>
+          <ExtensionCatalogProvider extensions={[]}>
+            <TooltipProvider>
+              <MemoryRouter>
+                <Sidebar open onClose={vi.fn()} />
+              </MemoryRouter>
+            </TooltipProvider>
+          </ExtensionCatalogProvider>
+        </SidebarDataProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree(false));
+
+    expect(screen.queryByTestId("sidebar-conversation-list")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Loading sessions");
+
+    rerender(tree(true));
+    expect(screen.getByTestId("sidebar-conversation-list")).toBeInTheDocument();
+    expect(screen.getByText("conv_mine")).toBeInTheDocument();
+  });
+
+  it("leaves Shared when runtime policy makes it unavailable", () => {
+    localStorage.setItem("omnigent:session-filter", "shared");
+    mockConversations([
+      conv("conv_mine", "Claude Code"),
+      conv("conv_shared", "Claude Code", { owner: "other@example.com" }),
+    ]);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = (config: SidebarConfig) => (
+      <QueryClientProvider client={qc}>
+        <SidebarDataProvider config={config}>
+          <ExtensionCatalogProvider extensions={[]}>
+            <TooltipProvider>
+              <MemoryRouter>
+                <Sidebar open onClose={vi.fn()} />
+              </MemoryRouter>
+            </TooltipProvider>
+          </ExtensionCatalogProvider>
+        </SidebarDataProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree(sidebarConfig));
+    expect(screen.getByText("conv_shared")).toBeInTheDocument();
+
+    rerender(tree({ ...sidebarConfig, sharedAvailable: false }));
+
+    expect(screen.getByText("conv_mine")).toBeInTheDocument();
+    expect(screen.queryByText("conv_shared")).toBeNull();
+    expect(localStorage.getItem("omnigent:session-filter")).toBe("mine");
+    fireEvent.pointerDown(screen.getByTestId("session-filter"), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    expect(screen.getByTestId("session-filter-mine")).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByTestId("session-filter-shared")).toBeNull();
+  });
+
   it("drops a persisted Shared filter on a single-user server", () => {
     // "Shared sessions" isn't in the menu on a loopback-only server, so honoring
     // a value stored against a multi-user one would scope the list to a slice
@@ -777,19 +898,17 @@ describe("Sidebar session list", () => {
     expect(screen.getByText("conv_live")).toBeInTheDocument();
   });
 
-  it("requests the list with archived included", () => {
+  it("requests mine and shared scopes without an all-sessions scan", () => {
     mockConversations(THREE_TYPE_CONVERSATIONS);
     renderSidebar();
-
-    // The sidebar makes two useConversations calls: one all-sessions query
-    // (includeArchived: true, reconcileWhileConnected: true — for inbox counts
-    // and WS reconciliation) and one tab-scoped filtered query (includeArchived:
-    // false, for display). Assert the all-sessions call is present and correct.
     const calls = useConvMock.mock.calls;
-    expect(calls.length).toBeGreaterThanOrEqual(1);
-    const allSessionsCall = calls.find((call) => call[0] === "" && call[1] === true);
-    expect(allSessionsCall).toBeDefined();
-    expect(allSessionsCall?.[2]).toMatchObject({ reconcileWhileConnected: true });
+    expect(calls.some((call) => call[1] === true)).toBe(false);
+    expect(calls.find((call) => call[4] === "mine")?.[2]).toMatchObject({
+      refreshIntervalMs: 60_000,
+    });
+    expect(calls.find((call) => call[4] === "shared")?.[2]).toMatchObject({
+      refreshIntervalMs: 180_000,
+    });
   });
 
   it("opens the command palette when the Search button is clicked", () => {
@@ -833,11 +952,13 @@ describe("Sidebar session list", () => {
     expect(search).toHaveAttribute("data-size", "icon-xs");
     expect(search).toHaveClass("size-6", "rounded-[var(--radius-md)]");
     expect(search).not.toHaveClass("rounded-sm");
-    expect(search.querySelector("svg")).toHaveClass("ui-icon");
+    expect(search.querySelector("svg")).toHaveClass("size-4");
+    expect(search.querySelector("svg")).not.toHaveClass("ui-icon");
     expect(settings).toHaveAttribute("aria-label", "Settings");
     expect(settings).toHaveAttribute("data-size", "icon-xs");
-    expect(settings).toHaveClass("size-6", "rounded-[var(--radius-md)]");
-    expect(settings.querySelector("svg")).toHaveClass("ui-icon");
+    expect(settings).toHaveClass("size-6", "rounded-[8px]");
+    expect(settings.querySelector("svg")).toHaveClass("size-4");
+    expect(settings.querySelector("svg")).not.toHaveClass("ui-icon");
     const collapse = within(headerActions).getByRole("button", { name: "Close sidebar" });
     expect(collapse).toHaveAttribute("data-size", "icon-xs");
     expect(collapse).toHaveClass("size-6", "rounded-[var(--radius-md)]");
@@ -961,12 +1082,35 @@ describe("Sidebar session list", () => {
     expect(screen.getByTestId("new-chat-button")).not.toHaveClass("bg-[var(--sidebar-active)]");
   });
 
+  it.each(["/canvas", "/canvas/c/conv_one"])(
+    "keeps the Canvas navigation destination on the selected project at %s",
+    (pathname) => {
+      mockConversations(THREE_TYPE_CONVERSATIONS);
+      renderSidebar(true, `${pathname}?canvas=project`, undefined, {
+        ...FALLBACK_SERVER_INFO,
+        features: { canvas: true },
+      });
+
+      expect(screen.getByTestId("canvas-nav")).toHaveAttribute("href", "/canvas?canvas=project");
+      expect(screen.getByTestId("canvas-nav")).toHaveAttribute("aria-current", "page");
+    },
+  );
+
   it("keeps filtering visible while session selection remains hover-revealed", () => {
     mockConversations(THREE_TYPE_CONVERSATIONS);
     renderSidebar();
 
     const sessionsSection = screen.getByText("Sessions").closest("section");
     expect(sessionsSection).not.toBeNull();
+
+    const newSession = within(sessionsSection!).getByRole("link", {
+      name: "New session",
+    });
+    expect(newSession).toHaveAttribute("data-testid", "sessions-new-session");
+    expect(newSession).toHaveAttribute("href", "/");
+    expect(newSession).toHaveAttribute("data-size", "icon-xs");
+    expect(newSession).toHaveClass("text-muted-foreground", "hover:text-foreground");
+    expect(newSession).not.toHaveTextContent("New session");
 
     const selectSessions = within(sessionsSection!).getByRole("button", {
       name: "Select sessions",
@@ -975,7 +1119,11 @@ describe("Sidebar session list", () => {
     expect(selectSessions).toHaveAttribute("data-size", "icon-xs");
     expect(selectSessions).toHaveClass("text-muted-foreground", "hover:text-foreground");
     expect(selectSessions).not.toHaveTextContent("Select sessions");
-    expect(selectSessions.parentElement).toHaveClass(
+    expect(
+      newSession.compareDocumentPosition(selectSessions) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(selectSessions.parentElement).toHaveClass("flex", "gap-0.5");
+    expect(selectSessions.parentElement?.parentElement).toHaveClass(
       "[@media((hover:hover)_and_(pointer:fine))]:md:opacity-0",
       "[@media((hover:hover)_and_(pointer:fine))]:md:group-hover/header:opacity-100",
       "[@media((hover:hover)_and_(pointer:fine))]:md:group-has-[[data-header-controls]:focus-within]/header:opacity-100",
@@ -985,15 +1133,18 @@ describe("Sidebar session list", () => {
     const filterSessions = within(sessionsSection!).getByRole("button", {
       name: "Filter sessions",
     });
-    // The filter never fades; its wrapper re-enables hit-testing inside the
-    // pointer-events-gated outer box (see the overlay hit-test spec below).
-    expect(filterSessions.parentElement).not.toHaveClass("md:opacity-0");
-    expect(filterSessions.parentElement).toHaveClass("pointer-events-auto", "flex");
-    expect(filterSessions.parentElement!.parentElement).toHaveClass("absolute", "right-1", "flex");
+    // The filter never fades; its persistent-action wrapper re-enables hit-testing
+    // inside the pointer-events-gated outer box (see the overlay hit-test spec below).
+    const filterTooltipTrigger = filterSessions.parentElement!;
+    const filterPersistentAction = filterTooltipTrigger.parentElement!;
+    expect(filterTooltipTrigger).not.toHaveClass("md:opacity-0");
+    expect(filterPersistentAction).toHaveClass("pointer-events-auto", "flex");
+    expect(filterPersistentAction.parentElement).toHaveClass("absolute", "right-1", "flex");
 
     fireEvent.click(selectSessions);
     expect(screen.getByRole("button", { name: "Exit selection mode" })).toBeInTheDocument();
     expect(within(sessionsSection!).queryByRole("button", { name: "Select sessions" })).toBeNull();
+    expect(within(sessionsSection!).queryByRole("link", { name: "New session" })).toBeNull();
   });
 
   it("renders the 'Automations' nav row directly under 'New session' and routes to /tasks", () => {
@@ -1019,6 +1170,28 @@ describe("Sidebar session list", () => {
     );
     expect(scheduled.compareDocumentPosition(inbox) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("reveals the new-session shortcut within the row on hover or keyboard focus", () => {
+    mockConversations(THREE_TYPE_CONVERSATIONS);
+    renderSidebar();
+
+    const newSession = screen.getByTestId("new-chat-button");
+    const shortcut = newSession.querySelector<HTMLElement>('[data-slot="shortcut-keys"]');
+
+    expect(newSession).toHaveAttribute("aria-keyshortcuts", `${ARIA_MOD_KEY}+Alt+N`);
+    expect(
+      Array.from(newSession.querySelectorAll('[data-slot="kbd"]'), (key) => key.textContent),
+    ).toEqual([MOD_KEY, ALT_KEY, "N"]);
+    expect(shortcut).toHaveClass(
+      "absolute",
+      "top-1/2",
+      "right-2",
+      "-translate-y-1/2",
+      "opacity-0",
+      "group-focus-visible/new-session:opacity-100",
+      "[@media((hover:hover)_and_(pointer:fine))]:group-hover/new-session:opacity-100",
     );
   });
 
@@ -1076,11 +1249,13 @@ describe("Sidebar session list", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <TooltipProvider>
-          <MemoryRouter initialEntries={["/"]}>
-            <Sidebar open onClose={onClose} />
-          </MemoryRouter>
-        </TooltipProvider>
+        <SidebarDataProvider>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={["/"]}>
+              <Sidebar open onClose={onClose} />
+            </MemoryRouter>
+          </TooltipProvider>
+        </SidebarDataProvider>
       </QueryClientProvider>,
     );
     fireEvent.click(screen.getByTestId("settings-button"));
@@ -1329,14 +1504,16 @@ describe("Sidebar failed session indicator", () => {
       const sidebar = <Sidebar open onClose={vi.fn()} />;
       return (
         <QueryClientProvider client={qc}>
-          <TooltipProvider>
-            <MemoryRouter initialEntries={[initialEntry]}>
-              <Routes>
-                <Route path="/c/:conversationId" element={sidebar} />
-                <Route path="*" element={sidebar} />
-              </Routes>
-            </MemoryRouter>
-          </TooltipProvider>
+          <SidebarDataProvider>
+            <TooltipProvider>
+              <MemoryRouter initialEntries={[initialEntry]}>
+                <Routes>
+                  <Route path="/c/:conversationId" element={sidebar} />
+                  <Route path="*" element={sidebar} />
+                </Routes>
+              </MemoryRouter>
+            </TooltipProvider>
+          </SidebarDataProvider>
         </QueryClientProvider>
       );
     };
@@ -1913,7 +2090,7 @@ describe("Sidebar load-more vs collapsed Sessions", () => {
     observerCallback!([{ isIntersecting: false } as IntersectionObserverEntry], {} as never);
     expect(fetchNextPage).not.toHaveBeenCalled();
     observerCallback!([{ isIntersecting: true } as IntersectionObserverEntry], {} as never);
-    expect(fetchNextPage).toHaveBeenCalledTimes(1);
+    expect(fetchNextPage).toHaveBeenCalledTimes(2);
 
     vi.unstubAllGlobals();
   });
@@ -2046,24 +2223,7 @@ describe("Sidebar project sections", () => {
     expect(within(recentSection).queryByText("conv_moved")).toBeNull();
   });
 
-  it("offers a pencil that starts a new session pre-filed under the project", () => {
-    projectsMock.push("Customer X");
-    mockConversations([
-      conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
-    ]);
-    renderSidebar();
-
-    // The pencil links to the landing composer with the project pre-selected
-    // via the `?project=` query param (URL-encoded).
-    const pencil = screen.getByTestId("project-new-session");
-    expect(pencil).toHaveAttribute("aria-label", "New session in Customer X");
-    expect(pencil.closest("a")).toHaveAttribute("href", "/?project=Customer%20X");
-  });
-
-  it("closes the mobile overlay when the project pencil is tapped", () => {
-    // jsdom's matchMedia mock reports non-desktop, so isMobileViewport() is
-    // true: a plain pencil tap must close the full-screen sidebar overlay,
-    // otherwise the pre-filed new-session page is left hidden behind it.
+  it("closes the mobile overlay when New session is selected from the project menu", async () => {
     projectsMock.push("Customer X");
     mockConversations([
       conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
@@ -2072,15 +2232,18 @@ describe("Sidebar project sections", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <TooltipProvider>
-          <MemoryRouter initialEntries={["/"]}>
-            <Sidebar open onClose={onClose} />
-          </MemoryRouter>
-        </TooltipProvider>
+        <SidebarDataProvider>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={["/"]}>
+              <Sidebar open onClose={onClose} />
+            </MemoryRouter>
+          </TooltipProvider>
+        </SidebarDataProvider>
       </QueryClientProvider>,
     );
 
-    fireEvent.click(screen.getByTestId("project-new-session").closest("a")!);
+    fireEvent.pointerDown(screen.getByTestId("project-actions"), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByTestId("project-new-session-menu"));
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -2110,13 +2273,15 @@ describe("Sidebar project sections", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
-        <TooltipProvider>
-          <MemoryRouter initialEntries={["/c/conv_filed"]}>
-            <Routes>
-              <Route path="/c/:conversationId" element={<Sidebar open onClose={vi.fn()} />} />
-            </Routes>
-          </MemoryRouter>
-        </TooltipProvider>
+        <SidebarDataProvider>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={["/c/conv_filed"]}>
+              <Routes>
+                <Route path="/c/:conversationId" element={<Sidebar open onClose={vi.fn()} />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </SidebarDataProvider>
       </QueryClientProvider>,
     );
 
@@ -2317,106 +2482,30 @@ describe("Sidebar project sections", () => {
     );
   });
 
-  it("keeps New session in the project menu when the pencil requires hover", async () => {
-    // The pencil is a redundant shortcut for the kebab's always-present "New
-    // session" item, so without a fine hover pointer it is genuinely absent
-    // (display:none via `hidden`), NOT sr-only — an sr-only pencil would stay
-    // focusable and announce a duplicate "New session" alongside the kebab's
-    // item. On hover+fine it is display-flex, revealed on hover/focus by the
-    // overlay's opacity. The kebab (not this pencil) carries the touch a11y path.
+  it("offers a desktop New session shortcut while keeping the touch menu accessible", async () => {
     projectsMock.push("Customer X");
     mockConversations([
       conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
     ]);
     renderSidebar();
 
-    const pencil = screen.getByTestId("project-new-session");
-    expect(pencil).toHaveClass("hidden", "[@media((hover:hover)_and_(pointer:fine))]:flex");
-    // Genuinely absent on touch — not merely clipped — so it leaves the a11y
-    // tree and tab order, unlike the kebab.
-    // Separate assertions: toHaveClass with multiple classes only fails when
-    // ALL are present, so a partial regression (e.g. adding just `sr-only`)
-    // would slip past a combined negation while clipping the pencil invisible
-    // on hover+fine.
-    expect(pencil).not.toHaveClass("sr-only");
-    expect(pencil).not.toHaveClass("focus-visible:not-sr-only");
-
-    // The menu remains a touch/long-press fallback even when the hover shortcut
-    // is eligible, because a touchscreen tap cannot reveal that shortcut first.
+    const shortcut = screen.getByRole("link", { name: "New session in Customer X" });
+    expect(shortcut).toHaveAttribute("href", "/?project=Customer%20X");
+    expect(shortcut).toHaveClass("hidden", "[@media((hover:hover)_and_(pointer:fine))]:flex");
+    const menuButton = screen.getByTestId("project-actions");
+    expect(menuButton).not.toHaveClass("hidden");
+    expect(menuButton).not.toHaveClass("sr-only");
     fireEvent.pointerDown(screen.getByRole("button", { name: "Project actions for Customer X" }), {
       button: 0,
       ctrlKey: false,
     });
     const menuItem = await screen.findByTestId("project-new-session-menu");
-    for (const hiddenClass of [
-      "hidden",
-      "md:hidden",
-      "[@media((hover:hover)_and_(pointer:fine))]:md:hidden",
-    ]) {
-      expect(menuItem).not.toHaveClass(hiddenClass);
-    }
+    expect(menuItem).not.toHaveClass("hidden");
+    expect(menuItem).toHaveClass("[@media((hover:hover)_and_(pointer:fine))]:hidden");
     expect(menuItem.closest("a")).toHaveAttribute("href", "/?project=Customer%20X");
   });
 
-  it("keeps the project kebab off the row but reachable without a fine hover pointer", () => {
-    // jsdom can't evaluate @media, so the capability contract is asserted via
-    // classes; the recorded demo is the behavioral guardrail. The base classes
-    // stand for every pointer lacking fine hover — a 390px phone and an 810px
-    // unfolded foldable alike (coarse, hover:none) — where the kebab is
-    // sr-only: absent from the row, zero layout, yet in the a11y tree.
-    projectsMock.push("Customer X");
-    mockConversations([
-      conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
-    ]);
-    renderSidebar();
-
-    const kebab = screen.getByTestId("project-actions");
-    // sr-only at rest; revealed only where a fine hover pointer exists, at ANY
-    // width — no md gate that would drop it on a narrow hover desktop.
-    expect(kebab).toHaveClass(
-      "sr-only",
-      "[@media((hover:hover)_and_(pointer:fine))]:not-sr-only",
-      "[@media((hover:hover)_and_(pointer:fine))]:flex",
-    );
-    // Never display:none — that would strip it from the a11y tree and tab order
-    // on touch, where the long-press contextmenu isn't reliably dispatched.
-    expect(kebab).not.toHaveClass("hidden");
-    // Keyboard focus un-clips it (`:focus-visible` isn't raised by a touch tap),
-    // so a sighted keyboard/switch user on a touchscreen laptop gets a visible
-    // focus ring instead of one clipped off-screen.
-    expect(kebab).toHaveClass("focus-visible:not-sr-only");
-    // No un-capability-gated display utility at md would re-expose it on a wide
-    // touch screen (the reported foldable bug) — broader than the one literal.
-    for (const cls of kebab.classList) {
-      expect(cls).not.toMatch(
-        /^md:(flex|inline-flex|block|inline-block|inline|grid|inline-grid|table|contents|flow-root)$/,
-      );
-    }
-  });
-
-  it("gives the touch kebab the sr-only (not display:none) class contract", () => {
-    // The touch/coarse case (390px and 810px). No CSS is loaded in jsdom, so a
-    // display:none button is equally findable/focusable here — the meaningful
-    // guard is the class contract: sr-only (kept in the a11y tree, unlike
-    // `hidden`) plus focus-visible:not-sr-only (a focused control becomes
-    // visible). The demo is the behavioral guardrail for the effective render.
-    projectsMock.push("Customer X");
-    mockConversations([
-      conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
-    ]);
-    renderSidebar();
-
-    const kebab = screen.getByRole("button", { name: "Project actions for Customer X" });
-    expect(kebab).toHaveClass("sr-only", "focus-visible:not-sr-only");
-    expect(kebab).not.toHaveClass("hidden");
-  });
-
-  it("reveals the folder kebab on hover at every width, narrow hover desktops included", () => {
-    // The regression case: a fine-pointer, hover-capable desktop narrower than
-    // md (~500px window) and a wide 1280px desktop share one gate. The reveal
-    // keys off the pointer capability alone (no md), so hover brings the kebab
-    // back at any width instead of stranding a mouse-only user in a narrow
-    // window. jsdom can't evaluate @media; the demo shows the effective reveal.
+  it("reveals project actions on hover only on wide fine-pointer layouts", () => {
     projectsMock.push("Customer X");
     mockConversations([
       conv("conv_running", "Claude Code", {
@@ -2428,26 +2517,15 @@ describe("Sidebar project sections", () => {
 
     const kebab = screen.getByTestId("project-actions");
     const revealWrapper = kebab.closest("div[class*=transition-opacity]")!;
-    // Opacity reveal is capability-gated with NO md: hidden at rest, shown on
-    // hover, at every width for a fine hover pointer.
     expect(revealWrapper).toHaveClass(
-      "[@media((hover:hover)_and_(pointer:fine))]:opacity-0",
-      "[@media((hover:hover)_and_(pointer:fine))]:group-hover/header:opacity-100",
+      "[@media((hover:hover)_and_(pointer:fine))]:md:opacity-0",
+      "[@media((hover:hover)_and_(pointer:fine))]:md:group-hover/header:opacity-100",
     );
-    for (const cls of revealWrapper.classList) {
-      expect(cls).not.toMatch(/:md:opacity-0$/);
-    }
-    // A collapsed folder (marker shown) protects that marker from the kebab's
-    // at-rest hit target with the same capability-only (no md) gate, so a
-    // narrow hover desktop doesn't let an invisible control swallow the tap.
     const outerBox = kebab.closest("div[class*=absolute]")!;
     expect(outerBox).toHaveClass(
-      "[@media((hover:hover)_and_(pointer:fine))]:pointer-events-none",
-      "[@media((hover:hover)_and_(pointer:fine))]:group-hover/header:pointer-events-auto",
+      "[@media((hover:hover)_and_(pointer:fine))]:md:pointer-events-none",
+      "[@media((hover:hover)_and_(pointer:fine))]:md:group-hover/header:pointer-events-auto",
     );
-    for (const cls of outerBox.classList) {
-      expect(cls).not.toMatch(/:md:pointer-events-none$/);
-    }
   });
 });
 
@@ -2637,30 +2715,17 @@ describe("Sidebar collapsed project marker", () => {
     // Fixed centered box so the dot centers on the same vertical line as the
     // rows' dots.
     expect(slot).toHaveClass("w-6", "justify-center");
-    // Hover-only controls never reserve a rest column, keeping the marker at
-    // the rows' right edge.
-    expect(slot).toHaveClass("-mr-1");
-    expect(slot).not.toHaveClass("mr-14");
-    expect(slot).not.toHaveClass("[@media((hover:hover)_and_(pointer:fine))]:md:-mr-1");
-    // The hover-driven fades track the fine-hover reveal (hover only exists on
-    // fine), so they stay pointer-gated with no md.
+    // Visible touch controls get their own column beside the marker.
     expect(slot).toHaveClass(
-      "[@media((hover:hover)_and_(pointer:fine))]:group-hover/section:opacity-0",
-      "[@media((hover:hover)_and_(pointer:fine))]:group-has-[[data-state=open]]/header:opacity-0",
+      "mr-7",
+      "[@media((hover:hover)_and_(pointer:fine))]:mr-14",
+      "[@media((hover:hover)_and_(pointer:fine))]:md:-mr-1",
     );
-    // The focus-within fade tracks the pointer-UNgated focus-visible reveal, so
-    // it is ungated too: a coarse-pointer tablet + keyboard can focus the kebab,
-    // and the spinner must clear there as well or the revealed kebab overlaps
-    // it. Asserted separately below (it must NOT carry the pointer/hover gate).
-    expect(slot).toHaveClass("group-has-[[data-header-controls]:focus-within]/header:opacity-0");
-    expect(slot).not.toHaveClass(
-      "[@media((hover:hover)_and_(pointer:fine))]:group-has-[[data-header-controls]:focus-within]/header:opacity-0",
+    expect(slot).toHaveClass(
+      "[@media((hover:hover)_and_(pointer:fine))]:md:group-hover/section:opacity-0",
+      "[@media((hover:hover)_and_(pointer:fine))]:md:group-has-[[data-state=open]]/header:opacity-0",
+      "[@media((hover:hover)_and_(pointer:fine))]:md:group-has-[[data-header-controls]:focus-within]/header:opacity-0",
     );
-    // No width-gated fade survives for a hover-only action — that mismatch is
-    // the narrow-hover overlap regression.
-    for (const cls of slot.classList) {
-      expect(cls).not.toMatch(/:md:group-(hover|has-).*opacity-0$/);
-    }
   });
 
   // The "awaiting" pill is wider than the dot markers; constraining it to the
@@ -2726,11 +2791,13 @@ describe("Sidebar auto-expand Pinned on pin", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const tree = () => (
       <QueryClientProvider client={qc}>
-        <TooltipProvider>
-          <MemoryRouter initialEntries={["/"]}>
-            <Sidebar open onClose={vi.fn()} />
-          </MemoryRouter>
-        </TooltipProvider>
+        <SidebarDataProvider>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={["/"]}>
+              <Sidebar open onClose={vi.fn()} />
+            </MemoryRouter>
+          </TooltipProvider>
+        </SidebarDataProvider>
       </QueryClientProvider>
     );
     const { rerender } = render(tree());
@@ -2864,14 +2931,16 @@ describe("Sidebar active-row auto-scroll", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     return render(
       <QueryClientProvider client={qc}>
-        <TooltipProvider>
-          <MemoryRouter initialEntries={[initialEntry]}>
-            <Routes>
-              <Route path="/" element={<Sidebar open onClose={vi.fn()} />} />
-              <Route path="/c/:conversationId" element={<Sidebar open onClose={vi.fn()} />} />
-            </Routes>
-          </MemoryRouter>
-        </TooltipProvider>
+        <SidebarDataProvider>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={[initialEntry]}>
+              <Routes>
+                <Route path="/" element={<Sidebar open onClose={vi.fn()} />} />
+                <Route path="/c/:conversationId" element={<Sidebar open onClose={vi.fn()} />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </SidebarDataProvider>
       </QueryClientProvider>,
     );
   }
@@ -2940,5 +3009,762 @@ describe("Sidebar collapsed marker", () => {
     // Open: the attribute must be ABSENT — rendering it as "false" would
     // still match [data-collapsed] and strip the glass border while open.
     expect(openAside).not.toHaveAttribute("data-collapsed");
+  });
+});
+
+it("caps Shared display independently of Mine while revealing cached rows", async () => {
+  isServerLocalMock.mockReturnValue(false);
+  const owned = Array.from({ length: 40 }, (_, i) => conv(`owned-${i}`, "agent"));
+  const shared = Array.from({ length: 70 }, (_, i) =>
+    conv(`shared-${i}`, "agent", {
+      owner: "other@example.com",
+      permission_level: 1,
+      updated_at: 100 - i,
+    }),
+  );
+  mockConversations([...owned, ...shared]);
+  renderSidebar(true, "/", undefined, undefined, [], vi.fn(), {
+    ...sidebarConfig,
+    sharedDisplayPageSize: 30,
+  });
+  selectSessionFilter("mine");
+  expect(screen.getByText("owned-39", { exact: true })).toBeInTheDocument();
+  showSharedTab();
+  expect(screen.getByText("shared-29", { exact: true })).toBeInTheDocument();
+  expect(screen.queryByText("shared-30", { exact: true })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+  await waitFor(() => expect(screen.getByText("shared-59", { exact: true })).toBeInTheDocument());
+  expect(screen.queryByText("shared-60", { exact: true })).toBeNull();
+  selectSessionFilter("mine");
+  expect(screen.getByText("owned-39", { exact: true })).toBeInTheDocument();
+  showSharedTab();
+  expect(screen.queryByText("shared-30", { exact: true })).toBeNull();
+});
+
+/** Render the sidebar with the sidebar_grouping_ui release flag on. */
+function renderGroupingSidebar() {
+  return renderSidebar(true, "/", undefined, {
+    ...FALLBACK_SERVER_INFO,
+    features: { ...FALLBACK_SERVER_INFO.features, sidebar_grouping_ui: true },
+  });
+}
+
+describe("Sidebar view options", () => {
+  function openViewSubmenu(testId: string) {
+    fireEvent.pointerDown(screen.getByTestId("session-filter"), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.keyDown(screen.getByTestId(testId), { key: "ArrowRight" });
+  }
+
+  const GROUP_TITLES = new Set([
+    "Needs attention",
+    "Unread",
+    "Working",
+    "Draft",
+    "Done",
+    "Created today",
+    "Created yesterday",
+    "Created in the last 7 days",
+    "Created in the last 30 days",
+    "Created earlier",
+    "Updated today",
+    "Updated yesterday",
+    "Updated in the last 7 days",
+    "Updated in the last 30 days",
+    "Updated earlier",
+  ]);
+  const groupHeaders = () =>
+    screen
+      .getAllByRole("button", { expanded: true })
+      .map((button) => button.textContent ?? "")
+      .filter((title) => GROUP_TITLES.has(title));
+  const groupSection = (title: string) => screen.getByText(title).closest("section")!;
+
+  it("hides Status grouping and falls back to Default for a saved Status selection", () => {
+    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ grouping: "status" }));
+    projectsMock.push("Customer X");
+    mockConversations([
+      conv("conv_running", "Codex", { status: "running" }),
+      conv("conv_idle", "Codex", { status: "idle" }),
+    ]);
+    renderGroupingSidebar();
+    expect(screen.getByText("Projects")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sessions" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Working" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+
+    openViewSubmenu("session-grouping-menu");
+    expect(screen.queryByTestId("session-grouping-status")).toBeNull();
+    expect(screen.getByRole("menuitemradio", { name: "Default" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByRole("menuitemradio", { name: "Created" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: "Updated" })).toBeInTheDocument();
+  });
+
+  it("folds shared sessions into the groups instead of a Shared section", () => {
+    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ grouping: "updated" }));
+    mockConversations([
+      conv("conv_mine", "Claude Code", { status: "running", updated_at: Date.now() / 1000 }),
+      conv("conv_shared", "Claude Code", {
+        status: "idle",
+        owner: "other@example.com",
+        updated_at: 0,
+      }),
+    ]);
+    renderGroupingSidebar();
+    selectSessionFilter("all");
+
+    expect(screen.queryByRole("button", { name: "Shared" })).toBeNull();
+    expect(groupHeaders()).toEqual(["Updated today", "Updated earlier"]);
+    expect(within(groupSection("Updated earlier")).getByText("conv_shared")).toBeInTheDocument();
+    // The first group carries every list control: filter, Select and New session.
+    const firstGroup = groupSection("Updated today");
+    expect(within(firstGroup).getByTestId("session-filter")).toBeTruthy();
+    expect(within(firstGroup).getByTestId("toggle-selection-mode")).toBeTruthy();
+    expect(within(firstGroup).getByTestId("sessions-new-session")).toBeTruthy();
+  });
+
+  it("keeps the filter reachable on the Sessions header when there's nothing to group", () => {
+    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ grouping: "updated" }));
+    mockConversations([]);
+    renderGroupingSidebar();
+
+    expect(screen.queryByText("Projects")).toBeNull();
+    const sessions = screen.getByRole("button", { name: "Sessions" }).closest("section")!;
+    expect(within(sessions).getByTestId("session-filter")).toBeTruthy();
+  });
+
+  it("keeps Load more while any group is expanded", () => {
+    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ grouping: "updated" }));
+    const rows = [
+      conv("conv_running", "Codex", { status: "running", updated_at: Date.now() / 1000 }),
+      conv("conv_done", "Codex", { status: "idle", updated_at: 0 }),
+    ];
+    useConvMock.mockImplementation(
+      () =>
+        ({
+          data: {
+            pages: [{ data: rows, first_id: rows[0]!.id, last_id: rows[1]!.id, has_more: true }],
+            pageParams: [undefined],
+          },
+          isLoading: false,
+          isError: false,
+          error: null,
+          fetchNextPage: vi.fn(),
+          hasNextPage: true,
+          isFetchingNextPage: false,
+        }) as unknown as ReturnType<typeof useConversations>,
+    );
+    renderGroupingSidebar();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
+
+    // A next page can land in any group, so collapsing only the last one
+    // mustn't stall pagination; collapsing every group does.
+    fireEvent.click(screen.getByRole("button", { name: "Updated earlier" }));
+    expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Updated today" }));
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+  });
+
+  it("leaves selection when the grouping changes", () => {
+    projectsMock.push("Customer X");
+    mockConversations([
+      conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
+    ]);
+    renderGroupingSidebar();
+    fireEvent.click(screen.getByRole("button", { name: /^Customer X/ }));
+    fireEvent.click(screen.getByTestId("toggle-selection-mode"));
+    expect(screen.getByRole("button", { name: "Exit selection mode" })).toBeInTheDocument();
+
+    // Grouped views hide Projects (and its bulk bar), so selection ends.
+    openViewSubmenu("session-grouping-menu");
+    fireEvent.click(screen.getByTestId("session-grouping-updated"));
+    expect(screen.queryByRole("button", { name: "Exit selection mode" })).toBeNull();
+    expect(screen.getByTestId("toggle-selection-mode")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["created", "updated"],
+    ["updated", "created"],
+  ])(
+    "groups by %s day independently of %s ordering, including project sessions",
+    (grouping, ordering) => {
+      localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ grouping, ordering }));
+      projectsMock.push("Customer X");
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000;
+      const yesterday =
+        new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime() / 1000;
+      mockConversations([
+        conv("conv_old", "Codex", { created_at: 0, updated_at: Date.now() / 1000 }),
+        conv("conv_today", "Codex", { created_at: today, updated_at: today }),
+        conv("conv_yesterday", "Codex", { created_at: yesterday, updated_at: yesterday }),
+        conv("conv_filed", "Codex", {
+          created_at: 0,
+          updated_at: 0,
+          labels: { omni_project: "Customer X" },
+        }),
+      ]);
+      renderGroupingSidebar();
+      const prefix = grouping === "created" ? "Created" : "Updated";
+      expect(groupHeaders()).toEqual([
+        `${prefix} today`,
+        `${prefix} yesterday`,
+        `${prefix} earlier`,
+      ]);
+      expect(within(groupSection(`${prefix} today`)).getByText("conv_today")).toBeInTheDocument();
+      expect(
+        within(groupSection(`${prefix} yesterday`)).getByText("conv_yesterday"),
+      ).toBeInTheDocument();
+      expect(
+        within(groupSection(`${prefix} ${grouping === "created" ? "earlier" : "today"}`)).getByText(
+          "conv_old",
+        ),
+      ).toBeInTheDocument();
+      expect(within(groupSection(`${prefix} earlier`)).getByText("conv_filed")).toBeInTheDocument();
+      if (grouping === "updated") {
+        expect(
+          within(groupSection("Updated today"))
+            .getAllByRole("link", { name: /^conv_/ })
+            .map((link) => link.textContent),
+        ).toEqual(["conv_today", "conv_old"]);
+      }
+      expect(screen.queryByText("Projects")).toBeNull();
+      expect(screen.getAllByTestId("session-filter")).toHaveLength(1);
+    },
+  );
+
+  it("uses fresh timestamps when switching Created to Updated through the menu", () => {
+    mockConversations([
+      conv("conv_done_new", "Codex", { status: "idle", created_at: 3, updated_at: 300 }),
+      conv("conv_running", "Codex", { status: "running", created_at: 1, updated_at: 100 }),
+      conv("conv_done_old", "Codex", { status: "idle", created_at: 2, updated_at: 400 }),
+    ]);
+    renderGroupingSidebar();
+
+    openViewSubmenu("session-ordering-menu");
+    expect(screen.queryByTestId("session-ordering-status")).toBeNull();
+    const created = screen.getByRole("menuitemradio", { name: "Created" });
+    // Portalled menu events bubble through the list even though the pointer is outside it.
+    expect(screen.getByTestId("sidebar-conversation-list")).not.toContainElement(created);
+    fireEvent.mouseOver(created);
+    fireEvent.click(created);
+    expect(JSON.parse(localStorage.getItem("omnigent:sidebar-view")!).ordering).toBe("created");
+    const links = within(groupSection("Sessions")).getAllByRole("link", { name: /^conv_/ });
+    expect(links.map((link) => link.textContent)).toEqual([
+      "conv_done_new",
+      "conv_done_old",
+      "conv_running",
+    ]);
+
+    mockConversations([
+      conv("conv_done_new", "Codex", { status: "idle", created_at: 3, updated_at: 500 }),
+      conv("conv_running", "Codex", { status: "running", created_at: 1, updated_at: 100 }),
+      conv("conv_done_old", "Codex", { status: "idle", created_at: 2, updated_at: 400 }),
+    ]);
+    openViewSubmenu("session-ordering-menu");
+    const updated = screen.getByRole("menuitemradio", { name: "Updated" });
+    fireEvent.mouseOver(updated);
+    fireEvent.click(updated);
+    expect(
+      within(groupSection("Sessions"))
+        .getAllByRole("link", { name: /^conv_/ })
+        .map((link) => link.textContent),
+    ).toEqual(["conv_done_new", "conv_done_old", "conv_running"]);
+  });
+
+  it.each(["default", "status", "created", "updated"])(
+    "uses Created for saved %s grouping and project folders",
+    (grouping) => {
+      localStorage.setItem(
+        "omnigent:sidebar-view",
+        JSON.stringify({ ordering: "created", grouping }),
+      );
+      projectsMock.push("Customer X");
+      mockConversations([
+        conv("conv_old", "Codex", { created_at: 1, updated_at: 200 }),
+        conv("conv_new", "Codex", { created_at: 2, updated_at: 100 }),
+        conv("conv_project_old", "Codex", {
+          created_at: 3,
+          updated_at: 400,
+          labels: { omni_project: "Customer X" },
+        }),
+        conv("conv_project_new", "Codex", {
+          created_at: 4,
+          updated_at: 300,
+          labels: { omni_project: "Customer X" },
+        }),
+      ]);
+      renderGroupingSidebar();
+      if (grouping === "default" || grouping === "status")
+        fireEvent.click(screen.getByRole("button", { name: /^Customer X/ }));
+      expect(
+        screen.getAllByRole("link", { name: /^conv_/ }).map((link) => link.textContent),
+      ).toEqual(["conv_project_new", "conv_project_old", "conv_new", "conv_old"]);
+    },
+  );
+
+  it("shows the toggled metadata under the title and the updated time in the trailing slot", () => {
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_mac", name: "Build Mac", sandbox_provider: null }],
+    });
+    mockConversations([
+      conv("conv_meta", "Codex", {
+        status: "idle",
+        host_id: "host_mac",
+        git_branch: "fix/retries",
+        updated_at: Date.now() / 1000 - 120,
+      }),
+      conv("conv_no_branch", "Codex", { status: "idle" }),
+    ]);
+    renderGroupingSidebar();
+    const row = screen.getByText("conv_meta").closest("li")!;
+    expect(within(row).queryByTestId("session-row-meta")).toBeNull();
+    expect(within(row).queryByTestId("session-row-updated")).toBeNull();
+    const controls = () => within(row).getByTestId("quick-pin-conversation").closest(".absolute");
+    expect(controls()).toHaveClass("top-1/2");
+
+    openViewSubmenu("session-show-menu");
+    // Checkbox items keep the menu open, so all three toggle in one visit.
+    fireEvent.click(screen.getByTestId("session-show-branch"));
+    fireEvent.click(screen.getByTestId("session-show-environment"));
+    fireEvent.click(screen.getByTestId("session-show-updated"));
+
+    // The row names a host's kind, not the host; the tooltip carries the name.
+    expect(within(row).getByTestId("session-row-meta")).toHaveTextContent("Remote·fix/retries");
+    expect(within(row).getByTestId("session-row-updated")).toHaveTextContent("2m");
+    // With a second line, the controls and the timestamp stay on the title line.
+    expect(controls()).toHaveClass("top-4", "md:top-3.5");
+    expect(within(row).getByTestId("session-row-updated")).toHaveClass("top-4", "md:top-3.5");
+    // A session without a branch omits that part rather than leaving a gap.
+    const bare = screen.getByText("conv_no_branch").closest("li")!;
+    expect(within(bare).getByTestId("session-row-meta")).toHaveTextContent(/^Local machine$/);
+    expect(JSON.parse(localStorage.getItem("omnigent:sidebar-view")!).show).toEqual([
+      "updated",
+      "environment",
+      "branch",
+    ]);
+  });
+
+  it("labels this machine's host by device instead of its host name", () => {
+    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ show: ["environment"] }));
+    // A loopback server with one online host: that host is this machine.
+    isServerLocalMock.mockReturnValue(true);
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_here", name: "Build Mac", sandbox_provider: null, status: "online" }],
+    });
+    mockConversations([conv("conv_here", "Codex", { status: "idle", host_id: "host_here" })]);
+    renderGroupingSidebar();
+    const meta = within(screen.getByText("conv_here").closest("li")!).getByTestId(
+      "session-row-meta",
+    );
+    expect(meta).toHaveTextContent(/^This /);
+    expect(meta).not.toHaveTextContent("Build Mac");
+  });
+
+  it("shows a managed-sandbox session's repo name from its label when Show → Repo is on", () => {
+    mockConversations([
+      conv("conv_sandbox", "Codex", {
+        status: "idle",
+        labels: { "omnigent.sandbox.repo.0": "https://github.com/omnigent-ai/omnigent#main" },
+      }),
+      conv("conv_local", "Codex", { status: "idle" }),
+    ]);
+    renderGroupingSidebar();
+
+    openViewSubmenu("session-show-menu");
+    fireEvent.click(screen.getByTestId("session-show-repo"));
+
+    const sandbox = screen.getByText("conv_sandbox").closest("li")!;
+    expect(within(sandbox).getByTestId("session-row-meta")).toHaveTextContent(/^omnigent$/);
+    // A session with no repo label omits the row entirely.
+    const local = screen.getByText("conv_local").closest("li")!;
+    expect(within(local).queryByTestId("session-row-meta")).toBeNull();
+  });
+
+  it("adds the harness and on-demand repo, PR and branch to the session tooltip", async () => {
+    usePullRequestInfoMock.mockReturnValue({
+      data: {
+        object: "session.github.info",
+        available: true,
+        branch: "onboarding-flow",
+        repo: { name_with_owner: "omnigent-ai/omnigent" },
+        pr: { number: 419, state: "OPEN", is_draft: true },
+      },
+    });
+    mockConversations([
+      conv("conv_gh", "claude-native-ui", {
+        workspace: "/Users/me/omnigent",
+        labels: { "omnigent.wrapper": "claude-code-native-ui" },
+      }),
+      conv("conv_no_workspace", "Codex"),
+    ]);
+    renderGroupingSidebar();
+    // Closed tooltips don't fetch: rows only ask for GitHub info once opened.
+    expect(usePullRequestInfoMock).not.toHaveBeenCalled();
+
+    fireEvent.pointerMove(screen.getByRole("link", { name: "conv_gh" }), { pointerType: "mouse" });
+    await waitFor(() => {
+      const tooltip = screen.getByTestId("session-tooltip-content");
+      expect(within(tooltip).getByRole("img", { name: "Claude Code harness" })).toBeTruthy();
+      expect(within(tooltip).getByTestId("session-tooltip-repo")).toHaveTextContent("Repoomnigent");
+      expect(within(tooltip).getByTestId("session-tooltip-pr")).toHaveTextContent("PR#419 · Draft");
+      expect(within(tooltip).getByTestId("session-tooltip-branch")).toHaveTextContent(
+        "Branchonboarding-flow",
+      );
+    });
+    expect(usePullRequestInfoMock).toHaveBeenCalledWith("conv_gh");
+  });
+
+  it("shows the tracked PR number when gh can't resolve its state", async () => {
+    // gh unauthenticated: `pr` is null, but the association carries the number.
+    usePullRequestInfoMock.mockReturnValue({
+      data: {
+        object: "session.github.info",
+        available: true,
+        authenticated: false,
+        repo: { name_with_owner: "omnigent-ai/omnigent" },
+        pr: null,
+        selected_pr_url: "https://github.com/omnigent-ai/omnigent/pull/7918",
+        prs: [
+          {
+            url: "https://github.com/omnigent-ai/omnigent/pull/7918",
+            host: "github.com",
+            repository: "omnigent-ai/omnigent",
+            number: 7918,
+            relationship: "created",
+          },
+        ],
+      },
+    });
+    mockConversations([conv("conv_assoc", "Codex", { workspace: "/Users/me/omnigent" })]);
+    renderGroupingSidebar();
+
+    fireEvent.pointerMove(screen.getByRole("link", { name: "conv_assoc" }), {
+      pointerType: "mouse",
+    });
+    await waitFor(() => {
+      // Number only, no "· Open/Draft" suffix, since there's no resolved state.
+      expect(screen.getByTestId("session-tooltip-pr")).toHaveTextContent(/^PR#7918$/);
+    });
+  });
+
+  it("skips the GitHub lookup for a session without a workspace", async () => {
+    mockConversations([conv("conv_bare", "Codex", { owner: null })]);
+    renderGroupingSidebar();
+
+    fireEvent.pointerMove(screen.getByRole("link", { name: "conv_bare" }), {
+      pointerType: "mouse",
+    });
+    await screen.findByTestId("session-tooltip-content");
+    expect(usePullRequestInfoMock).toHaveBeenCalledWith(undefined);
+    expect(screen.queryByTestId("session-tooltip-repo")).toBeNull();
+  });
+
+  it("names the creator in the session tooltip", async () => {
+    const viewer = vi.spyOn(identity, "getCurrentUserId").mockReturnValue("viewer@example.com");
+    try {
+      mockConversations([
+        conv("conv_mine", "Codex", { owner: "viewer@example.com", git_branch: "fix/a" }),
+      ]);
+      renderGroupingSidebar();
+
+      fireEvent.pointerMove(screen.getByRole("link", { name: "conv_mine" }), {
+        pointerType: "mouse",
+      });
+      await waitFor(() => {
+        const tooltip = screen.getByTestId("session-tooltip-content");
+        expect(within(tooltip).getByTestId("session-tooltip-owner")).toHaveTextContent(
+          "Created byYou",
+        );
+        expect(within(tooltip).getByTestId("session-tooltip-branch")).toHaveTextContent(
+          "Branchfix/a",
+        );
+      });
+    } finally {
+      viewer.mockRestore();
+    }
+  });
+});
+
+describe("sidebar_grouping_ui release flag", () => {
+  const SHARED_AND_OWNED = [
+    conv("conv_mine", "Claude Code", {
+      status: "idle",
+      host_id: "host_box",
+      git_branch: "fix/x",
+      created_at: 1,
+      updated_at: 200,
+    }),
+    conv("conv_shared", "Claude Code", {
+      status: "idle",
+      owner: "other@example.com",
+      created_at: 2,
+      updated_at: 100,
+    }),
+  ];
+
+  it("keeps the default sidebar while off, ignoring stored view options", async () => {
+    localStorage.setItem(
+      "omnigent:sidebar-view",
+      JSON.stringify({
+        grouping: "created",
+        ordering: "created",
+        show: ["environment", "updated"],
+      }),
+    );
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_box", name: "Build box", sandbox_provider: null }],
+    });
+    mockConversations(SHARED_AND_OWNED);
+    renderSidebar();
+    selectSessionFilter("all");
+
+    // One flat list with the filter on its own header; no Shared section or groups.
+    const sessions = screen.getByRole("button", { name: "Sessions" }).closest("section")!;
+    expect(within(sessions).getByTestId("session-filter")).toBeInTheDocument();
+    expect(within(sessions).getByText("conv_shared")).toBeInTheDocument();
+    expect(
+      within(sessions)
+        .getAllByRole("link", { name: /^conv_/ })
+        .map((link) => link.textContent),
+    ).toEqual(["conv_mine", "conv_shared"]);
+    expect(screen.queryByRole("button", { name: "Shared" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+    expect(screen.queryByTestId("session-row-meta")).toBeNull();
+    expect(screen.queryByTestId("session-row-updated")).toBeNull();
+
+    // The menu offers Display alone, as a flat list.
+    fireEvent.pointerDown(screen.getByTestId("session-filter"), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    expect(screen.getByText("Display")).toBeInTheDocument();
+    expect(screen.queryByTestId("session-grouping-menu")).toBeNull();
+    expect(screen.queryByTestId("session-show-menu")).toBeNull();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+
+    // The tooltip is the plain one: no harness, no GitHub lookup.
+    fireEvent.pointerMove(screen.getByRole("link", { name: "conv_mine" }), {
+      pointerType: "mouse",
+    });
+    const tooltip = await screen.findByTestId("session-tooltip-content");
+    expect(within(tooltip).getByTestId("session-tooltip-location")).toHaveTextContent("Build box");
+    expect(within(tooltip).queryByTestId("session-tooltip-harness")).toBeNull();
+    expect(usePullRequestInfoMock).not.toHaveBeenCalled();
+  });
+
+  it("puts the filter and Select on the Projects header, leaving New session on Sessions", () => {
+    mockConversations(THREE_TYPE_CONVERSATIONS);
+    renderGroupingSidebar();
+
+    expect(
+      screen.getAllByRole("button", { name: "Group, sort, and filter sessions" }),
+    ).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Select sessions" })).toHaveLength(1);
+    const sessions = screen.getByRole("button", { name: "Sessions" }).closest("section")!;
+    expect(within(sessions).queryByTestId("session-filter")).toBeNull();
+    expect(within(sessions).queryByTestId("toggle-selection-mode")).toBeNull();
+    expect(within(sessions).getByTestId("sessions-new-session")).toBeInTheDocument();
+    const projects = screen.getByRole("button", { name: "Projects" }).closest("section")!;
+    const filter = within(projects).getByTestId("session-filter");
+    // Outside the hover-faded wrapper, so it never fades.
+    expect(filter.closest("[data-header-controls]")).toHaveClass("absolute", "right-1");
+    expect(filter.closest(".md\\:opacity-0")).toBeNull();
+
+    fireEvent.click(within(projects).getByTestId("toggle-selection-mode"));
+    expect(screen.getByRole("button", { name: "Exit selection mode" })).toBeInTheDocument();
+    expect(within(projects).getByTestId("session-filter")).toBe(filter);
+  });
+
+  it("centers empty project rows with a dashed border without changing row sizing", () => {
+    projectsMock.push("Alpha");
+    mockConversations([]);
+    renderGroupingSidebar();
+    fireEvent.click(screen.getByRole("button", { name: /^Alpha/ }));
+
+    const action = screen
+      .getAllByRole("link", { name: "new session" })
+      .find((link) => link.getAttribute("href") === "/?project=Alpha")!;
+    const empty = action.closest(".sidebar-row")!;
+    expect(empty).toHaveClass(
+      "items-center",
+      "text-center",
+      "h-auto",
+      "min-h-0",
+      "px-2",
+      "py-1.5",
+      "md:py-1",
+    );
+    expect(empty).not.toHaveClass("border", "border-dashed", "border-border");
+    const border = empty.firstElementChild!;
+    expect(border).toHaveAttribute("aria-hidden", "true");
+    expect(border).toHaveClass(
+      "pointer-events-none",
+      "absolute",
+      "inset-0",
+      "border",
+      "border-dashed",
+      "border-border",
+    );
+  });
+
+  it("keeps the project loading placeholder at session-row height", () => {
+    projectsMock.push("Alpha");
+    projectSessionsLoadingRef.current = true;
+    mockConversations([]);
+    renderGroupingSidebar();
+    fireEvent.click(screen.getByRole("button", { name: /^Alpha/ }));
+
+    const loading = screen.getByText("Loading…");
+    expect(loading.parentElement).toHaveClass("pl-6");
+    expect(loading).toHaveClass(
+      "sidebar-row",
+      "sidebar-compact-text",
+      "h-auto",
+      "min-h-0",
+      "w-full",
+      "px-2",
+      "py-1.5",
+      "md:py-1",
+      "justify-center",
+    );
+    expect(loading).not.toHaveClass("text-sm");
+  });
+
+  it("selects project, Shared and Sessions rows together from the Projects header", () => {
+    projectsMock.push("Alpha");
+    mockConversations([
+      conv("conv_filed", "Claude Code", { labels: { omni_project: "Alpha" } }),
+      conv("conv_mine", "Claude Code"),
+      conv("conv_shared", "Claude Code", { owner: "other@example.com" }),
+    ]);
+    renderGroupingSidebar();
+    selectSessionFilter("all");
+    fireEvent.click(screen.getByRole("button", { name: /^Alpha/ }));
+
+    // The Projects menu no longer offers its own, folder-only selection.
+    openProjectsMenu();
+    expect(screen.queryByTestId("projects-select-sessions")).toBeNull();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+
+    const projects = screen.getByRole("button", { name: "Projects" }).closest("section")!;
+    fireEvent.click(within(projects).getByTestId("toggle-selection-mode"));
+    for (const name of ["conv_filed", "conv_mine", "conv_shared"]) {
+      fireEvent.click(screen.getByRole("link", { name: new RegExp(name) }));
+    }
+    // One bulk bar, under the Projects header, counting all three.
+    expect(screen.getAllByRole("button", { name: "Exit selection mode" })).toHaveLength(1);
+    expect(within(projects).getByText("3 selected")).toBeInTheDocument();
+  });
+
+  it("lists other owners' sessions in a Shared section above Sessions", () => {
+    mockConversations(SHARED_AND_OWNED);
+    renderGroupingSidebar();
+
+    selectSessionFilter("all");
+    const shared = screen.getByRole("button", { name: "Shared" }).closest("section")!;
+    const sessions = screen.getByRole("button", { name: "Sessions" }).closest("section")!;
+    expect(within(shared).getByText("conv_shared")).toBeInTheDocument();
+    expect(within(sessions).queryByText("conv_shared")).toBeNull();
+    expect(within(sessions).getByText("conv_mine")).toBeInTheDocument();
+    expect(shared.compareDocumentPosition(sessions) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+
+    selectSessionFilter("mine");
+    expect(screen.queryByRole("button", { name: "Shared" })).toBeNull();
+
+    // The Shared filter shows that section alone.
+    showSharedTab();
+    expect(screen.getByRole("button", { name: "Shared" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sessions" })).toBeNull();
+    expect(screen.queryByText("conv_mine")).toBeNull();
+  });
+
+  it("shows the Shared filter's load status in the Shared section", () => {
+    mockConversations(SHARED_AND_OWNED);
+    const original = useConvMock.getMockImplementation()!;
+    useConvMock.mockImplementation((...args) => {
+      const query = original(...args);
+      if (args[4] !== "shared") return query;
+      return { ...query, data: undefined, isLoading: true } as ReturnType<typeof useConversations>;
+    });
+    renderGroupingSidebar();
+
+    showSharedTab();
+    const shared = screen.getByRole("button", { name: "Shared" }).closest("section")!;
+    expect(within(shared).getByRole("status")).toHaveTextContent("Loading…");
+  });
+
+  it("selects from the Shared list when it's the only list", () => {
+    mockConversations(SHARED_AND_OWNED);
+    renderGroupingSidebar();
+    showSharedTab();
+
+    // Shared carries New session when Sessions isn't shown; Select stays on Projects.
+    const shared = screen.getByRole("button", { name: "Shared" }).closest("section")!;
+    expect(within(shared).getByTestId("sessions-new-session")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Select sessions" }));
+    fireEvent.click(screen.getByRole("link", { name: /conv_shared/ }));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Exit selection mode" })).toBeInTheDocument();
+  });
+
+  it("keeps Load more while the Shared section is expanded", () => {
+    useConvMock.mockImplementation(
+      () =>
+        ({
+          data: {
+            pages: [
+              {
+                data: SHARED_AND_OWNED,
+                first_id: SHARED_AND_OWNED[0]!.id,
+                last_id: SHARED_AND_OWNED[1]!.id,
+                has_more: true,
+              },
+            ],
+            pageParams: [undefined],
+          },
+          isLoading: false,
+          isError: false,
+          error: null,
+          fetchNextPage: vi.fn(),
+          hasNextPage: true,
+          isFetchingNextPage: false,
+        }) as unknown as ReturnType<typeof useConversations>,
+    );
+    renderGroupingSidebar();
+    selectSessionFilter("all");
+
+    // A next page can add shared rows too, so a collapsed Sessions list alone
+    // mustn't stall pagination; collapsing Shared as well does.
+    fireEvent.click(screen.getByRole("button", { name: "Sessions" }));
+    expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Shared" }));
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+  });
+
+  it("keeps a shared session with a colliding project label in the Shared list", () => {
+    projectsMock.push("Alpha");
+    mockConversations([
+      conv("conv_owned", "Claude Code", { labels: { omni_project: "Alpha" } }),
+      conv("conv_shared_alpha", "Claude Code", {
+        owner: "other@example.com",
+        labels: { omni_project: "Alpha" },
+      }),
+    ]);
+    renderGroupingSidebar();
+
+    selectSessionFilter("all");
+    const shared = screen.getByRole("button", { name: "Shared" }).closest("section")!;
+    expect(within(shared).getByText("conv_shared_alpha")).toBeInTheDocument();
+    expect(screen.queryByText("conv_owned")).toBeNull(); // in the collapsed Alpha folder
   });
 });
