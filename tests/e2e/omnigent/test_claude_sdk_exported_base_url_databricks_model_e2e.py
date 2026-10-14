@@ -178,6 +178,7 @@ def test_databricks_model_run_uses_exported_same_workspace_base_url(
         "requests on the exported URL must carry the bearer minted from the staged profile"
         + detail
     )
-    assert REPLY_TEXT in proc.stdout and proc.returncode == 0, (
+    assert proc.returncode == 0, "the run exited non-zero" + detail
+    assert REPLY_TEXT in proc.stdout, (
         "the reply served on the exported URL was not printed" + detail
     )

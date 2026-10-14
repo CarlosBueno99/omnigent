@@ -163,6 +163,7 @@ def stub_workspace(port: int = 0, log_path: Path | None = None) -> Iterator[Stub
     """Serve the stub on ``127.0.0.1:<port>`` (0 picks a free port)."""
     handler = type("_StubHandler", (_Handler,), {"seen": [], "log_path": log_path})
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server.daemon_threads = False  # server_close() then joins in-flight handlers
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

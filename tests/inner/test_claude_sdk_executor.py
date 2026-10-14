@@ -1905,6 +1905,28 @@ class TestResolveGatewayEnv(unittest.TestCase):
             self.assertNotIn("dummy-secret", text)
             self.assertIn("<unparseable url>", text)
 
+    def test_honored_serving_endpoints_url_keeps_the_beta_workaround(self):
+        """A serving-endpoints route is not the Unity AI Gateway, so betas stay disabled for it."""
+        from omnigent.inner.claude_sdk_executor import _resolve_gateway_env
+        from omnigent.inner.databricks_executor import DatabricksCredentials
+
+        host = "https://wkspc.cloud.databricks.com"
+        with (
+            patch.dict(
+                "os.environ",
+                {"ANTHROPIC_BASE_URL": f"{host}/serving-endpoints/anthropic"},
+                clear=True,
+            ),
+            patch(
+                "omnigent.inner.databricks_executor._read_databrickscfg",
+                return_value=DatabricksCredentials(host=host, token="t"),
+            ),
+        ):
+            env = _resolve_gateway_env()
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], f"{host}/serving-endpoints/anthropic")
+        self.assertEqual(env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"], "1")
+        self.assertNotIn("CLAUDE_CODE_USE_GATEWAY", env)
+
     def test_strips_trailing_slash(self):
         from omnigent.inner.claude_sdk_executor import _resolve_gateway_env
         from omnigent.inner.databricks_executor import DatabricksCredentials
