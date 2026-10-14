@@ -628,9 +628,11 @@ class HostStore:
 
     def set_offline(self, host_id: str) -> None:
         """
-        Mark a host offline regardless of which connection wrote its row.
+        Unconditionally mark a host offline; retained for operator tooling.
 
-        The tunnel uses :meth:`set_offline_if_generation`; no-op for unknown hosts.
+        Tunnel disconnect cleanup must use :meth:`set_offline_if_generation`
+        so a superseded connection cannot clobber a live one. No-op for
+        unknown hosts.
 
         :param host_id: Host identifier, e.g.
             ``"host_a1b2c3d4..."``.

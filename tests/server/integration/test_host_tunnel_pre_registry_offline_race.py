@@ -15,6 +15,7 @@ from omnigent.db.utils import now_epoch
 from omnigent.host.frames import HostConnectionErrorFrame, decode_host_frame
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.stores.host_store import HostStore, host_is_live
+from tests.budgets import budget
 from tests.server.integration.test_host_tunnel_route import (
     _make_hello,
     _managed_scope,
@@ -26,6 +27,18 @@ pytestmark = pytest.mark.asyncio
 
 _HOST_ID = "1444b179a19322377dcc75cf7fcd1bd2"
 _TUNNEL_PATH = f"/v1/hosts/{_HOST_ID}/tunnel"
+_MANAGED_TOKEN = "managed-race-token"
+
+
+async def _connect(target: FastAPI, *, managed: bool = False) -> ApplicationCommunicator:
+    scope = (
+        _managed_scope(_TUNNEL_PATH, _MANAGED_TOKEN) if managed else _websocket_scope(_TUNNEL_PATH)
+    )
+    communicator = ApplicationCommunicator(target, scope)
+    await communicator.send_input({"type": "websocket.connect"})
+    accepted = await communicator.receive_output(timeout=budget(2.0))
+    assert accepted["type"] == "websocket.accept"
+    return communicator
 
 
 @pytest.mark.parametrize("managed", [False, True], ids=["external", "managed"])
@@ -46,7 +59,7 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
             host_id=_HOST_ID,
             name="managed-laptop",
             user_id="alice@example.com",
-            token="managed-race-token",
+            token=_MANAGED_TOKEN,
             provider="modal",
             sandbox_id="race-sandbox",
             token_expires_at=now_epoch() + 3600,
@@ -59,18 +72,6 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
             tunnel_mod.create_host_tunnel_router(successor_registry, successor_store),
             prefix="/v1",
         )
-
-    async def connect(target: FastAPI) -> ApplicationCommunicator:
-        scope = (
-            _managed_scope(_TUNNEL_PATH, "managed-race-token")
-            if managed
-            else _websocket_scope(_TUNNEL_PATH)
-        )
-        communicator = ApplicationCommunicator(target, scope)
-        await communicator.send_input({"type": "websocket.connect"})
-        accepted = await communicator.receive_output(timeout=2.0)
-        assert accepted["type"] == "websocket.accept"
-        return communicator
 
     # Fail A after its durable upsert.
     real_register = registry.register
@@ -100,13 +101,13 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
 
     monkeypatch.setattr(tunnel_mod, "_send_connection_error", _send_error_then_hold)
 
-    comm_a = await connect(app)
+    comm_a = await _connect(app, managed=managed)
     a_finished = False
     try:
         await comm_a.send_input({"type": "websocket.receive", "text": _make_hello()})
 
         # The error frame confirms A is parked after its upsert.
-        sent = await comm_a.receive_output(timeout=2.0)
+        sent = await comm_a.receive_output(timeout=budget(2.0))
         assert sent["type"] == "websocket.send"
         error_frame = decode_host_frame(sent["text"])
         assert error_frame == HostConnectionErrorFrame(
@@ -120,10 +121,12 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
             "connection A should have persisted the host online before failing"
         )
 
-        comm_b = await connect(successor_app)
+        comm_b = await _connect(successor_app, managed=managed)
         try:
             await comm_b.send_input({"type": "websocket.receive", "text": _make_hello()})
-            await asyncio.wait_for(_wait_registered(successor_registry, _HOST_ID), timeout=2.0)
+            await asyncio.wait_for(
+                _wait_registered(successor_registry, _HOST_ID), timeout=budget(2.0)
+            )
             host = store.get_host(_HOST_ID)
             assert host is not None and host.status == "online", (
                 "connection B's upsert should have the host online"
@@ -131,9 +134,9 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
 
             # Release A only after B is registered.
             reconnect_done.set()
-            closed = await comm_a.receive_output(timeout=2.0)
+            closed = await comm_a.receive_output(timeout=budget(2.0))
             assert closed["type"] == "websocket.close"
-            await comm_a.wait(timeout=2.0)
+            await comm_a.wait(timeout=budget(2.0))
             a_finished = True
 
             assert successor_registry.get(_HOST_ID) is not None, (
@@ -149,14 +152,14 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
             assert host_is_live(host), "the reconnected host must still be live"
         finally:
             await comm_b.send_input({"type": "websocket.disconnect", "code": 1000})
-            await comm_b.wait(timeout=2.0)
+            await comm_b.wait(timeout=budget(2.0))
     finally:
         # Unblock A if an earlier assertion fails, then let its handler finish.
         reconnect_done.set()
         if not a_finished:
             await comm_a.send_input({"type": "websocket.disconnect", "code": 1000})
             with contextlib.suppress(asyncio.TimeoutError):
-                await comm_a.wait(timeout=2.0)
+                await comm_a.wait(timeout=budget(2.0))
 
 
 async def test_stale_registered_cleanup_cannot_offline_newer_connection_on_other_replica(
@@ -173,32 +176,27 @@ async def test_stale_registered_cleanup_cannot_offline_newer_connection_on_other
         tunnel_mod.create_host_tunnel_router(second_registry, second_store), prefix="/v1"
     )
 
-    async def connect(target: FastAPI) -> ApplicationCommunicator:
-        communicator = ApplicationCommunicator(target, _websocket_scope(_TUNNEL_PATH))
-        await communicator.send_input({"type": "websocket.connect"})
-        accepted = await communicator.receive_output(timeout=2.0)
-        assert accepted["type"] == "websocket.accept"
-        return communicator
-
-    comm_a = await connect(first_app)
+    comm_a = await _connect(first_app)
     a_finished = False
     try:
         await comm_a.send_input(
             {"type": "websocket.receive", "text": _make_hello(connection_id="conn-a")}
         )
-        await asyncio.wait_for(_wait_registered(first_registry, _HOST_ID), timeout=2.0)
+        await asyncio.wait_for(_wait_registered(first_registry, _HOST_ID), timeout=budget(2.0))
 
         # The host reconnects through another replica while the first still holds A.
-        comm_b = await connect(second_app)
+        comm_b = await _connect(second_app)
         try:
             await comm_b.send_input(
                 {"type": "websocket.receive", "text": _make_hello(connection_id="conn-b")}
             )
-            await asyncio.wait_for(_wait_registered(second_registry, _HOST_ID), timeout=2.0)
+            await asyncio.wait_for(
+                _wait_registered(second_registry, _HOST_ID), timeout=budget(2.0)
+            )
             assert first_registry.get(_HOST_ID) is not None
 
             await comm_a.send_input({"type": "websocket.disconnect", "code": 1000})
-            await comm_a.wait(timeout=2.0)
+            await comm_a.wait(timeout=budget(2.0))
             a_finished = True
             assert first_registry.get(_HOST_ID) is None
 
@@ -211,9 +209,9 @@ async def test_stale_registered_cleanup_cannot_offline_newer_connection_on_other
             assert host_is_live(host), "the reconnected host must still be live"
         finally:
             await comm_b.send_input({"type": "websocket.disconnect", "code": 1000})
-            await comm_b.wait(timeout=2.0)
+            await comm_b.wait(timeout=budget(2.0))
     finally:
         if not a_finished:
             await comm_a.send_input({"type": "websocket.disconnect", "code": 1000})
             with contextlib.suppress(asyncio.TimeoutError):
-                await comm_a.wait(timeout=2.0)
+                await comm_a.wait(timeout=budget(2.0))
