@@ -470,9 +470,32 @@ def test_host_status_all_lists_targets_despite_wrapper_injected_server(
     )
     assert "No host daemons found." in result.output, result.output
     assert "not both" not in result.output, result.output
-    assert f"Ignoring --server {_MANAGED_SERVER}" in result.output, (
+    assert "Ignoring --server: --all selects every known target." in result.output, (
         f"Expected a notice that the injected --server was overridden, got: {result.output}"
     )
+
+
+def test_host_status_all_notice_omits_server_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The override notice must not echo basic-auth userinfo from the injected URL."""
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("OMNIGENT_WRAPPER_COMMAND", "isaac omni")
+    monkeypatch.setenv("OMNIGENT_REQUIRE_WRAPPER", "1")
+    monkeypatch.setenv("OMNIGENT_WRAPPER_BYPASS", "1")
+    monkeypatch.setattr("omnigent.cli._HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setattr("omnigent.cli._list_daemon_records", list)
+    credentialed = "https://svc-user:secret-token@managed.example.databricksapps.com"
+
+    result = CliRunner().invoke(cli, ["host", "status", "--all", "--server", credentialed])
+
+    assert result.exit_code == 0, (
+        f"Expected the listing, got exit {result.exit_code}. Output: {result.output}"
+    )
+    assert "Ignoring --server: --all selects every known target." in result.output, result.output
+    assert "secret-token" not in result.output, f"credentials leaked into output: {result.output}"
+    assert "svc-user" not in result.output, f"userinfo leaked into output: {result.output}"
 
 
 def test_host_stop_all_stops_every_target_despite_wrapper_injected_server(
@@ -524,7 +547,7 @@ def test_host_stop_all_stops_every_target_despite_wrapper_injected_server(
     assert terminated == records, f"--all must stop every registered daemon, stopped: {terminated}"
     assert "Stopped https://a.example.com daemon pid=4242" in result.output, result.output
     assert "Stopped https://b.example.com daemon pid=4243" in result.output, result.output
-    assert f"Ignoring --server {_MANAGED_SERVER}" in result.output, result.output
+    assert "Ignoring --server: --all selects every known target." in result.output, result.output
 
 
 def test_host_daemon_alive_returns_false_when_no_pid_file(

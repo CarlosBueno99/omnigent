@@ -31,6 +31,7 @@ def _wrapper_env(fake_home: Path) -> dict[str, str]:
         if not k.startswith(_AMBIENT_ENV_PREFIXES) and k not in _AMBIENT_ENV_KEYS
     }
     env["HOME"] = str(fake_home)
+    env["OMNIGENT_DATA_DIR"] = str(fake_home / ".omnigent")  # registry root on every platform
     env["LC_ALL"] = "C.UTF-8"
     env["TERM"] = "dumb"
     existing = env.get("PYTHONPATH")
@@ -67,6 +68,6 @@ def test_wrapper_injected_server_reaches_host_status_through_the_real_entrypoint
     assert "No host daemons found." in proc.stdout, (
         f"expected the empty-registry listing.\n{output}"
     )
-    assert f"Ignoring --server {_MANAGED_SERVER}" in proc.stderr, (
+    assert "Ignoring --server: --all selects every known target." in proc.stderr, (
         f"the overridden --server must be reported on stderr.\n{output}"
     )

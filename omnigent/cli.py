@@ -2202,16 +2202,16 @@ WRAPPER_BYPASS_ENV = "OMNIGENT_WRAPPER_BYPASS"
 
 
 def _wrapper_managed_deployment(env: Mapping[str, str] | None = None) -> bool:
-    """Report whether a deployment wrapper (e.g. ``isaac omni``) drives the CLI.
+    """Report whether an operator forces CLI use through a wrapper (e.g. ``isaac omni``).
 
-    Wrapped deployments rewrite invocations to add their managed ``--server``,
-    so a ``--server`` that conflicts with an explicit user flag may be
-    wrapper-injected rather than user intent.
+    Such wrappers rewrite invocations to add their managed ``--server``, so a
+    ``--server`` that conflicts with an explicit user flag may be injected rather
+    than typed. Only ``OMNIGENT_REQUIRE_WRAPPER`` marks enforcement; a configured
+    ``OMNIGENT_WRAPPER_COMMAND`` alone just spells hints and leaves direct calls
+    (and their argument checks) untouched.
     """
     if env is None:
         env = os.environ
-    if (env.get(WRAPPER_COMMAND_ENV) or "").strip():
-        return True
     return env_truthy(env.get(REQUIRE_WRAPPER_ENV))
 
 
@@ -9439,7 +9439,8 @@ def _selected_daemon_records(
         # --server) an explicit --all overrides --server; say so on stderr.
         if not _wrapper_managed_deployment():
             raise click.ClickException("Use either --server or --all, not both.")
-        click.echo(f"Ignoring --server {server}: --all selects every known target.", err=True)
+        # The URL is omitted on purpose: it may carry basic-auth credentials.
+        click.echo("Ignoring --server: --all selects every known target.", err=True)
     if all_targets or (server is None and default_all):
         return _list_daemon_records()
     resolved = _resolve_host_server(server)

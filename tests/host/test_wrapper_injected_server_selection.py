@@ -48,20 +48,23 @@ def _fake_record(target: str) -> cli_module._HostDaemonRecord:
     )
 
 
-def test_wrapper_managed_deployment_reads_wrapper_markers(
+def test_wrapper_managed_deployment_requires_enforcement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Either wrapper marker (command name or require flag) flags the deployment."""
+    """Only the enforcement flag marks a wrapper-managed deployment."""
     from omnigent.cli import _wrapper_managed_deployment
 
     _clear_wrapper_env(monkeypatch)
     assert not _wrapper_managed_deployment()
 
+    # A configured command spells hints but does not block direct calls.
     monkeypatch.setenv("OMNIGENT_WRAPPER_COMMAND", "isaac omni")
+    assert not _wrapper_managed_deployment()
+
+    monkeypatch.setenv("OMNIGENT_REQUIRE_WRAPPER", "1")
     assert _wrapper_managed_deployment()
 
     monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND")
-    monkeypatch.setenv("OMNIGENT_REQUIRE_WRAPPER", "1")
     assert _wrapper_managed_deployment()
 
 
@@ -86,16 +89,26 @@ def test_all_wins_over_injected_server_under_wrapper(
     assert selected == records, (
         "the wrapper-injected --server must not narrow or veto --all selection"
     )
-    assert f"Ignoring --server {_MANAGED_SERVER}" in capsys.readouterr().err, (
+    assert "Ignoring --server: --all selects every known target." in capsys.readouterr().err, (
         "overriding a --server must be reported on stderr, not silently applied"
     )
 
 
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param({}, id="no-markers"),
+        pytest.param({"OMNIGENT_WRAPPER_COMMAND": "isaac omni"}, id="command-only"),
+    ],
+)
 def test_direct_invocation_keeps_server_all_conflict_error(
     monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
 ) -> None:
-    """Without a wrapper, passing both flags by hand is still rejected."""
+    """Without wrapper enforcement, passing both flags by hand is still rejected."""
     _clear_wrapper_env(monkeypatch)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
 
     with pytest.raises(click.ClickException, match="not both"):
         _selected_daemon_records(
