@@ -78,6 +78,7 @@ from omnigent.harness_plugins import (
     DEVIN_NATIVE_CODING_AGENT,
     NativeCodingAgent,
 )
+from omnigent.mcp_selection import mcp_selection_revision
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.native.failure_telemetry import failure_log_attributes
 from omnigent.native.native_coding_agents import (
@@ -92,7 +93,7 @@ from omnigent.runner.identity import (
 from omnigent.runner.launch_failure import classify_native_turn_error
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runner.subagent_routing import ROUTING_DECISION_LABEL_KEY
-from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
+from omnigent.runner.transports.ws_tunnel.registry import RunnerSession, TunnelRegistry
 from omnigent.runtime import (
     get_policy_store,
     inflight_text,
@@ -196,6 +197,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY,
     _LAST_TASK_ERROR_MESSAGE_LABEL_KEY,
     _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY,
+    _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY,
     _LAST_TASK_ERROR_TITLE_LABEL_KEY,
     _MAX_TERMINAL_LAUNCH_ARG_LEN,
     _MAX_TERMINAL_LAUNCH_ARGS,
@@ -4979,6 +4981,7 @@ def _publish_status(
                 code=failure_code,
                 previous_status=previous_status or "unknown",
                 response_id=response_id,
+                cached_background_task_count=_session_background_task_count_cache.get(session_id),
                 **failure_log_attributes(failure_context),
             ),
         )
@@ -5111,6 +5114,7 @@ async def _persist_session_status_error_labels(
     error: ErrorDetail | None,
     conversation_store: ConversationStore,
     *,
+    owner_runner_id: str | None = None,
     agent_name: str | None = None,
     item_id: str | None = None,
 ) -> None:
@@ -5127,6 +5131,9 @@ async def _persist_session_status_error_labels(
     :param error: Failure detail from a ``session.status: failed`` edge, or
         ``None`` to clear stale error labels on subsequent activity.
     :param conversation_store: Store used to upsert labels.
+    :param owner_runner_id: Runner this failure belongs to, so a later exit from a
+        replacement runner surfaces its own startup failure instead of this cause.
+        Callers pass the runner they already hold; ``None`` leaves it unattributed.
     :param agent_name: Agent responsible for this failure, captured before a rebind.
     :param item_id: Persisted item a ``runner_rejected_event`` failure refers to, so
         a client whose POST answer was lost can match the refusal to its own send.
@@ -5144,6 +5151,7 @@ async def _persist_session_status_error_labels(
             _LAST_TASK_ERROR_CAUSE_LABEL_KEY: _truncate_label(error.cause or ""),
             _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY: _truncate_label(error.remediation or ""),
             _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY: _truncate_label(item_id or ""),
+            _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY: _truncate_label(owner_runner_id or ""),
         }
         if error is not None
         else {
@@ -5154,6 +5162,7 @@ async def _persist_session_status_error_labels(
             _LAST_TASK_ERROR_CAUSE_LABEL_KEY: "",
             _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY: "",
             _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY: "",
+            _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY: "",
         }
     )
     try:
@@ -5199,6 +5208,16 @@ def _last_task_error_from_labels(labels: Mapping[str, str]) -> dict[str, str] | 
                 error[key] = value
         return error
     return None
+
+
+def _last_task_error_runner_id_from_labels(labels: Mapping[str, str]) -> str | None:
+    """Return the runner that owned the persisted failure, or ``None`` if unknown.
+
+    Older causes (and manually seeded labels) carry no owner, so ``None`` means
+    "attribute to the current runner" — the conservative choice that preserves
+    an existing cause rather than overwriting it.
+    """
+    return labels.get(_LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY) or None
 
 
 def _publish_terminal_pending(session_id: str, pending: bool) -> None:
@@ -5501,11 +5520,11 @@ def _publish_btw_sidechat(
     connects later never sees it (no SSE replay), matching the terminal
     overlay's Escape-to-close, leave-no-history behavior.
 
-    The oldest pending input is also discarded so a web composer's
-    optimistic ``/btw`` bubble does not linger as a stuck "queued" message —
-    the same reconciliation ``_publish_session_superseded`` performs.
     ``/btw`` is never committed as a user turn (no ``session.input.consumed``
-    is emitted); the overlay carries the request text instead.
+    is emitted); the overlay carries the request text instead. A web ``/btw``
+    is not queued as a pending input either, so nothing is settled here: a
+    message queued meanwhile keeps its entry, and the web client drops its own
+    optimistic bubble on this event.
 
     :param session_id: Conversation id whose stream receives the event.
     :param question: The ``/btw`` request line as typed.
@@ -5520,16 +5539,6 @@ def _publish_btw_sidechat(
         truncated=truncated,
     )
     session_stream.publish(session_id, event.model_dump())
-    # Drop the optimistic ``/btw`` bubble (the oldest unconsumed input) so it
-    # does not spin forever — ``/btw`` never round-trips through the transcript
-    # to earn a ``session.input.consumed``. Only the oldest is resolved so a
-    # follow-up the user queued after ``/btw`` is left intact.
-    if pending_inputs.resolve_oldest(session_id) is not None:
-        _logger.info(
-            "Discarded the pending /btw input on session %s",
-            session_id,
-            extra={"session_id": session_id},
-        )
 
 
 async def _get_runner_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient | None:
@@ -5679,6 +5688,13 @@ async def _wait_for_runner_client_impl(
     instant we are convinced, neither speculatively early nor a full
     timeout late.
 
+    A lookup that misses right after the connect is retried a few times
+    (:func:`_resolve_connected_runner_client`): the binding the router checks
+    can settle just after the tunnel registers, and giving up then reports a
+    healthy runner as failed. The retries share ``timeout_s`` with the connect
+    wait; no lookup starts or result is accepted after that budget expires.
+    The outcome is logged once as ``runner_client_wait``.
+
     :param session_id: Session/conversation identifier,
         e.g. ``"conv_abc123"``.
     :param runner_router: The ``RunnerRouter`` instance, or ``None`` for
@@ -5687,20 +5703,85 @@ async def _wait_for_runner_client_impl(
         ``None`` in test setups without runner tunnels.
     :param runner_id: Runner id expected to connect, e.g.
         ``"runner_0123456789abcdef"``.
-    :param timeout_s: Maximum seconds to wait, e.g. ``3.0``.
+    :param timeout_s: Maximum seconds for the connect wait and the client
+        lookups together, e.g. ``3.0``.
     :param runner_exit_reports: Crash-report store consulted to abort the
         wait early when this runner is reported dead. ``None`` keeps the
         plain wait-to-timeout behavior.
     :returns: A runner HTTP client if one becomes available, otherwise
-        ``None`` (timed out, or the runner was reported dead).
+        ``None`` (timed out, the runner was reported dead, or it connected
+        but no client could be resolved before the deadline).
     """
     if runner_id is None:
         return None
     if tunnel_registry is None:
         return await _get_runner_client(session_id, runner_router)
+    started = time.monotonic()
+    session = await _await_runner_connect(
+        tunnel_registry,
+        runner_id,
+        timeout_s=timeout_s,
+        runner_exit_reports=runner_exit_reports,
+    )
+    client: httpx.AsyncClient | None = None
+    attempts = 0
+    if session is not None:
+        client, attempts = await _resolve_connected_runner_client(
+            session_id,
+            runner_router,
+            runner_id=runner_id,
+            deadline=started + timeout_s,
+            runner_exit_reports=runner_exit_reports,
+        )
+    if client is not None:
+        outcome = "resolved"
+    elif session is not None:
+        outcome = "connected_but_unresolved"
+    else:
+        outcome = "never_connected"
+    waited_s = time.monotonic() - started
+    log = _logger.warning if outcome == "connected_but_unresolved" else _logger.info
+    log(
+        "Runner %s for session %s: client wait %s after %.1fs (%d lookups)",
+        runner_id,
+        session_id,
+        outcome,
+        waited_s,
+        attempts,
+        extra=debug_event(
+            "runner_client_wait",
+            session_id=session_id,
+            runner_id=runner_id,
+            outcome=outcome,
+            attempts=attempts,
+            waited_s=round(waited_s, 3),
+            timeout_s=timeout_s,
+        ),
+    )
+    return client
+
+
+async def _await_runner_connect(
+    tunnel_registry: TunnelRegistry,
+    runner_id: str,
+    *,
+    timeout_s: float,
+    runner_exit_reports: RunnerExitReports | None,
+) -> RunnerSession | None:
+    """
+    Wait for a runner's tunnel to register, ending early on a crash report.
+
+    :param tunnel_registry: The server's ``TunnelRegistry``.
+    :param runner_id: Runner id expected to connect, e.g.
+        ``"runner_0123456789abcdef"``.
+    :param timeout_s: Maximum seconds to wait, e.g. ``30.0``.
+    :param runner_exit_reports: Crash-report store, or ``None`` to wait out
+        ``timeout_s`` regardless.
+    :returns: The connected runner's registry session, or ``None`` on
+        timeout or when the runner was reported dead.
+    """
     if runner_exit_reports is None:
-        session = await tunnel_registry.wait_for_runner(runner_id, timeout_s=timeout_s)
-        return None if session is None else await _get_runner_client(session_id, runner_router)
+        return await tunnel_registry.wait_for_runner(runner_id, timeout_s=timeout_s)
     # Race the event-driven connect signal against the crash-report poll;
     # whichever resolves first wins. A report means the runner is busted —
     # stop waiting and let the caller fail the turn now.
@@ -5717,8 +5798,53 @@ async def _wait_for_runner_client_impl(
             connect_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await connect_task
-    session = connect_task.result()
-    return None if session is None else await _get_runner_client(session_id, runner_router)
+    return connect_task.result()
+
+
+async def _resolve_connected_runner_client(
+    session_id: str,
+    runner_router: RunnerRouter | None,
+    *,
+    runner_id: str,
+    deadline: float,
+    runner_exit_reports: RunnerExitReports | None,
+) -> tuple[httpx.AsyncClient | None, int]:
+    """
+    Resolve the client of a runner whose tunnel has connected, retrying a miss.
+
+    Tries up to ``_RUNNER_CLIENT_RESOLVE_ATTEMPTS`` lookups,
+    ``_RUNNER_CLIENT_RESOLVE_RETRY_S`` apart. Each pause is clamped to the time
+    left before ``deadline``, and no further lookup starts once the deadline
+    has passed or the daemon has reported the runner dead.
+
+    :param session_id: Session/conversation identifier,
+        e.g. ``"conv_abc123"``.
+    :param runner_router: The ``RunnerRouter`` instance, or ``None``.
+    :param runner_id: The runner that connected, e.g. ``"runner_0123456789abcdef"``.
+    :param deadline: ``time.monotonic()`` cutoff for starting lookups and
+        accepting their results.
+    :param runner_exit_reports: Crash-report store, or ``None``.
+    :returns: ``(client, attempts)``; ``client`` is ``None`` when every lookup
+        missed, and ``attempts`` counts the lookups made.
+    """
+    from omnigent.server.routes import sessions as _facade
+
+    attempts = 0
+    while True:
+        if time.monotonic() >= deadline or (
+            runner_exit_reports is not None and runner_exit_reports.get(runner_id) is not None
+        ):
+            return None, attempts
+        attempts += 1
+        client = await _get_runner_client(session_id, runner_router)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or (
+            runner_exit_reports is not None and runner_exit_reports.get(runner_id) is not None
+        ):
+            return None, attempts
+        if client is not None or attempts >= _facade._RUNNER_CLIENT_RESOLVE_ATTEMPTS:
+            return client, attempts
+        await asyncio.sleep(min(_facade._RUNNER_CLIENT_RESOLVE_RETRY_S, remaining))
 
 
 async def _validate_session_workspace(
@@ -7300,6 +7426,8 @@ async def _resolve_skill_meta_text_via_runner(
     skill_name: str,
     arguments: str,
     runner_client: httpx.AsyncClient,
+    *,
+    legacy_name: str | None = None,
 ) -> str:
     """
     Resolve a skill's hidden ``<skill>`` meta text on the bound runner.
@@ -7317,6 +7445,10 @@ async def _resolve_skill_meta_text_via_runner(
     :param arguments: Raw argument string typed after the slash
         command, e.g. ``"review this plan"``. Empty when none.
     :param runner_client: HTTP client pointed at the bound runner.
+    :param legacy_name: The skill's frontmatter name, e.g. ``"code-review"``
+        for directory ``review``. Retried once when the runner rejects
+        ``skill_name`` but lists this name, as runners from before
+        directory-name invocation do.
     :returns: The hidden ``<skill>`` meta text for a single
         ``input_text`` block.
     :raises OmnigentError: If the skill is not exposed for the session
@@ -7360,6 +7492,10 @@ async def _resolve_skill_meta_text_via_runner(
         ) from exc
     if resp.status_code == 404:
         available = payload.get("available", [])
+        if legacy_name is not None and isinstance(available, list) and legacy_name in available:
+            return await _resolve_skill_meta_text_via_runner(
+                session_id, legacy_name, arguments, runner_client
+            )
         raise OmnigentError(
             f"Skill {skill_name!r} not found. Available skills: {available}",
             code=ErrorCode.INVALID_INPUT,
@@ -7383,6 +7519,7 @@ async def _dispatch_skill_slash_command_to_runner(
     agent: Agent,
     has_mcp_servers: bool,
     created_by: str | None,
+    legacy_skill_names: Mapping[str, str] | None = None,
 ) -> str:
     """
     Persist a skill slash command and forward hidden skill context.
@@ -7416,6 +7553,9 @@ async def _dispatch_skill_slash_command_to_runner(
         servers; forwarded unchanged to the runner event.
     :param created_by: Authenticated actor id, e.g.
         ``"alice@example.com"``, or ``None`` in single-user mode.
+    :param legacy_skill_names: Frontmatter names of the agent's bundled
+        skills keyed by command, e.g. ``{"review": "code-review"}``, for
+        runners that predate directory-name invocation.
     :returns: The persisted visible ``slash_command`` item id.
     :raises OmnigentError: If the skill is not exposed for the
         session, or the runner is unreachable while resolving it.
@@ -7428,6 +7568,7 @@ async def _dispatch_skill_slash_command_to_runner(
         skill_name,
         arguments,
         runner_client,
+        legacy_name=(legacy_skill_names or {}).get(skill_name),
     )
 
     response_id = f"turn_{uuid.uuid4().hex}"
@@ -7477,7 +7618,7 @@ async def _dispatch_skill_slash_command_to_runner(
         "role": "user",
         "content": meta_content,
         "agent_id": conv.agent_id,
-        "agent_revision": agent.bundle_location,
+        "agent_revision": mcp_selection_revision(agent.bundle_location, conv.labels),
         "model": agent.name,
         "has_mcp_servers": has_mcp_servers,
         # Live-renderer hint: the runner drops ``browser_*`` schemas for
@@ -8063,7 +8204,7 @@ async def _relay_persist_error_once(
                 and existing.data.message == item.data.message
             ):
                 return "duplicate"
-        await asyncio.to_thread(
+        persisted_items = await asyncio.to_thread(
             conversation_store.append,
             session_id,
             [item],
@@ -8078,6 +8219,8 @@ async def _relay_persist_error_once(
                 code=item.data.code,
                 level=item.data.level,
                 source=item.data.source,
+                item_id=persisted_items[0].id,
+                response_id=persisted_items[0].response_id,
             ),
         )
         return "persisted"
@@ -8614,11 +8757,15 @@ def _load_agent_spec_for_session_impl(
     if agent is None:
         return None
     agent_cache = cast(AgentCache, get_agent_cache())
-    return agent_cache.load(
+    spec = agent_cache.load(
         agent.id,
         agent.bundle_location,
         expand_env=agent.operator_authored,
     ).spec
+
+    from omnigent.mcp_selection import selected_mcp_spec
+
+    return selected_mcp_spec(spec, conv.labels)
 
 
 def _build_policy_engine_from_spec(*args: Any, **kwargs: Any) -> PolicyEngine:
@@ -10148,7 +10295,22 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
     """
     if not labels:
         return
+    from omnigent.mcp_selection import MCP_SELECTION_PREFIX
+
+    if any(key.startswith(MCP_SELECTION_PREFIX) for key in labels):
+        raise OmnigentError(
+            "MCP selection must be changed through the session MCP endpoint",
+            code=ErrorCode.INVALID_INPUT,
+        )
     from omnigent.server.routes._host_worktree import WORKTREE_ROOT_LABEL_KEY
+    from omnigent.stores.conversation_store import SIDE_CHAT_SOURCE_LABEL_KEY
+
+    if SIDE_CHAT_SOURCE_LABEL_KEY in labels:
+        raise OmnigentError(
+            f"label {SIDE_CHAT_SOURCE_LABEL_KEY!r} is server-internal"
+            " and cannot be set by clients",
+            code=ErrorCode.INVALID_INPUT,
+        )
 
     if WORKTREE_ROOT_LABEL_KEY in labels:
         raise OmnigentError(
@@ -11747,6 +11909,7 @@ __all__ = [
     "_is_devin_native_subagent",
     "_is_kiro_native_session",
     "_last_task_error_from_labels",
+    "_last_task_error_runner_id_from_labels",
     "_latest_assistant_text_from_store",
     "_latest_message_preview",
     "_launch_runner_on_host",
