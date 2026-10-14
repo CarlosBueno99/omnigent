@@ -1238,9 +1238,9 @@ def _resolve_gateway_env(
                 logger.info(
                     "Ignoring %s (%s is not on %s); using %s",
                     exported[0],
-                    redact_url(ambient_base_url),
-                    redact_url(host),
-                    redact_url(base_url),
+                    _log_safe_url(ambient_base_url),
+                    _log_safe_url(host),
+                    _log_safe_url(base_url),
                 )
         auth_command = (
             auth_command_override
@@ -1309,6 +1309,11 @@ def _on_workspace_origin(url: str, workspace_host: str) -> bool:
     """True when *url* shares *workspace_host*'s scheme, host and effective port."""
     expected = _origin(workspace_host)
     return expected is not None and _origin(url) == expected
+
+
+def _log_safe_url(url: str) -> str:
+    """Redact *url* and escape control characters so a log entry stays on one line."""
+    return (redact_url(url) or "").encode("unicode_escape").decode("ascii")
 
 
 def _databricks_claude_auth_command(host: str, profile: str | None = None) -> str:

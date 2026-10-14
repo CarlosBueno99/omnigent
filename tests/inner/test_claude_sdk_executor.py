@@ -1873,6 +1873,22 @@ class TestResolveGatewayEnv(unittest.TestCase):
         self.assertNotIn("hunter2", text)
         self.assertNotIn("admin:", text)
 
+        # Control characters cannot forge extra log lines.
+        with (
+            patch.dict(
+                "os.environ",
+                {"ANTHROPIC_BASE_URL": "https://proxy.example/anthropic\nFORGED"},
+                clear=True,
+            ),
+            creds,
+            self.assertLogs("omnigent.inner.claude_sdk_executor", level="INFO") as logs,
+        ):
+            _resolve_gateway_env()
+        self.assertFalse(
+            any(line.startswith("FORGED") for line in "\n".join(logs.output).splitlines())
+        )
+        self.assertIn("anthropic\\nFORGED", "\n".join(logs.output))
+
     def test_strips_trailing_slash(self):
         from omnigent.inner.claude_sdk_executor import _resolve_gateway_env
         from omnigent.inner.databricks_executor import DatabricksCredentials
