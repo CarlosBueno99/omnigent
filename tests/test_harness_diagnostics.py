@@ -10,6 +10,7 @@ from omnigent.harnesses.diagnostics import (
     bounded_diagnostic_tail,
     detect_launcher_question,
     detect_sign_in_prompt,
+    may_end_with_answer_cue,
     sanitize_diagnostic_text,
     sign_in_next_step,
 )
@@ -439,6 +440,36 @@ def test_detect_launcher_question_keeps_the_cue_of_a_long_line() -> None:
     assert len(question) <= 120
     assert question.startswith("xxxx")
     assert question.endswith("(y/n)")
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [
+        _UG_UPGRADE_SCREEN,
+        # The cue wrapped at the pane edge: only its tail is on the last row.
+        "Upgrade Claude Code if available? (Y/\nn) \n",
+        "Continue? [y/N]: ^[[B",
+    ],
+)
+def test_may_end_with_answer_cue_accepts_a_closing_bracket_tail(screen: str) -> None:
+    assert may_end_with_answer_cue(screen)
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [
+        None,
+        "",
+        "Loading Omnigent...\n",
+        "Claude Code v2.1.283\n",
+        _UG_UPGRADE_SCREEN + "Upgrading...\n",
+        # A long line ending in a bracket is ordinary output, not a wrapped cue.
+        "JSON Parse error: Unrecognized token\n  at parse (unknown)\n",
+        "  ⏵⏵ auto mode on (shift+tab to cycle)\n",
+    ],
+)
+def test_may_end_with_answer_cue_rejects_other_tails(screen: str | None) -> None:
+    assert not may_end_with_answer_cue(screen)
 
 
 def test_sign_in_next_step_names_the_agent_and_carries_no_address() -> None:

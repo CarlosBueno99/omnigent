@@ -9811,6 +9811,57 @@ def test_wait_for_claude_prompt_ready_quotes_a_wrapped_launcher_question_whole(
     assert captures == [False, True, False, True]
 
 
+_SPLIT_CUE_PANE = "Installing ug CLI...\nUpgrade Claude Code if available? (Y/\nn) \n"
+_JOINED_SPLIT_CUE_PANE = "Installing ug CLI...\nUpgrade Claude Code if available? (Y/n) \n"
+
+
+def test_wait_for_claude_prompt_ready_reads_a_cue_split_across_rows_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cue wrapped at the pane edge still triggers the joined read, which quotes the question."""
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._capture_pane",
+        lambda socket_path, tmux_target, *, join_wrapped=False: (
+            _JOINED_SPLIT_CUE_PANE if join_wrapped else _SPLIT_CUE_PANE
+        ),
+    )
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._claude_pane_state",
+        lambda socket_path, tmux_target: claude_native_bridge._ClaudePaneState(True),
+    )
+    with pytest.raises(claude_native_bridge.ClaudeLauncherQuestionPending) as raised:
+        claude_native_bridge._wait_for_claude_prompt_ready(
+            "/tmp/example/tmux.sock",
+            "claude:0.0",
+            timeout_s=30.0,
+        )
+    assert 'answer "Upgrade Claude Code if available? (Y/n)"' in raised.value.remediation
+
+
+def test_wait_for_claude_prompt_ready_reports_a_dead_launcher_not_a_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launcher that printed its question and exited is an exit, not a prompt to answer."""
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._capture_pane",
+        lambda socket_path, tmux_target, *, join_wrapped=False: _LAUNCHER_QUESTION_PANE,
+    )
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._claude_pane_state",
+        lambda socket_path, tmux_target: claude_native_bridge._ClaudePaneState(
+            False, exited=True, exit_status="1"
+        ),
+    )
+    with pytest.raises(claude_native_bridge.ClaudeTerminalExited) as raised:
+        claude_native_bridge._wait_for_claude_prompt_ready(
+            "/tmp/example/tmux.sock",
+            "claude:0.0",
+            timeout_s=30.0,
+        )
+    assert raised.value.exit_status == "1"
+    assert "Upgrade Claude Code if available? (Y/n)" in str(raised.value)
+
+
 def test_wait_for_claude_prompt_ready_reports_the_exit_when_pane_dead(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

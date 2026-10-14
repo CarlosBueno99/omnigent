@@ -198,6 +198,9 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
 _YES_NO = r"\s*(?:y(?:es)?\s*/\s*no?|no?\s*/\s*y(?:es)?)\s*"
 _YES_NO_CUE = re.compile(rf"(?:\({_YES_NO}\)|\[{_YES_NO}\])\s*[:?]?\s*$", re.IGNORECASE)
 _QUESTION_MAX_CHARS = 120
+# What a cue wrapped at the pane edge leaves on the last row: one short token
+# ending in a closing bracket, optionally followed by ``:`` or ``?``.
+_CUE_TAIL = re.compile(r"^\S{1,8}[\])]\s*[:?]?\s*$")
 
 
 def detect_launcher_question(screen: str | None) -> str | None:
@@ -228,6 +231,31 @@ def detect_launcher_question(screen: str | None) -> str | None:
         return line
     head = _QUESTION_MAX_CHARS // 2
     return f"{line[:head]}…{line[-(_QUESTION_MAX_CHARS - head - 1) :]}"
+
+
+def may_end_with_answer_cue(screen: str | None) -> bool:
+    """Whether the screen's last non-blank line may be a yes/no cue, possibly wrapped.
+
+    A cue can wrap at the pane edge so only a short tail (``n)``, ``N]:``) sits
+    on the last row. Callers use this cheap test on a plain capture to decide
+    when to re-read the pane with wrapped rows joined before
+    :func:`detect_launcher_question`; echoed keys are ignored.
+
+    :param screen: ANSI-stripped terminal screen text, or ``None``.
+    :returns: ``True`` when the last non-blank line ends with a complete cue or
+        is a short bracket-terminated fragment of one.
+    """
+    if not screen:
+        return False
+    lines = [
+        line
+        for line in (_ECHOED_CONTROL.sub("", raw) for raw in screen.splitlines())
+        if line.strip()
+    ]
+    if not lines:
+        return False
+    last = lines[-1].strip()
+    return _YES_NO_CUE.search(last) is not None or _CUE_TAIL.match(last) is not None
 
 
 def sign_in_next_step(agent: str) -> str:

@@ -75,6 +75,7 @@ from omnigent.harnesses.claude_native.status import CONTEXT_RAW_FILE
 from omnigent.harnesses.diagnostics import (
     detect_launcher_question,
     detect_sign_in_prompt,
+    may_end_with_answer_cue,
     sign_in_next_step,
 )
 from omnigent.harnesses.kiro_native import bridge as kiro_bridge
@@ -6187,8 +6188,8 @@ def _wait_for_claude_prompt_ready(
         card can offer it; the pane is left alive for the sign-in to finish.
     :raises ClaudeLauncherQuestionPending: If a yes/no question the launcher
         printed (see :func:`detect_launcher_question`) is the pane's last line
-        on two consecutive polls. Raised within a poll interval naming the
-        question; the pane is left alive for it to be answered.
+        on two consecutive polls while the pane is alive. Raised within a poll
+        interval naming the question; the pane is left for it to be answered.
     :raises ClaudePromptTimeout: If the prompt never renders in time
         (Claude failed to boot, or a slow boot outlasted even the hard
         cap). The message carries the seconds actually waited, a poll
@@ -6266,18 +6267,23 @@ def _wait_for_claude_prompt_ready(
         sign_in_url = sign_in.url if sign_in is not None else None
         # A launcher parked on a yes/no question of its own ("Upgrade Claude
         # Code if available? (Y/n)"), real when the same question ends two
-        # consecutive polls. Fail now rather than reap the pane holding it.
+        # consecutive polls. Fail now rather than reap the pane holding it. The
+        # plain capture only says whether the pane ends like a cue; the question
+        # is read with wrapped rows joined so a cue split across rows or a
+        # question wider than the pane comes back whole.
         question = (
-            None
-            if billing_notice or _composer_row(pane) is not None
-            else detect_launcher_question(pane)
+            detect_launcher_question(_capture_pane(socket_path, tmux_target, join_wrapped=True))
+            if not billing_notice and _composer_row(pane) is None and may_end_with_answer_cue(pane)
+            else None
         )
-        if question is not None:
-            # A question wider than the pane wraps; the joined capture reads it whole.
-            question = detect_launcher_question(
-                _capture_pane(socket_path, tmux_target, join_wrapped=True)
-            )
         if question is not None and question == launcher_question:
+            # A launcher that printed its question and died leaves the text on a
+            # retained pane; that is an exit to report, not something to answer.
+            state = _claude_pane_state(socket_path, tmux_target)
+            if state.alive is False:
+                pane_exited = state.exited
+                exited_status = state.exit_status
+                break
             raise ClaudeLauncherQuestionPending(
                 "Claude Code's launcher is waiting for an answer in this session's "
                 "terminal, so the message was not delivered."
