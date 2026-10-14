@@ -23,6 +23,14 @@ from tests.e2e.conftest import configure_mock_llm, reset_mock_llm
 
 pexpect = pytest.importorskip("pexpect")
 
+from tests.e2e.omnigent._pexpect_harness import (  # noqa: E402
+    STATE_SLEEPING,
+    await_turn_complete,
+    clean_exit,
+    submit_prompt,
+    wait_for_ready,
+)
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _AGENT_YAML = (
     _REPO_ROOT / "tests" / "_fixtures" / "agents" / "markup-args-shell" / "markup-args-shell.yaml"
@@ -30,7 +38,7 @@ _AGENT_YAML = (
 _MODEL_KEY = "mock-markup-args-shell"
 _SHELL_COMMAND = "echo '[/dim]'"
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-_READY_PATTERNS = [r"state: sleeping", r"·\s*ready"]
+_READY_PATTERNS = [STATE_SLEEPING, r"·\s*ready"]
 _BOOT_TIMEOUT_S = 180.0
 _RESUME_TIMEOUT_S = 120.0
 # Inherited runner/credential variables would re-point the spawned CLI at this
@@ -121,14 +129,12 @@ def _create_conversation_with_markup_tool_call(env: dict[str, str]) -> str:
     transcript = io.StringIO()
     child = _spawn(["run", str(_AGENT_YAML)], env, transcript)
     try:
-        child.expect(_READY_PATTERNS, timeout=_BOOT_TIMEOUT_S)
+        wait_for_ready(child, timeout=_BOOT_TIMEOUT_S)
         time.sleep(1.0)
-        child.send(f"run {_SHELL_COMMAND}\r")
-        child.expect(r"state: running", timeout=60)
-        child.expect(r"state: sleeping", timeout=120)
+        submit_prompt(child, f"run {_SHELL_COMMAND}")
+        await_turn_complete(child, running_timeout=60, completion_timeout=120)
         time.sleep(1.0)
-        child.send("/quit\r")
-        child.expect(pexpect.EOF, timeout=60)
+        clean_exit(child, timeout=60)
     finally:
         if child.isalive():
             child.terminate(force=True)
@@ -175,12 +181,10 @@ def test_resume_replays_tool_call_with_markup_like_args(
             f"Output tail:\n{plain[-3000:]}"
         )
         assert "MarkupError" not in plain, f"resume raised MarkupError:\n{plain[-3000:]}"
-        assert "⏵ sys_os_shell" in plain and "[/dim]" in plain, (
+        assert re.search(r"⏵ sys_os_shell\([^\n]*echo '\[/dim\]'", plain), (
             f"replayed history lacks the tool-call line with literal arguments:\n{plain[-3000:]}"
         )
-        child.send("/quit\r")
-        with contextlib.suppress(Exception):
-            child.expect(pexpect.EOF, timeout=60)
+        clean_exit(child, timeout=60)
     finally:
         if child.isalive():
             child.terminate(force=True)

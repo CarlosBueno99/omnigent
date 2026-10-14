@@ -405,6 +405,29 @@ def test_format_tool_group_renders_markup_like_args_literally(args_summary: str)
     )
 
 
+def test_format_tool_group_renders_markup_like_names_literally() -> None:
+    """Tool and sub-agent names on the ``⏵`` line are escaped like the args."""
+    fmt = RichBlockFormatter()
+    group = ToolGroup(
+        executions=[
+            ToolExecution(
+                name="run[/dim]",
+                arguments={},
+                args_summary="ls",
+                call_id="c1",
+                agent_name="coder.[bold]worker",
+                executed_by="server",
+                output=None,
+            ),
+        ]
+    )
+    (line,) = fmt.format(group)
+    assert isinstance(line, Text)
+    assert line.plain == "   coder.[bold]worker → ⏵ run[/dim](ls)", (
+        f"tool and agent names must survive rendering unchanged; got {line.plain!r}"
+    )
+
+
 def test_duplicate_tool_call_renders_call_line_once() -> None:
     """
     Regression: sessions API emits ``function_call`` twice per tool —
