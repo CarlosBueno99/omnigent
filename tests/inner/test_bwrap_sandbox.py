@@ -921,6 +921,40 @@ def test_wrap_launcher_argv_binds_symlinked_venv_target_at_its_own_path(
     )
 
 
+@pytest.mark.parametrize("target_kind", ["not_a_venv", "dangling"])
+def test_wrap_launcher_argv_does_not_mount_non_venv_symlink_targets(
+    tmp_path: Path, target_kind: str
+) -> None:
+    """
+    A covered directory-symlink is followed only when it leads to a working
+    virtualenv. A link at an arbitrary directory that happens to hold a
+    ``bin/python`` (an agent-writable tree could point ``.venv`` at
+    ``$HOME``), or one whose interpreter does not exist, must not widen the
+    mount set.
+    """
+    tmp_path = tmp_path.resolve()
+    target = tmp_path / "target"
+    (target / "bin").mkdir(parents=True)
+    if target_kind == "not_a_venv":
+        (target / "bin" / "python").symlink_to(os.path.realpath(sys.executable))
+    else:
+        (target / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".venv").symlink_to(target, target_is_directory=True)
+    interp = checkout / ".venv" / "bin" / "python"
+    policy = _make_policy(checkout, allow_hidden=[".venv"])
+
+    argv = _make_backend().wrap_launcher_argv([str(interp), "-c", "pass"], policy, checkout)
+
+    exposed = [
+        argv[i + 2]
+        for i in range(len(argv) - 2)
+        if argv[i] == "--ro-bind-try" and Path(argv[i + 2]).is_relative_to(target)
+    ]
+    assert exposed == [], f"symlink target {str(target)!r} must not be mounted: {exposed}"
+
+
 def test_wrap_launcher_argv_target_binds_non_default_path(
     tmp_path: Path,
 ) -> None:

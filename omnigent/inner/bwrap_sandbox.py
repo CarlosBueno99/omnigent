@@ -478,9 +478,7 @@ class BwrapSandboxBackend(SandboxBackend):
 
         # Make sure argv[0] (the helper interpreter) is reachable inside
         # the sandbox even when it lives outside the default mounts —
-        # e.g. a pyenv install under ``$HOME/.pyenv``. The wholesale binds
-        # below shadow anything mounted underneath them, so they count as
-        # covered here and only a directory-symlink's target gets bound.
+        # e.g. a pyenv install under ``$HOME/.pyenv``.
         bound_roots = [cwd_resolved, *(policy.read_roots or []), *policy.write_roots]
         bwrap_args += _ensure_executable_visible(argv, bound_roots)
 
@@ -923,10 +921,10 @@ def _ensure_executable_visible(argv: list[str], bound_roots: Sequence[Path]) -> 
     handles intermediate directory-symlinks: e.g. uv installs a
     version-floating symlink ``cpython-3.12 -> cpython-3.12.13``; the
     kernel traverses the literal ``cpython-3.12`` name, so we mount the
-    real ``cpython-3.12.13`` contents there. A directory-symlink whose
-    target lies outside every mount is also bound at the target's own
-    path, so the link still resolves where a wholesale bind (cwd,
-    ``read_paths``, ``write_paths``) shows the literal name instead.
+    real ``cpython-3.12.13`` contents there. A directory-symlink leading to
+    the interpreter's virtualenv is also bound at the target's own path, so
+    the link still resolves where a wholesale bind (cwd, ``read_paths``,
+    ``write_paths``) shows the literal name instead.
 
     Common cases:
 
@@ -951,7 +949,7 @@ def _ensure_executable_visible(argv: list[str], bound_roots: Sequence[Path]) -> 
     :param bound_roots: Directories the namespace binds wholesale (the
         cwd plus the policy's read/write roots). Paths under them need no
         literal-name bind — the wholesale bind would shadow it anyway —
-        but a directory-symlink there still needs its target mounted.
+        but a virtualenv symlink there still needs its target mounted.
     :returns: Extra bwrap args (possibly empty) to insert before the
         wholesale binds. Never includes a destination already covered by
         :data:`_DEFAULT_RO_DIRS` or by *bound_roots*.
@@ -997,30 +995,30 @@ def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) 
         seen_dest.add(dst)
         extra.extend(["--ro-bind-try", str(src), str(dst)])
 
-    def _emit_parent_pair(literal: Path) -> None:
+    def _emit_parent_pair(literal: Path, follow_venv_links: bool) -> None:
         """Make ``literal``'s parent and grandparent reachable: bind each
-        realpath at its literal name outside the covered mounts, and bind a
-        directory-symlink's target at its own path where a covered mount
-        shows the symlink itself."""
+        realpath at its literal name outside the covered mounts. Where a
+        covered mount shows a directory-symlink instead, bind its target at
+        its own path, but only a virtualenv target: the link may sit in an
+        agent-writable tree, so an arbitrary target must not widen the mounts."""
         covered = any(_is_within(literal, root, resolve=False) for root in covered_prefixes)
         parent_literal = literal.parent
         for literal_dir in (parent_literal, parent_literal.parent):
             real_dir = Path(os.path.realpath(str(literal_dir)))
             if not covered:
                 _emit(real_dir, literal_dir)
-            if real_dir != literal_dir:
+            elif follow_venv_links and real_dir != literal_dir and _is_venv_dir(real_dir):
                 _emit(real_dir, real_dir)
 
     # Walk the symlink chain hop-by-hop until either a regular file is
     # reached or the visited-set catches a cycle. The 40-hop cap matches
     # Linux's MAXSYMLINKS / ELOOP threshold.
-    visited: set[Path] = set()
+    hops: list[Path] = []
     current = Path(os.path.abspath(str(Path(argv[0]))))
     for _ in range(40):
-        if current in visited:
+        if current in hops:
             break
-        visited.add(current)
-        _emit_parent_pair(current)
+        hops.append(current)
         try:
             if not current.is_symlink():
                 break
@@ -1031,8 +1029,18 @@ def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) 
             current = Path(link)
         else:
             current = Path(os.path.normpath(str(current.parent / link)))
+    # Symlink targets are only worth exposing when the chain ends at an
+    # interpreter file.
+    resolves = hops[-1].is_file()
+    for hop in hops:
+        _emit_parent_pair(hop, resolves)
 
     return extra
+
+
+def _is_venv_dir(path: Path) -> bool:
+    """Whether *path* is a virtualenv root or its ``bin`` directory."""
+    return (path / "pyvenv.cfg").is_file() or (path.parent / "pyvenv.cfg").is_file()
 
 
 def _tmpfs_mask_dirs(mask_args: Sequence[str]) -> list[Path]:
