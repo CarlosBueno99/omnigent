@@ -2133,13 +2133,7 @@ def _is_resumable_codex_rollout(path: Path, *, external_session_id: str) -> bool
 
 
 def _assistant_reply_texts(payloads: Iterable[object]) -> Counter[str]:
-    """
-    Count the assistant message texts among Codex ``response_item`` payloads.
-
-    :param payloads: Responses-style item payloads, e.g.
-        ``{"type": "message", "role": "assistant", "content": [...]}``.
-    :returns: Multiset of stripped assistant texts; empty texts are ignored.
-    """
+    """Count the non-empty assistant message texts among ``response_item`` payloads."""
     replies: Counter[str] = Counter()
     for payload in payloads:
         if (
@@ -2169,16 +2163,16 @@ def _local_rollout_outruns_server_history(
     """
     Return whether a valid local rollout carries assistant replies the server lacks.
 
-    Only assistant replies are compared: Codex records its own injected
-    context (``<environment_context>``, instructions) as user/developer
-    messages, which have no server counterpart. A server reply missing from
-    the rollout still counts as divergent history, so the server wins then.
+    Only assistant replies are compared: Codex records its injected context
+    (``<environment_context>``, instructions) as user/developer messages with
+    no server counterpart. A server reply missing from the rollout is
+    divergent history, so the server still wins then.
 
     :param rollout: Existing ``rollout-*.jsonl`` for the thread.
     :param items: Committed Omnigent items fetched for the resume.
     :param external_session_id: Codex thread id the rollout must belong to.
-    :returns: ``True`` when every server reply is in the rollout and the
-        rollout has at least one more; ``False`` for an unusable rollout.
+    :returns: ``True`` when the rollout holds every server reply plus at least
+        one more; ``False`` for an unusable rollout.
     """
     if not _is_resumable_codex_rollout(rollout, external_session_id=external_session_id):
         return False

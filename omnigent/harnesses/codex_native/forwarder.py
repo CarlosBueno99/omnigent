@@ -2568,14 +2568,9 @@ async def _subscribe_until_ready(
     """
     Reserve authoritative delivery order while subscribing and replaying.
 
-    When Codex refuses the subscription, the attempt mirrors the thread's
-    history through ``thread/read`` instead and is repeated after every
-    thread status edge the caller reports on *status_signal*, until a later
-    ``thread/resume`` succeeds. The order lock is released while waiting so
-    live posts for the session are not held up.
-
-    :param status_signal: Set by the caller on each ``thread/status/changed``
-        for this thread. ``None`` stops after one refused attempt.
+    A refused subscription is retried after each thread status edge reported
+    on *status_signal* (``None``: one attempt), with the order lock released
+    while waiting so live posts for the session are not held up.
     """
     after_refusal = False
     while True:
@@ -2632,12 +2627,10 @@ async def _subscribe_until_ready_inner(
     detect activity and set the signal. A short poll still covers the
     brief window between "thread active" and the rollout being flushed.
 
-    Codex delivers ``turn/*``/``item/*`` notifications only to connections
-    whose ``thread/resume`` succeeded. Any other refusal of that call (seen
-    as ``-32601 list_turns is not supported yet``) therefore falls back to
-    ``thread/read`` so the thread's completed turns still reach the Omnigent
-    transcript and close the session status; the caller retries the
-    subscription after the next status edge.
+    Any other refusal (such as ``-32601 list_turns is not supported yet``)
+    falls back to ``thread/read``: Codex only routes turn/item notifications
+    to subscribed connections, so this is how the thread's completed turns
+    still reach the transcript until a later ``thread/resume`` succeeds.
 
     :param client: Codex app-server client.
     :param ap_client: Omnigent HTTP client used for replayed items.
@@ -2755,16 +2748,11 @@ async def _read_thread_after_refused_resume(
     first_refusal: bool,
 ) -> CodexMessage | None:
     """
-    Fetch a thread Codex refused to resume, so its history can still be mirrored.
-
-    ``thread/read`` with ``includeTurns`` returns the same ``{"thread": Thread}``
-    shape as ``thread/resume`` (the fallback the sub-agent backfill already
-    uses), without subscribing the connection. The refusal is logged with its
-    traceback the first time only.
+    Read a thread Codex refused to resume; same ``{"thread": Thread}`` shape.
 
     :param client: Codex app-server client.
     :param thread_id: Codex thread id.
-    :param refusal: Exception ``thread/resume`` raised.
+    :param refusal: Exception ``thread/resume`` raised; logged in full once.
     :param first_refusal: Whether this is the subscription's first refusal.
     :returns: JSON-RPC response envelope, or ``None`` when the read failed too.
     """
@@ -2795,12 +2783,8 @@ def _event_is_thread_status_edge(event: CodexMessage, thread_id: str) -> bool:
     """
     Return whether *event* is a ``thread/status/changed`` for *thread_id*.
 
-    Codex broadcasts these to every connection, subscribed or not, so they
-    are the wake-up for re-reading a thread whose subscription was refused.
-
-    :param event: A Codex JSON-RPC notification envelope.
-    :param thread_id: Codex thread id the forwarder mirrors.
-    :returns: ``True`` for a status edge on that thread (or one carrying no id).
+    Codex broadcasts these to unsubscribed connections too, so they wake a
+    refused subscription for its next ``thread/read``.
     """
     if event.get("method") != _CODEX_THREAD_STATUS_CHANGED_METHOD:
         return False
