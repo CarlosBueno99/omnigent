@@ -4,8 +4,11 @@ The runner resolves ``codex`` through ``OMNIGENT_CODEX_PATH``. The wrapper writt
 here execs the real CLI for every invocation except ``app-server --listen``, where
 it starts the real app-server on a private loopback port and serves a transparent
 WebSocket proxy on the requested port. While the fault flag file exists, the proxy
-answers ``thread/resume`` on the transcript forwarder's connections with the
-``-32601 list_turns is not supported yet`` refusal and forwards everything else.
+answers the transcript forwarder's subscribe requests (``thread/resume`` carrying
+only ``threadId``/``excludeTurns``) on its connections with the
+``-32601 list_turns is not supported yet`` refusal and forwards everything else,
+including the TUI's own resume and the terminal attach that shares the resumed
+forwarder's connection.
 """
 
 from __future__ import annotations
@@ -41,8 +44,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 RESUME_FAULT_ERROR: dict[str, Any] = {"code": -32601, "message": "list_turns is not supported yet"}
 # A fresh session's forwarder subscribes over the runner's thread-discovery
-# listener; a resumed session's forwarder opens its own connection.
-FORWARDER_CLIENT_NAMES = ("omnigent-codex-native-auto", "omnigent-codex-forwarder")
+# listener; a resumed session's forwarder reuses the terminal-attach preload
+# connection, or opens its own.
+FORWARDER_CLIENT_NAMES = (
+    "omnigent-codex-native-auto",
+    "omnigent-codex-native-preload",
+    "omnigent-codex-forwarder",
+)
+SUBSCRIBE_PARAMS = frozenset({"threadId", "excludeTurns"})
 
 _PROXY_SCRIPT = textwrap.dedent(
     '''\
@@ -64,6 +73,7 @@ _PROXY_SCRIPT = textwrap.dedent(
     LOG = {log!r}
     FAULT_FLAG = {flag!r}
     FAULT_NAMES = {names!r}
+    SUBSCRIBE_PARAMS = {subscribe_params!r}
     FAULT_ERROR = {error!r}
 
 
@@ -116,7 +126,12 @@ _PROXY_SCRIPT = textwrap.dedent(
                             state["name"] = (params.get("clientInfo") or {{}}).get("name")
                             _log(event="initialize", conn=conn_id, client=state["name"])
                         elif method == "thread/resume":
-                            inject = state["name"] in FAULT_NAMES and os.path.exists(FAULT_FLAG)
+                            params = obj.get("params") or {{}}
+                            inject = (
+                                state["name"] in FAULT_NAMES
+                                and set(params) <= set(SUBSCRIBE_PARAMS)
+                                and os.path.exists(FAULT_FLAG)
+                            )
                             _log(
                                 event="thread/resume",
                                 conn=conn_id,
@@ -129,7 +144,8 @@ _PROXY_SCRIPT = textwrap.dedent(
                                 refusal = {{"id": obj.get("id"), "error": FAULT_ERROR}}
                                 await conn.send(json.dumps(refusal))
                                 continue
-                            state["pending"].add(obj.get("id"))
+                            if obj.get("id") is not None:
+                                state["pending"].add(obj["id"])
                 await upstream.send(message)
 
         async def upstream_to_client():
@@ -244,6 +260,7 @@ def write_codex_fault_proxy(
             log=str(log_path),
             flag=str(fault_flag),
             names=FORWARDER_CLIENT_NAMES,
+            subscribe_params=tuple(sorted(SUBSCRIBE_PARAMS)),
             error=RESUME_FAULT_ERROR,
         ),
         encoding="utf-8",
@@ -354,7 +371,11 @@ def _wait_until_ready(
         except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
         time.sleep(_HEALTH_POLL_INTERVAL_S)
-    tails = "\n".join(f"{log}:\n{log.read_text()[-3000:] if log.exists() else ''}" for log in logs)
+    tails = "\n".join(
+        f"{log}:\n{log.read_text(encoding='utf-8', errors='replace')[-3000:]}"
+        for log in logs
+        if log.exists()
+    )
     raise RuntimeError(f"codex-native fault environment not ready ({last_error}).\n{tails}")
 
 

@@ -7,7 +7,8 @@ TUI's own connection keeps working. The refusal is injected here at the
 app-server WebSocket boundary by the ``codex`` wrapper in
 ``_codex_native_fault_proxy``; the real Codex CLI (mock model) still runs both
 turns. The journey then performs a cold reconnect (runner restart + page reload)
-and checks that the native history survives the server-history rebuild.
+with the refusal still in place and checks that the native history survives the
+server-history rebuild without duplicating the already mirrored transcript.
 
 Set ``OMNIGENT_E2E_CODEX_RESUME_FAULT=0`` to run the same journey without the
 refusal as a control. ``OMNIGENT_E2E_EVIDENCE_DIR`` copies logs, screenshots and
@@ -186,8 +187,12 @@ def _rollout_summary(codex_home: Path, thread_id: str, markers: list[str]) -> di
     for line in text.splitlines():
         if not line.strip():
             continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            # Codex may still be appending the last record.
+            continue
         records += 1
-        record = json.loads(line)
         payload = record.get("payload") or {}
         key = f"{record.get('type')}/{payload.get('type')}"
         types[key] = types.get(key, 0) + 1
@@ -359,6 +364,11 @@ def test_native_codex_chat_and_history_survive_forwarder_subscription_refusal(
                 f"{_CHAT_SYNC_WINDOW_S:.0f}s after both TUI turns completed (expected 2); "
                 f"server transcript roles={roles}"
             )
+        if _FAULT_ENABLED and not any(
+            event.get("event") == "thread/resume" and event.get("injected")
+            for event in env.proxy_events()
+        ):
+            failures.append("the fault proxy never refused the forwarder's thread/resume")
         if status != "idle":
             failures.append(
                 f"session status is {status!r} after both turns completed (expected 'idle')"
@@ -380,8 +390,8 @@ def test_native_codex_chat_and_history_survive_forwarder_subscription_refusal(
             f"rollout carries {evidence['rollout_before']['markers']}/4 turn markers"
         )
 
-        # Cold reconnect: runner restart, then reopen the session.
-        env.disable_resume_fault()
+        # Cold reconnect with the refusal still in place: runner restart, then
+        # reopen the session.
         env.restart_runner()
         mark("runner restarted (cold reconnect)")
         page.reload()
@@ -407,13 +417,21 @@ def test_native_codex_chat_and_history_survive_forwarder_subscription_refusal(
         if rollout_after:
             _save_evidence("rollout-after.jsonl", Path(rollout_after).read_text(encoding="utf-8"))
         _ensure_chat_view(page)
+        deadline = time.monotonic() + _CHAT_SYNC_WINDOW_S
+        while True:
+            chat_after_reconnect = {
+                "user_bubbles": page.locator(_USER).count(),
+                "assistant_bubbles": page.locator(_ASSISTANT).count(),
+                "working_indicator": page.locator(_WORKING).count(),
+                "status": _session_status(env, session_id),
+            }
+            if chat_after_reconnect["status"] == "idle" or time.monotonic() >= deadline:
+                break
+            page.wait_for_timeout(2_000)
         page.wait_for_timeout(3_000)
         _screenshot(page, "06-chat-after-reconnect.png")
-        evidence["chat_after_reconnect"] = {
-            "user_bubbles": page.locator(_USER).count(),
-            "assistant_bubbles": page.locator(_ASSISTANT).count(),
-            "status": _session_status(env, session_id),
-        }
+        chat_after_reconnect["server_message_roles"] = _message_roles(env, session_id)
+        evidence["chat_after_reconnect"] = chat_after_reconnect
         turns_after = evidence["thread_read_after"].get("turn_count")
         mark(
             f"after reconnect: thread/read {turns_after} turns; "
@@ -434,11 +452,24 @@ def test_native_codex_chat_and_history_survive_forwarder_subscription_refusal(
                 f"{evidence['rollout_before']['markers']} -> "
                 f"{evidence['rollout_after']['markers']} of 4 turn markers"
             )
-        if not any(
-            line.strip().startswith("• ") and (assistant_1 in line or assistant_2 in line)
-            for line in pane_after_reconnect.splitlines()
-        ):
-            failures.append("resumed Codex TUI shows neither earlier reply")
+        for token in (assistant_1, assistant_2):
+            if not any(
+                line.strip().startswith("• ") and token in line
+                for line in pane_after_reconnect.splitlines()
+            ):
+                failures.append(f"resumed Codex TUI does not show the earlier reply {token}")
+        # The reconnect must neither lose nor duplicate the mirrored transcript.
+        if (
+            chat_after_reconnect["user_bubbles"],
+            chat_after_reconnect["assistant_bubbles"],
+            chat_after_reconnect["status"],
+        ) != (2, 2, "idle"):
+            failures.append(f"Chat after the cold reconnect: {chat_after_reconnect}")
+        if chat_after_reconnect["server_message_roles"] != ["user", "assistant"] * 2:
+            failures.append(
+                "server transcript after the cold reconnect: "
+                f"{chat_after_reconnect['server_message_roles']}"
+            )
     finally:
         evidence["failures"] = failures
         _save_evidence("evidence.json", json.dumps(evidence, indent=1, default=str))

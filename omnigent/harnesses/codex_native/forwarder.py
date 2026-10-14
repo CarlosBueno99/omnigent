@@ -9,6 +9,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -2690,6 +2691,15 @@ async def _subscribe_until_ready_inner(
                     # poll covers that window.
                     await _sleep(_SUBSCRIBE_RETRY_DELAY_SECONDS)
                 continue
+            if not isinstance(exc, CodexAppServerResponseError):
+                # A transport failure (dropped websocket) cannot be read around.
+                _logger.log(
+                    logging.INFO if after_refusal else logging.WARNING,
+                    "failed to subscribe to Codex thread %s",
+                    thread_id,
+                    exc_info=True,
+                )
+                return False
             read = await _read_thread_after_refused_resume(
                 client, thread_id=thread_id, refusal=exc, first_refusal=not after_refusal
             )
@@ -2725,6 +2735,23 @@ async def _subscribe_until_ready_inner(
             await _sync_codex_approval_mode_change(
                 ap_client, session_id=session_id, forwarder_state=forwarder_state
             )
+        # History fetched because of a refusal may include turns Omnigent already
+        # committed. A cold-resume rollout rebuild gives Codex's turns and items
+        # new ids, so committed replies are recognised by text, not identity.
+        replay_items = True
+        committed_replies: Counter[str] | None = None
+        if not subscribed or after_refusal:
+            committed_replies = await _committed_assistant_replies(
+                ap_client, session_id=session_id
+            )
+            if committed_replies is None:
+                _logger.warning(
+                    "Could not read the committed history of %s; Codex thread %s items "
+                    "are replayed after the next status edge instead",
+                    session_id,
+                    thread_id,
+                )
+                replay_items = False
         await _replay_resume_response(
             ap_client,
             session_id=session_id,
@@ -2734,6 +2761,8 @@ async def _subscribe_until_ready_inner(
             elicitation_tracker=elicitation_tracker,
             forwarder_state=forwarder_state,
             replay_from_turn_id=replay_from_turn_id,
+            replay_items=replay_items,
+            committed_replies=committed_replies,
         )
         if subscribed and after_refusal:
             _logger.info("Codex thread %s subscription succeeded after a refusal", thread_id)
@@ -2777,6 +2806,97 @@ async def _read_thread_after_refused_resume(
             exc_info=True,
         )
         return None
+
+
+def _normalized_message_text(value: object) -> str:
+    """Collapse a message text (a string or Codex/Omnigent content blocks) for comparison."""
+    if isinstance(value, list):
+        value = "".join(
+            block["text"]
+            for block in value
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        )
+    return " ".join(value.split()) if isinstance(value, str) else ""
+
+
+def _consume_committed_turn(items: list[object], committed_replies: Counter[str]) -> bool:
+    """
+    Return whether every agent reply in a turn is already committed, consuming them.
+
+    :param items: Codex turn items from ``thread/read``/``thread/resume``.
+    :param committed_replies: Remaining committed assistant texts; matched
+        replies are removed so a repeated identical reply still counts once.
+    :returns: ``True`` when the turn can be skipped; ``False`` when it has no
+        agent reply or one is missing from Omnigent.
+    """
+    replies = Counter(
+        text
+        for text in (
+            _normalized_message_text(item.get("text", item.get("content")))
+            for item in items
+            if isinstance(item, dict) and item.get("type") == "agentMessage"
+        )
+        if text
+    )
+    if not replies or any(committed_replies[text] < count for text, count in replies.items()):
+        return False
+    committed_replies.subtract(replies)
+    return True
+
+
+async def _committed_assistant_replies(
+    client: httpx.AsyncClient, *, session_id: str
+) -> Counter[str] | None:
+    """
+    Return the assistant reply texts Omnigent has already committed for a session.
+
+    :param client: HTTP client for Omnigent reads.
+    :param session_id: Omnigent conversation id.
+    :returns: Multiset of normalized assistant texts, or ``None`` when the
+        history could not be read.
+    """
+    replies: Counter[str] = Counter()
+    after: str | None = None
+    while True:
+        params: dict[str, str | int] = {"limit": 1000, "order": "asc"}
+        if after is not None:
+            params["after"] = after
+        try:
+            response = await client.get(
+                f"/v1/sessions/{url_component(session_id)}/items", params=params
+            )
+        except httpx.HTTPError:
+            _logger.warning("Failed to fetch committed history for %s", session_id, exc_info=True)
+            return None
+        if response.status_code >= 400:
+            _logger.warning(
+                "Failed to fetch committed history for %s: HTTP %s",
+                session_id,
+                response.status_code,
+            )
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            return None
+        for item in data:
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "message"
+                and item.get("role") == "assistant"
+            ):
+                text = _normalized_message_text(item.get("content"))
+                if text:
+                    replies[text] += 1
+        if not payload.get("has_more"):
+            return replies
+        last_id = payload.get("last_id")
+        if not isinstance(last_id, str) or not last_id:
+            return None
+        after = last_id
 
 
 def _event_is_thread_status_edge(event: CodexMessage, thread_id: str) -> bool:
@@ -2852,6 +2972,8 @@ async def _replay_resume_response(
     elicitation_tracker: _CodexElicitationTaskTracker,
     forwarder_state: _CodexForwarderState | None = None,
     replay_from_turn_id: str | None = None,
+    replay_items: bool = True,
+    committed_replies: Counter[str] | None = None,
 ) -> None:
     """
     Mirror message items returned by ``thread/resume``.
@@ -2871,6 +2993,11 @@ async def _replay_resume_response(
         sub-agent registration.
     :param replay_from_turn_id: Optional first turn to replay after an
         interrupted forwarder. Earlier acknowledged turns are skipped.
+    :param replay_items: Whether to mirror items at all; the terminal status
+        edge is published either way.
+    :param committed_replies: Assistant texts Omnigent already holds; a turn
+        whose replies are all among them is skipped (see
+        :func:`_consume_committed_turn`).
     :returns: None.
     """
     result = response.get("result")
@@ -2884,7 +3011,7 @@ async def _replay_resume_response(
         return
     thread_id = thread.get("id")
     thread_id = thread_id if isinstance(thread_id, str) and thread_id else None
-    replay_turns = _resume_turns_from(turns, replay_from_turn_id)
+    replay_turns = _resume_turns_from(turns, replay_from_turn_id) if replay_items else []
     async with _conversation_item_delivery_scope(session_id):
         for turn in replay_turns:
             if not isinstance(turn, dict):
@@ -2892,6 +3019,8 @@ async def _replay_resume_response(
             turn_id = _turn_id_from_payload(turn)
             items = turn.get("items")
             if not turn_id or not isinstance(items, list):
+                continue
+            if committed_replies is not None and _consume_committed_turn(items, committed_replies):
                 continue
             for item in items:
                 if not isinstance(item, dict):
