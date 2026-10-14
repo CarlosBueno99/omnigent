@@ -1463,6 +1463,30 @@ def test_copilot_command_without_sdk_still_launches_against_a_remote_server(
     assert dispatch.call_args.kwargs["harness"] == "copilot"
 
 
+def test_copilot_shorthand_forwards_a_real_help_request_without_the_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forwarded ``--help`` never launches, so the SDK gate stays out of its way."""
+    from omnigent.cli import _run_harness_shorthand, run
+
+    monkeypatch.setattr("omnigent.cli._harness_extra_checks", lambda: {"copilot": lambda: False})
+    monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
+    forwarded = Mock()
+    monkeypatch.setattr(run, "main", forwarded)
+
+    _run_harness_shorthand("copilot", ("--help",))
+
+    forwarded.assert_called_once()
+    assert forwarded.call_args.kwargs["args"] == ["--harness", "copilot", "--help"]
+
+
+def test_extras_gated_shorthand_rosters_stay_coupled() -> None:
+    """Every extras-gated harness has the SDK/extra names its missing-SDK message needs."""
+    from omnigent.cli import _harness_extra_checks, _harness_sdk_extras
+
+    assert set(_harness_sdk_extras()) == set(_harness_extra_checks())
+
+
 def test_copilot_command_answers_help_and_is_rostered_as_a_harness() -> None:
     """``omnigent copilot --help`` prints its own usage and the command is a harness row."""
     from omnigent.cli import _HARNESS_COMMANDS, _harness_extra_checks

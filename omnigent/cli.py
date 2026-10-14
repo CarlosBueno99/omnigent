@@ -1803,6 +1803,21 @@ def _harness_extra_checks() -> dict[str, Callable[[], bool]]:
     }
 
 
+def _harness_sdk_extras() -> dict[str, tuple[str, str, str]]:
+    """Map extras-gated harness commands to (display name, SDK distribution, extra).
+
+    Companion of :func:`_harness_extra_checks` for the message a local launch
+    prints when the SDK is missing; keep the two rosters in step.
+    """
+    from omnigent.onboarding.copilot_auth import COPILOT_EXTRA
+    from omnigent.onboarding.cursor_auth import CURSOR_EXTRA
+
+    return {
+        "copilot": ("Copilot", "github-copilot-sdk", COPILOT_EXTRA),
+        "cursor": ("Cursor", "cursor-sdk", CURSOR_EXTRA),
+    }
+
+
 def _cli_style(text: str, **style: object) -> str:
     """Colorize *text* for terminal output, honoring ``NO_COLOR``.
 
@@ -13883,6 +13898,17 @@ def _forwarded_run_is_local(params: dict[str, Any]) -> bool:
     return True
 
 
+def _forwarded_run_requests_help(run_args: tuple[str, ...], params: dict[str, Any]) -> bool:
+    """Whether forwarded ``run`` args carry a real ``--help``.
+
+    A ``--help`` consumed as an option VALUE (e.g. ``-p --help``) is prompt text,
+    not a help request; the parsed *params* resolve which.
+    """
+    return "--help" in run_args and all(
+        value != "--help" for value in params.values() if isinstance(value, str)
+    )
+
+
 def _bundled_brain_fallback_applies(run_args: tuple[str, ...]) -> bool:
     """Whether this bundled launch may reroute its brain harness.
 
@@ -13900,12 +13926,8 @@ def _bundled_brain_fallback_applies(run_args: tuple[str, ...]) -> bool:
     params = _forwarded_run_params(run_args)
     if params is None:
         return False
-    # A real --help never launches, so keep the fallback (and its notice)
-    # out. A "--help" consumed as an option VALUE (e.g. ``-p --help``) is
-    # prompt text, not a help request — the parse above resolves which.
-    if "--help" in run_args and all(
-        value != "--help" for value in params.values() if isinstance(value, str)
-    ):
+    # A real --help never launches, so keep the fallback (and its notice) out.
+    if _forwarded_run_requests_help(run_args, params):
         return False
     if params.get("harness") is not None or params.get("model") is not None:
         return False
@@ -14019,11 +14041,9 @@ def _missing_harness_sdk_error(harness: str) -> click.ClickException:
     :returns: The exception to raise.
     """
     from omnigent.cli_diagnostics import SUPPRESS_RECOVERY_HINT_ATTR
-    from omnigent.onboarding.copilot_auth import COPILOT_EXTRA
     from omnigent.onboarding.extra_install import extra_install_display
 
-    # Display name, SDK distribution and pip extra per extras-gated shorthand.
-    label, sdk, extra = {"copilot": ("Copilot", "github-copilot-sdk", COPILOT_EXTRA)}[harness]
+    label, sdk, extra = _harness_sdk_extras()[harness]
     prog = cli_invocation()
     exc = click.ClickException(
         f"{label}'s SDK ({sdk}) isn't installed, so `{prog} {harness}` can't run on "
@@ -14052,9 +14072,13 @@ def _run_harness_shorthand(harness: str, run_args: tuple[str, ...]) -> None:
             f"--harness, or use `{cli_invocation()} run --harness <name>` to pick another."
         )
     sdk_installed = _harness_extra_checks().get(harness)
-    if sdk_installed is not None and not sdk_installed():
+    if sdk_installed is not None and harness in _harness_sdk_extras() and not sdk_installed():
         params = _forwarded_run_params(run_args)
-        if params is not None and _forwarded_run_is_local(params):
+        if (
+            params is not None
+            and not _forwarded_run_requests_help(run_args, params)
+            and _forwarded_run_is_local(params)
+        ):
             raise _missing_harness_sdk_error(harness)
     run.main(
         args=["--harness", harness, *run_args],

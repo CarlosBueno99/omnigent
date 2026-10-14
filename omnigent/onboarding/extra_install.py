@@ -87,7 +87,8 @@ def extra_install_command(extra: str) -> list[str]:
 
     Both ``uv tool`` forms name the receipt's recorded extras alongside *extra*:
     ``--force`` replaces the tool's requirements, so an ``omnigent[databricks]``
-    install would otherwise lose ``databricks`` while gaining *extra*.
+    install would otherwise lose ``databricks`` while gaining *extra*. Other
+    ``--with`` requirements the receipt records are not re-applied.
 
     :param extra: The pip extra name, e.g. ``"cursor"``.
     :returns: The install argv.
