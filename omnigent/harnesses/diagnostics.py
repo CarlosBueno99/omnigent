@@ -193,6 +193,39 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
     return SignInPrompt(url=url, code=code)
 
 
+# A yes/no answer cue ending a question a launcher waits on: ``(Y/n)``,
+# ``[y/N]``, ``(yes/no)``, optionally followed by ``:`` or ``?``.
+_YES_NO_CUE = re.compile(
+    r"[\[(]\s*(?:y(?:es)?\s*/\s*no?|no?\s*/\s*y(?:es)?)\s*[\])]\s*[:?]?\s*$", re.IGNORECASE
+)
+
+
+def detect_launcher_question(screen: str | None) -> str | None:
+    """Find a yes/no question a launcher is waiting on at the bottom of the screen.
+
+    A launcher wrapper can stop before the agent binary runs and ask a question
+    of its own — ``ug``'s "Upgrade Claude Code if available? (Y/n)" — then block
+    on a keypress. The question counts only while it is the last thing printed,
+    since any output below it means the launcher has moved on; keys echoed into
+    the waiting pane (Escape as ``^[``, arrows as ``^[[A``) are not output.
+
+    :param screen: ANSI-stripped terminal screen text, or ``None``.
+    :returns: The question line with its answer cue, whitespace-normalized and
+        capped at 120 characters, e.g.
+        ``"Upgrade Claude Code if available? (Y/n)"``, or ``None``.
+    """
+    if not screen:
+        return None
+    lines = [
+        " ".join(line.split())
+        for line in (_ECHOED_CONTROL.sub("", raw) for raw in screen.splitlines())
+        if line.strip()
+    ]
+    if not lines or not _YES_NO_CUE.search(lines[-1]):
+        return None
+    return lines[-1][:120]
+
+
 def sign_in_next_step(agent: str) -> str:
     """Phrase the next step for a card whose harness is waiting on a launcher sign-in.
 

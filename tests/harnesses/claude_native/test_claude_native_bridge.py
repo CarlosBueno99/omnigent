@@ -9678,6 +9678,86 @@ def test_wait_for_claude_prompt_ready_prefers_a_rendered_prompt_over_a_link(
     )
 
 
+_LAUNCHER_QUESTION_PANE = (
+    "Installing ug CLI...\n"
+    "ug CLI installed (0.1.0+5f7eed4).\n"
+    "! ug requires Claude Code 2.1.290 or newer. Your current version is Claude Code 2.1.287.\n"
+    "Upgrade Claude Code if available? (Y/n) \n"
+)
+
+
+def test_wait_for_claude_prompt_ready_fails_fast_on_a_launcher_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A launcher parked on a yes/no question of its own fails delivery within a
+    poll interval, naming the question and the terminal to answer it in,
+    instead of waiting out the budget and reaping the pane holding the question.
+    """
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._capture_pane",
+        lambda socket_path, tmux_target: _LAUNCHER_QUESTION_PANE,
+    )
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._claude_pane_state",
+        lambda socket_path, tmux_target: claude_native_bridge._ClaudePaneState(True),
+    )
+    started = time.monotonic()
+    with pytest.raises(claude_native_bridge.ClaudeLauncherQuestionPending) as raised:
+        claude_native_bridge._wait_for_claude_prompt_ready(
+            "/tmp/example/tmux.sock",
+            "claude:0.0",
+            timeout_s=30.0,
+        )
+    assert time.monotonic() - started < 5.0
+    assert not isinstance(raised.value, claude_native_bridge.ClaudePromptTimeout)
+    assert isinstance(raised.value, claude_native_bridge.ClaudeLauncherPending)
+    assert raised.value.code == "agent_startup_pending"
+    assert raised.value.title == (
+        "Claude Code can't start until you answer a question in the terminal"
+    )
+    assert raised.value.remediation == (
+        'Open the terminal and answer "Upgrade Claude Code if available? (Y/n)". '
+        "Claude Code continues on its own once the launcher finishes; then send your "
+        "message again."
+    )
+    message = str(raised.value)
+    assert "waiting for an answer in this session's terminal" in message
+    # The pane tail rides along so the card can show why the launcher asked.
+    assert "ug requires Claude Code 2.1.290 or newer" in message
+
+
+def test_wait_for_claude_prompt_ready_ignores_a_single_launcher_question_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One question-shaped frame is not enough; the composer on the next poll wins."""
+    frames = iter([_LAUNCHER_QUESTION_PANE, _READY_PANE])
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._capture_pane",
+        lambda socket_path, tmux_target: next(frames, _READY_PANE),
+    )
+    claude_native_bridge._wait_for_claude_prompt_ready(
+        "/tmp/example/tmux.sock",
+        "claude:0.0",
+        timeout_s=30.0,
+    )
+
+
+def test_wait_for_claude_prompt_ready_prefers_a_rendered_prompt_over_a_launcher_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launcher question left in scrollback is no gate once the input box is up."""
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._capture_pane",
+        lambda socket_path, tmux_target: _LAUNCHER_QUESTION_PANE + _READY_PANE,
+    )
+    claude_native_bridge._wait_for_claude_prompt_ready(
+        "/tmp/example/tmux.sock",
+        "claude:0.0",
+        timeout_s=30.0,
+    )
+
+
 def test_wait_for_claude_prompt_ready_reports_the_exit_when_pane_dead(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
