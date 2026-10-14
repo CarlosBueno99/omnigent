@@ -14,7 +14,7 @@ import json
 import threading
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -30,7 +30,7 @@ REPLY_TEXT = "STUB_SERVING_ENDPOINT_REPLY"
 
 
 def unavailable_message(model: str) -> str:
-    """The AI Gateway's 403 body quoted in the report, for *model*."""
+    """The AI Gateway's rejection for a *model* it does not serve."""
     return f"'{model}' is no longer available. Use Unity Catalog model services."
 
 
@@ -182,7 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     with stub_workspace(args.port, args.log) as stub:
         print(stub.base_url, flush=True)
-        threading.Event().wait()
+        with suppress(KeyboardInterrupt):
+            threading.Event().wait()
     return 0
 
 

@@ -1763,23 +1763,95 @@ class TestResolveGatewayEnv(unittest.TestCase):
         from omnigent.inner.claude_sdk_executor import _resolve_gateway_env
         from omnigent.inner.databricks_executor import DatabricksCredentials
 
+        ws = "https://ws.example"
+        route = "/serving-endpoints/anthropic"
         cases = [
-            ("http://127.0.0.1:48123", "http://127.0.0.1:48123/serving-endpoints/anthropic", True),
-            ("https://ws.example", "https://ws.example:8443/serving-endpoints/anthropic", False),
-            ("https://ws.example", "https://WS.example/serving-endpoints/anthropic", True),
+            # (profile host, exported env, honored)
+            (ws, {"ANTHROPIC_BASE_URL": f"{ws}{route}"}, True),
+            (ws, {"OMNIGENT_ANTHROPIC_BASE_URL": f"{ws}{route}"}, True),
+            (ws, {"ANTHROPIC_BASE_URL": f"{ws}{route}\r"}, True),
+            (ws, {"ANTHROPIC_BASE_URL": f"https://WS.example{route}"}, True),
+            (ws, {"ANTHROPIC_BASE_URL": f"https://ws.example:443{route}"}, True),
+            (f"{ws}:443", {"ANTHROPIC_BASE_URL": f"{ws}{route}"}, True),
+            (
+                "http://127.0.0.1:48123",
+                {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:48123{route}"},
+                True,
+            ),
+            ("http://ws.example", {"ANTHROPIC_BASE_URL": f"http://ws.example:80{route}"}, True),
+            (ws, {"ANTHROPIC_BASE_URL": f"http://ws.example{route}"}, False),
+            (ws, {"ANTHROPIC_BASE_URL": f"https://ws.example:8443{route}"}, False),
+            (ws, {"ANTHROPIC_BASE_URL": "https://proxy.example/anthropic"}, False),
+            (ws, {"ANTHROPIC_BASE_URL": f"https://user:secret@ws.example{route}"}, False),
+            (ws, {"ANTHROPIC_BASE_URL": "http://["}, False),
+            (ws, {"ANTHROPIC_BASE_URL": f"https://ws.example:notaport{route}"}, False),
         ]
-        for host, exported, honored in cases:
+        for host, environ, honored in cases:
             with (
-                self.subTest(host=host, exported=exported),
-                patch.dict("os.environ", {"ANTHROPIC_BASE_URL": exported}, clear=True),
+                self.subTest(host=host, environ=environ),
+                patch.dict("os.environ", environ, clear=True),
                 patch(
                     "omnigent.inner.databricks_executor._read_databrickscfg",
                     return_value=DatabricksCredentials(host=host, token="t"),
                 ),
             ):
                 env = _resolve_gateway_env()
+            exported = next(iter(environ.values())).strip()
             expected = exported if honored else f"{host}/ai-gateway/anthropic"
             self.assertEqual(env["ANTHROPIC_BASE_URL"], expected)
+
+    def test_explicit_base_url_override_beats_exported_base_url(self):
+        from omnigent.inner.claude_sdk_executor import _resolve_gateway_env
+        from omnigent.inner.databricks_executor import DatabricksCredentials
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"ANTHROPIC_BASE_URL": "https://ws.example/serving-endpoints/anthropic"},
+                clear=True,
+            ),
+            patch(
+                "omnigent.inner.databricks_executor._read_databrickscfg",
+                return_value=DatabricksCredentials(host="https://ws.example", token="t"),
+            ),
+        ):
+            env = _resolve_gateway_env(base_url_override="https://override.example/anthropic")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://override.example/anthropic")
+
+    def test_rejected_exported_base_url_is_logged_without_secrets(self):
+        """The ignore log names the rejected origin but never userinfo, query or fragment."""
+        from omnigent.inner.claude_sdk_executor import _resolve_gateway_env
+        from omnigent.inner.databricks_executor import DatabricksCredentials
+
+        creds = patch(
+            "omnigent.inner.databricks_executor._read_databrickscfg",
+            return_value=DatabricksCredentials(host="https://ws.example", token="t"),
+        )
+        rejected = "https://proxy.example:8443/anthropic?token=abc#frag"
+        with (
+            patch.dict("os.environ", {"ANTHROPIC_BASE_URL": rejected}, clear=True),
+            creds,
+            self.assertLogs("omnigent.inner.claude_sdk_executor", level="INFO") as logs,
+        ):
+            _resolve_gateway_env()
+        text = "\n".join(logs.output)
+        self.assertIn(
+            "Ignoring ANTHROPIC_BASE_URL (https://proxy.example:8443/anthropic is not on", text
+        )
+        self.assertNotIn("token=abc", text)
+        self.assertNotIn("frag", text)
+
+        with_userinfo = "https://user:secret@ws.example/serving-endpoints/anthropic?k=v"
+        with (
+            patch.dict("os.environ", {"ANTHROPIC_BASE_URL": with_userinfo}, clear=True),
+            creds,
+            self.assertLogs("omnigent.inner.claude_sdk_executor", level="INFO") as logs,
+        ):
+            _resolve_gateway_env()
+        text = "\n".join(logs.output)
+        self.assertIn("Ignoring ANTHROPIC_BASE_URL", text)
+        for leaked in ("secret", "user:", "k=v"):
+            self.assertNotIn(leaked, text)
 
     def test_strips_trailing_slash(self):
         from omnigent.inner.claude_sdk_executor import _resolve_gateway_env

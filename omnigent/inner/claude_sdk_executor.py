@@ -46,6 +46,7 @@ from urllib.parse import urlsplit
 from omnigent._platform import resolve_cli_binary, stable_user_id
 from omnigent.cli_invocation import cli_invocation
 from omnigent.databricks_ai_gateway import is_databricks_ai_gateway_url
+from omnigent.diagnostics import redact_url
 from omnigent.inner import _proc
 from omnigent.inner.bundle_skills import ensure_bundle_plugin_manifest
 from omnigent.inner.hook_scripts import subagent_router
@@ -1235,9 +1236,9 @@ def _resolve_gateway_env(
             base_url = f"{host}/ai-gateway/anthropic"
             if exported:
                 logger.info(
-                    "Ignoring %s=%s (not on %s); using %s",
+                    "Ignoring %s (%s is not on %s); using %s",
                     exported[0],
-                    ambient_base_url,
+                    redact_url(ambient_base_url),
                     host,
                     base_url,
                 )
@@ -1284,19 +1285,28 @@ def _resolve_gateway_env(
     return gateway_env
 
 
-def _on_workspace_origin(url: str, workspace_host: str) -> bool:
-    """True when *url* shares *workspace_host*'s scheme and network location.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
-    :param url: A candidate base URL, e.g. ``"https://ws.example/serving-endpoints/anthropic"``.
-    :param workspace_host: The workspace origin the bearer is minted for.
-    :returns: ``False`` for an empty URL, a different scheme, or a different host/port.
+
+def _origin(url: str) -> tuple[str, str, int | None] | None:
+    """Return ``(scheme, hostname, effective port)`` for *url*, or ``None`` when unusable.
+
+    Unparseable URLs and URLs carrying userinfo never yield an origin.
     """
-    expected = urlsplit(workspace_host)
-    parts = urlsplit(url)
-    return bool(expected.netloc) and (parts.scheme, parts.netloc.lower()) == (
-        expected.scheme,
-        expected.netloc.lower(),
-    )
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if not parts.scheme or not parts.hostname or parts.username is not None:
+        return None
+    return parts.scheme, parts.hostname, port or _DEFAULT_PORTS.get(parts.scheme)
+
+
+def _on_workspace_origin(url: str, workspace_host: str) -> bool:
+    """True when *url* shares *workspace_host*'s scheme, host and effective port."""
+    expected = _origin(workspace_host)
+    return expected is not None and _origin(url) == expected
 
 
 def _databricks_claude_auth_command(host: str, profile: str | None = None) -> str:

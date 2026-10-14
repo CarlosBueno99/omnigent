@@ -55,13 +55,14 @@ WORKSPACE_HOST = "https://adb-12345.azuredatabricks.net"
 
 @pytest.fixture(autouse=True)
 def _isolate_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Isolate OMNIGENT_CONFIG_HOME and any exported Anthropic endpoint from the developer's shell.
+    """Isolate the global config, exported Anthropic endpoint and harness env from the shell.
 
     :param monkeypatch: Pytest monkeypatch fixture.
     :param tmp_path: Temporary directory.
     """
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
-    for name in ("ANTHROPIC_BASE_URL", "OMNIGENT_ANTHROPIC_BASE_URL"):
+    ambient = [name for name in os.environ if name.startswith("HARNESS_CLAUDE_SDK_")]
+    for name in ("ANTHROPIC_BASE_URL", "OMNIGENT_ANTHROPIC_BASE_URL", *ambient):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(
         "omnigent.runtime.workflow._resolve_catalog_default_model",
@@ -329,66 +330,3 @@ def test_openai_agents_databricks_auth_works_for_contrast(
     assert env.get("HARNESS_OPENAI_AGENTS_DATABRICKS_PROFILE") == "my-profile", (
         "openai-agents must still thread the profile env var for token refresh"
     )
-
-
-SERVING_ENDPOINTS_URL = f"{WORKSPACE_HOST}/serving-endpoints/anthropic"
-AI_GATEWAY_URL = f"{WORKSPACE_HOST}/ai-gateway/anthropic"
-
-
-@pytest.mark.parametrize(
-    ("environ", "expected"),
-    [
-        ({"ANTHROPIC_BASE_URL": SERVING_ENDPOINTS_URL}, SERVING_ENDPOINTS_URL),
-        ({"OMNIGENT_ANTHROPIC_BASE_URL": SERVING_ENDPOINTS_URL}, SERVING_ENDPOINTS_URL),
-        ({"ANTHROPIC_BASE_URL": f"{SERVING_ENDPOINTS_URL}\r"}, SERVING_ENDPOINTS_URL),
-        (
-            {
-                "ANTHROPIC_BASE_URL": "http://adb-12345.azuredatabricks.net/serving-endpoints/anthropic"
-            },
-            AI_GATEWAY_URL,
-        ),
-        ({"ANTHROPIC_BASE_URL": "https://proxy.example/anthropic"}, AI_GATEWAY_URL),
-        (
-            {
-                "ANTHROPIC_BASE_URL": SERVING_ENDPOINTS_URL,
-                "HARNESS_CLAUDE_SDK_GATEWAY_BASE_URL": "https://override.example/anthropic",
-            },
-            "https://override.example/anthropic",
-        ),
-    ],
-)
-def test_databricks_model_honors_workspace_anthropic_base_url(
-    monkeypatch: pytest.MonkeyPatch, environ: dict[str, str], expected: str
-) -> None:
-    """`omnigent run --harness claude-sdk --model databricks-...` with ANTHROPIC_BASE_URL set."""
-    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
-    from omnigent.inner.databricks_executor import DatabricksCredentials
-
-    monkeypatch.setattr(
-        "omnigent.inner.databricks_executor._read_databrickscfg",
-        lambda profile: DatabricksCredentials(host=WORKSPACE_HOST, token="t"),
-    )
-    for name, value in environ.items():
-        monkeypatch.setenv(name, value)
-    spec = AgentSpec(
-        spec_version=1,
-        name="test-claude-databricks-model",
-        instructions="You are a test agent.",
-        executor=ExecutorSpec(
-            type="omnigent",
-            config={"harness": "claude-sdk"},
-            model="databricks-claude-sonnet-5-5",
-        ),
-        llm=LLMConfig(model="databricks-claude-sonnet-5-5"),
-    )
-    # The runner process inherits the caller env with the spawn env on top.
-    env = {**os.environ, **_build_claude_sdk_spawn_env(spec, workdir=None)}
-
-    executor = ClaudeSDKExecutor(
-        model=env["HARNESS_CLAUDE_SDK_MODEL"],
-        gateway=env.get("HARNESS_CLAUDE_SDK_GATEWAY") == "true",
-        databricks_profile=env.get("HARNESS_CLAUDE_SDK_DATABRICKS_PROFILE"),
-        base_url_override=env.get("HARNESS_CLAUDE_SDK_GATEWAY_BASE_URL"),
-        gateway_auth_command=env.get("HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND"),
-    )
-    assert executor._extra_env["ANTHROPIC_BASE_URL"] == expected

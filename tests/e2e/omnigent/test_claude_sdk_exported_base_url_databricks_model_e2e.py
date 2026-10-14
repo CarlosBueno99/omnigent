@@ -39,6 +39,15 @@ _ENV_TO_CLEAR = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_MODEL",
+    "OMNIGENT_ANTHROPIC_API_KEY",
+    "OMNIGENT_ANTHROPIC_AUTH_TOKEN",
+    "OMNIGENT_ANTHROPIC_BASE_URL",
+    "OMNIGENT_ANTHROPIC_MODEL",
+    "CLAUDE_CONFIG_DIR",
+    "HARNESS_CLAUDE_SDK_GATEWAY_BASE_URL",
+    "HARNESS_CLAUDE_SDK_GATEWAY_AUTH_COMMAND",
+    "HARNESS_CLAUDE_SDK_GATEWAY_HOST",
+    "HARNESS_CLAUDE_SDK_DATABRICKS_PROFILE",
     "DATABRICKS_HOST",
     "DATABRICKS_TOKEN",
     "DATABRICKS_CONFIG_PROFILE",
@@ -138,12 +147,13 @@ def test_databricks_model_run_uses_exported_same_workspace_base_url(
             text=True,
             timeout=_RUN_TIMEOUT_SEC,
         )
-        message_posts = [
-            urlsplit(request.path).path
+        model_requests = [
+            request
             for request in workspace.seen
             if request.method == "POST" and urlsplit(request.path).path.endswith("/v1/messages")
         ]
 
+    message_posts = [urlsplit(request.path).path for request in model_requests]
     detail = (
         f"\nmodel requests seen by the workspace: {message_posts}"
         f"\nexit={proc.returncode}"
@@ -155,6 +165,9 @@ def test_databricks_model_run_uses_exported_same_workspace_base_url(
     assert not gateway_posts, (
         f"claude-sdk sent model requests to {AI_GATEWAY_PATH} instead of the exported "
         f"{SERVING_ENDPOINTS_PATH} URL" + detail
+    )
+    assert all(request.has_authorization for request in model_requests), (
+        "requests on the exported URL must carry the minted workspace bearer" + detail
     )
     assert REPLY_TEXT in proc.stdout and proc.returncode == 0, (
         "the reply served on the exported URL was not printed" + detail
