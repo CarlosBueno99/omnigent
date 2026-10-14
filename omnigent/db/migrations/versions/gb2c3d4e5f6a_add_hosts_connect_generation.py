@@ -1,7 +1,7 @@
 """add connect_generation to hosts
 
 Revision ID: gb2c3d4e5f6a
-Revises: ll1a2b3c4d5e
+Revises: mm1a2b3c4d5e
 Create Date: 2026-09-02 00:00:00.000000
 
 Nullable epoch-µs tokens let pre-registry cleanup compare-and-update across
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "gb2c3d4e5f6a"
-down_revision: str | None = "ll1a2b3c4d5e"
+down_revision: str | None = "mm1a2b3c4d5e"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
