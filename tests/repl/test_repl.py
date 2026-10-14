@@ -409,6 +409,13 @@ def test_render_history_item_function_call_renders_args_literally(command: str) 
     _render_history_item(item, host)
     plain = host.render_plain()
     assert plain.strip() == f"⏵ Bash({command})", plain
+    (line,) = host.outputs
+    spans = [(s.start, s.end, str(s.style)) for s in line.spans]
+    assert spans[0][:2] == (3, len("   ⏵ Bash")) and spans[1] == (
+        len("   ⏵ Bash"),
+        len(line.plain),
+        "dim",
+    ), spans
 
 
 def test_attach_failure_notice_renders_markup_in_error_text_literally() -> None:
@@ -425,6 +432,7 @@ def test_attach_failure_notice_renders_markup_in_error_text_literally() -> None:
         "  Failed [bold]to open [/dim]0123456789…: "
         "closing tag '[/dim]' at position 48 doesn't match any open tag"
     )
+    assert notice.style == "bold red"
 
 
 def test_render_history_item_function_call_output_renders_panel_with_tool_name() -> None:

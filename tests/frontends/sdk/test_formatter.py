@@ -405,6 +405,12 @@ def test_format_tool_group_renders_markup_like_args_literally(args_summary: str)
     assert line.plain == f"   coder.worker → ⏵ Bash({args_summary})", (
         f"tool args must survive rendering unchanged; got {line.plain!r}"
     )
+    prefix = "   coder.worker → "
+    assert [(s.start, s.end, str(s.style)) for s in line.spans] == [
+        (3, len(prefix), fmt.muted),
+        (len(prefix), len(prefix) + len("⏵ Bash"), fmt.accent),
+        (len(prefix) + len("⏵ Bash"), len(line.plain), "dim"),
+    ]
 
 
 def test_format_tool_group_renders_markup_like_names_literally() -> None:
@@ -428,6 +434,12 @@ def test_format_tool_group_renders_markup_like_names_literally() -> None:
     assert line.plain == "   coder.[bold]worker → ⏵ run[/dim](ls)", (
         f"tool and agent names must survive rendering unchanged; got {line.plain!r}"
     )
+    prefix = "   coder.[bold]worker → "
+    assert [(s.start, s.end, str(s.style)) for s in line.spans] == [
+        (3, len(prefix), fmt.muted),
+        (len(prefix), len(prefix) + len("⏵ run[/dim]"), fmt.accent),
+        (len(prefix) + len("⏵ run[/dim]"), len(line.plain), "dim"),
+    ]
 
 
 def test_duplicate_tool_call_renders_call_line_once() -> None:

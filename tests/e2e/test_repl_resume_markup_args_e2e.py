@@ -35,6 +35,8 @@ _AGENT_YAML = (
 )
 _MODEL_KEY = "mock-markup-args-shell"
 _SHELL_COMMAND = "echo '[/dim]'"
+# The replayed history echoes the user's "❯ …" line before the tool call renders,
+# so wait on the status bar rather than the harness's PROMPT_READY marker.
 _READY_PATTERNS = [STATE_SLEEPING, r"·\s*ready"]
 _BOOT_TIMEOUT_S = 180.0
 _RESUME_TIMEOUT_S = 120.0
