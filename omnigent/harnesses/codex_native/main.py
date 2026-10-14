@@ -2177,15 +2177,21 @@ def _local_rollout_outruns_server_history(
     if not _is_resumable_codex_rollout(rollout, external_session_id=external_session_id):
         return False
     local_payloads: list[object] = []
+    truncated = False
     try:
         with rollout.open("r", encoding="utf-8") as handle:
             for line in handle:
                 if not line.strip():
                     continue
+                if truncated:
+                    # Malformed records before the end mean corruption, not a
+                    # crash mid-append.
+                    return False
                 try:
                     record = json.loads(line)
                 except ValueError:
-                    return False
+                    truncated = True
+                    continue
                 if isinstance(record, dict) and record.get("type") == "response_item":
                     local_payloads.append(record.get("payload"))
     except (OSError, UnicodeDecodeError):

@@ -2651,9 +2651,10 @@ async def _subscribe_until_ready_inner(
     :param after_refusal: Whether an earlier attempt was refused. Turns are
         then requested from ``thread/resume`` so items completed while
         unsubscribed are replayed once it succeeds.
-    :returns: ``True`` once ``thread/resume`` subscribed this connection;
-        ``False`` when the thread was only mirrored through ``thread/read``
-        or neither call succeeded.
+    :returns: ``True`` once ``thread/resume`` subscribed this connection and
+        no history is still owed; ``False`` when the thread was only mirrored
+        through ``thread/read``, neither call succeeded, or the committed
+        history could not be read and a replay is still pending.
     """
     bridge_state = read_bridge_state(bridge_dir)
     replay_from_turn_id = (
@@ -2737,14 +2738,12 @@ async def _subscribe_until_ready_inner(
             )
         # History fetched because of a refusal may include turns Omnigent already
         # committed. A cold-resume rollout rebuild gives Codex's turns and items
-        # new ids, so committed replies are recognised by text, not identity.
+        # new ids, so committed messages are recognised by text, not identity.
         replay_items = True
-        committed_replies: Counter[str] | None = None
+        committed: Counter[tuple[str, str]] | None = None
         if not subscribed or after_refusal:
-            committed_replies = await _committed_assistant_replies(
-                ap_client, session_id=session_id
-            )
-            if committed_replies is None:
+            committed = await _committed_messages(ap_client, session_id=session_id)
+            if committed is None:
                 _logger.warning(
                     "Could not read the committed history of %s; Codex thread %s items "
                     "are replayed after the next status edge instead",
@@ -2762,8 +2761,11 @@ async def _subscribe_until_ready_inner(
             forwarder_state=forwarder_state,
             replay_from_turn_id=replay_from_turn_id,
             replay_items=replay_items,
-            committed_replies=committed_replies,
+            committed=committed,
         )
+        if not replay_items:
+            # Still owed even if this connection is now subscribed.
+            return False
         if subscribed and after_refusal:
             _logger.info("Codex thread %s subscription succeeded after a refusal", thread_id)
         return subscribed
@@ -2819,43 +2821,54 @@ def _normalized_message_text(value: object) -> str:
     return " ".join(value.split()) if isinstance(value, str) else ""
 
 
-def _consume_committed_turn(items: list[object], committed_replies: Counter[str]) -> bool:
+_CODEX_MESSAGE_ROLES = {"userMessage": "user", "agentMessage": "assistant"}
+
+
+def _consume_committed_turn(items: list[object], committed: Counter[tuple[str, str]]) -> bool:
     """
-    Return whether every agent reply in a turn is already committed, consuming them.
+    Return whether a turn's messages are already committed, consuming them.
+
+    Agent replies decide when the turn has any; a reply-less turn (interrupted,
+    or commands only) is judged by its user prompts instead, so its tool items
+    are not posted again under fresh ids.
 
     :param items: Codex turn items from ``thread/read``/``thread/resume``.
-    :param committed_replies: Remaining committed assistant texts; matched
-        replies are removed so a repeated identical reply still counts once.
+    :param committed: Remaining committed ``(role, text)`` messages; matched
+        ones are removed so a repeated identical message still counts once.
     :returns: ``True`` when the turn can be skipped; ``False`` when it has no
-        agent reply or one is missing from Omnigent.
+        message to compare or one is missing from Omnigent.
     """
-    replies = Counter(
-        text
-        for text in (
-            _normalized_message_text(item.get("text", item.get("content")))
-            for item in items
-            if isinstance(item, dict) and item.get("type") == "agentMessage"
-        )
-        if text
-    )
-    if not replies or any(committed_replies[text] < count for text, count in replies.items()):
+    messages: Counter[tuple[str, str]] = Counter()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        role = _CODEX_MESSAGE_ROLES.get(item_type) if isinstance(item_type, str) else None
+        if role is None:
+            continue
+        text = _normalized_message_text(item.get("text", item.get("content")))
+        if text:
+            messages[(role, text)] += 1
+    replies = Counter({key: n for key, n in messages.items() if key[0] == "assistant"})
+    needed = replies or messages
+    if not needed or any(committed[key] < count for key, count in needed.items()):
         return False
-    committed_replies.subtract(replies)
+    committed.subtract(needed)
     return True
 
 
-async def _committed_assistant_replies(
+async def _committed_messages(
     client: httpx.AsyncClient, *, session_id: str
-) -> Counter[str] | None:
+) -> Counter[tuple[str, str]] | None:
     """
-    Return the assistant reply texts Omnigent has already committed for a session.
+    Return the user and assistant messages Omnigent has already committed.
 
     :param client: HTTP client for Omnigent reads.
     :param session_id: Omnigent conversation id.
-    :returns: Multiset of normalized assistant texts, or ``None`` when the
-        history could not be read.
+    :returns: Multiset of normalized ``(role, text)`` pairs, or ``None`` when
+        the history could not be read.
     """
-    replies: Counter[str] = Counter()
+    messages: Counter[tuple[str, str]] = Counter()
     after: str | None = None
     while True:
         params: dict[str, str | int] = {"limit": 1000, "order": "asc"}
@@ -2878,23 +2891,28 @@ async def _committed_assistant_replies(
         try:
             payload = response.json()
         except ValueError:
+            _logger.warning("Committed history of %s is not JSON", session_id)
             return None
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list):
+            _logger.warning("Committed history of %s has no item list", session_id)
             return None
         for item in data:
-            if (
-                isinstance(item, dict)
-                and item.get("type") == "message"
-                and item.get("role") == "assistant"
-            ):
-                text = _normalized_message_text(item.get("content"))
-                if text:
-                    replies[text] += 1
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            # An interrupted partial is not a committed reply (the rollout
+            # rebuild drops it too) and must not hide a later identical reply.
+            if item.get("interrupted") is True:
+                continue
+            role = item.get("role")
+            text = _normalized_message_text(item.get("content"))
+            if role in {"user", "assistant"} and text:
+                messages[(role, text)] += 1
         if not payload.get("has_more"):
-            return replies
+            return messages
         last_id = payload.get("last_id")
         if not isinstance(last_id, str) or not last_id:
+            _logger.warning("Committed history of %s set has_more without last_id", session_id)
             return None
         after = last_id
 
@@ -2973,7 +2991,7 @@ async def _replay_resume_response(
     forwarder_state: _CodexForwarderState | None = None,
     replay_from_turn_id: str | None = None,
     replay_items: bool = True,
-    committed_replies: Counter[str] | None = None,
+    committed: Counter[tuple[str, str]] | None = None,
 ) -> None:
     """
     Mirror message items returned by ``thread/resume``.
@@ -2995,9 +3013,8 @@ async def _replay_resume_response(
         interrupted forwarder. Earlier acknowledged turns are skipped.
     :param replay_items: Whether to mirror items at all; the terminal status
         edge is published either way.
-    :param committed_replies: Assistant texts Omnigent already holds; a turn
-        whose replies are all among them is skipped (see
-        :func:`_consume_committed_turn`).
+    :param committed: ``(role, text)`` messages Omnigent already holds; a turn
+        already among them is skipped (see :func:`_consume_committed_turn`).
     :returns: None.
     """
     result = response.get("result")
@@ -3020,7 +3037,7 @@ async def _replay_resume_response(
             items = turn.get("items")
             if not turn_id or not isinstance(items, list):
                 continue
-            if committed_replies is not None and _consume_committed_turn(items, committed_replies):
+            if committed is not None and _consume_committed_turn(items, committed):
                 continue
             for item in items:
                 if not isinstance(item, dict):

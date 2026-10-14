@@ -968,6 +968,25 @@ async def test_ensure_local_codex_resume_rollout_rebuilds_when_server_history_di
 
 
 @pytest.mark.asyncio
+async def test_ensure_local_codex_resume_rollout_keeps_a_rollout_with_a_truncated_last_record(
+    tmp_path: Path,
+) -> None:
+    """A record cut short mid-append does not forfeit the replies before it."""
+    codex_home = tmp_path / "codex-home"
+    existing = _write_rollout_with_turns(
+        codex_home, _THREAD_ID, [("prompt 1", "reply 1"), ("prompt 2", "reply 2")]
+    )
+    with existing.open("a", encoding="utf-8") as handle:
+        handle.write('{"type": "event_msg", "payload": {"type": "task_comp')
+    before = existing.read_bytes()
+
+    rollout = await _cold_resume_rollout(tmp_path, codex_home, [])
+
+    assert rollout == existing
+    assert existing.read_bytes() == before
+
+
+@pytest.mark.asyncio
 async def test_ensure_local_codex_resume_rollout_rebuilds_from_an_unusable_local_rollout(
     tmp_path: Path,
 ) -> None:

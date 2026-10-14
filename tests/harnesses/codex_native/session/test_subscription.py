@@ -594,14 +594,39 @@ def _committed_items_transport(
     return httpx.MockTransport(handler)
 
 
-def _committed_reply(text: str) -> dict[str, Any]:
-    """One assistant message Omnigent already committed, under its original turn id."""
-    return {
-        "id": "msg_committed",
+def _committed_message(role: str, text: str, *, interrupted: bool = False) -> dict[str, Any]:
+    """One message Omnigent already committed, under its original (live) turn id."""
+    item: dict[str, Any] = {
+        "id": f"msg_{role}_{abs(hash(text))}",
         "response_id": "codex_01a13c15-687a-7793-ac29-fb7e2e293b1b",
         "type": "message",
-        "role": "assistant",
-        "content": [{"type": "output_text", "text": text}],
+        "role": role,
+        "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}],
+    }
+    if interrupted:
+        item["interrupted"] = True
+    return item
+
+
+def _reply_less_turn(index: int) -> dict[str, Any]:
+    """An interrupted turn: a user prompt and a command, but no agent reply."""
+    return {
+        "id": f"turn_{index}",
+        "status": "interrupted",
+        "items": [
+            {
+                "type": "userMessage",
+                "id": f"item_user_{index}",
+                "content": [{"type": "text", "text": f"prompt {index}"}],
+            },
+            {
+                "type": "commandExecution",
+                "id": f"item_cmd_{index}",
+                "command": "ls",
+                "status": "completed",
+                "exitCode": 0,
+            },
+        ],
     }
 
 
@@ -775,7 +800,8 @@ def test_subscribe_until_ready_skips_turns_the_server_already_holds(
 
     A cold-resume rollout rebuild gives Codex turns and items new ids, so the
     committed reply is recognised by its text, not by the ``codex_<turn>``
-    response id it was committed under.
+    response id it was committed under. An interrupted partial with the same
+    text as a later reply is not a committed reply and must not hide that turn.
     """
     _write_forwarder_bridge(tmp_path, active_turn_id=None)
     fake_client = _FakeCodexAppServerClient()
@@ -796,7 +822,13 @@ def test_subscribe_until_ready_skips_turns_the_server_already_holds(
     async def run() -> None:
         async with httpx.AsyncClient(
             base_url="http://127.0.0.1:8000",
-            transport=_committed_items_transport(posted, [_committed_reply("reply 1")]),
+            transport=_committed_items_transport(
+                posted,
+                [
+                    _committed_message("assistant", "reply 1"),
+                    _committed_message("assistant", "reply 2", interrupted=True),
+                ],
+            ),
         ) as client:
             await codex_native_forwarder._subscribe_until_ready(
                 fake_client,  # type: ignore[arg-type]
@@ -818,6 +850,119 @@ def test_subscribe_until_ready_skips_turns_the_server_already_holds(
     ]
     assert source_ids == ["thread_123:turn_2:item_user_2", "thread_123:turn_2:item_agent_2"]
     assert _expected_status_data("idle", "turn_2") in _posted_status_edges(posted)
+
+
+def test_subscribe_until_ready_skips_a_committed_turn_without_a_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A reply-less turn is judged by its prompt, so its command items are not reposted."""
+    _write_forwarder_bridge(tmp_path, active_turn_id=None)
+    fake_client = _FakeCodexAppServerClient()
+
+    async def fake_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        fake_client.requests.append((method, params))
+        if method == "thread/resume":
+            raise _refused_resume()
+        return {
+            "result": {
+                "thread": {"id": "thread_123", "turns": [_reply_less_turn(1), _reply_less_turn(2)]}
+            }
+        }
+
+    monkeypatch.setattr(fake_client, "request", fake_request)
+    posted: list[dict[str, Any]] = []
+
+    async def run() -> None:
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:8000",
+            transport=_committed_items_transport(posted, [_committed_message("user", "prompt 1")]),
+        ) as client:
+            await codex_native_forwarder._subscribe_until_ready(
+                fake_client,  # type: ignore[arg-type]
+                client,
+                session_id="conv_123",
+                bridge_dir=tmp_path,
+                thread_id="thread_123",
+                usage_coalescer=_usage_coalescer(client),
+                elicitation_tracker=_elicitation_tracker(),
+            )
+
+    asyncio.run(run())
+
+    source_ids = [
+        payload["data"]["source_id"]
+        for payload in posted
+        if payload.get("type") == "external_conversation_item"
+    ]
+    assert all(":turn_2:" in source_id for source_id in source_ids), source_ids
+    assert _mirrored_roles(posted) == ["user"]
+
+
+def test_subscribe_until_ready_retries_the_backlog_when_committed_history_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A successful resume with an unreadable committed history still owes the backlog.
+
+    The attempt must not count as done, or the turns completed while
+    unsubscribed would never be mirrored once the connection is live.
+    """
+    _write_forwarder_bridge(tmp_path, active_turn_id=None)
+    fake_client = _FakeCodexAppServerClient()
+    refuse_resume = True
+    history_reads = 0
+
+    async def fake_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        fake_client.requests.append((method, params))
+        if method == "thread/resume" and refuse_resume:
+            raise _refused_resume()
+        return {"result": {"thread": {"id": "thread_123", "turns": [_completed_turn(1)]}}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal history_reads
+        if request.method == "GET":
+            history_reads += 1
+            if history_reads == 1:
+                return httpx.Response(503, json={"error": "history unavailable"})
+            return httpx.Response(200, json={"data": [], "has_more": False})
+        posted.append(json.loads(request.content))
+        return httpx.Response(202, json={"queued": False})
+
+    monkeypatch.setattr(fake_client, "request", fake_request)
+    posted: list[dict[str, Any]] = []
+
+    async def run() -> None:
+        nonlocal refuse_resume
+        status_signal = asyncio.Event()
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:8000", transport=httpx.MockTransport(handler)
+        ) as client:
+            task = asyncio.create_task(
+                codex_native_forwarder._subscribe_until_ready(
+                    fake_client,  # type: ignore[arg-type]
+                    client,
+                    session_id="conv_123",
+                    bridge_dir=tmp_path,
+                    thread_id="thread_123",
+                    usage_coalescer=_usage_coalescer(client),
+                    elicitation_tracker=_elicitation_tracker(),
+                    status_signal=status_signal,
+                )
+            )
+            await _until(lambda: history_reads >= 1 and len(fake_client.requests) >= 2, task=task)
+            assert not task.done(), "an unreadable history must leave the backlog pending"
+            assert _mirrored_roles(posted) == []
+            # The subscription itself now succeeds, but the history read failed once.
+            refuse_resume = False
+            status_signal.set()
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(run())
+
+    assert fake_client.requests == [_RESUME_EXCLUDING_TURNS, _READ_WITH_TURNS, _RESUME_WITH_TURNS]
+    assert _mirrored_roles(posted) == ["user", "assistant"]
 
 
 def test_subscribe_until_ready_defers_replay_when_committed_history_is_unreadable(

@@ -434,28 +434,24 @@ def spawn_codex_native_fault_environment(
     }
     server_log = root / "server.log"
     server_handle = open(server_log, "w")  # noqa: SIM115 — closed in teardown
-    server = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import omnigent.server.presence as _p; _p._LEAVE_GRACE_S = 1.0; "
-            "from omnigent.cli import main; main()",
-            "server",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--database-uri",
-            f"sqlite:///{root / 'test.db'}",
-            "--artifact-location",
-            str(artifact_dir),
-            "--agent",
-            str(agent_yaml_path),
-        ],
-        env=server_env,
-        stdout=server_handle,
-        stderr=subprocess.STDOUT,
-    )
+    server: subprocess.Popen[bytes] | None = None
+    server_argv = [
+        sys.executable,
+        "-c",
+        "import omnigent.server.presence as _p; _p._LEAVE_GRACE_S = 1.0; "
+        "from omnigent.cli import main; main()",
+        "server",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--database-uri",
+        f"sqlite:///{root / 'test.db'}",
+        "--artifact-location",
+        str(artifact_dir),
+        "--agent",
+        str(agent_yaml_path),
+    ]
     runner_logs: list[Path] = []
     runner_handles: list[Any] = []
     runner_box: dict[str, subprocess.Popen[bytes]] = {}
@@ -490,6 +486,9 @@ def spawn_codex_native_fault_environment(
                 handle.close()
 
     try:
+        server = subprocess.Popen(
+            server_argv, env=server_env, stdout=server_handle, stderr=subprocess.STDOUT
+        )
         runner = _spawn_runner()
         _wait_until_ready(base_url, runner_id, server, runner, logs=(server_log, runner_logs[-1]))
     except BaseException:
