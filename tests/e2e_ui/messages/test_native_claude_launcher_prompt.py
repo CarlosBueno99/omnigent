@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import re
 import shutil
@@ -27,6 +26,7 @@ from pathlib import Path
 import httpx
 import pytest
 import websockets
+import yaml
 from playwright.sync_api import Page, expect
 
 from tests._helpers.native_session import create_native_session
@@ -144,7 +144,7 @@ def _write_launcher_workspace(workspace: Path) -> None:
     config = workspace / ".omnigent" / "config.yaml"
     config.parent.mkdir(parents=True)
     config.write_text(
-        json.dumps({"harness": {"claude-native": {"command": str(launcher), "args": ["--"]}}})
+        yaml.safe_dump({"harness": {"claude-native": {"command": str(launcher), "args": ["--"]}}})
     )
 
 

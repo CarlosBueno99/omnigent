@@ -9744,21 +9744,33 @@ def test_wait_for_claude_prompt_ready_ignores_a_single_launcher_question_frame(
     )
 
 
-def test_wait_for_claude_prompt_ready_prefers_a_rendered_prompt_over_a_launcher_question(
+def test_wait_for_claude_prompt_ready_ignores_a_cue_below_a_live_composer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A launcher question left in scrollback is no gate once the input box is up."""
-    monkeypatch.setattr(
-        "omnigent.harnesses.claude_native.bridge._capture_pane",
-        lambda socket_path, tmux_target, *, join_wrapped=False: (
-            _LAUNCHER_QUESTION_PANE + _READY_PANE
-        ),
-    )
+    """
+    A yes/no cue under a mounted input box is Claude output, not a launcher question.
+
+    The frame keeps a composer row (shell mode, so the prompt is not yet
+    "rendered" and the gate keeps polling) and ends in a cue the detector alone
+    would lift; the composer guard must stop the two-poll rule from failing
+    delivery, and the composer on the next poll wins.
+    """
+    cue_below_composer = _SHELL_MODE_PANE + "Proceed? (Y/n) \n"
+    frames = iter([cue_below_composer, cue_below_composer, _READY_PANE])
+    captures: list[bool] = []
+
+    def _capture(socket_path: str, tmux_target: str, *, join_wrapped: bool = False) -> str:
+        captures.append(join_wrapped)
+        return next(frames, _READY_PANE)
+
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._capture_pane", _capture)
     claude_native_bridge._wait_for_claude_prompt_ready(
         "/tmp/example/tmux.sock",
         "claude:0.0",
         timeout_s=30.0,
     )
+    # The guard short-circuits before the joined re-read, so every poll captured once.
+    assert captures == [False, False, False]
 
 
 _WRAPPED_LAUNCHER_QUESTION = (
