@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
 from dataclasses import dataclass
 from typing import cast
 
@@ -36,7 +37,6 @@ from omnigent.db.utils import (
     get_or_create_engine,
     make_named_managed_session_maker,
     now_epoch,
-    now_epoch_us,
     run_write_transaction,
 )
 from omnigent.errors import ErrorCode, OmnigentError
@@ -89,7 +89,7 @@ class Host:
         ``{"claude-sdk": True, "codex": False}``. ``None`` when the
         host has never reported it (older host build) — unknown, not
         "nothing configured".
-    :param connect_generation: Per-connect epoch-µs token for guarded cleanup;
+    :param connect_generation: Per-connect token that guards offline cleanup;
         ``None`` on legacy rows.
     """
 
@@ -317,8 +317,9 @@ class HostStore:
         :returns: The upserted :class:`Host` with this connect's token.
         """
         now = now_epoch()
-        # The cleanup guard compares tokens for equality, not time ordering.
-        connect_generation = now_epoch_us()
+        # Equality-only guard token; random so same-microsecond connects and
+        # replica clock skew cannot collide.
+        connect_generation = secrets.randbits(63)
         harnesses_json = (
             json.dumps(configured_harnesses) if configured_harnesses is not None else None
         )
@@ -468,7 +469,7 @@ class HostStore:
         :param new_host_id: The host_id the host reconnected with.
         :param now: Unix epoch seconds for the updated_at timestamp.
         :param harnesses_json: JSON-encoded harness readiness, or None.
-        :param connect_generation: Epoch-µs connect token for the new row.
+        :param connect_generation: Connect token for the new row.
         :returns: The newly inserted :class:`SqlHost` row.
         """
         old_host_id = row.host_id
@@ -579,8 +580,8 @@ class HostStore:
             ``'{"claude-sdk": true}'``, or ``None`` when unreported.
             Written like the normal connect paths so a re-owned row
             carries fresh (not stale) readiness.
-        :param connect_generation: Epoch-µs connect token to stamp, like the
-            normal connect paths.
+        :param connect_generation: Connect token to stamp, like the normal
+            connect paths.
         :returns: The re-owned :class:`Host`, or ``None`` if no row holds
             *host_id* (caller falls through to a normal insert).
         """
@@ -627,10 +628,10 @@ class HostStore:
 
     def set_offline(self, host_id: str) -> None:
         """
-        Mark a host as offline when its WebSocket disconnects.
+        Mark a host offline regardless of which connection wrote its row.
 
-        No-op if the host does not exist (the disconnect callback
-        may fire after a failed registration).
+        The tunnel's disconnect cleanup uses :meth:`set_offline_if_generation`
+        instead. No-op if the host does not exist.
 
         :param host_id: Host identifier, e.g.
             ``"host_a1b2c3d4..."``.
@@ -655,7 +656,6 @@ class HostStore:
         """Offline only this connect's row, returning whether the DB row changed.
 
         The SQL comparison works across replicas; ``None`` never matches.
-        Registered disconnects use the separate unguarded :meth:`set_offline`.
         """
         if generation is None:
             return False

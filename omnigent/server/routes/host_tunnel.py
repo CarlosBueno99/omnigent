@@ -309,7 +309,7 @@ def create_host_tunnel_router(
 
         await ws.accept()
         conn: HostConnection | None = None
-        # Keep this upsert's token for pre-registry cleanup.
+        # This connect's generation guards every offline write below.
         host_generation: int | None = None
         stage = "hello"
         connected_at = time.monotonic()
@@ -491,9 +491,12 @@ def create_host_tunnel_router(
                         return_exceptions=True,
                     )
                     # If the host already reconnected, this handler's connection
-                    # was replaced; only the current one may mark it offline.
+                    # was replaced; only the current one may mark it offline. The
+                    # generation guard covers a reconnect through another replica.
                     if host_registry.deregister(host_id, conn=conn):
-                        await asyncio.to_thread(host_store.set_offline, host_id)
+                        await asyncio.to_thread(
+                            host_store.set_offline_if_generation, host_id, host_generation
+                        )
                     if on_host_disconnect is not None:
                         try:
                             await on_host_disconnect(host_id, tunnel_owner)
@@ -516,7 +519,9 @@ def create_host_tunnel_router(
             # or flip that owner's host offline (cross-user DoS).
             if conn is not None:
                 if host_registry.deregister(host_id, conn=conn):
-                    await asyncio.to_thread(host_store.set_offline, host_id)
+                    await asyncio.to_thread(
+                        host_store.set_offline_if_generation, host_id, host_generation
+                    )
                 if on_host_disconnect is not None:
                     try:
                         await on_host_disconnect(host_id, tunnel_owner)
@@ -546,7 +551,9 @@ def create_host_tunnel_router(
                 await ws.close(code=4005, reason="host connection failed")
             if conn is not None:
                 if host_registry.deregister(host_id, conn=conn):
-                    await asyncio.to_thread(host_store.set_offline, host_id)
+                    await asyncio.to_thread(
+                        host_store.set_offline_if_generation, host_id, host_generation
+                    )
             elif host_generation is not None:
                 # Clear this failed connect's ghost-online row if still owned.
                 await asyncio.to_thread(

@@ -1,8 +1,9 @@
-"""Pre-registry cleanup races across host types and simulated replicas."""
+"""Host offline-cleanup races across host types and simulated replicas."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 import pytest
@@ -148,5 +149,60 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
             await comm_b.send_input({"type": "websocket.disconnect", "code": 1000})
             await comm_b.wait(timeout=2.0)
     finally:
-        # Unblock A if an earlier assertion fails.
+        # Unblock A if an earlier assertion fails, then let its handler finish.
         reconnect_done.set()
+        with contextlib.suppress(Exception):
+            await comm_a.send_input({"type": "websocket.disconnect", "code": 1000})
+            await comm_a.wait(timeout=2.0)
+
+
+async def test_stale_registered_cleanup_cannot_offline_newer_connection_on_other_replica(
+    db_uri: str,
+) -> None:
+    """A registered connection's disconnect must not offline a newer connection elsewhere."""
+    first_registry, second_registry = HostRegistry(), HostRegistry()
+    first_store, second_store = HostStore(db_uri), HostStore(db_uri)
+    first_app, second_app = FastAPI(), FastAPI()
+    first_app.include_router(
+        tunnel_mod.create_host_tunnel_router(first_registry, first_store), prefix="/v1"
+    )
+    second_app.include_router(
+        tunnel_mod.create_host_tunnel_router(second_registry, second_store), prefix="/v1"
+    )
+
+    async def connect(target: FastAPI) -> ApplicationCommunicator:
+        communicator = ApplicationCommunicator(target, _websocket_scope(_TUNNEL_PATH))
+        await communicator.send_input({"type": "websocket.connect"})
+        accepted = await communicator.receive_output(timeout=2.0)
+        assert accepted["type"] == "websocket.accept"
+        return communicator
+
+    comm_a = await connect(first_app)
+    await comm_a.send_input(
+        {"type": "websocket.receive", "text": _make_hello(connection_id="conn-a")}
+    )
+    await asyncio.wait_for(_wait_registered(first_registry, _HOST_ID), timeout=2.0)
+
+    # The host reconnects through another replica while the first still holds A.
+    comm_b = await connect(second_app)
+    try:
+        await comm_b.send_input(
+            {"type": "websocket.receive", "text": _make_hello(connection_id="conn-b")}
+        )
+        await asyncio.wait_for(_wait_registered(second_registry, _HOST_ID), timeout=2.0)
+        assert first_registry.get(_HOST_ID) is not None
+
+        await comm_a.send_input({"type": "websocket.disconnect", "code": 1000})
+        await comm_a.wait(timeout=2.0)
+        assert first_registry.get(_HOST_ID) is None
+
+        host = first_store.get_host(_HOST_ID)
+        assert host is not None
+        assert host.status == "online", (
+            "a superseded connection's disconnect on another replica "
+            "must not mark the live host offline"
+        )
+        assert host_is_live(host), "the reconnected host must still be live"
+    finally:
+        await comm_b.send_input({"type": "websocket.disconnect", "code": 1000})
+        await comm_b.wait(timeout=2.0)

@@ -469,6 +469,7 @@ def test_upsert_stamps_a_fresh_connect_generation(
         user_id="dana@example.com",
     )
     assert first.connect_generation is not None
+    assert 0 <= first.connect_generation < 2**63
 
     second = host_store.upsert_on_connect(
         host_id="5f2e1d0c9b8a77665544332211009988",
@@ -476,7 +477,7 @@ def test_upsert_stamps_a_fresh_connect_generation(
         user_id="dana@example.com",
     )
     assert second.connect_generation is not None
-    # Equality drives the guard; wall time need not increase.
+    # Equality drives the guard; tokens are random, not ordered.
     assert second.connect_generation != first.connect_generation
 
 
