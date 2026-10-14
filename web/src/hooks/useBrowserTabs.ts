@@ -12,8 +12,8 @@ export function browserViewId(conversationId: string, tabId: string): string {
     : `browser-tab:${encodeURIComponent(conversationId)}:${tabId}`;
 }
 
-/** Owning session of a browser view id; the inverse of `browserViewId`. */
-export function browserViewConversationId(viewId: string): string {
+/** Owning session ID for a browser view ID; mirrors the Electron view-registry parser. */
+export function browserViewOwnerId(viewId: string): string {
   const tab = /^browser-tab:([^:]+):.+$/.exec(viewId);
   if (!tab) return viewId;
   try {
@@ -23,6 +23,10 @@ export function browserViewConversationId(viewId: string): string {
   }
 }
 
+/** Owning session of a browser view id; the inverse of `browserViewId`. */
+export function browserViewConversationId(viewId: string): string {
+  return browserViewOwnerId(viewId);
+}
 interface BrowserTabsState {
   tabs: string[];
   selected: string | null;
