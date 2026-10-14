@@ -864,6 +864,71 @@ def test_wrap_launcher_argv_binds_intermediate_symlink_at_literal_path(
     )
 
 
+def _symlinked_venv_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """
+    Build ``<tmp>/checkout/.venv -> <tmp>/venvs/real``, a venv whose
+    ``bin/python`` is the running interpreter's real binary, and return
+    ``(checkout, real_venv, literal interpreter path)``.
+    """
+    tmp_path = tmp_path.resolve()
+    real_python = Path(os.path.realpath(sys.executable))
+    real_venv = tmp_path / "venvs" / "real"
+    (real_venv / "bin").mkdir(parents=True)
+    (real_venv / "bin" / "python").symlink_to(real_python)
+    (real_venv / "pyvenv.cfg").write_text(f"home = {real_python.parent}\n")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".venv").symlink_to(real_venv, target_is_directory=True)
+    return checkout, real_venv, checkout / ".venv" / "bin" / "python"
+
+
+def _covering_policy(
+    tmp_path: Path, checkout: Path, covering_bind: str
+) -> tuple[Path, SandboxPolicy]:
+    """
+    Return ``(cwd, policy)`` where *checkout* is shown by the cwd bind
+    (``"cwd"``) or by a ``read_paths`` bind (``"read_root"``).
+    """
+    if covering_bind == "cwd":
+        return checkout, _make_policy(checkout, allow_hidden=[".venv"])
+    scratch = tmp_path.resolve() / "scratch"
+    scratch.mkdir()
+    return scratch, _make_policy(scratch, read_roots=[checkout])
+
+
+@pytest.mark.parametrize("covering_bind", ["cwd", "read_root"])
+def test_wrap_launcher_argv_binds_symlinked_venv_target_at_its_own_path(
+    tmp_path: Path, covering_bind: str
+) -> None:
+    """
+    ``argv[0]`` under a wholesale bind (cwd or a ``read_paths`` root) may
+    still reach the interpreter through a directory-symlink such as
+    ``<checkout>/.venv -> <elsewhere>/venv``. That bind shows the symlink
+    itself, so the target has to be mounted at its own path. Mounting it
+    at the literal ``.venv`` name is useless: the wholesale bind is
+    emitted later and shadows it, leaving the kernel a dangling link
+    (``bwrap: execvp .../.venv/bin/python: No such file or directory``).
+    """
+    checkout, real_venv, interp = _symlinked_venv_layout(tmp_path)
+    cwd, policy = _covering_policy(tmp_path, checkout, covering_bind)
+
+    argv = _make_backend().wrap_launcher_argv([str(interp), "-c", "pass"], policy, cwd)
+
+    pairs = [
+        (argv[i + 1], argv[i + 2]) for i in range(len(argv) - 2) if argv[i] == "--ro-bind-try"
+    ]
+    assert (str(real_venv), str(real_venv)) in pairs, (
+        f"Expected the symlink target {str(real_venv)!r} bound at its own path so "
+        f"{str(checkout / '.venv')!r} resolves inside the sandbox. Pairs: {pairs}"
+    )
+    shadowed = [
+        dst for _, dst in pairs if Path(dst) != checkout and Path(dst).is_relative_to(checkout)
+    ]
+    assert shadowed == [], (
+        f"Binds underneath {str(checkout)!r} are shadowed by its own later bind: {shadowed}"
+    )
+
+
 def test_wrap_launcher_argv_target_binds_non_default_path(
     tmp_path: Path,
 ) -> None:
@@ -1999,6 +2064,35 @@ def test_interpreter_under_masked_dotdir_still_spawns(tmp_path: Path) -> None:
     assert "SECRET_LEAK" not in completed.stdout, (
         "the re-expose bind leaked an unrelated secret under the masked "
         ".local dir; only the interpreter subtree should be re-exposed."
+    )
+
+
+@pytestmark_bwrap
+@pytest.mark.parametrize("covering_bind", ["cwd", "read_root"])
+def test_interpreter_behind_symlinked_venv_dir_still_spawns(
+    tmp_path: Path, covering_bind: str
+) -> None:
+    """
+    End-to-end: a helper interpreter reached through ``<checkout>/.venv``,
+    where ``.venv`` is a symlink to a venv outside every sandbox mount,
+    still execs whether the cwd bind or a ``read_paths`` bind shows the
+    symlink, and runs as that venv (``sys.prefix`` is the literal path).
+    Without the target bind bwrap died at spawn with
+    ``execvp .../.venv/bin/python: No such file or directory``.
+    """
+    checkout, _real_venv, interp = _symlinked_venv_layout(tmp_path)
+    cwd, policy = _covering_policy(tmp_path, checkout, covering_bind)
+    probe = "import sys; sys.stdout.write(sys.prefix)"
+    argv = _make_backend().wrap_launcher_argv([str(interp), "-c", probe], policy, cwd)
+
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+
+    assert completed.returncode == 0, (
+        f"interpreter behind the symlinked .venv failed to spawn (rc="
+        f"{completed.returncode}). stderr={completed.stderr[-400:]!r}"
+    )
+    assert completed.stdout == str(checkout / ".venv"), (
+        f"helper did not run as the symlinked venv. stdout={completed.stdout!r}"
     )
 
 
