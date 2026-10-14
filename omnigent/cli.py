@@ -3745,7 +3745,11 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
     if workspace_host is None:
         return
     org_id = load_databricks_org_id(server)
-    auth_info = _databricks_workspace_auth_info(workspace_host)
+    auth_info = (
+        _databricks_workspace_auth_info(workspace_host)
+        if _databricks_workspace_binding_trusted(server, workspace_host)
+        else None
+    )
     if auth_info is not None:
         if org_id is None:
             org_id = _workspace_hosted_profile_org_id(
@@ -12880,6 +12884,22 @@ def _databricks_host_needs_org_selector(workspace_host: str) -> bool:
     return not meta.workspace_id and bool(meta.account_id)
 
 
+def _databricks_workspace_binding_trusted(server: str, workspace_host: str) -> bool:
+    """Reuse credentials only for the selected origin or an approved server binding."""
+    import httpx
+
+    from omnigent.cli_auth import load_databricks_workspace_host
+
+    server_url = httpx.URL(server)
+    workspace_url = httpx.URL(workspace_host)
+    same_origin = (server_url.scheme, server_url.host, server_url.port) == (
+        workspace_url.scheme,
+        workspace_url.host,
+        workspace_url.port,
+    )
+    return same_origin or load_databricks_workspace_host(server) == workspace_host
+
+
 def _databricks_login(server: str, workspace_host: str, org_id: str | None = None) -> None:
     """Log in to a Databricks-fronted Omnigent server.
 
@@ -12922,6 +12942,12 @@ def _databricks_login(server: str, workspace_host: str, org_id: str | None = Non
 
     from omnigent.cli_auth import is_workspace_hosted_url
 
+    if not _databricks_workspace_binding_trusted(server, workspace_host):
+        if not click.confirm(
+            f"Allow {server} to receive credentials for workspace {workspace_host}?",
+            default=False,
+        ):
+            raise click.ClickException("Workspace credential sharing was not approved.")
     auth_info = _databricks_workspace_auth_info(workspace_host)
     if org_id is None and auth_info is not None:
         org_id = _workspace_hosted_profile_org_id(server, workspace_host, auth_info.profile_name)

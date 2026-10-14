@@ -172,6 +172,12 @@ The rest of this guide walks each piece in depth.
 
 ## 1. Deploy on Databricks Apps
 
+When signing in with `omnigent login <server-url>`, the CLI asks before sending
+workspace credentials to a different server origin. Check both displayed URLs
+before approving. Later refreshes reuse that saved pairing. Custom domains use
+the same confirmation; unattended commands require a prior login. Log in locally
+before provisioning a sandbox that derives its workspace from the server.
+
 ### Context
 
 Databricks Apps is a managed runtime for HTTP applications inside the

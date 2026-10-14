@@ -3181,6 +3181,11 @@ def test_databricks_preflight_silent_sdk_refresh_skips_login(
 
     monkeypatch.setattr("omnigent.cli_auth.store_databricks_auth", _store)
 
+    monkeypatch.setattr(
+        "omnigent.cli_auth.load_databricks_workspace_host",
+        lambda server: "https://example.databricks.com",
+    )
+
     cli._ensure_databricks_server_auth(_HOST_DATABRICKS_SERVER, non_interactive=True)
 
     assert requests[1]["headers"] == {"Authorization": "Bearer fresh-token"}
@@ -3337,6 +3342,11 @@ def test_databricks_preflight_refresh_handles_duplicate_workspace_profiles(
     monkeypatch.setattr(httpx, "get", _get)
     monkeypatch.setattr(cli, "_databricks_login", lambda *args, **kwargs: pytest.fail("login"))
     monkeypatch.setattr("omnigent.cli_auth.store_databricks_auth", _store)
+
+    monkeypatch.setattr(
+        "omnigent.cli_auth.load_databricks_workspace_host",
+        lambda server: "https://example.databricks.com",
+    )
 
     cli._ensure_databricks_server_auth(_HOST_DATABRICKS_SERVER, non_interactive=True)
 

@@ -405,13 +405,16 @@ def derive_workspace(server_url: str) -> DerivedWorkspace | None:
     # Deferred import: cli.py transitively imports this module at
     # startup, so a top-level import would be a cycle. The classifier
     # is cli-private; promoting it to a shared module is follow-up.
-    from omnigent.cli import _databricks_workspace_login_target
+    from omnigent.cli import (
+        _databricks_workspace_binding_trusted,
+        _databricks_workspace_login_target,
+    )
 
     probe = _probe_server(server_url)
     if probe is None:
         return None
     host = _databricks_workspace_login_target(server_url, probe)
-    if host is None:
+    if host is None or not _databricks_workspace_binding_trusted(server_url, host):
         return None
     return DerivedWorkspace(host=host, workspace_id=_workspace_org_id(host))
 

@@ -454,8 +454,10 @@ def test_login_seed_omits_workspace_id_line_when_unknown() -> None:
     assert "workspace_id" not in seed_command
 
 
-def test_derive_workspace_extracts_workspace_from_apps_redirect(
+@pytest.mark.parametrize("approved", [False, True])
+def test_derive_workspace_extracts_approved_workspace_from_apps_redirect(
     monkeypatch: pytest.MonkeyPatch,
+    approved: bool,
 ) -> None:
     """
     A Databricks Apps edge answers the unauthenticated probe with a
@@ -476,6 +478,14 @@ def test_derive_workspace_extracts_workspace_from_apps_redirect(
         return "654321"
 
     monkeypatch.setattr(bootstrap_mod, "_workspace_org_id", _fake_org_id)
+    monkeypatch.setattr(
+        "omnigent.cli_auth.load_databricks_workspace_host",
+        lambda _: "https://ws.example.com" if approved else None,
+    )
+    if not approved:
+        assert derive_workspace("https://myapp.example.com") is None
+        assert org_probes == []
+        return
     assert derive_workspace("https://myapp.example.com") == DerivedWorkspace(
         host="https://ws.example.com", workspace_id="654321"
     )
