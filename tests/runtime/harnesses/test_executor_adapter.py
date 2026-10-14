@@ -2121,8 +2121,58 @@ class _OneInjectionCtx:
         self.emitted.append(event)
 
 
+@pytest.mark.parametrize(
+    ("injection_input", "expected_text"),
+    [
+        pytest.param("steer me", "steer me", id="string"),
+        pytest.param([{"type": "input_text", "text": "steer me"}], "steer me", id="flat_blocks"),
+        pytest.param(
+            [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Status?"}],
+                }
+            ],
+            "Status?",
+            id="message_item_blocks",
+        ),
+        pytest.param(
+            [{"type": "message", "role": "user", "content": "Status?"}],
+            "Status?",
+            id="message_item_string",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "older request"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "older reply"}],
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "tool output"},
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Status?"},
+                        {"type": "input_text", "text": "Be brief."},
+                    ],
+                },
+            ],
+            "Status?\nBe brief.",
+            id="history_newest_user_only",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_watch_injections_emits_consumed_marker_on_accept() -> None:
+async def test_watch_injections_emits_consumed_marker_on_accept(
+    injection_input: str | list[dict[str, Any]], expected_text: str
+) -> None:
     """An accepted mid-turn injection echoes an injection.consumed marker.
 
     The runner stamps an ``injection_id`` on a forwarded mid-turn message;
@@ -2132,6 +2182,11 @@ async def test_watch_injections_emits_consumed_marker_on_accept() -> None:
     re-deliver it in a continuation turn (RUNNER_MESSAGE_INGEST.md
     Part B). A missing/empty marker is exactly what would let the
     duplication regress.
+
+    The runner forwards the message ``content`` verbatim, and the request
+    schema accepts a plain string, flat content blocks, or conversation-shaped
+    ``message`` items (block-list or string ``content``). Every shape must
+    deliver the newest user message's text, and nothing older.
     """
     import asyncio as _aio
 
@@ -2141,7 +2196,7 @@ async def test_watch_injections_emits_consumed_marker_on_accept() -> None:
     executor = _AcceptingInjectionExecutor()
     adapter = ExecutorAdapter(executor_factory=lambda: executor, session_key="sk")
     ctx = _OneInjectionCtx(
-        CreateResponseRequest(model="m", input="steer me", injection_id="inj_x")
+        CreateResponseRequest(model="m", input=injection_input, injection_id="inj_x")
     )
 
     task = _aio.create_task(adapter._watch_injections(ctx, executor))  # type: ignore[arg-type]
@@ -2157,7 +2212,7 @@ async def test_watch_injections_emits_consumed_marker_on_accept() -> None:
 
     # The injection text reached the inner executor under the adapter's
     # session key.
-    assert executor.received == [("sk", "steer me")]
+    assert executor.received == [("sk", expected_text)]
     # Exactly one injection.consumed marker, echoing the correlation id.
     # If 0, the runner would never drop the buffered copy → duplication.
     assert len(ctx.emitted) == 1, f"expected one consumed marker, got {ctx.emitted!r}"
@@ -2165,6 +2220,52 @@ async def test_watch_injections_emits_consumed_marker_on_accept() -> None:
     assert isinstance(marker, InjectionConsumedEvent)
     assert marker.type == "injection.consumed"
     assert marker.injection_id == "inj_x"
+
+
+@pytest.mark.asyncio
+async def test_watch_injections_textless_newest_user_message_does_not_replay_older() -> None:
+    """A newest user message without text must not fall back to an older request."""
+    import asyncio as _aio
+
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+    from omnigent.server.schemas import CreateResponseRequest
+
+    executor = _AcceptingInjectionExecutor()
+    adapter = ExecutorAdapter(executor_factory=lambda: executor, session_key="sk")
+    ctx = _OneInjectionCtx(
+        CreateResponseRequest(
+            model="m",
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "older request"}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": "data:image/png;base64,AA=="}
+                    ],
+                },
+            ],
+            injection_id="inj_x",
+        )
+    )
+
+    task = _aio.create_task(adapter._watch_injections(ctx, executor))  # type: ignore[arg-type]
+    try:
+        await _aio.sleep(0.2)
+    finally:
+        task.cancel()
+        with contextlib.suppress(_aio.CancelledError):
+            await task
+
+    # Skipped outright: nothing is steered and no consumed marker is emitted.
+    assert executor.received == [], (
+        f"an older request was replayed as the steer: {executor.received!r}"
+    )
+    assert ctx.emitted == [], f"unexpected consumed marker: {ctx.emitted!r}"
 
 
 @pytest.mark.asyncio
