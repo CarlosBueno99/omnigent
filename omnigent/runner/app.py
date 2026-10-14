@@ -104,7 +104,12 @@ from omnigent.runner.background_titles import (
 )
 from omnigent.runner.background_titles.service import BACKGROUND_TITLE_MAX_PROMPT_CHARS
 from omnigent.runner.codex.goal import CodexGoalRunner
-from omnigent.runner.launch_failure import FailureDiagnosis, classify_terminal_failure
+from omnigent.runner.launch_failure import (
+    HOST_CREDENTIAL_UNAVAILABLE_CODE,
+    FailureDiagnosis,
+    classify_terminal_failure,
+    diagnose_host_credential_failure,
+)
 from omnigent.runner.mcp_execution_registry import (
     McpExecutionRegistry,
 )
@@ -962,14 +967,17 @@ def _normalize_turn_error(error: Mapping[str, object]) -> dict[str, str]:
     that code is kept so the failed status edge and the persisted error item
     describe one failure the same way (the web UI de-duplicates them by code
     and message). ``type`` is the legacy spelling; ``runner_error`` is the
-    fallback for setup failures that carry neither.
+    fallback for setup failures that carry neither. A classified failure's
+    ``title`` / ``cause`` / ``remediation`` are kept when present, so the web
+    UI renders its card instead of the raw message.
 
     :param error: Raw error dict from a ``_on_proxy_stream_end`` call,
         e.g. ``{"message": "turn setup failed: ..."}``,
         ``{"code": "agent_startup_pending", "message": "..."}`` or
         ``{"status": 502}``.
     :returns: A dict with ``code`` and ``message`` string keys, e.g.
-        ``{"code": "runner_error", "message": "turn setup failed: ..."}``.
+        ``{"code": "runner_error", "message": "turn setup failed: ..."}``,
+        plus any non-blank ``title`` / ``cause`` / ``remediation`` strings.
         Falls back to a generic message when none is present.
     """
     raw_message = error.get("message")
@@ -985,7 +993,41 @@ def _normalize_turn_error(error: Mapping[str, object]) -> dict[str, str]:
         if isinstance(raw_code, str) and raw_code:
             code = raw_code
             break
-    return {"code": code, "message": message}
+    normalized = {"code": code, "message": message}
+    for key in ("title", "cause", "remediation"):
+        value = error.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized[key] = value
+    return normalized
+
+
+def _turn_setup_error(exc: BaseException) -> dict[str, str]:
+    """
+    Build the turn-failure ``error`` for an exception that aborted turn setup.
+
+    A host credential failure gets its own code plus the ``title`` / ``cause`` /
+    ``remediation`` the web UI renders as a card, with the remedy repeated in the
+    message for text-only clients. Anything else stays the generic
+    ``turn setup failed: <exc>`` that :func:`_normalize_turn_error` codes as
+    ``runner_error``.
+
+    :param exc: The exception that escaped the setup phase.
+    :returns: An error dict for :func:`_on_proxy_stream_end`.
+    """
+    message = f"turn setup failed: {exc}"
+    diagnosis = diagnose_host_credential_failure(exc)
+    if diagnosis is None:
+        return {"message": message}
+    error = {
+        "code": HOST_CREDENTIAL_UNAVAILABLE_CODE,
+        "message": message,
+        "title": diagnosis.title,
+        "cause": diagnosis.cause,
+    }
+    if diagnosis.remediation:
+        error["message"] = f"{message}\n\nTry this: {diagnosis.remediation}"
+        error["remediation"] = diagnosis.remediation
+    return error
 
 
 def _harness_error_response_error(response: object) -> dict[str, str]:
@@ -4852,7 +4894,7 @@ def create_runner_app(
                     exc_info=True,
                     extra={"session_id": conv},
                 )
-                _on_proxy_stream_end(conv, error={"message": f"turn setup failed: {exc}"})
+                _on_proxy_stream_end(conv, error=_turn_setup_error(exc))
             finally:
                 # Permanent-wedge floor: guarantee _active_turns is never left stale,
                 # however the body exits — including a BaseException that escapes

@@ -98,6 +98,7 @@ from omnigent.runtime.harnesses._scaffold import ToolResultEvent as _ToolResultE
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
 from omnigent.runtime.prompt import EMBEDDED_BROWSER_PRIORITY_INSTRUCTION
 from omnigent.server.schemas import CreateResponseRequest as _CreateResponseRequest
+from omnigent.server.schemas import ErrorDetail
 from omnigent.spec.types import AgentSpec, ExecutorSpec, SharePolicy, ToolsConfig
 from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
 from tests.runner.conftest import (
@@ -1695,6 +1696,28 @@ def test_harness_error_response_error_parses_runner_error_bodies(
         ),
         ({"status": 503}, {"code": "runner_error", "message": "turn failed (status 503)"}),
         ({}, {"code": "runner_error", "message": "turn failed"}),
+        # A classified failure keeps the fields the web UI renders as its card.
+        (
+            {
+                "code": "host_credential_unavailable",
+                "message": "turn setup failed: no token",
+                "title": "The host couldn't get workspace credentials",
+                "cause": "The runner couldn't get a workspace credential: no token",
+                "remediation": "Restart the host.",
+            },
+            {
+                "code": "host_credential_unavailable",
+                "message": "turn setup failed: no token",
+                "title": "The host couldn't get workspace credentials",
+                "cause": "The runner couldn't get a workspace credential: no token",
+                "remediation": "Restart the host.",
+            },
+        ),
+        # Blank classification fields are dropped rather than sent as empty strings.
+        (
+            {"message": "turn setup failed: boom", "title": "  ", "remediation": None},
+            {"code": "runner_error", "message": "turn setup failed: boom"},
+        ),
     ],
 )
 def test_normalize_turn_error_keeps_the_failure_code(
@@ -2367,6 +2390,75 @@ async def test_runner_failed_status_carries_setup_error_message(
     assert raised_message in error["message"]
     # Normalized shape always has a code so the wire ErrorDetail validates.
     assert error["code"]
+
+
+@pytest.mark.asyncio
+async def test_runner_failed_status_classifies_a_host_credential_failure() -> None:
+    """
+    A setup callback the host can't sign fails the turn as a credential error.
+
+    The runner's auth flow raises ``DatabricksAuthError`` (an ``OSError``, not an
+    ``httpx`` error) when the host's credential source has no token, so spec
+    resolution escapes the setup-phase handlers. The failed status edge must
+    carry its own code and the title / cause / remediation the web UI renders,
+    not the generic ``runner_error``.
+    """
+    from omnigent.inner.databricks_executor import DatabricksAuthError
+
+    conv = "conv_host_credential_failure"
+    raised_message = "Host credential service could not supply workspace credentials"
+
+    async def _spec_resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        """
+        Fail the way the real resolver does when the runner's auth can't mint a token.
+
+        :param agent_id: Agent id (unused).
+        :param session_id: Session id (unused).
+        :returns: Never returns.
+        :raises DatabricksAuthError: Always.
+        """
+        del agent_id, session_id
+        raise DatabricksAuthError(raised_message)
+
+    app = create_runner_app(
+        process_manager=cast(
+            HarnessProcessManager,
+            _FakeProcessManager(_FakeHarnessClient([])),
+        ),
+        spec_resolver=_spec_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+
+    async with _runner_test_client(app) as http:
+        response = await http.post(
+            f"/v1/sessions/{conv}/events",
+            json={
+                "type": "message",
+                "role": "user",
+                "agent_id": "ag_credential_probe",
+                "model": "x",
+                "content": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert response.status_code == 202
+        await _await_bg_turn_task(conv)
+        failed_event = await _drain_failed_status_event(
+            app.state.session_event_queues, conv, timeout=2.0
+        )
+
+    assert failed_event is not None
+    error = failed_event["error"]
+    assert error["code"] == "host_credential_unavailable"
+    assert error["title"] == "The host couldn't get workspace credentials"
+    assert raised_message in error["cause"]
+    assert " stop`" in error["remediation"]
+    # Text-only clients render the message alone: it keeps the raw detail and
+    # repeats the remedy.
+    assert error["message"].startswith(f"turn setup failed: {raised_message}")
+    assert "Try this:" in error["message"]
+    # The server validates the status edge's error against the wire schema.
+    detail = ErrorDetail.model_validate(error)
+    assert detail.remediation == error["remediation"]
 
 
 # ── Harness-stream failure → terminal session.status ────

@@ -1253,4 +1253,17 @@ describe("ErrorBanner — info level", () => {
     expect(screen.getByTestId("error-pill")).toHaveAttribute("data-level", "error");
     expect(screen.getByTestId("error-headline")).toHaveClass("text-destructive");
   });
+
+  it("describes a host credential failure in English when no title arrived", () => {
+    render(
+      <ErrorBanner
+        message="turn setup failed: Host credential service could not supply workspace credentials"
+        source="execution"
+        code="host_credential_unavailable"
+      />,
+    );
+    expect(screen.getByTestId("error-headline")).toHaveTextContent(
+      "The host couldn't get workspace credentials to set up the turn.",
+    );
+  });
 });

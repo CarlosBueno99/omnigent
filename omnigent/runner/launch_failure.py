@@ -24,12 +24,18 @@ from omnigent.errors import SESSION_AGENT_MISSING_MESSAGE, ErrorCategory
 from omnigent.llms.errors import detect_request_size_overflow
 
 __all__ = [
+    "HOST_CREDENTIAL_UNAVAILABLE_CODE",
     "FailureDiagnosis",
     "classify_native_turn_error",
     "classify_terminal_failure",
     "describe_failure_code",
     "diagnose_client_update_required",
+    "diagnose_host_credential_failure",
 ]
+
+# Turn setup aborted because the host's credential source could not sign the
+# runner's callbacks to the server.
+HOST_CREDENTIAL_UNAVAILABLE_CODE = "host_credential_unavailable"
 
 
 @dataclass(frozen=True)
@@ -307,6 +313,50 @@ def diagnose_client_update_required(message: str) -> FailureDiagnosis | None:
     )
 
 
+def diagnose_host_credential_failure(exc: BaseException) -> FailureDiagnosis | None:
+    """Explain a turn-setup failure caused by the host's credential source.
+
+    The runner signs its callbacks to the Omnigent server (spec resolution,
+    history load, label lookups) with a token from the host. When that source
+    raises ``DatabricksAuthError`` the turn cannot be set up at all, and the
+    raw error text gives the user no next step.
+
+    :param exc: The exception that aborted turn setup. Its cause chain is
+        searched too, so a credential failure wrapped by a caller still
+        classifies.
+    :returns: A diagnosis naming the credential failure and the host restart
+        that clears it, or ``None`` when *exc* is unrelated.
+    """
+    from omnigent.inner.databricks_executor import DatabricksAuthError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, DatabricksAuthError):
+            break
+        if current.__cause__ is not None:
+            current = current.__cause__
+        else:
+            current = None if current.__suppress_context__ else current.__context__
+    else:
+        return None
+    detail = str(current) or type(current).__name__
+    cli = cli_invocation()
+    return FailureDiagnosis(
+        title="The host couldn't get workspace credentials",
+        cause=(
+            "The runner on the host couldn't get a workspace credential to set up "
+            f"this turn: {detail}"
+        ),
+        remediation=(
+            f"Restart the host (run `{cli} stop`, then start it again) and send the "
+            "message again. If it keeps failing, refresh the host's Databricks sign-in "
+            "before restarting."
+        ),
+    )
+
+
 # --- failure-code English fallbacks -------------------------------------------
 # Every server-emitted failure code, mapped to a one-line human sentence, so
 # even an unclassified failure reads as English instead of a raw enum. Terminal
@@ -349,6 +399,9 @@ _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
     "client_update_required": (
         "The agent CLI on the host is too old for the selected model. Update it on the "
         "host, then start a new session."
+    ),
+    HOST_CREDENTIAL_UNAVAILABLE_CODE: (
+        "The host couldn't get workspace credentials to set up the turn."
     ),
     "session_agent_missing": SESSION_AGENT_MISSING_MESSAGE,
 }

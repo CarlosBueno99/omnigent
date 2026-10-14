@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import pytest
 
+from omnigent.cli_invocation import WRAPPER_COMMAND_ENV
 from omnigent.errors import ErrorCategory
+from omnigent.inner.databricks_executor import DatabricksAuthError
 from omnigent.runner.launch_failure import (
+    HOST_CREDENTIAL_UNAVAILABLE_CODE,
     FailureDiagnosis,
     classify_native_turn_error,
     classify_terminal_failure,
     describe_failure_code,
     diagnose_client_update_required,
+    diagnose_host_credential_failure,
 )
 
 # The tail Claude Code prints when refusing --dangerously-skip-permissions as
@@ -28,6 +32,9 @@ _CLIENT_UPDATE_OUTPUT = (
     "version 2.1.280 or newer is required. Run 'claude update', or update the Claude "
     'desktop app, then try again."}'
 )
+
+# What a host credential service reports when it has no token for the runner.
+_CREDENTIAL_SERVICE_FAILURE = "Host credential service could not supply workspace credentials"
 
 
 def test_classifies_root_permission_failure() -> None:
@@ -412,6 +419,54 @@ def test_client_update_diagnosis_without_installed_version_still_names_required(
     )
 
 
+def test_host_credential_failure_names_the_host_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(WRAPPER_COMMAND_ENV, raising=False)
+    diagnosis = diagnose_host_credential_failure(DatabricksAuthError(_CREDENTIAL_SERVICE_FAILURE))
+    assert diagnosis is not None
+    assert diagnosis.title == "The host couldn't get workspace credentials"
+    assert _CREDENTIAL_SERVICE_FAILURE in diagnosis.cause
+    assert diagnosis.remediation is not None
+    assert "`omnigent stop`" in diagnosis.remediation
+    assert "Databricks sign-in" in diagnosis.remediation
+
+
+def test_host_credential_failure_remediation_uses_the_configured_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(WRAPPER_COMMAND_ENV, "isaac omni")
+    diagnosis = diagnose_host_credential_failure(DatabricksAuthError(_CREDENTIAL_SERVICE_FAILURE))
+    assert diagnosis is not None
+    assert diagnosis.remediation is not None
+    assert "`isaac omni stop`" in diagnosis.remediation
+
+
+def test_host_credential_failure_is_found_behind_a_wrapping_error() -> None:
+    try:
+        try:
+            raise DatabricksAuthError(_CREDENTIAL_SERVICE_FAILURE)
+        except DatabricksAuthError as exc:
+            raise RuntimeError("spec_resolver: GET /v1/sessions/s/agent/contents failed") from exc
+    except RuntimeError as wrapped:
+        diagnosis = diagnose_host_credential_failure(wrapped)
+    assert diagnosis is not None
+    assert _CREDENTIAL_SERVICE_FAILURE in diagnosis.cause
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeError("spec_resolver: GET /v1/sessions/s/agent/contents failed with HTTP 502"),
+        # DatabricksAuthError is an OSError; a plain OSError is not a credential failure.
+        OSError("No space left on device"),
+        ValueError("session initialization envelope identity mismatch"),
+    ],
+)
+def test_other_setup_failures_are_not_host_credential_failures(exc: BaseException) -> None:
+    assert diagnose_host_credential_failure(exc) is None
+
+
 def test_client_update_diagnosis_ignores_unrelated_errors() -> None:
     assert diagnose_client_update_required(_GATEWAY_499_OUTPUT) is None
     assert diagnose_client_update_required("") is None
@@ -433,6 +488,7 @@ def test_client_update_diagnosis_ignores_unrelated_errors() -> None:
         ("databricks_sign_in_pending", "Databricks sign-in"),
         ("agent_startup_pending", "still starting"),
         ("codex_thread_not_started", "never ran"),
+        (HOST_CREDENTIAL_UNAVAILABLE_CODE, "workspace credentials"),
     ],
 )
 def test_describe_failure_code_known(code: str, expected_substring: str) -> None:
