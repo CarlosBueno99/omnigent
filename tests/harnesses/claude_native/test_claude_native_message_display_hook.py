@@ -229,6 +229,18 @@ _HEAVY_IMPORTS = (
 )
 
 
+def _adopt_import_roots() -> str:
+    """
+    Statement that gives a child interpreter this process's import roots.
+
+    A ``python -I`` child ignores ``PYTHONPATH`` and the cwd, so without it
+    ``omnigent`` would resolve from whatever is installed rather than the
+    checkout under test.
+    """
+    roots = [path for path in sys.path if path]
+    return f"sys.path[:0] = {roots!r}"
+
+
 def _heavy_imports_after(statements: str) -> list[str]:
     """
     Run *statements* in a fresh interpreter and report loaded heavy modules.
@@ -238,11 +250,10 @@ def _heavy_imports_after(statements: str) -> list[str]:
     :returns: The subset of :data:`_HEAVY_IMPORTS` present in the child's
         ``sys.modules`` after *statements* ran.
     """
-    repo_root = Path(hook.__file__).resolve().parent.parent
     code = "\n".join(
         (
             "import json, sys",
-            f"sys.path.insert(0, {str(repo_root)!r})",
+            _adopt_import_roots(),
             statements,
             f"heavy = [m for m in {list(_HEAVY_IMPORTS)!r} if m in sys.modules]",
             "print(json.dumps(heavy))",
@@ -359,6 +370,7 @@ def test_evaluate_policy_run_imports_only_policy_modules(tmp_path: Path) -> None
     code = "\n".join(
         (
             "import json, runpy, sys",
+            _adopt_import_roots(),
             f"sys.argv = ['hook', 'evaluate-policy', '--bridge-dir', {str(bridge_dir)!r}]",
             "try:",
             "    runpy.run_module('omnigent.harnesses.claude_native.hook', run_name='__main__')",
