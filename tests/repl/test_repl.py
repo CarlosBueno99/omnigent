@@ -387,36 +387,27 @@ def test_render_history_item_function_call_includes_args_summary() -> None:
     )
 
 
-def test_render_history_item_function_call_with_markup_in_args_does_not_crash() -> None:
-    """Replayed tool-call args such as ``echo '[/dim]'`` render verbatim on the
-    ``⏵`` line instead of raising ``MarkupError`` and aborting ``--resume``."""
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("echo '[/dim]'", id="unmatched-closing-tag"),
+        pytest.param("echo ok # \\", id="trailing-backslash"),
+    ],
+)
+def test_render_history_item_function_call_renders_args_literally(command: str) -> None:
+    """Replayed tool-call args render verbatim on the ``⏵`` line: markup-like text is
+    neither parsed as a tag nor shown with escape backslashes, and a trailing
+    backslash appears exactly once."""
     host = _CapturingHost()
     item = {
         "type": "function_call",
         "call_id": "c1",
         "name": "Bash",
-        "arguments": json.dumps({"command": "echo '[/dim]'"}),
+        "arguments": json.dumps({"command": command}),
     }
     _render_history_item(item, host)
     plain = host.render_plain()
-    assert "Bash(echo '[/dim]')" in plain, (
-        f"markup in tool-call args must render as literal text, neither consumed "
-        f"as a closing tag nor shown with escape backslashes. Got: {plain!r}."
-    )
-
-
-def test_render_history_item_function_call_keeps_trailing_backslash_in_args() -> None:
-    """A replayed command ending in a backslash shows exactly one backslash."""
-    host = _CapturingHost()
-    item = {
-        "type": "function_call",
-        "call_id": "c1",
-        "name": "Bash",
-        "arguments": json.dumps({"command": "echo ok # \\"}),
-    }
-    _render_history_item(item, host)
-    plain = host.render_plain()
-    assert "Bash(echo ok # \\)" in plain and "Bash(echo ok # \\\\)" not in plain, plain
+    assert plain.strip() == f"⏵ Bash({command})", plain
 
 
 def test_attach_failure_notice_renders_markup_in_error_text_literally() -> None:

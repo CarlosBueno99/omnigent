@@ -7,10 +7,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import os
 import re
-import shutil
-import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,6 +16,7 @@ from typing import Any
 import pytest
 
 from omnigent.testing.process_reaper import reap_leaked_omnigent_processes
+from tests.e2e._native_resume_helpers import cli_env, omnigent_console_script
 from tests.e2e.conftest import configure_mock_llm, reset_mock_llm
 
 pexpect = pytest.importorskip("pexpect")
@@ -41,34 +39,7 @@ _SHELL_COMMAND = "echo '[/dim]'"
 _READY_PATTERNS = [STATE_SLEEPING, r"·\s*ready"]
 _BOOT_TIMEOUT_S = 180.0
 _RESUME_TIMEOUT_S = 120.0
-# Inherited runner/credential variables would re-point the spawned CLI at this
-# process's own Omnigent session instead of the isolated local daemon.
-_STALE_ENV_VARS = (
-    "DATABRICKS_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "CODEX",
-    "CLAUDE_CODE",
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_EXECPATH",
-    "TMUX",
-    "RUNNER_SERVER_URL",
-    "OMNIGENT_RUNNER_WORKSPACE",
-    "OMNIGENT_RUNNER_ID",
-    "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN",
-    "OMNIGENT_DATABASE_URI",
-    "OMNIGENT_SESSION_ID",
-)
-
-
-def _omnigent_cli() -> str:
-    venv_cli = Path(sys.executable).parent / "omnigent"
-    if venv_cli.exists():
-        return str(venv_cli)
-    found = shutil.which("omnigent")
-    if found is None:
-        pytest.skip("omnigent console script not found")
-    return found
+_PTY_ROWS, _PTY_COLS = 40, 160
 
 
 @pytest.fixture
@@ -81,21 +52,21 @@ def repl_env(mock_llm_server_url: str, tmp_path: Path) -> Iterator[dict[str, str
         f"auto_open_conversation: false\ntui:\n  theme: light\ndefault_agent: {_AGENT_YAML}\n",
         encoding="utf-8",
     )
-    env = {k: v for k, v in os.environ.items() if k not in _STALE_ENV_VARS}
+    env = cli_env()
+    # This process may itself run inside an Omnigent session; keep its database
+    # and session ids away from the isolated local daemon.
+    for stale in ("OMNIGENT_DATABASE_URI", "OMNIGENT_SESSION_ID"):
+        env.pop(stale, None)
     env.update(
         {
             "HOME": str(home),
             "OMNIGENT_CONFIG_HOME": str(config_home),
             "OMNIGENT_DATA_DIR": str(config_home),
-            "OMNIGENT_SKIP_ONBOARD": "1",
-            "OMNIGENT_NO_UPDATE_CHECK": "1",
             "OPENAI_API_KEY": "mock-key",
             "OPENAI_BASE_URL": f"{mock_llm_server_url}/v1",
-            "TERM": "xterm-256color",
             "PROMPT_TOOLKIT_NO_CPR": "1",
-            "LINES": "40",
-            "COLUMNS": "160",
-            "PYTHONPATH": f"{_REPO_ROOT}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
+            "LINES": str(_PTY_ROWS),
+            "COLUMNS": str(_PTY_COLS),
         }
     )
     try:
@@ -107,13 +78,13 @@ def repl_env(mock_llm_server_url: str, tmp_path: Path) -> Iterator[dict[str, str
 
 def _spawn(args: list[str], env: dict[str, str], transcript: io.StringIO) -> Any:
     child = pexpect.spawn(
-        _omnigent_cli(),
+        str(omnigent_console_script()),
         args,
         env=env,
         cwd=str(_REPO_ROOT),
         encoding="utf-8",
         codec_errors="replace",
-        dimensions=(40, 160),
+        dimensions=(_PTY_ROWS, _PTY_COLS),
         timeout=_BOOT_TIMEOUT_S,
     )
     child.logfile_read = transcript
