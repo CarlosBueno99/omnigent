@@ -9434,11 +9434,12 @@ def _selected_daemon_records(
     :raises click.ClickException: If ``--server`` and ``--all`` conflict
         outside a wrapper-managed deployment.
     """
-    # A deployment wrapper (e.g. `isaac omni`) rewrites every invocation to add
-    # its managed --server, so under a wrapper the conflict is an injected
-    # flag, not user intent: --all wins for every consumer of this selector.
-    if all_targets and server is not None and not _wrapper_managed_deployment():
-        raise click.ClickException("Use either --server or --all, not both.")
+    if all_targets and server is not None:
+        # In a wrapper-managed deployment (e.g. `isaac omni` injects its managed
+        # --server) an explicit --all overrides --server; say so on stderr.
+        if not _wrapper_managed_deployment():
+            raise click.ClickException("Use either --server or --all, not both.")
+        click.echo(f"Ignoring --server {server}: --all selects every known target.", err=True)
     if all_targets or (server is None and default_all):
         return _list_daemon_records()
     resolved = _resolve_host_server(server)

@@ -67,6 +67,7 @@ def test_wrapper_managed_deployment_reads_wrapper_markers(
 
 def test_all_wins_over_injected_server_under_wrapper(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Under a wrapper, ``--all`` + injected ``--server`` selects every record."""
     _clear_wrapper_env(monkeypatch)
@@ -84,6 +85,9 @@ def test_all_wins_over_injected_server_under_wrapper(
 
     assert selected == records, (
         "the wrapper-injected --server must not narrow or veto --all selection"
+    )
+    assert f"Ignoring --server {_MANAGED_SERVER}" in capsys.readouterr().err, (
+        "overriding a --server must be reported on stderr, not silently applied"
     )
 
 

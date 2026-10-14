@@ -470,6 +470,61 @@ def test_host_status_all_lists_targets_despite_wrapper_injected_server(
     )
     assert "No host daemons found." in result.output, result.output
     assert "not both" not in result.output, result.output
+    assert f"Ignoring --server {_MANAGED_SERVER}" in result.output, (
+        f"Expected a notice that the injected --server was overridden, got: {result.output}"
+    )
+
+
+def test_host_stop_all_stops_every_target_despite_wrapper_injected_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Verify ``host stop --all`` under a wrapper stops every registered daemon even
+    though the wrapper also injected its managed ``--server``.
+
+    The selector is shared with ``host status``, so the same precedence applies
+    to the destructive command: the user asked for all targets.
+    """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("OMNIGENT_WRAPPER_COMMAND", "isaac omni")
+    monkeypatch.setenv("OMNIGENT_REQUIRE_WRAPPER", "1")
+    monkeypatch.setenv("OMNIGENT_WRAPPER_BYPASS", "1")
+    monkeypatch.setattr("omnigent.cli._HOST_PID_PATH", tmp_path / "host.pid")
+    records = [
+        cli_module._HostDaemonRecord(
+            pid=pid,
+            target=target,
+            mode="server",
+            server_url=target,
+            log_path=None,
+            started_at=int(time.time()),
+            config_sig="sig",
+        )
+        for pid, target in ((4242, "https://a.example.com"), (4243, "https://b.example.com"))
+    ]
+    terminated: list[cli_module._HostDaemonRecord] = []
+
+    def _fake_terminate(record: cli_module._HostDaemonRecord, *, force: bool) -> str:
+        terminated.append(record)
+        return cli_module._STOP_TERMINATED
+
+    with (
+        patch("omnigent.cli._list_daemon_records", lambda: list(records)),
+        patch("omnigent.cli._terminate_daemon", _fake_terminate),
+    ):
+        result = CliRunner().invoke(
+            cli,
+            ["host", "stop", "--all", "--daemon-only", "--server", _MANAGED_SERVER],
+        )
+
+    assert result.exit_code == 0, (
+        f"Expected every target stopped, got exit {result.exit_code}. Output: {result.output}"
+    )
+    assert terminated == records, f"--all must stop every registered daemon, stopped: {terminated}"
+    assert "Stopped https://a.example.com daemon pid=4242" in result.output, result.output
+    assert "Stopped https://b.example.com daemon pid=4243" in result.output, result.output
+    assert f"Ignoring --server {_MANAGED_SERVER}" in result.output, result.output
 
 
 def test_host_daemon_alive_returns_false_when_no_pid_file(
