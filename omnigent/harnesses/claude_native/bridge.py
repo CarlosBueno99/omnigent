@@ -8177,13 +8177,21 @@ def _hook_block_outcome(entry: _JsonObject) -> _JsonObject | None:
 
     :param entry: Decoded Claude transcript record of ``type == "system"``.
     :returns: Its ``promptSubmitEnding.ending`` object, e.g.
-        ``{"kind": "blocked_by_hook", "reason": "Token detected."}``, or
-        ``None`` when the record is not a hook block.
+        ``{"kind": "blocked_by_hook", "reason": "Token detected."}``; an
+        outcome without a ``reason`` when the build recorded only the notice
+        text; or ``None`` when the record is not a hook block.
     """
     ending = entry.get("promptSubmitEnding")
-    outcome = ending.get("ending") if isinstance(ending, dict) else None
-    if isinstance(outcome, dict) and outcome.get("kind") == "blocked_by_hook":
-        return cast(_JsonObject, outcome)
+    if isinstance(ending, dict):
+        outcome = ending.get("ending")
+        if isinstance(outcome, dict) and outcome.get("kind") == "blocked_by_hook":
+            return cast(_JsonObject, outcome)
+        return None
+    # Claude Code builds up to at least 2.1.283 write no promptSubmitEnding;
+    # the notice text is their only record of the block.
+    content = entry.get("content")
+    if isinstance(content, str) and content.startswith(_BLOCKED_PROMPT_HEADER):
+        return {"kind": "blocked_by_hook"}
     return None
 
 
@@ -8218,13 +8226,14 @@ def _blocked_prompt_transcript_items(
         return []
     body = content.removeprefix(_BLOCKED_PROMPT_HEADER)
     reason = outcome.get("reason")
-    reason = reason if isinstance(reason, str) else ""
-    # The structured reason marks where the prompt starts even when either
-    # one contains the separator text.
-    if body.startswith(reason + _BLOCKED_PROMPT_SEPARATOR):
+    if isinstance(reason, str) and body.startswith(reason + _BLOCKED_PROMPT_SEPARATOR):
+        # The structured reason marks where the prompt starts even when either
+        # one contains the separator text.
         prompt = body[len(reason + _BLOCKED_PROMPT_SEPARATOR) :]
     else:
-        prompt = body.partition(_BLOCKED_PROMPT_SEPARATOR)[2]
+        notice_reason, _separator, prompt = body.partition(_BLOCKED_PROMPT_SEPARATOR)
+        if not isinstance(reason, str):
+            reason = notice_reason
     prompt = _unwrap_pasted_content_markers(prompt)
     if not prompt.strip():
         return []

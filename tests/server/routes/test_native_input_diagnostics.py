@@ -121,8 +121,9 @@ async def test_skipped_message_logs_committed_ids_once_and_keeps_enqueue_identit
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("structured_ending", [True, False], ids=["ending", "notice-only"])
 async def test_hook_blocked_prompt_settles_its_web_message_with_the_reason(
-    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, structured_ending: bool
 ) -> None:
     store = SqlAlchemyConversationStore(db_uri)
     conv = store.create_conversation(title="Test", labels={"omnigent.wrapper": "claude-native-ui"})
@@ -144,9 +145,6 @@ async def test_hook_blocked_prompt_settles_its_web_message_with_the_reason(
                 "UserPromptSubmit operation blocked by hook:\nA token was detected."
                 "\n\nOriginal prompt: deploy with this key"
             ),
-            "promptSubmitEnding": {
-                "ending": {"kind": "blocked_by_hook", "reason": "A token was detected."}
-            },
         },
         {
             "type": "user",
@@ -154,6 +152,10 @@ async def test_hook_blocked_prompt_settles_its_web_message_with_the_reason(
             "message": {"role": "user", "content": "deploy without it"},
         },
     ]
+    if structured_ending:
+        records[0]["promptSubmitEnding"] = {
+            "ending": {"kind": "blocked_by_hook", "reason": "A token was detected."}
+        }
     transcript.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
     _cursor, _response_id, items = read_transcript_items_since(transcript, 0, agent_name="Claude")
 

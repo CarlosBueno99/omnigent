@@ -1329,6 +1329,35 @@ def test_transcript_mirrors_prompt_blocked_by_hook(
     assert len({item.source_id for item in items}) == 2
 
 
+def _notice_only_blocked_prompt_entry(reason: str, prompt: str) -> dict[str, Any]:
+    """The block record of a Claude Code build that writes no ``promptSubmitEnding``."""
+    entry = _blocked_prompt_entry(reason, prompt, version="2.1.283")
+    del entry["promptSubmitEnding"]
+    return entry
+
+
+def test_transcript_mirrors_prompt_blocked_by_hook_from_notice_text(tmp_path: Path) -> None:
+    """Without a structured ending, the reason and prompt come from the notice text."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        _transcript_line(_notice_only_blocked_prompt_entry("Blocked: test", "BLOCKME hello")),
+        encoding="utf-8",
+    )
+
+    _cursor, current_response_id, items = read_transcript_items_since(
+        transcript, 0, agent_name="Claude", current_response_id="active"
+    )
+
+    assert current_response_id == "active"
+    assert [item.item_type for item in items] == ["message", "error"]
+    assert items[0].data == {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "BLOCKME hello"}],
+    }
+    assert items[1].data["code"] == "native_prompt_blocked_by_hook"
+    assert items[1].data["message"].endswith("hook blocked it.\n\nBlocked: test")
+
+
 @pytest.mark.parametrize(
     "entry",
     [
@@ -1339,8 +1368,13 @@ def test_transcript_mirrors_prompt_blocked_by_hook(
         _blocked_prompt_entry(
             "No.", "", content="UserPromptSubmit operation blocked by hook:\nNo."
         ),
+        {
+            "type": "system",
+            "subtype": "informational",
+            "content": "UserPromptSubmit operation blocked by hook:\nNo.",
+        },
     ],
-    ids=["other-notice", "not-a-block", "prompt-missing"],
+    ids=["other-notice", "not-a-block", "prompt-missing", "notice-without-prompt"],
 )
 def test_transcript_skips_system_records_without_a_blocked_prompt(
     tmp_path: Path, entry: dict[str, Any]
