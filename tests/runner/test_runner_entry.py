@@ -631,13 +631,17 @@ async def test_tunnel_boot_hands_its_auth_resolution_to_create_app(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lifespan_exit_fails", [False, True])
 async def test_fatal_tunnel_rejection_still_stops_listener_and_lifespan(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    lifespan_exit_fails: bool,
 ) -> None:
     """A tunnel that fails before connecting must not skip the runner teardown.
 
     Otherwise ``asyncio.run`` cancels the still-running direct-attach listener
     and its lifespan traceback lands above the concise exit reason in the log.
+    A teardown failure is logged rather than replacing that exit reason.
     """
     from types import SimpleNamespace
 
@@ -652,6 +656,8 @@ async def test_fatal_tunnel_rejection_still_stops_listener_and_lifespan(
             yield
         finally:
             events.append("lifespan exit")
+            if lifespan_exit_fails:
+                raise OSError("teardown failed")
 
     class _Listener:
         port = 43210
@@ -690,10 +696,17 @@ async def test_fatal_tunnel_rejection_still_stops_listener_and_lifespan(
         lambda *_args, **_kwargs: object(),
     )
 
-    with pytest.raises(RuntimeError, match=RUNNER_TUNNEL_REJECTION_PREFIX):
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(RuntimeError, match=RUNNER_TUNNEL_REJECTION_PREFIX),
+    ):
         await entry_mod._run_tunnel_from_env()
 
     assert events == ["lifespan enter", "listener stop", "lifespan exit"]
+    teardown_warnings = [
+        record for record in caplog.records if "runner teardown failed" in record.getMessage()
+    ]
+    assert bool(teardown_warnings) == lifespan_exit_fails
 
 
 def test_make_auth_token_factory_none_without_creds_or_binding_token(

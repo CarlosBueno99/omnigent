@@ -77,6 +77,7 @@ def rejecting_front_door() -> Iterator[str]:
         server.server_close()
 
 
+@pytest.mark.min_runner_version("0.19.0")
 def test_fatal_401_rejection_exits_with_reason_and_no_traceback(
     tmp_path: Path, rejecting_front_door: str
 ) -> None:

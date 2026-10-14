@@ -1966,10 +1966,22 @@ async def _run_tunnel_from_env() -> None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await idle_task
         finally:
+            # An exception already unwinding (the fatal rejection) must reach
+            # main(); a teardown failure is logged instead of replacing it.
+            unwinding = sys.exc_info()[0] is not None
             if direct_attach_listener is not None:
                 with contextlib.suppress(Exception):
                     await direct_attach_listener.stop()
-            await _lifespan_cm.__aexit__(None, None, None)
+            try:
+                await _lifespan_cm.__aexit__(None, None, None)
+            except Exception:
+                if not unwinding:
+                    raise
+                _logger.warning(
+                    "runner teardown failed while exiting",
+                    exc_info=True,
+                    extra={"session_id": runner_primary_session_id()},
+                )
 
 
 def _install_signal_handlers(
