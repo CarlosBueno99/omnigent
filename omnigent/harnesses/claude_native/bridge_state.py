@@ -57,8 +57,6 @@ def read_active_session_id(bridge_dir: Path) -> str | None:
         ``None`` when the bridge config is absent or malformed.
     """
     config = _read_json_file(bridge_dir / _CONFIG_FILE)
-    if not isinstance(config, dict):
-        return None
     active = config.get("active_session_id")
     if isinstance(active, str) and active:
         return active
@@ -75,8 +73,6 @@ def read_bridge_id(bridge_dir: Path) -> str | None:
         ``None`` when the bridge config is absent or malformed.
     """
     config = _read_json_file(bridge_dir / _CONFIG_FILE)
-    if not isinstance(config, dict):
-        return None
     bridge_id = config.get("bridge_id")
     return bridge_id if isinstance(bridge_id, str) and bridge_id else None
 
@@ -91,8 +87,7 @@ def read_permission_hook_config(bridge_dir: Path) -> _JsonObject:
         "ap_auth_headers": {"Authorization": "Bearer token"}}``.
         Empty dict when the file is absent or malformed.
     """
-    payload = _read_json_file(bridge_dir / _PERMISSION_HOOK_FILE)
-    return payload if isinstance(payload, dict) else {}
+    return _read_json_file(bridge_dir / _PERMISSION_HOOK_FILE)
 
 
 def read_claude_session_id(bridge_dir: Path) -> str | None:
@@ -113,8 +108,7 @@ def read_claude_session_id(bridge_dir: Path) -> str | None:
         when no hook has yet reported one (the first poll after a
         cold launch).
     """
-    state = _read_json_file(bridge_dir / _STATE_FILE)
-    raw = state.get("claude_session_id") if isinstance(state, dict) else None
+    raw = _read_json_file(bridge_dir / _STATE_FILE).get("claude_session_id")
     if not isinstance(raw, str) or not raw:
         return None
     return raw
@@ -133,8 +127,6 @@ def read_seen_claude_session_ids(bridge_dir: Path) -> set[str]:
         ``{"a1b2c3d4-1234-5678-9abc-def012345678"}``.
     """
     state = _read_json_file(bridge_dir / _STATE_FILE)
-    if not isinstance(state, dict):
-        return set()
     seen: set[str] = set()
     raw_seen = state.get("seen_claude_session_ids")
     if isinstance(raw_seen, list):
