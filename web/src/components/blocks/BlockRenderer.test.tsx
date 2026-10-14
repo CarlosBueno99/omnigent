@@ -543,6 +543,42 @@ describe("BlockRenderer dispatch", () => {
     expect(screen.queryByText(/tool_1/)).toBeNull();
   });
 
+  it("keeps a card the user expanded open when the next tool lands mid-run", () => {
+    const shellStep = (n: number): RenderItem => ({
+      kind: "tool",
+      itemId: `fc_${n}`,
+      execution: {
+        name: "sys_os_shell",
+        arguments: { command: `echo probe-step-${n}` },
+        argsSummary: "",
+        callId: `call_${n}`,
+        agentName: "probe",
+        executedBy: "server",
+        output: `probe-step-${n}\n`,
+      },
+      output: `probe-step-${n}\n`,
+      state: "output-available",
+      startedAt: null,
+      duration: 1,
+    });
+    const run = (count: number) => Array.from({ length: count }, (_, i) => shellStep(i + 1));
+    const firstRow = () => screen.getByRole("button", { name: /echo probe-step-1/ });
+
+    const live = (items: RenderItem[]) => (
+      <TooltipProvider>
+        <BlockRenderer items={items} sessionStatus="running" />
+      </TooltipProvider>
+    );
+    const view = render(live(run(3)));
+    fireEvent.click(firstRow());
+    expect(firstRow().getAttribute("data-state")).toBe("open");
+
+    view.rerender(live(run(4)));
+
+    expect(screen.queryByText("Ran 1 shell command")).toBeNull();
+    expect(firstRow().getAttribute("data-state")).toBe("open");
+  });
+
   describe("user-expanded tool cards survive streaming re-layout", () => {
     const tool = (n: number): RenderItem => ({
       kind: "tool",
