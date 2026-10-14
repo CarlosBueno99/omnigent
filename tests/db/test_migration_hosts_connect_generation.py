@@ -10,59 +10,85 @@ import sqlalchemy as sa
 from alembic import command
 from sqlalchemy.engine import Engine
 
+from omnigent.db.enum_codecs import encode_host_status
 from omnigent.db.utils import (
     _build_alembic_config,
     clear_engine_cache,
     get_or_create_engine,
+    now_epoch,
 )
+
+_PARENT_REVISION = "mm1a2b3c4d5e"
 
 
 @pytest.fixture
 def db_engine(tmp_path: Path) -> Iterator[Engine]:
     """Fresh SQLite database with the full migration chain applied."""
-    db_path = tmp_path / "test.db"
-    uri = f"sqlite:///{db_path}"
-    engine = get_or_create_engine(uri)
+    engine = get_or_create_engine(f"sqlite:///{tmp_path / 'test.db'}")
     try:
         yield engine
     finally:
+        engine.dispose()
         clear_engine_cache()
+
+
+def _connect_generation_column(engine: Engine) -> dict[str, object] | None:
+    matches = [
+        c for c in sa.inspect(engine).get_columns("hosts") if c["name"] == "connect_generation"
+    ]
+    assert len(matches) <= 1, matches
+    return matches[0] if matches else None
+
+
+def _migrate(engine: Engine, target: str) -> None:
+    config = _build_alembic_config(str(engine.url))
+    with engine.begin() as conn:
+        config.attributes["connection"] = conn
+        if target == "head":
+            command.upgrade(config, "head")
+        else:
+            command.downgrade(config, target)
 
 
 def test_connect_generation_column_present_and_nullable(db_engine: Engine) -> None:
     """The migration adds a nullable BIGINT, including for legacy rows."""
-    cols = sa.inspect(db_engine).get_columns("hosts")
-    matches = [c for c in cols if c["name"] == "connect_generation"]
-    assert len(matches) == 1, (
-        f"Expected exactly one 'connect_generation' column on hosts, "
-        f"got {len(matches)}. If 0, the migration didn't apply."
-    )
-    col = matches[0]
-    assert col["nullable"], (
-        "hosts.connect_generation must be NULLABLE — pre-migration rows have "
-        "no connect token and would otherwise be rejected on read."
-    )
-    assert isinstance(col["type"], sa.BigInteger), (
-        f"Expected a BIGINT type (epoch-µs exceeds int32), got {col['type']!r}."
-    )
+    col = _connect_generation_column(db_engine)
+    assert col is not None, "the migration did not add hosts.connect_generation"
+    assert col["nullable"], "pre-migration rows have no connect token and must stay readable"
+    assert isinstance(col["type"], sa.BigInteger), f"expected BIGINT, got {col['type']!r}"
 
 
-def test_downgrade_drops_connect_generation(tmp_path: Path) -> None:
-    """Downgrade removes the column, restoring the prior hosts schema."""
-    db_path = tmp_path / "downgrade.db"
-    uri = f"sqlite:///{db_path}"
-    engine = get_or_create_engine(uri)
+def test_legacy_rows_keep_null_tokens_and_migration_is_retry_safe(db_engine: Engine) -> None:
+    """A host persisted before the column stays NULL; repeated runs are no-ops."""
+    _migrate(db_engine, _PARENT_REVISION)
+    assert _connect_generation_column(db_engine) is None
 
-    cols = {c["name"] for c in sa.inspect(engine).get_columns("hosts")}
-    assert "connect_generation" in cols
+    now = now_epoch()
+    with db_engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO hosts (workspace_id, host_id, user_id, name, status, created_at, "
+                "updated_at) VALUES (0, :host_id, 'legacy@example.com', 'legacy-laptop', "
+                ":status, :now, :now)"
+            ),
+            {
+                "host_id": bytes.fromhex("1444b179a19322377dcc75cf7fcd1bd2"),
+                "status": encode_host_status("online"),
+                "now": now,
+            },
+        )
 
-    config = _build_alembic_config(uri)
-    with engine.begin() as conn:
-        config.attributes["connection"] = conn
-        command.downgrade(config, "mm1a2b3c4d5e")
+    _migrate(db_engine, "head")
+    assert _connect_generation_column(db_engine) is not None
+    with db_engine.connect() as conn:
+        tokens = conn.execute(sa.text("SELECT connect_generation FROM hosts")).scalars().all()
+    assert tokens == [None]
 
-    remaining = {c["name"] for c in sa.inspect(engine).get_columns("hosts")}
-    assert "connect_generation" not in remaining
+    # A retried upgrade (version table behind, column already present) must not fail.
+    with db_engine.begin() as conn:
+        conn.execute(sa.text(f"UPDATE alembic_version SET version_num = '{_PARENT_REVISION}'"))
+    _migrate(db_engine, "head")
+    assert _connect_generation_column(db_engine) is not None
 
-    engine.dispose()
-    clear_engine_cache()
+    _migrate(db_engine, _PARENT_REVISION)
+    assert _connect_generation_column(db_engine) is None
