@@ -2081,7 +2081,7 @@ class _AcceptingInjectionExecutor:
 
 
 class _OneInjectionCtx:
-    """TurnContext stand-in: yields one injection, then blocks; records emits.
+    """TurnContext stand-in: yields one injection, then blocks; records emits and pulls.
 
     :param injection: The single injection ``_watch_injections`` should
         pull before the queue goes quiet.
@@ -2093,6 +2093,7 @@ class _OneInjectionCtx:
 
         self._injection: Any = injection
         self.emitted: list[Any] = []
+        self.pulls = 0
         self.response_id = "resp_injection"
         self.session_id = "session_injection"
         # Mirror TurnContext: the watcher skips delivery once cancelled.
@@ -2107,6 +2108,7 @@ class _OneInjectionCtx:
         import asyncio as _aio
 
         del timeout
+        self.pulls += 1
         if self._injection is None:
             await _aio.sleep(3600)
         inj, self._injection = self._injection, None
@@ -2223,12 +2225,9 @@ async def test_watch_injections_emits_consumed_marker_on_accept(
 
 
 @pytest.mark.asyncio
-async def test_watch_injections_textless_newest_user_message_does_not_replay_older(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_watch_injections_textless_newest_user_message_does_not_replay_older() -> None:
     """A newest user message without text must not fall back to an older request."""
     import asyncio as _aio
-    import logging
 
     from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
     from omnigent.server.schemas import CreateResponseRequest
@@ -2256,15 +2255,11 @@ async def test_watch_injections_textless_newest_user_message_does_not_replay_old
         )
     )
 
-    caplog.set_level(logging.WARNING, logger="omnigent.runtime.harnesses._executor_adapter")
-
-    def skipped() -> bool:
-        return any("no text payload" in record.getMessage() for record in caplog.records)
-
     task = _aio.create_task(adapter._watch_injections(ctx, executor))  # type: ignore[arg-type]
     try:
+        # The watcher pulls the next injection only after finishing with this one.
         for _ in range(200):
-            if skipped():
+            if ctx.pulls >= 2:
                 break
             await _aio.sleep(0.01)
     finally:
@@ -2272,9 +2267,8 @@ async def test_watch_injections_textless_newest_user_message_does_not_replay_old
         with contextlib.suppress(_aio.CancelledError):
             await task
 
-    # The watcher processed the injection and skipped it outright: nothing is
-    # steered and no consumed marker is emitted.
-    assert skipped(), "the watcher never processed the injection"
+    # Processed and skipped outright: nothing is steered and no consumed marker is emitted.
+    assert ctx.pulls >= 2, "the watcher never processed the injection"
     assert executor.received == [], (
         f"an older request was replayed as the steer: {executor.received!r}"
     )
