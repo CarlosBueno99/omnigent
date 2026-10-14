@@ -12,10 +12,12 @@ socket because the bridge's tmux socket lives in the runner sandbox's private /t
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from collections.abc import Iterator
@@ -106,7 +108,7 @@ def _pane_output(
             while (remaining := deadline - time.monotonic()) > 0:
                 try:
                     frame = await asyncio.wait_for(ws.recv(), timeout=remaining)
-                except TimeoutError:
+                except (TimeoutError, websockets.ConnectionClosed):
                     break
                 if isinstance(frame, bytes):
                     chunks.append(frame)
@@ -174,12 +176,19 @@ def parked_launcher_session(
             yield (live_server, session_id)
     finally:
         if session_id is not None:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+            with contextlib.suppress(httpx.HTTPError):
+                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
         if respawned is not None:
             respawned.terminate()
-            respawned.wait(timeout=5)
+            # Escalate to SIGKILL if the runner ignores SIGTERM, as the native fixtures do.
+            try:
+                respawned.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                respawned.kill()
+                respawned.wait(timeout=5)
 
 
+@pytest.mark.nightly
 @pytest.mark.timeout(600)
 def test_launcher_question_is_announced_in_chat(
     request: pytest.FixtureRequest,
