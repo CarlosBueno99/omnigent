@@ -1758,6 +1758,29 @@ class TestResolveGatewayEnv(unittest.TestCase):
         self.assertEqual(env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"], "1")
         self.assertNotIn("CLAUDE_CODE_USE_GATEWAY", env)
 
+    def test_exported_base_url_must_share_the_profile_host_origin(self):
+        """An exported ANTHROPIC_BASE_URL wins only when it is on the profile host's origin."""
+        from omnigent.inner.claude_sdk_executor import _resolve_gateway_env
+        from omnigent.inner.databricks_executor import DatabricksCredentials
+
+        cases = [
+            ("http://127.0.0.1:48123", "http://127.0.0.1:48123/serving-endpoints/anthropic", True),
+            ("https://ws.example", "https://ws.example:8443/serving-endpoints/anthropic", False),
+            ("https://ws.example", "https://WS.example/serving-endpoints/anthropic", True),
+        ]
+        for host, exported, honored in cases:
+            with (
+                self.subTest(host=host, exported=exported),
+                patch.dict("os.environ", {"ANTHROPIC_BASE_URL": exported}, clear=True),
+                patch(
+                    "omnigent.inner.databricks_executor._read_databrickscfg",
+                    return_value=DatabricksCredentials(host=host, token="t"),
+                ),
+            ):
+                env = _resolve_gateway_env()
+            expected = exported if honored else f"{host}/ai-gateway/anthropic"
+            self.assertEqual(env["ANTHROPIC_BASE_URL"], expected)
+
     def test_strips_trailing_slash(self):
         from omnigent.inner.claude_sdk_executor import _resolve_gateway_env
         from omnigent.inner.databricks_executor import DatabricksCredentials

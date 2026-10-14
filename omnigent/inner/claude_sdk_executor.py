@@ -41,6 +41,7 @@ from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, NamedTuple, Protocol, TypeAlias, cast
+from urllib.parse import urlsplit
 
 from omnigent._platform import resolve_cli_binary, stable_user_id
 from omnigent.cli_invocation import cli_invocation
@@ -1160,7 +1161,8 @@ def _resolve_gateway_env(
     values), the Databricks-specific fallback derives both from the profile's
     workspace **host** (see
     :func:`~omnigent.inner.databricks_executor._databricks_gateway_host`);
-    an ``ANTHROPIC_BASE_URL`` on that host replaces the derived base URL.
+    an exported ``ANTHROPIC_BASE_URL`` on that host's origin replaces the
+    derived base URL.
     Only the host is needed: the bearer token is minted at request time by
     the generated auth command, so OAuth U2M profiles (``auth_type =
     databricks-cli``, no static ``token`` field) resolve too. Returns an
@@ -1219,22 +1221,21 @@ def _resolve_gateway_env(
 
         if not host:
             return {}
-        from omnigent.host.databricks_credential import https_url_on_workspace_host
-
         host = host.rstrip("/")
-        # The auth command mints a bearer for this host, so only a same-workspace
-        # URL the user exported (e.g. /serving-endpoints/anthropic) may replace the route.
+        # The auth command mints a bearer for this host, so only an exported URL on
+        # the same origin (e.g. its /serving-endpoints/anthropic route) may replace
+        # the derived AI Gateway route.
         exported = getenv_nonempty_with_omnigent_prefix("ANTHROPIC_BASE_URL")
         ambient_base_url = exported[1].strip() if exported else ""
         if base_url_override is not None:
             base_url = base_url_override
-        elif https_url_on_workspace_host(ambient_base_url, host):
+        elif _on_workspace_origin(ambient_base_url, host):
             base_url = ambient_base_url
         else:
             base_url = f"{host}/ai-gateway/anthropic"
             if exported:
                 logger.info(
-                    "Ignoring %s=%s (not HTTPS on %s); using %s",
+                    "Ignoring %s=%s (not on %s); using %s",
                     exported[0],
                     ambient_base_url,
                     host,
@@ -1281,6 +1282,21 @@ def _resolve_gateway_env(
     else:
         gateway_env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
     return gateway_env
+
+
+def _on_workspace_origin(url: str, workspace_host: str) -> bool:
+    """True when *url* shares *workspace_host*'s scheme and network location.
+
+    :param url: A candidate base URL, e.g. ``"https://ws.example/serving-endpoints/anthropic"``.
+    :param workspace_host: The workspace origin the bearer is minted for.
+    :returns: ``False`` for an empty URL, a different scheme, or a different host/port.
+    """
+    expected = urlsplit(workspace_host)
+    parts = urlsplit(url)
+    return bool(expected.netloc) and (parts.scheme, parts.netloc.lower()) == (
+        expected.scheme,
+        expected.netloc.lower(),
+    )
 
 
 def _databricks_claude_auth_command(host: str, profile: str | None = None) -> str:
