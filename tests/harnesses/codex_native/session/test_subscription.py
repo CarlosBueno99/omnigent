@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -482,6 +483,353 @@ def test_subscribe_until_ready_retries_no_rollout_and_replays_messages(
         "user",
         "assistant",
     ]
+
+
+def test_subscribe_until_ready_recovers_from_a_refused_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A ``thread/resume`` refusal outside the not-ready gap must not end the
+    subscription silently: the thread's completed turns still have to reach
+    the Omnigent transcript (through a later ``thread/resume`` or the
+    ``thread/read`` fallback the sub-agent backfill already uses).
+    """
+    fake_client = _FakeCodexAppServerClient(
+        response={
+            "result": {
+                "thread": {
+                    "id": "thread_123",
+                    "turns": [
+                        {
+                            "id": "turn_123",
+                            "items": [
+                                {
+                                    "type": "userMessage",
+                                    "id": "item_user",
+                                    "content": [{"type": "text", "text": "first"}],
+                                },
+                                {
+                                    "type": "agentMessage",
+                                    "id": "item_agent",
+                                    "text": "reply",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            }
+        },
+    )
+    resume_calls = 0
+
+    async def fake_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        nonlocal resume_calls
+        fake_client.requests.append((method, params))
+        if method == "thread/resume":
+            resume_calls += 1
+            if resume_calls == 1:
+                raise codex_native_app_server.CodexAppServerResponseError(
+                    {"code": -32601, "message": "list_turns is not supported yet"}
+                )
+        return fake_client.response
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    posted: list[dict[str, Any]] = []
+    monkeypatch.setattr(fake_client, "request", fake_request)
+    monkeypatch.setattr(codex_native_forwarder, "_sleep", fake_sleep)
+
+    async def run() -> None:
+        async with _recording_forwarder_client(posted) as client:
+            await codex_native_forwarder._subscribe_until_ready(
+                fake_client,  # type: ignore[arg-type]
+                client,
+                session_id="conv_123",
+                bridge_dir=tmp_path,
+                thread_id="thread_123",
+                usage_coalescer=_usage_coalescer(client),
+                elicitation_tracker=_elicitation_tracker(),
+            )
+
+    asyncio.run(run())
+
+    assert fake_client.requests[0] == (
+        "thread/resume",
+        {"threadId": "thread_123", "excludeTurns": True},
+    )
+    assert [payload["data"]["item_data"]["role"] for payload in posted] == [
+        "user",
+        "assistant",
+    ], f"refused subscription replayed nothing; requests={fake_client.requests}"
+
+
+_RESUME_EXCLUDING_TURNS = ("thread/resume", {"threadId": "thread_123", "excludeTurns": True})
+_RESUME_WITH_TURNS = ("thread/resume", {"threadId": "thread_123"})
+_READ_WITH_TURNS = ("thread/read", {"threadId": "thread_123", "includeTurns": True})
+
+
+def _refused_resume() -> codex_native_app_server.CodexAppServerResponseError:
+    """Codex's refusal of ``thread/resume`` outside the fresh-thread not-ready gap."""
+    return codex_native_app_server.CodexAppServerResponseError(
+        {"code": -32601, "message": "list_turns is not supported yet"}
+    )
+
+
+def _completed_turn(index: int) -> dict[str, Any]:
+    """One completed Codex turn carrying a user prompt and an agent reply."""
+    return {
+        "id": f"turn_{index}",
+        "status": "completed",
+        "items": [
+            {
+                "type": "userMessage",
+                "id": f"item_user_{index}",
+                "content": [{"type": "text", "text": f"prompt {index}"}],
+            },
+            {"type": "agentMessage", "id": f"item_agent_{index}", "text": f"reply {index}"},
+        ],
+    }
+
+
+def _mirrored_roles(posted: list[dict[str, Any]]) -> list[str]:
+    """Roles of the transcript messages the forwarder posted, in order."""
+    roles = [
+        payload["data"].get("item_data", {}).get("role")
+        for payload in posted
+        if payload.get("type") == "external_conversation_item"
+    ]
+    return [role for role in roles if role in {"user", "assistant"}]
+
+
+def _posted_status_edges(posted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Session status payloads the forwarder posted, in order."""
+    return [
+        payload["data"] for payload in posted if payload.get("type") == "external_session_status"
+    ]
+
+
+def _replies_mirrored(posted: list[dict[str, Any]], count: int) -> Callable[[], bool]:
+    """Condition: at least *count* assistant replies have been posted."""
+    return lambda: _mirrored_roles(posted).count("assistant") >= count
+
+
+async def _until(condition: Callable[[], bool], *, task: asyncio.Task[None] | None = None) -> None:
+    """Yield to the loop until *condition* holds (or *task* ends); bounded."""
+    for _ in range(2000):
+        if condition() or (task is not None and task.done()):
+            return
+        await asyncio.sleep(0.001)
+    raise AssertionError("forwarder did not reach the expected state in time")
+
+
+def test_subscribe_until_ready_rereads_a_refused_thread_after_each_status_edge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A refused subscription keeps mirroring the thread through ``thread/read``.
+
+    Codex routes turn/item notifications only to subscribed connections but
+    broadcasts ``thread/status/changed``. After a refusal the forwarder must
+    re-read the thread on every status edge, replaying only the items it has
+    not mirrored yet and closing the session status, and return to a live
+    subscription once ``thread/resume`` succeeds.
+    """
+    _write_forwarder_bridge(tmp_path, active_turn_id=None)
+    fake_client = _FakeCodexAppServerClient()
+    turns: list[dict[str, Any]] = []
+    refuse_resume = True
+
+    async def fake_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        fake_client.requests.append((method, params))
+        if method == "thread/resume" and refuse_resume:
+            raise _refused_resume()
+        return {"result": {"thread": {"id": "thread_123", "turns": list(turns)}}}
+
+    monkeypatch.setattr(fake_client, "request", fake_request)
+    posted: list[dict[str, Any]] = []
+
+    async def run() -> None:
+        nonlocal refuse_resume
+        status_signal = asyncio.Event()
+        async with _recording_forwarder_client(posted) as client:
+            task = asyncio.create_task(
+                codex_native_forwarder._subscribe_until_ready(
+                    fake_client,  # type: ignore[arg-type]
+                    client,
+                    session_id="conv_123",
+                    bridge_dir=tmp_path,
+                    thread_id="thread_123",
+                    usage_coalescer=_usage_coalescer(client),
+                    elicitation_tracker=_elicitation_tracker(),
+                    forwarder_state=codex_native_forwarder._CodexForwarderState(
+                        parent_session_id="conv_123",
+                        codex_client=fake_client,  # type: ignore[arg-type]
+                    ),
+                    ready_signal=asyncio.Event(),
+                    status_signal=status_signal,
+                )
+            )
+            await _until(lambda: len(fake_client.requests) >= 2, task=task)
+            assert not task.done(), "a refused subscription must wait for the next status edge"
+            assert fake_client.requests == [_RESUME_EXCLUDING_TURNS, _READ_WITH_TURNS]
+            assert _mirrored_roles(posted) == []
+
+            # Each turn completes while unsubscribed; only its status edge arrives.
+            for index in (1, 2):
+                turns.append(_completed_turn(index))
+                status_signal.set()
+                await _until(_replies_mirrored(posted, index), task=task)
+                assert not task.done()
+
+            refuse_resume = False
+            status_signal.set()
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(run())
+
+    assert fake_client.requests[2:] == [
+        _RESUME_WITH_TURNS,
+        _READ_WITH_TURNS,
+        _RESUME_WITH_TURNS,
+        _READ_WITH_TURNS,
+        _RESUME_WITH_TURNS,
+    ]
+    assert _mirrored_roles(posted) == ["user", "assistant", "user", "assistant"]
+    idle_turns = [
+        edge["response_id"] for edge in _posted_status_edges(posted) if edge["status"] == "idle"
+    ]
+    assert idle_turns[:2] == ["codex_turn_1", "codex_turn_2"]
+    assert set(idle_turns) == {"codex_turn_1", "codex_turn_2"}
+
+
+def test_subscribe_until_ready_retries_a_refused_thread_after_a_failed_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A refusal whose ``thread/read`` fallback also fails waits for a status edge.
+
+    Without a status signal (no live stream to wake it) the subscription
+    still stops after the one attempt instead of polling.
+    """
+    fake_client = _FakeCodexAppServerClient(
+        response={"result": {"thread": {"id": "thread_123", "turns": []}}}
+    )
+    refuse = True
+
+    async def fake_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        fake_client.requests.append((method, params))
+        if refuse:
+            raise _refused_resume()
+        return fake_client.response
+
+    monkeypatch.setattr(fake_client, "request", fake_request)
+    posted: list[dict[str, Any]] = []
+
+    async def run() -> None:
+        nonlocal refuse
+        async with _recording_forwarder_client(posted) as client:
+            context: dict[str, Any] = {
+                "session_id": "conv_123",
+                "bridge_dir": tmp_path,
+                "thread_id": "thread_123",
+                "usage_coalescer": _usage_coalescer(client),
+                "elicitation_tracker": _elicitation_tracker(),
+            }
+            await codex_native_forwarder._subscribe_until_ready(
+                fake_client,  # type: ignore[arg-type]
+                client,
+                **context,
+            )
+            assert fake_client.requests == [_RESUME_EXCLUDING_TURNS, _READ_WITH_TURNS]
+            fake_client.requests.clear()
+
+            status_signal = asyncio.Event()
+            task = asyncio.create_task(
+                codex_native_forwarder._subscribe_until_ready(
+                    fake_client,  # type: ignore[arg-type]
+                    client,
+                    status_signal=status_signal,
+                    **context,
+                )
+            )
+            await _until(lambda: len(fake_client.requests) >= 2, task=task)
+            assert not task.done(), "a failed read must park on the status signal, not give up"
+            refuse = False
+            status_signal.set()
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(run())
+
+    assert fake_client.requests == [_RESUME_EXCLUDING_TURNS, _READ_WITH_TURNS, _RESUME_WITH_TURNS]
+    assert posted == []
+
+
+def test_supervise_forwarder_rereads_a_refused_thread_on_its_status_edge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    The supervisor wakes a refused subscription on the thread's status edge.
+
+    ``thread/status/changed`` is the one notification Codex still broadcasts
+    to an unsubscribed connection, so a turn finished while unsubscribed must
+    reach Omnigent through it.
+    """
+    _write_forwarder_bridge(tmp_path, active_turn_id=None)
+    fake_client = _FakeCodexAppServerClient()
+    turns: list[dict[str, Any]] = []
+    posted: list[dict[str, Any]] = []
+    idle_edge = _expected_status_data("idle", "turn_1")
+
+    async def fake_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        fake_client.requests.append((method, params))
+        if method == "thread/resume":
+            raise _refused_resume()
+        return {"result": {"thread": {"id": "thread_123", "turns": list(turns)}}}
+
+    async def fake_iter_events() -> Any:
+        # The first read finds no turns; one then completes while the
+        # connection is unsubscribed and only its status edge is broadcast.
+        await _until(lambda: fake_client.requests.count(_READ_WITH_TURNS) == 1)
+        turns.append(_completed_turn(1))
+        yield {
+            "method": "thread/status/changed",
+            "params": {"threadId": "thread_123", "status": {"type": "idle"}},
+        }
+        await _until(lambda: idle_edge in _posted_status_edges(posted))
+
+    monkeypatch.setattr(fake_client, "request", fake_request)
+    monkeypatch.setattr(fake_client, "iter_events", fake_iter_events)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted.append(json.loads(request.content))
+        return httpx.Response(202, json={"queued": False})
+
+    asyncio.run(
+        codex_native_forwarder.supervise_forwarder(
+            base_url="http://127.0.0.1:1",
+            headers={},
+            session_id="conv_123",
+            bridge_dir=tmp_path,
+            app_server_url=str(tmp_path / "app-server.sock"),
+            thread_id="thread_123",
+            client=fake_client,  # type: ignore[arg-type]
+            ap_transport=httpx.MockTransport(handler),
+        )
+    )
+
+    assert fake_client.requests == [
+        _RESUME_EXCLUDING_TURNS,
+        _READ_WITH_TURNS,
+        _RESUME_WITH_TURNS,
+        _READ_WITH_TURNS,
+    ]
+    assert _mirrored_roles(posted) == ["user", "assistant"]
+    assert idle_edge in _posted_status_edges(posted)
 
 
 def test_subscribe_until_ready_replays_completed_turn_status(

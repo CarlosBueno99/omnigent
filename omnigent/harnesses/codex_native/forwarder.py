@@ -2141,6 +2141,9 @@ async def supervise_forwarder(
         # subscribe task park instead of blind-polling ``thread/resume``
         # for a fresh, still-empty thread. Recreated per thread on rotation.
         thread_active = asyncio.Event()
+        # Pulsed on every status edge of the thread, so a subscription Codex
+        # refused re-reads the thread after each turn until it succeeds.
+        thread_status = asyncio.Event()
         subscribe_task = asyncio.create_task(
             _subscribe_until_ready(
                 client,
@@ -2152,6 +2155,7 @@ async def supervise_forwarder(
                 elicitation_tracker=target.elicitation_tracker,
                 forwarder_state=forwarder_state,
                 ready_signal=thread_active,
+                status_signal=thread_status,
             ),
             name="codex-native-forwarder-subscribe",
         )
@@ -2181,6 +2185,7 @@ async def supervise_forwarder(
                         # own active signal so the new subscription parks
                         # until the rotated thread's first turn.
                         thread_active = asyncio.Event()
+                        thread_status = asyncio.Event()
                         subscribe_task = asyncio.create_task(
                             _subscribe_until_ready(
                                 client,
@@ -2192,6 +2197,7 @@ async def supervise_forwarder(
                                 elicitation_tracker=target.elicitation_tracker,
                                 forwarder_state=forwarder_state,
                                 ready_signal=thread_active,
+                                status_signal=thread_status,
                             ),
                             name="codex-native-forwarder-subscribe",
                         )
@@ -2201,6 +2207,8 @@ async def supervise_forwarder(
                     # waiting forever on an idle fresh thread.
                     if not thread_active.is_set() and _event_indicates_thread_active(event):
                         thread_active.set()
+                    if _event_is_thread_status_edge(event, target.thread_id):
+                        thread_status.set()
                     # Surface a /side ephemeral fork as its own sub-agent (rail)
                     # child. No-op unless this event is a fork of the active
                     # thread; once mapped, the fork's events route to the child.
@@ -2555,20 +2563,40 @@ async def _subscribe_until_ready(
     elicitation_tracker: _CodexElicitationTaskTracker,
     forwarder_state: _CodexForwarderState | None = None,
     ready_signal: asyncio.Event | None = None,
+    status_signal: asyncio.Event | None = None,
 ) -> None:
-    """Reserve authoritative delivery order while subscribing and replaying."""
-    async with _conversation_item_delivery_scope(session_id):
-        await _subscribe_until_ready_inner(
-            client,
-            ap_client,
-            session_id=session_id,
-            bridge_dir=bridge_dir,
-            thread_id=thread_id,
-            usage_coalescer=usage_coalescer,
-            elicitation_tracker=elicitation_tracker,
-            forwarder_state=forwarder_state,
-            ready_signal=ready_signal,
-        )
+    """
+    Reserve authoritative delivery order while subscribing and replaying.
+
+    When Codex refuses the subscription, the attempt mirrors the thread's
+    history through ``thread/read`` instead and is repeated after every
+    thread status edge the caller reports on *status_signal*, until a later
+    ``thread/resume`` succeeds. The order lock is released while waiting so
+    live posts for the session are not held up.
+
+    :param status_signal: Set by the caller on each ``thread/status/changed``
+        for this thread. ``None`` stops after one refused attempt.
+    """
+    after_refusal = False
+    while True:
+        async with _conversation_item_delivery_scope(session_id):
+            subscribed = await _subscribe_until_ready_inner(
+                client,
+                ap_client,
+                session_id=session_id,
+                bridge_dir=bridge_dir,
+                thread_id=thread_id,
+                usage_coalescer=usage_coalescer,
+                elicitation_tracker=elicitation_tracker,
+                forwarder_state=forwarder_state,
+                ready_signal=ready_signal,
+                after_refusal=after_refusal,
+            )
+        if subscribed or status_signal is None:
+            return
+        after_refusal = True
+        await status_signal.wait()
+        status_signal.clear()
 
 
 async def _subscribe_until_ready_inner(
@@ -2582,7 +2610,8 @@ async def _subscribe_until_ready_inner(
     elicitation_tracker: _CodexElicitationTaskTracker,
     forwarder_state: _CodexForwarderState | None = None,
     ready_signal: asyncio.Event | None = None,
-) -> None:
+    after_refusal: bool = False,
+) -> bool:
     """
     Subscribe this app-server connection to a Codex thread.
 
@@ -2603,6 +2632,13 @@ async def _subscribe_until_ready_inner(
     detect activity and set the signal. A short poll still covers the
     brief window between "thread active" and the rollout being flushed.
 
+    Codex delivers ``turn/*``/``item/*`` notifications only to connections
+    whose ``thread/resume`` succeeded. Any other refusal of that call (seen
+    as ``-32601 list_turns is not supported yet``) therefore falls back to
+    ``thread/read`` so the thread's completed turns still reach the Omnigent
+    transcript and close the session status; the caller retries the
+    subscription after the next status edge.
+
     :param client: Codex app-server client.
     :param ap_client: Omnigent HTTP client used for replayed items.
     :param session_id: Omnigent conversation id.
@@ -2618,7 +2654,12 @@ async def _subscribe_until_ready_inner(
         thread parks here instead of polling. ``None`` falls back to the
         fixed-interval retry (used where no live event stream drives the
         signal).
-    :returns: None.
+    :param after_refusal: Whether an earlier attempt was refused. Turns are
+        then requested from ``thread/resume`` so items completed while
+        unsubscribed are replayed once it succeeds.
+    :returns: ``True`` once ``thread/resume`` subscribed this connection;
+        ``False`` when the thread was only mirrored through ``thread/read``
+        or neither call succeeded.
     """
     bridge_state = read_bridge_state(bridge_dir)
     replay_from_turn_id = (
@@ -2628,9 +2669,10 @@ async def _subscribe_until_ready_inner(
     )
     saw_not_ready = False
     while True:
+        subscribed = True
         try:
             params: _JsonObject = {"threadId": thread_id}
-            if not saw_not_ready and replay_from_turn_id is None:
+            if not saw_not_ready and not after_refusal and replay_from_turn_id is None:
                 params["excludeTurns"] = True
             response = await client.request("thread/resume", params)
         except asyncio.CancelledError:
@@ -2655,8 +2697,13 @@ async def _subscribe_until_ready_inner(
                     # poll covers that window.
                     await _sleep(_SUBSCRIBE_RETRY_DELAY_SECONDS)
                 continue
-            _logger.warning("failed to subscribe to Codex thread %s", thread_id, exc_info=True)
-            return
+            read = await _read_thread_after_refused_resume(
+                client, thread_id=thread_id, refusal=exc, first_refusal=not after_refusal
+            )
+            if read is None:
+                return False
+            response = read
+            subscribed = False
         if forwarder_state is not None:
             forwarder_state.note_resume_response(response)
             # Source of truth for the cost policy is config.toml's model (what
@@ -2695,7 +2742,72 @@ async def _subscribe_until_ready_inner(
             forwarder_state=forwarder_state,
             replay_from_turn_id=replay_from_turn_id,
         )
-        return
+        if subscribed and after_refusal:
+            _logger.info("Codex thread %s subscription succeeded after a refusal", thread_id)
+        return subscribed
+
+
+async def _read_thread_after_refused_resume(
+    client: CodexAppServerClient,
+    *,
+    thread_id: str,
+    refusal: Exception,
+    first_refusal: bool,
+) -> CodexMessage | None:
+    """
+    Fetch a thread Codex refused to resume, so its history can still be mirrored.
+
+    ``thread/read`` with ``includeTurns`` returns the same ``{"thread": Thread}``
+    shape as ``thread/resume`` (the fallback the sub-agent backfill already
+    uses), without subscribing the connection. The refusal is logged with its
+    traceback the first time only.
+
+    :param client: Codex app-server client.
+    :param thread_id: Codex thread id.
+    :param refusal: Exception ``thread/resume`` raised.
+    :param first_refusal: Whether this is the subscription's first refusal.
+    :returns: JSON-RPC response envelope, or ``None`` when the read failed too.
+    """
+    if first_refusal:
+        _logger.warning(
+            "failed to subscribe to Codex thread %s; mirroring its history through "
+            "thread/read until thread/resume succeeds",
+            thread_id,
+            exc_info=refusal,
+        )
+    else:
+        _logger.info("Codex thread %s still refuses thread/resume; reading it instead", thread_id)
+    try:
+        return await client.request("thread/read", {"threadId": thread_id, "includeTurns": True})
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - app-server error envelopes are surfaced as RuntimeError.
+        _logger.log(
+            logging.WARNING if first_refusal else logging.INFO,
+            "failed to read Codex thread %s after its subscription was refused",
+            thread_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _event_is_thread_status_edge(event: CodexMessage, thread_id: str) -> bool:
+    """
+    Return whether *event* is a ``thread/status/changed`` for *thread_id*.
+
+    Codex broadcasts these to every connection, subscribed or not, so they
+    are the wake-up for re-reading a thread whose subscription was refused.
+
+    :param event: A Codex JSON-RPC notification envelope.
+    :param thread_id: Codex thread id the forwarder mirrors.
+    :returns: ``True`` for a status edge on that thread (or one carrying no id).
+    """
+    if event.get("method") != _CODEX_THREAD_STATUS_CHANGED_METHOD:
+        return False
+    params = event.get("params")
+    if not isinstance(params, dict):
+        return False
+    return _thread_id_from_params(params) in {None, thread_id}
 
 
 def _event_indicates_thread_active(event: CodexMessage) -> bool:
