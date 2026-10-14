@@ -155,7 +155,9 @@ def test_databricks_model_run_uses_exported_same_workspace_base_url(
             timeout=_RUN_TIMEOUT_SEC,
         )
 
-    # Read the journal only after the stub server has shut down and joined its handlers.
+    # Read the journal after the run and the stub server shut down; only POST /v1/messages
+    # entries are asserted, so a straggling handler from the CLI's keep-alive socket cannot
+    # produce a false pass.
     model_requests = [
         request
         for request in workspace.seen
