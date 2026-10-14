@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
 import {
   ImportContextModal,
@@ -24,14 +25,21 @@ function renderModal(
   props: Partial<Omit<ImportContextModalProps, "context">> = {},
 ) {
   return render(
-    <ImportContextModal
-      open={true}
-      onOpenChange={vi.fn()}
-      onConfirm={vi.fn()}
-      {...props}
-      context={context}
-    />,
+    <MemoryRouter>
+      <ImportContextModal
+        open={true}
+        onOpenChange={vi.fn()}
+        onConfirm={vi.fn()}
+        {...props}
+        context={context}
+      />
+      <LocationProbe />
+    </MemoryRouter>,
   );
+}
+
+function LocationProbe() {
+  return <span data-testid="location">{useLocation().pathname}</span>;
 }
 
 function selectTab(tab: HTMLElement) {
@@ -86,7 +94,7 @@ describe("ImportContextModal – harness tabs", () => {
   it("shows the credential line and read-only asset lists with details", () => {
     renderModal();
 
-    expect(screen.getByText("Databricks AI Gateway")).toBeTruthy();
+    expect(screen.getByText("Databricks Unity Gateway")).toBeTruthy();
     expect(screen.getAllByText("Detected")).toHaveLength(1);
     expect(assetTabNames()).toEqual(["MCPs 5", "Skills 10", "Plugins 3"]);
 
@@ -178,7 +186,7 @@ describe("ImportContextModal – empty states", () => {
     renderModal({ ...MOCK_IMPORT_CONTEXT, mcps: [], skills: [], plugins: [] });
 
     expect(harnessTabs()).toHaveLength(3);
-    expect(screen.getByText("Databricks AI Gateway")).toBeTruthy();
+    expect(screen.getByText("Databricks Unity Gateway")).toBeTruthy();
     expect(screen.getByText("No MCPs, skills, or plugins detected")).toBeTruthy();
     expect(assetTabNames()).toEqual([]);
   });
@@ -192,6 +200,21 @@ describe("ImportContextModal – empty states", () => {
 });
 
 describe("ImportContextModal – closing", () => {
+  it("opens Harnesses and dismisses without confirming on See more", () => {
+    const onConfirm = vi.fn();
+    const onOpenChange = vi.fn();
+    renderModal(MOCK_IMPORT_CONTEXT, { onConfirm, onOpenChange });
+
+    const seeMore = screen.getByRole("link", { name: "See more" });
+    expect(seeMore.getAttribute("href")).toBe("/settings/harnesses");
+    expect(seeMore.nextElementSibling).toBe(screen.getByRole("button", { name: "Confirm" }));
+    fireEvent.click(seeMore);
+
+    expect(screen.getByTestId("location").textContent).toBe("/settings/harnesses");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
   it("confirms and closes on Confirm", () => {
     const onConfirm = vi.fn();
     const onOpenChange = vi.fn();
