@@ -3165,9 +3165,9 @@ def _render_failed_status_error(
 
 
 def _attach_failure_notice(action: str, conversation_id: str, exc: BaseException) -> Text:
-    """Red notice for a failed ``--resume`` / ``/open`` attach; ``exc`` is escaped so
-    a message quoting Rich markup (e.g. ``[/dim]``) displays instead of raising."""
-    return Text.from_markup(f"  [bold red]{action} {conversation_id[:16]}…: {escape(str(exc))}[/]")
+    """Red notice for a failed ``--resume`` / ``/open`` attach, built as plain styled
+    text so a message quoting Rich markup (e.g. ``[/dim]``) displays instead of raising."""
+    return Text(f"  {action} {conversation_id[:16]}…: {exc}", style="bold red")
 
 
 async def run_repl(

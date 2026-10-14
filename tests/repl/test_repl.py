@@ -428,6 +428,11 @@ def test_attach_failure_notice_renders_markup_in_error_text_literally() -> None:
         "  Failed to resume 6ad83003d41543f7…: "
         "closing tag '[/dim]' at position 48 doesn't match any open tag"
     )
+    notice = _attach_failure_notice("Failed [bold]to open", "[/dim]0123456789abcdef", exc)
+    assert notice.plain == (
+        "  Failed [bold]to open [/dim]0123456789…: "
+        "closing tag '[/dim]' at position 48 doesn't match any open tag"
+    )
 
 
 def test_render_history_item_function_call_output_renders_panel_with_tool_name() -> None:
