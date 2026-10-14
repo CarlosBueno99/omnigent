@@ -69,9 +69,9 @@ from filelock import Timeout as FileLockTimeout
 from omnigent._platform import IS_WINDOWS, is_wsl, stable_user_id
 from omnigent.harnesses.claude_native import delivery_diagnostics
 
-# The hook-facing bridge-state readers live in ``bridge_state`` so hook spawns
-# never import this module. Names other modules import from here are
-# re-exported explicitly so an unused-import fix cannot drop them.
+# The hook-facing bridge-state readers live in ``bridge_state`` so importing
+# the hook module never pulls this one in. Names other modules import from here
+# are re-exported explicitly so an unused-import fix cannot drop them.
 from omnigent.harnesses.claude_native.bridge_state import (
     _COMMAND_NAME_RE,
     _CONTEXT_FILE,
