@@ -220,6 +220,7 @@ def test_message_display_hook_many_appends_stay_line_clean(
 _HEAVY_IMPORTS = (
     "fastapi",
     "httpx",
+    "omnigent.harnesses.claude_native.bridge",
     "omnigent.inner.databricks_executor",
     "omnigent.inner.datamodel",
     "omnigent.models.model_catalog",
@@ -304,13 +305,13 @@ def test_package_lazy_exports_resolve_on_access() -> None:
     [
         ("omnigent.harnesses.claude_native.message_display_hook", frozenset()),
         ("omnigent.harnesses.claude_native.status", frozenset()),
+        ("omnigent.harnesses.claude_native.bridge_state", frozenset()),
         (
             "omnigent.harnesses.claude_native.hook",
-            # The observer path (the most frequent invocation) is pure
-            # stdlib + light bridge state: httpx and the policy machinery
-            # are imported inside the subcommands that speak HTTP, and the
-            # bridge defers its tools/spec/pydantic graph to the launch
-            # path. Nothing heavy may ride the module import.
+            # Every subcommand pays this import per spawn, so it is pure
+            # stdlib + the stdlib-only bridge-state readers: httpx and the
+            # policy machinery load inside the subcommands that speak HTTP,
+            # and ``bridge`` only inside the paths that write bridge state.
             frozenset(),
         ),
     ],
@@ -326,3 +327,58 @@ def test_hook_entrypoints_stay_import_light(module: str, allowed: frozenset[str]
     """
     loaded = _heavy_imports_after(f"import {module}")
     assert set(loaded) <= allowed, f"{module} newly imports {sorted(set(loaded) - allowed)}"
+
+
+# Modules a policy evaluation never touches. Each one on the evaluate-policy run
+# path is paid per hook spawn; ``bridge`` alone pulls in most of the others.
+_POLICY_UNRELATED_IMPORTS = (
+    "asyncio",
+    "filelock",
+    "http.server",
+    "omnigent.harnesses.claude_native.bridge",
+    "omnigent.harnesses.claude_native.failure_telemetry",
+    "omnigent.harnesses.kiro_native.bridge",
+    "omnigent.tools.base",
+)
+
+
+def test_evaluate_policy_run_imports_only_policy_modules(tmp_path: Path) -> None:
+    """An evaluate-policy hook run loads none of the modules unrelated to the check."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / "bridge.json").write_text(
+        json.dumps({"bridge_id": "bridge_test", "active_session_id": "sess_test"}),
+        encoding="utf-8",
+    )
+    payload = json.dumps(
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+        }
+    )
+    code = "\n".join(
+        (
+            "import json, runpy, sys",
+            f"sys.argv = ['hook', 'evaluate-policy', '--bridge-dir', {str(bridge_dir)!r}]",
+            "try:",
+            "    runpy.run_module('omnigent.harnesses.claude_native.hook', run_name='__main__')",
+            "except SystemExit:",
+            "    pass",
+            f"loaded = [m for m in {list(_POLICY_UNRELATED_IMPORTS)!r} if m in sys.modules]",
+            "print(json.dumps(loaded))",
+        )
+    )
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", code],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    loaded = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert loaded == [], (
+        f"evaluate-policy run imports modules the policy check never uses: {loaded}"
+    )
