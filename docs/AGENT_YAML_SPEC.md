@@ -631,9 +631,11 @@ To migrate an existing uploaded agent:
 3. Make subsequent MCP configuration changes on the migrated agent. Removing an
    MCP server from an old agent does not bypass bundle validation.
 
-Operator-authored bundles on trusted single-user/local servers retain their
-Python and TypeScript tool support. Changing a tool's declared runtime alone is
-not a migration: client tools require a client-provided implementation.
+HTTP uploads use these restrictions on local single-user servers too: a
+loopback request cannot distinguish the operator from code in a session. Use
+operator-registered agents for trusted in-process tools, or MCP/client tools for
+uploaded agents. Changing a tool's declared runtime alone is not a migration:
+client tools require a client-provided implementation.
 
 ### MCP server
 
