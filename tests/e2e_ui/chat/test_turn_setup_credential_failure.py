@@ -121,7 +121,9 @@ def expect_reply(page: Page, token: str) -> None:
     expect(page.locator(_WORKING)).to_have_count(0, timeout=_TURN_TIMEOUT_MS)
 
 
-def settle_turn(page: Page, token: str, timeout_ms: int = 60_000) -> dict[str, str | None]:
+def settle_turn(
+    page: Page, token: str, timeout_ms: int = _TURN_TIMEOUT_MS
+) -> dict[str, str | None]:
     """Wait for a reply or an error pill; return what the user sees."""
     pill = page.get_by_test_id("error-pill")
     reply = page.locator(_ASSISTANT, has_text=token)
@@ -177,9 +179,16 @@ def test_credential_failure_during_turn_setup_is_not_a_generic_runner_error(
             )
             _screenshot(affected_page, "02-affected-turn")
             print(f"affected turn: {observed}")
+            assert observed["outcome"] == "error", observed
+            assert observed["headline"] == CREDENTIAL_FAILURE_HEADLINE, observed
+            message = observed["message"] or ""
+            assert CREDENTIAL_FAILURE_MESSAGE in message, observed
+            assert "Try this:" in message, observed
+            assert " stop`" in message, observed
         finally:
             context.close()
 
+        # Once the fault clears, the affected session's next turn replies normally.
         marker.unlink()
         recovery = browser.new_context()
         try:
@@ -188,10 +197,3 @@ def test_credential_failure_during_turn_setup_is_not_a_generic_runner_error(
             _screenshot(page, "03-recovered-reply")
         finally:
             recovery.close()
-
-    assert observed["outcome"] == "error", observed
-    assert observed["headline"] == CREDENTIAL_FAILURE_HEADLINE, observed
-    message = observed["message"] or ""
-    assert CREDENTIAL_FAILURE_MESSAGE in message, observed
-    assert "Try this:" in message, observed
-    assert " stop`" in message, observed
