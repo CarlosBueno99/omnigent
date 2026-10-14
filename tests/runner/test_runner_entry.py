@@ -631,6 +631,7 @@ async def test_tunnel_boot_hands_its_auth_resolution_to_create_app(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="direct-attach listener is POSIX-only")
 @pytest.mark.parametrize("lifespan_exit_fails", [False, True])
 async def test_fatal_tunnel_rejection_still_stops_listener_and_lifespan(
     monkeypatch: pytest.MonkeyPatch,
