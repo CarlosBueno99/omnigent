@@ -8,7 +8,6 @@ import contextlib
 import io
 import json
 import re
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -97,10 +96,8 @@ def _create_conversation_with_markup_tool_call(env: dict[str, str]) -> str:
     child = _spawn(["run", str(_AGENT_YAML)], env, transcript)
     try:
         wait_for_ready(child, timeout=_BOOT_TIMEOUT_S)
-        time.sleep(1.0)
         submit_prompt(child, f"run {_SHELL_COMMAND}")
         await_turn_complete(child, running_timeout=60, completion_timeout=120)
-        time.sleep(1.0)
         clean_exit(child, timeout=60)
     finally:
         if child.isalive():
@@ -140,7 +137,7 @@ def test_resume_replays_tool_call_with_markup_like_args(
         if idx == 2:
             # Decline the crash handler's bug-filing prompt; a bare Enter would accept it.
             child.send("n\r")
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(pexpect.TIMEOUT, pexpect.EOF):
                 child.expect(pexpect.EOF, timeout=30)
         plain = strip_ansi(transcript.getvalue())
         assert idx in (0, 1), (
