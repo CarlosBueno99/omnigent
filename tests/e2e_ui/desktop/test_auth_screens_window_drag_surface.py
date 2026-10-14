@@ -53,7 +53,7 @@ _APP_REGION_JS = """
 }
 """
 
-# Where a user grabs the window: inside the 2.25rem title-bar band, clear of the
+# Where a user grabs the window: inside the title-bar band, clear of the
 # traffic lights. The strip has pointer-events: none, so elementFromPoint would
 # skip it; drag regions are matched by geometry instead.
 _GRAB_POINT = (400, 10)
