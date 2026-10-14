@@ -27,6 +27,7 @@ from tests.e2e.omnigent._pexpect_harness import (  # noqa: E402
     STATE_SLEEPING,
     await_turn_complete,
     clean_exit,
+    strip_ansi,
     submit_prompt,
     wait_for_ready,
 )
@@ -37,7 +38,6 @@ _AGENT_YAML = (
 )
 _MODEL_KEY = "mock-markup-args-shell"
 _SHELL_COMMAND = "echo '[/dim]'"
-_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _READY_PATTERNS = [STATE_SLEEPING, r"·\s*ready"]
 _BOOT_TIMEOUT_S = 180.0
 _RESUME_TIMEOUT_S = 120.0
@@ -59,10 +59,6 @@ _STALE_ENV_VARS = (
     "OMNIGENT_DATABASE_URI",
     "OMNIGENT_SESSION_ID",
 )
-
-
-def _strip_ansi(text: str) -> str:
-    return _ANSI_RE.sub("", text)
 
 
 def _omnigent_cli() -> str:
@@ -138,7 +134,7 @@ def _create_conversation_with_markup_tool_call(env: dict[str, str]) -> str:
     finally:
         if child.isalive():
             child.terminate(force=True)
-    plain = re.sub(r"\\\s*\n\s*", " ", _strip_ansi(transcript.getvalue()))
+    plain = re.sub(r"\\\s*\n\s*", " ", strip_ansi(transcript.getvalue()))
     match = re.search(r"--resume\s+([0-9a-f]{32}|conv_[0-9a-f]+)", plain)
     assert match, f"no resume hint with a conversation id in the exit output:\n{plain[-3000:]}"
     return match.group(1)
@@ -175,7 +171,7 @@ def test_resume_replays_tool_call_with_markup_like_args(
             child.send("n\r")
             with contextlib.suppress(Exception):
                 child.expect(pexpect.EOF, timeout=30)
-        plain = _strip_ansi(transcript.getvalue())
+        plain = strip_ansi(transcript.getvalue())
         assert idx in (0, 1), (
             f"`omnigent run --resume {conversation_id}` never reached the prompt. "
             f"Output tail:\n{plain[-3000:]}"

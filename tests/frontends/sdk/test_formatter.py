@@ -381,9 +381,11 @@ def test_format_tool_group_no_output() -> None:
     assert len(items) == 1
 
 
-@pytest.mark.parametrize("args_summary", ["echo '[/dim]'", "printf '[bold]x[/bold]'"])
+@pytest.mark.parametrize(
+    "args_summary", ["echo '[/dim]'", "printf '[bold]x[/bold]'", "echo ok # \\"]
+)
 def test_format_tool_group_renders_markup_like_args_literally(args_summary: str) -> None:
-    """Bracketed tool args on the ``⏵`` line are text, not Rich markup."""
+    """Bracketed or backslash-terminated tool args on the ``⏵`` line are text, not markup."""
     fmt = RichBlockFormatter()
     group = ToolGroup(
         executions=[

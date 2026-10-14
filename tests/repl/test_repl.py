@@ -405,6 +405,20 @@ def test_render_history_item_function_call_with_markup_in_args_does_not_crash() 
     )
 
 
+def test_render_history_item_function_call_keeps_trailing_backslash_in_args() -> None:
+    """A replayed command ending in a backslash shows exactly one backslash."""
+    host = _CapturingHost()
+    item = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "Bash",
+        "arguments": json.dumps({"command": "echo ok # \\"}),
+    }
+    _render_history_item(item, host)
+    plain = host.render_plain()
+    assert "Bash(echo ok # \\)" in plain and "Bash(echo ok # \\\\)" not in plain, plain
+
+
 def test_attach_failure_notice_renders_markup_in_error_text_literally() -> None:
     """An exception whose message quotes Rich markup renders in the notice rather
     than raising a second ``MarkupError`` from the handler that keeps the REPL alive."""
