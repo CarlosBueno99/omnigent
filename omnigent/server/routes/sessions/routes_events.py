@@ -34,6 +34,7 @@ from omnigent.debug_logging import (
 from omnigent.entities import (
     Conversation,
     ErrorData,
+    MessageData,
     NewConversationItem,
 )
 from omnigent.entities.conversation import (
@@ -63,12 +64,14 @@ from omnigent.runner.transports.ws_tunnel.frames import (
     encode_frame,
 )
 from omnigent.runtime import (
+    get_policy_store,
     inflight_text,
     pending_inputs,
     session_stream,
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
+from omnigent.runtime.policies.builder import any_policies_apply
 from omnigent.server import presence
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
@@ -159,6 +162,7 @@ from omnigent.server.routes._sessions.common import (
     _session_mcp_startup_cache,
     _session_sandbox_status_cache,
     _session_status_cache,
+    get_caps,
     get_server_runner_router,
     set_server_runner_router,
 )
@@ -180,7 +184,10 @@ from omnigent.server.routes._sessions.helpers import (
     _is_codex_native_subagent,
     _is_devin_native_subagent,
     _launch_runner_on_host,
+    _load_agent_spec_for_session,
     _parse_background_tasks,
+    _parse_external_assistant_message,
+    _parse_external_conversation_item,
     _persist_external_acp_subagent_start,
     _persist_external_assistant_message,
     _persist_external_codex_approval_mode_change,
@@ -273,6 +280,7 @@ from omnigent.session_event_batch import (
     MAX_SESSION_EVENT_BATCH_EVENTS,
     MAX_SESSION_EVENT_REQUEST_BYTES,
 )
+from omnigent.spec.types import Phase
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.conversation_store import (
@@ -734,6 +742,62 @@ def register_events_routes(
             )
         return user_id, conv
 
+    async def _external_output_needs_review(conv: Conversation) -> bool:
+        spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store)
+        if spec is None:
+            return True
+        return await asyncio.to_thread(
+            any_policies_apply,
+            spec=spec,
+            conversation_id=conv.id,
+            default_policies=get_caps().default_policies,
+            policy_store=get_policy_store(),
+            phase=Phase.RESPONSE,
+            conversation=conv,
+        )
+
+    async def _filter_external_assistant(
+        session_id: str,
+        conv: Conversation,
+        body: SessionEventInput,
+        actor: dict[str, str] | None,
+    ) -> SessionEventInput:
+        if body.type == _EXTERNAL_ASSISTANT_MESSAGE_TYPE:
+            _agent_name, text, _response_id = _parse_external_assistant_message(body)
+            message = SessionEventInput(
+                type="message",
+                data={
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}],
+                },
+            )
+        elif body.type == _EXTERNAL_CONVERSATION_ITEM_TYPE:
+            item = _parse_external_conversation_item(body)
+            if not isinstance(item.data, MessageData) or item.data.role != "assistant":
+                return body
+            message = SessionEventInput(type="message", data=item.data.model_dump(mode="json"))
+        else:
+            return body
+        verdict = await _evaluate_output_policy(
+            session_id,
+            conv,
+            message,
+            conversation_store,
+            agent_store,
+            runner_router,
+            actor=actor,
+            require_agent=True,
+        )
+        if verdict is None:
+            return body
+        denied = verdict["_denied_body"]
+        data = dict(body.data)
+        if body.type == _EXTERNAL_ASSISTANT_MESSAGE_TYPE:
+            data["text"] = denied.data["content"][0]["text"]
+        else:
+            data["item_data"] = denied.data
+        return body.model_copy(update={"data": data})
+
     @event_router.post(
         "/sessions/{session_id}/events",
         # Internal event ingestion — hidden from the public API reference.
@@ -789,10 +853,19 @@ def register_events_routes(
                                 )
                             )
                         continue
-                    await _authorized_conversation(request, session_id)
+                    batch_user, batch_conv = await _authorized_conversation(request, session_id)
+                    filtered = [
+                        await _filter_external_assistant(
+                            session_id,
+                            batch_conv,
+                            event,
+                            {"run_as": batch_user} if batch_user else None,
+                        )
+                        for event in run
+                    ]
                     add_audit_attrs(event_type=_EXTERNAL_CONVERSATION_ITEM_TYPE)
                     item_ids = await _persist_external_conversation_items(
-                        session_id, list(run), conversation_store
+                        session_id, filtered, conversation_store
                     )
                     acks.extend({"queued": False, "item_id": item_id} for item_id in item_ids)
                 return acks
@@ -1789,6 +1862,14 @@ def register_events_routes(
                 [item],
             )
             return {"queued": True}
+        if body.type in (_EXTERNAL_ASSISTANT_MESSAGE_TYPE, _EXTERNAL_CONVERSATION_ITEM_TYPE):
+            body = await _filter_external_assistant(session_id, conv, body, _actor)
+        # Partial text cannot be reviewed as a complete response. The completed
+        # assistant item is evaluated above before it is persisted or streamed.
+        if body.type == _EXTERNAL_OUTPUT_TEXT_DELTA_TYPE and await _external_output_needs_review(
+            conv
+        ):
+            return {"queued": False}
         if body.type == _EXTERNAL_ASSISTANT_MESSAGE_TYPE:
             item_id = await _persist_external_assistant_message(
                 session_id,

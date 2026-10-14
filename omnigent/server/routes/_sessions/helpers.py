@@ -9247,6 +9247,7 @@ async def _evaluate_output_policy(
     *,
     actor: dict[str, str] | None = None,
     turn_final: bool | None = None,
+    require_agent: bool = False,
 ) -> dict[str, Any] | None:
     """
     Evaluate an assistant message against OUTPUT phase policies.
@@ -9271,6 +9272,7 @@ async def _evaluate_output_policy(
     :param turn_final: Whether this segment ends a successfully completed
         turn. The relay passes ``False`` for intermediate or unsuccessful
         segments. ``None`` when the calling path doesn't distinguish.
+    :param require_agent: Reject mirrored output when its agent cannot be loaded.
     :returns: ``None`` on ALLOW (fall through). Verdict dict
         with ``_denied_body`` on DENY.
     """
@@ -9284,6 +9286,10 @@ async def _evaluate_output_policy(
     # the more expensive engine build.
     spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store)
     if spec is None:
+        if require_agent:
+            raise OmnigentError(
+                "Cannot evaluate output policy without the session agent", code=ErrorCode.CONFLICT
+            )
         return None
     if not spec.guardrails and not get_caps().default_policies and get_policy_store() is None:
         return None

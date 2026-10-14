@@ -659,3 +659,14 @@ curl -X POST http://localhost:6767/v1/policies \
 | `DELETE` | `/v1/policies/{policy_id}` | Remove a policy |
 
 `GET /v1/policy-registry` lists all discoverable policies with parameter schemas -- useful for building admin UIs.
+
+
+### Native assistant transcripts
+
+Completed external assistant messages are checked by RESPONSE policies before
+storage and publication, including batched transcript uploads. Denied content
+is replaced by the same policy notice used for ordinary assistant messages.
+When a session has configured policies, native assistant text previews are
+withheld until the completed item is reviewed. A missing agent configuration
+fails closed. This governs the mirrored web transcript; the native terminal's
+own display and tool output are separate policy boundaries.

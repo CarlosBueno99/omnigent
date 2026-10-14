@@ -1695,7 +1695,15 @@ async def test_runner_ingest_retries_internal_server_failures(
             events=[
                 {
                     "type": "external_conversation_item",
-                    "data": {"source_id": "record-a", "item_type": "message", "item_data": {}},
+                    "data": {
+                        "source_id": "record-a",
+                        "item_type": "message",
+                        "item_data": {
+                            "role": "assistant",
+                            "agent": "claude-native-ui",
+                            "content": [{"type": "output_text", "text": "hello"}],
+                        },
+                    },
                 }
             ],
         ),
