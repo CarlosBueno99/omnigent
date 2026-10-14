@@ -2223,9 +2223,12 @@ async def test_watch_injections_emits_consumed_marker_on_accept(
 
 
 @pytest.mark.asyncio
-async def test_watch_injections_textless_newest_user_message_does_not_replay_older() -> None:
+async def test_watch_injections_textless_newest_user_message_does_not_replay_older(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A newest user message without text must not fall back to an older request."""
     import asyncio as _aio
+    import logging
 
     from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
     from omnigent.server.schemas import CreateResponseRequest
@@ -2253,15 +2256,25 @@ async def test_watch_injections_textless_newest_user_message_does_not_replay_old
         )
     )
 
+    caplog.set_level(logging.WARNING, logger="omnigent.runtime.harnesses._executor_adapter")
+
+    def skipped() -> bool:
+        return any("no text payload" in record.getMessage() for record in caplog.records)
+
     task = _aio.create_task(adapter._watch_injections(ctx, executor))  # type: ignore[arg-type]
     try:
-        await _aio.sleep(0.2)
+        for _ in range(200):
+            if skipped():
+                break
+            await _aio.sleep(0.01)
     finally:
         task.cancel()
         with contextlib.suppress(_aio.CancelledError):
             await task
 
-    # Skipped outright: nothing is steered and no consumed marker is emitted.
+    # The watcher processed the injection and skipped it outright: nothing is
+    # steered and no consumed marker is emitted.
+    assert skipped(), "the watcher never processed the injection"
     assert executor.received == [], (
         f"an older request was replayed as the steer: {executor.received!r}"
     )
