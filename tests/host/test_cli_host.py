@@ -429,6 +429,49 @@ def test_host_rejects_positional_and_server_option_together(
     assert runs == [], "run_host_process must not run when the args are rejected"
 
 
+_MANAGED_SERVER = "https://managed.example.databricksapps.com"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(
+            ["host", "status", "--all", "--server", _MANAGED_SERVER],
+            id="subcommand-server",
+        ),
+        pytest.param(["host", "--server", _MANAGED_SERVER, "status", "--all"], id="group-server"),
+    ],
+)
+def test_host_status_all_lists_targets_despite_wrapper_injected_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> None:
+    """
+    Verify ``host status --all`` still lists every target when a CLI wrapper
+    appends its managed ``--server``.
+
+    A wrapper such as ``isaac omni`` rewrites every invocation to add the managed
+    server, so ``isaac omni host status --all`` reaches Omnigent as
+    ``host status --all --server <managed>``. The user asked for all targets; the
+    injected selector must not turn that into a usage error.
+    """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("OMNIGENT_WRAPPER_COMMAND", "isaac omni")
+    monkeypatch.setenv("OMNIGENT_REQUIRE_WRAPPER", "1")
+    monkeypatch.setenv("OMNIGENT_WRAPPER_BYPASS", "1")
+    monkeypatch.setattr("omnigent.cli._HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setattr("omnigent.cli._list_daemon_records", list)
+
+    result = CliRunner().invoke(cli, argv)
+
+    assert result.exit_code == 0, (
+        f"Expected the all-targets listing, got exit {result.exit_code}. Output: {result.output}"
+    )
+    assert "No host daemons found." in result.output, result.output
+    assert "not both" not in result.output, result.output
+
+
 def test_host_daemon_alive_returns_false_when_no_pid_file(
     tmp_path: Path,
 ) -> None:
