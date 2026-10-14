@@ -45,8 +45,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 RESUME_FAULT_ERROR: dict[str, Any] = {"code": -32601, "message": "list_turns is not supported yet"}
 # A fresh session's forwarder subscribes over the runner's thread-discovery
-# listener; a resumed session's forwarder reuses the terminal-attach preload
-# connection, or opens its own.
+# listener (orchestration.py), a resumed session's forwarder reuses the
+# terminal-attach preload connection (app_server.py) or opens its own
+# (forwarder.py); SUBSCRIBE_PARAMS mirrors the forwarder's thread/resume
+# request. The journey asserts that a refusal was injected, so drift here
+# fails loudly instead of degrading into a control run.
 FORWARDER_CLIENT_NAMES = (
     "omnigent-codex-native-auto",
     "omnigent-codex-native-preload",
@@ -223,6 +226,8 @@ _PROXY_SCRIPT = textwrap.dedent(
             os.execv(REAL, [REAL, *argv])
         url_index = argv.index("--listen") + 1
         listen = argv[url_index]
+        if not listen.startswith("ws://"):
+            os.execv(REAL, [REAL, *argv])
         host, _, port_text = listen.removeprefix("ws://").partition(":")
         upstream_port = _free_port()
         child_argv = [REAL, *argv]

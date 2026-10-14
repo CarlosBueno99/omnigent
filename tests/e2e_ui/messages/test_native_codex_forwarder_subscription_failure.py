@@ -148,9 +148,12 @@ def _run_coroutine(coroutine: Coroutine[Any, Any, dict[str, Any]]) -> dict[str, 
     # The sync Playwright API already drives an event loop on the test thread.
     pool = ThreadPoolExecutor(max_workers=1)
     try:
-        return pool.submit(asyncio.run, coroutine).result(timeout=120)
+        # Bound the probe itself so a wedged request cannot leave a thread
+        # holding the WebSocket open behind a failed test.
+        return pool.submit(asyncio.run, asyncio.wait_for(coroutine, timeout=110)).result(
+            timeout=120
+        )
     finally:
-        # Do not block on a wedged probe; let the test fail promptly.
         pool.shutdown(wait=False, cancel_futures=True)
 
 
@@ -260,7 +263,6 @@ def test_native_codex_chat_and_history_survive_forwarder_subscription_refusal(
     request: pytest.FixtureRequest,
     fault_environment: CodexNativeFaultEnvironment,
     mock_llm_server_url: str,
-    tmp_path: Path,
 ) -> None:
     """Both TUI turns reach Chat (session idle) and survive a cold reconnect."""
     env = fault_environment

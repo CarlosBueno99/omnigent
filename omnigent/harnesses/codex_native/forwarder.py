@@ -2574,7 +2574,8 @@ async def _subscribe_until_ready(
     reported on *status_signal* (``None``: one attempt), with the order lock
     released while waiting so live posts for the session are not held up.
     """
-    after_refusal = False
+    history_owed = False
+    refused_before = False
     history = _CommittedHistory()
     while True:
         async with _conversation_item_delivery_scope(session_id):
@@ -2588,15 +2589,17 @@ async def _subscribe_until_ready(
                 elicitation_tracker=elicitation_tracker,
                 forwarder_state=forwarder_state,
                 ready_signal=ready_signal,
-                after_refusal=after_refusal,
+                history_owed=history_owed,
+                refused_before=refused_before,
                 history=history,
             )
         if attempt is _SubscribeAttempt.SUBSCRIBED or status_signal is None:
             return
-        # Only a transport failure leaves no history owed; a refusal or a
-        # pending replay means the retry must ask for turns.
+        # The retry is woken by a status edge, so a turn ran while this
+        # connection was unsubscribed: every failed attempt owes history.
+        history_owed = True
         if attempt is not _SubscribeAttempt.UNAVAILABLE:
-            after_refusal = True
+            refused_before = True
         await status_signal.wait()
         status_signal.clear()
 
@@ -2612,7 +2615,8 @@ async def _subscribe_until_ready_inner(
     elicitation_tracker: _CodexElicitationTaskTracker,
     forwarder_state: _CodexForwarderState | None = None,
     ready_signal: asyncio.Event | None = None,
-    after_refusal: bool = False,
+    history_owed: bool = False,
+    refused_before: bool = False,
     history: _CommittedHistory | None = None,
 ) -> _SubscribeAttempt:
     """
@@ -2655,9 +2659,11 @@ async def _subscribe_until_ready_inner(
         thread parks here instead of polling. ``None`` falls back to the
         fixed-interval retry (used where no live event stream drives the
         signal).
-    :param after_refusal: Whether an earlier attempt was refused. Turns are
-        then requested from ``thread/resume`` so items completed while
-        unsubscribed are replayed once it succeeds.
+    :param history_owed: Whether an earlier attempt failed. Turns are then
+        requested from ``thread/resume`` and checked against committed history
+        so items completed while unsubscribed are replayed exactly once.
+    :param refused_before: Whether Codex already refused this subscription;
+        later refusals log quietly and a success is reported as a recovery.
     :param history: Committed messages cached across attempts; fetched
         incrementally before a replay that may repeat committed turns.
     :returns: How the attempt ended; only ``SUBSCRIBED`` finishes the
@@ -2674,7 +2680,7 @@ async def _subscribe_until_ready_inner(
         subscribed = True
         try:
             params: _JsonObject = {"threadId": thread_id}
-            if not saw_not_ready and not after_refusal and replay_from_turn_id is None:
+            if not saw_not_ready and not history_owed and replay_from_turn_id is None:
                 params["excludeTurns"] = True
             response = await client.request("thread/resume", params)
         except asyncio.CancelledError:
@@ -2704,7 +2710,7 @@ async def _subscribe_until_ready_inner(
                 _logger.warning("failed to subscribe to Codex thread %s", thread_id, exc_info=True)
                 return _SubscribeAttempt.UNAVAILABLE
             read = await _read_thread_after_refused_resume(
-                client, thread_id=thread_id, refusal=exc, first_refusal=not after_refusal
+                client, thread_id=thread_id, refusal=exc, first_refusal=not refused_before
             )
             if read is None:
                 return _SubscribeAttempt.REFUSED
@@ -2743,7 +2749,7 @@ async def _subscribe_until_ready_inner(
         # new ids, so committed messages are recognised by text, not identity.
         replay_items = True
         committed: Counter[tuple[str, str]] | None = None
-        if not subscribed or after_refusal:
+        if not subscribed or history_owed:
             if history is None:
                 history = _CommittedHistory()
             if await history.refresh(ap_client, session_id=session_id):
@@ -2773,7 +2779,7 @@ async def _subscribe_until_ready_inner(
             return _SubscribeAttempt.PENDING
         if not subscribed:
             return _SubscribeAttempt.REFUSED
-        if after_refusal:
+        if refused_before:
             _logger.info("Codex thread %s subscription succeeded after a refusal", thread_id)
         return _SubscribeAttempt.SUBSCRIBED
 
@@ -2820,7 +2826,8 @@ async def _read_thread_after_refused_resume(
 def _normalized_message_text(value: object) -> str:
     """Collapse a message text (a string or Codex/Omnigent content blocks) for comparison."""
     if isinstance(value, list):
-        value = "".join(
+        # Blocks are joined with newlines when a user message is mirrored.
+        value = "\n".join(
             block["text"]
             for block in value
             if isinstance(block, dict) and isinstance(block.get("text"), str)
@@ -2833,16 +2840,16 @@ _CODEX_MESSAGE_ROLES = {"userMessage": "user", "agentMessage": "assistant"}
 
 def _consume_committed_turn(items: list[object], committed: Counter[tuple[str, str]]) -> bool:
     """
-    Return whether a turn's messages are already committed, consuming them.
+    Return whether every message of a turn is already committed, consuming them.
 
-    Agent replies decide when the turn has any; a reply-less turn (interrupted,
-    or commands only) is judged by its user prompts instead, so its tool items
+    Prompts and replies are matched together, so a reply text shared by two
+    turns cannot stand in for the other turn, and a reply-less turn
+    (interrupted, or commands only) is judged by its prompts so its tool items
     are not posted again under fresh ids.
 
     :param items: Codex turn items from ``thread/read``/``thread/resume``.
     :param committed: Remaining committed ``(role, text)`` messages; a skipped
-        turn's messages are all removed so a repeated identical message still
-        counts once and a later reply-less turn cannot reuse its prompt.
+        turn's messages are removed so a repeated identical message counts once.
     :returns: ``True`` when the turn can be skipped; ``False`` when it has no
         message to compare or one is missing from Omnigent.
     """
@@ -2857,9 +2864,7 @@ def _consume_committed_turn(items: list[object], committed: Counter[tuple[str, s
         text = _normalized_message_text(item.get("text", item.get("content")))
         if text:
             messages[(role, text)] += 1
-    replies = Counter({key: n for key, n in messages.items() if key[0] == "assistant"})
-    needed = replies or messages
-    if not needed or any(committed[key] < count for key, count in needed.items()):
+    if not messages or any(committed[key] < count for key, count in messages.items()):
         return False
     committed.subtract(messages)
     return True
@@ -2952,6 +2957,11 @@ class _CommittedHistory:
                     )
                     return False
             if isinstance(last_id, str) and last_id:
+                if payload.get("has_more") and last_id == self.cursor:
+                    _logger.warning(
+                        "Committed history of %s repeated cursor %s", session_id, last_id
+                    )
+                    return False
                 self.cursor = last_id
             if not payload.get("has_more"):
                 return True
