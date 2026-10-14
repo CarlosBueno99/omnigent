@@ -1781,6 +1781,7 @@ class TestResolveGatewayEnv(unittest.TestCase):
             ("http://ws.example", {"ANTHROPIC_BASE_URL": f"http://ws.example:80{route}"}, True),
             (ws, {"ANTHROPIC_BASE_URL": f"http://ws.example{route}"}, False),
             (ws, {"ANTHROPIC_BASE_URL": f"https://ws.example:8443{route}"}, False),
+            (ws, {"ANTHROPIC_BASE_URL": f"https://ws.example:0{route}"}, False),
             (ws, {"ANTHROPIC_BASE_URL": "https://proxy.example/anthropic"}, False),
             (ws, {"ANTHROPIC_BASE_URL": f"https://user:secret@ws.example{route}"}, False),
             (ws, {"ANTHROPIC_BASE_URL": "http://["}, False),
@@ -1852,6 +1853,25 @@ class TestResolveGatewayEnv(unittest.TestCase):
         self.assertIn("Ignoring ANTHROPIC_BASE_URL", text)
         for leaked in ("secret", "user:", "k=v"):
             self.assertNotIn(leaked, text)
+
+        # A profile host carrying userinfo is redacted in the same message.
+        with (
+            patch.dict(
+                "os.environ", {"ANTHROPIC_BASE_URL": "https://proxy.example/anthropic"}, clear=True
+            ),
+            patch(
+                "omnigent.inner.databricks_executor._read_databrickscfg",
+                return_value=DatabricksCredentials(
+                    host="https://admin:hunter2@ws.example", token="t"
+                ),
+            ),
+            self.assertLogs("omnigent.inner.claude_sdk_executor", level="INFO") as logs,
+        ):
+            _resolve_gateway_env()
+        text = "\n".join(logs.output)
+        self.assertIn("Ignoring ANTHROPIC_BASE_URL", text)
+        self.assertNotIn("hunter2", text)
+        self.assertNotIn("admin:", text)
 
     def test_strips_trailing_slash(self):
         from omnigent.inner.claude_sdk_executor import _resolve_gateway_env

@@ -251,6 +251,14 @@ def default_pat_databrickscfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg_path))
     for ambient in ("DATABRICKS_CONFIG_PROFILE", "DATABRICKS_HOST", "DATABRICKS_TOKEN"):
         monkeypatch.delenv(ambient, raising=False)
+
+    def _offline_host_metadata(host: str) -> None:
+        raise ConnectionError(f"offline test stub: refusing to probe {host}")
+
+    # The SDK's Config() probes /.well-known/databricks-config with retries; keep it offline.
+    monkeypatch.setattr(
+        "databricks.sdk.config.get_host_metadata", _offline_host_metadata, raising=False
+    )
     return cfg_path
 
 

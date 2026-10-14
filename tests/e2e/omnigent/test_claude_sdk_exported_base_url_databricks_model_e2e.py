@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -86,7 +87,9 @@ def _stage_workspace_login(home: Path, workspace_url: str) -> None:
                         "access_token": "stub-oauth-access-token",
                         "token_type": "Bearer",
                         "refresh_token": "stub-refresh-token",
-                        "expiry": "2031-01-01T00:00:00Z",
+                        "expiry": (datetime.now(UTC) + timedelta(days=365)).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        ),
                     }
                 },
             }
@@ -147,12 +150,13 @@ def test_databricks_model_run_uses_exported_same_workspace_base_url(
             text=True,
             timeout=_RUN_TIMEOUT_SEC,
         )
-        model_requests = [
-            request
-            for request in workspace.seen
-            if request.method == "POST" and urlsplit(request.path).path.endswith("/v1/messages")
-        ]
 
+    # Read the journal only after the stub server has shut down and joined its handlers.
+    model_requests = [
+        request
+        for request in workspace.seen
+        if request.method == "POST" and urlsplit(request.path).path.endswith("/v1/messages")
+    ]
     message_posts = [urlsplit(request.path).path for request in model_requests]
     detail = (
         f"\nmodel requests seen by the workspace: {message_posts}"

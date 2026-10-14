@@ -133,8 +133,6 @@ class _Handler(BaseHTTPRequestHandler):
 
     do_GET = _answer
     do_POST = _answer
-    do_PUT = _answer
-    do_DELETE = _answer
 
     def log_message(self, fmt: str, *args: object) -> None:
         pass
@@ -148,14 +146,6 @@ class StubWorkspace:
     @property
     def serving_endpoints_url(self) -> str:
         return f"{self.base_url}{SERVING_ENDPOINTS_PATH}"
-
-    @property
-    def ai_gateway_url(self) -> str:
-        return f"{self.base_url}{AI_GATEWAY_PATH}"
-
-    def messages_paths(self) -> list[str]:
-        paths = [urlsplit(r.path).path for r in self.seen]
-        return [p for p in paths if p.endswith("/v1/messages")]
 
 
 @contextmanager

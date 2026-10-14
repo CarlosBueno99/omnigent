@@ -1239,8 +1239,8 @@ def _resolve_gateway_env(
                     "Ignoring %s (%s is not on %s); using %s",
                     exported[0],
                     redact_url(ambient_base_url),
-                    host,
-                    base_url,
+                    redact_url(host),
+                    redact_url(base_url),
                 )
         auth_command = (
             auth_command_override
@@ -1300,7 +1300,9 @@ def _origin(url: str) -> tuple[str, str, int | None] | None:
         return None
     if not parts.scheme or not parts.hostname or parts.username is not None:
         return None
-    return parts.scheme, parts.hostname, port or _DEFAULT_PORTS.get(parts.scheme)
+    if port is None:
+        port = _DEFAULT_PORTS.get(parts.scheme)
+    return parts.scheme, parts.hostname, port
 
 
 def _on_workspace_origin(url: str, workspace_host: str) -> bool:
