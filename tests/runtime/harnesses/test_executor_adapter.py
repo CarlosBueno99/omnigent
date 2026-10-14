@@ -2224,25 +2224,19 @@ async def test_watch_injections_emits_consumed_marker_on_accept(
     assert marker.injection_id == "inj_x"
 
 
-@pytest.mark.asyncio
-async def test_watch_injections_textless_newest_user_message_does_not_replay_older() -> None:
-    """A newest user message without text must not fall back to an older request."""
-    import asyncio as _aio
+_OLDER_REQUEST = {
+    "type": "message",
+    "role": "user",
+    "content": [{"type": "input_text", "text": "older request"}],
+}
 
-    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
-    from omnigent.server.schemas import CreateResponseRequest
 
-    executor = _AcceptingInjectionExecutor()
-    adapter = ExecutorAdapter(executor_factory=lambda: executor, session_key="sk")
-    ctx = _OneInjectionCtx(
-        CreateResponseRequest(
-            model="m",
-            input=[
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "older request"}],
-                },
+@pytest.mark.parametrize(
+    "injection_input",
+    [
+        pytest.param(
+            [
+                _OLDER_REQUEST,
                 {
                     "type": "message",
                     "role": "user",
@@ -2251,8 +2245,39 @@ async def test_watch_injections_textless_newest_user_message_does_not_replay_old
                     ],
                 },
             ],
-            injection_id="inj_x",
-        )
+            id="image_only_newest_user",
+        ),
+        pytest.param(
+            [_OLDER_REQUEST, {"type": "message", "role": "user"}],
+            id="newest_user_without_content",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "older reply"}],
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "tool output"},
+            ],
+            id="assistant_and_tool_only",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_watch_injections_skips_conversation_input_without_newest_user_text(
+    injection_input: list[dict[str, Any]],
+) -> None:
+    """Conversation-shaped input without steerable user text is skipped and never replayed."""
+    import asyncio as _aio
+
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+    from omnigent.server.schemas import CreateResponseRequest
+
+    executor = _AcceptingInjectionExecutor()
+    adapter = ExecutorAdapter(executor_factory=lambda: executor, session_key="sk")
+    ctx = _OneInjectionCtx(
+        CreateResponseRequest(model="m", input=injection_input, injection_id="inj_x")
     )
 
     task = _aio.create_task(adapter._watch_injections(ctx, executor))  # type: ignore[arg-type]
