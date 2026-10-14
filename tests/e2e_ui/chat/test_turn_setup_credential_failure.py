@@ -19,8 +19,9 @@ from pathlib import Path
 
 import httpx
 import pytest
-from playwright.sync_api import Browser, BrowserContext, Page, expect
+from playwright.sync_api import Browser, Page, expect
 
+from tests._helpers.browser import user_page
 from tests._helpers.server_runner import ServerRunner, server_runner
 from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
 from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm, set_fallback_mock_llm
@@ -121,34 +122,23 @@ def expect_reply(page: Page, token: str) -> None:
     expect(page.locator(_WORKING)).to_have_count(0, timeout=_TURN_TIMEOUT_MS)
 
 
-def settle_turn(
-    page: Page, token: str, timeout_ms: int = _TURN_TIMEOUT_MS
-) -> dict[str, str | None]:
-    """Wait for a reply or an error pill; return what the user sees."""
-    pill = page.get_by_test_id("error-pill")
-    reply = page.locator(_ASSISTANT, has_text=token)
-    expect(pill.or_(reply).first).to_be_visible(timeout=timeout_ms)
-    if pill.count() == 0:
-        return {"outcome": "reply", "headline": None, "message": None}
-    headline = pill.first.get_by_test_id("error-headline").inner_text()
-    expander = pill.first.locator('button[aria-expanded="false"]')
+def read_error_pill(page: Page) -> dict[str, str]:
+    """Wait for the turn's error pill; return its headline and expanded body."""
+    pill = page.get_by_test_id("error-pill").first
+    expect(pill).to_be_visible(timeout=_TURN_TIMEOUT_MS)
+    headline = pill.get_by_test_id("error-headline").inner_text()
+    expander = pill.locator('button[aria-expanded="false"]')
     if expander.count() > 0:
         expander.first.click()
-    content = pill.first.get_by_test_id("error-message-content")
+    content = pill.get_by_test_id("error-message-content")
     expect(content).to_be_visible(timeout=10_000)
-    return {"outcome": "error", "headline": headline, "message": content.inner_text()}
+    return {"headline": headline, "message": content.inner_text()}
 
 
 def _screenshot(page: Page, name: str) -> None:
     directory = os.environ.get("OMNIGENT_E2E_RECORD_DIR")
     if directory:
         page.screenshot(path=str(Path(directory) / f"{name}.png"))
-
-
-def _open_session(context: BrowserContext, base_url: str, session_id: str) -> Page:
-    page = context.new_page()
-    page.goto(f"{base_url}/c/{session_id}")
-    return page
 
 
 @pytest.mark.timeout(900)
@@ -166,34 +156,26 @@ def test_credential_failure_during_turn_setup_is_not_a_generic_runner_error(
         affected_session = create_bound_session(stack.base_url, stack.runner_id)
         print(f"sessions: control={control_session} affected={affected_session}")
 
-        context = browser.new_context()
-        try:
-            control_page = _open_session(context, stack.base_url, control_session)
+        with user_page(browser, headers={}) as control_page:
+            control_page.goto(f"{stack.base_url}/c/{control_session}")
             expect_reply(control_page, send_scripted_turn(control_page, mock_llm_server_url))
             _screenshot(control_page, "01-control-reply")
 
-            marker.touch()
-            affected_page = _open_session(context, stack.base_url, affected_session)
-            observed = settle_turn(
-                affected_page, send_scripted_turn(affected_page, mock_llm_server_url)
-            )
+        marker.touch()
+        with user_page(browser, headers={}) as affected_page:
+            affected_page.goto(f"{stack.base_url}/c/{affected_session}")
+            send_scripted_turn(affected_page, mock_llm_server_url)
+            observed = read_error_pill(affected_page)
             _screenshot(affected_page, "02-affected-turn")
             print(f"affected turn: {observed}")
-            assert observed["outcome"] == "error", observed
             assert observed["headline"] == CREDENTIAL_FAILURE_HEADLINE, observed
-            message = observed["message"] or ""
-            assert CREDENTIAL_FAILURE_MESSAGE in message, observed
-            assert "Try this:" in message, observed
-            assert " stop`" in message, observed
-        finally:
-            context.close()
+            assert CREDENTIAL_FAILURE_MESSAGE in observed["message"], observed
+            assert "Try this:" in observed["message"], observed
+            assert " stop`" in observed["message"], observed
 
         # Once the fault clears, the affected session's next turn replies normally.
         marker.unlink()
-        recovery = browser.new_context()
-        try:
-            page = _open_session(recovery, stack.base_url, affected_session)
-            expect_reply(page, send_scripted_turn(page, mock_llm_server_url))
-            _screenshot(page, "03-recovered-reply")
-        finally:
-            recovery.close()
+        with user_page(browser, headers={}) as recovered_page:
+            recovered_page.goto(f"{stack.base_url}/c/{affected_session}")
+            expect_reply(recovered_page, send_scripted_turn(recovered_page, mock_llm_server_url))
+            _screenshot(recovered_page, "03-recovered-reply")

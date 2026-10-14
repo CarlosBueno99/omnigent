@@ -2294,6 +2294,43 @@ async def test_runner_background_turn_emits_failed_when_spawn_env_build_raises(
     assert statuses == ["running", "failed"]
 
 
+async def _failed_status_after_setup_failure(
+    spec_resolver: Callable[..., Any], conv: str, agent_id: str
+) -> dict[str, Any] | None:
+    """Post one message to a runner whose turn setup fails; return its failed status event.
+
+    :param spec_resolver: Resolver handed to :func:`create_runner_app`; the
+        scenario decides how (or whether) it fails.
+    :param conv: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param agent_id: Agent id carried on the posted message.
+    :returns: The ``session.status: failed`` event, or ``None`` when none arrived.
+    """
+    app = create_runner_app(
+        process_manager=cast(
+            HarnessProcessManager,
+            _FakeProcessManager(_FakeHarnessClient([])),
+        ),
+        spec_resolver=spec_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _runner_test_client(app) as http:
+        response = await http.post(
+            f"/v1/sessions/{conv}/events",
+            json={
+                "type": "message",
+                "role": "user",
+                "agent_id": agent_id,
+                "model": "x",
+                "content": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert response.status_code == 202
+        # Await the background turn task before draining, then read the
+        # runner's per-session queue via the ``app.state`` test seam.
+        await _await_bg_turn_task(conv)
+        return await _drain_failed_status_event(app.state.session_event_queues, conv, timeout=2.0)
+
+
 @pytest.mark.asyncio
 async def test_runner_failed_status_carries_setup_error_message(
     monkeypatch: pytest.MonkeyPatch,
@@ -2351,33 +2388,7 @@ async def test_runner_failed_status_carries_setup_error_message(
         _raising_build,
     )
 
-    app = create_runner_app(
-        process_manager=cast(
-            HarnessProcessManager,
-            _FakeProcessManager(_FakeHarnessClient([])),
-        ),
-        spec_resolver=_spec_resolver,
-        server_client=NullServerClient(),  # type: ignore[arg-type]
-    )
-
-    async with _runner_test_client(app) as http:
-        response = await http.post(
-            f"/v1/sessions/{conv}/events",
-            json={
-                "type": "message",
-                "role": "user",
-                "agent_id": "ag_claude_sdk",
-                "model": "x",
-                "content": [{"role": "user", "content": "hi"}],
-            },
-        )
-        assert response.status_code == 202
-        # Await the background turn task (main's helper) before draining, then
-        # read the runner's per-session queue via the ``app.state`` test seam.
-        await _await_bg_turn_task(conv)
-        failed_event = await _drain_failed_status_event(
-            app.state.session_event_queues, conv, timeout=2.0
-        )
+    failed_event = await _failed_status_after_setup_failure(_spec_resolver, conv, "ag_claude_sdk")
 
     # The failed event must carry the real setup error message — not a
     # bare status. Without the fix ``error`` is absent and the REPL
@@ -2420,31 +2431,9 @@ async def test_runner_failed_status_classifies_a_host_credential_failure() -> No
         del agent_id, session_id
         raise DatabricksAuthError(raised_message)
 
-    app = create_runner_app(
-        process_manager=cast(
-            HarnessProcessManager,
-            _FakeProcessManager(_FakeHarnessClient([])),
-        ),
-        spec_resolver=_spec_resolver,
-        server_client=NullServerClient(),  # type: ignore[arg-type]
+    failed_event = await _failed_status_after_setup_failure(
+        _spec_resolver, conv, "ag_credential_probe"
     )
-
-    async with _runner_test_client(app) as http:
-        response = await http.post(
-            f"/v1/sessions/{conv}/events",
-            json={
-                "type": "message",
-                "role": "user",
-                "agent_id": "ag_credential_probe",
-                "model": "x",
-                "content": [{"role": "user", "content": "hi"}],
-            },
-        )
-        assert response.status_code == 202
-        await _await_bg_turn_task(conv)
-        failed_event = await _drain_failed_status_event(
-            app.state.session_event_queues, conv, timeout=2.0
-        )
 
     assert failed_event is not None
     error = failed_event["error"]
