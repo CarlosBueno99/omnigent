@@ -2268,7 +2268,11 @@ _OLDER_REQUEST = {
 async def test_watch_injections_skips_conversation_input_without_newest_user_text(
     injection_input: list[dict[str, Any]],
 ) -> None:
-    """Conversation-shaped input without steerable user text is skipped and never replayed."""
+    """Conversation-shaped input without steerable user text is skipped mid-turn.
+
+    Nothing older is steered in its place and no consumed marker is emitted, so the
+    runner keeps its buffered copy and re-delivers the message as the next turn.
+    """
     import asyncio as _aio
 
     from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
