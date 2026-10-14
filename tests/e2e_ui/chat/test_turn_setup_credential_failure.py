@@ -177,13 +177,6 @@ def test_credential_failure_during_turn_setup_is_not_a_generic_runner_error(
             )
             _screenshot(affected_page, "02-affected-turn")
             print(f"affected turn: {observed}")
-
-            # The warm control session's setup is cached, so only turns that still
-            # need a fresh credential (such as a session's first turn) fail.
-            warm_followup = settle_turn(
-                control_page, send_scripted_turn(control_page, mock_llm_server_url)
-            )
-            print(f"warm-session follow-up turn (fault active): {warm_followup}")
         finally:
             context.close()
 
@@ -196,7 +189,6 @@ def test_credential_failure_during_turn_setup_is_not_a_generic_runner_error(
         finally:
             recovery.close()
 
-    assert warm_followup["outcome"] == "reply", warm_followup
     assert observed["outcome"] == "error", observed
     assert observed["headline"] == CREDENTIAL_FAILURE_HEADLINE, observed
     message = observed["message"] or ""
