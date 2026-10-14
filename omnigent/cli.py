@@ -2202,13 +2202,9 @@ WRAPPER_BYPASS_ENV = "OMNIGENT_WRAPPER_BYPASS"
 
 
 def _wrapper_managed_deployment(env: Mapping[str, str] | None = None) -> bool:
-    """Report whether an operator forces CLI use through a wrapper (e.g. ``isaac omni``).
+    """Return whether wrapper use is required (``OMNIGENT_REQUIRE_WRAPPER``).
 
-    Such wrappers rewrite invocations to add their managed ``--server``, so a
-    ``--server`` that conflicts with an explicit user flag may be injected rather
-    than typed. Only ``OMNIGENT_REQUIRE_WRAPPER`` marks enforcement; a configured
-    ``OMNIGENT_WRAPPER_COMMAND`` alone just spells hints and leaves direct calls
-    (and their argument checks) untouched.
+    A configured ``OMNIGENT_WRAPPER_COMMAND`` alone only affects hint spelling.
     """
     if env is None:
         env = os.environ

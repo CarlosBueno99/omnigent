@@ -31,7 +31,9 @@ def _wrapper_env(fake_home: Path) -> dict[str, str]:
         if not k.startswith(_AMBIENT_ENV_PREFIXES) and k not in _AMBIENT_ENV_KEYS
     }
     env["HOME"] = str(fake_home)
-    env["OMNIGENT_DATA_DIR"] = str(fake_home / ".omnigent")  # registry root on every platform
+    # Pin both roots: HOME alone does not relocate Path.home() on Windows.
+    env["OMNIGENT_DATA_DIR"] = str(fake_home / ".omnigent")
+    env["OMNIGENT_CONFIG_HOME"] = str(fake_home / ".omnigent")
     env["LC_ALL"] = "C.UTF-8"
     env["TERM"] = "dumb"
     existing = env.get("PYTHONPATH")
