@@ -30,6 +30,7 @@ from tests.e2e._stub_databricks_workspace import (
 from tests.e2e.omnigent._pexpect_harness import ensure_repl_test_theme_env
 
 _MODEL = "databricks-claude-sonnet-5-5"
+_STAGED_TOKEN = "stub-oauth-access-token"
 # claude-sdk boots a local server, runner and the Claude CLI; the observed run
 # takes ~30 s, so this leaves headroom for a cold CI box.
 _RUN_TIMEOUT_SEC = 180
@@ -52,6 +53,9 @@ _ENV_TO_CLEAR = (
     "DATABRICKS_HOST",
     "DATABRICKS_TOKEN",
     "DATABRICKS_CONFIG_PROFILE",
+    "DATABRICKS_CLIENT_ID",
+    "DATABRICKS_CLIENT_SECRET",
+    "DATABRICKS_AUTH_TYPE",
     "CLAUDECODE",
     "CLAUDE_CODE",
     "CLAUDE_CODE_ENTRYPOINT",
@@ -84,7 +88,7 @@ def _stage_workspace_login(home: Path, workspace_url: str) -> None:
                 "version": 1,
                 "tokens": {
                     workspace_url: {
-                        "access_token": "stub-oauth-access-token",
+                        "access_token": _STAGED_TOKEN,
                         "token_type": "Bearer",
                         "refresh_token": "stub-refresh-token",
                         "expiry": (datetime.now(UTC) + timedelta(days=365)).strftime(
@@ -170,8 +174,9 @@ def test_databricks_model_run_uses_exported_same_workspace_base_url(
         f"claude-sdk sent model requests to {AI_GATEWAY_PATH} instead of the exported "
         f"{SERVING_ENDPOINTS_PATH} URL" + detail
     )
-    assert all(request.has_authorization for request in model_requests), (
-        "requests on the exported URL must carry the minted workspace bearer" + detail
+    assert all(request.authorization == f"Bearer {_STAGED_TOKEN}" for request in model_requests), (
+        "requests on the exported URL must carry the bearer minted from the staged profile"
+        + detail
     )
     assert REPLY_TEXT in proc.stdout and proc.returncode == 0, (
         "the reply served on the exported URL was not printed" + detail

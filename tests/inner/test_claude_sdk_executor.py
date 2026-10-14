@@ -1889,6 +1889,22 @@ class TestResolveGatewayEnv(unittest.TestCase):
         )
         self.assertIn("anthropic\\nFORGED", "\n".join(logs.output))
 
+        # Userinfo outside the authority of a malformed URL is never echoed either.
+        for malformed in (
+            "https:/user:dummy-secret@proxy.example/path",
+            "https:///user:dummy-secret@proxy.example/path",
+        ):
+            with (
+                patch.dict("os.environ", {"ANTHROPIC_BASE_URL": malformed}, clear=True),
+                creds,
+                self.assertLogs("omnigent.inner.claude_sdk_executor", level="INFO") as logs,
+            ):
+                env = _resolve_gateway_env()
+            text = "\n".join(logs.output)
+            self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://ws.example/ai-gateway/anthropic")
+            self.assertNotIn("dummy-secret", text)
+            self.assertIn("<unparseable url>", text)
+
     def test_strips_trailing_slash(self):
         from omnigent.inner.claude_sdk_executor import _resolve_gateway_env
         from omnigent.inner.databricks_executor import DatabricksCredentials

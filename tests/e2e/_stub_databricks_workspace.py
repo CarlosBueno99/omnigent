@@ -38,8 +38,17 @@ def unavailable_message(model: str) -> str:
 class SeenRequest:
     method: str
     path: str
-    has_authorization: bool
+    authorization: str | None
     model: str | None
+
+    def journal_entry(self) -> dict[str, object]:
+        """The on-disk journal form; the bearer value itself is never written."""
+        return {
+            "method": self.method,
+            "path": self.path,
+            "has_authorization": self.authorization is not None,
+            "model": self.model,
+        }
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -62,14 +71,14 @@ class _Handler(BaseHTTPRequestHandler):
         entry = SeenRequest(
             method=self.command,
             path=self.path,
-            has_authorization=bool(self.headers.get("Authorization")),
+            authorization=self.headers.get("Authorization"),
             model=model,
         )
         with self._lock:
             type(self).seen.append(entry)
             if self.log_path is not None:
                 with self.log_path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(entry.__dict__) + "\n")
+                    fh.write(json.dumps(entry.journal_entry()) + "\n")
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)
@@ -82,7 +91,8 @@ class _Handler(BaseHTTPRequestHandler):
         body = self._read_json()
         self._record(body)
         model = body.get("model") if isinstance(body.get("model"), str) else "unknown-model"
-        origin = f"http://{self.headers.get('Host')}"
+        host = self.headers.get("Host") or "{}:{}".format(*self.server.server_address)
+        origin = f"http://{host}"
         # Claude Code appends ``?beta=true``; route on the path alone.
         path = urlsplit(self.path).path
         if self.command == "GET" and path == HOST_METADATA_PATH:

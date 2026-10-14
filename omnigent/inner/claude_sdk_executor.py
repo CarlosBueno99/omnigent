@@ -1223,9 +1223,7 @@ def _resolve_gateway_env(
         if not host:
             return {}
         host = host.rstrip("/")
-        # The auth command mints a bearer for this host, so only an exported URL on
-        # the same origin (e.g. its /serving-endpoints/anthropic route) may replace
-        # the derived AI Gateway route.
+        # The bearer is minted for this host, so only a same-origin exported URL may replace it.
         exported = getenv_nonempty_with_omnigent_prefix("ANTHROPIC_BASE_URL")
         ambient_base_url = exported[1].strip() if exported else ""
         if base_url_override is not None:
@@ -1312,7 +1310,13 @@ def _on_workspace_origin(url: str, workspace_host: str) -> bool:
 
 
 def _log_safe_url(url: str) -> str:
-    """Redact *url* and escape control characters so a log entry stays on one line."""
+    """Redact *url* for a single-line log entry; URLs without a usable origin become a placeholder.
+
+    Userinfo in a malformed URL can sit outside the authority, where redaction
+    would miss it, so only URLs that parse to an origin are echoed at all.
+    """
+    if _origin(url) is None:
+        return "<unparseable url>"
     return (redact_url(url) or "").encode("unicode_escape").decode("ascii")
 
 
