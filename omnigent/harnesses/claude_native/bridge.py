@@ -598,13 +598,14 @@ class ClaudeLauncherPending(RuntimeError):
     :class:`ClaudePromptTimeout`: the pane is alive and the launcher continues
     into Claude Code once answered, so delivery handlers must report the
     ``code``, ``title`` and ``remediation`` and must not reap the pane.
+    ``code`` is the generic startup-pending code; subclasses refine it.
 
     :param message: Human-readable failure text.
     :param title: Card headline.
     :param remediation: The next step, phrased for the card.
     """
 
-    code: str
+    code = "agent_startup_pending"
 
     def __init__(self, message: str, *, title: str, remediation: str) -> None:
         super().__init__(message)
@@ -631,8 +632,6 @@ class ClaudeLauncherQuestionPending(ClaudeLauncherPending):
     E.g. ``ug``'s "Upgrade Claude Code if available? (Y/n)"; it is answered
     from the embedded terminal.
     """
-
-    code = "agent_startup_pending"
 
 
 class ClaudeInjectionCancelled(RuntimeError):
@@ -6273,6 +6272,11 @@ def _wait_for_claude_prompt_ready(
             if billing_notice or _composer_row(pane) is not None
             else detect_launcher_question(pane)
         )
+        if question is not None:
+            # A question wider than the pane wraps; the joined capture reads it whole.
+            question = detect_launcher_question(
+                _capture_pane(socket_path, tmux_target, join_wrapped=True)
+            )
         if question is not None and question == launcher_question:
             raise ClaudeLauncherQuestionPending(
                 "Claude Code's launcher is waiting for an answer in this session's "

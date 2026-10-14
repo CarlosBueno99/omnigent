@@ -9696,7 +9696,7 @@ def test_wait_for_claude_prompt_ready_fails_fast_on_a_launcher_question(
     """
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._capture_pane",
-        lambda socket_path, tmux_target: _LAUNCHER_QUESTION_PANE,
+        lambda socket_path, tmux_target, *, join_wrapped=False: _LAUNCHER_QUESTION_PANE,
     )
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._claude_pane_state",
@@ -9731,10 +9731,10 @@ def test_wait_for_claude_prompt_ready_ignores_a_single_launcher_question_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One question-shaped frame is not enough; the composer on the next poll wins."""
-    frames = iter([_LAUNCHER_QUESTION_PANE, _READY_PANE])
+    frames = iter([_LAUNCHER_QUESTION_PANE, _LAUNCHER_QUESTION_PANE, _READY_PANE])
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._capture_pane",
-        lambda socket_path, tmux_target: next(frames, _READY_PANE),
+        lambda socket_path, tmux_target, *, join_wrapped=False: next(frames, _READY_PANE),
     )
     claude_native_bridge._wait_for_claude_prompt_ready(
         "/tmp/example/tmux.sock",
@@ -9749,13 +9749,53 @@ def test_wait_for_claude_prompt_ready_prefers_a_rendered_prompt_over_a_launcher_
     """A launcher question left in scrollback is no gate once the input box is up."""
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._capture_pane",
-        lambda socket_path, tmux_target: _LAUNCHER_QUESTION_PANE + _READY_PANE,
+        lambda socket_path, tmux_target, *, join_wrapped=False: (
+            _LAUNCHER_QUESTION_PANE + _READY_PANE
+        ),
     )
     claude_native_bridge._wait_for_claude_prompt_ready(
         "/tmp/example/tmux.sock",
         "claude:0.0",
         timeout_s=30.0,
     )
+
+
+_WRAPPED_LAUNCHER_QUESTION = (
+    "Upgrade Claude Code to 2.1.290 from the internal registry before continuing? (Y/n)"
+)
+# The same question as an 80-column pane shows it, and as ``capture-pane -J`` joins it.
+_WRAPPED_LAUNCHER_QUESTION_PANE = (
+    "Installing ug CLI...\n"
+    "Upgrade Claude Code to 2.1.290 from the internal registry before\n"
+    "continuing? (Y/n) \n"
+)
+_JOINED_LAUNCHER_QUESTION_PANE = f"Installing ug CLI...\n{_WRAPPED_LAUNCHER_QUESTION} \n"
+
+
+def test_wait_for_claude_prompt_ready_quotes_a_wrapped_launcher_question_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A question wider than the pane is read with wrapped rows joined and quoted whole."""
+    captures: list[bool] = []
+
+    def _capture(socket_path: str, tmux_target: str, *, join_wrapped: bool = False) -> str:
+        captures.append(join_wrapped)
+        return _JOINED_LAUNCHER_QUESTION_PANE if join_wrapped else _WRAPPED_LAUNCHER_QUESTION_PANE
+
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._capture_pane", _capture)
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._claude_pane_state",
+        lambda socket_path, tmux_target: claude_native_bridge._ClaudePaneState(True),
+    )
+    with pytest.raises(claude_native_bridge.ClaudeLauncherQuestionPending) as raised:
+        claude_native_bridge._wait_for_claude_prompt_ready(
+            "/tmp/example/tmux.sock",
+            "claude:0.0",
+            timeout_s=30.0,
+        )
+    assert f'answer "{_WRAPPED_LAUNCHER_QUESTION}"' in raised.value.remediation
+    # Each plain poll that showed the cue looked again with wrapped rows joined.
+    assert captures == [False, True, False, True]
 
 
 def test_wait_for_claude_prompt_ready_reports_the_exit_when_pane_dead(

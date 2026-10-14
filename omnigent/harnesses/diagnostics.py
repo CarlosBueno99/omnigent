@@ -211,7 +211,7 @@ def detect_launcher_question(screen: str | None) -> str | None:
 
     :param screen: ANSI-stripped terminal screen text, or ``None``.
     :returns: The question line with its answer cue, whitespace-normalized and
-        capped at 120 characters, e.g.
+        capped at 120 characters by eliding its middle, e.g.
         ``"Upgrade Claude Code if available? (Y/n)"``, or ``None``.
     """
     if not screen:
@@ -223,7 +223,8 @@ def detect_launcher_question(screen: str | None) -> str | None:
     ]
     if not lines or not _YES_NO_CUE.search(lines[-1]):
         return None
-    return lines[-1][:120]
+    line = lines[-1]
+    return line if len(line) <= 120 else f"{line[:60]}…{line[-59:]}"
 
 
 def sign_in_next_step(agent: str) -> str:

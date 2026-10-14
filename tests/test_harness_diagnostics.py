@@ -431,10 +431,12 @@ def test_detect_launcher_question_ignores_other_screens(screen: str | None) -> N
     assert detect_launcher_question(screen) is None
 
 
-def test_detect_launcher_question_caps_a_long_line() -> None:
+def test_detect_launcher_question_keeps_the_cue_of_a_long_line() -> None:
     question = detect_launcher_question("x" * 200 + " (y/n)")
     assert question is not None
-    assert len(question) == 120
+    assert len(question) <= 120
+    assert question.startswith("xxxx")
+    assert question.endswith("(y/n)")
 
 
 def test_sign_in_next_step_names_the_agent_and_carries_no_address() -> None:

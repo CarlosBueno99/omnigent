@@ -57,7 +57,7 @@ pytestmark = pytest.mark.skipif(
 _log = logging.getLogger(__name__)
 
 _UPGRADE_QUESTION = "Upgrade Claude Code if available? (Y/n)"
-# What the reporter's terminal showed from the ug wrapper before Claude Code ran.
+# Output the ug wrapper prints before Claude Code runs.
 _LAUNCHER_SCRIPT = """\
 #!/usr/bin/env bash
 if [ "${1:-}" = "--" ]; then shift; fi
@@ -73,17 +73,13 @@ IFS= read -r answer
 exec claude "$@"
 """.replace("UPGRADE_QUESTION", _UPGRADE_QUESTION)
 
-# Chat text that would tell the person the terminal is waiting on a question, as
-# the sign-in card and the dialog notice already do.
-_TERMINAL_NOTICE = re.compile(r"terminal|Upgrade Claude Code|dialog|sign in", re.IGNORECASE)
+_CARD_HEADLINE = "Claude Code can't start until you answer a question in the terminal"
 _ERROR_PILL = '[data-testid="error-pill"]'
 _WORKING = '[data-testid="working-indicator"]'
 
 _ANSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\r")
 _PROMPT_TIMEOUT_S = 90.0
-_CHAT_NOTICE_WAIT_S = 30.0
 _CLAUDE_BOOT_TIMEOUT_S = 120.0
-_PENDING_MESSAGE_WAIT_MS = 90_000
 
 
 def _terminal_id(base_url: str, session_id: str) -> str | None:
@@ -162,38 +158,26 @@ def parked_launcher_session(
     environment pass ``--basetemp`` inside the worktree.
     """
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
-    runner_id = str(_server_state["runner_id"])
-    workspace = tmp_path_factory.mktemp("launcher_workspace").resolve()
-    _write_launcher_workspace(workspace)
-    with _temp_omnigent_mock_config(
-        mock_llm_server_url, "claude", workflow_owned=bool(_server_state.get("workflow_owned"))
-    ):
-        created = create_native_session(
-            httpx, live_server, harness="claude", metadata={"workspace": str(workspace)}
-        )
-        session_id = str(created["session_id"])
-        bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
-        try:
+    session_id: str | None = None
+    try:
+        runner_id = str(_server_state["runner_id"])
+        workspace = tmp_path_factory.mktemp("launcher_workspace").resolve()
+        _write_launcher_workspace(workspace)
+        with _temp_omnigent_mock_config(
+            mock_llm_server_url, "claude", workflow_owned=bool(_server_state.get("workflow_owned"))
+        ):
+            created = create_native_session(
+                httpx, live_server, harness="claude", metadata={"workspace": str(workspace)}
+            )
+            session_id = str(created["session_id"])
+            bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
             yield (live_server, session_id)
-        finally:
+    finally:
+        if session_id is not None:
             httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-            if respawned is not None:
-                respawned.terminate()
-                respawned.wait(timeout=5)
-
-
-def _chat_mentions_terminal_question(page: Page) -> bool:
-    pills = page.locator(_ERROR_PILL).all_inner_texts()
-    return any(_TERMINAL_NOTICE.search(text) for text in pills)
-
-
-def _wait_for_chat_notice(page: Page, *, timeout_s: float) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if _chat_mentions_terminal_question(page):
-            return True
-        page.wait_for_timeout(500)
-    return False
+        if respawned is not None:
+            respawned.terminate()
+            respawned.wait(timeout=5)
 
 
 @pytest.mark.timeout(600)
@@ -202,11 +186,10 @@ def test_launcher_question_is_announced_in_chat(
     parked_launcher_session: tuple[str, str],
     mock_llm_server_url: str,
 ) -> None:
-    """While the launcher waits on its question, the chat view must say so.
+    """A message sent to a parked launcher gets a card naming the terminal question.
 
-    Mirrors the report: look at the chat view, send a message, then find the
-    question in the Terminal view and answer it. The notice check is deferred so a
-    failing run still shows the whole journey, including the terminal contrast.
+    Mirrors the report: send a message from the chat view, read the card, answer
+    the question in the Terminal view, then resend and get a reply.
     """
     base_url, session_id = parked_launcher_session
     pane = _wait_for_pane_text(
@@ -221,47 +204,31 @@ def test_launcher_question_is_announced_in_chat(
     page: Page = request.getfixturevalue("page")
     page.goto(f"{base_url}/c/{session_id}")
     _ensure_chat_view(page)
-    notice_before_send = _wait_for_chat_notice(page, timeout_s=_CHAT_NOTICE_WAIT_S)
-    _log.info("chat notice before sending: %s", notice_before_send)
-
     _send(page, "hello")
     expect(page.locator(_USER, has_text="hello")).to_have_count(1, timeout=30_000)
-    notice_after_send = _wait_for_chat_notice(page, timeout_s=_CHAT_NOTICE_WAIT_S)
-    chat_after_send = page.locator("main").inner_text()
-    _log.info("chat notice after sending: %s; chat text:\n%s", notice_after_send, chat_after_send)
-    assert _UPGRADE_QUESTION in _pane_output(
-        base_url, session_id, _terminal_id(base_url, session_id) or ""
-    ), "the launcher moved past its question before the chat was observed"
+    card = page.locator(_ERROR_PILL)
+    expect(card).to_have_count(1, timeout=30_000)
+    expect(card).to_contain_text(_CARD_HEADLINE)
+    card.locator('button[aria-expanded="false"]').click()
+    expect(card).to_contain_text(_UPGRADE_QUESTION)
+    expect(card).to_contain_text("send your message again")
+    expect(page.locator(_WORKING)).to_have_count(0, timeout=30_000)
+
+    terminal_id = _terminal_id(base_url, session_id)
+    assert terminal_id is not None, "the Claude terminal disappeared after the failed send"
+    assert _UPGRADE_QUESTION in _pane_output(base_url, session_id, terminal_id), (
+        "the failed send did not leave the launcher parked on its question"
+    )
 
     _open_terminal_view(page)
     _wait_terminal_connected(page)
     _type_into_tui(page, "y")
     deadline = time.monotonic() + _CLAUDE_BOOT_TIMEOUT_S
-    while "❯" not in (
-        pane := _pane_output(base_url, session_id, _terminal_id(base_url, session_id) or "")
-    ):
+    while "❯" not in (pane := _pane_output(base_url, session_id, terminal_id)):
         assert time.monotonic() < deadline, f"Claude Code did not start after the answer:\n{pane}"
         page.wait_for_timeout(1000)
-    _log.info("Claude Code started after answering in the terminal")
 
     _ensure_chat_view(page)
-    reply = page.locator(_ASSISTANT, has_text=token)
-    outcome = "no reply or error within the wait"
-    deadline = time.monotonic() + _PENDING_MESSAGE_WAIT_MS / 1000
-    while time.monotonic() < deadline:
-        if reply.count():
-            outcome = "pending message delivered and answered"
-            break
-        if page.locator(_ERROR_PILL).count():
-            outcome = "error shown: " + " | ".join(page.locator(_ERROR_PILL).all_inner_texts())
-            break
-        page.wait_for_timeout(1000)
-    _log.info("after answering in the terminal, the chat shows: %s", outcome)
+    _send(page, "hello")
+    expect(page.locator(_ASSISTANT, has_text=token)).to_have_count(1, timeout=90_000)
     expect(page.locator(_WORKING)).to_have_count(0, timeout=30_000)
-
-    assert notice_before_send or notice_after_send, (
-        "the chat view never said that Claude Code's launcher was waiting on "
-        f"{_UPGRADE_QUESTION!r} in the terminal (checked {_CHAT_NOTICE_WAIT_S:.0f}s before and "
-        f"after sending). Chat after sending:\n{chat_after_send}\n"
-        f"After answering in the terminal: {outcome}"
-    )
