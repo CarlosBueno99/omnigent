@@ -425,6 +425,8 @@ def test_detect_launcher_question_lifts_the_waiting_question(screen: str, expect
         _UG_UPGRADE_SCREEN + "╭── Claude Code ──╮\n❯ \n",
         # A fraction or a path is not an answer cue.
         "Downloaded 3/4 files (1/2)\n",
+        # Mismatched delimiters are prose, not a cue.
+        "Continue (y/n]\n",
     ],
 )
 def test_detect_launcher_question_ignores_other_screens(screen: str | None) -> None:

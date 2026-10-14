@@ -9731,6 +9731,7 @@ def test_wait_for_claude_prompt_ready_ignores_a_single_launcher_question_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One question-shaped frame is not enough; the composer on the next poll wins."""
+    # Poll 1 captures twice (plain, then joined to read the question whole).
     frames = iter([_LAUNCHER_QUESTION_PANE, _LAUNCHER_QUESTION_PANE, _READY_PANE])
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._capture_pane",

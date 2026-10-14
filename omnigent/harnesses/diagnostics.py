@@ -195,9 +195,9 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
 
 # A yes/no answer cue ending a question a launcher waits on: ``(Y/n)``,
 # ``[y/N]``, ``(yes/no)``, optionally followed by ``:`` or ``?``.
-_YES_NO_CUE = re.compile(
-    r"[\[(]\s*(?:y(?:es)?\s*/\s*no?|no?\s*/\s*y(?:es)?)\s*[\])]\s*[:?]?\s*$", re.IGNORECASE
-)
+_YES_NO = r"\s*(?:y(?:es)?\s*/\s*no?|no?\s*/\s*y(?:es)?)\s*"
+_YES_NO_CUE = re.compile(rf"(?:\({_YES_NO}\)|\[{_YES_NO}\])\s*[:?]?\s*$", re.IGNORECASE)
+_QUESTION_MAX_CHARS = 120
 
 
 def detect_launcher_question(screen: str | None) -> str | None:
@@ -211,7 +211,7 @@ def detect_launcher_question(screen: str | None) -> str | None:
 
     :param screen: ANSI-stripped terminal screen text, or ``None``.
     :returns: The question line with its answer cue, whitespace-normalized and
-        capped at 120 characters by eliding its middle, e.g.
+        capped at :data:`_QUESTION_MAX_CHARS` by eliding its middle, e.g.
         ``"Upgrade Claude Code if available? (Y/n)"``, or ``None``.
     """
     if not screen:
@@ -224,7 +224,10 @@ def detect_launcher_question(screen: str | None) -> str | None:
     if not lines or not _YES_NO_CUE.search(lines[-1]):
         return None
     line = lines[-1]
-    return line if len(line) <= 120 else f"{line[:60]}…{line[-59:]}"
+    if len(line) <= _QUESTION_MAX_CHARS:
+        return line
+    head = _QUESTION_MAX_CHARS // 2
+    return f"{line[:head]}…{line[-(_QUESTION_MAX_CHARS - head - 1) :]}"
 
 
 def sign_in_next_step(agent: str) -> str:
