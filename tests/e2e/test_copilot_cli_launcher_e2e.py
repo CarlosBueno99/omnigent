@@ -24,9 +24,12 @@ pexpect = pytest.importorskip("pexpect")
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _EXIT_TIMEOUT_S = 90.0
-# Booting `omnigent copilot` starts the local server + host daemon first.
-_BOOT_TIMEOUT_S = 180.0
-_FIRST_TURN_TIMEOUT_S = 120.0
+# Booting `omnigent copilot` starts the local server + host daemon first (~20 s).
+# The budgets below keep the whole test, teardown included, under CI's 180 s
+# per-test timeout even when the launch regresses.
+_BOOT_TIMEOUT_S = 75.0
+_FIRST_TURN_TIMEOUT_S = 40.0
+_QUIT_TIMEOUT_S = 15.0
 _STOP_GRACE_S = 10.0
 
 _REPL_READY_RE = r"state: sleeping|❯ "
@@ -151,19 +154,22 @@ def _recorded_pids(data_dir: Path) -> list[int]:
 
 
 def _terminate(pid: int) -> None:
-    """SIGTERM a recorded process, escalating to SIGKILL after a grace period."""
+    """SIGTERM a recorded process, escalating to SIGKILL after a grace period.
+
+    A PID that is gone, or reused by a process we may not signal, is not ours.
+    """
     try:
         os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return
     deadline = time.monotonic() + _STOP_GRACE_S
     while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             return
         time.sleep(0.2)
-    with contextlib.suppress(ProcessLookupError):
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         os.kill(pid, signal.SIGKILL)
 
 
@@ -171,8 +177,9 @@ def _shutdown(child: pexpect.spawn, data_dir: Path) -> None:
     try:
         if child.isalive():
             child.send("/quit\r")
-            child.expect(pexpect.EOF, timeout=20)
-    except (pexpect.EOF, pexpect.TIMEOUT):
+            child.expect(pexpect.EOF, timeout=_QUIT_TIMEOUT_S)
+    except (pexpect.EOF, pexpect.TIMEOUT, OSError):
+        # OSError: the child exited between isalive() and the pty write.
         pass
     finally:
         child.close(force=True)
@@ -207,7 +214,7 @@ def test_copilot_without_sdk_reports_the_missing_extra_before_booting(
         startup = _ANSI_RE.sub("", child.before or "")
         if outcome == 0:
             # Named the extra: the launcher must now exit instead of booting the REPL.
-            ended = child.expect([pexpect.EOF, _REPL_READY_RE], timeout=_EXIT_TIMEOUT_S)
+            ended = child.expect([pexpect.EOF, _REPL_READY_RE], timeout=_FIRST_TURN_TIMEOUT_S)
             rest = _ANSI_RE.sub("", child.before or "")
             assert ended == 0, (
                 f"`omnigent copilot` named the missing copilot extra but booted its REPL anyway:\n"
