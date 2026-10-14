@@ -187,6 +187,7 @@ def test_copilot_without_sdk_reports_the_missing_extra_before_booting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     env = _copilot_launch_env(tmp_path, monkeypatch)
+    data_dir = Path(env["OMNIGENT_DATA_DIR"])
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     child = pexpect.spawn(
@@ -217,6 +218,10 @@ def test_copilot_without_sdk_reports_the_missing_extra_before_booting(
                 f"`omnigent copilot` named the missing copilot extra but exited with "
                 f"{child.exitstatus}:\n{(startup + rest)[-3000:]}"
             )
+            assert _recorded_pids(data_dir) == [], (
+                "`omnigent copilot` named the missing copilot extra but still started a "
+                f"server or host daemon: {_recorded_pids(data_dir)}"
+            )
             return
         assert outcome != 2, (
             "`omnigent copilot` exited without naming the missing copilot extra:\n"
@@ -240,4 +245,4 @@ def test_copilot_without_sdk_reports_the_missing_extra_before_booting(
             f"{detail}:\n{turn_output[-3000:]}"
         )
     finally:
-        _shutdown(child, Path(env["OMNIGENT_DATA_DIR"]))
+        _shutdown(child, data_dir)

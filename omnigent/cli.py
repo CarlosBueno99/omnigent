@@ -14030,19 +14030,19 @@ def _run_bundled_agent(name: str, run_args: tuple[str, ...]) -> None:
     )
 
 
-def _missing_harness_sdk_error(harness: str) -> click.ClickException:
-    """Error for a local extras-gated launch whose SDK is not installed.
+def _missing_harness_sdk_error(harness: str, gated: _ExtrasGatedHarness) -> click.ClickException:
+    """Error for an extras-gated launch whose SDK is not installed.
 
     Names the SDK, the install command for this install shape and the setup
     route, instead of booting a REPL whose first turn fails on the lazy import.
 
-    :param harness: An extras-gated shorthand, e.g. ``"copilot"``.
+    :param harness: The shorthand command, e.g. ``"copilot"``.
+    :param gated: Its :func:`_extras_gated_harnesses` entry.
     :returns: The exception to raise.
     """
     from omnigent.cli_diagnostics import SUPPRESS_RECOVERY_HINT_ATTR
     from omnigent.onboarding.extra_install import extra_install_display
 
-    gated = _extras_gated_harnesses()[harness]
     prog = cli_invocation()
     exc = click.ClickException(
         f"{gated.label}'s SDK ({gated.sdk}) isn't installed, so `{prog} {harness}` can't "
@@ -14060,7 +14060,7 @@ def _run_harness_shorthand(harness: str, run_args: tuple[str, ...]) -> None:
     way :func:`_run_bundled_agent` forwards ``polly``; an explicit ``--harness`` in
     *run_args* is a usage error rather than a silent override.
 
-    An extras-gated harness (:func:`_harness_extra_checks`) imports its SDK lazily
+    An extras-gated harness (:func:`_extras_gated_harnesses`) imports its SDK lazily
     on the first turn, so a launch without the SDK would boot a REPL whose first
     message can only fail; it stops here and names the install instead. This holds
     with ``--server`` too: the forwarded ``--harness`` makes :func:`_dispatch_run`
@@ -14070,11 +14070,11 @@ def _run_harness_shorthand(harness: str, run_args: tuple[str, ...]) -> None:
             f"`{cli_invocation()} {harness}` always uses the {harness} harness; drop "
             f"--harness, or use `{cli_invocation()} run --harness <name>` to pick another."
         )
-    sdk_installed = _harness_extra_checks().get(harness)
-    if sdk_installed is not None and not sdk_installed():
+    gated = _extras_gated_harnesses().get(harness)
+    if gated is not None and not gated.installed():
         params = _forwarded_run_params(run_args)
         if params is not None and not _forwarded_run_requests_help(run_args, params):
-            raise _missing_harness_sdk_error(harness)
+            raise _missing_harness_sdk_error(harness, gated)
     run.main(
         args=["--harness", harness, *run_args],
         prog_name="omnigent run",
