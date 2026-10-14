@@ -13845,6 +13845,44 @@ def _bundled_agent_brain_harness_fallback(name: str) -> str | None:
     return None
 
 
+def _forwarded_run_params(run_args: tuple[str, ...]) -> dict[str, Any] | None:
+    """Parse pass-through ``run`` args with ``run``'s own Click parser.
+
+    Resilient mode (no callbacks, no prompts, errors swallowed) so flag-shape
+    handling — attached short options (``-rID``), option values that merely
+    look like flags (``-p --harness``) — agrees exactly with the downstream
+    dispatch instead of re-implementing Click's rules by hand.
+
+    :param run_args: Unparsed pass-through CLI args for ``run``.
+    :returns: The parsed ``run`` params, or ``None`` for malformed args — the
+        forwarded ``run`` re-parses and reports them, so nothing launches or
+        mutates on this partial parse.
+    """
+    try:
+        with run.make_context("omnigent run", list(run_args), resilient_parsing=True) as ctx:
+            return dict(ctx.params)
+    except click.ClickException:
+        return None
+
+
+def _forwarded_run_is_local(params: dict[str, Any]) -> bool:
+    """Whether parsed ``run`` params launch against a local server.
+
+    An explicit ``--server`` decides; otherwise a configured remote default
+    makes the launch remote.
+
+    :param params: Params from :func:`_forwarded_run_params`.
+    :returns: ``True`` for a local-server launch.
+    """
+    server = params.get("server")
+    if server is not None:
+        return _is_local_server_request(server)
+    configured = _load_effective_config().get("server")
+    if isinstance(configured, str) and configured and not _is_local_server_request(configured):
+        return False
+    return True
+
+
 def _bundled_brain_fallback_applies(run_args: tuple[str, ...]) -> bool:
     """Whether this bundled launch may reroute its brain harness.
 
@@ -13856,23 +13894,11 @@ def _bundled_brain_fallback_applies(run_args: tuple[str, ...]) -> bool:
     supply the brain's routing server-side (e.g. a managed gateway), so a
     missing local credential there is not evidence the brain can't run.
 
-    The forwarded args are parsed with ``run``'s own Click parser in
-    resilient mode (no callbacks, no prompts, errors swallowed) so
-    flag-shape handling — attached short options (``-rID``), option values
-    that merely look like flags (``-p --harness``) — agrees exactly with the
-    downstream dispatch instead of re-implementing Click's rules by hand.
-
     :param run_args: Unparsed pass-through CLI args for ``run``.
     :returns: ``True`` when the fallback may inject ``--harness``.
     """
-    try:
-        with run.make_context("omnigent run", list(run_args), resilient_parsing=True) as ctx:
-            params = dict(ctx.params)
-    except click.ClickException:
-        # Malformed args — the forwarded run re-parses and reports them.
-        # (Resilient parsing swallows most of these; a partial parse at
-        # worst prints the reroute notice before the real parse rejects
-        # the command — nothing launches or mutates.)
+    params = _forwarded_run_params(run_args)
+    if params is None:
         return False
     # A real --help never launches, so keep the fallback (and its notice)
     # out. A "--help" consumed as an option VALUE (e.g. ``-p --help``) is
@@ -13889,13 +13915,7 @@ def _bundled_brain_fallback_applies(run_args: tuple[str, ...]) -> bool:
         or params.get("fork_session_id") is not None
     ):
         return False
-    server = params.get("server")
-    if server is not None:
-        return _is_local_server_request(server)
-    configured = _load_effective_config().get("server")
-    if isinstance(configured, str) and configured and not _is_local_server_request(configured):
-        return False
-    return True
+    return _forwarded_run_is_local(params)
 
 
 def _reject_reserved_devin_resume_args(devin_args: tuple[str, ...]) -> None:
@@ -13989,15 +14009,53 @@ def _run_bundled_agent(name: str, run_args: tuple[str, ...]) -> None:
     )
 
 
+def _missing_harness_sdk_error(harness: str) -> click.ClickException:
+    """Error for a local extras-gated launch whose SDK is not installed.
+
+    Names the SDK, the install command for this install shape and the setup
+    route, instead of booting a REPL whose first turn fails on the lazy import.
+
+    :param harness: An extras-gated shorthand, e.g. ``"copilot"``.
+    :returns: The exception to raise.
+    """
+    from omnigent.cli_diagnostics import SUPPRESS_RECOVERY_HINT_ATTR
+    from omnigent.onboarding.copilot_auth import COPILOT_EXTRA
+    from omnigent.onboarding.extra_install import extra_install_display
+
+    # Display name, SDK distribution and pip extra per extras-gated shorthand.
+    label, sdk, extra = {"copilot": ("Copilot", "github-copilot-sdk", COPILOT_EXTRA)}[harness]
+    prog = cli_invocation()
+    exc = click.ClickException(
+        f"{label}'s SDK ({sdk}) isn't installed, so `{prog} {harness}` can't run on "
+        f"this machine. Install the optional `{extra}` extra:\n\n"
+        f"    {extra_install_display(extra)}\n\n"
+        f"or run `{prog} setup` and open {label} to install it from there. "
+        f"`{prog} {harness} --server <url>` runs on that server's hosts instead."
+    )
+    # A missing dependency is not something `omnigent stop` can fix.
+    setattr(exc, SUPPRESS_RECOVERY_HINT_ATTR, True)
+    return exc
+
+
 def _run_harness_shorthand(harness: str, run_args: tuple[str, ...]) -> None:
     """Forward a harness shorthand (``omnigent copilot``) to ``run --harness``, the
     way :func:`_run_bundled_agent` forwards ``polly``; an explicit ``--harness`` in
-    *run_args* is a usage error rather than a silent override."""
+    *run_args* is a usage error rather than a silent override.
+
+    An extras-gated harness (:func:`_harness_extra_checks`) imports its SDK lazily
+    on the first turn, so a local launch without the SDK would boot a REPL whose
+    first message can only fail; it stops here and names the install instead. A
+    remote ``--server`` launch runs on that server's hosts and is left alone."""
     if any(arg == "--harness" or arg.startswith("--harness=") for arg in run_args):
         raise click.UsageError(
             f"`{cli_invocation()} {harness}` always uses the {harness} harness; drop "
             f"--harness, or use `{cli_invocation()} run --harness <name>` to pick another."
         )
+    sdk_installed = _harness_extra_checks().get(harness)
+    if sdk_installed is not None and not sdk_installed():
+        params = _forwarded_run_params(run_args)
+        if params is not None and _forwarded_run_is_local(params):
+            raise _missing_harness_sdk_error(harness)
     run.main(
         args=["--harness", harness, *run_args],
         prog_name="omnigent run",

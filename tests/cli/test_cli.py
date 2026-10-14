@@ -1406,6 +1406,7 @@ def test_copilot_command_forwards_to_run_on_the_copilot_harness(
 ) -> None:
     """``omnigent copilot`` dispatches ``run --harness copilot`` with pass-through
     flags intact and a canonical ``omnigent run --harness copilot`` resume prefix."""
+    monkeypatch.setattr("omnigent.cli._harness_extra_checks", lambda: {"copilot": lambda: True})
     result, dispatch = _invoke_bundled_agent_command(
         monkeypatch, ["copilot", "-p", "review the last commit", "--model", "m1"]
     )
@@ -1427,6 +1428,39 @@ def test_copilot_command_rejects_explicit_harness(monkeypatch: pytest.MonkeyPatc
     assert result.exit_code != 0
     assert "always uses the copilot harness" in result.output
     dispatch.assert_not_called()
+
+
+def test_copilot_command_without_sdk_names_the_extra_instead_of_launching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local ``omnigent copilot`` without the Copilot SDK stops before booting a
+    REPL whose first turn would fail on the lazy import, and names the install."""
+    monkeypatch.setattr("omnigent.cli._harness_extra_checks", lambda: {"copilot": lambda: False})
+    monkeypatch.setattr(
+        "omnigent.onboarding.extra_install.extra_install_command",
+        lambda extra: ["uv", "tool", "install", "--force", f"omnigent[databricks,{extra}]"],
+    )
+    result, dispatch = _invoke_bundled_agent_command(monkeypatch, ["copilot", "-p", "hello"])
+
+    assert result.exit_code != 0
+    dispatch.assert_not_called()
+    assert "Copilot's SDK (github-copilot-sdk) isn't installed" in result.output
+    assert "uv tool install --force 'omnigent[databricks,copilot]'" in result.output
+    assert "setup" in result.output
+
+
+def test_copilot_command_without_sdk_still_launches_against_a_remote_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK gate is local-only: a remote ``--server`` runs on that server's hosts."""
+    monkeypatch.setattr("omnigent.cli._harness_extra_checks", lambda: {"copilot": lambda: False})
+    result, dispatch = _invoke_bundled_agent_command(
+        monkeypatch, ["copilot", "--server", "https://omnigent.example.databricksapps.com"]
+    )
+
+    assert result.exit_code == 0, result.output
+    dispatch.assert_called_once()
+    assert dispatch.call_args.kwargs["harness"] == "copilot"
 
 
 def test_copilot_command_answers_help_and_is_rostered_as_a_harness() -> None:
