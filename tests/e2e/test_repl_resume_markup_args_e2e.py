@@ -1,21 +1,6 @@
-"""PTY e2e: ``omnigent run --resume`` replays a tool call whose arguments look
-like Rich markup instead of crashing.
-
-Journey (local-daemon mode, mock LLM):
-
-1. ``omnigent run <agent>`` and ask the agent to run ``echo '[/dim]'``. The
-   mock answers with a ``sys_os_shell`` call for that command, then a reply.
-2. ``/quit``; the exit hint carries the conversation id.
-3. ``omnigent run --resume <id>`` must show the replayed tool-call line with
-   the brackets intact and reach the prompt.
-
-Tool arguments and exception text are user data: both the formatter's tool-call
-line and the resume-failure notice must render them literally.
-
-Usage::
-
-    python -m pytest tests/e2e/test_repl_resume_markup_args_e2e.py -v
-"""
+"""PTY e2e: ``omnigent run --resume`` must replay a tool call whose arguments look
+like Rich markup (``echo '[/dim]'``) literally and reach the prompt instead of crashing.
+Runs the real CLI in local-daemon mode against the mock LLM."""
 
 from __future__ import annotations
 
