@@ -28,11 +28,9 @@ from omnigent.harnesses.claude_native.bridge_state import (
     url_component,
 )
 
-# Claude blocks on every command hook, so this module import is paid per tool
-# call and per prompt. It stays stdlib + the stdlib-only bridge-state readers:
-# httpx and the policy machinery are imported inside the subcommands that speak
-# HTTP, and ``bridge`` (asyncio, filelock, the MCP relay server, the tool graph)
-# only inside the paths that write bridge state.
+# Claude blocks on every command hook, so this module import is paid per spawn:
+# stdlib + the stdlib-only bridge-state readers only. httpx, the policy machinery
+# and ``bridge`` (asyncio, filelock, MCP server, tool graph) load inside subcommands.
 if TYPE_CHECKING:
     import httpx
 

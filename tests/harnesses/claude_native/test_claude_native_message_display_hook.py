@@ -308,10 +308,9 @@ def test_package_lazy_exports_resolve_on_access() -> None:
         ("omnigent.harnesses.claude_native.bridge_state", frozenset()),
         (
             "omnigent.harnesses.claude_native.hook",
-            # Every subcommand pays this import per spawn, so it is pure
-            # stdlib + the stdlib-only bridge-state readers: httpx and the
-            # policy machinery load inside the subcommands that speak HTTP,
-            # and ``bridge`` only inside the paths that write bridge state.
+            # Every subcommand pays this import per spawn: stdlib + the
+            # stdlib-only bridge-state readers; httpx, the policy machinery
+            # and ``bridge`` load inside the subcommands that need them.
             frozenset(),
         ),
     ],
