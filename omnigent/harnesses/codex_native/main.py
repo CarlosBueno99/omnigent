@@ -2200,7 +2200,7 @@ def _local_rollout_outruns_server_history(
     server_replies = _assistant_reply_texts(
         _codex_response_item_from_session_item(item)
         for item in items
-        if not _is_interrupted_assistant_session_item(item)
+        if item.get("type") == "message" and not _is_interrupted_assistant_session_item(item)
     )
     if sum(local_replies.values()) <= sum(server_replies.values()):
         return False

@@ -987,6 +987,28 @@ async def test_ensure_local_codex_resume_rollout_keeps_a_rollout_with_a_truncate
 
 
 @pytest.mark.asyncio
+async def test_ensure_local_codex_resume_rollout_guard_ignores_malformed_tool_history(
+    tmp_path: Path,
+) -> None:
+    """A malformed tool item in server history does not abort the keep-local check."""
+    codex_home = tmp_path / "codex-home"
+    existing = _write_rollout_with_turns(codex_home, _THREAD_ID, [("prompt 1", "reply 1")])
+    before = existing.read_bytes()
+
+    rollout = await _cold_resume_rollout(
+        tmp_path,
+        codex_home,
+        [
+            _server_message("user", "prompt 1", turn=1),
+            {"id": "fc_broken", "response_id": "codex_turn_1", "type": "function_call"},
+        ],
+    )
+
+    assert rollout == existing
+    assert existing.read_bytes() == before
+
+
+@pytest.mark.asyncio
 async def test_ensure_local_codex_resume_rollout_rebuilds_from_an_unusable_local_rollout(
     tmp_path: Path,
 ) -> None:

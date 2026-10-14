@@ -13,6 +13,7 @@ forwarder's connection.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -180,8 +181,12 @@ _PROXY_SCRIPT = textwrap.dedent(
         for task in pending:
             task.cancel()
         for task in tasks:
-            with contextlib.suppress(BaseException):
+            try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                _log(event="relay_error", conn=conn_id, error=repr(exc))
         with contextlib.suppress(Exception):
             await upstream.close()
         with contextlib.suppress(Exception):
@@ -243,7 +248,11 @@ _PROXY_SCRIPT = textwrap.dedent(
 
 
     if __name__ == "__main__":
-        main()
+        try:
+            main()
+        except Exception as exc:  # noqa: BLE001
+            _log(event="shim_error", error=repr(exc))
+            raise
     '''
 )
 
@@ -328,11 +337,15 @@ class CodexNativeFaultEnvironment:
     def proxy_events(self) -> list[dict[str, Any]]:
         if not self.proxy_log.exists():
             return []
-        return [
-            json.loads(line)
-            for line in self.proxy_log.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        events: list[dict[str, Any]] = []
+        for line in self.proxy_log.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue  # the shim may still be appending the last record
+        return events
 
     def bridge_dir(self, session_id: str) -> Path:
         digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
@@ -387,7 +400,8 @@ def _stop(process: subprocess.Popen[bytes] | None, *, grace: float) -> None:
         process.wait(timeout=grace)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait(timeout=5)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=5)
 
 
 def spawn_codex_native_fault_environment(

@@ -132,18 +132,26 @@ def _wait_for_bridge_state(
 ) -> CodexNativeBridgeState:
     deadline = time.monotonic() + 120.0
     bridge_dir = env.bridge_dir(session_id)
+    state = None
     while time.monotonic() < deadline:
         state = read_bridge_state(bridge_dir)
         if state is not None and state.thread_id and state.socket_path != not_socket:
             return state
         time.sleep(0.5)
-    raise AssertionError(f"no bridge state with a thread id at {bridge_dir}")
+    raise AssertionError(
+        f"no fresh bridge state with a thread id at {bridge_dir} "
+        f"(last state: {state!r}, excluded socket: {not_socket!r})"
+    )
 
 
 def _run_coroutine(coroutine: Coroutine[Any, Any, dict[str, Any]]) -> dict[str, Any]:
     # The sync Playwright API already drives an event loop on the test thread.
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
         return pool.submit(asyncio.run, coroutine).result(timeout=120)
+    finally:
+        # Do not block on a wedged probe; let the test fail promptly.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _thread_read(ws_url: str, thread_id: str) -> dict[str, Any]:
@@ -425,7 +433,12 @@ def test_native_codex_chat_and_history_survive_forwarder_subscription_refusal(
                 "working_indicator": page.locator(_WORKING).count(),
                 "status": _session_status(env, session_id),
             }
-            if chat_after_reconnect["status"] == "idle" or time.monotonic() >= deadline:
+            settled = (
+                chat_after_reconnect["status"] == "idle"
+                and chat_after_reconnect["assistant_bubbles"] >= 2
+                and chat_after_reconnect["working_indicator"] == 0
+            )
+            if settled or time.monotonic() >= deadline:
                 break
             page.wait_for_timeout(2_000)
         page.wait_for_timeout(3_000)
