@@ -5537,10 +5537,8 @@ def test_readable_permission_modes_match_the_server_read_back_vocabulary() -> No
     """
     Every footer the bridge can read is a mode the Sessions API accepts back.
 
-    The forwarder posts whatever the pane footer parses to as an
-    ``external_permission_mode_change``, and the API validates it against its
-    own frozenset. A footer readable here but unknown there is rejected on
-    every poll, so the web picker never learns the pane's real mode.
+    The forwarder posts the parsed footer as ``external_permission_mode_change``;
+    a mode readable here but unknown there is rejected on every poll.
     """
     from omnigent.server.routes._sessions.common import (
         _CLAUDE_NATIVE_READABLE_PERMISSION_MODES,

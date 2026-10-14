@@ -1,13 +1,10 @@
 """E2E: the composer permission picker switches a claude-native session out of Don't ask.
 
-A claude-native session launched with ``--permission-mode dontAsk`` renders Claude
-Code's ``⏵⏵ don't ask on (shift+tab to cycle)`` footer and the composer chip reads
-"Don't ask". Choosing a switchable mode from that chip must apply it: the chip
-settles on the new mode and the terminal footer changes. Don't ask itself stays
-launch-only — the runner only needs to read it as the cycle's starting point.
-
-The footer is read through the product's read-only terminal-attach WebSocket
-(rendered with ``pyte``): the runner's tmux socket is not reachable from here.
+The session is launched with ``--permission-mode dontAsk``, so Claude Code renders
+its ``don't ask on`` footer and the chip reads "Don't ask". Choosing a switchable
+mode must move both the chip and that footer. The footer is read through the
+product's read-only terminal-attach WebSocket (rendered with ``pyte``), since the
+runner's tmux socket is not reachable from the test.
 """
 
 from __future__ import annotations
@@ -131,9 +128,8 @@ def test_permission_picker_switches_out_of_dont_ask(
 ) -> None:
     """Picking Accept edits on a don't-ask session applies it in Claude's terminal.
 
-    Control first: the real TUI booted into don't-ask and painted the footer the
-    runner must read. The page is requested only afterwards so a recording
-    starts at the user's first action.
+    The real TUI must paint the don't-ask footer before the page is requested, so
+    a recording starts at the user's first action.
     """
     base_url, session_id = native_claude_dont_ask_session
     _wait_for_footer(base_url, session_id, _DONT_ASK_FOOTER, timeout_s=_FOOTER_TIMEOUT_S)
