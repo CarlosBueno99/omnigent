@@ -3450,8 +3450,8 @@ async def run_repl(
         """
         Fire a background re-sync of session metadata from a snapshot.
 
-        Shared by the two triggers that can observe an in-place agent
-        switch: the ``session.agent_changed`` stream event (live, while
+        Shared by the two triggers that can observe an agent change: the
+        ``session.agent_changed`` stream event (live, while
         attached) and the turn-start catch-up in the ``running`` status
         branch. Both funnel into :func:`_refresh_session_metadata` so
         adapter state is always derived from a snapshot — never applied
@@ -5969,9 +5969,8 @@ async def _refresh_session_metadata(
     Fired in the background from two triggers. The session's bound
     agent — and with it ``llm_model`` / ``harness`` /
     ``context_window`` / ``model_override`` — can change between turns
-    when another client switches the agent in place
-    (``POST /v1/sessions/{id}/switch-agent``). The server publishes a
-    ``session.agent_changed`` stream event for the switch (the live
+    when another client edits it. The server publishes a
+    ``session.agent_changed`` stream event (the live
     trigger), but the event is transient SSE-only with no replay — one
     landing in a stream-pump reconnect gap or before this REPL attached
     is lost — so each turn start re-fires the refresh as the catch-up
@@ -6514,7 +6513,7 @@ async def _list_all_conversation_items(
             continue
         except Exception:  # noqa: BLE001 — overlay builder: any other per-page error falls back to whatever was already fetched; partial sidebar beats no sidebar
             break
-        page: list[dict[str, object]] = list(raw_page) if raw_page else []
+        page: list[dict[str, object]] = raw_page.data
         if not page:
             break
         all_items.extend(page)
@@ -8467,6 +8466,10 @@ _SLASH_COMMAND_ALIASES: frozenset[str] = frozenset({"/?", "/exit"})
 # SLASH_COMMAND_RE so the terminal and the menu agree on what is a command.
 _SKILL_COMMAND_NAME_RE = re.compile(r"^[A-Za-z0-9][\w:-]*$")
 
+# Registered skill commands' display names, e.g. ``{"/asd-ste100": "Simplified
+# Technical English"}``; the completer matches these as well as the command.
+_SKILL_DISPLAY_NAMES: dict[str, str] = {}
+
 
 def register_skill_commands(skills: list[SkillSpec]) -> list[str]:
     """
@@ -8538,7 +8541,11 @@ def register_skill_commands(skills: list[SkillSpec]) -> list[str]:
             return _skill_handler
 
         handler = _make_handler(skill)
-        COMMANDS[cmd_name] = (skill.description, handler)
+        # Label the command with its display name, matching the web menu.
+        description = " — ".join(filter(None, (skill.display_name, skill.description)))
+        COMMANDS[cmd_name] = (description, handler)
+        if skill.display_name:
+            _SKILL_DISPLAY_NAMES[cmd_name] = skill.display_name
         registered.append(cmd_name)
         _log.debug("Registered skill slash command: %s", cmd_name)
 
@@ -8549,6 +8556,7 @@ def unregister_skill_commands(names: list[str]) -> None:
     """Remove previously registered skill commands from the global registry."""
     for name in names:
         COMMANDS.pop(name, None)
+        _SKILL_DISPLAY_NAMES.pop(name, None)
 
 
 class _SlashCommandCompleter(Completer):
@@ -8594,9 +8602,8 @@ class _SlashCommandCompleter(Completer):
         # SlashCommandMenu.tsx): a case-insensitive substring of the
         # command name (sans the leading "/"), so a namespaced skill is
         # reachable by its leaf name (``/using-superpowers`` ->
-        # ``/superpowers:using-superpowers``). Name only, not the
-        # description — kept identical to the web menu, which never shows
-        # descriptions inline.
+        # ``/superpowers:using-superpowers``). A skill's display name also
+        # matches, ranked after name hits; the description never does.
         #
         # Prefix matches rank ahead of mid-string matches (mirrors the web
         # menu's ``rankedSlashCommandNames``): ``/e`` surfaces ``/effort``
@@ -8607,6 +8614,7 @@ class _SlashCommandCompleter(Completer):
         query = text_before[1:].lower()
         prefix_hits: list[tuple[str, str]] = []
         substring_hits: list[tuple[str, str]] = []
+        label_hits: list[tuple[str, str]] = []
         for name, (desc, _) in COMMANDS.items():
             if name in _SLASH_COMMAND_ALIASES:
                 continue
@@ -8615,7 +8623,9 @@ class _SlashCommandCompleter(Completer):
                 prefix_hits.append((name, desc))
             elif query in body:
                 substring_hits.append((name, desc))
-        for name, desc in (*prefix_hits, *substring_hits):
+            elif query in _SKILL_DISPLAY_NAMES.get(name, "").lower():
+                label_hits.append((name, desc))
+        for name, desc in (*prefix_hits, *substring_hits, *label_hits):
             yield Completion(
                 text=name,
                 # Replace everything typed so far so the splice
