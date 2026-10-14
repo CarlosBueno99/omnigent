@@ -2149,6 +2149,20 @@ class _OneInjectionCtx:
                 {
                     "type": "message",
                     "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Status?"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,AA=="},
+                    ],
+                }
+            ],
+            "Status?",
+            id="message_item_text_and_image",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "message",
+                    "role": "user",
                     "content": [{"type": "input_text", "text": "older request"}],
                 },
                 {
@@ -2188,7 +2202,7 @@ async def test_watch_injections_emits_consumed_marker_on_accept(
     The runner forwards the message ``content`` verbatim, and the request
     schema accepts a plain string, flat content blocks, or conversation-shaped
     ``message`` items (block-list or string ``content``). Every shape must
-    deliver the newest user message's text, and nothing older.
+    deliver the newest user message's text, only its text, and nothing older.
     """
     import asyncio as _aio
 
