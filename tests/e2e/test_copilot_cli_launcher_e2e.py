@@ -181,7 +181,8 @@ def test_copilot_without_sdk_reports_the_missing_extra_before_booting(
             )
             return
         assert outcome != 2, (
-            f"`omnigent copilot` exited without naming the missing copilot extra:\n{startup[-3000:]}"
+            "`omnigent copilot` exited without naming the missing copilot extra:\n"
+            f"{startup[-3000:]}"
         )
 
         child.send("hello")
