@@ -865,11 +865,8 @@ def test_wrap_launcher_argv_binds_intermediate_symlink_at_literal_path(
 
 
 def _symlinked_venv_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """
-    Build ``<tmp>/checkout/.venv -> <tmp>/venvs/real``, a venv whose
-    ``bin/python`` is the running interpreter's real binary, and return
-    ``(checkout, real_venv, literal interpreter path)``.
-    """
+    """Build ``<tmp>/checkout/.venv -> <tmp>/venvs/real`` around the running
+    interpreter and return ``(checkout, real_venv, literal interpreter path)``."""
     tmp_path = tmp_path.resolve()
     real_python = Path(os.path.realpath(sys.executable))
     real_venv = tmp_path / "venvs" / "real"
@@ -885,10 +882,7 @@ def _symlinked_venv_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
 def _covering_policy(
     tmp_path: Path, checkout: Path, covering_bind: str
 ) -> tuple[Path, SandboxPolicy]:
-    """
-    Return ``(cwd, policy)`` where *checkout* is shown by the cwd bind
-    (``"cwd"``) or by a ``read_paths`` bind (``"read_root"``).
-    """
+    """Return ``(cwd, policy)`` showing *checkout* via the cwd bind or a ``read_paths`` bind."""
     if covering_bind == "cwd":
         return checkout, _make_policy(checkout, allow_hidden=[".venv"])
     scratch = tmp_path.resolve() / "scratch"
@@ -901,13 +895,11 @@ def test_wrap_launcher_argv_binds_symlinked_venv_target_at_its_own_path(
     tmp_path: Path, covering_bind: str
 ) -> None:
     """
-    ``argv[0]`` under a wholesale bind (cwd or a ``read_paths`` root) may
-    still reach the interpreter through a directory-symlink such as
-    ``<checkout>/.venv -> <elsewhere>/venv``. That bind shows the symlink
-    itself, so the target has to be mounted at its own path. Mounting it
-    at the literal ``.venv`` name is useless: the wholesale bind is
-    emitted later and shadows it, leaving the kernel a dangling link
-    (``bwrap: execvp .../.venv/bin/python: No such file or directory``).
+    An interpreter under a wholesale bind (cwd or a ``read_paths`` root)
+    reached through ``<checkout>/.venv -> <elsewhere>/venv`` needs the
+    symlink target mounted at its own path: the bind shows the symlink
+    itself, and a bind at the literal ``.venv`` name would be shadowed by
+    the later wholesale bind, leaving ``execvp`` a dangling link.
     """
     checkout, real_venv, interp = _symlinked_venv_layout(tmp_path)
     cwd, policy = _covering_policy(tmp_path, checkout, covering_bind)
@@ -2073,12 +2065,11 @@ def test_interpreter_behind_symlinked_venv_dir_still_spawns(
     tmp_path: Path, covering_bind: str
 ) -> None:
     """
-    End-to-end: a helper interpreter reached through ``<checkout>/.venv``,
-    where ``.venv`` is a symlink to a venv outside every sandbox mount,
-    still execs whether the cwd bind or a ``read_paths`` bind shows the
-    symlink, and runs as that venv (``sys.prefix`` is the literal path).
-    Without the target bind bwrap died at spawn with
-    ``execvp .../.venv/bin/python: No such file or directory``.
+    End-to-end: an interpreter behind ``<checkout>/.venv``, a symlink to a
+    venv outside every sandbox mount, still execs whether the cwd bind or a
+    ``read_paths`` bind shows the symlink, and runs as that venv. Without
+    the target bind bwrap died with ``execvp .../.venv/bin/python: No such
+    file or directory``.
     """
     checkout, _real_venv, interp = _symlinked_venv_layout(tmp_path)
     cwd, policy = _covering_policy(tmp_path, checkout, covering_bind)

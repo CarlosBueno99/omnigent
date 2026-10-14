@@ -998,12 +998,10 @@ def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) 
         extra.extend(["--ro-bind-try", str(src), str(dst)])
 
     def _emit_parent_pair(literal: Path) -> None:
-        """Make ``literal``'s parent and grandparent reachable. Outside the
-        covered mounts each directory's realpath is bound at its literal
-        name so intermediate directory-symlinks resolve inside the sandbox.
-        A covered mount already shows the literal name, but a
-        directory-symlink there dangles unless its target is bound at the
-        target's own path."""
+        """Make ``literal``'s parent and grandparent reachable: bind each
+        realpath at its literal name outside the covered mounts, and bind a
+        directory-symlink's target at its own path where a covered mount
+        shows the symlink itself."""
         covered = any(_is_within(literal, root, resolve=False) for root in covered_prefixes)
         parent_literal = literal.parent
         for literal_dir in (parent_literal, parent_literal.parent):
