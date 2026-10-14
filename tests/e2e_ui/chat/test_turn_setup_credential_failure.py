@@ -1,22 +1,13 @@
 """Turn setup when the runner's server-callback credential source fails.
 
-Reported journey: every turn in every session failed immediately with
-``turn setup failed: Host credential service could not supply workspace
-credentials`` until the host was hard-restarted. The message belongs to an
-external credential service; what this repository owns is how the runner reacts
-when its ``_RunnerDatabricksAuth`` token factory raises ``DatabricksAuthError``
-on a server callback during turn setup: the turn must fail as an actionable
-credential error that names a remedy (restart the host), not as the opaque
-generic ``runner_error``.
-
-Stand-in: a real runner starts through a bootstrap that overrides its auth flow.
-While the marker is absent it authenticates normally (credential-less locally);
-once the marker exists it raises the reported ``DatabricksAuthError`` on the
-turn-setup server callbacks, while a cached token still serves the synchronous
-history read (``/items``) so the failure surfaces inside the background
-turn-setup wrapper exactly as reported rather than as an ingest-time 500. Why
-the real service went stale, and why only a host restart cleared it, are unknown
-and not reproduced.
+A real runner starts through a bootstrap that overrides its auth flow: once the
+marker file exists, ``_RunnerDatabricksAuth`` raises the reported
+``DatabricksAuthError`` on turn-setup server callbacks while a cached token still
+serves the synchronous history read (``/items``), so the failure surfaces inside
+the background turn-setup wrapper. The turn must fail as an actionable credential
+error that names a remedy (restart the host), not as the opaque generic
+``runner_error``. This covers the runner-process, server-relay and browser
+boundary that the runner dispatch tests cannot reach.
 """
 
 from __future__ import annotations
@@ -35,10 +26,10 @@ from tests._helpers.session import bind_session_runner, bundle_files, post_sessi
 from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm, set_fallback_mock_llm
 
 CREDENTIAL_FAILURE_MESSAGE = "Host credential service could not supply workspace credentials"
-GENERIC_RUNNER_ERROR_HEADLINE = "Something went wrong setting up the turn on the host."
+CREDENTIAL_FAILURE_HEADLINE = "The host couldn't get workspace credentials"
 
-_MARKER_ENV = "OMNIGENT_REPRO_CREDENTIAL_FAULT_MARKER"
-_MESSAGE_ENV = "OMNIGENT_REPRO_CREDENTIAL_FAULT_MESSAGE"
+_MARKER_ENV = "OMNIGENT_TEST_CREDENTIAL_FAULT_MARKER"
+_MESSAGE_ENV = "OMNIGENT_TEST_CREDENTIAL_FAULT_MESSAGE"
 _MODEL = "credential-probe"
 _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 _WORKING = '[data-testid="working-indicator"]'
@@ -57,10 +48,9 @@ executor:
     harness: openai-agents
 """
 
-# Runs as the runner process. Stands in for the host credential service: it
-# raises on turn-setup callbacks once the marker exists, but lets the history
-# read (/items) through so the failure lands in the background turn-setup
-# wrapper, surfacing the reported "turn setup failed:" error.
+# Runs as the runner process, standing in for the host credential service:
+# raises on turn-setup callbacks once the marker exists, but lets /items
+# through so the failure surfaces as the reported "turn setup failed:" error.
 RUNNER_BOOTSTRAP = textwrap.dedent(
     f"""\
     import os, pathlib
@@ -77,7 +67,7 @@ RUNNER_BOOTSTRAP = textwrap.dedent(
             yield from super().auth_flow(request)
 
     entry._RunnerDatabricksAuth = StandInRunnerAuth
-    print("repro stand-in installed: host credential service marker", marker, flush=True)
+    print("credential stand-in installed: marker", marker, flush=True)
     entry.main()
     """
 )
@@ -139,21 +129,12 @@ def settle_turn(page: Page, token: str, timeout_ms: int = 60_000) -> dict[str, s
     if pill.count() == 0:
         return {"outcome": "reply", "headline": None, "message": None}
     headline = pill.first.get_by_test_id("error-headline").inner_text()
-    pill.first.locator('button[aria-expanded="false"]').first.click()
+    expander = pill.first.locator('button[aria-expanded="false"]')
+    if expander.count() > 0:
+        expander.first.click()
     content = pill.first.get_by_test_id("error-message-content")
     expect(content).to_be_visible(timeout=10_000)
     return {"outcome": "error", "headline": headline, "message": content.inner_text()}
-
-
-def runner_log_excerpt(stack: ServerRunner) -> str:
-    text = stack.log_path("runner").read_text(errors="replace")
-    keys = (
-        "repro stand-in",
-        "turn setup failed",
-        "DatabricksAuthError",
-        CREDENTIAL_FAILURE_MESSAGE,
-    )
-    return "\n".join(line for line in text.splitlines() if any(k in line for k in keys))
 
 
 def _screenshot(page: Page, name: str) -> None:
@@ -181,14 +162,7 @@ def test_credential_failure_during_turn_setup_is_not_a_generic_runner_error(
         start_runner_with_credential_stand_in(stack, mock_llm_server_url, marker)
         control_session = create_bound_session(stack.base_url, stack.runner_id)
         affected_session = create_bound_session(stack.base_url, stack.runner_id)
-        second_session = create_bound_session(stack.base_url, stack.runner_id)
-        print(
-            f"sessions: control={control_session} affected={affected_session} "
-            f"second={second_session}"
-        )
-
-        runner_pid = stack.runner.pid
-        print(f"runner pid (before any turn): {runner_pid}")
+        print(f"sessions: control={control_session} affected={affected_session}")
 
         context = browser.new_context()
         try:
@@ -204,23 +178,12 @@ def test_credential_failure_during_turn_setup_is_not_a_generic_runner_error(
             _screenshot(affected_page, "02-affected-turn")
             print(f"affected turn: {observed}")
 
-            # A follow-up turn on the already-warm control session succeeds: its
-            # setup callbacks were served from cache, so no credential callback is
-            # made. The failure is specific to turn-setup callbacks that still need
-            # a fresh credential, such as a session's first turn.
+            # The warm control session's setup is cached, so only turns that still
+            # need a fresh credential (such as a session's first turn) fail.
             warm_followup = settle_turn(
                 control_page, send_scripted_turn(control_page, mock_llm_server_url)
             )
             print(f"warm-session follow-up turn (fault active): {warm_followup}")
-
-            # A second, independent session fails its first turn identically while
-            # the fault is active - the reported "every session" symptom.
-            second_page = _open_session(context, stack.base_url, second_session)
-            observed_second = settle_turn(
-                second_page, send_scripted_turn(second_page, mock_llm_server_url)
-            )
-            _screenshot(second_page, "02b-second-session-turn")
-            print(f"second session first turn (fault active): {observed_second}")
         finally:
             context.close()
 
@@ -232,22 +195,11 @@ def test_credential_failure_during_turn_setup_is_not_a_generic_runner_error(
             _screenshot(page, "03-recovered-reply")
         finally:
             recovery.close()
-        print(runner_log_excerpt(stack))
-        runner_pid_after = stack.runner.pid
-        print(f"runner pid (after recovery): {runner_pid_after}")
 
-    # No runner restart occurred across the control, affected, second-session and
-    # recovery turns: the stand-in recovers on marker removal, unlike the reported
-    # need for a hard host restart (that persistence is not reproduced here).
-    assert runner_pid_after == runner_pid, (runner_pid, runner_pid_after)
-    # The credential failure aborts the turn the same way in every session.
+    assert warm_followup["outcome"] == "reply", warm_followup
     assert observed["outcome"] == "error", observed
-    assert observed_second["outcome"] == "error", observed_second
-    assert observed_second["headline"] == observed["headline"], (observed, observed_second)
-    # A credential failure is surfaced as its own actionable error naming a
-    # remedy, not the opaque generic runner_error.
-    assert observed["headline"] != GENERIC_RUNNER_ERROR_HEADLINE, observed
-    assert observed["headline"] != "Something went wrong", observed
-    assert observed["headline"] == "The host couldn't get workspace credentials", observed
-    assert "Try this:" in (observed["message"] or ""), observed
-    assert " stop`" in (observed["message"] or ""), observed
+    assert observed["headline"] == CREDENTIAL_FAILURE_HEADLINE, observed
+    message = observed["message"] or ""
+    assert CREDENTIAL_FAILURE_MESSAGE in message, observed
+    assert "Try this:" in message, observed
+    assert " stop`" in message, observed

@@ -283,6 +283,10 @@ describe("ErrorBanner", () => {
       "client_update_required",
       "The agent CLI on the host is too old for the selected model. Update it on the host, then start a new session.",
     ],
+    [
+      "host_credential_unavailable",
+      "The host couldn't get workspace credentials to set up the turn.",
+    ],
   ])("describes a %s failure in plain English", (code, sentence) => {
     render(<ErrorBanner message="raw diagnostics" source="execution" code={code} />);
     expect(screen.getByText(sentence)).toBeInTheDocument();
@@ -1252,18 +1256,5 @@ describe("ErrorBanner — info level", () => {
     render(<ErrorBanner message="boom" source="execution" code="runner_error" />);
     expect(screen.getByTestId("error-pill")).toHaveAttribute("data-level", "error");
     expect(screen.getByTestId("error-headline")).toHaveClass("text-destructive");
-  });
-
-  it("describes a host credential failure in English when no title arrived", () => {
-    render(
-      <ErrorBanner
-        message="turn setup failed: Host credential service could not supply workspace credentials"
-        source="execution"
-        code="host_credential_unavailable"
-      />,
-    );
-    expect(screen.getByTestId("error-headline")).toHaveTextContent(
-      "The host couldn't get workspace credentials to set up the turn.",
-    );
   });
 });
