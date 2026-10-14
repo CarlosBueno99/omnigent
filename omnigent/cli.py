@@ -13880,24 +13880,6 @@ def _forwarded_run_params(run_args: tuple[str, ...]) -> dict[str, Any] | None:
         return None
 
 
-def _forwarded_run_is_local(params: dict[str, Any]) -> bool:
-    """Whether parsed ``run`` params launch against a local server.
-
-    An explicit ``--server`` decides; otherwise a configured remote default
-    makes the launch remote.
-
-    :param params: Params from :func:`_forwarded_run_params`.
-    :returns: ``True`` for a local-server launch.
-    """
-    server = params.get("server")
-    if server is not None:
-        return _is_local_server_request(server)
-    configured = _load_effective_config().get("server")
-    if isinstance(configured, str) and configured and not _is_local_server_request(configured):
-        return False
-    return True
-
-
 def _forwarded_run_requests_help(run_args: tuple[str, ...], params: dict[str, Any]) -> bool:
     """Whether forwarded ``run`` args carry a real ``--help``.
 
@@ -13937,7 +13919,13 @@ def _bundled_brain_fallback_applies(run_args: tuple[str, ...]) -> bool:
         or params.get("fork_session_id") is not None
     ):
         return False
-    return _forwarded_run_is_local(params)
+    server = params.get("server")
+    if server is not None:
+        return _is_local_server_request(server)
+    configured = _load_effective_config().get("server")
+    if isinstance(configured, str) and configured and not _is_local_server_request(configured):
+        return False
+    return True
 
 
 def _reject_reserved_devin_resume_args(devin_args: tuple[str, ...]) -> None:
@@ -14049,8 +14037,7 @@ def _missing_harness_sdk_error(harness: str) -> click.ClickException:
         f"{label}'s SDK ({sdk}) isn't installed, so `{prog} {harness}` can't run on "
         f"this machine. Install the optional `{extra}` extra:\n\n"
         f"    {extra_install_display(extra)}\n\n"
-        f"or run `{prog} setup` and open {label} to install it from there. "
-        f"`{prog} {harness} --server <url>` runs on that server's hosts instead."
+        f"or run `{prog} setup` and open {label} to install it from there."
     )
     # A missing dependency is not something `omnigent stop` can fix.
     setattr(exc, SUPPRESS_RECOVERY_HINT_ATTR, True)
@@ -14063,9 +14050,10 @@ def _run_harness_shorthand(harness: str, run_args: tuple[str, ...]) -> None:
     *run_args* is a usage error rather than a silent override.
 
     An extras-gated harness (:func:`_harness_extra_checks`) imports its SDK lazily
-    on the first turn, so a local launch without the SDK would boot a REPL whose
-    first message can only fail; it stops here and names the install instead. A
-    remote ``--server`` launch runs on that server's hosts and is left alone."""
+    on the first turn, so a launch without the SDK would boot a REPL whose first
+    message can only fail; it stops here and names the install instead. This holds
+    with ``--server`` too: the forwarded ``--harness`` makes :func:`_dispatch_run`
+    run the harness in this machine's runner, not on the server's hosts."""
     if any(arg == "--harness" or arg.startswith("--harness=") for arg in run_args):
         raise click.UsageError(
             f"`{cli_invocation()} {harness}` always uses the {harness} harness; drop "
@@ -14074,11 +14062,7 @@ def _run_harness_shorthand(harness: str, run_args: tuple[str, ...]) -> None:
     sdk_installed = _harness_extra_checks().get(harness)
     if sdk_installed is not None and harness in _harness_sdk_extras() and not sdk_installed():
         params = _forwarded_run_params(run_args)
-        if (
-            params is not None
-            and not _forwarded_run_requests_help(run_args, params)
-            and _forwarded_run_is_local(params)
-        ):
+        if params is not None and not _forwarded_run_requests_help(run_args, params):
             raise _missing_harness_sdk_error(harness)
     run.main(
         args=["--harness", harness, *run_args],

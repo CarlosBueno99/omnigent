@@ -6,10 +6,13 @@ before booting a REPL whose first message can only fail."""
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import json
 import os
 import re
-import subprocess
+import signal
+import time
 from pathlib import Path
 
 import pytest
@@ -24,7 +27,7 @@ _EXIT_TIMEOUT_S = 90.0
 # Booting `omnigent copilot` starts the local server + host daemon first.
 _BOOT_TIMEOUT_S = 180.0
 _FIRST_TURN_TIMEOUT_S = 120.0
-_STOP_TIMEOUT_S = 90.0
+_STOP_GRACE_S = 10.0
 
 _REPL_READY_RE = r"state: sleeping|❯ "
 _COPILOT_EXTRA_RE = r"omnigent\[copilot\]|github-copilot-sdk"
@@ -93,10 +96,11 @@ def test_help_lists_copilot_under_harnesses() -> None:
 def _copilot_launch_env(root: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Env for ``omnigent copilot`` with a token from setup but no copilot SDK.
 
-    Isolated ``HOME``/config home so the launch spawns its own local server and host
-    daemon; the token is persisted the way pasting it into ``omnigent setup`` does
-    (secret store + ``keychain:copilot`` reference), with the file backend so a
-    developer's real keychain is never written.
+    Isolated ``HOME``/config/data dirs so the launch spawns its own local server and
+    host daemon and records their PIDs where only this test looks; the token is
+    persisted the way pasting it into ``omnigent setup`` does (secret store +
+    ``keychain:copilot`` reference), with the file backend so a developer's real
+    keychain is never written.
     """
     home = root / "home"
     config_home = home / ".omnigent"
@@ -119,6 +123,7 @@ def _copilot_launch_env(root: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     env.update(
         HOME=str(home),
         OMNIGENT_CONFIG_HOME=str(config_home),
+        OMNIGENT_DATA_DIR=str(config_home),
         OMNIGENT_DISABLE_KEYRING="1",
         NO_COLOR="1",
         PYTHONPATH=f"{blocker}{os.pathsep}{env['PYTHONPATH']}",
@@ -126,7 +131,43 @@ def _copilot_launch_env(root: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     return env
 
 
-def _shutdown(child: pexpect.spawn, env: dict[str, str]) -> None:
+def _recorded_pids(data_dir: Path) -> list[int]:
+    """PIDs the launch recorded under its own data dir: host daemon registry
+    records first, then the local server pidfile (PID and port lines)."""
+    pids: list[int] = []
+    for record in sorted((data_dir / "daemons").glob("*.json")):
+        try:
+            pid = json.loads(record.read_text(encoding="utf-8")).get("pid")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(pid, int):
+            pids.append(pid)
+    pidfile = data_dir / "local_server.pid"
+    if pidfile.is_file():
+        first = pidfile.read_text(encoding="utf-8").split()[:1]
+        if first and first[0].isdigit():
+            pids.append(int(first[0]))
+    return pids
+
+
+def _terminate(pid: int) -> None:
+    """SIGTERM a recorded process, escalating to SIGKILL after a grace period."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + _STOP_GRACE_S
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.2)
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+
+
+def _shutdown(child: pexpect.spawn, data_dir: Path) -> None:
     try:
         if child.isalive():
             child.send("/quit\r")
@@ -135,14 +176,11 @@ def _shutdown(child: pexpect.spawn, env: dict[str, str]) -> None:
         pass
     finally:
         child.close(force=True)
-    # The launch leaves a detached local server + host daemon behind in the temp HOME.
-    subprocess.run(
-        [str(omnigent_console_script()), "stop", "--force"],
-        env=env,
-        capture_output=True,
-        timeout=_STOP_TIMEOUT_S,
-        check=False,
-    )
+    # Stop only the detached daemon and server this launch recorded under its own
+    # data dir (the daemon reaps its runner); `omnigent stop` also sweeps the
+    # canonical port and could hit a server the test does not own.
+    for pid in _recorded_pids(data_dir):
+        _terminate(pid)
 
 
 def test_copilot_without_sdk_reports_the_missing_extra_before_booting(
@@ -202,4 +240,4 @@ def test_copilot_without_sdk_reports_the_missing_extra_before_booting(
             f"{detail}:\n{turn_output[-3000:]}"
         )
     finally:
-        _shutdown(child, env)
+        _shutdown(child, Path(env["OMNIGENT_DATA_DIR"]))

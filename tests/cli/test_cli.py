@@ -1449,18 +1449,25 @@ def test_copilot_command_without_sdk_names_the_extra_instead_of_launching(
     assert "setup" in result.output
 
 
-def test_copilot_command_without_sdk_still_launches_against_a_remote_server(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "launch",
+    [
+        ["copilot", "--server", "https://omnigent.example.databricksapps.com"],
+        ["copilot", "agent.yaml", "--server", "https://omnigent.example.databricksapps.com"],
+    ],
+    ids=["shorthand-only", "positional-agent"],
+)
+def test_copilot_command_without_sdk_is_rejected_even_with_a_remote_server(
+    monkeypatch: pytest.MonkeyPatch, launch: list[str]
 ) -> None:
-    """The SDK gate is local-only: a remote ``--server`` runs on that server's hosts."""
+    """``--harness copilot`` makes ``run`` launch the harness in this machine's runner
+    even against a remote server, so the SDK check applies to every launch."""
     monkeypatch.setattr("omnigent.cli._harness_extra_checks", lambda: {"copilot": lambda: False})
-    result, dispatch = _invoke_bundled_agent_command(
-        monkeypatch, ["copilot", "--server", "https://omnigent.example.databricksapps.com"]
-    )
+    result, dispatch = _invoke_bundled_agent_command(monkeypatch, launch)
 
-    assert result.exit_code == 0, result.output
-    dispatch.assert_called_once()
-    assert dispatch.call_args.kwargs["harness"] == "copilot"
+    assert result.exit_code != 0
+    assert "Copilot's SDK (github-copilot-sdk) isn't installed" in result.output
+    dispatch.assert_not_called()
 
 
 def test_copilot_shorthand_forwards_a_real_help_request_without_the_sdk(

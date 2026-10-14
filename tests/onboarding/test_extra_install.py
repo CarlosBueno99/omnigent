@@ -87,29 +87,21 @@ def test_recorded_uv_tool_extras(
 # -- extra_install_command() -------------------------------------------------
 
 
-def test_extra_install_command_uv_tool(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A registry uv tool venv reinstalls the tool with the extra attached."""
-    monkeypatch.setattr(extra_install, "_is_uv_tool_install", lambda: True)
-    monkeypatch.setattr(extra_install, "_installed_vcs_url", lambda: None)
-    monkeypatch.setattr(extra_install, "_recorded_uv_tool_extras", list)
-    cmd = extra_install_command("cursor")
-    assert cmd == ["uv", "tool", "install", "--force", "omnigent[cursor]"]
-
-
 @pytest.mark.parametrize(
     "recorded, expected",
     [
+        ([], "omnigent[copilot]"),
         (["databricks"], "omnigent[copilot,databricks]"),
         (["copilot", "databricks"], "omnigent[copilot,databricks]"),
     ],
-    ids=["adds-to-recorded", "already-recorded"],
+    ids=["no-recorded-extras", "adds-to-recorded", "already-recorded"],
 )
-def test_extra_install_command_uv_tool_keeps_recorded_extras(
+def test_extra_install_command_uv_tool(
     monkeypatch: pytest.MonkeyPatch, recorded: list[str], expected: str
 ) -> None:
-    """``uv tool install --force`` replaces the tool's requirements, so the
-    reinstall names the receipt's extras too: an ``omnigent[databricks]`` install
-    gains ``copilot`` without losing ``databricks``."""
+    """A registry uv tool venv reinstalls the tool with the receipt's extras plus
+    the new one: ``uv tool install --force`` replaces the tool's requirements, so an
+    ``omnigent[databricks]`` install gains ``copilot`` without losing ``databricks``."""
     monkeypatch.setattr(extra_install, "_is_uv_tool_install", lambda: True)
     monkeypatch.setattr(extra_install, "_installed_vcs_url", lambda: None)
     monkeypatch.setattr(extra_install, "_recorded_uv_tool_extras", lambda: recorded)

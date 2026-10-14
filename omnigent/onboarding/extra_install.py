@@ -93,8 +93,6 @@ def extra_install_command(extra: str) -> list[str]:
     :param extra: The pip extra name, e.g. ``"cursor"``.
     :returns: The install argv.
     """
-    target = f"omnigent[{extra}]"
-
     if _is_uv_tool_install():
         target = f"omnigent[{','.join(sorted({*_recorded_uv_tool_extras(), extra}))}]"
         vcs_url = _installed_vcs_url()
@@ -104,6 +102,7 @@ def extra_install_command(extra: str) -> list[str]:
             return ["uv", "tool", "install", "--force", f"{target} @ {vcs_url}"]
         return ["uv", "tool", "install", "--force", target]
 
+    target = f"omnigent[{extra}]"
     if shutil.which("uv") is not None:
         # ``--python`` pins the install to the interpreter that will import the
         # extra.  Without it ``uv pip install`` requires an active virtualenv
