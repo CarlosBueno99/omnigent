@@ -926,7 +926,9 @@ def _ensure_executable_visible(
     real ``cpython-3.12.13`` contents there. A directory-symlink leading to
     the interpreter's virtualenv is also bound at the target's own path, so
     the link still resolves where a wholesale bind (cwd, ``read_paths``,
-    ``write_paths``) shows the literal name instead.
+    ``write_paths``) shows the literal name instead. Only the final target
+    is mounted: a link that passes through another unmounted directory-link
+    (``.venv -> /venvs/current -> /venvs/proj``) still does not resolve.
 
     Common cases:
 
@@ -949,10 +951,8 @@ def _ensure_executable_visible(
       for it to resolve. Under a writable root the link is not followed.
 
     :param argv: Helper argv. The function inspects ``argv[0]``.
-    :param bound_roots: Directories the namespace binds wholesale (the
-        cwd plus the policy's read/write roots). Paths under them need no
-        literal-name bind — the wholesale bind would shadow it anyway —
-        but a virtualenv symlink there still needs its target mounted.
+    :param bound_roots: Directories bound wholesale (cwd plus read/write
+        roots); descendants need no literal bind.
     :param writable_roots: The subset of *bound_roots* the sandboxed
         process may write to. The agent could retarget a directory-symlink
         under one of them, so such a link is never followed.
@@ -1016,19 +1016,25 @@ def _interpreter_chain_binds(
         covered mount shows a directory-symlink instead, bind its target at
         its own path — only a virtualenv target, and only when no write root
         lets the agent retarget the link, so it cannot widen the mounts."""
-        covered = _under(literal, covered_prefixes)
         parent_literal = literal.parent
-        for literal_dir in (parent_literal, parent_literal.parent):
+        dirs = (parent_literal, parent_literal.parent)
+        if not _under(literal, covered_prefixes):
+            for literal_dir in dirs:
+                _emit(Path(os.path.realpath(str(literal_dir))), literal_dir)
+            return
+        if not follow_venv_links:
+            return
+        # The venv root's mount already contains ``bin``; a separately
+        # symlinked ``bin`` is the only case that needs the inner mount.
+        for literal_dir in reversed(dirs):
             real_dir = Path(os.path.realpath(str(literal_dir)))
-            if not covered:
-                _emit(real_dir, literal_dir)
-            elif (
-                follow_venv_links
-                and real_dir != literal_dir
+            if (
+                real_dir != literal_dir
                 and _is_venv_dir(real_dir)
                 and not _under(literal_dir, writable_prefixes)
             ):
                 _emit(real_dir, real_dir)
+                return
 
     # Walk the symlink chain hop-by-hop until either a regular file is
     # reached or the hop list catches a cycle. The 40-hop cap matches
@@ -1060,7 +1066,9 @@ def _interpreter_chain_binds(
 
 def _is_venv_dir(path: Path) -> bool:
     """Whether *path* is a virtualenv root or its ``bin`` directory."""
-    return (path / "pyvenv.cfg").is_file() or (path.parent / "pyvenv.cfg").is_file()
+    return (path / "pyvenv.cfg").is_file() or (
+        path.name == "bin" and (path.parent / "pyvenv.cfg").is_file()
+    )
 
 
 def _tmpfs_mask_dirs(mask_args: Sequence[str]) -> list[Path]:
