@@ -221,14 +221,11 @@ import {
   writeSessionFilter,
 } from "@/lib/sessionFilterPreferences";
 import {
-  DEFAULT_SIDEBAR_VIEW,
-  readSidebarViewPreferences,
   SIDEBAR_SHOW_FIELDS,
   type SidebarGrouping,
   type SidebarOrdering,
   type SidebarShowField,
   type SidebarViewPreferences,
-  writeSidebarViewPreferences,
 } from "@/lib/sidebarViewPreferences";
 import { ExtensionPrimaryNavigation } from "@/extensions/ExtensionPrimaryNavigation";
 import { PrimaryNavLink } from "@/shell/PrimaryNavLink";
@@ -252,7 +249,7 @@ import {
   readPinnedConversationIds,
   resolveSidebarDrop,
   type SidebarDropTarget,
-  sortByUpdatedAtDesc,
+  sortConversations,
   STATUS_BUCKETS,
   type StatusBucket,
   statusBucket,
@@ -758,7 +755,7 @@ function SidebarImpl({
   }, [activeTab, availableTab, switchTab]);
 
   useSidebarView(availableTab);
-  const archivedQuery = useArchivedSessions(availableTab === "archived");
+  const archivedQuery = useArchivedSessions(availableTab === "archived", sidebarData.sortBy);
   const displayQuery: SidebarListQuery =
     availableTab === "archived"
       ? archivedQuery
@@ -1475,8 +1472,8 @@ function ProjectFolder({
       action. */
   onConversationsLoaded?: (name: string, conversations: Conversation[]) => void;
 }) {
-  const query = useProjectSessions(name, expanded);
-  const { registerFolder } = useSidebarData();
+  const { registerFolder, sortBy } = useSidebarData();
+  const query = useProjectSessions(name, expanded, sortBy);
   const watchedRows = useMemo(
     () => query.data?.pages.flatMap((page) => page.data) ?? [],
     [query.data],
@@ -1495,12 +1492,13 @@ function ProjectFolder({
     for (const c of query.data?.pages.flatMap((page) => page.data) ?? []) byId.set(c.id, c);
     for (const c of windowConversations) byId.set(c.id, c);
     // Pinned sessions live in the global Pinned section, not their folder.
-    return sortByUpdatedAtDesc(
+    return sortConversations(
       [...byId.values()].filter((c) => !pinnedSet.has(c.id)),
       activeOverride,
       frozenSortKeys,
+      sortBy,
     );
-  }, [query.data, windowConversations, pinnedSet, activeOverride, frozenSortKeys]);
+  }, [query.data, windowConversations, pinnedSet, activeOverride, frozenSortKeys, sortBy]);
   const errors = useSessionErrorStates(conversations);
   const startingConversationId = useChatStore((s) =>
     s.status === "streaming" || s.terminalPending ? s.conversationId : null,
@@ -1594,7 +1592,7 @@ function ProjectFolder({
         onProjectAssigned={onProjectAssigned}
         emptyMessage={
           loadingFirstPage ? undefined : (
-            <span className="block text-ui">
+            <span className="block">
               No sessions. Start a{" "}
               <Link
                 to={`/?project=${encodeURIComponent(name)}`}
@@ -1630,7 +1628,16 @@ function ProjectFolder({
         }
         footer={
           loadingFirstPage ? (
-            <p className="px-2 py-1 pl-5 text-muted-foreground text-sm">Loading…</p>
+            <div className="pl-6">
+              <p
+                className={cn(
+                  SIDEBAR_ROW,
+                  "flex w-full flex-col justify-center text-left text-muted-foreground",
+                )}
+              >
+                Loading…
+              </p>
+            </div>
           ) : (
             <InfiniteScrollSentinel
               hasMore={query.hasNextPage}
@@ -1731,27 +1738,24 @@ function ConversationList({
   // persisted per-device preference. With the release flag off the sidebar
   // keeps its default layout and ignores any stored choice.
   const groupingUi = isFeatureEnabled(serverInfo, "sidebar_grouping_ui");
-  const [storedView, setView] = useState<SidebarViewPreferences>(readSidebarViewPreferences);
-  const view = groupingUi ? storedView : DEFAULT_SIDEBAR_VIEW;
+  const { view, updateView: saveView, sortBy } = useSidebarData();
   const updateView = useCallback(
     (patch: Partial<SidebarViewPreferences>) => {
       // Regrouping swaps which sections (and selection scopes) exist, so leave
       // selection the way a Display switch does.
-      if (patch.grouping !== undefined && patch.grouping !== storedView.grouping && selectionMode) {
+      if (patch.grouping !== undefined && patch.grouping !== view.grouping && selectionMode) {
         onExitSelectionMode();
       }
-      const next = { ...storedView, ...patch };
-      writeSidebarViewPreferences(next);
-      setView(next);
+      saveView(patch);
     },
-    [storedView, selectionMode, onExitSelectionMode],
+    [view.grouping, saveView, selectionMode, onExitSelectionMode],
   );
   const grouped = view.grouping !== "default";
   const groupOrder: readonly string[] =
     view.grouping === "status" ? STATUS_BUCKETS : UPDATED_BUCKETS;
   // Status buckets read the unread mirror and the drafts store; only a status
   // view subscribes, so other views don't re-render the list on those writes.
-  const statusView = view.grouping === "status" || view.ordering === "status";
+  const statusView = view.grouping === "status";
   const unseenTick = useUnseenTick(statusView);
   const draftIds = useSessionDraftIds(statusView);
   const startingId = useStartingConversationId(statusView);
@@ -1840,7 +1844,7 @@ function ConversationList({
   // mid-interaction receives the click / right-click and the rename it
   // triggers, hitting a session the user never aimed at; a reorder during an
   // edit can move (and blur) the input, committing a half-typed title. The
-  // map accumulates keys lazily inside sortByUpdatedAtDesc (a render-time ref
+  // map accumulates keys lazily inside sortConversations (a render-time ref
   // write) and is cleared once neither hold is active, when the order snaps
   // back to reality.
   const frozenKeysRef = useRef<Map<string, number>>(new Map());
@@ -1930,7 +1934,7 @@ function ConversationList({
         id,
         name,
         icon,
-        conversations: sortByUpdatedAtDesc(inProject, activeOverride, frozenKeys),
+        conversations: sortConversations(inProject, activeOverride, frozenKeys, sortBy),
       };
     });
     // NOTE: empty projects are intentionally NOT filtered out. A project comes
@@ -1941,10 +1945,11 @@ function ConversationList({
 
     // The remainder — not pinned, not filed — splits into Shared (other owners')
     // and Sessions (the viewer's own).
-    const byUpdated = sortByUpdatedAtDesc(
+    const allOrdered = sortConversations(
       tabScoped.filter((c) => !pinnedIdSet.has(c.id) && !filedIds.has(c.id)),
       activeOverride,
       frozenKeys,
+      sortBy,
     );
     const statusOf = (c: Conversation): StatusBucket => {
       const frozen = frozenStatus?.get(c.id);
@@ -1956,11 +1961,6 @@ function ConversationList({
       frozenStatus?.set(c.id, live);
       return live;
     };
-    // Status ordering is a stable sort by bucket, so updated_at order holds within one.
-    const allOrdered =
-      view.ordering === "status"
-        ? groupConversations(byUpdated, statusOf, STATUS_BUCKETS).flatMap((g) => g.conversations)
-        : byUpdated;
     // Grouped views fold Shared into the groups too, so the first group takes
     // the Projects header's place.
     const splitShared = groupingUi && !grouped;
@@ -2003,7 +2003,7 @@ function ConversationList({
     grouped,
     groupOrder,
     view.grouping,
-    view.ordering,
+    sortBy,
     unseenTick,
     draftIds,
     startingId,
@@ -2017,7 +2017,7 @@ function ConversationList({
   );
   const displayPagination = useSidebarDisplayPagination(
     listRows,
-    JSON.stringify([activeTab, searchQuery]),
+    JSON.stringify([activeTab, searchQuery, view.grouping, sortBy]),
     activeTab === "shared"
       ? (config.sharedDisplayPageSize ?? config.displayPageSize)
       : config.displayPageSize,
@@ -2635,10 +2635,11 @@ function ConversationList({
             <div
               className="flex flex-col gap-6"
               data-testid="sidebar-conversation-list"
-              // Freeze the sort order while the pointer is over the list so rows
-              // never move under the cursor. The frozen-keys map is cleared by the
-              // effect above once no hold (pointer or open rename edit) remains.
-              onMouseEnter={() => setPointerInside(true)}
+              // Only DOM descendants hold the order; portalled menus bubble
+              // mouse events here even when the pointer is outside the list.
+              onMouseOver={(event) =>
+                setPointerInside(event.currentTarget.contains(event.target as Node))
+              }
               onMouseLeave={() => setPointerInside(false)}
             >
               {/* Removing a filed session from its project means dropping it back
@@ -2653,7 +2654,7 @@ function ConversationList({
               {totalVisible === 0 && searchQuery && !sessionStatus ? (
                 <>
                   <p className="px-2 py-1 text-ui text-muted-foreground">{emptyMessage}</p>
-                  {/* The list is one paginated stream ordered by updated_at across
+                  {/* The list is one paginated stream in the selected order across
               owned + shared sessions, so the current filter can be empty on the
               loaded window while its sessions live on a later page. Keep the
               sentinel mounted so pagination continues instead of stranding the
@@ -3227,7 +3228,7 @@ const GROUPING_LABELS: Record<SidebarGrouping, string> = {
   status: "Status",
   updated: "Updated",
 };
-const ORDERING_LABELS: Record<SidebarOrdering, string> = { updated: "Updated", status: "Status" };
+const ORDERING_LABELS: Record<SidebarOrdering, string> = { updated: "Updated", created: "Created" };
 const SHOW_LABELS: Record<SidebarShowField, string> = {
   updated: "Updated",
   environment: "Environment",
@@ -3250,8 +3251,10 @@ function FilterMenuSub({
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger data-testid={testId}>
-        {label}
-        {value && <span className="ml-auto pl-6 text-muted-foreground">{value}</span>}
+        <span className="flex-1 flex justify-between">
+          {label}
+          {value && <span className="ml-auto text-muted-foreground">{value}</span>}
+        </span>
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent className="min-w-40 [&_[role=menuitemradio]]:text-ui [&_[role=menuitemcheckbox]]:text-ui">
         {children}
@@ -3274,6 +3277,7 @@ function SessionFilterMenu({
   view: SidebarViewPreferences | null;
   onViewChange: (patch: Partial<SidebarViewPreferences>) => void;
 }) {
+  const triggerLabel = view === null ? "Filter sessions" : "Group, sort, and filter sessions";
   const filters = multiUser
     ? SIDEBAR_FILTERS
     : SIDEBAR_FILTERS.filter((filter) => filter.value !== "shared");
@@ -3301,7 +3305,7 @@ function SessionFilterMenu({
                 type="button"
                 variant="ghost"
                 size="icon-xs"
-                aria-label="Filter sessions"
+                aria-label={triggerLabel}
                 data-testid="session-filter"
                 className="text-muted-foreground"
                 onClick={(event) => event.stopPropagation()}
@@ -3312,7 +3316,7 @@ function SessionFilterMenu({
           </span>
         </TooltipTrigger>
         <TooltipContent side="bottom" data-noninteractive-tooltip>
-          Filter sessions
+          {triggerLabel}
         </TooltipContent>
       </Tooltip>
       {view === null ? (
@@ -3639,6 +3643,7 @@ function ConversationSection({
       can expand that (possibly brand-new) project folder. */
   onProjectAssigned?: (projectName: string) => void;
 }) {
+  const groupingEmptyState = isFeatureEnabled(useContext(ServerInfoContext), "sidebar_grouping_ui");
   // An untitled section is always open — there's no header to collapse it.
   const isCollapsed = title != null && collapsed;
   const protectsCollapsedBadge = isCollapsed && marker != null;
@@ -3713,13 +3718,22 @@ function ConversationSection({
             // Expanded but empty — a project with no loaded chats (indented, in a
             // dashed well) or a top-level list whose filter matched nothing.
             indentRows ? (
-              <div
-                className={cn(
-                  SIDEBAR_ROW,
-                  "mt-1 mr-2 ml-8 flex flex-col items-start justify-center gap-1.5 px-0 py-1 pb-2 text-left md:py-1 md:pb-2",
-                )}
-              >
-                <p className="text-ui text-muted-foreground">{emptyMessage}</p>
+              <div className="pl-6">
+                <div
+                  className={cn(
+                    SIDEBAR_ROW,
+                    "relative flex w-full flex-col justify-center text-left text-muted-foreground",
+                    groupingEmptyState && "items-center text-center",
+                  )}
+                >
+                  {groupingEmptyState && (
+                    <span
+                      aria-hidden
+                      className="pointer-events-none absolute inset-0 rounded-[var(--radius-otto-button)] border border-dashed border-border"
+                    />
+                  )}
+                  <p>{emptyMessage}</p>
+                </div>
               </div>
             ) : (
               <p className="px-2 py-1 text-ui text-muted-foreground">{emptyMessage}</p>
