@@ -1487,13 +1487,6 @@ def test_copilot_shorthand_forwards_a_real_help_request_without_the_sdk(
     assert forwarded.call_args.kwargs["args"] == ["--harness", "copilot", "--help"]
 
 
-def test_extras_gated_shorthand_rosters_stay_coupled() -> None:
-    """Every extras-gated harness has the SDK/extra names its missing-SDK message needs."""
-    from omnigent.cli import _harness_extra_checks, _harness_sdk_extras
-
-    assert set(_harness_sdk_extras()) == set(_harness_extra_checks())
-
-
 def test_copilot_command_answers_help_and_is_rostered_as_a_harness() -> None:
     """``omnigent copilot --help`` prints its own usage and the command is a harness row."""
     from omnigent.cli import _HARNESS_COMMANDS, _harness_extra_checks

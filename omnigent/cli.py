@@ -1785,37 +1785,48 @@ _ACCENT_RGB = (244, 59, 166)
 _ALIAS_COMMANDS: frozenset[str] = frozenset({"update", "antigravity"})
 
 
+@dataclass(frozen=True)
+class _ExtrasGatedHarness:
+    """A harness command whose SDK ships as an optional pip extra.
+
+    :param label: Display name, e.g. ``"Copilot"``.
+    :param sdk: SDK distribution name, e.g. ``"github-copilot-sdk"``.
+    :param extra: The pip extra that installs it, e.g. ``"copilot"``.
+    :param installed: Whether the SDK is importable (``find_spec``, no heavy import).
+    """
+
+    label: str
+    sdk: str
+    extra: str
+    installed: Callable[[], bool]
+
+
+def _extras_gated_harnesses() -> dict[str, _ExtrasGatedHarness]:
+    """Harness commands gated on an optional SDK extra, by command name.
+
+    The single roster behind :func:`_harness_extra_checks` (the ``--help``
+    listing) and the missing-SDK message of :func:`_run_harness_shorthand`.
+    """
+    from omnigent.onboarding.copilot_auth import COPILOT_EXTRA, copilot_sdk_installed
+    from omnigent.onboarding.cursor_auth import CURSOR_EXTRA, cursor_sdk_installed
+
+    return {
+        "copilot": _ExtrasGatedHarness(
+            "Copilot", "github-copilot-sdk", COPILOT_EXTRA, copilot_sdk_installed
+        ),
+        "cursor": _ExtrasGatedHarness("Cursor", "cursor-sdk", CURSOR_EXTRA, cursor_sdk_installed),
+    }
+
+
 def _harness_extra_checks() -> dict[str, Callable[[], bool]]:
     """Map extras-gated harness commands to their SDK-installed predicate.
 
     Harnesses that ride an optional pip extra (lazily imported on first
     turn) are hidden from ``omnigent --help`` until the extra is
     importable, so the listing only advertises harnesses ready to launch.
-    The predicates use ``importlib.util.find_spec`` (no heavy import).
     Commands absent from this map are always listed.
     """
-    from omnigent.onboarding.copilot_auth import copilot_sdk_installed
-    from omnigent.onboarding.cursor_auth import cursor_sdk_installed
-
-    return {
-        "copilot": copilot_sdk_installed,
-        "cursor": cursor_sdk_installed,
-    }
-
-
-def _harness_sdk_extras() -> dict[str, tuple[str, str, str]]:
-    """Map extras-gated harness commands to (display name, SDK distribution, extra).
-
-    Companion of :func:`_harness_extra_checks` for the message a local launch
-    prints when the SDK is missing; keep the two rosters in step.
-    """
-    from omnigent.onboarding.copilot_auth import COPILOT_EXTRA
-    from omnigent.onboarding.cursor_auth import CURSOR_EXTRA
-
-    return {
-        "copilot": ("Copilot", "github-copilot-sdk", COPILOT_EXTRA),
-        "cursor": ("Cursor", "cursor-sdk", CURSOR_EXTRA),
-    }
+    return {name: gated.installed for name, gated in _extras_gated_harnesses().items()}
 
 
 def _cli_style(text: str, **style: object) -> str:
@@ -14031,13 +14042,13 @@ def _missing_harness_sdk_error(harness: str) -> click.ClickException:
     from omnigent.cli_diagnostics import SUPPRESS_RECOVERY_HINT_ATTR
     from omnigent.onboarding.extra_install import extra_install_display
 
-    label, sdk, extra = _harness_sdk_extras()[harness]
+    gated = _extras_gated_harnesses()[harness]
     prog = cli_invocation()
     exc = click.ClickException(
-        f"{label}'s SDK ({sdk}) isn't installed, so `{prog} {harness}` can't run on "
-        f"this machine. Install the optional `{extra}` extra:\n\n"
-        f"    {extra_install_display(extra)}\n\n"
-        f"or run `{prog} setup` and open {label} to install it from there."
+        f"{gated.label}'s SDK ({gated.sdk}) isn't installed, so `{prog} {harness}` can't "
+        f"run on this machine. Install the optional `{gated.extra}` extra:\n\n"
+        f"    {extra_install_display(gated.extra)}\n\n"
+        f"or run `{prog} setup` and open {gated.label} to install it from there."
     )
     # A missing dependency is not something `omnigent stop` can fix.
     setattr(exc, SUPPRESS_RECOVERY_HINT_ATTR, True)
@@ -14060,7 +14071,7 @@ def _run_harness_shorthand(harness: str, run_args: tuple[str, ...]) -> None:
             f"--harness, or use `{cli_invocation()} run --harness <name>` to pick another."
         )
     sdk_installed = _harness_extra_checks().get(harness)
-    if sdk_installed is not None and harness in _harness_sdk_extras() and not sdk_installed():
+    if sdk_installed is not None and not sdk_installed():
         params = _forwarded_run_params(run_args)
         if params is not None and not _forwarded_run_requests_help(run_args, params):
             raise _missing_harness_sdk_error(harness)
