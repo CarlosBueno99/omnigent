@@ -611,7 +611,7 @@ def test_launcher_rejects_visible_credential_sources(
         monkeypatch.setattr(
             bwrap_sandbox,
             "_ensure_executable_visible",
-            lambda argv, cwd: ["--ro-bind", str(private), "/runtime"],
+            lambda argv, bound_roots, writable_roots: ["--ro-bind", str(private), "/runtime"],
         )
     else:
         source = Path("/usr/lib/private-token")
@@ -921,29 +921,33 @@ def test_wrap_launcher_argv_binds_symlinked_venv_target_at_its_own_path(
     )
 
 
-@pytest.mark.parametrize("target_kind", ["not_a_venv", "dangling"])
-def test_wrap_launcher_argv_does_not_mount_non_venv_symlink_targets(
-    tmp_path: Path, target_kind: str
+@pytest.mark.parametrize("case", ["not_a_venv", "dangling", "writable_link"])
+def test_wrap_launcher_argv_does_not_mount_unsafe_symlink_targets(
+    tmp_path: Path, case: str
 ) -> None:
     """
     A covered directory-symlink is followed only when it leads to a working
-    virtualenv. A link at an arbitrary directory that happens to hold a
-    ``bin/python`` (an agent-writable tree could point ``.venv`` at
-    ``$HOME``), or one whose interpreter does not exist, must not widen the
-    mount set.
+    virtualenv and the agent cannot retarget it. A link at an arbitrary
+    directory holding a stray ``bin/python``, a venv whose interpreter does
+    not exist, or a venv link inside a writable root (an agent could point
+    ``.venv`` at any readable venv) must not widen the mount set.
     """
     tmp_path = tmp_path.resolve()
-    target = tmp_path / "target"
-    (target / "bin").mkdir(parents=True)
-    if target_kind == "not_a_venv":
-        (target / "bin" / "python").symlink_to(os.path.realpath(sys.executable))
+    if case == "writable_link":
+        checkout, target, interp = _symlinked_venv_layout(tmp_path)
+        policy = _make_policy(checkout, allow_hidden=[".venv"], write_roots=[checkout])
     else:
-        (target / "pyvenv.cfg").write_text("home = /usr/bin\n")
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    (checkout / ".venv").symlink_to(target, target_is_directory=True)
-    interp = checkout / ".venv" / "bin" / "python"
-    policy = _make_policy(checkout, allow_hidden=[".venv"])
+        target = tmp_path / "target"
+        (target / "bin").mkdir(parents=True)
+        if case == "not_a_venv":
+            (target / "bin" / "python").symlink_to(os.path.realpath(sys.executable))
+        else:
+            (target / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        (checkout / ".venv").symlink_to(target, target_is_directory=True)
+        interp = checkout / ".venv" / "bin" / "python"
+        policy = _make_policy(checkout, allow_hidden=[".venv"])
 
     argv = _make_backend().wrap_launcher_argv([str(interp), "-c", "pass"], policy, checkout)
 

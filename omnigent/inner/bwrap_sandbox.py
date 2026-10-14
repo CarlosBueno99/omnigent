@@ -480,7 +480,7 @@ class BwrapSandboxBackend(SandboxBackend):
         # the sandbox even when it lives outside the default mounts —
         # e.g. a pyenv install under ``$HOME/.pyenv``.
         bound_roots = [cwd_resolved, *(policy.read_roots or []), *policy.write_roots]
-        bwrap_args += _ensure_executable_visible(argv, bound_roots)
+        bwrap_args += _ensure_executable_visible(argv, bound_roots, policy.write_roots)
 
         # Make sure the final target binary (e.g. the claude CLI at
         # node_modules/.bin/claude) is also reachable.  The launcher
@@ -489,7 +489,7 @@ class BwrapSandboxBackend(SandboxBackend):
         # directory is invisible inside the namespace and the exec
         # fails with FileNotFoundError.
         if target is not None:
-            bwrap_args += _ensure_executable_visible([target], bound_roots)
+            bwrap_args += _ensure_executable_visible([target], bound_roots, policy.write_roots)
 
         # Extra read roots beyond the default toolchain bind set. These
         # mounts precede write grants because bwrap resolves overlaps by
@@ -907,7 +907,9 @@ def _is_same_path(a: Path, b: Path) -> bool:
     return a.resolve(strict=False) == b.resolve(strict=False)
 
 
-def _ensure_executable_visible(argv: list[str], bound_roots: Sequence[Path]) -> list[str]:
+def _ensure_executable_visible(
+    argv: list[str], bound_roots: Sequence[Path], writable_roots: Sequence[Path] = ()
+) -> list[str]:
     """
     Return any extra ``--ro-bind-try`` args needed so ``argv[0]`` (the
     helper interpreter) is reachable inside the sandbox.
@@ -942,22 +944,30 @@ def _ensure_executable_visible(argv: list[str], bound_roots: Sequence[Path]) -> 
       walk produces the binds needed whether or not the
       ``versions/3.12`` component is itself a symlink.
     - ``<cwd>/.venv -> /srv/venvs/proj`` (a project venv kept outside
-      the tree): the cwd bind shows the symlink itself, so the real
-      ``/srv/venvs/proj`` is bound at its own path for it to resolve.
+      the tree) with a read-only cwd: the cwd bind shows the symlink
+      itself, so the real ``/srv/venvs/proj`` is bound at its own path
+      for it to resolve. Under a writable root the link is not followed.
 
     :param argv: Helper argv. The function inspects ``argv[0]``.
     :param bound_roots: Directories the namespace binds wholesale (the
         cwd plus the policy's read/write roots). Paths under them need no
         literal-name bind — the wholesale bind would shadow it anyway —
         but a virtualenv symlink there still needs its target mounted.
+    :param writable_roots: The subset of *bound_roots* the sandboxed
+        process may write to. The agent could retarget a directory-symlink
+        under one of them, so such a link is never followed.
     :returns: Extra bwrap args (possibly empty) to insert before the
         wholesale binds. Never includes a destination already covered by
         :data:`_DEFAULT_RO_DIRS` or by *bound_roots*.
     """
-    return _interpreter_chain_binds(argv, [Path(p) for p in _DEFAULT_RO_DIRS] + list(bound_roots))
+    return _interpreter_chain_binds(
+        argv, [Path(p) for p in _DEFAULT_RO_DIRS] + list(bound_roots), writable_roots
+    )
 
 
-def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) -> list[str]:
+def _interpreter_chain_binds(
+    argv: Sequence[str], covered_prefixes: list[Path], writable_prefixes: Sequence[Path] = ()
+) -> list[str]:
     """
     Walk ``argv[0]``'s symlink chain and return the ``--ro-bind-try``
     args needed to reach each hop, skipping destinations already
@@ -976,6 +986,8 @@ def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) 
     :param argv: Helper argv. Only ``argv[0]`` is inspected.
     :param covered_prefixes: Paths whose descendants need no explicit
         bind (already visible inside the sandbox).
+    :param writable_prefixes: Covered paths the sandboxed process may
+        write to; directory-symlinks under them are never followed.
     :returns: Extra bwrap args (possibly empty), as ``--ro-bind-try
         <src> <dst>`` triples.
     """
@@ -984,6 +996,9 @@ def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) 
 
     extra: list[str] = []
     seen_dest: set[Path] = set()
+
+    def _under(path: Path, roots: Sequence[Path]) -> bool:
+        return any(_is_within(path, root, resolve=False) for root in roots)
 
     def _emit(src: Path, dst: Path) -> None:
         if dst in seen_dest or dst == dst.parent or src == src.parent:
@@ -999,19 +1014,24 @@ def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) 
         """Make ``literal``'s parent and grandparent reachable: bind each
         realpath at its literal name outside the covered mounts. Where a
         covered mount shows a directory-symlink instead, bind its target at
-        its own path, but only a virtualenv target: the link may sit in an
-        agent-writable tree, so an arbitrary target must not widen the mounts."""
-        covered = any(_is_within(literal, root, resolve=False) for root in covered_prefixes)
+        its own path — only a virtualenv target, and only when no write root
+        lets the agent retarget the link, so it cannot widen the mounts."""
+        covered = _under(literal, covered_prefixes)
         parent_literal = literal.parent
         for literal_dir in (parent_literal, parent_literal.parent):
             real_dir = Path(os.path.realpath(str(literal_dir)))
             if not covered:
                 _emit(real_dir, literal_dir)
-            elif follow_venv_links and real_dir != literal_dir and _is_venv_dir(real_dir):
+            elif (
+                follow_venv_links
+                and real_dir != literal_dir
+                and _is_venv_dir(real_dir)
+                and not _under(literal_dir, writable_prefixes)
+            ):
                 _emit(real_dir, real_dir)
 
     # Walk the symlink chain hop-by-hop until either a regular file is
-    # reached or the visited-set catches a cycle. The 40-hop cap matches
+    # reached or the hop list catches a cycle. The 40-hop cap matches
     # Linux's MAXSYMLINKS / ELOOP threshold.
     hops: list[Path] = []
     current = Path(os.path.abspath(str(Path(argv[0]))))
