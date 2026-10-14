@@ -1735,16 +1735,20 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             sandboxLaunching={sandboxLaunching}
             spacerMeasureRef={spacerMeasureRef}
           />
-          {/* Floating reply button — scoped to the conversation container. */}
-          <SelectionPopup
-            containerRef={conversationRef}
-            onReply={(text) => composerRef.current?.appendReplyQuote(text)}
-            onAskInSideChat={
-              supportsSideChat(selectionSessionHarness)
-                ? (text) => composerRef.current?.startSideChat(text)
-                : undefined
-            }
-          />
+          {/* Floating reply button — scoped to the conversation container.
+          Withheld when the composer refuses quotes (read-only grant or a
+          structurally non-interactive session), as SideChatPane does. */}
+          {!isComposerReadOnly(permissionLevel, readOnlyReason, sendDisabledReason) && (
+            <SelectionPopup
+              containerRef={conversationRef}
+              onReply={(text) => composerRef.current?.appendReplyQuote(text)}
+              onAskInSideChat={
+                supportsSideChat(selectionSessionHarness)
+                  ? (text) => composerRef.current?.startSideChat(text)
+                  : undefined
+              }
+            />
+          )}
 
           <Composer
             ref={composerRef}
@@ -2215,6 +2219,20 @@ function SubagentComposerTray({ label }: { label: string }) {
  * transcript underneath stays interactive.
  */
 /**
+ * Whether the composer refuses input: the viewer holds only a read grant, or
+ * the session is structurally non-interactive (``readOnlyReason``). A
+ * temporary send block (``sendDisabledReason``) keeps the level-1 fallback of
+ * a still-starting client-only conversation editable.
+ */
+export function isComposerReadOnly(
+  permissionLevel: number | null,
+  readOnlyReason: string | null,
+  sendDisabledReason: string | null,
+): boolean {
+  return readOnlyReason !== null || (permissionLevel === 1 && sendDisabledReason === null);
+}
+
+/**
  * The message-input composer: textarea, attachments, slash-command
  * suggestions menu, and the send/stop controls. Exported for direct
  * unit testing of the slash-command keyboard behavior.
@@ -2354,8 +2372,7 @@ function ComposerImpl(
   // is structurally non-interactive (``readOnlyReason``). The
   // structural reason takes priority for the placeholder text since it
   // explains *why* this specific row can't receive input.
-  const isReadOnly =
-    readOnlyReason !== null || (permissionLevel === 1 && sendDisabledReason === null);
+  const isReadOnly = isComposerReadOnly(permissionLevel, readOnlyReason, sendDisabledReason);
   // A pending elicitation addressed to this session parks the turn
   // server-side (the runner blocks on the verdict Future), so a message
   // sent now would sit queued and unread until the card is answered —
