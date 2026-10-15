@@ -7420,6 +7420,10 @@ _FROM_OPENCLAW_HELP = (
 )
 _MODEL_HELP = "Model to use for the agent."
 _PROMPT_HELP = "Send this as the first message when the REPL starts."
+_AGENT_HELP = (
+    "Agent registered on the --server to start the session with. With -p and "
+    "several registered agents, this picks the one to run."
+)
 _SYSTEM_PROMPT_HELP = "Instructions to use for the agent."
 _RESUME_HELP = (
     "Resume a prior conversation. With no value, opens an interactive "
@@ -8090,6 +8094,7 @@ def _dispatch_run(
     server_from_cli: bool = False,
     model_from_cli: bool = False,
     acp_agent: AcpAgentEntry | None = None,
+    agent: str | None = None,
 ) -> None:
     """
     Route ``omnigent run`` to the right impl.
@@ -8136,6 +8141,8 @@ def _dispatch_run(
         on the command line rather than loaded from config.
     :param acp_agent: Optional one-shot ACP agent carried in the generated
         temporary spec instead of loaded from global config.
+    :param agent: ``--agent`` value: the registered agent a direct ``--server``
+        session starts with, e.g. ``"scribe"``. ``None`` discovers one.
     """
     if target is not None and _is_server_url(target):
         raise click.ClickException(
@@ -8220,6 +8227,7 @@ def _dispatch_run(
                 debug_events=debug_events,
                 resume_parts=resume_parts,
                 auto_open_conversation=auto_open_conversation,
+                agent_name=agent,
             )
             return
         if harness is None:
@@ -8589,6 +8597,7 @@ def attach(
         'configured server default (--server "" does the same).'
     ),
 )
+@click.option("--agent", "agent", default=None, metavar="NAME", help=_AGENT_HELP)
 @click.option(
     "--profile",
     "databricks_profile",
@@ -8638,6 +8647,7 @@ def run(
     ephemeral: bool,
     log: bool,
     server: str | None,
+    agent: str | None,
     databricks_profile: str | None,
     debug_events: bool,
     register_host: bool,
@@ -8662,6 +8672,7 @@ def run(
       omnigent run examples/hello_world.yaml
       omnigent run examples/hello_world.yaml --harness codex --model gpt-5.4-mini
       omnigent run --server http://localhost:6767
+      omnigent run --server http://localhost:6767 --agent scribe -p "hi"
       omnigent run --server local  # local server, ignoring any configured default
       omnigent run examples/databricks_coding_agent.yaml --server https://<app>.databricksapps.com
       omnigent run --server https://<app>.databricksapps.com --profile my-sp -p "hi"
@@ -8735,6 +8746,17 @@ def run(
         and not harness_from_cli
         and acp_agent is None
     )
+    if agent is not None:
+        if not direct_server_cli:
+            raise click.ClickException(
+                "--agent names an agent registered on a server. Use it with "
+                "`--server <url>` and no AGENT path or --harness."
+            )
+        if resume is not None or resume_latest or fork_session_id is not None:
+            raise click.ClickException(
+                "--agent starts a new session; it cannot be combined with "
+                "--resume, --continue, or --fork."
+            )
 
     _global_cfg = _load_effective_config()
     if target is None and not direct_server_cli and acp_agent is None:
@@ -8805,6 +8827,7 @@ def run(
         server_from_cli=server_from_cli,
         model_from_cli=model_from_cli,
         acp_agent=acp_agent,
+        agent=agent,
     )
 
 

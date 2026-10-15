@@ -11,7 +11,7 @@ import click
 import httpx
 import pytest
 from omnigent_client import OmnigentError as ClientOmnigentError
-from omnigent_client import PaginatedList, QueryResult
+from omnigent_client import PaginatedList, QueryResult, RegisteredAgent
 
 import omnigent.chat as chat_module
 from omnigent.chat import (
@@ -33,6 +33,7 @@ from omnigent.chat import (
     _query_sessions_once,
     _raise_server_failed,
     _remote_headers,
+    _require_registered_agent,
     _spec_used_families,
     _start_local_server,
     _validate_agent_spec,
@@ -41,6 +42,7 @@ from omnigent.chat import (
     run_chat,
 )
 from omnigent.cli import _build_resume_parts
+from omnigent.cli_diagnostics import suppresses_recovery_hint
 from omnigent.inner.databricks_executor import DatabricksCredentials
 from omnigent.models.model_resolver import ModelResolutionError
 from omnigent.spec import load as load_spec
@@ -1717,6 +1719,238 @@ def test_pick_agent_reports_unreachable_server_as_click_error(
     assert server_url in message
     # The advice differs for a stopped local server vs a bad remote target.
     assert expected_hint in message
+
+
+# ── agent discovery on a server without sessions ─────────────────────
+
+
+def _agents_page(
+    names: list[str], *, has_more: bool = False, last_id: str | None = None
+) -> dict[str, object]:
+    """One ``GET /v1/agents`` page listing *names*."""
+    return {
+        "data": [{"id": f"ag_{name}", "name": name} for name in names],
+        "has_more": has_more,
+        "last_id": last_id,
+    }
+
+
+def _serve_listings(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    sessions: list[dict[str, str]],
+    agent_pages: list[dict[str, object]],
+) -> list[tuple[str, object]]:
+    """Answer ``GET /v1/sessions`` and successive ``GET /v1/agents`` pages.
+
+    :returns: The ``(route, after-cursor)`` pairs requested, in order.
+    """
+    requests: list[tuple[str, object]] = []
+    pages = iter(agent_pages)
+
+    def _get(url: str, **kwargs: object) -> SimpleNamespace:
+        route = url.rsplit("/v1/", 1)[1]
+        params = kwargs.get("params")
+        requests.append((route, params.get("after") if isinstance(params, dict) else None))
+        body: object = {"data": sessions} if route == "sessions" else next(pages)
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: body)
+
+    monkeypatch.setattr(chat_module.httpx, "get", _get)
+    return requests
+
+
+def test_pick_agent_offers_registered_agents_when_no_sessions_exist(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A server with registered agents but no sessions yet is not an error.
+
+    Discovery falls back to ``GET /v1/agents`` and auto-selects a lone agent.
+    """
+    requests = _serve_listings(monkeypatch, sessions=[], agent_pages=[_agents_page(["scribe"])])
+
+    assert _pick_agent("http://127.0.0.1:6767") == "scribe"
+
+    assert requests == [("sessions", None), ("agents", None)]
+    assert "Agent: scribe" in capsys.readouterr().out
+
+
+def test_pick_agent_follows_agent_listing_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agents past the first ``GET /v1/agents`` page are still discovered."""
+    requests = _serve_listings(
+        monkeypatch,
+        sessions=[],
+        agent_pages=[
+            _agents_page(["coder"], has_more=True, last_id="ag_coder"),
+            _agents_page(["scribe"]),
+        ],
+    )
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _pick_agent("http://127.0.0.1:6767", interactive=False)
+
+    assert "coder, scribe" in str(excinfo.value)
+    assert requests == [("sessions", None), ("agents", None), ("agents", "ag_coder")]
+
+
+def test_pick_agent_prefers_agents_with_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing sessions still drive discovery; the registry is only the fallback."""
+    requests = _serve_listings(monkeypatch, sessions=[{"agent_name": "used"}], agent_pages=[])
+
+    assert _pick_agent("http://127.0.0.1:6767", quiet=True) == "used"
+
+    assert requests == [("sessions", None)]
+
+
+@pytest.mark.parametrize("kwargs", [{"interactive": False}, {"quiet": True}])
+def test_pick_agent_headless_with_several_agents_asks_for_agent_flag(
+    monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, bool]
+) -> None:
+    """Headless ``-p`` cannot answer a menu: it fails naming the agents and ``--agent``.
+
+    The stale-host hint is withheld because ``omnigent stop`` cannot help here.
+    """
+    _serve_listings(monkeypatch, sessions=[], agent_pages=[_agents_page(["coder", "scribe"])])
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _pick_agent("http://127.0.0.1:6767", **kwargs)
+
+    message = str(excinfo.value)
+    assert "--agent <name>" in message
+    assert "coder, scribe" in message
+    assert "No sessions found" not in message
+    assert suppresses_recovery_hint(excinfo.value)
+
+
+def test_pick_agent_without_registered_agents_is_a_clean_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No sessions and no registered agents name the real remedy, hint withheld."""
+    _serve_listings(monkeypatch, sessions=[], agent_pages=[_agents_page([])])
+
+    with pytest.raises(click.ClickException, match="No agents are registered") as excinfo:
+        _pick_agent("http://127.0.0.1:6767")
+
+    assert suppresses_recovery_hint(excinfo.value)
+
+
+def test_require_registered_agent_accepts_a_registered_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--agent`` with a registered name is accepted as given."""
+    _serve_listings(monkeypatch, sessions=[], agent_pages=[_agents_page(["coder", "scribe"])])
+
+    assert _require_registered_agent("http://127.0.0.1:6767", "scribe") == "scribe"
+
+
+def test_require_registered_agent_rejects_an_unknown_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo'd ``--agent`` is a clean error listing the registered agents."""
+    _serve_listings(monkeypatch, sessions=[], agent_pages=[_agents_page(["coder", "scribe"])])
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _require_registered_agent("http://127.0.0.1:6767", "scrbe")
+
+    message = str(excinfo.value)
+    assert "'scrbe' is not registered" in message
+    assert "coder, scribe" in message
+    assert suppresses_recovery_hint(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("initial_message", "resume_id", "expected_interactive"),
+    [
+        (None, None, True),  # REPL: a menu is fine
+        ("hi", None, False),  # headless one-shot on a new session: never prompt
+        ("hi", "conv_1", True),  # resume keeps today's behavior; --agent does not apply
+    ],
+)
+def test_chat_with_server_only_prompts_for_an_agent_when_it_can(
+    monkeypatch: pytest.MonkeyPatch,
+    initial_message: str | None,
+    resume_id: str | None,
+    expected_interactive: bool,
+) -> None:
+    """A headless one-shot that starts a new session never blocks on the agent menu."""
+    picked: dict[str, bool] = {}
+
+    def _fake_pick(base_url: str, *, quiet: bool = False, interactive: bool = True) -> str:
+        picked["interactive"] = interactive
+        return "scribe"
+
+    monkeypatch.setattr(chat_module, "_pick_agent", _fake_pick)
+    monkeypatch.setattr(chat_module, "_redirect_native_resume_if_needed", lambda **_kw: False)
+    monkeypatch.setattr(chat_module, "_run_one_shot", lambda **_kw: None)
+    monkeypatch.setattr(chat_module, "_run_repl", lambda *_args, **_kw: None)
+
+    chat_module._chat_with_server(
+        "http://127.0.0.1:6767",
+        None,
+        initial_message=initial_message,
+        resume_conversation_id=resume_id,
+    )
+
+    assert picked["interactive"] is expected_interactive
+
+
+def test_run_chat_checks_agent_flag_against_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--agent`` is validated before connecting, then starts the session as given."""
+    checked: dict[str, str] = {}
+
+    def _fake_require(base_url: str, agent_name: str) -> str:
+        checked["base_url"] = base_url
+        checked["agent_name"] = agent_name
+        return agent_name
+
+    captured: dict[str, object] = {}
+
+    def _capture(base_url: str, _tool_handler: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(chat_module, "_require_registered_agent", _fake_require)
+    monkeypatch.setattr(chat_module, "_chat_with_server", _capture)
+
+    run_chat("http://127.0.0.1:6767/", None, prompt="hi", agent_name="scribe")
+
+    assert checked == {"base_url": "http://127.0.0.1:6767", "agent_name": "scribe"}
+    assert captured["agent_name"] == "scribe"
+    assert captured["initial_message"] == "hi"
+
+
+def test_run_chat_rejects_agent_flag_for_a_local_agent_path(tmp_path: Path) -> None:
+    """``--agent`` picks a server-registered agent; a local YAML already is the agent."""
+    with pytest.raises(click.ClickException, match="--agent"):
+        run_chat(str(tmp_path / "agent.yaml"), None, agent_name="scribe")
+
+
+class _NoRunnerSessions:
+    """Sessions API of a server whose agent resolves but has no online runner."""
+
+    async def resolve_agent(self, agent_name: str) -> RegisteredAgent:
+        return RegisteredAgent(id=f"ag_{agent_name}", harness="openai-agents")
+
+    async def resolve_online_runner(
+        self, *, harness: str | None = None, canonicalize: object = None
+    ) -> str | None:
+        return None
+
+
+async def test_query_sessions_once_without_online_runner_is_a_cli_error() -> None:
+    """A remote one-shot with no runner to adopt fails as a CLI error, not a crash."""
+    client = SimpleNamespace(sessions=_NoRunnerSessions())
+
+    with pytest.raises(click.ClickException, match="no online runner") as excinfo:
+        await _query_sessions_once(
+            client=client,  # type: ignore[arg-type]
+            agent_name="scribe",
+            tool_handler=None,
+            prompt="hi",
+            session_bundle=None,
+            session_bundle_filename="agent.tar.gz",
+            runner_id=None,
+        )
+
+    assert suppresses_recovery_hint(excinfo.value)
 
 
 # ── OMNIGENT_MODEL env-var fallback ───────────────────

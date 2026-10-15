@@ -15,6 +15,9 @@ Three paths are covered:
 3. **Headless ``-p``.** ``_query_sessions_once`` with ``session_bundle=None``
    goes through the sessions API rather than the removed legacy
    ``/v1/responses`` endpoint.
+4. **Fresh server.** Agent discovery and the ``omnigent run --server`` one-shot
+   work against a server whose agents are registered but which has no
+   sessions yet, and a server without an online runner fails cleanly.
 
 Run locally (mock LLM, no real API key needed)::
 
@@ -24,7 +27,10 @@ Run locally (mock LLM, no real API key needed)::
 from __future__ import annotations
 
 import asyncio
+import io
 import os
+import subprocess
+import sys
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -34,6 +40,7 @@ import pytest
 import yaml as _yaml
 
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
+from tests._helpers.live_server import isolated_local_server, local_server_env
 from tests.e2e.conftest import (
     configure_mock_llm,
     find_free_port,
@@ -488,3 +495,141 @@ def test_runner_adoption_matches_harness_aliases(agent_harness: str, advertised:
     assert asyncio.run(_resolve(lambda name: canonicalize_harness(name) or name)) == "r1"
     # Without canonicalization the alias would not match at all — the bug this guards.
     assert asyncio.run(_resolve(None)) is None
+
+
+# ---------------------------------------------------------------------------
+# Fresh server: registered agents, no sessions yet
+# ---------------------------------------------------------------------------
+
+_NO_SESSIONS_ERROR = "No sessions found on the server"
+_STALE_HOST_HINT = "stale host processes may be the cause"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _run_cli(home: Path, *args: str, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
+    """Run ``omnigent <args>`` headlessly with CLI state isolated under *home*.
+
+    Enters through ``main()`` like the ``omnigent`` console script, so the
+    top-level error handling (hints, crash screen) is part of what is observed.
+    """
+    home.mkdir(parents=True, exist_ok=True)
+    env = local_server_env(
+        {"HOME": str(home), "OMNIGENT_DATA_DIR": str(home / ".omnigent"), "TERM": "dumb"}
+    )
+    return subprocess.run(
+        [sys.executable, "-c", "from omnigent.cli import main\n\nmain()\n", *args],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _session_count(base_url: str) -> int:
+    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+        resp = client.get("/v1/sessions", params={"visibility": "all", "limit": 100})
+        resp.raise_for_status()
+        return len(resp.json()["data"])
+
+
+def test_pick_agent_offers_registered_agents_before_any_session(
+    registered_agent_server: _RegisteredAgentServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent discovery works on a server that has agents but no sessions yet.
+
+    This is the normal state of a new server (built-ins are always seeded), so
+    ``_pick_agent`` must offer the registered agents rather than refusing until
+    some session exists.
+    """
+    from omnigent.chat import _pick_agent
+
+    server = registered_agent_server
+    assert _session_count(server.base_url) == 0
+
+    # Built-ins are registered alongside the test agent, so answer the picker.
+    monkeypatch.setattr("sys.stdin", io.StringIO(f"{server.agent_name}\n"))
+    assert _pick_agent(server.base_url) == server.agent_name
+
+
+def test_run_one_shot_on_fresh_server_does_not_demand_an_existing_session(
+    registered_agent_server: _RegisteredAgentServer,
+    tmp_path: Path,
+) -> None:
+    """``omnigent run --server <url> -p`` must not fail for lack of sessions.
+
+    Built-ins make every server multi-agent, so a headless run that names no
+    agent cannot pick one. It must fail by listing the registered agents and
+    the ``--agent`` selector; it must not tell the user that nothing can be
+    found, drop into an interactive picker it cannot answer, or append the
+    stale-host hint that ``omnigent stop`` cannot act on.
+    """
+    server = registered_agent_server
+    assert _session_count(server.base_url) == 0
+
+    proc = _run_cli(tmp_path / "cli-home", "run", "--server", server.base_url, "-p", "hi")
+    output = proc.stdout + proc.stderr
+
+    assert _NO_SESSIONS_ERROR not in output, output
+    assert _STALE_HOST_HINT not in output, output
+    assert "Aborted!" not in output, output
+    assert "Traceback (most recent call last)" not in output, output
+    assert proc.returncode != 0, output
+    assert "--agent <name>" in output, output
+    assert server.agent_name in output, output
+
+
+def test_run_one_shot_with_agent_on_fresh_server_answers(
+    registered_agent_server: _RegisteredAgentServer,
+    tmp_path: Path,
+) -> None:
+    """``omnigent run --server <url> --agent <name> -p`` answers on a fresh server.
+
+    The selector the discovery error points at starts a session for the named
+    registered agent, adopts the server's online runner, and prints the reply.
+    """
+    server = registered_agent_server
+    assert _session_count(server.base_url) == 0
+
+    proc = _run_cli(
+        tmp_path / "cli-home",
+        "run",
+        "--server",
+        server.base_url,
+        "--agent",
+        server.agent_name,
+        "-p",
+        "Say hello briefly.",
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert server.marker in proc.stdout, proc.stdout + proc.stderr
+    assert _session_count(server.base_url) == 1
+
+
+def test_run_one_shot_without_online_runner_fails_cleanly(tmp_path: Path) -> None:
+    """A server with no online runner yields a CLI error, not a crash screen."""
+    with isolated_local_server(
+        tmp_path / "server",
+        extra_args=["--agent", str(_REPO_ROOT / "examples" / "scribe")],
+    ) as base_url:
+        with httpx.Client(base_url=base_url, timeout=30.0) as client:
+            agents = client.get("/v1/agents", params={"limit": 100}).json()["data"]
+            agent_id = next(a["id"] for a in agents if a["name"] == "scribe")
+            # Give agent discovery something to find, so the run reaches the runner check.
+            resp = client.post(
+                "/v1/sessions",
+                json={"agent_id": agent_id},
+                headers={"Origin": OMNIGENT_INTERNAL_WS_ORIGIN},
+            )
+            resp.raise_for_status()
+            assert client.get("/v1/runners").json()["data"] == []
+
+        proc = _run_cli(tmp_path / "cli-home", "run", "--server", base_url, "-p", "hi")
+
+    output = proc.stdout + proc.stderr
+    assert proc.returncode != 0, output
+    assert "no online runner" in output, output
+    assert "Traceback (most recent call last)" not in output, output
+    assert "crash report" not in output, output
