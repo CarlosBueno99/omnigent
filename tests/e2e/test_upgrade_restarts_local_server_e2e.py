@@ -29,6 +29,10 @@ import pytest
 
 from tests.e2e.helpers import POLL_INTERVAL_S
 
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX-only: sh stand-in installer and signal-based cleanup"
+)
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _INSTALLED_VERSION = "0.19.0"
 _AVAILABLE_VERSION = "0.19.1"
@@ -53,6 +57,12 @@ _ENV_TO_CLEAR = (
     "UV_DEFAULT_INDEX",
     "UV_INDEX_URL",
     "PIP_INDEX_URL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
 )
 
 _SIMPLE_INDEX_PAGE = """<!DOCTYPE html><html><body>
@@ -61,7 +71,8 @@ _SIMPLE_INDEX_PAGE = """<!DOCTYPE html><html><body>
 """
 
 # Stand-in for the real installer: `uv tool upgrade omnigent` advances the
-# fabricated install's recorded version, which is all the CLI re-probes.
+# fabricated install's recorded version (what the CLI re-probes) and the
+# runtime's VERSION constant (what the restarted processes import and serve).
 _FAKE_UV = """#!/bin/sh
 set -e
 if [ "$1 $2 $3" != "tool upgrade omnigent" ]; then
@@ -72,6 +83,8 @@ fi
 import pathlib, re
 path = pathlib.Path("{metadata}")
 path.write_text(re.sub(r"(?m)^Version: .*", "Version: {new}", path.read_text()))
+version = pathlib.Path("{version_py}")
+version.write_text(re.sub(r"(?m)^VERSION = .*", 'VERSION = "{new}"', version.read_text()))
 PY
 echo "Updated omnigent v{old} -> v{new}" >&2
 """
@@ -102,6 +115,7 @@ def _fabricate_uv_tool_install(root: Path) -> dict[str, str]:
         _FAKE_UV.format(
             python=sys.executable,
             metadata=metadata,
+            version_py=runtime / "omnigent" / "version.py",
             old=_INSTALLED_VERSION,
             new=_AVAILABLE_VERSION,
         )
@@ -175,6 +189,10 @@ def _local_daemon_pid(env: dict[str, str]) -> int | None:
     return None
 
 
+def _server_version(url: str) -> str:
+    return str(httpx.get(f"{url}/api/version", timeout=2.0, trust_env=False).json()["version"])
+
+
 def _health_ok(url: str) -> bool:
     try:
         return httpx.get(f"{url}/health", timeout=2.0, trust_env=False).status_code == 200
@@ -231,6 +249,7 @@ def test_upgrade_restarts_running_local_server_and_host(tmp_path: Path) -> None:
             assert before["running"] and before["daemon_attached"], before
             url = str(before["url"])
             assert _health_ok(url)
+            before_version = _server_version(url)
             before_daemon_pid = _local_daemon_pid(env)
             assert before_daemon_pid is not None
 
@@ -250,12 +269,18 @@ def test_upgrade_restarts_running_local_server_and_host(tmp_path: Path) -> None:
                 f"upgrade output:\n{upgrade.stdout}"
             )
             assert _health_ok(str(after["url"]))
-            # Both processes were replaced, not merely left running.
+            # Both processes were replaced, not merely left running, and the new
+            # server imported the upgraded install rather than the old modules.
             assert after["pid"] != before["pid"], (before["pid"], after["pid"])
             after_daemon_pid = _local_daemon_pid(env)
             assert after_daemon_pid not in (None, before_daemon_pid), (
                 before_daemon_pid,
                 after_daemon_pid,
+            )
+            after_version = _server_version(str(after["url"]))
+            assert after_version == _AVAILABLE_VERSION != before_version, (
+                before_version,
+                after_version,
             )
         finally:
             _stop_everything(home, env)

@@ -4801,7 +4801,15 @@ def server(
             clear_local_server_record()
 
 
-def _stop_local_server_and_daemon(*, force: bool) -> bool:
+@dataclass(frozen=True)
+class _StoppedLocalProcesses:
+    """Which local processes a stop actually took down."""
+
+    server: bool
+    daemon: bool
+
+
+def _stop_local_server_and_daemon(*, force: bool) -> _StoppedLocalProcesses:
     """Stop the background Omnigent server and the local host daemon that owns it.
 
     Stops the local-mode host daemon first (the daemon spawns its server
@@ -4812,21 +4820,26 @@ def _stop_local_server_and_daemon(*, force: bool) -> bool:
 
     :param force: SIGKILL the daemon after the grace period if it does not
         exit on SIGTERM.
-    :returns: ``True`` if a healthy background server was running when
-        called, ``False`` otherwise.
+    :returns: ``server`` when a healthy background server (or an untracked
+        one on the canonical port) was running; ``daemon`` when a local daemon
+        this user owns was terminated. A stale or foreign record is dropped
+        without counting, and a daemon that will not exit is reported.
     """
     was_running = local_server_url_if_healthy() is not None
     local_record = _find_daemon_record(_LOCAL_DAEMON_MARKER)
+    daemon = False
     if local_record is not None:
-        # A stubborn daemon shouldn't block stopping the server.
-        with contextlib.suppress(click.ClickException):
-            _terminate_daemon(local_record, force=force)
+        try:
+            daemon = _terminate_daemon(local_record, force=force) == _STOP_TERMINATED
+        except click.ClickException as exc:
+            # A stubborn daemon shouldn't block stopping the server.
+            click.echo(exc.message, err=True)
     stop_local_omnigent_server()
     # Also catch an orphan on the canonical port whose pidfile was lost, so
     # `server stop` isn't blind to it (it reported "No background server is
     # running" while one was still listening on the default port).
     orphan_pid = stop_untracked_local_server()
-    return was_running or orphan_pid is not None
+    return _StoppedLocalProcesses(server=was_running or orphan_pid is not None, daemon=daemon)
 
 
 def _run_background_server() -> None:
@@ -4894,7 +4907,7 @@ def server_stop(force: bool) -> None:
         does not exit on SIGTERM.
     :returns: None.
     """
-    if _stop_local_server_and_daemon(force=force):
+    if _stop_local_server_and_daemon(force=force).server:
         click.echo("Stopped the background server.")
     else:
         click.echo("No background server is running.")
@@ -5451,14 +5464,6 @@ def _wait_for_local_sessions_to_drain() -> None:
             last = count
 
 
-@dataclass(frozen=True)
-class _StoppedLocalProcesses:
-    """Which local processes ``omni upgrade`` found running and stopped."""
-
-    server: bool
-    daemon: bool
-
-
 def _drain_and_stop_local_server(*, force: bool) -> _StoppedLocalProcesses:
     """Drain (or force-stop) the local server + daemon before an upgrade.
 
@@ -5469,20 +5474,24 @@ def _drain_and_stop_local_server(*, force: bool) -> _StoppedLocalProcesses:
 
     :param force: When ``False``, wait for in-flight sessions to drain first;
         when ``True``, stop them immediately.
-    :returns: The server / local host daemon that were running when the stop began.
+    :returns: What :func:`_stop_local_server_and_daemon` actually stopped.
     """
     if not force:
         _wait_for_local_sessions_to_drain()
-    daemon = _host_daemon_alive()
-    server = _stop_local_server_and_daemon(force=force)
-    if server:
+    stopped = _stop_local_server_and_daemon(force=force)
+    if stopped.server:
         click.echo("Stopped the background server before upgrading.")
-    return _StoppedLocalProcesses(server=server, daemon=daemon)
+    return stopped
 
 
 def _manual_restart_command(stopped: _StoppedLocalProcesses) -> str:
     """The command that brings back what the upgrade stopped, for user hints."""
-    return f"{cli_invocation()} {'start' if stopped.daemon else 'server --background'}"
+    command = 'start --server ""' if stopped.daemon else "server --background"
+    return f"{cli_invocation()} {command}"
+
+
+def _restarted_processes_label(stopped: _StoppedLocalProcesses) -> str:
+    return "the host daemon and background server" if stopped.daemon else "the background server"
 
 
 def _restart_local_processes_after_upgrade(stopped: _StoppedLocalProcesses) -> None:
@@ -5502,11 +5511,12 @@ def _restart_local_processes_after_upgrade(stopped: _StoppedLocalProcesses) -> N
         args = ["server", "--background"]
     else:
         return
+    what = _restarted_processes_label(stopped)
     hint = f"Start it again with `{_manual_restart_command(stopped)}`."
     if not sys.executable:
-        click.echo(f"Could not restart the background server. {hint}", err=True)
+        click.echo(f"Could not restart {what}. {hint}", err=True)
         return
-    click.echo("Restarting the background server…")
+    click.echo(f"Restarting {what}…")
     try:
         code = subprocess.run(
             [sys.executable, "-P", "-m", "omnigent.cli", *args],
@@ -5518,28 +5528,39 @@ def _restart_local_processes_after_upgrade(stopped: _StoppedLocalProcesses) -> N
         click.echo(f"Could not launch the restart command ({exc}). {hint}", err=True)
         return
     if code != 0:
-        click.echo(
-            f"Could not restart the background server (exit status {code}). {hint}", err=True
-        )
+        click.echo(f"Could not restart {what} (exit status {code}). {hint}", err=True)
 
 
 @contextlib.contextmanager
 def _local_server_stopped_for_upgrade(*, force: bool, restart: bool) -> Iterator[None]:
     """Stop the local server + daemon around an installer run, then bring them back.
 
-    The restart also runs when the installer fails or no-ops: the previous
-    install is still in place, and the machine should keep hosting on it
-    rather than stay down until the user notices.
+    The restart is also attempted when the installer fails or no-ops, so a
+    previous install that is still usable keeps hosting rather than staying
+    down until the user notices (a destroyed install just yields the manual
+    command). A Ctrl-C mid-install is the exception: the tree may be
+    half-swapped, so only the manual command is printed.
 
     :param force: Stop in-flight sessions immediately instead of draining.
     :param restart: Relaunch what was stopped once the installer has run.
         ``False`` leaves it stopped and prints the manual command.
     """
     stopped = _drain_and_stop_local_server(force=force)
+    interrupted = False
     try:
         yield
+    except KeyboardInterrupt:
+        interrupted = True
+        raise
     finally:
-        if restart:
+        if interrupted:
+            if stopped.server or stopped.daemon:
+                click.echo(
+                    "Upgrade interrupted. "
+                    f"Run `{_manual_restart_command(stopped)}` to bring it back.",
+                    err=True,
+                )
+        elif restart:
             _restart_local_processes_after_upgrade(stopped)
         elif stopped.server or stopped.daemon:
             click.echo(
