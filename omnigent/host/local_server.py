@@ -483,16 +483,16 @@ def _terminate_pid(pid: int) -> bool:
     return False
 
 
-def _pid_is_local_server(pid: int) -> bool:
+def _pid_is_local_server(pid: int, port: int) -> bool:
     """Whether *pid* is alive and still looks like the recorded Omnigent server.
 
     The pidfile carries no start-time identity like the daemon registry, so a
     pid recycled after a reboot would otherwise be signalled as if it were the
-    server. Every launch path names the package in argv — ``-m omnigent.cli``,
-    or the ``omni``/``omnigent`` console script as its own argv element — so a
-    readable command line without either marks a recycled pid (an empty one
-    too: the server is never argv-less). An unreadable command line falls
-    back to alive-only.
+    server. A readable command line must show a *server* launch: the
+    ``omnigent.cli`` module of ``-m omnigent.cli`` or an ``omni``/``omnigent``
+    console script (any extension), followed by the ``server`` subcommand, and
+    any ``--port`` it names must be the recorded one. An unreadable command
+    line falls back to alive-only.
     """
     if not _pid_alive(pid):
         return False
@@ -502,9 +502,26 @@ def _pid_is_local_server(pid: int) -> bool:
         return False
     except psutil.Error:  # unreadable command line: alive-only
         return True
-    return bool(cmdline) and any(
-        "omnigent" in part or os.path.basename(part) in ("omni", "omnigent") for part in cmdline
+    launcher = next(
+        (
+            i
+            for i, part in enumerate(cmdline)
+            if part == "omnigent.cli"
+            or os.path.splitext(os.path.basename(part))[0] in ("omni", "omnigent")
+        ),
+        None,
     )
+    if launcher is None:
+        return False
+    args = cmdline[launcher + 1 :]
+    if "server" not in args:
+        return False
+    for i, part in enumerate(args):
+        if part == "--port":
+            return i + 1 < len(args) and args[i + 1] == str(port)
+        if part.startswith("--port="):
+            return part.partition("=")[2] == str(port)
+    return True
 
 
 def stop_local_omnigent_server() -> bool:
@@ -525,13 +542,17 @@ def stop_local_omnigent_server() -> bool:
     :returns: ``True`` when a live recorded server process was terminated and
         is confirmed gone; ``False`` when the record was missing, dead, named a
         recycled pid (left alone, record cleared), or the process outlived
-        the SIGKILL wait.
+        the SIGKILL wait — in which case its record is kept so a later stop
+        can find and retry it.
     """
     existing = _read_local_server_pid_file()
     stopped = False
     if existing is not None:
-        pid, _port = existing
-        stopped = _pid_is_local_server(pid) and _terminate_pid(pid)
+        pid, port = existing
+        if _pid_is_local_server(pid, port):
+            if not _terminate_pid(pid):
+                return False
+            stopped = True
     with contextlib.suppress(OSError):
         _LOCAL_SERVER_PID_PATH.unlink()
     with contextlib.suppress(OSError):

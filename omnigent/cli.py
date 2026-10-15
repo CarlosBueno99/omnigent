@@ -4808,11 +4808,13 @@ class _StoppedLocalProcesses:
 
     ``base_path`` is the subpath the stopped server served under (``""`` for
     the root); the stop clears its sidecar, so a relaunch needs it carried.
+    ``server_still_running`` flags a recorded server that outlived the stop.
     """
 
     server: bool
     daemon: bool
     base_path: str = ""
+    server_still_running: bool = False
 
 
 def _stop_local_server_and_daemon(*, force: bool) -> _StoppedLocalProcesses:
@@ -4844,12 +4846,25 @@ def _stop_local_server_and_daemon(*, force: bool) -> _StoppedLocalProcesses:
             )
     base_path = _read_local_server_base_path()
     server = stop_local_omnigent_server()
+    still_running = False
+    if not server:
+        info = local_server_status()
+        still_running = info.pid is not None and _pid_alive(info.pid)
+        if still_running:
+            click.echo(
+                f"The background server (pid {info.pid}) did not exit and is still running; "
+                "retry with --force.",
+                err=True,
+            )
     # Also catch an orphan on the canonical port whose pidfile was lost, so
     # `server stop` isn't blind to it (it reported "No background server is
     # running" while one was still listening on the default port).
     orphan_pid = stop_untracked_local_server()
     return _StoppedLocalProcesses(
-        server=server or orphan_pid is not None, daemon=daemon, base_path=base_path
+        server=server or orphan_pid is not None,
+        daemon=daemon,
+        base_path=base_path,
+        server_still_running=still_running,
     )
 
 
@@ -4918,9 +4933,10 @@ def server_stop(force: bool) -> None:
         does not exit on SIGTERM.
     :returns: None.
     """
-    if _stop_local_server_and_daemon(force=force).server:
+    stopped = _stop_local_server_and_daemon(force=force)
+    if stopped.server:
         click.echo("Stopped the background server.")
-    else:
+    elif not stopped.server_still_running:
         click.echo("No background server is running.")
 
 
@@ -5560,7 +5576,15 @@ def _local_server_stopped_for_upgrade(*, force: bool, restart: bool) -> Iterator
     :param restart: Relaunch what was stopped once the installer has run.
         ``False`` leaves it stopped and prints the manual command.
     """
-    stopped = _drain_and_stop_local_server(force=force)
+    try:
+        stopped = _drain_and_stop_local_server(force=force)
+    except KeyboardInterrupt:
+        click.echo(
+            "Stop interrupted; the background server and host daemon may be down. "
+            f'Run `{cli_invocation()} start --server ""` to bring them back.',
+            err=True,
+        )
+        raise
     interrupted = False
     try:
         yield

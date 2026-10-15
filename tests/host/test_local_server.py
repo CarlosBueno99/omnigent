@@ -577,7 +577,7 @@ def test_stop_local_omnigent_server_reports_a_terminated_server(
     pid_file = tmp_path / "local_server.pid"
     pid_file.write_text("4242\n6767\n")
     monkeypatch.setattr(local_server, "_LOCAL_SERVER_PID_PATH", pid_file)
-    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid: pid == 4242)
+    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid, port: pid == 4242)
     terminated: list[int] = []
     monkeypatch.setattr(local_server, "_terminate_pid", lambda pid: terminated.append(pid) or True)
 
@@ -593,10 +593,11 @@ def test_stop_local_omnigent_server_false_when_the_process_outlives_sigkill(
     pid_file = tmp_path / "local_server.pid"
     pid_file.write_text("4242\n6767\n")
     monkeypatch.setattr(local_server, "_LOCAL_SERVER_PID_PATH", pid_file)
-    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid: True)
+    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid, port: True)
     monkeypatch.setattr(local_server, "_terminate_pid", lambda pid: False)
 
     assert local_server.stop_local_omnigent_server() is False
+    assert pid_file.exists(), "a live server's record must survive a failed stop"
 
 
 @pytest.mark.parametrize(
@@ -624,7 +625,7 @@ def test_stop_local_omnigent_server_leaves_a_recycled_pid_alone(
     pid_file = tmp_path / "local_server.pid"
     pid_file.write_text("4242\n6767\n")
     monkeypatch.setattr(local_server, "_LOCAL_SERVER_PID_PATH", pid_file)
-    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid: False)
+    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid, port: False)
     monkeypatch.setattr(
         local_server, "_terminate_pid", lambda pid: pytest.fail(f"signalled recycled pid {pid}")
     )
@@ -646,16 +647,36 @@ def test_stop_local_omnigent_server_false_without_a_record(
     [
         (False, ["python", "-m", "omnigent.cli", "server"], False),
         (True, ["python", "-m", "omnigent.cli", "server"], True),
+        (
+            True,
+            [
+                "python",
+                "-P",
+                "-m",
+                "omnigent.cli",
+                "server",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "6767",
+            ],
+            True,
+        ),
+        (True, ["python", "-m", "omnigent.cli", "server", "--port=6767"], True),
+        (True, ["python", "-m", "omnigent.cli", "server", "--port", "8123"], False),
+        (True, ["python", "-m", "omnigent.cli", "host", "status"], False),
         (True, ["/venv/bin/python", "/home/u/.local/bin/omni", "server", "--background"], True),
         (True, ["/venv/bin/python", "/home/u/.local/bin/omnigent", "server"], True),
+        (True, ["/c/Users/u/Scripts/omni.exe", "server"], True),
         (True, ["sshd: user@pts/0"], False),
         (True, ["less", "omni-notes.txt"], False),
+        (True, ["tail", "-f", "/home/u/.omnigent/logs/server.log"], False),
         (True, [], False),
         (True, psutil.AccessDenied(4242), True),
         (True, psutil.NoSuchProcess(4242), False),
     ],
 )
-def test_pid_is_local_server_rejects_only_a_readable_foreign_cmdline(
+def test_pid_is_local_server_requires_a_server_launch_on_the_recorded_port(
     monkeypatch: pytest.MonkeyPatch, alive: bool, cmdline: object, expected: bool
 ) -> None:
     monkeypatch.setattr(local_server, "_pid_alive", lambda pid: alive)
@@ -675,7 +696,7 @@ def test_pid_is_local_server_rejects_only_a_readable_foreign_cmdline(
         SimpleNamespace(Process=_Proc, NoSuchProcess=psutil.NoSuchProcess, Error=psutil.Error),
     )
 
-    assert local_server._pid_is_local_server(4242) is expected
+    assert local_server._pid_is_local_server(4242, 6767) is expected
 
 
 def test_stop_local_omnigent_server_waits_for_process_exit(
@@ -718,7 +739,7 @@ def test_stop_local_omnigent_server_waits_for_process_exit(
         return alive_calls <= 2
 
     monkeypatch.setattr(local_server, "_pid_alive", _fake_pid_alive)
-    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid: True)
+    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid, port: True)
     # Eliminate real sleeps — the poll interval is irrelevant in the test.
     monkeypatch.setattr(local_server.time, "sleep", lambda _s: None)
 
@@ -777,7 +798,7 @@ def test_stop_local_omnigent_server_escalates_to_sigkill(
         return signal_mod.SIGKILL not in kill_signals
 
     monkeypatch.setattr(local_server, "_pid_alive", _fake_pid_alive)
-    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid: True)
+    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid, port: True)
 
     # Fast-forward time so the grace period expires immediately.
     clock = [0.0]

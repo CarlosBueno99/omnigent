@@ -511,9 +511,62 @@ def test_stop_captures_the_servers_base_path_before_clearing_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stop_path(monkeypatch, outcome=_STOP_TERMINATED)
-    monkeypatch.setattr("omnigent.cli._read_local_server_base_path", lambda: "/proxy/6767")
+    sidecar = {"base_path": "/proxy/6767"}
+    monkeypatch.setattr("omnigent.cli._read_local_server_base_path", lambda: sidecar["base_path"])
+
+    def _stop_and_clear_sidecar() -> bool:
+        sidecar["base_path"] = ""
+        return True
+
+    monkeypatch.setattr("omnigent.cli.stop_local_omnigent_server", _stop_and_clear_sidecar)
 
     assert _stop_local_server_and_daemon(force=False).base_path == "/proxy/6767"
+
+
+def test_stop_reports_a_server_that_will_not_exit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A recorded server that outlives the stop is flagged, not counted as absent."""
+    monkeypatch.setattr("omnigent.cli.local_server_url_if_healthy", _no_health_probe)
+    monkeypatch.setattr("omnigent.cli._find_daemon_record", lambda _target: None)
+    monkeypatch.setattr("omnigent.cli.stop_local_omnigent_server", lambda: False)
+    monkeypatch.setattr(
+        "omnigent.cli.local_server_status",
+        lambda: LocalServerInfo(running=False, pid=4242, port=6767, url=None),
+    )
+    monkeypatch.setattr("omnigent.cli._pid_alive", lambda _pid: True)
+    monkeypatch.setattr("omnigent.cli.stop_untracked_local_server", lambda: None)
+
+    stopped = _stop_local_server_and_daemon(force=False)
+
+    assert stopped == _StoppedLocalProcesses(server=False, daemon=False, server_still_running=True)
+    assert "did not exit and is still running" in capsys.readouterr().err
+
+
+def test_interrupted_stop_prints_the_manual_command(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl-C while the stop itself runs leaves a recovery command for whatever went down."""
+
+    def _interrupted(*, force: bool) -> _StoppedLocalProcesses:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("omnigent.cli._drain_and_stop_local_server", _interrupted)
+    monkeypatch.setattr(
+        "omnigent.cli._restart_local_processes_after_upgrade",
+        lambda _stopped: pytest.fail("restarted after an interrupted stop"),
+    )
+
+    with (
+        pytest.raises(KeyboardInterrupt),
+        _local_server_stopped_for_upgrade(force=False, restart=True),
+    ):
+        pass
+
+    assert (
+        "Stop interrupted; the background server and host daemon may be down. "
+        f'Run `{cli_invocation()} start --server ""` to bring them back.'
+    ) in capsys.readouterr().err
 
 
 def test_stop_reports_a_daemon_that_will_not_exit(
