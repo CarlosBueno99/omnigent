@@ -136,12 +136,16 @@ def test_mixed_version_import_failure_guides_host_restart(
     assert payload["title"] == "Claude can't start until you restart the host"
     cause = payload["cause"]
     remediation = payload["remediation"]
-    assert "an in-place upgrade left it mixed-version" in cause
+    assert "in-place upgrade" in cause
+    assert "mixed-version" in cause
     assert "Restart the host" in remediation
-    # A foreground host and a host user service each need their own restart;
-    # both must appear in the configured CLI spelling, not just "restart".
-    assert f"re-run `{cli} host` for a foreground host" in remediation
-    assert f"`{cli} host disable && {cli} host enable` for a host user service" in remediation
+    # The foreground host restarts in the configured CLI spelling; the
+    # service restart must re-enable with the original options so a remote
+    # `--server` is not dropped to local mode (never the bare disable+enable).
+    assert f"re-run `{cli} host`" in remediation
+    assert "re-enable it" in remediation
+    assert "keeping `--server`" in remediation
+    assert "disable &&" not in remediation
     # The reload card is rebuilt from per-field labels, so each field must fit
     # the label column or the guidance truncates away on refresh.
     assert len(cause) <= LABEL_VALUE_MAX_LEN

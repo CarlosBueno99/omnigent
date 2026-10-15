@@ -7847,20 +7847,21 @@ def _native_terminal_start_error_payload(
         # Only the person can fix the host's setup, and the message says how.
         message = exc.message
     elif _is_stale_host_import_error(exc):
-        # Classify the mixed-version failure: split cause/remediation so each
-        # fits the reload-visible label budget, and never echo the exception
-        # text, which carries the on-disk install path.
+        # Classify into reload-safe fields: each fits the per-field label budget,
+        # the install-path-bearing exception text is never echoed, and the service
+        # remedy re-enables with the original options so a remote --server stays.
         cli = cli_invocation()
         error_title = f"{runtime_name} can't start until you restart the host"
         error_cause = (
-            f"Native {runtime_name} terminal failed to start because this host "
-            "is still running an older Omnigent build than the one now on disk "
-            "(an in-place upgrade left it mixed-version)."
+            f"Native {runtime_name} terminal failed to start: this host is "
+            "likely running an older Omnigent build than the one now on disk, "
+            "which an in-place upgrade can leave behind (mixed-version)."
         )
         error_remediation = (
-            "Restart the host so it loads the upgraded code: re-run "
-            f"`{cli} host` for a foreground host, or "
-            f"`{cli} host disable && {cli} host enable` for a host user service."
+            "Restart the host so it loads the upgraded code. For a foreground "
+            f"host, re-run `{cli} host`. For a host user service, re-enable it "
+            "with the same options you first installed it with, keeping "
+            "`--server` for a remote host."
         )
         message = f"{error_cause} {error_remediation}"
     elif IS_WINDOWS:
