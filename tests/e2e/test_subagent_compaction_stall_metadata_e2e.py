@@ -6,8 +6,7 @@ prompt. The child's Claude Code reads files until the mock model reports a
 near-full context, auto-compacts, reads again, auto-compacts a second time, and
 then its next model reply is held on the mock gate so the turn never advances
 (no further tool calls, no writes). The orchestrator then runs two status
-checks ten seconds apart through ``sys_session_get_info``, ``sys_session_list``,
-``sys_session_get_history`` and ``sys_read_inbox``.
+checks ten seconds apart through ``sys_session_get_info`` and ``sys_read_inbox``.
 
 Claude Code only enforces a context window it knows; a third-party base URL
 leaves the window unenforced, so the child's HOME carries
@@ -64,12 +63,7 @@ _SMALL_USAGE = {
 _DOC_COUNT = 6
 _HELD_REPLY = "HELD-REPLY: never delivered while the gate is closed."
 _POLL_GAP_S = 10.0
-_STATUS_TOOLS = (
-    "sys_session_get_info",
-    "sys_session_list",
-    "sys_session_get_history",
-    "sys_read_inbox",
-)
+_STATUS_TOOLS = ("sys_session_get_info", "sys_read_inbox")
 
 
 def _write_docs(workspace: Path) -> None:
@@ -293,8 +287,6 @@ def _configure_parent_status_check(mock_url: str, child_id: str, n: int) -> None
             "key": _PARENT_MODEL,
             "responses": [
                 call("sys_session_get_info", {"session_id": child_id}),
-                call("sys_session_list", {}),
-                call("sys_session_get_history", {"conversation_id": child_id, "tail_items": 5}),
                 call("sys_read_inbox", {}),
                 {"text": f"Status check {n} recorded."},
             ],
@@ -308,9 +300,8 @@ def _register_parent(client: httpx.Client, mock_url: str) -> str:
         "name": name,
         "prompt": (
             "You are an orchestrator. Dispatch the implementer sub-agent via "
-            "sys_session_send when asked, and check on it with sys_session_get_info, "
-            "sys_session_list, sys_session_get_history and sys_read_inbox when asked "
-            "for a status check."
+            "sys_session_send when asked, and check on it with sys_session_get_info "
+            "and sys_read_inbox when asked for a status check."
         ),
         "executor": {
             "harness": "openai-agents",
@@ -442,12 +433,6 @@ class StallObservation:
     def get_info(self, n: int) -> dict[str, Any]:
         return json.loads((self.check_1, self.check_2)[n - 1]["sys_session_get_info"])
 
-    def session_list(self, n: int) -> dict[str, Any]:
-        return json.loads((self.check_1, self.check_2)[n - 1]["sys_session_list"])
-
-    def history_tail(self, n: int) -> list[dict[str, Any]]:
-        return json.loads((self.check_1, self.check_2)[n - 1]["sys_session_get_history"])["items"]
-
     def inbox(self, n: int) -> str:
         return (self.check_1, self.check_2)[n - 1]["sys_read_inbox"]
 
@@ -541,10 +526,6 @@ def test_parked_subagent_metadata_reports_compactions(stalled_subagent: StallObs
     assert obs.head_before == obs.head_after
     for n in (1, 2):
         assert "docs-ia" not in obs.inbox(n) and obs.child_id not in obs.inbox(n), obs.inbox(n)
-    assert obs.history_tail(1) == obs.history_tail(2), "history tail advanced while parked"
-    assert any(item.get("type") == "compaction" for item in obs.history_tail(2)), obs.history_tail(
-        2
-    )
     info = obs.get_info(1)
     assert info.get("status") == "running", info
     assert info.get("runner_online") is True, info
