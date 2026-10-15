@@ -74,8 +74,14 @@ no registered distribution contributes an empty version and is unaffected.)
 5. Run the installer-appropriate command (`_build_upgrade_suggestion` +
    `_run_upgrade_command`): `uv tool upgrade omnigent`, `pip install -U
    omnigent`, `pipx upgrade omnigent`, `--reinstall <vcs_url>`, etc.
-6. **Lazy respawn**: do not restart the server. The next `omni` command spawns
-   a fresh new-code server via the signature change above.
+6. **Restart what was stopped**: relaunch the server / local host daemon that
+   step 4 found running, through a fresh `sys.executable -m omnigent.cli start`
+   (or `server --background` when no daemon was hosting) so the new code is
+   imported — this process still holds the old package. The restart also runs
+   after a failed or no-op install, so the machine keeps hosting on whatever
+   install it has. `--no-restart` skips it; the signature change above still
+   spawns a fresh new-code server on the next `omni` command, but nothing
+   respawns the host daemon lazily.
 
 Most of steps 2/5 reuse helpers that already existed in `update_check.py`.
 
@@ -115,7 +121,10 @@ itself (that responsibility moved to the command).
   `PIP_INDEX_URL` and the uv/pip config files). Picks the latest
   non-pre-release. No GitHub Releases are cut.
 - **Drain posture**: drain-and-wait by default, `--force` to stop now.
-- **Restart**: lazy respawn (no auto-restart) — simplest, fewest surprises.
+- **Restart**: bring back exactly what the upgrade stopped (server and/or local
+  host daemon) by default; `--no-restart` opts out. Lazy respawn alone covered
+  the server but never the host daemon, so `omnigent start` users were left
+  un-hosted after every upgrade.
 - **Notice cadence**: once per new release.
 
 ## Not in scope (possible follow-ups)
