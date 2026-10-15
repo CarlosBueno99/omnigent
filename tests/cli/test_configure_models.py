@@ -3768,7 +3768,7 @@ def test_codex_own_config_status_respects_dismissal(isolated_config, monkeypatch
     monkeypatch.delenv("CODEX_HOME", raising=False)
     _write_codex_config_toml(isolated_config)  # self-contained auth command
 
-    assert _codex_own_config_status({}) == "Databricks AI Gateway (Codex config)"
+    assert _codex_own_config_status({}) == "Databricks Unity Gateway (Codex config)"
     assert _codex_own_config_status({"dismissed_detections": ["codex-databricks"]}) is None
 
 
