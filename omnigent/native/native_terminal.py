@@ -43,7 +43,8 @@ async def request_with_429_retry(
     pause is shorter than the first fallback (a tiny hint cannot drive
     back-to-back retries), and retrying stops as soon as the next pause would
     end after the budget, measured from the first attempt; the caller then gets
-    the final 429.
+    the final 429. The budget schedules retries; it does not cut short a request
+    that is already in flight, so the last attempt can finish after it.
 
     :param send: Callable that creates and sends one request attempt.
     :param delays_s: Fallback pause before each retry when the response has
