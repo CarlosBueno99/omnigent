@@ -1667,10 +1667,10 @@ async def test_handle_launch_immediate_exit_reports_exit_code_and_log_tail(
     host._maintenance_janitor = SimpleNamespace(trigger=maintenance_reasons.append)  # type: ignore[assignment]
     workspace = tmp_path / "project"
     workspace.mkdir()
+    log_tail = tmp_path / "refused-tail.txt"
     if exit_output == "refusal":
-        log_tail = tmp_path / "refused-tail.txt"
         log_tail.write_text(_REFUSED_RUNNER_LOG_TAIL, encoding="utf-8")
-        script, exit_code = f"cat '{log_tail}' >&2; exit 1", 1
+        script, exit_code = 'cat "$1" >&2; exit 1', 1
     else:
         script, exit_code = "echo 'RuntimeError: boom-traceback' >&2; exit 7", 7
 
@@ -1689,7 +1689,7 @@ async def test_handle_launch_immediate_exit_reports_exit_code_and_log_tail(
         :returns: A finished subprocess handle.
         """
         proc = original_popen(
-            ["sh", "-c", script],
+            ["sh", "-c", script, "sh", str(log_tail)],
             stdin=subprocess.DEVNULL,
             stdout=kwargs["stdout"],
             stderr=kwargs["stderr"],
@@ -1932,7 +1932,7 @@ async def test_watch_runner_attributes_declared_tunnel_refusal_to_launch_config(
     def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
         """Spawn a runner that stays up briefly, prints the refusal, and exits 1."""
         return original_popen(
-            ["sh", "-c", f"sleep 0.2; cat '{log_tail}' >&2; exit 1"],
+            ["sh", "-c", 'sleep 0.2; cat "$1" >&2; exit 1', "sh", str(log_tail)],
             stdin=subprocess.DEVNULL,
             stdout=kwargs["stdout"],
             stderr=kwargs["stderr"],

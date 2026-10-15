@@ -98,6 +98,7 @@ def log_runner_exited(
     error: str,
     *,
     session_id: str | None = None,
+    had_connected: bool | None = None,
 ) -> None:
     """Emit the ``runner_exited`` debug event for a host-reported runner death.
 
@@ -109,12 +110,16 @@ def log_runner_exited(
     :param runner_id: The dead runner, e.g. ``"runner_abc123..."``.
     :param error: Daemon-composed cause (exit code + log tail).
     :param session_id: Session bound to the runner, if known.
+    :param had_connected: Whether the runner had connected its tunnel, when the
+        host's evidence is available; ``True`` keeps a refusal out of the
+        launch phase, mirroring the host's own row.
     :returns: None.
     """
     # A tunnel refusal the runner declared is a launch configuration failure.
     # Any other cause is an unparsed runner-process fault, and that runner may
     # have died before or during a turn, so its lifecycle stage is unknown.
     refused = runner_tunnel_refusal(error) is not None
+    launch_refusal = refused and had_connected is not True
     _logger.warning(
         "Host %s reported runner %s exited: %s",
         host_id,
@@ -127,7 +132,7 @@ def log_runner_exited(
             runner_id=runner_id,
             error_category=(ErrorCategory.CONFIG if refused else ErrorCategory.RUNNER).value,
             error_impact=ErrorImpact.BLOCKING.value,
-            error_phase=(ErrorPhase.RUNNER_LAUNCH if refused else ErrorPhase.UNKNOWN).value,
+            error_phase=(ErrorPhase.RUNNER_LAUNCH if launch_refusal else ErrorPhase.UNKNOWN).value,
         ),
     )
 
@@ -795,7 +800,9 @@ async def _receive_loop(
                     frame.runner_id, frame.error, conn.owner, had_connected=frame.had_connected
                 )
             if on_runner_exited is None:
-                log_runner_exited(host_id, frame.runner_id, frame.error)
+                log_runner_exited(
+                    host_id, frame.runner_id, frame.error, had_connected=frame.had_connected
+                )
             else:
                 # Only failure signal for a runner that crashed before connecting
                 # its tunnel; the callback resolves bound sessions and logs the event.

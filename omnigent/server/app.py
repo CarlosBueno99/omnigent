@@ -3698,12 +3698,14 @@ def create_app(
             )
         except Exception:
             # Never lose the crash event to a failed session lookup.
-            log_runner_exited(host_id, runner_id, error)
+            log_runner_exited(host_id, runner_id, error, had_connected=runner_ran)
             raise
         # One row per bound session so every crash is attributable; a runner
         # with no bound session still gets a session-less row.
         for session_id in [conv.id for conv in affected] or [None]:
-            log_runner_exited(host_id, runner_id, error, session_id=session_id)
+            log_runner_exited(
+                host_id, runner_id, error, session_id=session_id, had_connected=runner_ran
+            )
         await _mark_runner_sessions_offline(
             affected,
             ErrorDetail(code="runner_failed_to_start", message=error),

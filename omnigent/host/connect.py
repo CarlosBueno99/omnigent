@@ -418,8 +418,9 @@ def _runner_exit_report(
     tail = _read_log_tail(log_path)
     refusal = runner_tunnel_refusal(tail)
     if refusal is not None:
-        # A protocol-close refusal can follow a successful connect, so only a
-        # runner that never connected is localized to the launch phase.
+        # A protocol-close refusal can follow a successful connect, so a runner
+        # known to have connected keeps the phase unknown; a never-connected or
+        # unknown-marker death is treated as a launch failure.
         return _RunnerExitReport(
             error=f"{_redact_log_tail(refusal)}\n{exited}",
             category=ErrorCategory.CONFIG,
@@ -2509,7 +2510,10 @@ class HostProcess:
                 return
             # Pre-connect code 0 is a failed launch; send its cause to the server.
             report = await asyncio.to_thread(
-                _runner_exit_report, handle.proc.returncode, handle.log_path
+                _runner_exit_report,
+                handle.proc.returncode,
+                handle.log_path,
+                had_connected=had_connected,
             )
             error = report.error
             _logger.info(
