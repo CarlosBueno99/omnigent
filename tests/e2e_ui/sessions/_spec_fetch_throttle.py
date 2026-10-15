@@ -1,9 +1,10 @@
 """A rate-limiting API front end stand-in for the runner's agent-spec fetch.
 
 ``install()`` wraps the product app in a pure-ASGI edge that answers
-``GET /v1/sessions/{id}/agent/contents`` with HTTP 429 for a bounded window after
-each arming (the flag file holds the arming time) and passes everything else,
-including the runner tunnel, through untouched. Run it from the server bootstrap::
+``GET /v1/sessions/{id}/agent/contents`` with HTTP 429 for a bounded window that
+starts at the first such fetch after each arming (the flag file holds the arming
+request, then the window's start time) and passes everything else, including the
+runner tunnel, through untouched. Run it from the server bootstrap::
 
     python -c "from tests.e2e_ui.sessions._spec_fetch_throttle import install; \\
                install(); from omnigent.cli import main; main()" server ...
@@ -21,12 +22,25 @@ from typing import Any
 FLAG_ENV = "OMNIGENT_E2E_SPEC_FETCH_THROTTLE_FLAG"
 COUNTER_ENV = "OMNIGENT_E2E_SPEC_FETCH_THROTTLE_COUNTER"
 WINDOW_ENV = "OMNIGENT_E2E_SPEC_FETCH_THROTTLE_WINDOW"
+ARM_ON_NEXT_FETCH = "next-fetch"
 
 _SPEC_FETCH = re.compile(r"^/v1/sessions/[^/]+/agent/contents$")
 
 
+def _replace_text(path: Path, text: str) -> None:
+    """Write *text* atomically so a concurrent reader never sees a partial file."""
+    pending = path.with_suffix(".tmp")
+    pending.write_text(text)
+    os.replace(pending, path)
+
+
+def arm(flag: Path) -> None:
+    """Throttle spec fetches for the window, starting at the next one."""
+    _replace_text(flag, ARM_ON_NEXT_FETCH)
+
+
 class SpecFetchThrottle:
-    """Answer every spec fetch with 429 for *window* seconds after each arming."""
+    """Answer spec fetches with 429 for *window* seconds from the first one after arming."""
 
     def __init__(self, app: Any, *, flag: Path, counter: Path, window: float) -> None:
         self._app = app
@@ -38,8 +52,17 @@ class SpecFetchThrottle:
 
     def _armed(self) -> bool:
         try:
-            armed_at = float(self._flag.read_text().strip())
-        except (OSError, ValueError):
+            flag = self._flag.read_text().strip()
+        except OSError:
+            return False
+        if flag == ARM_ON_NEXT_FETCH:
+            # The window starts at the first throttled fetch rather than when the
+            # test armed it, so slow UI setup in between cannot shorten it.
+            _replace_text(self._flag, str(time.time()))
+            return True
+        try:
+            armed_at = float(flag)
+        except ValueError:
             return False
         return time.time() < armed_at + self._window
 
@@ -51,9 +74,7 @@ class SpecFetchThrottle:
             and self._armed()
         ):
             self._served.append(scope["path"])
-            pending = self._counter.with_suffix(".tmp")
-            pending.write_text(json.dumps(self._served))
-            os.replace(pending, self._counter)
+            _replace_text(self._counter, json.dumps(self._served))
             body = json.dumps(
                 {"error_code": "RESOURCE_EXHAUSTED", "message": "Too many requests"}
             ).encode()

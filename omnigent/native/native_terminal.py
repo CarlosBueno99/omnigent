@@ -40,7 +40,7 @@ async def request_with_429_retry(
     Without ``budget_s``, retries are bounded by attempt count: with every hint
     capped, the sleeps total at most ``len(delays_s) * max_retry_after_s`` (40s
     with the defaults). With ``budget_s``, the last fallback delay repeats, no
-    pause is shorter than the first fallback (a tiny hint cannot drive
+    pause is shorter than the smallest fallback (a tiny hint cannot drive
     back-to-back retries), and retrying stops as soon as the next pause would
     end after the budget, measured from the first attempt; the caller then gets
     the final 429. The budget schedules retries; it does not cut short a request
@@ -49,17 +49,20 @@ async def request_with_429_retry(
     :param send: Callable that creates and sends one request attempt.
     :param delays_s: Fallback pause before each retry when the response has
         no usable ``Retry-After`` hint, e.g. ``(0.5, 1.0, 2.0)``.
-    :param max_retry_after_s: Cap on any single pause, e.g. ``10.0``.
+    :param max_retry_after_s: Cap on any ``Retry-After`` hint, e.g. ``10.0``;
+        fallback delays are used as-is.
     :param budget_s: Wall-clock retry budget in seconds, e.g. ``30.0``.
-        ``None`` keeps the attempt-count bound; otherwise ``delays_s`` must be
-        non-empty and positive.
+        ``None`` keeps the attempt-count bound; otherwise ``delays_s`` must not
+        be empty.
     :returns: The first non-429 response, or the final 429 response.
     """
+    if any(delay <= 0 for delay in delays_s):
+        raise ValueError("delays_s must contain positive fallback delays")
     started = _monotonic()
     fallbacks: Iterable[float] = delays_s
     if budget_s is not None:
-        if not delays_s or min(delays_s) <= 0:
-            raise ValueError("budget_s needs positive fallback delays to repeat and floor")
+        if not delays_s:
+            raise ValueError("budget_s needs a fallback delay to repeat and floor")
         fallbacks = itertools.chain(delays_s, itertools.repeat(delays_s[-1]))
     for fallback_delay_s in fallbacks:
         response = await send()
@@ -71,7 +74,7 @@ async def request_with_429_retry(
             max_delay=max_retry_after_s,
         )
         if budget_s is not None:
-            delay_s = max(delay_s, delays_s[0])
+            delay_s = max(delay_s, min(delays_s))
             if _monotonic() - started + delay_s > budget_s:
                 return response
         await _sleep(delay_s)

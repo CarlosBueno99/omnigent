@@ -11,7 +11,6 @@ runner rides out the transient 429 instead of failing the turn with
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from collections.abc import Callable, Iterator
@@ -30,8 +29,8 @@ _BOOTSTRAP = (
     "from tests.e2e_ui.sessions._spec_fetch_throttle import install; install(); "
     "from omnigent.cli import main; main()"
 )
-# Shorter than the runner's 30 s retry budget, with headroom for slow UI setup.
-_THROTTLE_WINDOW_S = 20
+# Shorter than the runner's 30 s retry budget, so a run stays conclusive.
+_THROTTLE_WINDOW_S = 15
 
 BEFORE_PROMPT = "Hello before the server restart."
 BEFORE_REPLY = "Hi! Everything is working before the restart."
@@ -42,8 +41,7 @@ _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 _WORKING = '[data-testid="working-indicator"]'
 _SPEC_RESOLVER_LINE = re.compile(r".*(spec_resolver|spec resolve|re-assign session).*")
 _THROTTLED_FETCH_LINE = re.compile(
-    r"GET /v1/sessions/(?P<session>[0-9a-f]+)/agent/contents was throttled "
-    r"(?P<count>\d+) time\(s\); last status HTTP 200"
+    r"GET /v1/sessions/(?P<session>[0-9a-f]+)/agent/contents was throttled (?P<count>\d+) time"
 )
 
 
@@ -63,10 +61,8 @@ class ThrottledStack:
         return self.stack.base_url
 
     def arm_throttle(self) -> None:
-        """Start answering spec fetches with HTTP 429 for the throttle window."""
-        pending = self.flag.with_suffix(".tmp")
-        pending.write_text(str(time.time()))
-        os.replace(pending, self.flag)
+        """Answer spec fetches with HTTP 429 for the window starting at the next one."""
+        edge.arm(self.flag)
 
     def throttled_paths(self) -> list[str]:
         return edge.served_429s(self.counter)
@@ -138,8 +134,14 @@ def start_throttled_stack(root: Path, mock_llm_url: str) -> Iterator[ThrottledSt
         httpx.Client(base_url=stack.base_url, trust_env=False, timeout=30.0) as client,
     ):
         stack.start_host(env={"OMNIGENT_RUNNER_ZYGOTE": "0", **model_env})
-        _wait_until(lambda: _online_host_id(client) is not None, timeout=90, what="host online")
-        host_id = _online_host_id(client)
+        host_id: str | None = None
+
+        def _capture_host() -> bool:
+            nonlocal host_id
+            host_id = _online_host_id(client)
+            return host_id is not None
+
+        _wait_until(_capture_host, timeout=90, what="host online")
         assert host_id is not None
         agents = client.get("/v1/agents", params={"limit": 100}).json()["data"]
         agent_id = next((a["id"] for a in agents if a["name"] == "hello_world"), None)
@@ -222,8 +224,8 @@ def test_new_session_rides_out_throttled_spec_fetch_after_server_restart(
     env.stack.restart_server()
     env.wait_for_host_online(timeout=120)
 
-    # The user starts a fresh session during that window and sends a message. Arm
-    # the window right before sending so slow UI setup cannot outlast it.
+    # The user starts a fresh session during that window and sends a message; the
+    # throttle window starts at that session's first spec fetch.
     open_landing(page, env)
     choose_agent(page, env.agent_id)
     env.arm_throttle()

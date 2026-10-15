@@ -198,10 +198,11 @@ async def test_request_with_429_retry_budget_counts_request_latency(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delays_s", [(0.5, 1.0), (2.0, 0.5)])
 async def test_request_with_429_retry_budget_floors_tiny_hints(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, delays_s: tuple[float, ...]
 ) -> None:
-    """Under a budget a tiny ``Retry-After`` cannot drive back-to-back retries."""
+    """Under a budget a tiny ``Retry-After`` waits at least the smallest fallback."""
     clock = _fake_retry_clock(monkeypatch)
     attempts = 0
 
@@ -211,7 +212,7 @@ async def test_request_with_429_retry_budget_floors_tiny_hints(
         return httpx.Response(429, headers={"Retry-After": "0.01"})
 
     response = await native_terminal.request_with_429_retry(
-        _send, delays_s=(0.5, 1.0), max_retry_after_s=5.0, budget_s=2.0
+        _send, delays_s=delays_s, max_retry_after_s=5.0, budget_s=2.0
     )
 
     assert response.status_code == 429
@@ -220,17 +221,17 @@ async def test_request_with_429_retry_budget_floors_tiny_hints(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("delays_s", [(0.5, 0.0), ()])
-async def test_request_with_429_retry_budget_rejects_a_non_positive_repeat_delay(
-    delays_s: tuple[float, ...],
+@pytest.mark.parametrize(("delays_s", "budget_s"), [((0.5, 0.0), 5.0), ((), 5.0), ((0.0,), None)])
+async def test_request_with_429_retry_rejects_unusable_delays(
+    delays_s: tuple[float, ...], budget_s: float | None
 ) -> None:
-    """A budget cannot repeat a zero or missing delay, which would retry back-to-back."""
+    """A zero delay, or no delay to repeat under a budget, would retry back-to-back."""
 
     async def _send() -> httpx.Response:
         raise AssertionError("no request should be sent")
 
-    with pytest.raises(ValueError, match="positive"):
-        await native_terminal.request_with_429_retry(_send, delays_s=delays_s, budget_s=5.0)
+    with pytest.raises(ValueError, match="fallback delay"):
+        await native_terminal.request_with_429_retry(_send, delays_s=delays_s, budget_s=budget_s)
 
 
 @pytest.mark.asyncio
