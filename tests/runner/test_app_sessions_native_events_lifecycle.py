@@ -5012,8 +5012,6 @@ async def test_required_terminal_exit_during_shutdown_does_not_fail_session(
         "shutting down" in record.getMessage() and record.levelno == logging.INFO
         for record in caplog.records
     )
-    # Shutdown is handled before the idle check, so an idle session at teardown
-    # takes the benign path and emits no idle cause diagnostic.
     assert [
         record
         for record in caplog.records

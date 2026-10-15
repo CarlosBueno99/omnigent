@@ -1862,10 +1862,9 @@ def create_runner_app(
             return
 
         if _shutting_down.is_set():
-            # tmux died with this runner's process group on a stop signal, not
-            # a crash; the server settles the turn from the dropped tunnel. This
-            # precedes the idle check so stopping a runner with idle sessions
-            # stays benign instead of logging a cause diagnostic per session.
+            # tmux died with this runner's process group on a stop signal, not a
+            # crash; the server settles the turn from the dropped tunnel. Ordered
+            # before the idle check so stopping idle sessions stays benign.
             _logger.info(
                 "required terminal %s exited for %s while the runner is shutting down; "
                 "not failing the turn",

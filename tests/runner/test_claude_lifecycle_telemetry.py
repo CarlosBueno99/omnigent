@@ -449,7 +449,7 @@ async def test_explicit_close_and_cleanup_are_distinct_and_sink_json_remains_par
 
 
 async def test_idle_required_terminal_exit_records_the_launcher_output(
-    launch: _Launch, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    launch: _Launch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A launcher that dies before any turn must leave its exit cause in the runner log."""
     caplog.set_level(logging.INFO)
