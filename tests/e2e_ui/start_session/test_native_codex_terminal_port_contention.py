@@ -174,8 +174,7 @@ providers:
       api_key: "sk-e2e-mock"
       wire_api: responses
       models:
-        default: gpt-4o
-""",
+        default: gpt-4o""",
         encoding="utf-8",
     )
 
@@ -187,11 +186,8 @@ def codex_port_contention_stack(
     tmp_path_factory: pytest.TempPathFactory,
     request: pytest.FixtureRequest,
 ) -> Iterator[_ContentionStack]:
-    """A dedicated server + runner whose ``codex`` is the competing-bind wrapper.
-
-    The runner resolves codex from its own environment at launch time, so the
-    wrapper must be in place before the runner starts; the shared ``live_server``
-    runner cannot be re-pointed.
+    """A dedicated server + runner whose ``codex`` is the competing-bind wrapper; the
+    runner resolves codex at launch, so the shared ``live_server`` runner cannot be re-pointed.
     """
     if request.config.getoption("--ui-base-url"):
         pytest.skip("native Codex port-contention e2e requires an isolated spawned server")
@@ -336,12 +332,8 @@ def _terminal_resource_present(base_url: str, session_id: str) -> bool:
 def _wait_startup_outcome(
     page: Page, bind_thread: threading.Thread, base_url: str, session_id: str
 ) -> str:
-    """Classify startup once terminal auto-create settles.
-
-    The toggle is enabled before the app-server is even launched, so a reliable
-    outcome needs the auto-create to finish: bind returning marks that point.
-    A failure surfaces as the browser's error pill; success as a live terminal
-    resource. An early error pill short-circuits the wait.
+    """Classify startup once terminal auto-create settles (bind returning marks that point):
+    an error pill means failure, a live terminal resource success; an early pill short-circuits.
     """
     error_pill = page.get_by_test_id("error-pill")
     deadline = time.monotonic() + _STARTUP_OUTCOME_TIMEOUT_S
@@ -373,12 +365,8 @@ def _session_snapshot(base_url: str, session_id: str) -> dict[str, object]:
 
 
 def _start_codex_session(stack: _ContentionStack, page: Page) -> tuple[str, str]:
-    """Open an unbound Codex session in the browser, then bind it off-thread.
-
-    Binding kicks off the runner's terminal auto-create. On the port-race
-    failure path that PATCH blocks until the app-server readiness loop gives
-    up, so it runs on a background thread while the page observes the terminal
-    coming up or the failure pill over its own session stream.
+    """Open an unbound Codex session in the browser, then bind it off-thread: on the port-race
+    failure path the PATCH blocks until the readiness loop gives up, while the page observes.
     """
     created = create_native_session(
         httpx,
