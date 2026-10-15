@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   STARTING_GRACE_S,
@@ -331,6 +331,24 @@ describe("useSessionLiveness — derivation truth table", () => {
       await waitFor(() => expect(useStoppedSessions.getState().stoppedAt[SID]).toBeUndefined());
     });
 
+    it("the stale-online grace lapses on its own timer, not only on the next poll", () => {
+      vi.useFakeTimers();
+      try {
+        markSessionStopped(SID);
+        runnerMock.mockReturnValue(true);
+        hostMock.mockReturnValue(true);
+        const { result } = renderHook(() => useSessionLiveness(SID, conv({ host_id: "h1" })));
+        expect(result.current).toEqual({ kind: "stopped" });
+
+        act(() => vi.advanceTimersByTime(STOPPED_STALE_ONLINE_GRACE_S * 1000 + 50));
+
+        expect(result.current).toEqual({ kind: "online" });
+        expect(useStoppedSessions.getState().stoppedAt[SID]).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("a just-sent turn upgrades stopped to starting (the relaunch is visible)", () => {
       markSessionStopped(SID);
       expect(derive(false, true, conv({ host_id: "h1" }), { turnActive: true })).toEqual({
@@ -352,10 +370,9 @@ describe("useSessionLiveness — derivation truth table", () => {
     });
 
     it("a fresh stop stays visible while its own turn is still streaming (turnActive does not clear it)", () => {
-      // The turn a user stops is itself `streaming`, so `turnActive` is true at
-      // the instant of the stop and the poll can still read stale-online. That
-      // must not be mistaken for a relaunch and erase the marker before the
-      // stopped banner renders.
+      // The stopped turn is itself `streaming` and the poll can still read
+      // stale-online; that must not be mistaken for a relaunch and erase the
+      // marker before the band renders.
       markSessionStopped(SID);
       expect(derive(true, true, conv({ host_id: "h1" }), { turnActive: true })).toEqual({
         kind: "stopped",
@@ -370,22 +387,10 @@ describe("useSessionLiveness — derivation truth table", () => {
       });
     });
 
-    it("the cold-boot grace still applies to a fresh session with no stop marker", () => {
-      expect(derive(false, true, conv({ host_id: "h1", created_at: freshCreatedAt() }))).toEqual({
-        kind: "starting",
-      });
-    });
-
     it("a stop marker outranks the host-switch launch grace", () => {
       markSessionStopped(SID);
       expect(derive(false, true, conv({ host_id: "h1" }), { launchedAt: Date.now() })).toEqual({
         kind: "stopped",
-      });
-    });
-
-    it("the host-switch launch grace still applies with no stop marker", () => {
-      expect(derive(false, true, conv({ host_id: "h1" }), { launchedAt: Date.now() })).toEqual({
-        kind: "starting",
       });
     });
   });

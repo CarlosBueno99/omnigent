@@ -746,6 +746,18 @@ describe("useStopAndDeleteConversation cache eviction", () => {
     return { queryClient, rendered };
   }
 
+  it("drops the session's confirmed-stop marker along with its caches", async () => {
+    useStoppedSessions.setState({ stoppedAt: { conv_x: Date.now(), conv_other: Date.now() } });
+    const { rendered } = seedAndDelete();
+
+    rendered.result.current.mutate({ id: "conv_x" });
+    await waitFor(() => expect(rendered.result.current.isSuccess).toBe(true));
+
+    const { stoppedAt } = useStoppedSessions.getState();
+    expect(stoppedAt.conv_x).toBeUndefined();
+    expect(stoppedAt.conv_other).toEqual(expect.any(Number));
+  });
+
   it("removes the deleted row from every cached list variant in place", async () => {
     const { queryClient, rendered } = seedAndDelete();
 

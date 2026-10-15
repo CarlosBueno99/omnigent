@@ -1,11 +1,8 @@
 """Browser e2e: stopping a host-bound session from the sidebar visibly marks it stopped.
 
-The sidebar kebab offers "Stop session" only for host-spawned (or claude/devin-
-native) sessions, so this test brings a real ``omnigent host`` daemon online
-against the live server and creates the session on it. After the confirm the
-runner is torn down (the control), and the open session view is expected to
-say the session is stopped; without a stopped affordance the page stays
-identical to a running session.
+Uses a real ``omnigent host`` daemon, since only host-spawned (or claude/devin-native)
+sessions offer "Stop session"; once the confirmed stop tears the runner down, the
+open session view must say the session is stopped.
 """
 
 from __future__ import annotations
@@ -30,7 +27,7 @@ _RUNNER_BOOT_TIMEOUT_S = 120.0
 _STOP_LANDS_TIMEOUT_S = 30.0
 # Liveness is poll-driven (~10 s per poll); allow several polls after the stop lands.
 _STOPPED_INDICATION_TIMEOUT_MS = 40_000
-_STOPPED_TEXT = re.compile(r"\bstopped\b", re.IGNORECASE)
+_STOPPED_BAND_TEXT = "Session stopped — send a message to start it again"
 _HOST_BADGE_NAME = re.compile(r"^Host .+, (online|offline)$")
 
 
@@ -77,7 +74,7 @@ def _visible_state(page: Page) -> dict[str, object]:
     return {
         "composer_placeholder": composer.get_attribute("placeholder"),
         "host_badge": badge.first.get_attribute("aria-label") if badge.count() else None,
-        "visible_stopped_matches": page.get_by_text(_STOPPED_TEXT).filter(visible=True).count(),
+        "stopped_band_count": page.get_by_test_id("stopped-indicator").count(),
     }
 
 
@@ -142,7 +139,6 @@ def test_stop_session_shows_stopped_state(
                 page.goto(f"{live_server}/c/{session_id}")
             expect(page.get_by_placeholder("Send a message…")).to_be_visible(timeout=30_000)
             expect(page.get_by_role("button", name=_HOST_BADGE_NAME)).to_be_visible(timeout=30_000)
-            page.wait_for_timeout(2_000)
             _mark("session_running", **_visible_state(page))
 
             row = page.locator(f'li[data-sidebar-session-id="{session_id}"]')
@@ -152,7 +148,6 @@ def test_stop_session_shows_stopped_state(
             _mark("kebab_open")
             page.get_by_test_id("stop-conversation").click()
             expect(page.get_by_role("dialog")).to_contain_text("Stop session?")
-            page.wait_for_timeout(1_500)
             _mark("dialog_open")
             with page.expect_response(
                 lambda r: (
@@ -166,18 +161,16 @@ def test_stop_session_shows_stopped_state(
             expect(page.get_by_role("dialog")).to_have_count(0)
             _mark("stop_confirmed", status=stop.value.status)
 
-            page.wait_for_timeout(5_000)
-            _mark("five_seconds_after_confirm", **_visible_state(page))
-
             torn_down_s = _wait_for(
                 lambda: _runner_online(client, session_id) is False,
                 "the runner to be torn down after Stop session",
                 _STOP_LANDS_TIMEOUT_S,
             )
-            _mark("runner_torn_down", after_confirm_s=round(torn_down_s + 5, 1))
+            _mark("runner_torn_down", after_confirm_s=round(torn_down_s, 1))
 
-            stopped_indication = page.get_by_text(_STOPPED_TEXT).filter(visible=True)
-            expect(stopped_indication).not_to_have_count(0, timeout=_STOPPED_INDICATION_TIMEOUT_MS)
+            stopped_band = page.get_by_test_id("stopped-indicator")
+            expect(stopped_band).to_be_visible(timeout=_STOPPED_INDICATION_TIMEOUT_MS)
+            expect(stopped_band).to_contain_text(_STOPPED_BAND_TEXT)
         finally:
             if not page.is_closed():
                 _mark("final_state", **_visible_state(page))

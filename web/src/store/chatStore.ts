@@ -114,6 +114,7 @@ import { isSideChatCommand, usesNativeSideChatFork } from "@/lib/sideChat";
 // pure helpers live in a leaf module so low-level session hooks can gate on temp
 // ids without an import cycle back to the store.
 import { isTempConvId, newTempConversation } from "@/lib/tempConversationId";
+import { clearSessionStopped } from "./stoppedSessions";
 import { useTerminalActivityStore } from "./terminalActivity";
 import { terminalInfoFromResource, terminalsQueryKey, type TerminalInfo } from "@/lib/terminals";
 import type {
@@ -2342,6 +2343,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         : pinnedId === null
           ? get().status === "streaming"
           : setterForState(pinnedId)?.status === "streaming";
+    // Sending is the relaunch the stopped band promises, so a confirmed stop no
+    // longer describes this session.
+    const relaunchTargetId = pinnedId ?? get().conversationId;
+    if (!opensSideChat && relaunchTargetId !== null) clearSessionStopped(relaunchTargetId);
     if (!alreadyStreaming && !opensSideChat) {
       // Latch on the SAME entry as `status`, in one patch, so they can't
       // diverge — a new chat buffers both on root and `adoptPreSessionState`
@@ -2692,6 +2697,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       pinnedId === null
         ? get().status === "streaming"
         : setterForState(pinnedId)?.status === "streaming";
+    const relaunchTargetId = pinnedId ?? get().conversationId;
+    if (relaunchTargetId !== null) clearSessionStopped(relaunchTargetId);
     if (!alreadyStreaming) {
       // See `send`: latch and status on one entry, in one patch.
       pinnedSetter({ status: "streaming", activeResponse: null, sendLatchedAt: Date.now() });
@@ -3089,7 +3096,12 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     }
   },
 
-  markRunnerLaunched: () => setActive({ runnerLaunchedAt: Date.now() }),
+  markRunnerLaunched: () => {
+    // A host switch relaunches the runner, so a confirmed stop no longer applies.
+    const { conversationId } = get();
+    if (conversationId !== null) clearSessionStopped(conversationId);
+    setActive({ runnerLaunchedAt: Date.now() });
+  },
 
   compact: async () => {
     const { conversationId } = get();

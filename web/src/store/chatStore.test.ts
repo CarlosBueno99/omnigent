@@ -65,6 +65,7 @@ import type {
 import type { TerminalInfo } from "@/hooks/useTerminals";
 import { terminalsQueryKey } from "@/hooks/useTerminals";
 import { type ChildSessionInfo, childSessionsQueryKey } from "@/hooks/useChildSessions";
+import { markSessionStopped, useStoppedSessions } from "@/store/stoppedSessions";
 import {
   ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS,
   ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS,
@@ -18825,5 +18826,35 @@ describe("chatStore — one error card per failed turn", () => {
       error: { code: "runner_error", message: error.message },
     });
     expect(errorBlocks()).toHaveLength(2);
+  });
+});
+
+describe("confirmed-stop markers", () => {
+  beforeEach(() => {
+    useStoppedSessions.setState({ stoppedAt: {} });
+  });
+
+  it("send clears the session's stop marker — the message is the relaunch", async () => {
+    useChatStore.setState({
+      conversationId: "conv_stopped",
+      abortController: new AbortController(),
+    });
+    markSessionStopped("conv_stopped");
+
+    await useChatStore.getState().send("wake up", "agent_xyz");
+
+    expect(useStoppedSessions.getState().stoppedAt.conv_stopped).toBeUndefined();
+  });
+
+  it("a host-switch launch clears the active session's stop marker only", () => {
+    useChatStore.setState({ conversationId: "conv_stopped" });
+    markSessionStopped("conv_stopped");
+    markSessionStopped("conv_other");
+
+    useChatStore.getState().markRunnerLaunched();
+
+    const { stoppedAt } = useStoppedSessions.getState();
+    expect(stoppedAt.conv_stopped).toBeUndefined();
+    expect(stoppedAt.conv_other).toEqual(expect.any(Number));
   });
 });

@@ -68,7 +68,7 @@ import {
   updateProjectConfig as apiUpdateProjectConfig,
 } from "@/lib/projectsApi";
 import { releaseConversation, useChatStore } from "@/store/chatStore";
-import { markSessionStopped } from "@/store/stoppedSessions";
+import { clearSessionStopped, markSessionStopped } from "@/store/stoppedSessions";
 import type { Session } from "@/lib/types";
 import { useSessionUpdatesConnected } from "./useSessionUpdatesConnected";
 import { markConversationSeen } from "./useUnseenConversations";
@@ -1221,6 +1221,7 @@ export function useStopAndDeleteConversation() {
       showToast(deleteFailedToast(context?.label, err), { duration: 0 });
     },
     onSuccess: (_data, { id }) => {
+      clearSessionStopped(id);
       finalizeDeletedConversations(queryClient, [id]);
     },
   });
@@ -1515,6 +1516,7 @@ export function useBulkDeleteConversations() {
     },
     onMutate: ({ ids }) => paintConversationsDeleted(queryClient, ids),
     onSuccess: (_data, { ids }) => {
+      for (const id of ids) clearSessionStopped(id);
       finalizeDeletedConversations(queryClient, ids);
     },
     onError: (error, { ids }, snapshot) => {
@@ -1524,6 +1526,7 @@ export function useBulkDeleteConversations() {
       const failed = bulk ? bulk.failed : [...ids];
       const succeeded = bulk ? bulk.succeeded : [];
       restoreDeletedConversations(queryClient, snapshot, failed, succeeded);
+      for (const id of succeeded) clearSessionStopped(id);
       if (succeeded.length > 0) finalizeDeletedConversations(queryClient, succeeded);
       showToast(
         failed.length === 1

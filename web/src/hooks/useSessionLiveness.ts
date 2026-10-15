@@ -5,7 +5,7 @@
 // "is the runner asleep vs. is the host down vs. is this not host-bound"
 // inline at every render site.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { Conversation } from "@/hooks/useConversations";
 import type { Session } from "@/lib/types";
@@ -181,10 +181,9 @@ function isOwner(conv: Pick<Conversation, "permission_level"> | null | undefined
  * | 6 | false         | undefined   | set     | (any)      | unknown (host unseen)|
  * | 7 | false         | null/false  | null    | (any)      | local_stranded       |
  *
- * `†stopped` = a confirmed stop marker. A fresh marker outranks a
- * stale-online poll (row 1) and the startup/host-switch grace (rows 2/2');
- * a dead host (row 3) and a just-sent turn (relaunch) still take precedence.
- * A later genuine-online read clears the marker after the poll grace.
+ * `†stopped` = a confirmed stop marker. Fresh, it outranks a stale-online poll
+ * (row 1) and the startup/host-switch grace (rows 2/2'); a dead host (row 3) and
+ * a just-sent turn still win. Sending, or online past the grace, clears it.
  *
  * `*fresh` = `created_at` is within {@link STARTING_GRACE_S} of now AND
  * the runner tunnel has never been observed online (initial cold boot).
@@ -282,11 +281,17 @@ function useSessionLivenessRaw(
   const stopMarkerFresh =
     typeof stoppedAtMs === "number" &&
     Date.now() - stoppedAtMs < STOPPED_STALE_ONLINE_GRACE_S * 1000;
-  // Clear only once the runner is genuinely online again past the stale-poll
-  // grace (a real relaunch). A fresh marker is NOT cleared by a turn in
-  // flight: the turn a user stops is itself `streaming`, so treating
-  // `turnActive` as a relaunch would erase the marker of the very stop it is
-  // meant to acknowledge, before the open view could render it.
+  // Re-derive when the grace lapses: nothing else re-renders between polls.
+  const [, setGraceLapsed] = useState(0);
+  useEffect(() => {
+    if (!stopMarkerFresh || typeof stoppedAtMs !== "number") return;
+    const remainingMs = stoppedAtMs + STOPPED_STALE_ONLINE_GRACE_S * 1000 - Date.now();
+    const timer = setTimeout(() => setGraceLapsed((n) => n + 1), Math.max(remainingMs, 0) + 1);
+    return () => clearTimeout(timer);
+  }, [stopMarkerFresh, stoppedAtMs]);
+  // Clear only once the runner is online past the stale-poll grace. `turnActive`
+  // must not clear a fresh marker: the stopped turn is itself still `streaming`.
+  // (Sending clears the marker explicitly; see chatStore.)
   const clearStaleStop =
     sessionId !== undefined &&
     runnerOnline === true &&
@@ -296,9 +301,9 @@ function useSessionLivenessRaw(
     if (clearStaleStop && sessionId !== undefined) clearSessionStopped(sessionId);
   }, [clearStaleStop, sessionId]);
 
-  // 1. A fresh stop marker outranks a stale-online poll read; once the poll
-  // reads genuinely online past the grace, the marker is cleared above and we
-  // fall through to `online`.
+  // 1. A fresh stop marker outranks a stale-online poll read; past the grace an
+  // online runner reads `online` and the marker is cleared above. A hostless
+  // claude-native stop kills only the pane, so its band lapses with the grace.
   if (runnerOnline === true) {
     return stopMarkerFresh ? { kind: "stopped" } : { kind: "online" };
   }
@@ -314,10 +319,8 @@ function useSessionLivenessRaw(
   // session whose host hasn't registered yet doesn't flash "host offline"
   // either. `created_at` is Unix seconds; a missing/zero value (older
   // snapshot) yields a large delta and harmlessly skips the grace.
-  // A confirmed stop takes precedence over the cold-boot grace: an explicitly
-  // stopped session must say "stopped", not flash "Connecting…" for the rest of
-  // the window (e.g. a just-created session stopped, or reopened on a remount
-  // that reset the ever-online ref).
+  // A confirmed stop outranks the cold-boot grace: an explicitly stopped session
+  // must say "stopped", not flash "Connecting…" for the rest of the window.
   const createdAt = conv?.created_at;
   if (
     typeof stoppedAtMs !== "number" &&
