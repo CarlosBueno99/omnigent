@@ -5,6 +5,7 @@ Use empty CODEX_HOME and OMNIGENT_CONFIG_HOME.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import psutil
 import pytest
 import yaml
 
@@ -56,21 +58,23 @@ def _wait_for(check: Callable[[], Any], description: str, timeout: float = 60.0)
 
 
 def _app_server_pid(listen_url: str) -> int:
-    output = subprocess.run(
-        ["ps", "-ww", "-eo", "pid=,ppid=,args="],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=10,
-    ).stdout
-    processes = {
-        int(pid): int(ppid)
-        for pid, ppid, args in (line.split(maxsplit=2) for line in output.splitlines())
-        if listen_url in args and "app-server" in args
-    }
-    # npm's Node launcher passes the same arguments to the native child.
-    matches = [pid for pid in processes if pid not in processes.values()]
-    assert len(matches) == 1, f"Expected one app-server, found PIDs {matches}"
+    """Return the app-server process bound to ``listen_url``.
+
+    Codex binds a kernel-assigned port, so the endpoint is not in its argv; the
+    listening socket identifies the native child rather than npm's Node launcher.
+    """
+    port = int(listen_url.rsplit(":", 1)[1])
+    matches: list[int] = []
+    for process in psutil.process_iter(["cmdline"]):
+        if "app-server" not in (process.info["cmdline"] or []):
+            continue
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            if any(
+                connection.status == psutil.CONN_LISTEN and connection.laddr.port == port
+                for connection in process.net_connections(kind="tcp")
+            ):
+                matches.append(process.pid)
+    assert len(matches) == 1, f"Expected one app-server on port {port}, found PIDs {matches}"
     return matches[0]
 
 

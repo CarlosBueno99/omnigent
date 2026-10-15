@@ -160,9 +160,18 @@ async def test_prepare_codex_terminal_resumes_with_launch_provider(
     """CLI cold resume applies the configured provider before attaching the TUI."""
     from unittest.mock import AsyncMock
 
-    from omnigent.harnesses.codex_native.app_server import NativeCodexLaunch
+    from omnigent.harnesses.codex_native.app_server import (
+        DYNAMIC_LOOPBACK_LISTEN_URL,
+        NativeCodexLaunch,
+    )
 
-    server = SimpleNamespace(start=AsyncMock(), close=AsyncMock(), codex_cli_version=(0, 156, 1))
+    requested_listen: list[str | None] = []
+
+    async def start() -> None:
+        requested_listen.append(server.listen_url)
+        server.listen_url = "ws://127.0.0.1:57045"
+
+    server = SimpleNamespace(start=start, close=AsyncMock(), codex_cli_version=(0, 156, 1))
     preload = AsyncMock(side_effect=RuntimeError("stop after resume"))
     monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", tmp_path)
     monkeypatch.setattr(
@@ -199,6 +208,9 @@ async def test_prepare_codex_terminal_resumes_with_launch_provider(
 
     preload.assert_awaited_once()
     assert preload.await_args.kwargs["model_provider"] == expected_provider
+    # The CLI lets Codex pick the port and resumes over the endpoint it bound.
+    assert requested_listen == [DYNAMIC_LOOPBACK_LISTEN_URL]
+    assert preload.await_args.args[0] == "ws://127.0.0.1:57045"
     server.close.assert_awaited_once()
 
 

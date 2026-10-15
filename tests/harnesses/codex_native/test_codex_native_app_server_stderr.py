@@ -168,3 +168,45 @@ sys.stderr.flush()
     assert server.certificate_failure.expired is True
     assert "SSLV3_ALERT_CERTIFICATE_EXPIRED" in server.certificate_failure.evidence
     assert read_certificate_failure(tmp_path) == server.certificate_failure
+
+
+@pytest.mark.parametrize(
+    ("banner", "expected"),
+    [
+        ("  listening on: ws://127.0.0.1:57045", "ws://127.0.0.1:57045"),
+        (
+            "  listening on: ws://127.0.0.1:57045\n  listening on: ws://127.0.0.1:57046",
+            "ws://127.0.0.1:57045",
+        ),
+        ("  listening on: ws://127.0.0.1:0", None),
+        ("  listening on: ws://127.0.0.1:65536", None),
+        ("  listening on: ws://192.0.2.1:57045", None),
+        ("  readyz: http://127.0.0.1:57045/readyz", None),
+    ],
+    ids=[
+        "assigned-port",
+        "first-report-wins",
+        "unbound-port",
+        "invalid-port",
+        "other-host",
+        "other-line",
+    ],
+)
+async def test_stderr_records_the_loopback_listener_codex_reports(
+    server: CodexNativeAppServer, banner: str, expected: str | None
+) -> None:
+    """Codex's bind banner is captured whole even when a read boundary splits it."""
+    stderr = asyncio.StreamReader()
+    server.proc = cast(asyncio.subprocess.Process, SimpleNamespace(stderr=stderr))
+    stderr.feed_data(b"codex app-server (WebSockets)\n" + banner[:20].encode())
+    reader = asyncio.create_task(server._stderr_loop())
+    await asyncio.sleep(0)
+    assert server._reported_listen_url is None
+    stderr.feed_data(banner[20:].encode() + b"\n")
+    stderr.feed_eof()
+
+    await reader
+
+    assert server._reported_listen_url == expected
+    # Readiness adopts the report; the drain itself never retargets clients.
+    assert server.listen_url is None

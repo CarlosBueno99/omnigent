@@ -583,6 +583,9 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
                 "Codex resume rollout must be synthesized in app-server CODEX_HOME "
                 "before app-server start"
             )
+            # The runner lets Codex pick the port and reads the bound endpoint back.
+            assert self.listen_url == codex_app_mod.DYNAMIC_LOOPBACK_LISTEN_URL
+            self.listen_url = "ws://127.0.0.1:57045"
             self.started = True
 
         async def close(self) -> None:
@@ -831,8 +834,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
         app_server.listen_url,
         thread_id,
     ]
-    assert app_server.listen_url is not None
-    assert app_server.listen_url.startswith("ws://127.0.0.1:")
+    assert app_server.listen_url == "ws://127.0.0.1:57045"
     assert launched.env["OPENAI_API_KEY"] == "sk-test"
     assert "IGNORED" not in launched.env
     assert launched.env["CODEX_HOME"] == str(app_server.codex_home)

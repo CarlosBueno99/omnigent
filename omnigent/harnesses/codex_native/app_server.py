@@ -137,6 +137,10 @@ _CONNECT_TIMEOUT_SECONDS = 10.0
 # 10 s to start codex. Match the 60 s native-terminal readiness budget; a child
 # that exits early still fails at once.
 _APP_SERVER_READY_TIMEOUT_SECONDS = 60.0
+# Codex binds a kernel-assigned loopback port for this listen URL and reports the
+# bound endpoint on stderr; startup adopts that endpoint before probing it.
+DYNAMIC_LOOPBACK_LISTEN_URL = "ws://127.0.0.1:0"
+_REPORTED_LISTENER_PATTERN = re.compile(r"^\s*listening on:\s*(ws://127\.0\.0\.1:(\d{1,5}))$")
 # Initialization and model/list can stall after the listener becomes ready.
 _MODEL_CATALOG_PROBE_TIMEOUT_SECONDS = 30.0
 _MODEL_DISCOVERY_CACHE_SECONDS = 300.0
@@ -1937,6 +1941,10 @@ class CodexNativeAppServer:
     :param python_executable: Python executable the policy hook command
         runs, e.g. ``"/path/to/.venv/bin/python"``. ``None`` uses
         :data:`sys.executable`.
+    :param listen_url: Loopback WebSocket listen URL, e.g.
+        ``"ws://127.0.0.1:57045"``, or ``None`` for ``socket_path``.
+        :data:`DYNAMIC_LOOPBACK_LISTEN_URL` lets Codex pick the port;
+        :meth:`start` then replaces it with the endpoint Codex reports.
     :param policy_hook_disabled_reason: Runtime field set by
         :meth:`start`: ``None`` when the tool-call policy hook is active
         (registered + trusted), or a human-readable reason string when it
@@ -2017,10 +2025,14 @@ class CodexNativeAppServer:
     # bridge so the forwarder can fail a stuck turn with the cause.
     certificate_failure: CertificateFailure | None = field(default=None, init=False)
     _stderr_diagnostics: CodexStderrDiagnostics | None = field(default=None, init=False)
+    _reported_listen_url: str | None = field(default=None, init=False, repr=False)
 
     async def start(self) -> None:
         """
         Start the Codex app-server and wait for the socket.
+
+        A :data:`DYNAMIC_LOOPBACK_LISTEN_URL` request leaves ``listen_url`` set
+        to the loopback endpoint Codex reported once this returns.
 
         :returns: None.
         :raises OmnigentError: ``WORKSPACE_MISSING`` when the session's working
@@ -2188,9 +2200,6 @@ class CodexNativeAppServer:
         if self.reconcile_process_registry:
             reconcile_codex_native_process_registry()
         resolved_listen = self.listen_url or f"unix://{self.socket_path}"
-        effort_catalog_transport = self.listen_url or str(self.socket_path)
-        _effort_catalog_cache.pop(effort_catalog_transport, None)
-        _effort_catalog_misses.pop(effort_catalog_transport, None)
         self.process_registry_tag = f"codex-native-{uuid.uuid4().hex}"
         tagged_argv0 = (
             f"{Path(self.codex_path).name} "
@@ -2229,6 +2238,7 @@ class CodexNativeAppServer:
                 owner_lock_path=self.process_owner_lock.path,
             )
         self.recent_stderr = []
+        self._reported_listen_url = None
         self.stderr_task = asyncio.create_task(
             self._stderr_loop(),
             name="codex-native-app-server-stderr",
@@ -2248,6 +2258,11 @@ class CodexNativeAppServer:
         # outer guard so a cancellation mid-trust still tears down.
         try:
             startup_client = await self._wait_until_ready()
+            # Keyed on the endpoint clients use, which a dynamic listen only
+            # knows once readiness has adopted the reported port.
+            effort_catalog_transport = self.listen_url or str(self.socket_path)
+            _effort_catalog_cache.pop(effort_catalog_transport, None)
+            _effort_catalog_misses.pop(effort_catalog_transport, None)
             try:
                 # Standalone CLI launches may have no shared catalog snapshot.
                 # Correct their copied defaults before a TUI creates its thread.
@@ -2512,7 +2527,9 @@ class CodexNativeAppServer:
         client, and return that connection for startup RPCs.
 
         The budget bounds the retry loop; a connect attempt already in
-        flight when it expires is not interrupted.
+        flight when it expires is not interrupted. A dynamic loopback listen
+        first waits for the endpoint Codex reports and adopts it as
+        ``listen_url``.
 
         :returns: Connected app-server client. The caller owns it.
         :raises RuntimeError: If the app-server exits or never
@@ -2524,6 +2541,11 @@ class CodexNativeAppServer:
             if self.proc is not None and self.proc.returncode is not None:
                 detail = " | ".join((self.recent_stderr or [])[-5:])
                 raise RuntimeError(f"Codex app-server exited early: {detail}")
+            if self.listen_url == DYNAMIC_LOOPBACK_LISTEN_URL:
+                if self._reported_listen_url is None:
+                    await asyncio.sleep(_CONNECT_RETRY_DELAY_SECONDS)
+                    continue
+                self.listen_url = self._reported_listen_url
             client: CodexAppServerClient | None = None
             try:
                 if self.listen_url and self.listen_url.startswith("ws://"):
@@ -2550,6 +2572,11 @@ class CodexNativeAppServer:
                         await client.close()
                 await asyncio.sleep(_CONNECT_RETRY_DELAY_SECONDS)
         detail = " | ".join((self.recent_stderr or [])[-5:])
+        if self.listen_url == DYNAMIC_LOOPBACK_LISTEN_URL:
+            raise RuntimeError(
+                f"Timed out after {_APP_SERVER_READY_TIMEOUT_SECONDS:g}s waiting for the "
+                f"Codex app-server to report its loopback listener; stderr={detail}"
+            )
         target = self.listen_url or f"unix://{self.socket_path}"
         raise RuntimeError(
             f"Timed out after {_APP_SERVER_READY_TIMEOUT_SECONDS:g}s waiting for the "
@@ -2587,6 +2614,10 @@ class CodexNativeAppServer:
             text = pending[:_STDERR_CHUNK_LIMIT].decode("utf-8", errors="replace").rstrip()
             if omitted_bytes or len(pending) > _STDERR_CHUNK_LIMIT:
                 text = f"{text}...[truncated]"
+            if self._reported_listen_url is None:
+                reported = _REPORTED_LISTENER_PATTERN.match(text)
+                if reported is not None and 0 < int(reported[2]) <= 65535:
+                    self._reported_listen_url = reported[1]
             if self.recent_stderr is not None:
                 self.recent_stderr.append(text)
                 if len(self.recent_stderr) > 20:

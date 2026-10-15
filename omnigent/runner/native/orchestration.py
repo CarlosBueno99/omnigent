@@ -4801,7 +4801,6 @@ async def _auto_create_codex_terminal(
         terminal ensures omit it to read updated configuration from the server.
     :returns: The created terminal resource view.
     """
-    import socket as _socket
     from pathlib import Path
 
     # A relaunch after an in-place upgrade must not import new code into an
@@ -4809,6 +4808,7 @@ async def _auto_create_codex_terminal(
     import omnigent.harnesses.codex_native.main as _codex_native_main  # noqa: F401
     import omnigent.harnesses.codex_native.process_registry as _process_registry  # noqa: F401
     from omnigent.harnesses.codex_native.app_server import (
+        DYNAMIC_LOOPBACK_LISTEN_URL,
         CodexAppServerClient,
         CodexAppServerResponseError,
         apply_codex_thread_effort,
@@ -5238,11 +5238,6 @@ async def _auto_create_codex_terminal(
             exc_info=True,
         )
 
-    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        codex_ws_port = s.getsockname()[1]
-    codex_ws_url = f"ws://127.0.0.1:{codex_ws_port}"
-
     # Write the minimal MCP bridge config so serve-mcp can boot, and
     # start the tool relay so tool_relay.json is on disk before codex
     # launches its MCP server. This mirrors the claude-native relay
@@ -5367,8 +5362,12 @@ async def _auto_create_codex_terminal(
         server_client=server_client,
         turn_routing=launch_config.turn_routing,
     )
-    app_server.listen_url = codex_ws_url
+    # Codex binds a kernel-assigned loopback port: a port probed and released
+    # here could be taken by another process before Codex binds it.
+    app_server.listen_url = DYNAMIC_LOOPBACK_LISTEN_URL
     await app_server.start()
+    codex_ws_url = app_server.listen_url
+    assert codex_ws_url is not None
     _AUTO_CODEX_APP_SERVERS[session_id] = app_server
 
     event_client = CodexAppServerClient(

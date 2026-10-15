@@ -350,6 +350,17 @@ Cross-harness journeys:
 - **`cleanup`:** no single cross-harness test. For each harness in scope, start
   a session, stop it (and separately cancel one during startup), then confirm
   no helper process from that session is still running.
+- **`launch-web` and `cleanup`, Codex loopback listener (plain `uv run pytest`):**
+  `tests/e2e/test_codex_native_app_server_port_assignment_e2e.py` starts the
+  installed Codex CLI on a kernel-assigned loopback port without a model request,
+  checks startup adopts the endpoint Codex reports and that it accepts an
+  initialized client, and checks cancelling startup reaps the child. It skips
+  without `codex`.
+- **`launch-web`, Codex port contention (own environment):**
+  `tests/e2e_ui/start_session/test_native_codex_terminal_port_contention.py`
+  opens a native Codex session in the browser while a `codex` wrapper seizes any
+  fixed loopback port the runner would hand to `codex app-server`; the Terminal
+  view must still attach. Requires `codex` and `tmux`.
 - **`disconnect`, Claude startup (plain `uv run pytest`, no vendor CLI):**
   `tests/harnesses/claude_native/test_claude_native_readiness_exit.py` delivers
   a web message through the public bridge into a real retained dead tmux pane.

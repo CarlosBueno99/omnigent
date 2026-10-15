@@ -16,6 +16,7 @@ import pytest
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harnesses.codex_egress import CertificateFailure
 from omnigent.harnesses.codex_native.app_server import (
+    DYNAMIC_LOOPBACK_LISTEN_URL,
     CodexAppServerClient,
     CodexNativeAppServer,
 )
@@ -616,8 +617,24 @@ esac
 """
 
 
+@pytest.mark.parametrize(
+    ("listen_url", "timeout_message"),
+    [
+        (None, r"^Timed out after 1s waiting for the Codex app-server at "),
+        (
+            DYNAMIC_LOOPBACK_LISTEN_URL,
+            r"^Timed out after 1s waiting for the Codex app-server to report its loopback "
+            r"listener",
+        ),
+    ],
+    ids=["unix", "dynamic-port"],
+)
 async def test_readiness_failure_records_app_server_state_before_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    listen_url: str | None,
+    timeout_message: str,
 ) -> None:
     """A child that never becomes ready is reaped, but its state is logged first."""
     from omnigent.harnesses.codex_native import app_server as codex_native_app_server
@@ -633,12 +650,11 @@ async def test_readiness_failure_records_app_server_state_before_cleanup(
     monkeypatch.setattr(codex_native_app_server, "_APP_SERVER_READY_TIMEOUT_SECONDS", 1.0)
     server = _test_app_server(tmp_path, tmp_path / "codex-home", tmp_path / "bridge", workspace)
     server.codex_path = str(codex)
+    server.listen_url = listen_url
 
     with (
         caplog.at_level(logging.INFO),
-        pytest.raises(
-            RuntimeError, match=r"^Timed out after 1s waiting for the Codex app-server at "
-        ),
+        pytest.raises(RuntimeError, match=timeout_message),
     ):
         await server.start()
 
@@ -658,3 +674,166 @@ async def test_readiness_failure_records_app_server_state_before_cleanup(
     assert snapshot["stderr_reader_state"] == "running"
     assert snapshot["codex_version"] == "0.158.0"
     assert "--listen" not in repr(snapshot)
+
+
+async def test_wait_until_ready_adopts_the_loopback_listener_codex_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dynamic listen probes nothing until Codex reports its bound port, then uses it."""
+    from omnigent.harnesses.codex_native import app_server as codex_native_app_server
+
+    @dataclass
+    class _ReadyClient:
+        ws_url: str
+
+        async def connect(self) -> None:
+            pass
+
+        async def close(self) -> None:
+            raise AssertionError("the adopted listener's client is handed to the caller")
+
+    clients: list[_ReadyClient] = []
+
+    def _client(*, ws_url: str, client_name: str) -> _ReadyClient:
+        clients.append(_ReadyClient(ws_url))
+        return clients[-1]
+
+    monkeypatch.setattr(codex_native_app_server, "CodexAppServerClient", _client)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = _test_app_server(tmp_path, tmp_path / "codex-home", tmp_path / "bridge", workspace)
+    server.listen_url = DYNAMIC_LOOPBACK_LISTEN_URL
+    server.proc = Mock(returncode=None)
+
+    ready = asyncio.create_task(server._wait_until_ready())
+    await asyncio.sleep(4 * codex_native_app_server._CONNECT_RETRY_DELAY_SECONDS)
+    assert not ready.done() and clients == []
+    server._reported_listen_url = "ws://127.0.0.1:57045"
+
+    connected = await asyncio.wait_for(ready, 5)
+
+    assert connected is clients[-1]
+    assert [client.ws_url for client in clients] == ["ws://127.0.0.1:57045"]
+    assert server.listen_url == "ws://127.0.0.1:57045"
+
+
+@pytest.mark.parametrize("exited", [False, True], ids=["never-reports", "exits-at-bind"])
+async def test_wait_until_ready_dynamic_listen_fails_without_a_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exited: bool
+) -> None:
+    """No reported port, no probe: a dead child fails at once, a silent one at the budget."""
+    from omnigent.harnesses.codex_native import app_server as codex_native_app_server
+
+    def _unexpected_client(**_kwargs: object) -> None:
+        raise AssertionError("no listener to probe before Codex reports one")
+
+    monkeypatch.setattr(codex_native_app_server, "CodexAppServerClient", _unexpected_client)
+    monkeypatch.setattr(codex_native_app_server, "_APP_SERVER_READY_TIMEOUT_SECONDS", 0.2)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = _test_app_server(tmp_path, tmp_path / "codex-home", tmp_path / "bridge", workspace)
+    server.listen_url = DYNAMIC_LOOPBACK_LISTEN_URL
+    server.proc = Mock(returncode=1 if exited else None)
+    server.recent_stderr = (
+        ["Error: Address in use (os error 98)"] if exited else ["codex app-server (WebSockets)"]
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await server._wait_until_ready()
+
+    if exited:
+        assert (
+            str(excinfo.value)
+            == "Codex app-server exited early: Error: Address in use (os error 98)"
+        )
+    else:
+        assert str(excinfo.value) == (
+            "Timed out after 0.2s waiting for the Codex app-server to report its loopback "
+            "listener; stderr=codex app-server (WebSockets)"
+        )
+    assert server.listen_url == DYNAMIC_LOOPBACK_LISTEN_URL
+
+
+# A stand-in app-server that, like Codex, binds a kernel-assigned loopback port and
+# reports it on stderr. Version 0.128 predates policy hooks, so startup skips the
+# hook-trust RPCs and the readiness handshake is the only protocol exchanged.
+_DYNAMIC_PORT_CODEX = (
+    f"#!{sys.executable}\n"
+    + """
+import asyncio, json, sys
+from websockets.asyncio.server import serve
+
+if sys.argv[1:] == ["--version"]:
+    print("codex-cli 0.128.0")
+    raise SystemExit(0)
+assert sys.argv[1:4] == ["app-server", "--listen", "ws://127.0.0.1:0"], sys.argv
+
+
+async def handle(ws):
+    async for raw in ws:
+        request = json.loads(raw)
+        if "id" in request:
+            await ws.send(json.dumps({"id": request["id"], "result": {}}))
+
+
+async def main():
+    async with serve(handle, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        print("codex app-server (WebSockets)", file=sys.stderr)
+        print(f"  listening on: ws://127.0.0.1:{port}", file=sys.stderr)
+        print(f"  readyz: http://127.0.0.1:{port}/readyz", file=sys.stderr, flush=True)
+        await asyncio.Future()
+
+
+asyncio.run(main())
+"""
+)
+
+
+@pytest.mark.parametrize("cancel_startup", [False, True], ids=["ready", "cancelled"])
+async def test_start_adopts_the_loopback_port_the_child_binds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel_startup: bool
+) -> None:
+    """Startup connects to the port its owned child reports, and reaps it on every exit path."""
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    codex = tmp_path / "codex"
+    codex.write_text(_DYNAMIC_PORT_CODEX)
+    codex.chmod(0o755)
+    server = _test_app_server(tmp_path, tmp_path / "codex-home", tmp_path / "bridge", workspace)
+    server.codex_path = str(codex)
+    server.listen_url = DYNAMIC_LOOPBACK_LISTEN_URL
+    server.reconcile_process_registry = False
+
+    startup = asyncio.create_task(server.start())
+    try:
+        while server.proc is None and not startup.done():
+            await asyncio.sleep(0.01)
+        child = server.proc
+        assert child is not None, startup.result()
+        if cancel_startup:
+            startup.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await startup
+        else:
+            await asyncio.wait_for(startup, 30)
+            assert server.listen_url is not None
+            assert server.listen_url != DYNAMIC_LOOPBACK_LISTEN_URL
+            assert f"  listening on: {server.listen_url}" in (server.recent_stderr or [])
+            assert child.returncode is None
+            adopted_port = int(server.listen_url.rsplit(":", 1)[1])
+            await server.close()
+            with pytest.raises(OSError):
+                await asyncio.open_connection("127.0.0.1", adopted_port)
+    finally:
+        if not startup.done():
+            startup.cancel()
+        await asyncio.gather(startup, return_exceptions=True)
+        await server.close()
+
+    assert child.returncode is not None
+    assert not psutil.pid_exists(child.pid)
+    assert server.proc is None and server.stderr_task is None

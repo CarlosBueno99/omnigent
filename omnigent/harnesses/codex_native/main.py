@@ -10,7 +10,6 @@ import os
 import re
 import secrets
 import shutil
-import socket
 import time
 import uuid
 from collections import Counter
@@ -44,6 +43,7 @@ from omnigent.harnesses.claude_native.main import (
     attach_local_terminal,
 )
 from omnigent.harnesses.codex_native.app_server import (
+    DYNAMIC_LOOPBACK_LISTEN_URL,
     CodexAppServerClient,
     CodexNativeAppServer,
     build_codex_native_server,
@@ -1259,10 +1259,8 @@ async def _prepare_codex_terminal(
         # Codex CLI ``app-server`` only accepts ``stdio://``, ``ws://``,
         # or ``off`` — it dropped ``unix://`` — so a ``unix://`` listen
         # exits immediately and the terminal (and the web-UI Terminal
-        # pill) never appears.
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _probe:
-            _probe.bind(("127.0.0.1", 0))
-            codex_ws_url = f"ws://127.0.0.1:{_probe.getsockname()[1]}"
+        # pill) never appears. Codex picks the port itself: a port probed
+        # and released here could be taken before Codex binds it.
         app_server = build_codex_native_server(
             session_id=session_id,
             socket_path=socket_path,
@@ -1278,12 +1276,14 @@ async def _prepare_codex_terminal(
             developer_instructions=developer_instructions,
             terminal_launch_args=codex_args,
         )
-        app_server.listen_url = codex_ws_url
+        app_server.listen_url = DYNAMIC_LOOPBACK_LISTEN_URL
         event_client: CodexAppServerClient | None = None
         terminal_id: str | None = None
         launched_terminal: LaunchedCodexTerminal | None = None
         try:
             await app_server.start()
+            codex_ws_url = app_server.listen_url
+            assert codex_ws_url is not None
             if thread_id is None:
                 event_client = client_for_transport(
                     codex_ws_url,
