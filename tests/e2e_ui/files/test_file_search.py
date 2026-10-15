@@ -167,14 +167,19 @@ def test_search_matches_and_reveals_a_directory(
     page: Page,
     dir_search_session: tuple[str, str],
 ) -> None:
-    """Searching a folder name lists it and clicking it reveals it in the tree.
+    """Searching a folder name lists it and clicking it reveals it in the tree;
+    the file under it is then found by its absolute path.
 
     Directory search is the feature under test: the server ``/search`` now
     emits directory entries, the results render them as folder rows, and
     clicking one exits search and expands the folder in the tree (rather than
     opening a file). Covers the reveal + exit-search interaction end to end.
+    The final step pins the browser boundary of path-shaped search: the root
+    the Files header's "Copy folder path" copies is the root the search
+    compares an absolute query with.
     """
     base_url, session_id = dir_search_session
+    root = _environment_root(base_url, session_id)
     page.goto(f"{base_url}/c/{session_id}?view=explore")
 
     rail = page.get_by_role("complementary", name="Workspace")
@@ -210,6 +215,11 @@ def test_search_matches_and_reveals_a_directory(
     # Back in tree mode the folder row is still present as a tree node.
     expect(folder_row).to_be_visible(timeout=15_000)
 
+    # Only a search result carries the full path as its name; the tree row is
+    # named by the bare file name, so this cannot pass on the revealed tree.
+    _search_for(search, f"{root}/{_DIR_FILE}")
+    expect(rail.get_by_role("button", name=_DIR_FILE, exact=True)).to_be_visible(timeout=15_000)
+
 
 @pytest.mark.flaky(reruns=2, reruns_delay=5)
 def test_search_says_when_it_stopped_early(
@@ -234,37 +244,3 @@ def test_search_says_when_it_stopped_early(
     expect(
         rail.get_by_text("the search stopped early, so results may be incomplete")
     ).to_be_visible(timeout=30_000)
-
-
-@pytest.mark.flaky(reruns=2, reruns_delay=5)
-def test_search_finds_a_file_by_its_absolute_path(
-    page: Page,
-    dir_search_session: tuple[str, str],
-) -> None:
-    """Pasting an existing file's absolute path into the All search box lists it.
-
-    A relative subpath already matches. The same file spelled as its absolute
-    path (the Files header's "Copy folder path" value plus the relative path)
-    names a file that exists, so it must be listed too.
-    """
-    base_url, session_id = dir_search_session
-    root = _environment_root(base_url, session_id)
-    page.goto(f"{base_url}/c/{session_id}?view=explore")
-
-    rail = page.get_by_role("complementary", name="Workspace")
-    search = rail.get_by_role("searchbox", name="Search all files")
-    expect(search).to_be_visible(timeout=30_000)
-    expect(rail.get_by_role("button", name=f"{_DIR_NAME}/", exact=True)).to_be_visible(
-        timeout=30_000
-    )
-
-    _search_for(search, f"{_DIR_NAME}/gadget")
-    expect(_row(rail, "gadget.py")).to_be_visible(timeout=15_000)
-
-    # Back to the tree, where the collapsed folder hides the file, so the next
-    # query cannot pass on the previous query's rows.
-    _search_for(search, "")
-    expect(_row(rail, "gadget.py")).to_have_count(0)
-
-    _search_for(search, f"{root}/{_DIR_FILE}")
-    expect(_row(rail, "gadget.py")).to_be_visible(timeout=15_000)

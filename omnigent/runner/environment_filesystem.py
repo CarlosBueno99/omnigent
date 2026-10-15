@@ -146,10 +146,11 @@ def _glob_to_regex(pattern: str) -> str:
 def _path_query(q: str) -> str | None:
     """Normalized form of a path-shaped search query, or ``None`` for a plain one.
 
-    A query with a path separator names a path, so the matchers also compare
-    it against each entry's absolute path; a pasted absolute path, a ``./``
-    prefix, or the search root's own folder name then still finds the entry.
-    Plain words stay relative-path matches, since against absolute paths any
+    A query with a path separator names a path. Once normalized, one that still
+    contains a separator is also matched against each entry's absolute path, so
+    a pasted absolute path or the search root's own folder name finds the entry.
+    One that collapses to a bare word (``./name``, ``name/``) is matched like a
+    plain word, against the relative path only: against absolute paths, any
     word from the root's own path would match every entry.
 
     :param q: Stripped, lowercased query.
@@ -167,7 +168,8 @@ def _path_matcher(q: str, root: str) -> Callable[[str], bool]:
     """Build the search predicate for ``/``-separated paths relative to *root*.
 
     Same rule as the sandboxed walk in :meth:`CallerProcessFilesystem.search_files`:
-    a substring of the relative path, or of the absolute path for a path-shaped *q*.
+    a substring of the relative path, or of the absolute path when the normalized
+    *q* still contains a separator (see :func:`_path_query`).
 
     :param q: Stripped, lowercased query.
     :param root: Absolute directory the matched paths are relative to.
@@ -176,6 +178,8 @@ def _path_matcher(q: str, root: str) -> Callable[[str], bool]:
     qp = _path_query(q)
     if qp is None:
         return lambda rel: q in rel.lower()
+    if "/" not in qp:
+        return lambda rel: q in rel.lower() or qp in rel.lower()
     prefix = root.rstrip(os.sep)
     if os.sep != "/":
         prefix = prefix.replace(os.sep, "/")
@@ -1035,13 +1039,20 @@ root = os.path.abspath(start)
 # A bare root ('/', 'C:\') already ends in the separator the slice skips.
 cut = len(root.rstrip(os.sep)) + 1
 # An entry's absolute path, '/'-separated like its relative one, for
-# path-shaped queries.
+# path-shaped queries. A query that normalized to a bare word ('./name')
+# matches the relative path only, so a word from the root's own path
+# cannot match every entry.
 prefix = (root.rstrip(os.sep).replace(os.sep, '/') + '/').lower()
+qp_abs = qp is not None and '/' in qp
 
 
 def hit(p):
     low = p.lower()
-    return q in low or (qp is not None and qp in prefix + low)
+    if q in low:
+        return True
+    if qp is None:
+        return False
+    return qp in (prefix + low if qp_abs else low)
 
 
 def rel(dirpath, name):

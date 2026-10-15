@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
 import subprocess
@@ -25,7 +26,11 @@ from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import create_os_environment
 from omnigent.inner.sandbox import SandboxPolicy
 from omnigent.runner import create_runner_app
-from omnigent.runner.environment_filesystem import CallerProcessFilesystem, search_indexed_paths
+from omnigent.runner.environment_filesystem import (
+    CallerProcessFilesystem,
+    _path_matcher,
+    search_indexed_paths,
+)
 from omnigent.runner.resource_registry import SessionResourceRegistry
 from omnigent.runtime.filesystem_registry import GitFilesystemRegistry
 from tests.runner.helpers import NullServerClient
@@ -2657,34 +2662,54 @@ async def test_search_matches_path_shaped_queries(
     assert expected_path in paths, f"q={query!r} returned {paths}"
 
 
-def test_search_indexed_paths_matches_an_absolute_path(workspace: Path) -> None:
-    """The git-index matcher finds a tracked file by its absolute path."""
-    entries = search_indexed_paths(workspace, ["src/main.py"], f"{workspace}/src/main.py")
-    assert [e.path for e in entries] == ["src/main.py"]
-
-
 @pytest.mark.asyncio
-async def test_search_plain_query_ignores_the_root_path(
-    client: httpx.AsyncClient, workspace: Path
+@pytest.mark.parametrize(
+    ("query_template", "expected_paths"),
+    [
+        ("{folder}", []),
+        ("./{folder}", []),
+        ("{folder}/", []),
+        ("./hello.txt", ["hello.txt"]),
+    ],
+    ids=["plain_root_name", "dot_prefixed_root_name", "root_name_slash", "dot_prefixed_name"],
+)
+async def test_search_bare_word_queries_match_relative_paths_only(
+    client: httpx.AsyncClient, workspace: Path, query_template: str, expected_paths: list[str]
 ) -> None:
-    """A word from the workspace's own path matches nothing inside it."""
+    """A query that is or normalizes to a bare word never matches the root's own path."""
+    query = query_template.format(folder=workspace.name)
     resp = await client.get(
         f"/v1/sessions/conv_test/resources/environments/{DEFAULT_ENVIRONMENT_ID}/search"
-        f"?q={workspace.name}"
+        f"?q={urllib.parse.quote(query, safe='')}"
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["data"] == []
+    assert [e["path"] for e in resp.json()["data"]] == expected_paths, f"q={query!r}"
 
 
 @pytest.mark.parametrize(
     ("query_template", "expected_paths"),
     [
+        ("{root}/src/main.py", ["src/main.py"]),
         ("{root}/src", ["src", "src/main.py"]),
+        ("{root}/src/", ["src", "src/main.py"]),
         ("./src/main.py", ["src/main.py"]),
+        ("src//main.py", ["src/main.py"]),
         ("{folder}/src/main.py", ["src/main.py"]),
+        ("src/", ["src", "src/main.py"]),
         ("{folder}", []),
+        ("./{folder}", []),
     ],
-    ids=["absolute_dir", "dot_prefixed", "workspace_folder_prefixed", "plain_root_name"],
+    ids=[
+        "absolute_file",
+        "absolute_dir",
+        "absolute_dir_trailing_slash",
+        "dot_prefixed",
+        "doubled_separator",
+        "workspace_folder_prefixed",
+        "trailing_slash",
+        "plain_root_name",
+        "dot_prefixed_root_name",
+    ],
 )
 def test_search_indexed_paths_matches_path_shaped_queries(
     workspace: Path, query_template: str, expected_paths: list[str]
@@ -2693,3 +2718,14 @@ def test_search_indexed_paths_matches_path_shaped_queries(
     query = query_template.format(root=workspace, folder=workspace.name)
     entries = search_indexed_paths(workspace, ["src/main.py", "hello.txt"], query)
     assert [e.path for e in entries] == expected_paths, f"q={query!r}"
+
+
+def test_path_matcher_handles_windows_separators(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Windows query and root use backslashes; entries still use '/'."""
+    monkeypatch.setattr(os, "sep", "\\")
+    monkeypatch.setattr(os.path, "normpath", ntpath.normpath)
+
+    hit = _path_matcher("c:\\ws\\src\\main.py", "C:\\ws")
+
+    assert hit("src/main.py")
+    assert not hit("docs/main.py")
