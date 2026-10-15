@@ -38,7 +38,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import HostHelloFrame
 from omnigent.llms.context_window import ModelPricing
 from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
-from omnigent.runner.transports.ws_tunnel.frames import EventBatchFrame
+from omnigent.runner.transports.ws_tunnel.frames import EventAckFrame, EventBatchFrame
 from omnigent.runtime import inflight_text
 from omnigent.runtime.tool_output import MAX_TOOL_OUTPUT_BYTES
 from omnigent.server.background_session_titles import BackgroundTitleRequest
@@ -1538,10 +1538,12 @@ async def test_runner_ingest_requires_bound_runner_and_replays_source_key(
     }
     ingest = app.state.runner_event_ingest
     batch = EventBatchFrame(id="b1", session_id=session["id"], events=[event])
-    rejected = await ingest(
+    # A runner the session moved off gets its late events acknowledged but not written.
+    superseded = await ingest(
         app=app, headers=Headers({}), owner=None, runner_id="another-runner", batch=batch
     )
-    assert rejected.applied == 0 and not rejected.retryable
+    assert superseded == EventAckFrame("b1", 1)
+    assert (await client.get(f"/v1/sessions/{session['id']}/items")).json()["data"] == []
     first = await ingest(
         app=app, headers=Headers({}), owner=None, runner_id="runner-owning-session", batch=batch
     )
@@ -5665,34 +5667,60 @@ _OLD_CLI_CARD = {
 }
 
 
+_CODEX_MODEL_DETAIL = (
+    "The 'system.ai.gpt-6-1-sol' model is not supported when using Codex with a ChatGPT account."
+)
+_CODEX_MODEL_CARD = {
+    "title": "Model unavailable with ChatGPT login",
+    "cause": _CODEX_MODEL_DETAIL,
+    "remediation": (
+        "Choose a model supported by your ChatGPT account using the model picker or /model. "
+        "To use another provider, configure it for Codex with `omnigent setup` "
+        "on the host, then start a new session."
+    ),
+}
+
+
 @pytest.mark.parametrize("wire_output", [False, True])
 @pytest.mark.parametrize(
-    ("detail", "expected_code", "card"),
+    ("detail", "expected_code", "card", "wrapper", "reauth_required"),
     [
         (
             'API Error: 499 {"error_code":"CANCELLED","message":""}',
             "transient_upstream_error",
             {},
+            "claude-code-native-ui",
+            False,
         ),
-        (_OLD_CLI_DETAIL, "client_update_required", _OLD_CLI_CARD),
+        (_OLD_CLI_DETAIL, "client_update_required", _OLD_CLI_CARD, "claude-code-native-ui", False),
+        (_CODEX_MODEL_DETAIL, None, _CODEX_MODEL_CARD, "codex-native-ui", False),
+        (_CODEX_MODEL_DETAIL, "native_turn_error", {}, "claude-code-native-ui", False),
+        (_CODEX_MODEL_DETAIL, "codex_reauth_required", {}, "codex-native-ui", True),
     ],
 )
-async def test_native_gateway_cancel_and_old_cli_failures_are_coded_live_and_after_reload(
+async def test_native_failures_are_coded_live_and_after_reload(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     wire_output: bool,
     detail: str,
-    expected_code: str,
+    expected_code: str | None,
     card: dict[str, str],
+    wrapper: str,
+    reauth_required: bool,
 ) -> None:
-    """A gateway 499 is retryable and an old-CLI refusal names its fix, live and on reload."""
+    """Native failures keep their diagnosis and raw detail through status and persistence."""
     published: list[dict[str, Any]] = []
     monkeypatch.setattr(
         "omnigent.server.routes.sessions.session_stream.publish",
         lambda _session_id, event: published.append(event),
     )
-    agent = await create_test_agent(client)
-    session = await _create_session(client, agent["id"])
+    harness = "codex-native" if wrapper == "codex-native-ui" else "claude-native"
+    agent = await create_test_agent(
+        client, executor={"type": "omnigent", "config": {"harness": harness}}
+    )
+    session = await _create_session(client, agent["id"], labels={"omnigent.wrapper": wrapper})
+    if expected_code is None:
+        expected_code = "codex_turn_error" if wire_output else "native_turn_error"
     session_id = session["id"]
     response_id = "resp_native_coded_failure"
     item_resp = await client.post(
@@ -5705,7 +5733,7 @@ async def test_native_gateway_cancel_and_old_cli_failures_are_coded_live_and_aft
                 "source_id": "src_native_coded_failure",
                 "item_data": {
                     "role": "assistant",
-                    "agent": "claude-native-ui",
+                    "agent": wrapper,
                     "content": [{"type": "output_text", "text": detail}],
                 },
             },
@@ -5714,6 +5742,8 @@ async def test_native_gateway_cancel_and_old_cli_failures_are_coded_live_and_aft
     assert item_resp.status_code == 202, item_resp.text
 
     data: dict[str, Any] = {"status": "failed", "response_id": response_id}
+    if reauth_required:
+        data["reauth_required"] = True
     if wire_output:
         data["output"] = detail
     status_resp = await client.post(
@@ -5735,7 +5765,7 @@ async def test_native_gateway_cancel_and_old_cli_failures_are_coded_live_and_aft
     assert snapshot_resp.json()["last_task_error"] == {
         "code": expected_code,
         "message": detail,
-        "agent_name": "claude-native-ui",
+        "agent_name": wrapper,
         **card,
     }
 
