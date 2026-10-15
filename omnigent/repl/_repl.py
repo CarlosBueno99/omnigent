@@ -2257,11 +2257,15 @@ class _SessionsChatReplAdapter:
         self._replay_from_start = False
         self._streamed_text_parts = []
         self._pending_dup_texts = []
-        reconnecting = False
+        # Reconcile on the first subscription too, not just on reconnects: an
+        # item or terminal status committed between the seed read and the first
+        # tail-slot registration would otherwise be dropped until some later
+        # reconnect happened to recover it. The seeded cursor bounds the replay.
+        reconnecting = True
         assert self._session_id is not None
-        # Baseline the replay cursor before the first subscription, so a
-        # reconnect reconciles every item after it even if the gap opened
-        # before this pump ever delivered one.
+        # Baseline the replay cursor before the first subscription, so the
+        # reconcile covers every item after it even if the gap opened before
+        # this pump ever delivered one.
         await self._seed_stream_cursor()
         while True:
             try:
@@ -2282,14 +2286,25 @@ class _SessionsChatReplAdapter:
                         reconcile_pending = False
                         await self._reconcile_stream_gap()
                     if isinstance(event, _StatusEv):
+                        if event.status == self._replayed_status:
+                            # Live copy of the status reconciliation already
+                            # rendered. Consume the slot on an exact match; a
+                            # non-running mismatch keeps it so an intervening
+                            # transition cannot expose a second copy of the
+                            # reconciled status.
+                            self._replayed_status = None
+                            continue
                         if event.status == "running":
-                            # A new turn: no replayed prose is still pending.
+                            # A genuinely new turn (it is not the reconciled
+                            # status's live copy): drop replayed prose still
+                            # pending, and drop a reconciled status whose live
+                            # copy never arrived (the tail does not re-send a
+                            # status committed before this subscription) so it
+                            # cannot later dedup this turn's identical
+                            # transition into a stuck spinner.
                             self._streamed_text_parts.clear()
                             self._pending_dup_texts.clear()
-                        if event.status == self._replayed_status:
                             self._replayed_status = None
-                            continue  # live copy of the reconciled status
-                        self._replayed_status = None
                         self._last_streamed_status = event.status
                         if event.status in ("idle", "waiting", "failed"):
                             turn_done = getattr(self, "_turn_done", None)
