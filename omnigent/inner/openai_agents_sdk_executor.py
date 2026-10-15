@@ -1089,35 +1089,62 @@ def _skip_history_transform(resource: object, field: str) -> None:
     object.__setattr__(resource, "create", _create)
 
 
-# Per-request USD cost a LiteLLM-style gateway reports on each response.
+# Per-request USD cost a LiteLLM-style gateway reports on an HTTP response. On a
+# streamed reply this is at best a pre-stream estimate; the exact amount is the
+# ``usage.cost`` a gateway can annotate on the final response event instead.
 _GATEWAY_COST_HEADER = "x-litellm-response-cost"
 
-# Gateway-reported costs of the turn in progress. Set per ``run_turn`` call;
-# the SDK's request tasks inherit the list and the response hook appends to it.
+# Header costs of the model calls in flight. ``run_turn`` sets it only in the
+# context the SDK's run task is created from, so it never outlives the turn.
 _turn_gateway_costs: contextvars.ContextVar[list[float] | None] = contextvars.ContextVar(
     "openai_agents_turn_gateway_costs", default=None
 )
 
 
-def _parse_gateway_cost(value: str | None) -> float | None:
-    """Parse a gateway cost header value into a non-negative finite USD amount.
+def _parse_gateway_cost(value: object) -> float | None:
+    """Coerce a gateway-reported cost to a non-negative finite USD amount.
 
-    :param value: Raw header value, e.g. ``"0.0123"``; ``None`` when absent.
-    :returns: The cost, or ``None`` when the header is missing or malformed.
+    :param value: A header string such as ``"0.0123"``, a numeric usage field
+        such as ``0.0123``, or ``None`` when absent.
+    :returns: The cost, or ``None`` when the value is missing or unusable.
     """
-    if not value:
+    if value is None or isinstance(value, bool):
         return None
-    try:
+    if isinstance(value, str):
+        try:
+            cost = float(value)
+        except ValueError:
+            return None
+    elif isinstance(value, (int, float)):
         cost = float(value)
-    except ValueError:
+    else:
         return None
     if not math.isfinite(cost) or cost < 0:
         return None
     return cost
 
 
+def _gateway_usage_cost(response: object) -> float | None:
+    """Read the cost a gateway annotated on a completed response's ``usage``.
+
+    LiteLLM adds ``usage.cost`` when ``include_cost_in_streaming_usage`` is
+    enabled; it is computed after the stream ends, so it is exact.
+
+    :param response: The ``response`` carried by a ``response.completed`` or
+        ``response.incomplete`` event, or ``None`` when the event has none.
+    :returns: The annotated ``usage.cost``, or ``None`` when absent or unusable.
+    """
+    usage = (
+        response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    )
+    if usage is None:
+        return None
+    cost = usage.get("cost") if isinstance(usage, dict) else getattr(usage, "cost", None)
+    return _parse_gateway_cost(cost)
+
+
 async def _record_gateway_cost(response: httpx.Response) -> None:
-    """httpx response hook: credit a successful response's reported cost to the turn."""
+    """httpx response hook: credit a successful response's cost header to the turn."""
     costs = _turn_gateway_costs.get()
     if costs is None or not response.is_success:
         return
@@ -1130,13 +1157,17 @@ def _install_gateway_cost_hook(client: AsyncOpenAIClient) -> None:
     """Observe the gateway cost header on every HTTP response *client* receives.
 
     The Agents SDK exposes no response headers, so the hook sits on the
-    ``AsyncOpenAI`` client's underlying httpx client. Clients without one
-    (unit-test stand-ins) are left untouched.
+    ``AsyncOpenAI`` client's underlying httpx client. A client without one
+    (a unit-test stand-in) is left untouched.
 
     :param client: The ``AsyncOpenAI`` (or compatible) client the SDK will use.
     """
     http_client = getattr(client, "_client", None)
     if not isinstance(http_client, httpx.AsyncClient):
+        logger.debug(
+            "Gateway cost header hook not installed: %s has no httpx.AsyncClient",
+            type(client).__name__,
+        )
         return
     hooks = http_client.event_hooks
     if _record_gateway_cost not in hooks["response"]:
@@ -1293,8 +1324,6 @@ class OpenAIAgentsSDKExecutor(Executor):
             _skip_history_transform(getattr(raw_client, "responses", None), "input")
             _chat = getattr(raw_client, "chat", None)
             _skip_history_transform(getattr(_chat, "completions", None), "messages")
-
-
         _install_gateway_cost_hook(raw_client)
         # Wrap the chat.completions path to strip list-type delta.content
         # (reasoning blocks emitted by models like Kimi K2).  The SDK's
@@ -1686,8 +1715,13 @@ class OpenAIAgentsSDKExecutor(Executor):
         config: ExecutorConfig | None = None,
     ) -> AsyncIterator[ExecutorEvent]:
         cfg = config or ExecutorConfig()
-        gateway_costs: list[float] = []
-        _turn_gateway_costs.set(gateway_costs)
+        # Gateway-reported costs for this turn: exact ``usage.cost`` annotations and
+        # per-response cost headers. The header list is set only in ``run_context``
+        # (the SDK's run task copies it), so it never leaks into the caller's context.
+        gateway_usage_costs: list[float] = []
+        gateway_header_costs: list[float] = []
+        run_context = contextvars.copy_context()
+        run_context.run(_turn_gateway_costs.set, gateway_header_costs)
         # cfg.model (per-request /model override; agent name no longer
         # leaks here) wins over the spec default
         # (HARNESS_OPENAI_AGENTS_MODEL → self._model_override).
@@ -1813,7 +1847,8 @@ class OpenAIAgentsSDKExecutor(Executor):
                 state.run_item_count_before = current_item_count
                 result = cast(
                     _RunResult,
-                    agents_sdk.Runner.run_streamed(
+                    run_context.run(
+                        agents_sdk.Runner.run_streamed,
                         agent,
                         input=input_value,
                         session=state.sdk_session,
@@ -1854,6 +1889,10 @@ class OpenAIAgentsSDKExecutor(Executor):
                                 yield ReasoningChunk(
                                     delta=reasoning_delta, event_type="reasoning_text"
                                 )
+                        elif data.type in ("response.completed", "response.incomplete"):
+                            usage_cost = _gateway_usage_cost(getattr(data, "response", None))
+                            if usage_cost is not None:
+                                gateway_usage_costs.append(usage_cost)
 
                     elif event.type == "run_item_stream_event":
                         item_event = cast(_RunItemEvent, event)
@@ -2094,8 +2133,10 @@ class OpenAIAgentsSDKExecutor(Executor):
                 }
                 if cached_tok:
                     turn_usage["cache_read_input_tokens"] = cached_tok
+                # What the gateway billed; the server prefers it over a catalog
+                # estimate. Usage annotations are exact, so they win over headers.
+                gateway_costs = gateway_usage_costs or gateway_header_costs
                 if gateway_costs:
-                    # What the gateway billed; the server prefers it over a catalog estimate.
                     turn_usage["cost_usd"] = sum(gateway_costs)
         _notify_usage_from_dict(model=model, usage=turn_usage)
 
