@@ -59,8 +59,6 @@ def test_session_rename_streams_to_open_tabs(
     - The server didn't diff the rename into a ``changed`` frame, or the
       client didn't merge it / trigger the title reconcile
       (``_emit_deltas`` / ``mergeItemsIntoPages`` regression).
-    - The client refetched its session lists for a pushed rename instead
-      of applying the row in place (``SessionUpdatesProvider`` regression).
 
     If the stream were dead the rename would still surface — but only via
     the 45-60 s HTTP fallback poll, so a sub-20 s assertion would time
@@ -83,9 +81,6 @@ def test_session_rename_streams_to_open_tabs(
     try:
         tab_a = tab_a_ctx.new_page()
         tab_b = tab_b_ctx.new_page()
-        # Record list requests from the first navigation on, so startup traffic
-        # lands in the baseline instead of being attributed to the rename.
-        list_hits = _count_session_list_requests(tab_a)
         tab_a.goto(f"{base_url}/c/{session_id}")
         tab_b.goto(f"{base_url}/c/{session_id}")
 
@@ -95,10 +90,6 @@ def test_session_rename_streams_to_open_tabs(
         # match could be an initial snapshot rather than a live delivery.
         expect(tab_a.locator(row)).to_be_visible()
         expect(tab_b.locator(row)).to_be_visible()
-        # Let the initial-load requests settle; the idle test below uses the
-        # same 6 s window for its refetch flurry.
-        tab_a.wait_for_timeout(6_000)
-        baseline = len(list_hits)
 
         # A third client renames the session over the API — no browser
         # action triggers it, so any UI change is server-pushed.
@@ -114,12 +105,6 @@ def test_session_rename_streams_to_open_tabs(
         # delivers this fast; a dead stream times out here.
         expect(tab_a.locator(row)).to_contain_text(marker, timeout=20_000)
         expect(tab_b.locator(row)).to_contain_text(marker, timeout=20_000)
-        # The pushed row is applied in place: a rename can't change which
-        # sidebar lists hold the session, so it must not refetch them. Wait
-        # out the provider's 250 ms reconcile debounce before asserting.
-        tab_a.wait_for_timeout(1_500)
-        rename_hits = list_hits[baseline:]
-        assert rename_hits == [], f"pushed rename refetched session lists: {rename_hits}"
     finally:
         tab_a_ctx.close()
         tab_b_ctx.close()

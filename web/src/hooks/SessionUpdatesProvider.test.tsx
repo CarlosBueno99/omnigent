@@ -886,6 +886,36 @@ describe("SessionUpdatesProvider list reconciliation", () => {
     expect(result.current.beta.hasNextPage).toBe(true);
   });
 
+  it("refetches a folder whose cursor anchor was bumped out of order", async () => {
+    const backend = listBackend({ endless: true });
+    vi.stubGlobal("fetch", backend.fetch);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["projects"], PROJECTS);
+    const { result } = renderSidebarLists(client);
+    await loadSecondFolderPages(result);
+    const baseline = backend.calls.length;
+
+    // Every row of Beta's last loaded page is bumped in one frame, so the
+    // re-sorted tail is itself a row the server now resolves at a new time.
+    // Its cursor can't be trusted, so the folder reconciles from its head.
+    act(() =>
+      frameHandler()({
+        type: "changed",
+        items: Array.from({ length: 20 }, (_, i) => ({
+          ...conv(`Beta-1-${i}`),
+          project_id: "id-Beta",
+          updated_at: 5_000 - i,
+        })),
+      }),
+    );
+    await settle();
+    await waitFor(() => expect(result.current.beta.isFetching).toBe(false));
+
+    const betaCalls = backend.calls.slice(baseline).filter((p) => p.get("project") === "Beta");
+    expect(betaCalls.map((p) => p.get("after"))).toEqual([null]);
+    expect(result.current.beta.hasNextPage).toBe(true);
+  });
+
   it("refetches a folder whose landed page was emptied by a replayed removal", async () => {
     let holdPages = false;
     const backend = listBackend({

@@ -72,6 +72,7 @@ function applyItemsToCache(
   needsRefetch: boolean;
   unresolvedFolders: QueryKey[];
   fetchingLists: string[];
+  stranded: QueryKey[];
 } {
   // Frames are full rows with explicit nulls; convert null → undefined so a
   // cleared field overlays the cache in the same shape GET /v1/sessions
@@ -87,6 +88,10 @@ function applyItemsToCache(
   const foundAnywhere = new Set<string>();
   let needsRefetch = false;
   const fetchingLists: string[] = [];
+  // Lists whose cursor a local re-sort could not safely repair (the next page
+  // would replay loaded rows): reconcile them from the head, like a delete that
+  // strands the cursor.
+  const stranded: QueryKey[] = [];
   // Merge and place one cached list. A new watched session (a create here or
   // elsewhere, a share) shows now instead of after a refetch that lags the
   // search index; rows sorting onto an unloaded page are left for that page.
@@ -117,7 +122,11 @@ function applyItemsToCache(
       // flashes in and out. Mirrors the delete tombstone.
       for (const row of placed.inserted) markRecentlyCreated(row);
     }
-    if (next !== data) queryClient.setQueryData(key, next);
+    if (next !== data) {
+      queryClient.setQueryData(key, next);
+      const tail = next?.pages.at(-1);
+      if (tail?.has_more && !tail.last_id) stranded.push(key);
+    }
   };
   const cache = queryClient.getQueryCache();
   for (const query of cache.findAll({ queryKey: ["conversations"] })) {
@@ -182,6 +191,7 @@ function applyItemsToCache(
     needsRefetch,
     unresolvedFolders,
     fetchingLists,
+    stranded,
   };
 }
 
@@ -418,9 +428,20 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
         [...replayItems.values()],
         getCurrentUserId(),
       );
+      // A list that started fetching after the frame was buffered would clobber
+      // this replay when its own fetch lands; keep the buffers alive and replay
+      // it too once it settles.
+      for (const hash of replayed.fetchingLists) {
+        if (hash !== query.queryHash) replayLists.add(hash);
+      }
       // The earlier invalidation ran against pre-fetch pages; the replay can
       // strand the landed page as well.
-      const lists = [...replayed.unresolvedFolders];
+      const lists = [...replayed.stranded];
+      // Mirror the live path: only reconcile unresolved folders when a row is
+      // genuinely missing or a membership field changed, not for a plain bump.
+      if (replayed.missingIds.length > 0 || replayed.needsRefetch) {
+        lists.push(...replayed.unresolvedFolders);
+      }
       if (replayRemoved.size > 0) {
         const removal = removeIdsFromCache(queryClient, [...replayRemoved]);
         if (removal.removedAny) lists.push(...removal.stranded);
@@ -526,11 +547,8 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
           for (const parentId of parentIds) {
             void queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(parentId) });
           }
-          const { missingIds, needsRefetch, unresolvedFolders, fetchingLists } = applyItemsToCache(
-            queryClient,
-            frame.items,
-            getCurrentUserId(),
-          );
+          const { missingIds, needsRefetch, unresolvedFolders, fetchingLists, stranded } =
+            applyItemsToCache(queryClient, frame.items, getCurrentUserId());
           if (fetchingLists.length > 0) {
             for (const item of frame.items) {
               // Last frame wins: a change after a buffered removal restores the row.
@@ -557,6 +575,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
             // Search also matches message content, which any top-level change may carry.
             scheduleInvalidate({ search: true });
           }
+          if (stranded.length > 0) scheduleInvalidate({ lists: stranded });
           return;
         }
       }

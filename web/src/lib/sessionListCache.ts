@@ -302,9 +302,10 @@ export function mergeItemsIntoPages(
   const sortBy = filters.sortBy ?? "updated_at";
   let anyPageChanged = false;
   let needsRefetch = false;
-  const pages = data.pages.map((page) => {
+  const lastIndex = data.pages.length - 1;
+  const pages = data.pages.map((page, index) => {
     let rowChanged = false;
-    let reordered = false;
+    const bumped = new Set<string>();
     const nextData: Conversation[] = [];
     for (const conv of page.data) {
       const wire = itemsById.get(conv.id);
@@ -327,19 +328,22 @@ export function mergeItemsIntoPages(
       if (changedFieldsNeedRefetch(changed)) {
         needsRefetch = true;
       }
-      if (changed.has(sortBy)) reordered = true;
+      if (changed.has(sortBy)) bumped.add(conv.id);
       rowChanged = true;
       nextData.push(nextConv);
     }
     if (!rowChanged) return page;
     anyPageChanged = true;
-    // An evicted anchor still exists server-side (archived or moved), so its
-    // cursor stays valid and paging continues from it.
-    if (!reordered) return { ...page, data: nextData };
-    // Keep the page in server order and move a legacy row-id cursor off a
-    // bumped anchor, which the server would otherwise resolve at its new time.
+    // No sort-key change: the page order holds. An evicted anchor still exists
+    // server-side (archived or moved), so its cursor stays valid.
+    if (bumped.size === 0) return { ...page, data: nextData };
+    // Re-sort locally and repair the cursor for the new order.
     nextData.sort((a, b) => compareSessionRows(a, b, sortBy));
-    return { ...page, data: nextData, last_id: repairedLastId(page, nextData) };
+    return {
+      ...page,
+      data: nextData,
+      last_id: cursorAfterResort(page, nextData, bumped, index === lastIndex),
+    };
   });
   if (!anyPageChanged) return { data, found, needsRefetch };
   return { data: { ...data, pages }, found, needsRefetch };
@@ -454,12 +458,31 @@ export function lastIdAfterFiltering(
 }
 
 /**
- * Cursor for a re-sorted page. Only a legacy row-id cursor anchored at the page
- * tail follows the tail; a rewind cursor placed before retained history (see
- * `refreshScopeWindow`) must stay where it is.
+ * Cursor for a re-sorted page.
+ *
+ * A legacy row-id cursor names the page's oldest loaded row; the next page is
+ * `after=<that row>`. Only such a cursor (anchored at the original tail) is
+ * repaired — an opaque token or a rewind cursor placed before retained history
+ * (see `refreshScopeWindow`) stays put. After a re-sort:
+ *   - an evicted anchor still resolves server-side (archived or moved), so the
+ *     cursor stays on it;
+ *   - otherwise the cursor follows the surviving tail, unless that tail is a row
+ *     we just bumped on a page with more to load. The server would resolve it at
+ *     its new position and replay already-loaded rows, so drop the cursor and
+ *     let the caller reconcile the list from its head.
  */
-function repairedLastId(page: ConversationsPage, rows: Conversation[]): string | null {
-  return page.last_id === page.data.at(-1)?.id ? lastIdAfterFiltering(page, rows) : page.last_id;
+function cursorAfterResort(
+  page: ConversationsPage,
+  rows: Conversation[],
+  bumped: ReadonlySet<string>,
+  isLastPage: boolean,
+): string | null {
+  const anchor = page.data.at(-1)?.id;
+  if (page.last_id !== anchor) return page.last_id;
+  if (!rows.some((row) => row.id === anchor)) return page.last_id;
+  const tail = rows.at(-1)?.id ?? null;
+  if (isLastPage && page.has_more && tail !== null && bumped.has(tail)) return null;
+  return tail;
 }
 
 /** Drop matching rows while preserving opaque continuation metadata. */

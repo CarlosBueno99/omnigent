@@ -710,6 +710,40 @@ describe("cursors after local patches", () => {
     expect(after!.pages[0].last_id).toBe("b");
   });
 
+  it("keeps the evicted anchor cursor even when another row is bumped in the same frame", () => {
+    const before = data([conv("a", { updated_at: 30 }), conv("b", { updated_at: 20 })]);
+    before.pages[0].has_more = true;
+
+    const { data: after } = mergeItemsIntoPages(
+      before,
+      new Map([
+        ["b", { id: "b", archived: true }],
+        ["a", { id: "a", updated_at: 40 }],
+      ]),
+      DEFAULT_FILTERS,
+    );
+
+    expect(after!.pages[0].data.map((row) => row.id)).toEqual(["a"]);
+    // The re-sort must not move the cursor onto the surviving row: the evicted
+    // anchor still resolves server-side.
+    expect(after!.pages[0].last_id).toBe("b");
+  });
+
+  it("drops the cursor when a bumped row is the re-sorted tail of a page with more to load", () => {
+    const before = data([conv("a", { updated_at: 10 })]);
+    before.pages[0].has_more = true;
+
+    const { data: after } = mergeItemsIntoPages(
+      before,
+      new Map([["a", { id: "a", updated_at: 50 }]]),
+      DEFAULT_FILTERS,
+    );
+
+    // "after=a" would resolve at a's new, higher time and replay loaded rows,
+    // so the cursor is dropped; the provider reconciles the list from its head.
+    expect(after!.pages[0].last_id).toBeNull();
+  });
+
   it("places a new row into an emptied window that still has more pages", () => {
     const before = data([]);
     before.pages[0] = { ...before.pages[0], has_more: true, last_id: "opaque-token" };
