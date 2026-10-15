@@ -4,7 +4,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { ConversationsInfiniteData } from "@/lib/sessionListCache";
 import type { Session } from "@/lib/types";
 import { ApiError } from "@/lib/sessionsApi";
@@ -747,6 +747,7 @@ describe("useStopAndDeleteConversation cache eviction", () => {
   }
 
   it("drops the session's confirmed-stop marker along with its caches", async () => {
+    onTestFinished(() => useStoppedSessions.setState({ stoppedAt: {} }));
     useStoppedSessions.setState({ stoppedAt: { conv_x: Date.now(), conv_other: Date.now() } });
     const { rendered } = seedAndDelete();
 

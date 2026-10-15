@@ -364,6 +364,22 @@ describe("useSessionLiveness — derivation truth table", () => {
       });
     });
 
+    it("a stop marker outranks host_asleep on a resumable host (send wakes it)", () => {
+      // A resumable host is woken by the next message, so an explicit stop reads
+      // `stopped` ("send to restart") rather than the silent host_asleep.
+      markSessionStopped(SID);
+      expect(derive(false, false, conv({ host_id: "h1", host_resumable: true }))).toEqual({
+        kind: "stopped",
+      });
+    });
+
+    it("a just-sent turn still upgrades a stopped resumable host to starting", () => {
+      markSessionStopped(SID);
+      expect(
+        derive(false, false, conv({ host_id: "h1", host_resumable: true }), { turnActive: true }),
+      ).toEqual({ kind: "starting" });
+    });
+
     it("the marker is per-session — other sessions are unaffected", () => {
       markSessionStopped("some-other-session");
       expect(derive(false, true, conv({ host_id: "h1" }))).toEqual({ kind: "runner_asleep" });

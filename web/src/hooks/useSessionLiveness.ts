@@ -125,7 +125,8 @@ export function livenessRowFromSession(
  *   reachable from the web; without it a resumable host would dead-end on
  *   `host_offline` below. While a just-sent turn is waking it (`turnActive`),
  *   this upgrades to `starting` so the ~85s cold wake shows a "Connecting…"
- *   intermediate rather than a blank screen.
+ *   intermediate rather than a blank screen. An acknowledged explicit stop
+ *   outranks it to `stopped`, since sending wakes the host either way.
  * - `host_offline` — the session is host-bound and the host tunnel is down,
  *   and the host is NOT resumable from the web (an external/laptop host, or a
  *   managed provider without a stop/resume lifecycle). The owner must
@@ -172,7 +173,7 @@ function isOwner(conv: Pick<Conversation, "permission_level"> | null | undefined
  * | 1 | true          | (any)       | (any)   | (any)      | online (stopped†)    |
  * | 2 | not-true      | (any)       | (any)   | (any)      | starting (fresh*)    |
  * | 3 | not-true      | false       | set+resumable | true  | starting (waking)    |
- * | 3'| not-true      | false       | set+resumable | false | host_asleep          |
+ * | 3'| not-true      | false       | set+resumable | false | host_asleep (stopped†)|
  * | 3"| not-true      | false       | set, non-resum| (any) | host_offline {owner} |
  * | 3‴| not-true      | (other)     | (any)   | false      | stopped†             |
  * | 4 | undefined     | (any)       | (any)   | (any)      | unknown (pre-poll)   |
@@ -182,8 +183,9 @@ function isOwner(conv: Pick<Conversation, "permission_level"> | null | undefined
  * | 7 | false         | null/false  | null    | (any)      | local_stranded       |
  *
  * `†stopped` = a confirmed stop marker. Fresh, it outranks a stale-online poll
- * (row 1) and the startup/host-switch grace (rows 2/2'); a dead host (row 3) and
- * a just-sent turn still win. Sending, or online past the grace, clears it.
+ * (row 1), the startup/host-switch grace (rows 2/2'), and a resumable host
+ * asleep (row 3'); a non-resumable dead host (row 3") and a just-sent turn still
+ * win. Sending, or online past the grace, clears it.
  *
  * `*fresh` = `created_at` is within {@link STARTING_GRACE_S} of now AND
  * the runner tunnel has never been observed online (initial cold boot).
@@ -357,7 +359,13 @@ function useSessionLivenessRaw(
   // Otherwise (non-resumable) it's genuinely stuck: `host_offline`.
   if (hostId && hostOnline === false) {
     if (conv?.host_resumable) {
-      return opts?.turnActive ? { kind: "starting" } : { kind: "host_asleep" };
+      if (opts?.turnActive) return { kind: "starting" };
+      // An explicit stop outranks the silent `host_asleep`: a resumable host is
+      // woken by the next message just as a downed runner is relaunched, so the
+      // same "stopped — send to restart" affordance applies. A non-resumable
+      // dead host (below) still wins: sending cannot restart it.
+      if (typeof stoppedAtMs === "number") return { kind: "stopped" };
+      return { kind: "host_asleep" };
     }
     return { kind: "host_offline", isOwner: isOwner(conv) };
   }

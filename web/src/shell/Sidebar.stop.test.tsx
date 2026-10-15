@@ -124,6 +124,7 @@ describe("sidebar Stop session item", () => {
     fireEvent.click(screen.getByTestId("stop-conversation"));
     fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
 
+    expect(mocks.stop.mutate).toHaveBeenCalledTimes(1);
     const { onSuccess } = mocks.stop.mutate.mock.calls[0][1];
     expect(mocks.showToast).not.toHaveBeenCalled();
     onSuccess();

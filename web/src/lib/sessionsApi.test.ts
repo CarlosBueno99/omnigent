@@ -32,6 +32,7 @@ import {
 } from "./sessionsApi";
 import { BACKGROUND_SESSION_TITLES_STORAGE_KEY } from "./backgroundSessionTitlesPreferences";
 import { getSessionHost, setSessionHost } from "./sessionHost";
+import { markSessionStopped, useStoppedSessions } from "@/store/stoppedSessions";
 
 function mockJsonResponse(
   body: unknown,
@@ -692,6 +693,39 @@ describe("createSideChat", () => {
 
     await expect(createSideChat(source.id)).rejects.toThrow("This session is disconnected.");
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("clears the parent's stop marker once it relaunches for the side chat", async () => {
+    // A generic side chat never passes through the composer that would clear
+    // the marker, so the parent would otherwise stay labeled "Session stopped"
+    // while actually relaunching.
+    useStoppedSessions.setState({ stoppedAt: {} });
+    markSessionStopped(source.id);
+    fetchMock
+      .mockResolvedValueOnce(mockJsonResponse({ ...source, runner_online: false }))
+      .mockResolvedValueOnce(mockJsonResponse({ recovered: true, recovery: "runner_relaunched" }))
+      .mockResolvedValueOnce(mockJsonResponse({ ...source, runner_online: true }))
+      .mockResolvedValueOnce(mockJsonResponse(fork))
+      .mockResolvedValueOnce(mockJsonResponse({ ...fork, runner_id: source.runner_id }));
+
+    await expect(createSideChat(source.id)).resolves.toEqual({ childSessionId: fork.id });
+
+    expect(useStoppedSessions.getState().stoppedAt[source.id]).toBeUndefined();
+  });
+
+  it("leaves an online parent's stop marker alone (no relaunch, cleared on send)", async () => {
+    useStoppedSessions.setState({ stoppedAt: {} });
+    markSessionStopped(source.id);
+    fetchMock
+      .mockResolvedValueOnce(mockJsonResponse(source))
+      .mockResolvedValueOnce(mockJsonResponse(fork))
+      .mockResolvedValueOnce(mockJsonResponse({ ...fork, runner_id: source.runner_id }));
+
+    await expect(createSideChat(source.id)).resolves.toEqual({ childSessionId: fork.id });
+
+    // No relaunch happened here, so this path must not touch the marker.
+    expect(useStoppedSessions.getState().stoppedAt[source.id]).toEqual(expect.any(Number));
+    useStoppedSessions.setState({ stoppedAt: {} });
   });
 });
 

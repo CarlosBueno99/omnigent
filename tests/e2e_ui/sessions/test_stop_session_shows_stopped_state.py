@@ -71,8 +71,9 @@ def _mark(label: str, **data: object) -> None:
 def _visible_state(page: Page) -> dict[str, object]:
     badge = page.get_by_role("button", name=_HOST_BADGE_NAME)
     composer = page.get_by_label("Message the agent")
+    placeholder = composer.get_attribute("placeholder") if composer.count() else None
     return {
-        "composer_placeholder": composer.get_attribute("placeholder"),
+        "composer_placeholder": placeholder,
         "host_badge": badge.first.get_attribute("aria-label") if badge.count() else None,
         "stopped_band_count": page.get_by_test_id("stopped-indicator").count(),
     }

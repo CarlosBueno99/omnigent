@@ -18857,4 +18857,75 @@ describe("confirmed-stop markers", () => {
     expect(stoppedAt.conv_stopped).toBeUndefined();
     expect(stoppedAt.conv_other).toEqual(expect.any(Number));
   });
+
+  it("a denied send restores the stop marker — the relaunch never ran", async () => {
+    useChatStore.setState({
+      conversationId: "conv_stopped",
+      abortController: new AbortController(),
+      status: "idle",
+      sessionStatus: "running",
+    });
+    markSessionStopped("conv_stopped");
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/v1/sessions/conv_stopped/events")) {
+        return mockResponse({ queued: false, denied: true });
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    await useChatStore.getState().send("wake up", "agent_xyz");
+
+    expect(useStoppedSessions.getState().stoppedAt.conv_stopped).toEqual(expect.any(Number));
+  });
+
+  it("a failed send (POST throws) restores the stop marker", async () => {
+    useChatStore.setState({
+      conversationId: "conv_stopped",
+      abortController: new AbortController(),
+      status: "idle",
+    });
+    markSessionStopped("conv_stopped");
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/v1/sessions/conv_stopped/events")) {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    await useChatStore.getState().send("wake up", "agent_xyz");
+
+    expect(useStoppedSessions.getState().stoppedAt.conv_stopped).toEqual(expect.any(Number));
+  });
+
+  it("sendSlashCommand clears the stop marker on success — the command is the relaunch", async () => {
+    useChatStore.setState({
+      conversationId: "conv_stopped",
+      abortController: new AbortController(),
+    });
+    markSessionStopped("conv_stopped");
+
+    await useChatStore.getState().sendSlashCommand("deslop", "", "agent_xyz");
+
+    expect(useStoppedSessions.getState().stoppedAt.conv_stopped).toBeUndefined();
+  });
+
+  it("a denied slash command restores the stop marker", async () => {
+    useChatStore.setState({
+      conversationId: "conv_stopped",
+      abortController: new AbortController(),
+      status: "idle",
+      sessionStatus: "running",
+    });
+    markSessionStopped("conv_stopped");
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/v1/sessions/conv_stopped/events")) {
+        return mockResponse({ queued: false, denied: true });
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    await useChatStore.getState().sendSlashCommand("grill-me", "", "agent_xyz");
+
+    expect(useStoppedSessions.getState().stoppedAt.conv_stopped).toEqual(expect.any(Number));
+  });
 });

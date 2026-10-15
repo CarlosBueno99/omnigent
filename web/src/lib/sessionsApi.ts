@@ -17,6 +17,7 @@ import { authenticatedFetch } from "./identity";
 import { isAndroidShell, isElectronShell, isIOSShell } from "@/lib/nativeBridge";
 import { setSessionHost, setSessionParent } from "./sessionHost";
 import { backgroundSessionTitlesRequestHeaders } from "./backgroundSessionTitlesPreferences";
+import { clearSessionStopped } from "@/store/stoppedSessions";
 import { parseBackgroundTasks } from "./sse";
 import type {
   BackgroundTaskInfo,
@@ -909,6 +910,9 @@ export async function createSideChat(sourceId: string): Promise<{ childSessionId
     (source.hostOnline !== false || source.hostResumable)
   ) {
     await retrySession(sourceId);
+    // The parent is relaunching, so its "stopped" band no longer applies; a
+    // generic side chat never passes through the composer that would clear it.
+    clearSessionStopped(sourceId);
     source = await getSession(sourceId);
   }
   const { runnerId } = source;

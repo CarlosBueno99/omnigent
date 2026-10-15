@@ -114,7 +114,7 @@ import { isSideChatCommand, usesNativeSideChatFork } from "@/lib/sideChat";
 // pure helpers live in a leaf module so low-level session hooks can gate on temp
 // ids without an import cycle back to the store.
 import { isTempConvId, newTempConversation } from "@/lib/tempConversationId";
-import { clearSessionStopped } from "./stoppedSessions";
+import { clearSessionStopped, markSessionStopped, useStoppedSessions } from "./stoppedSessions";
 import { useTerminalActivityStore } from "./terminalActivity";
 import { terminalInfoFromResource, terminalsQueryKey, type TerminalInfo } from "@/lib/terminals";
 import type {
@@ -2343,10 +2343,13 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         : pinnedId === null
           ? get().status === "streaming"
           : setterForState(pinnedId)?.status === "streaming";
-    // Sending is the relaunch the stopped band promises, so a confirmed stop no
-    // longer describes this session.
+    // Sending is the relaunch the stopped band promises (a `/side` fork
+    // relaunches the parent too), so a confirmed stop no longer describes this
+    // session. Re-marked below if the relaunch never lands.
     const relaunchTargetId = pinnedId ?? get().conversationId;
-    if (!opensSideChat && relaunchTargetId !== null) clearSessionStopped(relaunchTargetId);
+    const clearedStopMarker =
+      relaunchTargetId !== null && relaunchTargetId in useStoppedSessions.getState().stoppedAt;
+    if (clearedStopMarker && relaunchTargetId !== null) clearSessionStopped(relaunchTargetId);
     if (!alreadyStreaming && !opensSideChat) {
       // Latch on the SAME entry as `status`, in one patch, so they can't
       // diverge — a new chat buffers both on root and `adoptPreSessionState`
@@ -2509,6 +2512,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // bubble. Settle local state from the POST response instead of
       // depending on the live stream being connected.
       if (postResult.denied) {
+        // The relaunch never ran, so restore the stopped band.
+        if (clearedStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
         // Target the session this send posted to: the user may have navigated
         // away while the POST was open, and settling the VISIBLE conversation
         // would clobber an unrelated chat's composer state.
@@ -2558,6 +2563,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // status transitions that happen during the turn.
       queryClient?.invalidateQueries({ queryKey: ["conversations"] });
     } catch (err) {
+      // The relaunch POST failed, so the session is still stopped — restore its band.
+      if (clearedStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
       if (initialDraft && !initialDispatched && !initialSendPending()) return;
       const { message, code } = describeSendFailure(err);
       // A codex `/side` that armed the side-chat latch (line ~2103) but then
@@ -2698,7 +2705,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         ? get().status === "streaming"
         : setterForState(pinnedId)?.status === "streaming";
     const relaunchTargetId = pinnedId ?? get().conversationId;
-    if (relaunchTargetId !== null) clearSessionStopped(relaunchTargetId);
+    const clearedStopMarker =
+      relaunchTargetId !== null && relaunchTargetId in useStoppedSessions.getState().stoppedAt;
+    if (clearedStopMarker && relaunchTargetId !== null) clearSessionStopped(relaunchTargetId);
     if (!alreadyStreaming) {
       // See `send`: latch and status on one entry, in one patch.
       pinnedSetter({ status: "streaming", activeResponse: null, sendLatchedAt: Date.now() });
@@ -2749,6 +2758,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         data: { kind: "skill", name, arguments: args },
       });
       if (postResult.denied) {
+        // The relaunch never ran, so restore the stopped band.
+        if (clearedStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
         // Denied commands publish no receipt, so nothing will pop the
         // optimistic echo — roll it back here alongside the status settle.
         // Targets the session the command posted to: a backgrounded
@@ -2781,6 +2792,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       }
       queryClient?.invalidateQueries({ queryKey: ["conversations"] });
     } catch (err) {
+      // The relaunch POST failed, so the session is still stopped — restore its band.
+      if (clearedStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
       const message = err instanceof Error ? err.message : String(err);
       // Settle the conversation this command targeted, wherever the user is
       // now: its echo must roll back and its status must not stay "streaming"
