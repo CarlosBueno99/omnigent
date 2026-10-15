@@ -501,8 +501,11 @@ def test_codex_provider_auth_failure_names_databricks_recovery_live_and_after_re
             expect(pill).not_to_contain_text("Codex ran into an error during this turn.")
             expect(pill.get_by_role("button", name="Retry", exact=True)).to_have_count(0)
             expect(pill.get_by_role("button", name="Resume session", exact=True)).to_have_count(0)
-            # Hold the expanded card so a recording shows it legibly.
-            page.wait_for_timeout(2_500)
+            if os.environ.get("OMNIGENT_E2E_RECORD_DIR") or (
+                request.config.getoption("--video", default="off") != "off"
+            ):
+                # Hold the expanded card so a recording shows it legibly.
+                page.wait_for_timeout(2_500)
     finally:
         httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0).raise_for_status()
 

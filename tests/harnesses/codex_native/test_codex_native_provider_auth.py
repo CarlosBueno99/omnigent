@@ -9,14 +9,15 @@ for that provider instead of ``codex login``.
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from omnigent.harnesses.codex_native import provider_auth
 from omnigent.harnesses.codex_native.bridge import (
     clear_bridge_state,
     codex_home_for_bridge_dir,
@@ -32,6 +33,7 @@ from omnigent.harnesses.codex_native.provider_auth import (
     databricks_cli_selector,
     diagnose_provider_auth_failure,
     is_provider_auth_error,
+    is_static_key_command,
     wrap_provider_auth_command,
 )
 
@@ -43,10 +45,18 @@ _UNAUTHENTICATED = json.dumps(
 )
 _OSS_HELPER = ProviderAuthHelper(provider="DatabricksOSS", databricks_profile="oss")
 _CODEX_EXIT_1 = "provider auth command `sh` exited with status exit status: 1"
+# The wrapper runs under the host's PATH, as Codex's helper does; the bridge dir
+# comes only from the CODEX_HOME each test chooses.
+_HOST_PATH = os.environ.get("PATH", "/usr/bin:/bin")
 
 
 def _run_wrapped(
-    bridge_dir: Path, auth_command: str, helper: ProviderAuthHelper, *, timeout_ms: int = 15_000
+    bridge_dir: Path,
+    auth_command: str,
+    helper: ProviderAuthHelper,
+    *,
+    timeout_ms: int = 15_000,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run *auth_command* through the wrapper exactly as Codex does: ``sh -c``."""
     codex_home = codex_home_for_bridge_dir(bridge_dir)
@@ -56,7 +66,8 @@ def _run_wrapped(
         ["sh", "-c", wrapped],
         capture_output=True,
         timeout=60,
-        env={"PATH": "/usr/bin:/bin", "CODEX_HOME": str(codex_home)},
+        env={"PATH": _HOST_PATH, "CODEX_HOME": str(codex_home)},
+        cwd=cwd,
         check=False,
     )
 
@@ -76,6 +87,7 @@ def test_wrapped_helper_passes_a_minted_token_through(tmp_path: Path) -> None:
     assert read_provider_auth_failure(tmp_path) is None
 
 
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the reported helper pipes through jq")
 def test_wrapped_helper_records_the_null_a_jq_filter_leaves(tmp_path: Path) -> None:
     """The reported shape: the CLI's JSON error becomes ``null`` + exit 1 under ``jq -er``."""
     helper = f"printf '%s' {shlex.quote(_UNAUTHENTICATED)} | jq -er .access_token"
@@ -129,7 +141,7 @@ def test_wrapped_helper_records_an_empty_token(tmp_path: Path) -> None:
 
 
 def test_wrapped_helper_redacts_and_bounds_what_it_records(tmp_path: Path) -> None:
-    """Credentials in the helper's output never reach the record; long output is capped."""
+    """Labeled credentials on stderr are redacted and free-form stdout is not kept at all."""
     jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlc2lnbmF0dXJl"
     helper = (
         f"echo 'access_token: {jwt}' >&2; echo 'Authorization: Bearer dapi{'a' * 40}' >&2; "
@@ -144,8 +156,46 @@ def test_wrapped_helper_redacts_and_bounds_what_it_records(tmp_path: Path) -> No
     assert jwt not in failure.stderr
     assert "dapi" + "a" * 40 not in failure.stderr
     assert failure.stderr.count("[REDACTED]") == 2
-    assert len(failure.stdout.encode()) < 2200
-    assert "more bytes" in failure.stdout
+    assert failure.stdout == "[output omitted: 6000 bytes]"
+
+
+def test_wrapped_helper_never_keeps_token_like_output(tmp_path: Path) -> None:
+    """A helper that prints a bare token and then fails leaks nothing to the record or card."""
+    token = "9f8e7d6c5b4a39281706f5e4d3c2b1a0f1e2d3c4"
+    helper = (
+        f"printf '%s' {token}; echo 'warn: refreshing {token} failed' >&2; "
+        "echo 'Error: token refresh failed' >&2; exit 1"
+    )
+
+    result = _run_wrapped(tmp_path, helper, _OSS_HELPER)
+
+    assert result.returncode == 1
+    failure = read_provider_auth_failure(tmp_path)
+    assert failure is not None
+    assert failure.stdout == f"[output omitted: {len(token)} bytes]"
+    assert token not in failure.stderr
+    assert failure.stderr == "warn: refreshing [REDACTED] failed\nError: token refresh failed"
+    diagnosis = diagnose_provider_auth_failure(_CODEX_EXIT_1, failure)
+    assert token not in diagnosis.cause
+    assert "Error: token refresh failed" in diagnosis.cause
+
+
+def test_wrapped_helper_ignores_a_workspace_package_named_omnigent(tmp_path: Path) -> None:
+    """Codex runs the helper in the session workspace; a checkout there must not shadow it."""
+    workspace = tmp_path / "workspace"
+    (workspace / "omnigent").mkdir(parents=True)
+    (workspace / "omnigent" / "__init__.py").write_text(
+        'raise RuntimeError("workspace package shadowed the installed omnigent")\n'
+    )
+    bridge_dir = tmp_path / "bridge"
+
+    result = _run_wrapped(
+        bridge_dir, "printf '%s\\n' eyJ-fake-token-value", _OSS_HELPER, cwd=workspace
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b"eyJ-fake-token-value\n"
+    assert read_provider_auth_failure(bridge_dir) is None
 
 
 def test_wrapped_helper_times_out_before_codex_and_records_it(tmp_path: Path) -> None:
@@ -166,7 +216,7 @@ def test_wrapped_helper_without_a_bridge_home_only_passes_through(tmp_path: Path
         ["sh", "-c", wrapped],
         capture_output=True,
         timeout=60,
-        env={"PATH": "/usr/bin:/bin", "CODEX_HOME": str(tmp_path / "elsewhere")},
+        env={"PATH": _HOST_PATH, "CODEX_HOME": str(tmp_path / "elsewhere")},
         check=False,
     )
 
@@ -185,7 +235,12 @@ def test_wrapped_command_names_the_interpreter_and_keeps_the_helper_verbatim() -
     )
 
     words = shlex.split(wrapped)
-    assert words[:3] == [sys.executable, "-m", "omnigent.harnesses.codex_native.provider_auth"]
+    assert words[:4] == [
+        sys.executable,
+        "-I",
+        "-m",
+        "omnigent.harnesses.codex_native.provider_auth",
+    ]
     assert words[-1] == helper
     assert words[words.index("--provider") + 1] == "DatabricksOSS"
     assert words[words.index("--databricks-profile") + 1] == "oss"
@@ -390,5 +445,17 @@ def test_relaunch_clears_a_recorded_helper_failure(tmp_path: Path) -> None:
     assert read_provider_auth_failure(tmp_path) is None
 
 
-def test_main_is_the_module_entry_point() -> None:
-    assert provider_auth.main(["--provider", "p", "--timeout-ms", "15000", "--", "exit 0"]) == 0
+@pytest.mark.parametrize(
+    ("auth_command", "expected"),
+    [
+        ("printf %s sk-static", True),
+        ("printf '%s' sk-static", True),
+        ('printf %s "$TOKEN"', False),
+        ("printf %s $(cat key)", False),
+        ("printf %s", False),
+        ("databricks auth token --profile oss | jq -r .access_token", False),
+    ],
+)
+def test_is_static_key_command(auth_command: str, expected: bool) -> None:
+    """Only a literal ``printf %s <key>`` skips the recorder; an expanded key can still fail."""
+    assert is_static_key_command(auth_command) is expected

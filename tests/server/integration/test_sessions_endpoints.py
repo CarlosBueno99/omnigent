@@ -5787,28 +5787,52 @@ _PROVIDER_AUTH_OUTPUT = (
     f"{_PROVIDER_AUTH_CARD['cause']}\n\nTry this: {_PROVIDER_AUTH_CARD['remediation']}\n\n"
     "Codex reported: provider auth command `sh` exited with status exit status: 1"
 )
+_PROVIDER_AUTH_FORWARDED = {
+    "error_code": "codex_provider_auth_failed",
+    **{f"error_{key}": value for key, value in _PROVIDER_AUTH_CARD.items()},
+}
 
 
 @pytest.mark.parametrize(
-    ("forwarded", "expected_code", "expected_card"),
+    ("forwarded", "output", "expected_code", "expected_card"),
     [
         (
-            {
-                "error_code": "codex_provider_auth_failed",
-                **{f"error_{key}": value for key, value in _PROVIDER_AUTH_CARD.items()},
-            },
+            _PROVIDER_AUTH_FORWARDED,
+            _PROVIDER_AUTH_OUTPUT,
             "codex_provider_auth_failed",
             _PROVIDER_AUTH_CARD,
         ),
         # Blank or non-string fields are an older runner's edge: the server classifies as before.
-        ({"error_code": "", "error_title": None, "error_cause": 7}, "codex_turn_error", {}),
+        (
+            {"error_code": "", "error_title": None, "error_cause": 7},
+            _PROVIDER_AUTH_OUTPUT,
+            "codex_turn_error",
+            {},
+        ),
+        # A code the forwarders are not known to diagnose is ignored, card and all.
+        (
+            {**_PROVIDER_AUTH_FORWARDED, "error_code": "made_up_code"},
+            _PROVIDER_AUTH_OUTPUT,
+            "codex_turn_error",
+            {},
+        ),
+        # The forwarded card describes its own code; it is dropped when the
+        # server's classification moves the failure elsewhere.
+        (
+            _PROVIDER_AUTH_FORWARDED,
+            'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED","message":'
+            '"Budget \\"team\\" has reached its limit of $100."}',
+            "budget_exhausted",
+            {},
+        ),
     ],
-    ids=["forwarder-diagnosed", "ignored-blanks"],
+    ids=["forwarder-diagnosed", "ignored-blanks", "unknown-code", "reclassified"],
 )
 async def test_forwarder_diagnosed_native_failure_keeps_its_card(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     forwarded: dict[str, Any],
+    output: str,
     expected_code: str,
     expected_card: dict[str, str],
 ) -> None:
@@ -5836,7 +5860,7 @@ async def test_forwarder_diagnosed_native_failure_keeps_its_card(
                 "item_data": {
                     "role": "assistant",
                     "agent": "codex-native-ui",
-                    "content": [{"type": "output_text", "text": _PROVIDER_AUTH_OUTPUT}],
+                    "content": [{"type": "output_text", "text": output}],
                 },
             },
         },
@@ -5849,7 +5873,7 @@ async def test_forwarder_diagnosed_native_failure_keeps_its_card(
             "data": {
                 "status": "failed",
                 "response_id": "resp_provider_auth",
-                "output": _PROVIDER_AUTH_OUTPUT,
+                "output": output,
                 **forwarded,
             },
         },
@@ -5859,7 +5883,7 @@ async def test_forwarder_diagnosed_native_failure_keeps_its_card(
     assert len(failed_events) == 1
     error = failed_events[0]["error"]
     assert error["code"] == expected_code
-    assert error["message"] == _PROVIDER_AUTH_OUTPUT
+    assert error["message"] == output
     for field in ("title", "cause", "remediation"):
         assert error[field] == expected_card.get(field)
 
@@ -5867,7 +5891,7 @@ async def test_forwarder_diagnosed_native_failure_keeps_its_card(
     assert snapshot_resp.status_code == 200, snapshot_resp.text
     last_task_error = snapshot_resp.json()["last_task_error"]
     # The persisted label keeps a bounded prefix of the long message.
-    assert _PROVIDER_AUTH_OUTPUT.startswith(last_task_error.pop("message").rstrip("…"))
+    assert output.startswith(last_task_error.pop("message").rstrip("…"))
     assert last_task_error == {
         "code": expected_code,
         "agent_name": "codex-native-ui",

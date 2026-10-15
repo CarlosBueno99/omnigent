@@ -38,6 +38,14 @@ _DATABRICKS_TOKEN_COMMAND = ("databricks", "auth", "token")
 _SHELL_SEPARATORS = frozenset({"|", "||", "&&", ";", "&"})
 # Each captured stream is kept to this many bytes in the record and the card.
 _OUTPUT_LIMIT_BYTES = 2048
+# The only stdout kept verbatim: what ``jq -e`` prints for a missing field.
+_SAFE_STDOUT = frozenset({"", "null", "true", "false"})
+# Diagnostic keys kept from a JSON error object on stdout; everything else may be a token.
+_ERROR_JSON_KEYS = ("error_code", "error", "error_description", "message", "details", "code")
+# An unlabeled opaque word with a digit (hex, base64) is treated as a credential.
+_OPAQUE_WORD = re.compile(
+    r"(?<![\w./:@%-])(?=[A-Za-z0-9_+=-]*\d)[A-Za-z0-9_+=-]{20,}(?![\w./:@%-])"
+)
 _CODEX_MESSAGE_LIMIT_BYTES = 512
 # Finish (and record) before Codex's own timeout kills this process.
 _TIMEOUT_MARGIN_MS = 1000
@@ -88,7 +96,7 @@ class ProviderAuthHelper:
             return f"provider {self.provider!r} (Databricks workspace {self.databricks_host})"
         return f"provider {self.provider!r}"
 
-    def databricks_cli_selector(self) -> str:
+    def cli_selector_flag(self) -> str:
         """:returns: The CLI selector, e.g. ``"--profile oss"`` or ``"--host https://..."``."""
         if self.databricks_profile is not None:
             return f"--profile {shlex.quote(self.databricks_profile)}"
@@ -214,13 +222,18 @@ def is_static_key_command(auth_command: str) -> bool:
 
     :param auth_command: The provider's auth command, e.g. ``"printf %s sk-x"``.
     :returns: ``True`` for the ``printf %s <key>`` form a static credential is
-        wrapped in; it cannot fail, so it is not worth a recorder.
+        wrapped in; it cannot fail, so it is not worth a recorder. A key that
+        the shell still has to expand (``printf %s "$TOKEN"``) can.
     """
     try:
         words = shlex.split(auth_command)
     except ValueError:
         return False
-    return len(words) == 3 and words[:2] == ["printf", "%s"]
+    return (
+        len(words) == 3
+        and words[:2] == ["printf", "%s"]
+        and not any(character in words[2] for character in "$`")
+    )
 
 
 def databricks_cli_selector(auth_command: str) -> tuple[str | None, str | None]:
@@ -278,6 +291,9 @@ def wrap_provider_auth_command(
     """
     argv = [
         sys.executable or "python3",
+        # Isolated mode: the helper inherits the session workspace as cwd,
+        # which must not shadow the installed omnigent package.
+        "-I",
         "-m",
         _MODULE,
         "--provider",
@@ -368,7 +384,7 @@ def _diagnose_from_codex_message(codex_message: str) -> ProviderAuthDiagnosis:
 
 
 def _databricks_remediation(helper: ProviderAuthHelper, outcome: str, login_required: bool) -> str:
-    selector = helper.databricks_cli_selector()
+    selector = helper.cli_selector_flag()
     login = f"`databricks auth login {selector}`"
     if login_required:
         return (
@@ -444,21 +460,45 @@ def _bounded(text: str, limit: int, *, keep: str) -> str:
     return f"[{omitted} earlier bytes] … " + encoded[-limit:].decode("utf-8", errors="ignore")
 
 
-def _captured(stream: bytes, *, keep: str) -> str:
+def _captured_stdout(stream: bytes) -> str:
+    """Keep stdout only when it cannot carry a token: a ``null``-style value or a JSON error."""
+    text = stream.decode("utf-8", errors="replace").strip()
+    if text in _SAFE_STDOUT:
+        return text
+    parsed = _json_object(text)
+    if parsed is not None:
+        kept = {
+            key: parsed[key] for key in _ERROR_JSON_KEYS if isinstance(parsed.get(key), (str, int))
+        }
+        if kept:
+            return _bounded(
+                _redacted(json.dumps(kept, sort_keys=True)), _OUTPUT_LIMIT_BYTES, keep="head"
+            )
+    return f"[output omitted: {len(stream)} bytes]"
+
+
+def _captured_stderr(stream: bytes) -> str:
     return _bounded(
-        _sanitized(stream.decode("utf-8", errors="replace")), _OUTPUT_LIMIT_BYTES, keep=keep
+        _redacted(stream.decode("utf-8", errors="replace")), _OUTPUT_LIMIT_BYTES, keep="tail"
     )
+
+
+def _redacted(text: str) -> str:
+    return _OPAQUE_WORD.sub("[REDACTED]", _sanitized(text))
 
 
 def _bridge_dir_from_env(env: Mapping[str, str]) -> Path | None:
     """The bridge dir behind the ``CODEX_HOME`` Omnigent gives its app-server."""
-    from omnigent.harnesses.codex_native.bridge import bridge_dir_for_codex_home
+    from omnigent.harnesses.codex_native.bridge import (
+        CODEX_HOME_DIR_NAME,
+        bridge_dir_for_codex_home,
+    )
 
     codex_home = env.get("CODEX_HOME")
     if not codex_home:
         return None
     home = Path(codex_home)
-    if home.name != "codex-home" or not home.parent.is_dir():
+    if home.name != CODEX_HOME_DIR_NAME or not home.parent.is_dir():
         return None
     return bridge_dir_for_codex_home(home)
 
@@ -505,7 +545,11 @@ def main(argv: list[str] | None = None) -> int:
         stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         _end_process_group(proc)
-        stdout, stderr = proc.communicate()
+        # A descendant that left the process group can keep the pipes open.
+        try:
+            stdout, stderr = proc.communicate(timeout=_TIMEOUT_MARGIN_MS / 2000)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = b"", b""
         if bridge_dir is not None:
             record_provider_auth_failure(
                 bridge_dir,
@@ -513,8 +557,8 @@ def main(argv: list[str] | None = None) -> int:
                     helper=helper,
                     outcome=OUTCOME_TIMED_OUT,
                     exit_status=None,
-                    stdout=_captured(stdout, keep="head"),
-                    stderr=_captured(stderr, keep="tail"),
+                    stdout=_captured_stdout(stdout),
+                    stderr=_captured_stderr(stderr),
                 ),
             )
         sys.stderr.buffer.write(stderr)
@@ -530,8 +574,8 @@ def main(argv: list[str] | None = None) -> int:
                 helper=helper,
                 outcome=OUTCOME_EXITED if status != 0 else OUTCOME_EMPTY_TOKEN,
                 exit_status=status,
-                stdout=_captured(stdout, keep="head"),
-                stderr=_captured(stderr, keep="tail"),
+                stdout=_captured_stdout(stdout),
+                stderr=_captured_stderr(stderr),
             ),
         )
     sys.stdout.buffer.write(stdout)

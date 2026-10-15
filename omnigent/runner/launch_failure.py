@@ -374,6 +374,11 @@ _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+# Codes a native forwarder may diagnose itself and send on a failed status
+# edge (``error_code``); the server classifies every other failure.
+FORWARDED_TURN_ERROR_CODES = frozenset({"codex_provider_auth_failed"})
+
+
 def describe_failure_code(code: str | None) -> str | None:
     """Return a one-line English description for a failure *code*.
 

@@ -53,6 +53,7 @@ from omnigent.host.frames import (
 from omnigent.mcp_selection import mcp_selection_revision, selected_mcp_spec
 from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
 from omnigent.runner.launch_failure import (
+    FORWARDED_TURN_ERROR_CODES,
     classify_native_turn_error,
     diagnose_client_update_required,
     diagnose_codex_model_rejection,
@@ -1977,13 +1978,15 @@ def register_events_routes(
                     agent_store=agent_store,
                     agent_cache=agent_cache,
                 )
-                # A forwarder that diagnosed the failure itself names its code
-                # and card fields. Otherwise native forwarders share the output
-                # and reauth fields; Codex-specific codes require a resolved
-                # Codex session.
+                # A forwarder that diagnosed the failure itself names its code and
+                # card fields; otherwise the server classifies from the shared
+                # output/reauth fields.
                 forwarded = _forwarded_status_error(data)
-                if "code" in forwarded:
-                    error_code = forwarded["code"]
+                forwarded_code = forwarded.get("code")
+                if forwarded_code not in FORWARDED_TURN_ERROR_CODES:
+                    forwarded_code = None
+                if forwarded_code is not None:
+                    error_code = forwarded_code
                 elif harness == "codex-native" and data.get("reauth_required") is True:
                     error_code = "codex_reauth_required"
                 elif harness == "codex-native" and body.data.get("output"):
@@ -1991,6 +1994,12 @@ def register_events_routes(
                 else:
                     error_code = "native_turn_error"
                 classified_code = classify_native_turn_error(error_code, output)
+                # The forwarded card describes the forwarded code only.
+                card = (
+                    forwarded
+                    if forwarded_code is not None and classified_code == forwarded_code
+                    else {}
+                )
                 # The old-CLI refusal carries the versions, so the card can name the fix.
                 diagnosis = (
                     diagnose_client_update_required(output)
@@ -2002,12 +2011,14 @@ def register_events_routes(
                     "native_turn_error",
                 }:
                     diagnosis = diagnose_codex_model_rejection(output)
+                if card:
+                    diagnosis = None
                 status_error = ErrorDetail(
                     code=classified_code,
                     message=output.strip(),
-                    title=forwarded.get("title") or (diagnosis.title if diagnosis else None),
-                    cause=forwarded.get("cause") or (diagnosis.cause if diagnosis else None),
-                    remediation=forwarded.get("remediation")
+                    title=card.get("title") or (diagnosis.title if diagnosis else None),
+                    cause=card.get("cause") or (diagnosis.cause if diagnosis else None),
+                    remediation=card.get("remediation")
                     or (diagnosis.remediation if diagnosis else None),
                 )
             if status_error is not None:

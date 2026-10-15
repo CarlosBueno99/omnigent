@@ -62,6 +62,8 @@ _STARTUP_ERROR_FILE = "startup_error.json"
 _STARTUP_TIMEOUT_FILE = "startup_timeout.json"
 _EGRESS_CERTIFICATE_FILE = "egress_certificate_failure.json"
 _PROVIDER_AUTH_FAILURE_FILE = "provider_auth_failure.json"
+#: Basename of the private per-session ``CODEX_HOME`` inside a bridge directory.
+CODEX_HOME_DIR_NAME = "codex-home"
 # Applied model/effort that config.toml failed to record, for every reader of it.
 _UNMIRRORED_SETTINGS_FILE = "unmirrored_settings.json"
 _UNMIRRORED_SETTINGS_LOCK_FILE = "unmirrored_settings.lock"
@@ -497,7 +499,7 @@ def codex_home_for_bridge_dir(bridge_dir: Path) -> Path:
     :param bridge_dir: Native Codex bridge directory.
     :returns: Absolute per-session ``CODEX_HOME`` directory.
     """
-    return bridge_dir / "codex-home"
+    return bridge_dir / CODEX_HOME_DIR_NAME
 
 
 def bridge_dir_for_codex_home(codex_home: Path) -> Path:
