@@ -56,6 +56,18 @@ if __name__ == "__main__":
 """
 
 
+def _isolated_state(root: Path) -> dict[str, str]:
+    """Point every CLI state directory at *root*."""
+    state = {
+        "HOME": root / "home",
+        "OMNIGENT_CONFIG_HOME": root / "config",
+        "OMNIGENT_DATA_DIR": root / "data",
+    }
+    for path in state.values():
+        path.mkdir(exist_ok=True)
+    return {key: str(path) for key, path in state.items()}
+
+
 def _isolated_env(root: Path) -> dict[str, str]:
     """Isolate CLI state and credentials; use this checkout as the runtime."""
     env = dict(os.environ)
@@ -64,9 +76,7 @@ def _isolated_env(root: Path) -> dict[str, str]:
     # Skip empty entries: an empty PYTHONPATH entry puts the cwd on sys.path at startup.
     pythonpath = (str(_REPO_ROOT), env.get("PYTHONPATH", ""))
     env.update(
-        HOME=str(root / "home"),
-        OMNIGENT_CONFIG_HOME=str(root / "config"),
-        OMNIGENT_DATA_DIR=str(root / "data"),
+        _isolated_state(root),
         PYTHONPATH=os.pathsep.join(entry for entry in pythonpath if entry),
     )
     return env
@@ -126,8 +136,7 @@ def test_cli_dispatch_ignores_workspace_shadow_of_runtime_dependency(
     tmp_path: Path, entry: str
 ) -> None:
     """``omnigent diagnose`` from a workspace behaves exactly as from an empty directory."""
-    for name in ("home", "config", "data", "clean"):
-        (tmp_path / name).mkdir()
+    (tmp_path / "clean").mkdir()
     workspace = tmp_path / "workspace"
     marker = tmp_path / "workspace-imports.jsonl"
     package = workspace / _SHADOWED_DEPENDENCY
@@ -145,6 +154,23 @@ def test_cli_dispatch_ignores_workspace_shadow_of_runtime_dependency(
     assert _SHADOWED_DEPENDENCY in _imported_modules(control.stderr), (
         f"`diagnose` no longer imports {_SHADOWED_DEPENDENCY!r} after dispatch; "
         "pick another dependency it imports lazily so this test stays meaningful."
+    )
+    preloaded = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            f"import sys, omnigent.cli; print({_SHADOWED_DEPENDENCY!r} in sys.modules)",
+        ],
+        cwd=tmp_path / "clean",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=_CLI_TIMEOUT_S,
+    )
+    assert preloaded.returncode == 0 and preloaded.stdout.strip() == "False", (
+        f"importing omnigent.cli already loads {_SHADOWED_DEPENDENCY!r}, so the workspace run "
+        f"would not exercise dispatch.\n{preloaded.stdout}\n{preloaded.stderr}"
     )
 
     shadowed = _run_diagnose(launcher, cwd=workspace, env=env)
@@ -170,6 +196,8 @@ def test_console_entry_appends_workspace_after_startup_entries(
 
     for key in _ENV_TO_CLEAR:
         monkeypatch.delenv(key, raising=False)
+    for key, value in _isolated_state(tmp_path).items():
+        monkeypatch.setenv(key, value)
     monkeypatch.chdir(tmp_path)
     startup_path = [entry for entry in sys.path if entry != str(tmp_path)]
     monkeypatch.setattr(sys, "path", list(startup_path))

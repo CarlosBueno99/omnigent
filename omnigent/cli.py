@@ -2247,8 +2247,8 @@ def main() -> None:
     Also appends the current working directory to ``sys.path`` so
     dotted callables declared in user YAMLs (``callable:
     mypackage.mymodule.my_fn``) resolve against the user's project.
-    It goes after the installed packages so a workspace module can
-    never shadow the runtime or its dependencies.
+    Appending adds the workspace without giving it precedence over
+    the import paths the interpreter already has.
 
     Sets up the always-on CLI diagnostics log before Click dispatch
     so unhandled exceptions are captured even when the user didn't
