@@ -633,7 +633,7 @@ _TRANSPORT_EXC_NAMES = frozenset(
 )
 
 
-def rpc_error_status_name(exc: BaseException) -> str | None:
+def _rpc_error_status_name(exc: BaseException) -> str | None:
     """Return the gRPC status name a failed call carries, or ``None``.
 
     Matched structurally — an ``RpcError`` ancestor by class name plus a
@@ -663,9 +663,9 @@ def is_cancelled_rpc_error(exc: BaseException) -> bool:
 
     :param exc: The exception to inspect.
     :returns: ``True`` only for a peer-cancelled RPC error (matched
-        structurally, see :func:`rpc_error_status_name`).
+        structurally, see :func:`_rpc_error_status_name`).
     """
-    return rpc_error_status_name(exc) == "CANCELLED"
+    return _rpc_error_status_name(exc) == "CANCELLED"
 
 
 def is_permission_denied_rpc_error(exc: BaseException) -> bool:
@@ -676,9 +676,9 @@ def is_permission_denied_rpc_error(exc: BaseException) -> bool:
 
     :param exc: The exception to inspect.
     :returns: ``True`` only for a permission-denied RPC error (matched
-        structurally, see :func:`rpc_error_status_name`).
+        structurally, see :func:`_rpc_error_status_name`).
     """
-    return rpc_error_status_name(exc) == "PERMISSION_DENIED"
+    return _rpc_error_status_name(exc) == "PERMISSION_DENIED"
 
 
 # Statuses a peer returns when it refuses the request content itself — an
@@ -699,9 +699,9 @@ def is_payload_rejected_rpc_error(exc: BaseException) -> bool:
 
     :param exc: The exception to inspect.
     :returns: ``True`` only for a payload-rejected RPC error (matched
-        structurally, see :func:`rpc_error_status_name`).
+        structurally, see :func:`_rpc_error_status_name`).
     """
-    return rpc_error_status_name(exc) in _PAYLOAD_REJECTED_RPC_STATUSES
+    return _rpc_error_status_name(exc) in _PAYLOAD_REJECTED_RPC_STATUSES
 
 
 # EDQUOT is POSIX-only; Windows reports a full disk as ENOSPC.

@@ -202,10 +202,16 @@ async def test_backend_outage_on_decrypt_remains_500(
         "_decode_item_data_batch",
         Mock(side_effect=_rpc_error("UNAVAILABLE")),
     )
+    caplog.clear()
     with caplog.at_level(logging.WARNING, logger="omnigent.server.app"):
         response = await catchall_client.get(f"/v1/sessions/{session['id']}/items")
 
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "internal_error"
-    (record,) = [r for r in caplog.records if r.name == "omnigent.server.app"]
+    (record,) = [
+        r
+        for r in caplog.records
+        if r.name == "omnigent.server.app" and r.levelno >= logging.WARNING
+    ]
     assert record.levelno == logging.ERROR
+    assert record.getMessage().startswith("Unhandled exception:")

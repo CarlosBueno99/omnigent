@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from sqlalchemy import event, text
 from sqlalchemy.exc import DBAPIError
@@ -7439,6 +7440,22 @@ def test_list_items_degrades_undecodable_item_instead_of_failing(db_uri: str) ->
     assert page.data[2].data.content[0]["text"] == "after"
 
 
+def test_list_items_type_filter_returns_unreadable_row_as_placeholder(db_uri: str) -> None:
+    """A ``type`` filter selects rows by their stored type; a selected row that
+    cannot be decoded still comes back as an ``error`` placeholder rather than
+    failing the page or silently disappearing."""
+    store = _FrameLimitedDecodeStore(db_uri)
+    conv = store.create_conversation()
+    store.append(conv.id, [_user_message("before", "resp_a")])
+    store.append(conv.id, [_user_message("y" * (store.frame_limit + 1), "resp_big")])
+    store.append(conv.id, [_user_message("after", "resp_b")])
+
+    page = store.list_items(conv.id, type="message")
+
+    assert [item.type for item in page.data] == ["message", "error", "message"]
+    assert page.data[1].response_id == "resp_big"
+
+
 def test_list_items_degrades_sole_oversized_row(db_uri: str) -> None:
     """A page made of one oversized row degrades to one placeholder rather than
     failing: a one-message conversation stays openable."""
@@ -7481,13 +7498,22 @@ def test_list_items_degrades_row_with_corrupt_data(db_uri: str) -> None:
         _rpc_error("UNAVAILABLE", "failed to connect to all addresses"),
         _rpc_error("CANCELLED", "Cancelled"),
         ConnectionError("decrypt sidecar unreachable"),
+        httpx.ConnectError("decrypt service unreachable"),
+        TypeError("decode seam defect"),
     ],
-    ids=["permission_denied", "unavailable", "cancelled", "connection_error"],
+    ids=[
+        "permission_denied",
+        "unavailable",
+        "cancelled",
+        "connection_error",
+        "httpx_connect_error",
+        "seam_defect",
+    ],
 )
 def test_list_items_propagates_backend_failures_unchanged(db_uri: str, error: Exception) -> None:
-    """A decode failure that is the backend's own state — a denial, an outage,
-    a cancelled or refused connection — is not an unreadable row: it propagates
-    as raised, after a single call, so the app's existing 403/499/500 handling
+    """A decode failure that is not about a row's payload — a denial, an outage,
+    a cancelled or refused connection, a defect inside the seam — propagates as
+    raised, after a single call, so the app's existing 403/499/500 handling
     still applies instead of a page of placeholders."""
     store = _FailingDecodeStore(db_uri, error)
     conv = store.create_conversation()
@@ -7499,6 +7525,40 @@ def test_list_items_propagates_backend_failures_unchanged(db_uri: str, error: Ex
 
     assert excinfo.value is error
     assert store.decode_calls == 1
+
+
+def test_list_items_propagates_when_even_the_smallest_row_is_refused(db_uri: str) -> None:
+    """RESOURCE_EXHAUSTED also means quota or overload. When the smallest row on
+    the page is refused on its own, the backend is refusing the call: the
+    original error propagates after that one probe instead of a page of
+    placeholders built from one decode call per halving."""
+    error = _rpc_error("RESOURCE_EXHAUSTED", "decrypt quota exceeded")
+    store = _FailingDecodeStore(db_uri, error)
+    conv = store.create_conversation()
+    store.append(conv.id, [_user_message("a", "resp_a"), _user_message("b", "resp_b")])
+    store.decode_calls = 0
+
+    with pytest.raises(type(error)) as excinfo:
+        store.list_items(conv.id)
+
+    assert excinfo.value is error
+    assert store.decode_calls == 2
+
+
+def test_get_item_degrades_unreadable_row(db_uri: str) -> None:
+    """A point lookup of a row that ``list_items`` serves as a placeholder
+    returns the same placeholder instead of raising."""
+    store = _FrameLimitedDecodeStore(db_uri)
+    conv = store.create_conversation()
+    [big] = store.append(conv.id, [_user_message("q" * (store.frame_limit + 1), "resp_big")])
+
+    item = store.get_item(conv.id, big.id)
+
+    assert item is not None
+    assert item.type == "error"
+    assert isinstance(item.data, ErrorData)
+    assert item.data.code == "item_data_unreadable"
+    assert item.id == big.id
 
 
 def test_latest_message_summaries_survive_undecodable_item(db_uri: str) -> None:
