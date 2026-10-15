@@ -632,17 +632,22 @@ async def test_tunnel_boot_hands_its_auth_resolution_to_create_app(
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform == "win32", reason="direct-attach listener is POSIX-only")
-@pytest.mark.parametrize("lifespan_exit_fails", [False, True])
-async def test_fatal_tunnel_rejection_still_stops_listener_and_lifespan(
+@pytest.mark.parametrize(
+    ("tunnel_rejected", "lifespan_exit_fails"),
+    [(True, False), (True, True), (False, True)],
+)
+async def test_tunnel_exit_runs_full_teardown(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    tunnel_rejected: bool,
     lifespan_exit_fails: bool,
 ) -> None:
-    """A tunnel that fails before connecting must not skip the runner teardown.
+    """Teardown completes whether the tunnel was rejected or closed normally.
 
-    Otherwise ``asyncio.run`` cancels the still-running direct-attach listener
-    and its lifespan traceback lands above the concise exit reason in the log.
-    A teardown failure is logged rather than replacing that exit reason.
+    A tunnel that fails before connecting must not skip it, or ``asyncio.run``
+    cancels the still-running direct-attach listener and its lifespan traceback
+    lands above the concise exit reason in the log. A teardown failure is then
+    logged rather than replacing that reason; an orderly shutdown propagates it.
     """
     from types import SimpleNamespace
 
@@ -669,10 +674,11 @@ async def test_fatal_tunnel_rejection_still_stops_listener_and_lifespan(
     async def _start_listener(_app: object) -> _Listener:
         return _Listener()
 
-    async def _reject_tunnel(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError(
-            f"{RUNNER_TUNNEL_REJECTION_PREFIX}(HTTP 401 persisted across 3 attempts)"
-        )
+    async def _serve_tunnel(*_args: object, **_kwargs: object) -> None:
+        if tunnel_rejected:
+            raise RuntimeError(
+                f"{RUNNER_TUNNEL_REJECTION_PREFIX}(HTTP 401 persisted across 3 attempts)"
+            )
 
     app = SimpleNamespace(
         router=SimpleNamespace(lifespan_context=_lifespan),
@@ -688,7 +694,7 @@ async def test_fatal_tunnel_rejection_still_stops_listener_and_lifespan(
     monkeypatch.setattr(entry_mod, "create_app", lambda **_kwargs: app)
     monkeypatch.setattr(entry_mod.gc, "freeze", lambda: None)
     monkeypatch.setattr("omnigent.runner.identity.get_stable_runner_id", lambda: "runner-test-id")
-    monkeypatch.setattr("omnigent.runner.transports.ws_tunnel.serve.serve_tunnel", _reject_tunnel)
+    monkeypatch.setattr("omnigent.runner.transports.ws_tunnel.serve.serve_tunnel", _serve_tunnel)
     monkeypatch.setattr(
         "omnigent.runner.direct_attach.start_direct_attach_listener", _start_listener
     )
@@ -697,17 +703,19 @@ async def test_fatal_tunnel_rejection_still_stops_listener_and_lifespan(
         lambda *_args, **_kwargs: object(),
     )
 
-    with (
-        caplog.at_level(logging.WARNING),
-        pytest.raises(RuntimeError, match=RUNNER_TUNNEL_REJECTION_PREFIX),
-    ):
+    expected = (
+        pytest.raises(RuntimeError, match=RUNNER_TUNNEL_REJECTION_PREFIX)
+        if tunnel_rejected
+        else pytest.raises(OSError, match="teardown failed")
+    )
+    with caplog.at_level(logging.WARNING), expected:
         await entry_mod._run_tunnel_from_env()
 
     assert events == ["lifespan enter", "listener stop", "lifespan exit"]
     teardown_warnings = [
         record for record in caplog.records if "runner teardown failed" in record.getMessage()
     ]
-    assert bool(teardown_warnings) == lifespan_exit_fails
+    assert bool(teardown_warnings) == (tunnel_rejected and lifespan_exit_fails)
 
 
 def test_make_auth_token_factory_none_without_creds_or_binding_token(
