@@ -79,9 +79,9 @@ def test_merge_effective_config_ignores_invalid_project_default(bad_default: obj
     }
 
 
-def test_merge_effective_config_scalar_global_no_deep_merge() -> None:
-    # Global scalar + local mapping: local (mapping) wins outright as a
-    # whole-value replace — only deep-merge when BOTH are mappings.
+def test_merge_effective_config_scalar_global_project_default_wins() -> None:
+    # A scalar user harness carries no launch settings to preserve, so the
+    # project's default selection applies on top of an empty trusted mapping.
     g = {"harness": "claude-sdk"}
     loc = {"harness": {"default": "codex"}}
     assert _merge_effective_config(g, loc) == {"harness": {"default": "codex"}}

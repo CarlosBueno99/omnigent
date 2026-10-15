@@ -5993,19 +5993,25 @@ def test_config_list_tolerates_non_string_harness_override_keys(
 
 
 @pytest.mark.parametrize(
-    "default_yaml",
-    ["  default: [bad]\n", '  default: ""\n', "  default: 123\n"],
+    "harness_yaml",
+    [
+        "harness:\n  default: [bad]\n",
+        'harness:\n  default: ""\n',
+        "harness:\n  default: 123\n",
+        'harness: ""\n',
+        "harness: 123\n",
+    ],
 )
 def test_config_list_notes_ignored_invalid_project_harness_default(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    default_yaml: str,
+    harness_yaml: str,
 ) -> None:
-    """An invalid project ``harness.default`` is reported as ignored, not dropped silently."""
+    """An invalid project harness default (mapping or scalar) is reported, not dropped silently."""
     monkeypatch.chdir(tmp_path)
     local_path = tmp_path / ".omnigent" / "config.yaml"
     local_path.parent.mkdir()
-    local_path.write_text("harness:\n" + default_yaml)
+    local_path.write_text(harness_yaml)
     monkeypatch.setattr("omnigent.cli._load_global_config", dict)
     monkeypatch.setattr("omnigent.cli._print_credentials_by_harness", lambda: None)
 
@@ -6015,6 +6021,25 @@ def test_config_list_notes_ignored_invalid_project_harness_default(
     # The malformed value fails safe but is not silently swallowed.
     assert "(none set" not in result.output
     assert "ignored invalid project harness default" in result.output
+
+
+def test_config_list_shows_scalar_project_harness_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A valid scalar project ``harness`` selects the default with no ignored notice."""
+    monkeypatch.chdir(tmp_path)
+    local_path = tmp_path / ".omnigent" / "config.yaml"
+    local_path.parent.mkdir()
+    local_path.write_text("harness: codex\n")
+    monkeypatch.setattr("omnigent.cli._load_global_config", dict)
+    monkeypatch.setattr("omnigent.cli._print_credentials_by_harness", lambda: None)
+
+    result = CliRunner().invoke(cli, ["config", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "harness=codex" in result.output
+    assert "ignored invalid project harness default" not in result.output
 
 
 def test_config_unset_removes_key(
