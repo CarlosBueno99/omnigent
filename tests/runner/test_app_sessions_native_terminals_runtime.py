@@ -1285,12 +1285,18 @@ async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_res
         source_home = codex_home_for_bridge_dir(bridge_dir_for_bridge_id(source_id))
         source_rollout_dir = source_home / "sessions" / "2026" / "06" / "05"
         source_rollout_dir.mkdir(parents=True)
+        # An older turn on the clone's own model precedes the pinned turn, so
+        # only the newest turn_context may decide the fork path.
         source_records = (
             {"type": "session_meta", "payload": {"id": source_thread, "cwd": "/old/source/dir"}},
             {
                 "type": "turn_context",
+                "payload": {"turn_id": "turn_1", "cwd": "/old/source/dir", "model": "gpt-5-default"},
+            },
+            {
+                "type": "turn_context",
                 "payload": {
-                    "turn_id": "turn_1",
+                    "turn_id": "turn_2",
                     "cwd": "/old/source/dir",
                     "model": source_turn_model,
                 },

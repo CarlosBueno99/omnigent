@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 from pathlib import Path
 
@@ -17,14 +18,16 @@ def find_thread_rollout(codex_home: Path, thread_id: str) -> Path | None:
     :param codex_home: A per-session private ``CODEX_HOME``, e.g.
         ``Path("~/.omnigent/codex-native/<hash>/codex-home")``.
     :param thread_id: Codex thread id / rollout stem, e.g.
-        ``"019e96aa-0be2-7343-8d3b-6f914d60936b"``. Callers validate it.
+        ``"019e96aa-0be2-7343-8d3b-6f914d60936b"``. Matched literally.
     :returns: Path to the most recently modified matching rollout, or
         ``None`` when none exists on this host.
+    :raises OSError: If a candidate rollout cannot be inspected.
     """
     sessions = codex_home / "sessions"
     if not sessions.is_dir():
         return None
-    matches = [p for p in sessions.glob(f"**/rollout-*-{thread_id}.jsonl") if p.is_file()]
+    pattern = f"**/rollout-*-{glob.escape(thread_id)}.jsonl"
+    matches = [p for p in sessions.glob(pattern) if p.is_file()]
     if not matches:
         return None
     return max(matches, key=lambda path: path.stat().st_mtime)
@@ -45,7 +48,7 @@ def last_turn_context_model(rollout_path: Path) -> str | None:
     :raises OSError: If the rollout cannot be read.
     """
     model: str | None = None
-    with rollout_path.open(encoding="utf-8") as lines:
+    with rollout_path.open(encoding="utf-8", errors="replace") as lines:
         for line in lines:
             if '"turn_context"' not in line:
                 continue

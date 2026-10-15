@@ -5079,7 +5079,8 @@ async def _auto_create_codex_terminal(
         # Codex compacts a resumed thread on its last recorded turn's model before
         # the first turn on another model; a clone pinned to an unusable (over
         # budget) model would stay blocked, so it rebuilds from items instead.
-        source_turn_model = _codex_source_rollout_last_turn_model(
+        source_turn_model = await asyncio.to_thread(
+            _codex_source_rollout_last_turn_model,
             source_session_id=launch_config.fork_source_id,
             source_thread_id=launch_config.fork_source_external_id,
         )

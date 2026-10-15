@@ -1937,10 +1937,10 @@ def _codex_source_rollout_last_turn_model(
         ``None`` when the rollout is missing, unreadable, or names no model.
     """
     source_home = codex_home_for_bridge_dir(bridge_dir_for_bridge_id(source_session_id))
-    source = _find_codex_rollout(source_home, source_thread_id)
-    if source is None:
-        return None
     try:
+        source = _find_codex_rollout(source_home, source_thread_id)
+        if source is None:
+            return None
         return last_turn_context_model(source)
     except OSError:
         return None

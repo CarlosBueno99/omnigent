@@ -27,9 +27,11 @@ __all__ = [
     "FailureDiagnosis",
     "classify_native_turn_error",
     "classify_terminal_failure",
+    "codex_previous_model_budget_hint",
     "describe_failure_code",
     "diagnose_client_update_required",
     "diagnose_codex_model_rejection",
+    "diagnose_codex_previous_model_budget",
 ]
 
 

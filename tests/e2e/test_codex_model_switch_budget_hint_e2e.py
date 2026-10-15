@@ -247,7 +247,9 @@ async def test_budget_refusal_after_model_switch_explains_previous_model_compact
         )
         rollouts = sorted((codex_home / "sessions").glob("**/rollout-*.jsonl"))
         assert len(rollouts) == 1, f"expected one rollout, found {rollouts}"
-        thread_match = re.search(r"-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$", rollouts[0].stem)
+        thread_match = re.search(
+            r"-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$", rollouts[0].stem
+        )
         assert thread_match is not None, rollouts[0].name
         thread_id = thread_match.group(1)
         assert find_thread_rollout(codex_home, thread_id) == rollouts[0]
