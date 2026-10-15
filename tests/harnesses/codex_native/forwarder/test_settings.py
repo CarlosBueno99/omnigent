@@ -22,6 +22,8 @@ import pytest
 from omnigent.harnesses.codex_native import forwarder as fwd
 from omnigent.harnesses.codex_native.bridge import (
     codex_home_for_bridge_dir,
+    read_codex_config_model,
+    read_unmirrored_codex_settings,
 )
 from tests.harnesses.codex_native.forwarder._support import (
     _RecordingClient,
@@ -308,10 +310,6 @@ def test_note_resume_response_records_model_without_seeding_baseline() -> None:
     state.note_resume_response({"result": {"model": "gpt-5.4-mini"}})
 
     assert state.model == "gpt-5.4-mini"
-    # The resumed thread's model is the running process's truth, like a live
-    # ``thread/settings/updated``, so a launch-pinned config.toml cannot
-    # overwrite it on the subscription-time read.
-    assert state.settings_model == "gpt-5.4-mini"
     # Baseline NOT seeded → the spawn model will be mirrored on the next sync.
     assert state.posted_model is None
 
@@ -341,31 +339,27 @@ async def test_sync_after_resume_posts_spawn_model() -> None:
     assert state.posted_model == "gpt-5.4-mini"
 
 
-@pytest.mark.asyncio
-async def test_subscribe_mirrors_resumed_thread_model_over_divergent_launch_pin(
-    tmp_path: Path,
-) -> None:
-    """A cold resume mirrors the model the resumed thread runs, not the launch pin.
+async def _subscribe_resumed_thread(
+    bridge_dir: Path, client: _RecordingClient, *, thread_model: str
+) -> fwd._CodexForwarderState:
+    """
+    Run the forwarder's subscription against a resumed thread.
 
-    The resume relaunch pins config.toml to ``model_override or the spec
-    default`` before Codex resumes the thread, and Codex can keep the thread's
-    rollout model instead — the ``thread/resume`` response reports which. The
-    subscription's first config read on the fresh forwarder state must not let
-    the pinned file overwrite that model, or the composer picker shows the
-    default while the Codex TUI keeps running the thread's model.
+    :param bridge_dir: Bridge dir holding the session's ``config.toml``.
+    :param client: Recording Omnigent client capturing the mirror posts.
+    :param thread_model: Model the ``thread/resume`` response reports.
+    :returns: The fresh forwarder state the subscription populated.
     """
 
     class _ResumeClient:
         async def request(self, _method: str, _params: dict) -> dict:
             return {
                 "result": {
-                    "model": "databricks-kimi-k3",
+                    "model": thread_model,
                     "thread": {"id": "thread_1", "turns": []},
                 }
             }
 
-    _write_codex_config(tmp_path, 'model = "gpt-5.6-sol"\n')
-    client = _RecordingClient()
     state = fwd._CodexForwarderState()
     tracker = fwd._CodexElicitationTaskTracker()
     usage = fwd._SessionUsageCoalescer(client, "conv_x")  # type: ignore[arg-type]
@@ -375,7 +369,7 @@ async def test_subscribe_mirrors_resumed_thread_model_over_divergent_launch_pin(
             _ResumeClient(),  # type: ignore[arg-type]
             client,  # type: ignore[arg-type]
             session_id="conv_x",
-            bridge_dir=tmp_path,
+            bridge_dir=bridge_dir,
             thread_id="thread_1",
             usage_coalescer=usage,
             elicitation_tracker=tracker,
@@ -385,68 +379,122 @@ async def test_subscribe_mirrors_resumed_thread_model_over_divergent_launch_pin(
         fwd._conversation_item_locks.reset(locks_token)
         await usage.close()
         await tracker.close()
+    return state
 
-    model_posts = [
+
+def _model_posts(client: _RecordingClient) -> list[str]:
+    """Return the models mirrored as ``external_model_change`` so far."""
+    return [
         body["data"]["model"]
         for _url, body in client.posts
         if body["type"] == "external_model_change"
     ]
-    assert model_posts == ["databricks-kimi-k3"]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_mirrors_resumed_thread_model_over_divergent_launch_pin(
+    tmp_path: Path,
+) -> None:
+    """A cold resume mirrors the model the resumed thread runs, not the launch pin.
+
+    The resume relaunch pins config.toml to ``model_override or the spec
+    default`` before Codex resumes the thread, and Codex can keep the thread's
+    rollout model instead — the ``thread/resume`` response reports which. The
+    subscription must bring config.toml in line with that model and mirror it,
+    or the composer picker shows the default while the Codex TUI keeps running
+    the thread's model.
+    """
+    _write_codex_config(tmp_path, 'model = "gpt-5.6-sol"\n')
+    client = _RecordingClient()
+
+    state = await _subscribe_resumed_thread(tmp_path, client, thread_model="databricks-kimi-k3")
+
+    assert _model_posts(client) == ["databricks-kimi-k3"]
     assert state.posted_model == "databricks-kimi-k3"
+    # Every config.toml reader (cost-gate hook, executor) now sees the thread's model.
+    assert read_codex_config_model(tmp_path) == "databricks-kimi-k3"
+    assert read_unmirrored_codex_settings(tmp_path) == {}
 
 
-def test_refresh_after_resume_keeps_thread_model_until_config_is_rewritten(
+@pytest.mark.asyncio
+async def test_refresh_after_resume_keeps_thread_model_until_config_is_rewritten(
     tmp_path: Path,
 ) -> None:
     """After a resume, only a rewritten config.toml replaces the thread's model.
 
-    The launch pin read at subscription seeds the change-detection baseline
-    rather than counting as a change: the next ``turn/started`` re-read of the
-    unchanged file keeps the resumed thread's model, while an in-TUI ``/model``
-    that rewrites the file is still the freshest signal and wins.
+    The next ``turn/started`` re-read of the unchanged file keeps the resumed
+    thread's model; an in-TUI ``/model`` that rewrites the file wins — even
+    when the pick is the model the relaunch had pinned — and stays won on
+    the following unchanged re-read.
     """
     _write_codex_config(tmp_path, 'model = "gpt-5.6-sol"\n')
-    state = fwd._CodexForwarderState()
-    state.note_resume_response({"result": {"model": "databricks-kimi-k3"}})
+    state = await _subscribe_resumed_thread(
+        tmp_path, _RecordingClient(), thread_model="databricks-kimi-k3"
+    )
+    assert state.model == "databricks-kimi-k3"
 
     fwd._refresh_model_from_config(tmp_path, state)
     assert state.model == "databricks-kimi-k3"
 
-    # turn/started re-read of the unchanged pin keeps the thread's model.
+    # The user picks the formerly pinned model in the TUI: /model rewrites config.toml.
+    _write_codex_config(tmp_path, 'model = "gpt-5.6-sol"\n')
     fwd._refresh_model_from_config(tmp_path, state)
-    assert state.model == "databricks-kimi-k3"
+    assert state.model == "gpt-5.6-sol"
 
-    # The user picks a model in the TUI: /model rewrites config.toml.
-    _write_codex_config(tmp_path, 'model = "gpt-5.5"\n')
     fwd._refresh_model_from_config(tmp_path, state)
-    assert state.model == "gpt-5.5"
-
-    # The next unchanged re-read must not revert to the resumed thread's model.
-    fwd._refresh_model_from_config(tmp_path, state)
-    assert state.model == "gpt-5.5"
+    assert state.model == "gpt-5.6-sol"
 
 
-def test_refresh_after_resume_without_pinned_model_adopts_first_tui_pick(
+@pytest.mark.asyncio
+async def test_refresh_after_resume_without_pinned_model_adopts_first_tui_pick(
     tmp_path: Path,
 ) -> None:
     """A config.toml with no model line still mirrors the first in-TUI ``/model``.
 
     An unpinned launch copies a config without a top-level ``model``; the
-    resumed thread's model is mirrored from ``thread/resume``. The first
-    ``/model`` that writes a model is a change against that known-empty read,
-    not a baseline seed, so the user's pick replaces the thread model.
+    subscription writes the resumed thread's model into it, so the user's
+    first ``/model`` is a change against that value and replaces the thread
+    model.
     """
     _write_codex_config(tmp_path, 'model_reasoning_effort = "medium"\n')
-    state = fwd._CodexForwarderState()
-    state.note_resume_response({"result": {"model": "gpt-5.4-mini"}})
-
-    fwd._refresh_model_from_config(tmp_path, state)
-    assert state.model == "gpt-5.4-mini"
+    client = _RecordingClient()
+    state = await _subscribe_resumed_thread(tmp_path, client, thread_model="gpt-5.4-mini")
+    assert _model_posts(client) == ["gpt-5.4-mini"]
+    assert read_codex_config_model(tmp_path) == "gpt-5.4-mini"
 
     _write_codex_config(tmp_path, 'model = "gpt-5.5"\nmodel_reasoning_effort = "medium"\n')
     fwd._refresh_model_from_config(tmp_path, state)
     assert state.model == "gpt-5.5"
 
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == "gpt-5.5"
+
+
+@pytest.mark.asyncio
+async def test_subscribe_records_unmirrored_model_when_config_write_fails(
+    tmp_path: Path,
+) -> None:
+    """A failed config.toml write still mirrors the thread's model until a rewrite.
+
+    The best-effort writer refuses to touch a malformed file. The resumed
+    thread's model is then recorded as an unmirrored setting, which the
+    refresh treats as the file's value, so the picker still shows the thread's
+    model; the next real rewrite of config.toml supersedes the record.
+    """
+    config = _write_codex_config(tmp_path, 'model = "gpt-5.6-sol\n')
+    client = _RecordingClient()
+
+    state = await _subscribe_resumed_thread(tmp_path, client, thread_model="databricks-kimi-k3")
+
+    assert _model_posts(client) == ["databricks-kimi-k3"]
+    assert read_unmirrored_codex_settings(tmp_path) == {"model": "databricks-kimi-k3"}
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == "databricks-kimi-k3"
+
+    # The TUI replaces the file (a new inode supersedes the record).
+    replacement = config.with_name("config.toml.new")
+    replacement.write_text('model = "gpt-5.5"\n')
+    replacement.replace(config)
     fwd._refresh_model_from_config(tmp_path, state)
     assert state.model == "gpt-5.5"
 
