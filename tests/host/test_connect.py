@@ -1714,7 +1714,8 @@ async def test_watch_runner_reports_unexpected_exit(
     assert attrs["runner_connection_phase"] == (
         "post_connect" if expected is True else "pre_connect" if expected is False else "unknown"
     )
-    assert attrs["runner_tracking_age_s"] >= 0
+    assert isinstance(attrs["runner_tracking_age_s"], float)
+    assert 0 <= attrs["runner_tracking_age_s"] < 60
     assert "tok_watch" not in str(attrs)
 
 

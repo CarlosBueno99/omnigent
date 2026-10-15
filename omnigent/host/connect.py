@@ -2563,7 +2563,9 @@ class HostProcess:
                 error_category=ErrorCategory.RUNNER.value,
                 error_impact=ErrorImpact.BLOCKING.value,
                 error_phase=ErrorPhase.RUNNER_LAUNCH.value,
-                **_runner_exit_attributes(handle, had_connected=False, exit_code=None),
+                **_runner_exit_attributes(
+                    handle, had_connected=False, exit_code=handle.proc.returncode
+                ),
             ),
         )
 
