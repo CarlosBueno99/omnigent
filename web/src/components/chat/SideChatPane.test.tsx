@@ -5,9 +5,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { UserMessageBlock } from "@/lib/blocks";
 import * as sessionsApi from "@/lib/sessionsApi";
 import type * as ChatStoreModule from "@/store/chatStore";
-import { useChatStore, type ChatState } from "@/store/chatStore";
+import { ensureConversationStreamed, useChatStore, type ChatState } from "@/store/chatStore";
 import { conversationRegistry } from "@/store/conversationRegistry";
 import { SideChatPane } from "./SideChatPane";
 
@@ -574,6 +575,101 @@ describe("side chat sealed by the server", () => {
     await waitFor(() =>
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ["session", childId] }),
     );
+  });
+});
+
+describe("inherited history boundary", () => {
+  function userBlock(id: string, text: string): UserMessageBlock {
+    return {
+      type: "user_message",
+      ctx: { agent: null, depth: 0, turn: 0, timestamp: 0, responseId: id, itemId: id },
+      content: [{ type: "input_text", text }],
+    };
+  }
+  const parentTurns = [
+    userBlock("parent_1", "main: summarize what we found"),
+    userBlock("parent_2", "main: list the important caveats"),
+  ];
+  const sideTurn = userBlock("side_1", "side: answer this side question");
+
+  /** Mount the pane on a child whose first transcript page is still loading. */
+  function mountLoadingChild() {
+    let finishLoad!: (loaded: boolean) => void;
+    vi.mocked(ensureConversationStreamed).mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishLoad = resolve;
+        }),
+    );
+    conversationRegistry.acquire(childId).setState({
+      sessionHarness: null,
+      sessionStatus: "idle",
+      loadingConversation: true,
+    });
+    const view = renderPane(<SideChatPane childId={childId} />);
+    // The page lands in the entry, then the stream call that fetched it resolves.
+    const settleLoad = async (blocks: UserMessageBlock[], harness = "openai-agents") => {
+      act(() =>
+        conversationRegistry.acquire(childId).setState({
+          sessionHarness: harness,
+          blocks,
+          loadingConversation: false,
+        }),
+      );
+      await act(async () => finishLoad(true));
+    };
+    return { view, settleLoad };
+  }
+
+  it("hides the forked-in history when its first load settles while the pane is unmounted", async () => {
+    const { view, settleLoad } = mountLoadingChild();
+    // Switching rail tabs unmounts the pane before the first page arrives.
+    view.unmount();
+    await settleLoad(parentTurns);
+
+    renderPane(<SideChatPane childId={childId} />);
+    expect(screen.queryByText("main: list the important caveats")).toBeNull();
+    expect(
+      screen.getByText("Ask a question here without affecting the main conversation."),
+    ).toBeInTheDocument();
+
+    act(() =>
+      conversationRegistry.acquire(childId).setState({ blocks: [...parentTurns, sideTurn] }),
+    );
+    expect(screen.getByText("side: answer this side question")).toBeInTheDocument();
+    expect(screen.queryByText("main: summarize what we found")).toBeNull();
+  });
+
+  it("keeps the side chat's own turns after a reload that follows an off-screen load", async () => {
+    const first = mountLoadingChild();
+    first.view.unmount();
+    await first.settleLoad(parentTurns);
+
+    // A reload drops the registry; the child's first page now holds its own turn too.
+    conversationRegistry.clear();
+    const reloaded = mountLoadingChild();
+    await reloaded.settleLoad([...parentTurns, sideTurn]);
+
+    expect(screen.getByText("side: answer this side question")).toBeInTheDocument();
+    expect(screen.queryByText("main: list the important caveats")).toBeNull();
+  });
+
+  it("hides the forked-in history when the load settles on screen", async () => {
+    const { settleLoad } = mountLoadingChild();
+    await settleLoad(parentTurns);
+
+    expect(screen.queryByText("main: list the important caveats")).toBeNull();
+    act(() =>
+      conversationRegistry.acquire(childId).setState({ blocks: [...parentTurns, sideTurn] }),
+    );
+    expect(screen.getByText("side: answer this side question")).toBeInTheDocument();
+  });
+
+  it("shows a native Codex child's own first turn", async () => {
+    const { settleLoad } = mountLoadingChild();
+    await settleLoad([sideTurn], "codex-native");
+
+    expect(screen.getByText("side: answer this side question")).toBeInTheDocument();
   });
 });
 

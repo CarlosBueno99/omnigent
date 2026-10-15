@@ -31,10 +31,12 @@ import { ComposerAttachments } from "@/components/ComposerAttachments";
 import { ReplyDraftBlocks } from "@/components/composer/ReplyDraftBlocks";
 import { Button } from "@/components/ui/button";
 import {
+  type ConversationState,
   EMPTY_SIDE_CHAT_COMPOSER,
   ensureConversationStreamed,
   useChatStore,
 } from "@/store/chatStore";
+import { conversationRegistry } from "@/store/conversationRegistry";
 import { useConversationEntryState } from "@/hooks/useConversationEntryState";
 import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 import { useDictationInsert } from "@/hooks/useDictationInsert";
@@ -71,6 +73,37 @@ function writeInheritedBoundary(childId: string, ids: Set<string>): void {
   } catch {
     // Storage disabled/full — the boundary just won't survive a reload.
   }
+}
+
+// Snapshot the forked-in history once the child's first load has settled, unless
+// a boundary is already persisted. Null while loading or failed, and for a
+// native Codex fork, which holds only its own turns.
+function captureInheritedBoundary(childId: string, state: ConversationState): Set<string> | null {
+  const persisted = readInheritedBoundary(childId);
+  if (persisted !== null) return persisted;
+  if (
+    state.loadingConversation ||
+    state.conversationLoadError !== null ||
+    usesNativeSideChatFork(state.sessionHarness)
+  ) {
+    return null;
+  }
+  const ids = new Set(
+    state.blocks
+      .map((b) => (b as { ctx?: { itemId?: string | null } }).ctx?.itemId)
+      .filter((id): id is string => typeof id === "string"),
+  );
+  writeInheritedBoundary(childId, ids);
+  return ids;
+}
+
+// Open the child's stream and capture the boundary when ITS load settles, even
+// if this pane unmounted meanwhile (a rail-tab switch mid-load): no render sees
+// that completion, so the next mount would show the parent's copied transcript.
+async function streamSideChat(childId: string): Promise<void> {
+  if (!(await ensureConversationStreamed(childId))) return;
+  const entry = conversationRegistry.peek(childId);
+  if (entry !== undefined) captureInheritedBoundary(childId, entry.getState());
 }
 
 // Accurate for every harness: a side chat is a fork that stays out of the main
@@ -126,7 +159,7 @@ export function SideChatPane({
   // here. The store guards a double-bind and re-binds a failed entry, so
   // re-mounts / tab switches / retries are cheap.
   useEffect(() => {
-    if (!pending) void ensureConversationStreamed(childId);
+    if (!pending) void streamSideChat(childId);
   }, [pending, childId]);
   // A real tab reads the child entry; a pending tab has none (null → empty).
   const state = useConversationEntryState(pending ? null : childId);
@@ -168,23 +201,15 @@ export function SideChatPane({
   if (loadingConversation) boundaryRef.current.loadSeen = true;
   // Capture once, when the fork's load has actually completed — even if it is
   // EMPTY (a parent with no history), so the side chat's first message isn't
-  // mistaken for inherited history and hidden. Snapshot the inherited item ids
-  // and persist so later mounts/reloads hide the same set, not new turns.
+  // mistaken for inherited history and hidden. Persisting lets later
+  // mounts/reloads hide the same set, not new turns.
   if (
     boundaryRef.current.ids === null &&
     !pending &&
     filterHistory &&
-    boundaryRef.current.loadSeen &&
-    !loadingConversation &&
-    conversationLoadError === null
+    boundaryRef.current.loadSeen
   ) {
-    const ids = new Set(
-      blocks
-        .map((b) => (b as { ctx?: { itemId?: string | null } }).ctx?.itemId)
-        .filter((id): id is string => typeof id === "string"),
-    );
-    boundaryRef.current.ids = ids;
-    writeInheritedBoundary(childId, ids);
+    boundaryRef.current.ids = captureInheritedBoundary(childId, state);
   }
   const inherited = boundaryRef.current.ids;
   const visibleBlocks = useMemo(
@@ -280,7 +305,7 @@ export function SideChatPane({
                 size="sm"
                 variant="outline"
                 className="mt-1"
-                onClick={() => void ensureConversationStreamed(childId)}
+                onClick={() => void streamSideChat(childId)}
               >
                 Retry
               </Button>
