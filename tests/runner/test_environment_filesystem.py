@@ -2655,6 +2655,8 @@ _PATH_SHAPED_QUERY_CASES = [
     pytest.param("./{folder}", [], id="dot_prefixed_root_name"),
     pytest.param("{folder}/", [], id="root_name_slash"),
     pytest.param("/", ["src/main.py"], id="bare_separator"),
+    pytest.param("{root}", [], id="root_itself"),
+    pytest.param("{parent_name}/{folder}", [], id="root_path_fragment"),
 ]
 
 
@@ -2664,8 +2666,11 @@ async def test_search_route_matches_path_shaped_queries(
     client: httpx.AsyncClient, workspace: Path, query_template: str, expected_paths: list[str]
 ) -> None:
     """A query spelled as a path finds its entry; one that is or normalizes to a
-    bare word (or only separators) never matches the root's own path."""
-    query = query_template.format(root=workspace, folder=workspace.name)
+    bare word, only separators, or a fragment of the root's own path matches
+    nothing inside it."""
+    query = query_template.format(
+        root=workspace, folder=workspace.name, parent_name=workspace.parent.name
+    )
     resp = await client.get(
         f"/v1/sessions/conv_test/resources/environments/{DEFAULT_ENVIRONMENT_ID}/search"
         f"?q={urllib.parse.quote(query, safe='')}"
@@ -2679,7 +2684,9 @@ def test_search_indexed_paths_matches_path_shaped_queries(
     workspace: Path, query_template: str, expected_paths: list[str]
 ) -> None:
     """The git-index matcher returns what the walk returns for every case above."""
-    query = query_template.format(root=workspace, folder=workspace.name)
+    query = query_template.format(
+        root=workspace, folder=workspace.name, parent_name=workspace.parent.name
+    )
     tracked = ["hello.txt", "logo.png", "src/main.py"]
     entries = search_indexed_paths(workspace, tracked, query)
     assert [e.path for e in entries] == expected_paths, f"q={query!r}"

@@ -173,7 +173,8 @@ def _path_matcher(q: str, root: str) -> Callable[[str], bool]:
 
     Same rule as the sandboxed walk in :meth:`CallerProcessFilesystem.search_files`:
     a substring of the relative path, or of the absolute path when the normalized
-    *q* still contains a separator (see :func:`_path_query`).
+    *q* still contains a separator (see :func:`_path_query`) and the match reaches
+    into the relative part, so a fragment of the root's own path matches nothing.
 
     :param q: Stripped, lowercased query.
     :param root: Absolute directory the matched paths are relative to.
@@ -191,7 +192,12 @@ def _path_matcher(q: str, root: str) -> Callable[[str], bool]:
 
     def hit(rel: str) -> bool:
         low = rel.lower()
-        return q in low or qp in prefix + low
+        if q in low:
+            return True
+        # The match must reach into the relative part; an occurrence lying
+        # wholly inside the root's own path says nothing about the entry.
+        pos = (prefix + low).rfind(qp)
+        return pos != -1 and pos + len(qp) > len(prefix)
 
     return hit
 
@@ -1054,7 +1060,11 @@ def hit(p):
         return True
     if qp is None:
         return False
-    return qp in (prefix + low if qp_abs else low)
+    if not qp_abs:
+        return qp in low
+    # The match must reach into the relative part (see _path_matcher).
+    pos = (prefix + low).rfind(qp)
+    return pos != -1 and pos + len(qp) > len(prefix)
 
 
 def rel(dirpath, name):
