@@ -7423,7 +7423,9 @@ def _leads_with_claude_prompt(terminal_launch_args: list[str] | None) -> bool:
 
     ``omni claude -p`` forwards the prompt as the leading positional ahead of
     the pass-through flags, so a first entry that is not an option is that
-    one-shot prompt; an option's value never leads the list.
+    one-shot prompt; an option's value never leads the list. The runner
+    delivers it on the launch that finds it and then removes it from the
+    stored args, so a later relaunch cannot submit it again.
 
     :param terminal_launch_args: Persisted pass-through args, e.g.
         ``["review the last commit", "--verbose"]``.
@@ -7454,11 +7456,6 @@ def _build_claude_native_base_args(
     ``(*cold_resume_args, *claude_args)``. See
     designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
 
-    A cold resume drops a leading positional prompt from
-    ``terminal_launch_args`` (the one-shot ``-p`` prompt the CLI persists for
-    the first launch): the resumed transcript already holds that turn, and
-    ``claude --resume <sid> <prompt>`` would submit it again.
-
     :param reasoning_effort: Persisted per-session effort, e.g.
         ``"high"``. Added as ``--effort <value>`` only when it is one
         of Claude's supported efforts; otherwise ignored. ``None``
@@ -7470,8 +7467,7 @@ def _build_claude_native_base_args(
         ``None`` adds nothing.
     :param terminal_launch_args: The user's pass-through CLI args,
         e.g. ``["--dangerously-skip-permissions"]``. ``None`` or an
-        empty list contributes nothing. A leading positional prompt is
-        kept on a fresh launch and dropped on a resume.
+        empty list contributes nothing.
     :param resume_external_session_id: Claude-native session id to
         resume, e.g. ``"02857840-6362-408f-b41f-309e396ed7c6"``.
         Prepended as ``--resume <value>`` so Claude reopens the prior
@@ -7487,14 +7483,12 @@ def _build_claude_native_base_args(
     from omnigent.util.reasoning_effort import CLAUDE_EFFORTS
 
     args: list[str] = []
-    launch_args = list(terminal_launch_args or [])
     if resume_external_session_id:
         args.extend(("--resume", resume_external_session_id))
-        if _leads_with_claude_prompt(launch_args):
-            del launch_args[0]
     if reasoning_effort is not None and reasoning_effort in CLAUDE_EFFORTS:
         args.extend(("--effort", reasoning_effort))
-    args.extend(launch_args)
+    if terminal_launch_args:
+        args.extend(terminal_launch_args)
     # model_override is a default: it applies only when the user did
     # not pass their own ``--model`` (in either the long ``--model X``
     # or the joined ``--model=X`` form).
@@ -8285,6 +8279,42 @@ async def _clear_session_model_override(
         )
 
 
+async def _consume_claude_initial_prompt(
+    session_id: str,
+    server_client: httpx.AsyncClient,
+    launch_args: list[str],
+) -> None:
+    """
+    Clear the one-shot prompt from a session's stored launch args after launching with it.
+
+    ``omni claude -p`` persists the prompt as the leading ``terminal_launch_args``
+    entry so the runner's launch can pass it as Claude's positional prompt. Once
+    a launch has carried it, a later relaunch of the pane must not submit it
+    again, so the remaining pass-through flags are written back without it.
+    Best-effort: a failed write leaves the prompt stored, and a relaunch may
+    submit it once more.
+
+    :param session_id: Session/conversation identifier.
+    :param server_client: Runner Omnigent server client.
+    :param launch_args: Stored launch args this launch used, prompt first.
+    """
+    try:
+        resp = await server_client.patch(
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
+            json={"terminal_launch_args": launch_args[1:]},
+            params={"include_usage": "false"},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+    except (httpx.HTTPError, RuntimeError):
+        _logger.warning(
+            "native terminal: could not clear the delivered initial prompt from the "
+            "launch args of session %s; a relaunch may submit it again",
+            session_id,
+            exc_info=True,
+        )
+
+
 async def _auto_create_claude_terminal(
     session_id: str,
     resource_registry: SessionResourceRegistry,
@@ -8658,14 +8688,18 @@ async def _auto_create_claude_terminal(
                     session_id,
                     exc_info=True,
                 )
+    # A leading positional in the stored args is the one-shot ``-p`` prompt this
+    # launch delivers; it is cleared from the session afterwards so a relaunch
+    # cannot submit it again.
+    initial_prompt_pending = _leads_with_claude_prompt(session_launch_args)
     _logger.info(
         "Claude terminal cold-resume decision: session=%s external_session_id_set=%s "
-        "fork_source_set=%s resume_enabled=%s drops_initial_prompt=%s",
+        "fork_source_set=%s resume_enabled=%s initial_prompt_pending=%s",
         session_id,
         session_external_id is not None,
         fork_source_external_id is not None,
         resume_external_session_id is not None,
-        resume_external_session_id is not None and _leads_with_claude_prompt(session_launch_args),
+        initial_prompt_pending,
         extra={"session_id": session_id},
     )
 
@@ -9136,6 +9170,10 @@ async def _auto_create_claude_terminal(
         raise
     if reset_pick_after_launch:
         await _clear_session_model_override(session_id, server_client)
+    if initial_prompt_pending:
+        await _consume_claude_initial_prompt(
+            session_id, server_client, list(session_launch_args or [])
+        )
     # Surface the terminal on the live SSE stream so an already-connected
     # web UI enables the Terminal toggle immediately. The required-terminal
     # launch helper registers the resource and starts the activity watcher but

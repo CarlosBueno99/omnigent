@@ -24,6 +24,15 @@ RESUME_PICKER_SENTINEL = "__resume_picker__"
 # command's ``--profile-startup`` help string, so it is decorator-time state.
 CLAUDE_STARTUP_PROFILE_ENV_VAR = "OMNIGENT_CLAUDE_STARTUP_PROFILE"
 
+# ``-p`` is a new session's first message. On the remote path the runner could
+# only carry a resume-time prompt as persisted launch config, which every later
+# relaunch of the pane would replay, so the combination is refused up front.
+CLAUDE_PROMPT_WITH_RESUME_ERROR = (
+    "-p/--prompt gives a new session its first message, so it cannot be combined "
+    "with --resume (or --continue on `omnigent run`). Resume without -p and type the "
+    "message in Claude."
+)
+
 
 def reject_native_on_windows(harness: str) -> None:
     """Fail a native (tmux/PTY) harness command with an actionable message.

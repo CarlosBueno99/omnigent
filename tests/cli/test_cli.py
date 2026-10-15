@@ -672,6 +672,27 @@ def test_claude_command_session_and_resume_mutually_exclusive(
     assert "mutually exclusive" in result.output
 
 
+def test_claude_command_prompt_with_resume_fails_before_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``-p`` together with ``--resume`` is refused before the backend is contacted.
+
+    The daemon-launched runner could only carry a resume-time prompt as a
+    persisted launch arg that later relaunches would replay, so the pair is a
+    usage error; it must fail fast, not after a daemon spawn or discovery wait.
+    """
+    monkeypatch.setattr(
+        "omnigent.cli._ensure_backend",
+        lambda *_: pytest.fail("invalid args must not start the backend"),
+    )
+
+    result = CliRunner().invoke(cli, ["claude", "--resume", "conv_a", "-p", "hi"])
+
+    assert result.exit_code != 0
+    assert "cannot be combined with --resume" in result.output
+
+
 def test_claude_command_profile_startup_threads_profiler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

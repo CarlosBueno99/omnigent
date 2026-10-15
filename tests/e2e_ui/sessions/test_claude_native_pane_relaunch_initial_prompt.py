@@ -95,6 +95,12 @@ def _wait_until(page: Page, predicate, timeout_s: float, what: str) -> None:
     raise AssertionError(f"{what} did not happen within {timeout_s:.0f}s")
 
 
+def _pause(page: Page, ms: int) -> None:
+    """Hold a state on screen only when the run is being filmed or screenshotted."""
+    if _SHOTS_DIR is not None or os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+        page.wait_for_timeout(ms)
+
+
 def _shot(page: Page, name: str) -> None:
     if _SHOTS_DIR is None:
         return
@@ -107,7 +113,10 @@ def _short_idle_window_s() -> float | None:
     raw = os.environ.get(_IDLE_TIMEOUT_ENV)
     if raw is None:
         return None
-    window = float(raw)
+    try:
+        window = float(raw)
+    except ValueError:
+        return None
     return window if 0 < window <= 60 else None
 
 
@@ -123,11 +132,13 @@ def _close_claude_pane(page: Page, base_url: str, session_id: str) -> None:
         )
         print(f"[journey] pane reaped after {time.monotonic() - closed_after:.0f}s idle")
         return
-    terminal_id = str(_terminals(base_url, session_id)[0]["id"])
-    httpx.delete(
-        f"{base_url}/v1/sessions/{session_id}/resources/terminals/{terminal_id}",
-        timeout=30.0,
-    ).raise_for_status()
+    terminals = _terminals(base_url, session_id)
+    terminal_id = str(terminals[0]["id"]) if terminals else None
+    if terminal_id is not None:
+        httpx.delete(
+            f"{base_url}/v1/sessions/{session_id}/resources/terminals/{terminal_id}",
+            timeout=30.0,
+        ).raise_for_status()
     _wait_until(
         page,
         lambda: not _terminals(base_url, session_id),
@@ -200,13 +211,13 @@ def test_relaunched_claude_pane_does_not_resubmit_the_initial_prompt(
         f"terminals={[t.get('id') for t in _terminals(live_server, session_id)]}"
     )
     assert len(first_prompt_items) == 1, first_prompt_items
-    page.wait_for_timeout(3000)
+    _pause(page, 3000)
     _shot(page, "01-first-prompt-submitted")
     _select_view_mode(page, "Chat")
     prompt_bubbles = page.locator(_USER_BUBBLE).filter(has_text=f"INITIAL_PROMPT_{nonce}")
     expect(prompt_bubbles).to_have_count(1, timeout=30_000)
     expect(prompt_bubbles.first).to_be_visible()
-    page.wait_for_timeout(3000)
+    _pause(page, 3000)
     _shot(page, "01b-chat-one-prompt")
     _select_view_mode(page, "Terminal")
 
@@ -214,7 +225,7 @@ def test_relaunched_claude_pane_does_not_resubmit_the_initial_prompt(
     resume = page.get_by_role("button", name="Resume session")
     expect(resume).to_be_visible(timeout=60_000)
     expect(page.get_by_text("The harness is not running.")).to_be_visible()
-    page.wait_for_timeout(3000)
+    _pause(page, 3000)
     _shot(page, "02-pane-closed")
 
     resume.click()
@@ -228,12 +239,12 @@ def test_relaunched_claude_pane_does_not_resubmit_the_initial_prompt(
         if len(_user_items_with(live_server, session_id, f"INITIAL_PROMPT_{nonce}")) >= 2:
             break
         page.wait_for_timeout(1000)
-    page.wait_for_timeout(5000)
+    _pause(page, 5000)
     _shot(page, "03-terminal-after-resume")
     _select_view_mode(page, "Chat")
     prompt_bubbles = page.locator(_USER_BUBBLE).filter(has_text=f"INITIAL_PROMPT_{nonce}")
     expect(prompt_bubbles.first).to_be_visible(timeout=30_000)
-    page.wait_for_timeout(5000)
+    _pause(page, 5000)
     visible_prompt_bubbles = prompt_bubbles.count()
     print(f"[journey] chat view shows {visible_prompt_bubbles} user bubble(s) with the prompt")
     _shot(page, "04-chat-after-resume")

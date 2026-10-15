@@ -139,34 +139,31 @@ def test_build_claude_native_base_args(
         # No resume id → no --resume (fresh launch, or no local
         # transcript could be synthesized).
         (None, None, ["--verbose"], None, ("--verbose",)),
-        # A resume drops the persisted ``-p`` prompt (the leading positional):
-        # the resumed transcript already holds that turn, so passing it again
-        # would submit it twice. The flags after it and the model default stay.
+        # An older CLI's ``--resume <id> -p <text>`` replaces the stored args
+        # with that prompt; the resumed Claude must still receive it. Replay
+        # of an already-delivered prompt is prevented upstream, where the
+        # runner removes a prompt from the stored args after launching with it.
         (
             None,
             "claude-opus-4-7",
-            ["review the last commit", "--mcp-config", "mcp.json"],
+            ["new request", "--mcp-config", "mcp.json"],
             "sid-123",
-            ("--resume", "sid-123", "--mcp-config", "mcp.json", "--model", "claude-opus-4-7"),
-        ),
-        # A persisted prompt with no other flags leaves just the prefix.
-        (None, None, ["review the last commit"], "sid-123", ("--resume", "sid-123")),
-        # Only a leading positional is a prompt: an option's value stays.
-        (
-            None,
-            None,
-            ["--model", "sonnet"],
-            "sid-123",
-            ("--resume", "sid-123", "--model", "sonnet"),
+            (
+                "--resume",
+                "sid-123",
+                "new request",
+                "--mcp-config",
+                "mcp.json",
+                "--model",
+                "claude-opus-4-7",
+            ),
         ),
     ],
     ids=[
         "resume-only",
         "resume-first-ordering",
         "no-resume",
-        "resume-drops-persisted-prompt",
-        "resume-drops-prompt-only-args",
-        "resume-keeps-option-value",
+        "resume-keeps-explicit-prompt",
     ],
 )
 def test_build_claude_native_base_args_resume_prefix(

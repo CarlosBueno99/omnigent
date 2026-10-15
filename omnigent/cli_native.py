@@ -28,6 +28,9 @@ import click
 from omnigent._startup_events import observe_native_startup
 from omnigent._startup_profile import StartupProfiler
 from omnigent.cli_common import (
+    CLAUDE_PROMPT_WITH_RESUME_ERROR as _CLAUDE_PROMPT_WITH_RESUME_ERROR,
+)
+from omnigent.cli_common import (
     CLAUDE_STARTUP_PROFILE_ENV_VAR as _CLAUDE_STARTUP_PROFILE_ENV_VAR,
 )
 from omnigent.cli_common import (
@@ -253,6 +256,12 @@ def register_native_commands(cli: click.Group) -> None:
                 "--session and --resume are mutually exclusive; "
                 "prefer --resume (--session is deprecated).",
             )
+        if (
+            prompt
+            and prompt.strip()
+            and (choice.picker or choice.conversation_id is not None or session_id is not None)
+        ):
+            raise click.UsageError(_CLAUDE_PROMPT_WITH_RESUME_ERROR)
         if smart_routing:
             _reject_smart_routing_resume(
                 resuming=choice.picker

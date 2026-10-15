@@ -80,6 +80,7 @@ from omnigent._wrapper_labels import (
     WRAPPER_LABEL_KEY as _WRAPPER_LABEL_KEY,
 )
 from omnigent.claude_launcher import resolve_claude_launch
+from omnigent.cli_common import CLAUDE_PROMPT_WITH_RESUME_ERROR
 from omnigent.cli_invocation import cli_invocation
 from omnigent.conversation_browser import conversation_url, open_conversation_link_if_enabled
 from omnigent.entities.session_resources import terminal_resource_id
@@ -1636,10 +1637,7 @@ def run_claude_native(
         and prompt.strip()
         and (session_id is not None or resume_picker)
     ):
-        raise click.UsageError(
-            "-p/--prompt gives a new session its first message, so it cannot be combined "
-            "with --resume or --continue. Resume without -p and type the message in Claude."
-        )
+        raise click.UsageError(CLAUDE_PROMPT_WITH_RESUME_ERROR)
     startup_profiler = startup_profiler or StartupProfiler.from_env(
         name="omnigent claude",
         env_var=_CLAUDE_STARTUP_PROFILE_ENV_VAR,

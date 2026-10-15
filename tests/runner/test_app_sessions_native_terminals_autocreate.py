@@ -1172,19 +1172,39 @@ async def test_auto_create_claude_terminal_passes_session_effort(
 
 
 @pytest.mark.asyncio
-async def test_auto_create_claude_terminal_cold_resume_drops_persisted_prompt(
+@pytest.mark.parametrize(
+    ("stored_args", "claude_session_id", "expected_patch"),
+    [
+        # First launch: the prompt reaches Claude and is then cleared from the
+        # stored args; the flags after it stay persisted.
+        (["review the last commit", "--verbose"], None, ["--verbose"]),
+        # Relaunch of a session whose prompt was already consumed: nothing to
+        # deliver or clear; the stored flags apply to the resumed Claude.
+        (["--verbose"], "02857840-6362-408f-b41f-309e396ed7c6", None),
+        # An older CLI's ``--resume <id> -p`` stored a new prompt: the resumed
+        # Claude receives it once and it is cleared like a first prompt.
+        (["new request"], "02857840-6362-408f-b41f-309e396ed7c6", []),
+    ],
+    ids=["first-launch", "relaunch-consumed", "older-client-resume-prompt"],
+)
+async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
+    stored_args: list[str],
+    claude_session_id: str | None,
+    expected_patch: list[str] | None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    A pane relaunch that cold-resumes Claude does not replay the stored ``-p`` prompt.
+    A prompt stored in ``terminal_launch_args`` reaches Claude exactly once.
 
-    ``omni claude -p`` persists the prompt as the leading ``terminal_launch_args``
-    entry so the first launch submits it. When the idle reaper or a lost pane
-    forces a relaunch, the runner resumes the captured Claude session: passing
-    the prompt again would submit that first turn a second time, while the
-    other stored flags must still apply.
+    ``omni claude -p`` persists the prompt as the leading entry so the runner's
+    launch can pass it as Claude's positional prompt. The launch that carries it
+    writes the remaining flags back without it, so the relaunch after the idle
+    reaper closed the pane (or any later cold resume) cannot submit it again.
 
+    :param stored_args: Persisted ``terminal_launch_args`` in the init envelope.
+    :param claude_session_id: Captured Claude session id enabling a cold resume.
+    :param expected_patch: ``terminal_launch_args`` written back, or ``None``.
     :param tmp_path: Pytest-provided temporary directory.
     :param monkeypatch: Pytest monkeypatch fixture.
     """
@@ -1200,44 +1220,47 @@ async def test_auto_create_claude_terminal_cold_resume_drops_persisted_prompt(
         "omnigent.harnesses.claude_native.forwarder.supervise_forwarder",
         _no_op_forwarder,
     )
-    claude_session_id = "02857840-6362-408f-b41f-309e396ed7c6"
-    transcript = tmp_path / f"{claude_session_id}.jsonl"
+    transcript = tmp_path / "resume.jsonl"
     transcript.write_text('{"type": "user"}\n', encoding="utf-8")
-    synthesized: dict[str, Any] = {}
 
     async def fake_resume_transcript(client: Any, **kwargs: Any) -> Path:
-        del client
-        synthesized.update(kwargs)
+        del client, kwargs
         return transcript
 
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.main._ensure_local_claude_resume_transcript",
         fake_resume_transcript,
     )
+    session_id = "4c1f0d2e9b8a7c6d5e4f3a2b1c0d9e8f"
+    patches: list[dict[str, Any]] = []
 
-    def _handle_request(_request: httpx.Request) -> httpx.Response:
-        raise AssertionError("envelope terminal startup made a legacy HTTP callback")
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        if request.method == "PATCH" and request.url.path == f"/v1/sessions/{session_id}":
+            patches.append(json.loads(request.content))
+            return httpx.Response(200, json={"id": session_id})
+        raise AssertionError(f"unexpected server call {request.method} {request.url}")
 
     fake_client = httpx.AsyncClient(
         base_url="http://test-server",
         transport=httpx.MockTransport(_handle_request),
     )
     captured: dict[str, Any] = {}
-    session_id = "4c1f0d2e9b8a7c6d5e4f3a2b1c0d9e8f"
+    snapshot: dict[str, Any] = {
+        "created_at": 10,
+        "updated_at": 11,
+        "workspace": str(workspace),
+        "terminal_launch_args": stored_args,
+        "labels": {},
+    }
+    if claude_session_id is not None:
+        snapshot["external_session_id"] = claude_session_id
     session_init = RunnerSessionInitEnvelope.model_validate(
         {
             "protocol_version": 2,
             "server_version": "0.6.0.dev0",
             "session_id": session_id,
             "agent_id": "agent",
-            "snapshot": {
-                "created_at": 10,
-                "updated_at": 11,
-                "workspace": str(workspace),
-                "terminal_launch_args": ["review the last commit", "--verbose"],
-                "external_session_id": claude_session_id,
-                "labels": {},
-            },
+            "snapshot": snapshot,
         }
     )
 
@@ -1251,10 +1274,16 @@ async def test_auto_create_claude_terminal_cold_resume_drops_persisted_prompt(
     await fake_client.aclose()
 
     args = list(captured["spec"].args)
-    assert synthesized["external_session_id"] == claude_session_id
-    assert args[args.index("--resume") + 1] == claude_session_id
-    assert "--verbose" in args
-    assert "review the last commit" not in args
+    if claude_session_id is None:
+        assert "--resume" not in args
+    else:
+        assert args[args.index("--resume") + 1] == claude_session_id
+    for stored in stored_args:
+        assert stored in args
+    if expected_patch is None:
+        assert patches == []
+    else:
+        assert patches == [{"terminal_launch_args": expected_patch}]
 
 
 @pytest.mark.asyncio
