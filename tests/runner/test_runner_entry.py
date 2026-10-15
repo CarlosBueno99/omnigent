@@ -1384,6 +1384,189 @@ def test_initial_host_token_re_resolves_to_sdk_when_remint_403s_after_expiry(
     assert factory() == "sdk-token"
 
 
+def _host_launched_runner_behind_validating_edge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[set[str], list[str | None], list[int]]:
+    """Put the process in the host-launched posture with no runner-local credential.
+
+    The mint stub stands in for an Apps edge that validates the bearer on the
+    mint request itself: it mints only while the presented bearer is in the
+    accepted set, answers ``403 Invalid Token`` otherwise, and accepts every
+    JWT it minted. SDK/OIDC discovery finds nothing in the runner process.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :returns: ``(accepted_bearers, mint_bearers, sdk_resolve_calls)`` — the
+        edge's live set, the proxy bearer seen by each mint, and SDK probes.
+    """
+    from omnigent.inner.databricks_executor import DatabricksAuthError
+
+    accepted = {"host-bootstrap-token"}
+    mint_bearers: list[str | None] = []
+    resolve_calls: list[int] = []
+
+    def _edge_mint(
+        mint_url: str, server_url: str, binding_token: str, *, proxy_bearer: str | None = None
+    ) -> tuple[str, float]:
+        del server_url, binding_token
+        mint_bearers.append(proxy_bearer)
+        if proxy_bearer not in accepted:
+            request = httpx.Request("POST", mint_url)
+            raise httpx.HTTPStatusError(
+                "Invalid Token", request=request, response=httpx.Response(403, request=request)
+            )
+        jwt = f"owner-jwt-{len(mint_bearers)}"
+        accepted.add(jwt)
+        return jwt, time.time() + 1800
+
+    def _no_sdk(*args: Any, **kwargs: Any) -> tuple[Any, str]:
+        del args, kwargs
+        resolve_calls.append(1)
+        raise DatabricksAuthError("no credential configured")
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "https://app.databricksapps.com")
+    monkeypatch.setenv(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, "host-bootstrap-token")
+    monkeypatch.setenv("OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN", "host-binding-token")
+    monkeypatch.setenv("OMNIGENT_RUNNER_DELEGATED_AUTH", "1")
+    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url, **_kw: None)
+    monkeypatch.setattr("omnigent.cli_auth.refresh_stored_token", lambda _url, **_kw: None)
+    monkeypatch.setattr("omnigent.inner.databricks_executor._resolve_databricks_auth", _no_sdk)
+    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", _edge_mint)
+    return accepted, mint_bearers, resolve_calls
+
+
+def test_host_launched_runner_exchanges_bootstrap_bearer_before_it_lapses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host-launched runner swaps to its own owner JWT while the host bearer is accepted.
+
+    An Apps edge validates the bearer on the mint request too, so a runner that
+    only exchanges after the rejection can no longer mint; with no SDK/OIDC
+    credential in the runner process it is left with nothing, and every HTTP
+    callback — including the policy relay behind the native prompt hook — fails
+    until the host restarts. The exchange must happen while the bearer is live.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :returns: None.
+    """
+    accepted, mint_bearers, resolve_calls = _host_launched_runner_behind_validating_edge(
+        monkeypatch
+    )
+
+    factory = _make_auth_token_factory()
+    assert isinstance(factory, _InitialAuthTokenFactory)
+    # The boot path stays on the host bearer: no mint before the tunnel is up.
+    assert factory() == "host-bootstrap-token"
+    assert mint_bearers == []
+
+    # The next ordinary call past the exchange delay swaps credentials.
+    factory._exchange_due_at = 0.0
+    factory()
+    # The host bearer lapses: the edge rejects it on every request, mint included.
+    accepted.discard("host-bootstrap-token")
+
+    presented = factory()
+    assert presented in accepted, f"runner presents a bearer the edge rejects: {presented!r}"
+    assert mint_bearers == ["host-bootstrap-token"]
+    assert resolve_calls == []
+
+    request = httpx.Request("GET", "https://app.databricksapps.com/api/version")
+    captured = _drive_auth_flow(_RunnerDatabricksAuth(factory), request, httpx.Response(200))
+    assert captured == [f"Bearer {presented}"]
+
+
+@pytest.mark.asyncio
+async def test_credential_keepalive_remints_owner_jwt_before_it_lapses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The keepalive re-mints inside the refresh window even with no callbacks.
+
+    An idle session otherwise presents a fully expired JWT on its next re-mint,
+    which the edge rejects, leaving the runner dependent on SDK/OIDC recovery.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :returns: None.
+    """
+    from omnigent.runner._entry import _run_credential_keepalive
+
+    _accepted, mint_bearers, resolve_calls = _host_launched_runner_behind_validating_edge(
+        monkeypatch
+    )
+    factory = _make_auth_token_factory()
+    assert isinstance(factory, _InitialAuthTokenFactory)
+    factory._exchange_due_at = 0.0
+    assert factory() == "owner-jwt-1"
+    mint_factory = factory._fallback_factory
+    assert isinstance(mint_factory, _ManagedMintTokenFactory)
+    # Inside the refresh skew: still valid at the edge, due for a re-mint.
+    mint_factory._cached_expires_at = time.time() + 60.0
+
+    task = asyncio.create_task(_run_credential_keepalive(factory, interval_s=0.001))
+    try:
+        for _ in range(200):
+            if len(mint_bearers) >= 2:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert mint_bearers[:2] == ["host-bootstrap-token", "owner-jwt-1"]
+    assert factory() == "owner-jwt-2"
+    assert resolve_calls == []
+
+
+def test_bootstrap_bearer_stays_in_use_when_server_declines_to_mint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that never mints keeps the host bearer until rejection, then SDK/OIDC.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :returns: None.
+    """
+    mint_calls: list[int] = []
+
+    class _SdkAuth:
+        def current_token(self) -> str:
+            return "sdk-token"
+
+    def _resolve(*args: Any, **kwargs: Any) -> tuple[_SdkAuth, str]:
+        del args, kwargs
+        return _SdkAuth(), "https://workspace.cloud.databricks.com"
+
+    def _declines(mint_url: str, *args: Any, **kwargs: Any) -> tuple[str, float]:
+        del args, kwargs
+        mint_calls.append(1)
+        request = httpx.Request("POST", mint_url)
+        raise httpx.HTTPStatusError(
+            "no auth provider", request=request, response=httpx.Response(400, request=request)
+        )
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "https://omnigent.example.com")
+    monkeypatch.setenv(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, "host-bootstrap-token")
+    monkeypatch.setenv("OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN", "bind-tok")
+    monkeypatch.setenv("OMNIGENT_RUNNER_DELEGATED_AUTH", "1")
+    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url, **_kw: None)
+    monkeypatch.setattr("omnigent.cli_auth.refresh_stored_token", lambda _url, **_kw: None)
+    monkeypatch.setattr("omnigent.inner.databricks_executor._resolve_databricks_auth", _resolve)
+    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", _declines)
+
+    factory = _make_auth_token_factory()
+    assert isinstance(factory, _InitialAuthTokenFactory)
+    factory._exchange_due_at = 0.0
+    assert factory() == "host-bootstrap-token"
+    # A definitive refusal is not re-probed on later calls.
+    probes = len(mint_calls)
+    factory._exchange_due_at = 0.0
+    assert factory() == "host-bootstrap-token"
+    assert len(mint_calls) == probes
+
+    request = httpx.Request("GET", "https://omnigent.example.com/api/version")
+    unauthorized = httpx.Response(401)
+    captured = _drive_auth_flow(_RunnerDatabricksAuth(factory), request, unauthorized)
+    assert captured == ["Bearer host-bootstrap-token", "Bearer sdk-token"]
+
+
 def test_mint_managed_owner_token_posts_binding_token_and_parses_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
