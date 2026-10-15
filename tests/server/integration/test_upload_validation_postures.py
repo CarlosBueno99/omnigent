@@ -1,10 +1,7 @@
 """HTTP bundle uploads apply the same content validation in every auth posture.
 
-``POST /v1/agents`` (install), multipart ``POST /v1/sessions`` (create) and
-``PUT /v1/sessions/{id}/agent`` (replace) share ``validate_agent_bundle``. A
-local single-user server must reject an unregistered policy handler, a
-server-side callable/source-file tool and an escaping ``os_env.cwd`` exactly
-like a multi-user server: loopback access does not prove operator authorship.
+Install, create and replace share ``validate_agent_bundle``; a local single-user
+server must reject the same bundles as a multi-user server.
 """
 
 from __future__ import annotations
