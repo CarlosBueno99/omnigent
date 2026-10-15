@@ -6,11 +6,14 @@ import pytest
 
 from omnigent.errors import ErrorCategory
 from omnigent.runner.launch_failure import (
+    RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX,
+    RUNNER_TUNNEL_REJECTION_PREFIX,
     FailureDiagnosis,
     classify_native_turn_error,
     classify_terminal_failure,
     describe_failure_code,
     diagnose_client_update_required,
+    runner_tunnel_refusal,
 )
 
 # The tail Claude Code prints when refusing --dangerously-skip-permissions as
@@ -444,3 +447,38 @@ def test_describe_failure_code_known(code: str, expected_substring: str) -> None
 @pytest.mark.parametrize("code", [None, "", "some_unknown_code"])
 def test_describe_failure_code_unknown(code: str | None) -> None:
     assert describe_failure_code(code) is None
+
+
+_REJECTED = (
+    f"{RUNNER_TUNNEL_REJECTION_PREFIX}(HTTP 401 persisted across 3 attempts); "
+    "run `omnigent login https://ws.example.com` to re-authenticate"
+)
+_NO_CREDENTIAL = (
+    f"{RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX}(HTTP 401 persisted across 3 unauthenticated "
+    "attempts; the credential source returned no token); run `omnigent login https://x` "
+    "to re-authenticate"
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The runner's log tail: a shutdown traceback, the ERROR line, then stderr.
+        (
+            "Traceback (most recent call last):\n"
+            "asyncio.exceptions.CancelledError\n\n"
+            f"ERROR 10-15 03:53:52.780 runner._entry main | runner exiting: {_REJECTED}\n"
+            f"error: {_REJECTED}\n"
+            'INFO  10-15 03:53:52.781 httpx _single_request | HTTP Request: POST http://x "200"\n',
+            _REJECTED,
+        ),
+        (f"error: {_NO_CREDENTIAL}\n", _NO_CREDENTIAL),
+        # A host-composed report that already leads with the refusal.
+        (f"{_REJECTED}\nrunner process exited with code 1 (log on host: ~/r.log)", _REJECTED),
+        ("runner process exited with code 1\n--- runner log tail ---\nRuntimeError: boom", None),
+        ("", None),
+    ],
+    ids=["log-tail", "no-credential", "report", "unexplained-crash", "empty"],
+)
+def test_runner_tunnel_refusal_reads_the_declared_line(text: str, expected: str | None) -> None:
+    assert runner_tunnel_refusal(text) == expected

@@ -32,7 +32,7 @@ from omnigent.host.connect import (
     HostRetryableConnectionError,
     ModelOptionsResult,
     _build_runner_env,
-    _runner_exit_error,
+    _runner_exit_report,
     _RunnerHandle,
     run_host_process,
 )
@@ -1714,6 +1714,7 @@ async def test_handle_launch_immediate_exit_reports_exit_code_and_log_tail(
 async def test_watch_runner_reports_unexpected_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     marker_state: str,
 ) -> None:
     """A runner that dies after launch is reported via host.runner_exited.
@@ -1760,6 +1761,7 @@ async def test_watch_runner_reports_unexpected_exit(
         binding_token="tok_watch",
         workspace=str(workspace),
     )
+    caplog.set_level(logging.WARNING, logger="omnigent.host.connect")
     with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
         result = await host._handle_launch(frame)
     assert result.status == "launched", result.error
@@ -1789,9 +1791,16 @@ async def test_watch_runner_reports_unexpected_exit(
     expected = {"connected": True, "not_connected": False}.get(marker_state)
     assert report.had_connected is expected
     assert maintenance_reasons == ["runner_exited"]
+    died = next(r for r in caplog.records if getattr(r, "event_name", None) == "runner_died")
+    # An unexplained crash stays the runner's fault; its phase is only known
+    # when the connect marker proves the runner never got past launch.
+    assert died.attributes["error_category"] == "runner"
+    assert died.attributes["error_phase"] == (
+        "runner_launch" if marker_state == "not_connected" else "unknown"
+    )
 
 
-def test_runner_exit_error_redacts_credential_values(tmp_path: Path) -> None:
+def test_runner_exit_report_redacts_credential_values(tmp_path: Path) -> None:
     """Redact credentials before exit reports reach the server or SPA."""
     log = tmp_path / "runner-x.log"
     log.write_text(
@@ -1803,7 +1812,7 @@ def test_runner_exit_error_redacts_credential_values(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    error = _runner_exit_error(3, log)
+    error = _runner_exit_report(3, log).error
 
     assert "sk-live-abc123" not in error
     assert "eyJhbGciOiJIUzI1NiJ9" not in error
@@ -1813,6 +1822,170 @@ def test_runner_exit_error_redacts_credential_values(tmp_path: Path) -> None:
     # Keep the diagnostic cause.
     assert "tunnel rejected: bad frame" in error
     assert "code 3" in error
+
+
+_TUNNEL_REFUSAL = (
+    "runner tunnel rejected by server (HTTP 401 persisted across 3 attempts); "
+    "run `omnigent login http://127.0.0.1:8000` to re-authenticate"
+)
+
+# The last lines a refused runner leaves in its log: uvicorn's shutdown
+# traceback, the entry point's ERROR line, and its stderr summary.
+_REFUSED_RUNNER_LOG_TAIL = (
+    "ERROR 10-15 03:53:52.755 uvicorn.error send | Traceback (most recent call last):\n"
+    '  File "starlette/routing.py", line 645, in lifespan\n'
+    "    await receive()\n"
+    "asyncio.exceptions.CancelledError\n"
+    "\n"
+    f"ERROR 10-15 03:53:52.780 runner._entry main | runner exiting: {_TUNNEL_REFUSAL}\n"
+    f"error: {_TUNNEL_REFUSAL}\n"
+)
+
+
+def test_runner_exit_report_leads_with_declared_tunnel_refusal(tmp_path: Path) -> None:
+    """A refusal the runner printed heads the report; the noisy tail is dropped."""
+    log = tmp_path / "runner-refused.log"
+    log.write_text(_REFUSED_RUNNER_LOG_TAIL, encoding="utf-8")
+
+    report = _runner_exit_report(1, log, had_connected=False)
+
+    first_line, _, rest = report.error.partition("\n")
+    assert first_line == _TUNNEL_REFUSAL
+    assert rest.startswith("runner process exited with code 1 (log on host: ")
+    assert "CancelledError" not in report.error
+    assert "runner log tail" not in report.error
+    assert report.category.value == "config"
+    assert report.phase.value == "runner_launch"
+
+
+@pytest.mark.parametrize(
+    ("had_connected", "expected_phase"),
+    [(False, "runner_launch"), (True, "unknown"), (None, "unknown")],
+)
+def test_runner_exit_report_localizes_unexplained_pre_connect_death(
+    tmp_path: Path, had_connected: bool | None, expected_phase: str
+) -> None:
+    """An unexplained crash stays the runner's fault; only a pre-connect one is launch-phase."""
+    log = tmp_path / "runner-crash.log"
+    log.write_text("RuntimeError: boom-traceback\n", encoding="utf-8")
+
+    report = _runner_exit_report(1, log, had_connected=had_connected)
+
+    assert report.error.startswith("runner process exited with code 1")
+    assert "RuntimeError: boom-traceback" in report.error
+    assert report.category.value == "runner"
+    assert report.phase.value == expected_phase
+
+
+async def test_handle_launch_immediate_exit_leads_with_declared_tunnel_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A runner refused before Popen returns fails the launch as a config problem."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / ".omnigent"))
+    caplog.set_level(logging.WARNING, logger="omnigent.host.connect")
+    host = _make_host_process()
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    log_tail = tmp_path / "refused-tail.txt"
+    log_tail.write_text(_REFUSED_RUNNER_LOG_TAIL, encoding="utf-8")
+
+    original_popen = subprocess.Popen
+
+    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        """Spawn a runner that prints the refusal and has exited before poll()."""
+        proc = original_popen(
+            ["sh", "-c", f"cat '{log_tail}' >&2; exit 1"],
+            stdin=subprocess.DEVNULL,
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+        )
+        proc.wait()
+        return proc
+
+    frame = HostLaunchRunnerFrame(
+        request_id="req_refused_now",
+        binding_token="tok_refused_now",
+        workspace=str(workspace),
+    )
+    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+        result = await host._handle_launch(frame)
+
+    assert result.status == "failed"
+    error = result.error or ""
+    assert error.splitlines()[0] == _TUNNEL_REFUSAL
+    assert "CancelledError" not in error
+    failure = next(
+        r for r in caplog.records if getattr(r, "event_name", None) == "runner_launch_failed"
+    )
+    assert failure.attributes["error_category"] == "config"
+    assert failure.attributes["error_phase"] == "runner_launch"
+
+
+async def test_watch_runner_attributes_declared_tunnel_refusal_to_launch_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A runner the server refused is reported as a sign-in problem, not a crash.
+
+    The host keeps its own tunnel, so it still receives launches after its
+    sign-in lapsed; each runner is refused (HTTP 401) and exits before
+    connecting. The report must lead with the runner's own refusal line, and
+    both host rows for the death must blame launch configuration.
+    """
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    monkeypatch.setattr("omnigent.host.connect._RUNNER_WATCH_INTERVAL_S", 0.01)
+    caplog.set_level(logging.WARNING, logger="omnigent.host.connect")
+    host = _make_host_process()
+    tunnel = _FakeTunnel()
+    host._ws = tunnel  # type: ignore[assignment] — duck-typed send
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    log_tail = tmp_path / "refused-tail.txt"
+    log_tail.write_text(_REFUSED_RUNNER_LOG_TAIL, encoding="utf-8")
+
+    original_popen = subprocess.Popen
+
+    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        """Spawn a runner that stays up briefly, prints the refusal, and exits 1."""
+        return original_popen(
+            ["sh", "-c", f"sleep 0.2; cat '{log_tail}' >&2; exit 1"],
+            stdin=subprocess.DEVNULL,
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+        )
+
+    frame = HostLaunchRunnerFrame(
+        request_id="req_refused",
+        binding_token="tok_refused",
+        workspace=str(workspace),
+        session_id="conv_refused",
+    )
+    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+        result = await host._handle_launch(frame)
+    assert result.status == "launched", result.error
+    await asyncio.wait_for(asyncio.gather(*host._watcher_tasks), timeout=5.0)
+
+    assert len(tunnel.sent) == 1
+    report = decode_host_frame(tunnel.sent[0])
+    assert isinstance(report, HostRunnerExitedFrame)
+    assert report.error.splitlines()[0] == _TUNNEL_REFUSAL
+    assert "CancelledError" not in report.error
+    assert report.had_connected is False
+    rows = {
+        record.event_name: record
+        for record in caplog.records
+        if getattr(record, "event_name", None) in {"runner_died", "runner_never_connected"}
+    }
+    assert set(rows) == {"runner_died", "runner_never_connected"}
+    for record in rows.values():
+        assert record.attributes["error_category"] == "config"
+        assert record.attributes["error_impact"] == "blocking"
+        assert record.attributes["error_phase"] == "runner_launch"
+    assert _TUNNEL_REFUSAL in rows["runner_never_connected"].getMessage()
 
 
 async def test_watch_runner_silent_on_intentional_stop(

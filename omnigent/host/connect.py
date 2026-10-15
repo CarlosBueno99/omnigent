@@ -173,6 +173,7 @@ from omnigent.runner.identity import (
     RUNNER_WORKSPACE_ENV_VAR,
     token_bound_runner_id,
 )
+from omnigent.runner.launch_failure import runner_tunnel_refusal
 from omnigent.runner.transports.ws_tunnel.diagnostics import TunnelDiagnostics
 from omnigent.runner.transports.ws_tunnel.frames import (
     PingFrame,
@@ -368,32 +369,68 @@ def _redact_log_tail(tail: str) -> str:
     return redact_log_text(tail, include_whitespace_credentials=True)
 
 
-def _runner_exit_error(exit_code: int | None, log_path: Path) -> str:
-    """Compose the human-readable error for a runner that died.
+@dataclass(frozen=True)
+class _RunnerExitReport:
+    """A dead runner's cause and fault attribution, read from its log.
+
+    :param error: Human-readable cause for the server and session viewers.
+    :param category: Fault attribution for the host's debug-log row.
+    :param phase: Lifecycle phase for that row.
+    """
+
+    error: str
+    category: ErrorCategory
+    phase: ErrorPhase
+
+
+def _runner_exit_report(
+    exit_code: int | None, log_path: Path, *, had_connected: bool | None = None
+) -> _RunnerExitReport:
+    """Compose the error and attribution for a runner that died.
 
     Carries the actual cause to the user: exit code, the host-side log
     path (for the full log), and the trailing log lines — the part that
-    usually holds the traceback or tunnel-rejection message. Without
-    this, the cause stays in a file on the host and every consumer just
-    sees a connect timeout. Credential-shaped values in the tail are
-    masked (see :func:`_redact_log_tail`) because the report travels to
-    session viewers, not just host operators.
+    usually holds the traceback. Without this, the cause stays in a file
+    on the host and every consumer just sees a connect timeout.
+    Credential-shaped values in the tail are masked (see
+    :func:`_redact_log_tail`) because the report travels to session
+    viewers, not just host operators.
+
+    A runner the server refused (credentials rejected or missing, an
+    incompatible tunnel) prints that refusal as its last line, so the
+    report leads with it instead of a tail that buries the same line
+    under shutdown noise, and attributes the death to launch
+    configuration rather than to the runner.
 
     :param exit_code: The runner process's exit code, e.g. ``1``.
         ``None`` when unknown.
     :param log_path: The runner's captured stdout/stderr log file.
-    :returns: A multi-line error message ready to surface verbatim in
+    :param had_connected: Whether the runner had connected its tunnel;
+        ``False`` localizes an unexplained death to the launch phase.
+    :returns: The report, whose ``error`` is ready to surface verbatim in
         a CLI error or API ``error`` field.
     """
-    message = "runner process exited"
+    exited = "runner process exited"
     if exit_code is not None:
-        message += f" with code {exit_code}"
-    message += f" (log on host: {display_log_path(log_path)})"
+        exited += f" with code {exit_code}"
+    exited += f" (log on host: {display_log_path(log_path)})"
     tail = _read_log_tail(log_path)
+    refusal = runner_tunnel_refusal(tail)
+    if refusal is not None:
+        return _RunnerExitReport(
+            error=f"{_redact_log_tail(refusal)}\n{exited}",
+            category=ErrorCategory.CONFIG,
+            phase=ErrorPhase.RUNNER_LAUNCH,
+        )
+    error = exited
     if tail.strip():
         lines = tail.strip().splitlines()[-_LOG_TAIL_MAX_LINES:]
-        message += "\n--- runner log tail ---\n" + _redact_log_tail("\n".join(lines))
-    return message
+        error += "\n--- runner log tail ---\n" + _redact_log_tail("\n".join(lines))
+    return _RunnerExitReport(
+        error=error,
+        category=ErrorCategory.RUNNER,
+        phase=ErrorPhase.RUNNER_LAUNCH if had_connected is False else ErrorPhase.UNKNOWN,
+    )
 
 
 def _url_is_loopback(url: str) -> bool:
@@ -2026,11 +2063,11 @@ class HostProcess:
             # The runner died before Popen returned — its actual error
             # is in the captured log, so ship the tail with the result
             # instead of making the user go find the file on the host.
-            error = _runner_exit_error(proc.returncode, log_path)
+            report = _runner_exit_report(proc.returncode, log_path)
             self._trigger_maintenance("runner_launch_failed")
             # The returned result retains the diagnostic tail, while
             # _launch_failed limits the host lifecycle line to its first line.
-            return self._launch_failed(frame, error, error_category=ErrorCategory.RUNNER)
+            return self._launch_failed(frame, report.error, error_category=report.category)
 
         # One live runner per session: the session's previous runner —
         # whose binding the server has already rotated away — is
@@ -2468,32 +2505,31 @@ class HostProcess:
                 _logger.info("Runner %s exited cleanly (code 0); no crash report", runner_id)
                 return
             # Pre-connect code 0 is a failed launch; send its cause to the server.
-            error = _runner_exit_error(handle.proc.returncode, handle.log_path)
+            error = _runner_exit_report(handle.proc.returncode, handle.log_path).error
             _logger.info(
                 "Runner %s exited cleanly (code 0) before connecting; reporting exit",
                 runner_id,
             )
             await self._report_runner_exit(runner_id, error, had_connected=had_connected)
             return
-        error = _runner_exit_error(handle.proc.returncode, handle.log_path)
-        # A non-zero runner exit is a runner-process fault that blocks the
-        # session; the specific cause lives in the unparsed log tail (lifecycle
-        # stage unknown).
+        report = _runner_exit_report(
+            handle.proc.returncode, handle.log_path, had_connected=had_connected
+        )
         _logger.warning(
             "Runner %s died unexpectedly: %s",
             runner_id,
-            error,
+            report.error,
             extra=debug_event(
                 "runner_died",
                 session_id=handle.session_id,
                 stage="runner_process",
                 runner_id=runner_id,
-                error_category=ErrorCategory.RUNNER.value,
+                error_category=report.category.value,
                 error_impact=ErrorImpact.BLOCKING.value,
-                error_phase=ErrorPhase.UNKNOWN.value,
+                error_phase=report.phase.value,
             ),
         )
-        await self._report_runner_exit(runner_id, error, had_connected=had_connected)
+        await self._report_runner_exit(runner_id, report.error, had_connected=had_connected)
 
     async def _watch_runner_connect(
         self, runner_id: str, *, exit_watcher: asyncio.Task[None]
@@ -2514,20 +2550,25 @@ class HostProcess:
         if handle.stop_requested:
             # A stop may arrive while the marker check runs off-loop.
             return
+        refusal = None
+        if exit_watcher.done():
+            tail = await asyncio.to_thread(_read_log_tail, handle.log_path)
+            refusal = runner_tunnel_refusal(_redact_log_tail(tail))
         _logger.error(
             "Runner %s for session %s never connected its tunnel within "
-            "%.0fs of launch (pid=%d): the runner process is hung, exited "
-            "before connecting, or cannot reach the server. Runner log: %s",
+            "%.0fs of launch (pid=%d): %s. Runner log: %s",
             runner_id,
             handle.session_id or "<unknown>",
             _RUNNER_CONNECT_DEADLINE_S,
             handle.proc.pid,
+            refusal
+            or "the runner process is hung, exited before connecting, or cannot reach the server",
             handle.log_path,
             extra=debug_event(
                 "runner_never_connected",
                 session_id=handle.session_id,
                 runner_id=runner_id,
-                error_category=ErrorCategory.RUNNER.value,
+                error_category=(ErrorCategory.CONFIG if refusal else ErrorCategory.RUNNER).value,
                 error_impact=ErrorImpact.BLOCKING.value,
                 error_phase=ErrorPhase.RUNNER_LAUNCH.value,
             ),
@@ -2546,7 +2587,7 @@ class HostProcess:
 
         :param runner_id: The dead runner, e.g. ``"runner_abc123..."``.
         :param error: Composed exit error from
-            :func:`_runner_exit_error`.
+            :func:`_runner_exit_report`.
         :param had_connected: First-connect marker evidence, or ``None`` when unknown.
         :returns: None. A report that cannot be sent (tunnel down or
             mid-reconnect) is parked in ``self._unreported_exits`` and

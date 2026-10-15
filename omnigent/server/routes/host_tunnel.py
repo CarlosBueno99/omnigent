@@ -65,6 +65,7 @@ from omnigent.host.frames import (
     encode_host_frame,
 )
 from omnigent.host.identity import MANAGED_HOST_TOKEN_HEADER
+from omnigent.runner.launch_failure import runner_tunnel_refusal
 from omnigent.runner.transports.ws_tunnel.frames import (
     PingFrame,
     PongFrame,
@@ -110,8 +111,10 @@ def log_runner_exited(
     :param session_id: Session bound to the runner, if known.
     :returns: None.
     """
-    # A runner-process fault; the free-text cause is unparsed, and the runner
-    # may have died before or during a turn, so the lifecycle stage is unknown.
+    # A tunnel refusal the runner declared is a launch configuration failure.
+    # Any other cause is an unparsed runner-process fault, and that runner may
+    # have died before or during a turn, so its lifecycle stage is unknown.
+    refused = runner_tunnel_refusal(error) is not None
     _logger.warning(
         "Host %s reported runner %s exited: %s",
         host_id,
@@ -122,9 +125,9 @@ def log_runner_exited(
             session_id=session_id,
             host_id=host_id,
             runner_id=runner_id,
-            error_category=ErrorCategory.RUNNER.value,
+            error_category=(ErrorCategory.CONFIG if refused else ErrorCategory.RUNNER).value,
             error_impact=ErrorImpact.BLOCKING.value,
-            error_phase=ErrorPhase.UNKNOWN.value,
+            error_phase=(ErrorPhase.RUNNER_LAUNCH if refused else ErrorPhase.UNKNOWN).value,
         ),
     )
 

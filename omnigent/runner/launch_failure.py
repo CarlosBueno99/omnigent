@@ -370,3 +370,35 @@ def describe_failure_code(code: str | None) -> str | None:
     if not code:
         return None
     return _FAILURE_CODE_DESCRIPTIONS.get(code)
+
+
+# --- runner tunnel refusals ---------------------------------------------------
+# A runner that never upgraded its tunnel gives up after a streak of HTTP
+# 401/403s, login redirects, or a fatal close code and prints that reason as
+# its last line; the host and server read it back to attribute the exit.
+RUNNER_TUNNEL_REJECTION_PREFIX = "runner tunnel rejected by server "
+# Raised instead of the rejection above when the runner had no credential
+# to send, so the message names the local cause rather than the server.
+RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX = "runner tunnel has no credential available "
+_RUNNER_TUNNEL_REFUSAL_PREFIXES = (
+    RUNNER_TUNNEL_REJECTION_PREFIX,
+    RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX,
+)
+
+
+def runner_tunnel_refusal(text: str) -> str | None:
+    """Return the fatal tunnel refusal a runner declared in *text*, if any.
+
+    :param text: A runner log tail or a host-composed exit report, e.g.
+        ``"...\\nerror: runner tunnel rejected by server (HTTP 401 persisted
+        across 3 attempts); run `omnigent login https://…` to re-authenticate"``.
+    :returns: The refusal from its prefix to the end of its line, e.g.
+        ``"runner tunnel rejected by server (HTTP 401 …); run `omnigent login
+        …` to re-authenticate"``, or ``None`` when the runner declared none.
+    """
+    for line in reversed(text.splitlines()):
+        for prefix in _RUNNER_TUNNEL_REFUSAL_PREFIXES:
+            start = line.find(prefix)
+            if start != -1:
+                return line[start:].rstrip()
+    return None
