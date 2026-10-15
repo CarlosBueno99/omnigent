@@ -20,6 +20,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Windows spelling of $HOME
     return home
 
 
@@ -48,7 +49,7 @@ def test_claude_config_dir_expands_tilde(home: Path, monkeypatch: pytest.MonkeyP
 def test_claude_config_dir_treats_empty_value_as_unset(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An empty ``CLAUDE_CONFIG_DIR`` falls back to ``~/.claude``, as the CLI does."""
+    """An empty ``CLAUDE_CONFIG_DIR`` keeps Omnigent on ``~/.claude``, as before this helper."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "")
 
     assert claude_config_dir() == home / ".claude"
