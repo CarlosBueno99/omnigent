@@ -204,10 +204,11 @@ def test_new_session_rides_out_throttled_spec_fetch_after_server_restart(
     env.stack.restart_server()
     env.wait_for_host_online(timeout=120)
 
-    # The user starts a fresh session during that window and sends a message.
-    env.arm_throttle()
+    # The user starts a fresh session during that window and sends a message. Arm
+    # the window right before sending so slow UI setup cannot outlast it.
     open_landing(page, env)
     choose_agent(page, env.agent_id)
+    env.arm_throttle()
     new_session = start_session(page, AFTER_PROMPT)
 
     reply = page.locator(_ASSISTANT).filter(has_text=AFTER_REPLY)

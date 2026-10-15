@@ -55,10 +55,9 @@ async def request_with_429_retry(
     started = _monotonic()
     fallbacks: Iterable[float] = delays_s
     if budget_s is not None:
-        last_delay_s = delays_s[-1] if delays_s else max_retry_after_s
-        if last_delay_s <= 0:
+        if not delays_s or delays_s[-1] <= 0:
             raise ValueError("budget_s needs a positive final fallback delay to repeat")
-        fallbacks = itertools.chain(delays_s, itertools.repeat(last_delay_s))
+        fallbacks = itertools.chain(delays_s, itertools.repeat(delays_s[-1]))
     for fallback_delay_s in fallbacks:
         response = await send()
         if response.status_code != 429:

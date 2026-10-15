@@ -198,14 +198,17 @@ async def test_request_with_429_retry_budget_counts_request_latency(
 
 
 @pytest.mark.asyncio
-async def test_request_with_429_retry_budget_rejects_a_non_positive_repeat_delay() -> None:
-    """A budget cannot repeat a zero delay, which would retry back-to-back."""
+@pytest.mark.parametrize("delays_s", [(0.5, 0.0), ()])
+async def test_request_with_429_retry_budget_rejects_a_non_positive_repeat_delay(
+    delays_s: tuple[float, ...],
+) -> None:
+    """A budget cannot repeat a zero or missing delay, which would retry back-to-back."""
 
     async def _send() -> httpx.Response:
         raise AssertionError("no request should be sent")
 
     with pytest.raises(ValueError, match="positive"):
-        await native_terminal.request_with_429_retry(_send, delays_s=(0.5, 0.0), budget_s=5.0)
+        await native_terminal.request_with_429_retry(_send, delays_s=delays_s, budget_s=5.0)
 
 
 @pytest.mark.asyncio
