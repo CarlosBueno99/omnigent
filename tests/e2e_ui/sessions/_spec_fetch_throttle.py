@@ -33,7 +33,8 @@ class SpecFetchThrottle:
         self._flag = flag
         self._counter = counter
         self._window = window
-        self._served: list[str] = []
+        # A restarted server process continues the counter instead of resetting it.
+        self._served: list[str] = served_429s(counter)
 
     def _armed(self) -> bool:
         try:
@@ -50,7 +51,9 @@ class SpecFetchThrottle:
             and self._armed()
         ):
             self._served.append(scope["path"])
-            self._counter.write_text(json.dumps(self._served))
+            pending = self._counter.with_suffix(".tmp")
+            pending.write_text(json.dumps(self._served))
+            os.replace(pending, self._counter)
             body = json.dumps(
                 {"error_code": "RESOURCE_EXHAUSTED", "message": "Too many requests"}
             ).encode()

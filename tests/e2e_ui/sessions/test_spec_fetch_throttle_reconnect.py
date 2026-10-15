@@ -124,7 +124,8 @@ def start_throttled_stack(root: Path, mock_llm_url: str) -> Iterator[ThrottledSt
         host_id = _online_host_id(client)
         assert host_id is not None
         agents = client.get("/v1/agents", params={"limit": 100}).json()["data"]
-        agent_id = next(a["id"] for a in agents if a["name"] == "hello_world")
+        agent_id = next((a["id"] for a in agents if a["name"] == "hello_world"), None)
+        assert agent_id is not None, f"hello_world agent not registered; agents: {agents}"
         yield ThrottledStack(stack, client, host_id, agent_id, flag, counter)
 
 
@@ -219,9 +220,13 @@ def test_new_session_rides_out_throttled_spec_fetch_after_server_restart(
         print(f"throttled spec fetches: {throttled}")
         print("spec-resolver log lines:\n" + "\n".join(env.spec_resolver_log_lines()[-20:]))
 
-    assert throttled, "the stand-in front end never throttled a spec fetch; inconclusive run"
+    assert any(new_session in path for path in throttled), (
+        f"the new session's spec fetch was never throttled; inconclusive run; "
+        f"throttled fetches: {throttled}"
+    )
     assert pill.count() == 0, (
         f"the new session's first message failed instead of being answered; "
         f"error pill: {pill.first.inner_text().strip()!r}; throttled fetches: {throttled}"
     )
     expect_reply(page, AFTER_REPLY, timeout_ms=120_000)
+    expect(pill).to_have_count(0)

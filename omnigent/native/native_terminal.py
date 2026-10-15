@@ -48,13 +48,16 @@ async def request_with_429_retry(
         no usable ``Retry-After`` hint, e.g. ``(0.5, 1.0, 2.0)``.
     :param max_retry_after_s: Cap on any single pause, e.g. ``10.0``.
     :param budget_s: Wall-clock retry budget in seconds, e.g. ``30.0``.
-        ``None`` keeps the attempt-count bound.
+        ``None`` keeps the attempt-count bound; otherwise the repeated last
+        fallback delay must be positive.
     :returns: The first non-429 response, or the final 429 response.
     """
     started = _monotonic()
     fallbacks: Iterable[float] = delays_s
     if budget_s is not None:
         last_delay_s = delays_s[-1] if delays_s else max_retry_after_s
+        if last_delay_s <= 0:
+            raise ValueError("budget_s needs a positive final fallback delay to repeat")
         fallbacks = itertools.chain(delays_s, itertools.repeat(last_delay_s))
     for fallback_delay_s in fallbacks:
         response = await send()

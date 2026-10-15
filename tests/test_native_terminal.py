@@ -109,19 +109,23 @@ async def test_bind_session_runner_surfaces_429_after_retries(
     assert sleeps == [10.0] * 4
 
 
-def _fake_retry_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """Replace the 429 retry sleep and clock with a fake; returns the recorded pauses."""
-    sleeps: list[float] = []
-    now = 1_000.0
+class _FakeRetryClock:
+    """Fake sleep and monotonic clock for the 429 retry loop."""
 
-    async def _fake_sleep(delay: float) -> None:
-        nonlocal now
-        sleeps.append(delay)
-        now += delay
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.sleeps: list[float] = []
 
-    monkeypatch.setattr(native_terminal, "_sleep", _fake_sleep)
-    monkeypatch.setattr(native_terminal, "_monotonic", lambda: now)
-    return sleeps
+    async def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.now += delay
+
+
+def _fake_retry_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeRetryClock:
+    clock = _FakeRetryClock()
+    monkeypatch.setattr(native_terminal, "_sleep", clock.sleep)
+    monkeypatch.setattr(native_terminal, "_monotonic", lambda: clock.now)
+    return clock
 
 
 @pytest.mark.asyncio
@@ -138,14 +142,14 @@ async def test_request_with_429_retry_budget_outlasts_repeated_hints(
             return httpx.Response(429, headers={"Retry-After": "1"})
         return httpx.Response(200)
 
-    sleeps = _fake_retry_clock(monkeypatch)
+    clock = _fake_retry_clock(monkeypatch)
     response = await native_terminal.request_with_429_retry(
         _send, delays_s=(0.5, 1.0), max_retry_after_s=5.0, budget_s=10.0
     )
 
     assert response.status_code == 200
     assert attempts == 7
-    assert sleeps == [1.0] * 6
+    assert clock.sleeps == [1.0] * 6
 
 
 @pytest.mark.asyncio
@@ -160,14 +164,48 @@ async def test_request_with_429_retry_budget_repeats_last_fallback_until_spent(
         attempts += 1
         return httpx.Response(429)
 
-    sleeps = _fake_retry_clock(monkeypatch)
+    clock = _fake_retry_clock(monkeypatch)
     response = await native_terminal.request_with_429_retry(
         _send, delays_s=(0.5, 1.0, 2.0), max_retry_after_s=5.0, budget_s=7.0
     )
 
     assert response.status_code == 429
     assert attempts == 5
-    assert sleeps == [0.5, 1.0, 2.0, 2.0]
+    assert clock.sleeps == [0.5, 1.0, 2.0, 2.0]
+
+
+@pytest.mark.asyncio
+async def test_request_with_429_retry_budget_counts_request_latency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow 429 responses consume the budget even when every pause is short."""
+    clock = _fake_retry_clock(monkeypatch)
+    attempts = 0
+
+    async def _send() -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        clock.now += 4.0
+        return httpx.Response(429)
+
+    response = await native_terminal.request_with_429_retry(
+        _send, delays_s=(1.0,), max_retry_after_s=5.0, budget_s=10.0
+    )
+
+    assert response.status_code == 429
+    assert attempts == 3
+    assert clock.sleeps == [1.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_request_with_429_retry_budget_rejects_a_non_positive_repeat_delay() -> None:
+    """A budget cannot repeat a zero delay, which would retry back-to-back."""
+
+    async def _send() -> httpx.Response:
+        raise AssertionError("no request should be sent")
+
+    with pytest.raises(ValueError, match="positive"):
+        await native_terminal.request_with_429_retry(_send, delays_s=(0.5, 0.0), budget_s=5.0)
 
 
 @pytest.mark.asyncio
