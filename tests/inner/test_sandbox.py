@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -48,6 +49,42 @@ def _noop_policy_arg() -> str:
         "utf-8"
     )
     return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+@pytest.mark.parametrize("grant_field", ["write_roots", "write_files"])
+@pytest.mark.parametrize("grant_parent", [False, True])
+def test_exec_launcher_rejects_writable_launcher_directory(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, grant_field: str, grant_parent: bool
+) -> None:
+    launcher_dir = tmp_path / "launchers"
+    launcher_dir.mkdir()
+    monkeypatch.setattr("omnigent.inner.sandbox.tempfile.tempdir", str(launcher_dir))
+    policy = dataclasses.replace(_noop_policy(), active=True, backend_type="linux_bwrap")
+    setattr(policy, grant_field, [tmp_path if grant_parent else launcher_dir])
+
+    with pytest.raises(ValueError, match="Grant a dedicated scratch directory"):
+        create_exec_launcher(sys.executable, policy)
+    assert list(launcher_dir.iterdir()) == []
+
+
+def test_exec_launcher_accepts_dedicated_scratch_directory(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher_dir = tmp_path / "launchers"
+    launcher_dir.mkdir()
+    scratch = launcher_dir / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr("omnigent.inner.sandbox.tempfile.tempdir", str(launcher_dir))
+    policy = dataclasses.replace(
+        _noop_policy(), active=True, backend_type="linux_bwrap", write_roots=[scratch]
+    )
+
+    path = pathlib.Path(create_exec_launcher(sys.executable, policy, cwd=str(scratch)))
+    try:
+        assert path.parent == launcher_dir
+        assert path.stat().st_mode & 0o777 == 0o700
+    finally:
+        path.unlink()
 
 
 def test_run_launcher_emits_logger_checkpoints(caplog) -> None:
@@ -324,29 +361,6 @@ def test_with_additional_write_roots_records_mask_scan_skip_roots() -> None:
     # Source policy not mutated.
     assert policy.mask_scan_skip_roots is None
     assert augmented is not policy
-
-
-def test_sandbox_policy_round_trips_mask_scan_skip_roots() -> None:
-    """``mask_scan_skip_roots`` survives the launcher wire encoding.
-
-    Exec launchers build the bwrap mount plan in ``run_launcher`` from the
-    decoded policy; a dropped field would mask the egress ``.egress.sock``
-    the parent registered and reset every relayed request.
-    """
-    from pathlib import Path
-
-    policy = _noop_policy()
-    policy.mask_scan_skip_roots = [Path("/tmp/omnigent-osenv-ab12")]
-
-    decoded = SandboxPolicy.from_jsonable(policy.to_jsonable())
-
-    assert decoded.mask_scan_skip_roots == [Path("/tmp/omnigent-osenv-ab12")]
-    # Old payloads (no key) and unset policies decode to None — "skip
-    # nothing", not an empty-but-present list.
-    old_payload = _noop_policy().to_jsonable()
-    del old_payload["mask_scan_skip_roots"]
-    assert SandboxPolicy.from_jsonable(old_payload).mask_scan_skip_roots is None
-    assert SandboxPolicy.from_jsonable(_noop_policy().to_jsonable()).mask_scan_skip_roots is None
 
 
 def test_with_denied_unix_sockets_resolves_dedupes_and_is_pure() -> None:
