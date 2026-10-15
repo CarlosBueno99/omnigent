@@ -414,12 +414,7 @@ def test_sign_in_running_elsewhere_ignores_other_output(screen: str | None) -> N
 
 
 def test_sign_in_running_elsewhere_ignores_a_wait_line_the_launcher_moved_past() -> None:
-    """
-    Once the other sign-in completes, the launcher and the agent print below the line.
-
-    The agent boots for a while before its input box takes the screen; a message
-    sent in that window is a slow boot to wait out, not a sign-in to report.
-    """
+    """Boot output below the wait line means the launcher moved on; the line is stale."""
     screen = (
         "dbexec: launcher 1.2.3\n"
         + _WAIT_ELSEWHERE_LINE

@@ -9718,9 +9718,8 @@ def test_wait_for_claude_prompt_ready_waits_out_a_boot_below_a_stale_wait_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    The wait line stays in scrollback while Claude Code boots after the other
-    sign-in completes. A send in that window waits for the input box like any
-    slow boot; it must not fail as a sign-in that already finished.
+    Claude Code boots below the stale wait line once the other sign-in completes;
+    a send in that window waits for the input box like any slow boot.
     """
     frames = iter([_STALE_WAIT_PANE, _STALE_WAIT_PANE, _STALE_WAIT_PANE, _READY_PANE])
     monkeypatch.setattr(

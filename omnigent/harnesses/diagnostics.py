@@ -137,10 +137,9 @@ def _is_reprint(line: str, url: str) -> bool:
 def _launcher_moved_on(
     lines: list[str], index: int, *, trailer: re.Pattern[str], url: str | None = None
 ) -> bool:
-    """Whether the launcher printed real output below ``lines[index]``.
+    """Whether real output follows ``lines[index]``.
 
-    Echoed keys, lines matching ``trailer`` (the prompt's own trailing output)
-    and a reprint of ``url`` do not count.
+    Echoed keys, lines matching ``trailer`` and a reprint of ``url`` do not count.
     """
     return any(
         re.search(r"\w", _ECHOED_CONTROL.sub("", line))
@@ -220,11 +219,8 @@ def sign_in_running_elsewhere(screen: str | None) -> bool:
     """Whether a launcher is waiting for a sign-in that another process started.
 
     The screen shows no address of its own: the sign-in to finish is in the
-    browser tab or terminal of whichever launch started it first. The wait
-    message counts only while it is the launcher's latest output. Once the
-    other sign-in completes the launcher moves on and the agent boots below
-    the line, which stays on screen until the agent's own interface takes it;
-    a message sent in that window is a slow boot to wait out, not a sign-in.
+    browser tab or terminal of whichever launch started it first. The line counts
+    only while it is the launcher's latest output; below it, the agent is booting.
 
     :param screen: ANSI-stripped terminal screen text, or ``None``.
     :returns: ``True`` while the launcher is still waiting.
