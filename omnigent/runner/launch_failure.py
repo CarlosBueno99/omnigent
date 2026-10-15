@@ -350,9 +350,10 @@ def diagnose_host_credential_failure(exc: BaseException) -> FailureDiagnosis | N
             f"this turn: {detail}"
         ),
         remediation=(
-            f"Restart the host (run `{cli} stop`, then start it again) and send the "
-            "message again. If it keeps failing, refresh the host's Databricks sign-in "
-            "before restarting."
+            f"Stop Omnigent on the host with `{cli} stop` (this stops every host and the "
+            "local server on that machine), start the host again the way it was started "
+            "before, and send the message again. If it keeps failing, refresh the host's "
+            "Databricks sign-in first."
         ),
     )
 

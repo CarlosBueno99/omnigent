@@ -1,13 +1,10 @@
-"""Turn setup when the runner's server-callback credential source fails.
+"""Render an actionable error when runner callback authentication fails during turn setup.
 
-A real runner starts through a bootstrap that overrides its auth flow: once the
-marker file exists, ``_RunnerDatabricksAuth`` raises the reported
-``DatabricksAuthError`` on turn-setup server callbacks while a cached token still
-serves the synchronous history read (``/items``), so the failure surfaces inside
-the background turn-setup wrapper. The turn must fail as an actionable credential
-error that names a remedy (restart the host), not as the opaque generic
-``runner_error``. This covers the runner-process, server-relay and browser
-boundary that the runner dispatch tests cannot reach.
+A real runner starts through a bootstrap that makes ``_RunnerDatabricksAuth``
+raise the reported ``DatabricksAuthError`` on turn-setup server callbacks once a
+marker file exists. The pill must name the credential failure and a remedy
+(restart the host) instead of the generic ``runner_error``; this covers the
+runner-process, server-relay and browser boundary the dispatch tests cannot reach.
 """
 
 from __future__ import annotations

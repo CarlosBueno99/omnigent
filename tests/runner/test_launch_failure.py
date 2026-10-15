@@ -419,27 +419,24 @@ def test_client_update_diagnosis_without_installed_version_still_names_required(
     )
 
 
+@pytest.mark.parametrize(
+    ("wrapper", "stop_command"),
+    [(None, "`omnigent stop`"), ("isaac omni", "`isaac omni stop`")],
+)
 def test_host_credential_failure_names_the_host_restart(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, wrapper: str | None, stop_command: str
 ) -> None:
-    monkeypatch.delenv(WRAPPER_COMMAND_ENV, raising=False)
+    if wrapper is None:
+        monkeypatch.delenv(WRAPPER_COMMAND_ENV, raising=False)
+    else:
+        monkeypatch.setenv(WRAPPER_COMMAND_ENV, wrapper)
     diagnosis = diagnose_host_credential_failure(DatabricksAuthError(_CREDENTIAL_SERVICE_FAILURE))
     assert diagnosis is not None
     assert diagnosis.title == "The host couldn't get workspace credentials"
     assert _CREDENTIAL_SERVICE_FAILURE in diagnosis.cause
     assert diagnosis.remediation is not None
-    assert "`omnigent stop`" in diagnosis.remediation
+    assert stop_command in diagnosis.remediation
     assert "Databricks sign-in" in diagnosis.remediation
-
-
-def test_host_credential_failure_remediation_uses_the_configured_wrapper(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(WRAPPER_COMMAND_ENV, "isaac omni")
-    diagnosis = diagnose_host_credential_failure(DatabricksAuthError(_CREDENTIAL_SERVICE_FAILURE))
-    assert diagnosis is not None
-    assert diagnosis.remediation is not None
-    assert "`isaac omni stop`" in diagnosis.remediation
 
 
 def test_host_credential_failure_is_found_behind_a_wrapping_error() -> None:
