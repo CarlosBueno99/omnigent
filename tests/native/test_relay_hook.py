@@ -9,6 +9,8 @@ import shlex
 import shutil
 import stat
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -56,6 +58,34 @@ def _curl_shim(directory: Path) -> tuple[Path, Path]:
     return shim.parent, argv_log
 
 
+class _StrayServer(ThreadingHTTPServer):
+    """A second listener an ambient ``.curlrc`` could point curl at."""
+
+    def __init__(self) -> None:
+        self.hits: list[tuple[str, str | None]] = []
+        super().__init__(("127.0.0.1", 0), _StrayHandler)
+        self.url = f"http://127.0.0.1:{self.server_address[1]}"
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.shutdown()
+        self.server_close()
+
+
+class _StrayHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.server.hits.append((self.path, self.headers.get("Authorization")))  # type: ignore[attr-defined]
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_GET = do_POST
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
 async def test_relay_hook_command_replays_stdin_unless_the_relay_answers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -66,9 +96,15 @@ async def test_relay_hook_command_replays_stdin_unless_the_relay_answers(
     )
     shim_dir, argv_log = _curl_shim(tmp_path / "shim")
     path = f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    # An ambient curl config that adds a destination must never see the hook.
+    stray = _StrayServer()
+    curl_home = tmp_path / "curl-home"
+    curl_home.mkdir()
+    (curl_home / ".curlrc").write_text(f'url = "{stray.url}/stray"\n')
+    env = {"PATH": path, "CURL_HOME": str(curl_home), "HOME": str(curl_home)}
 
     # Relay not started yet: no env file, so stdin goes to the fallback.
-    absent = await asyncio.to_thread(_run, command, _PAYLOAD, PATH=path)
+    absent = await asyncio.to_thread(_run, command, _PAYLOAD, **env)
     assert absent.returncode == 0, absent.stderr
     assert absent.stdout.strip() == f"fallback:{_PAYLOAD}"
     assert not argv_log.exists(), "curl must not run before the relay advertises itself"
@@ -84,28 +120,43 @@ async def test_relay_hook_command_replays_stdin_unless_the_relay_answers(
         curlrc = bridge_dir / TOOL_RELAY_CURL_FILE
         assert stat.S_IMODE(curlrc.stat().st_mode) == 0o600
         assert curlrc.read_text() == f'header = "Authorization: Bearer {token}"\n'
-        answered = await asyncio.to_thread(_run, command, _PAYLOAD, PATH=path)
+        answered = await asyncio.to_thread(_run, command, _PAYLOAD, **env)
         assert answered.returncode == 0, answered.stderr
         assert answered.stdout == "", "the relay's (empty) answer is the hook output"
-        # The bearer reaches curl only through its config file, never argv.
+        # The bearer reaches curl only through its config file, never argv, and
+        # the ambient .curlrc is ignored (-q leads the argv) so the stray
+        # destination sees neither the payload nor the bearer.
         argv = argv_log.read_text().splitlines()
+        assert argv[0] == "-q"
         assert argv[argv.index("-K") + 1] == str(curlrc)
         assert token not in command and all(token not in arg for arg in argv)
+        assert stray.hits == []
 
         # An older relay without this route answers 404: curl -f rejects it
         # and the fallback still runs with the same payload.
         unknown = relay_hook_command(
             bridge_dir, "/hook/not-served-here", "sed s/^/fallback:/", max_time_s=5
         )
-        missing_route = await asyncio.to_thread(_run, unknown, _PAYLOAD, PATH=path)
+        missing_route = await asyncio.to_thread(_run, unknown, _PAYLOAD, **env)
         assert missing_route.returncode == 0, missing_route.stderr
         assert missing_route.stdout.strip() == f"fallback:{_PAYLOAD}"
+
+        # A relay from before the curl config existed: env file only, so the
+        # command does not try curl and replays the same stdin.
+        curlrc.rename(tmp_path / "curlrc.aside")
+        argv_log.unlink()
+        upgrading = await asyncio.to_thread(_run, command, _PAYLOAD, **env)
+        assert upgrading.returncode == 0, upgrading.stderr
+        assert upgrading.stdout.strip() == f"fallback:{_PAYLOAD}"
+        assert not argv_log.exists()
+        (tmp_path / "curlrc.aside").rename(curlrc)
     finally:
         relay.close()
+        stray.close()
 
     # Runner gone, relay files left behind: curl fails and stdin is replayed.
     assert (bridge_dir / TOOL_RELAY_ENV_FILE).is_file()
-    stale = await asyncio.to_thread(_run, command, _PAYLOAD, PATH=path)
+    stale = await asyncio.to_thread(_run, command, _PAYLOAD, **env)
     assert stale.returncode == 0, stale.stderr
     assert stale.stdout.strip() == f"fallback:{_PAYLOAD}"
 

@@ -45,15 +45,38 @@ def _registered_per_tool_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     codex_dir = tmp_path / "codex-bridge"
     codex_dir.mkdir()
     codex_hooks = _codex_policy_hooks_settings(codex_dir, python)["hooks"]
-    commands = {
-        "claude PreToolUse policy": (claude_dir, claude_hooks["PreToolUse"][0]["hooks"][0]),
-        "claude PostToolUse observer": (claude_dir, claude_hooks["PostToolUse"][-2]["hooks"][0]),
-        "codex PreToolUse policy": (codex_dir, codex_hooks["PreToolUse"][0]["hooks"][0]),
-        "codex PostToolUse policy": (codex_dir, codex_hooks["PostToolUse"][0]["hooks"][0]),
-        "codex PostToolUse observer": (codex_dir, codex_hooks["PostToolUse"][0]["hooks"][1]),
-    }
+
+    def registered(hooks: dict, event: str, marker: str) -> str:
+        commands = [
+            str(hook["command"])
+            for entry in hooks[event]
+            for hook in entry["hooks"]
+            if marker in str(hook["command"])
+        ]
+        assert len(commands) == 1, (event, marker, commands)
+        return commands[0]
+
     return {
-        label: (bridge_dir, str(hook["command"])) for label, (bridge_dir, hook) in commands.items()
+        "claude PreToolUse policy": (
+            claude_dir,
+            registered(claude_hooks, "PreToolUse", "evaluate-policy"),
+        ),
+        "claude PostToolUse observer": (
+            claude_dir,
+            registered(claude_hooks, "PostToolUse", "observe-tool"),
+        ),
+        "codex PreToolUse policy": (
+            codex_dir,
+            registered(codex_hooks, "PreToolUse", "evaluate-policy"),
+        ),
+        "codex PostToolUse policy": (
+            codex_dir,
+            registered(codex_hooks, "PostToolUse", "evaluate-policy"),
+        ),
+        "codex PostToolUse observer": (
+            codex_dir,
+            registered(codex_hooks, "PostToolUse", "observe-tool"),
+        ),
     }
 
 

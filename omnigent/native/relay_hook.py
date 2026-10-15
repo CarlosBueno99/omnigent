@@ -56,7 +56,9 @@ def relay_hook_command(
     :param max_time_s: curl's total budget in seconds.
     :param max_bytes: When set, read at most this many bytes of stdin. An
         oversized payload is truncated, so the relay and the fallback both
-        reject it as malformed JSON instead of buffering it whole.
+        reject it as malformed JSON instead of buffering it whole. Policy
+        hooks leave it unset: a truncated ``PreToolUse`` payload would turn
+        the verdict into "no opinion".
     :returns: The shell command string.
     """
     env = shlex.quote(str(bridge_dir / TOOL_RELAY_ENV_FILE))
@@ -65,7 +67,9 @@ def relay_hook_command(
     script = (
         f"p=$({read_stdin}); "
         f"if [ -r {env} ] && [ -r {curlrc} ]; then . {env}; "
-        f"out=$(printf '%s' \"$p\" | curl -sf --max-time {max_time_s} -K {curlrc} "
+        # ``-q`` first: an ambient ~/.curlrc (an extra ``url``, say) must not
+        # see the payload or the bearer; only the relay's own config applies.
+        f"out=$(printf '%s' \"$p\" | curl -q -sf --max-time {max_time_s} -K {curlrc} "
         "-H 'Content-Type: application/json' --data-binary @- "
         f'"$OMNIGENT_RELAY_URL{route}" 2>/dev/null) '
         "&& { printf '%s' \"$out\"; exit 0; }; fi; "

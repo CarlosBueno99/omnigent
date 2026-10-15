@@ -2620,9 +2620,11 @@ class CodexNativeAppServer:
                 diagnostics.finish()
 
 
-def _codex_policy_hook_command(bridge_dir: Path, python_executable: str | None) -> str:
+def _codex_policy_hook_command(
+    bridge_dir: Path, python_executable: str | None, *, subcommand: str = "evaluate-policy"
+) -> str:
     """
-    Build the Python policy hook command, run when the runner's relay cannot answer.
+    Build the Python hook command, run when the runner's relay cannot answer.
 
     Runs python in isolated mode (``-I``): codex executes hooks with the
     session's workspace as cwd, and ``-m`` would otherwise put that
@@ -2636,6 +2638,7 @@ def _codex_policy_hook_command(bridge_dir: Path, python_executable: str | None) 
         via ``--bridge-dir``.
     :param python_executable: Python executable to run, e.g.
         ``"/path/to/python"``. ``None`` uses :data:`sys.executable`.
+    :param subcommand: Hook subcommand, ``"evaluate-policy"`` or ``"observe-tool"``.
     :returns: A shell-escaped command string, e.g.
         ``"/path/python -I -m omnigent.harnesses.codex_native.hook evaluate-policy
         --bridge-dir /home/u/.omnigent/codex-native/abc"``.
@@ -2647,7 +2650,7 @@ def _codex_policy_hook_command(bridge_dir: Path, python_executable: str | None) 
             "-I",
             "-m",
             _POLICY_HOOK_MODULE,
-            "evaluate-policy",
+            subcommand,
             "--bridge-dir",
             str(bridge_dir),
         ]
@@ -2713,17 +2716,7 @@ def _codex_policy_hooks_settings(
     # Keeps _POLICY_HOOK_MODULE in the command, which the trust pass matches on.
     observer = hook_settings(
         bridge_dir,
-        shlex.join(
-            [
-                python_executable or sys.executable,
-                "-I",
-                "-m",
-                _POLICY_HOOK_MODULE,
-                "observe-tool",
-                "--bridge-dir",
-                str(bridge_dir),
-            ]
-        ),
+        _codex_policy_hook_command(bridge_dir, python_executable, subcommand="observe-tool"),
     )
     prompt_submit: list[_JsonObject] = [hook]
     if turn_routing:

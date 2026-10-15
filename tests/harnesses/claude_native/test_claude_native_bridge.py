@@ -12190,6 +12190,7 @@ async def test_hook_evaluate_endpoint_exhausts_connect_retry_budget(
 
 
 @pytest.mark.asyncio
+@_HOOK_EVALUATE_ROUTES
 @pytest.mark.parametrize(
     "failure",
     [401, 504, httpx.RequestError("no auth token"), httpx.ReadError("torn poll")],
@@ -12199,15 +12200,18 @@ async def test_hook_evaluate_endpoint_preserves_non_connect_retries(
     monkeypatch: pytest.MonkeyPatch,
     _policy_retry_clock: Mock,
     failure: int | Exception,
+    route: str,
+    harness: str,
 ) -> None:
-    """HTTP, auth, and held-poll failures retain the existing three attempts."""
+    """HTTP, auth, and held-poll failures retain the three attempts on both routes."""
+    del harness
     client = _ScriptedPolicyClient(failure)
     relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, client)
     try:
         body = await asyncio.to_thread(
             _relay_request_raw,
             bridge_dir,
-            "/hook/claude/evaluate-policy",
+            route,
             _PRE_TOOL_USE_PAYLOAD,
         )
         output = json.loads(body)
