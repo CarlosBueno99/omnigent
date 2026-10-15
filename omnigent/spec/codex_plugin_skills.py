@@ -61,9 +61,12 @@ def _inventory_failure(exc: Exception) -> tuple[str, str]:
 def _without_inventory(summary: str, detail: str, warnings: list[str] | None) -> list[SkillSpec]:
     """Omit plugin skills, telling the host log and the caller's menu why."""
     message = f"Codex plugin skills unavailable: {summary}"
-    _log.warning("%s%s", message, f": {detail}" if detail else "")
+    if detail:
+        _log.warning("%s: %s", message, detail)
+    else:
+        _log.warning("%s", message)
     if warnings is not None:
-        warnings.append(f"{message}; see the host log for details.")
+        warnings.append(f"{message}; see the host log for details." if detail else f"{message}.")
     return []
 
 
@@ -85,8 +88,10 @@ def discover_codex_plugin_skills(
     if skills_filter == "none" or skills_filter == []:
         return []
     cache = codex_home / "plugins" / "cache"
-    if not cache.is_dir() or (codex_path := _find_codex_cli()) is None:
+    if not cache.is_dir():
         return []
+    if (codex_path := _find_codex_cli()) is None:
+        return _without_inventory("`codex` was not found on the host", "", warnings)
     try:
         result = subprocess.run(
             [codex_path, "plugin", "list", "--json"],

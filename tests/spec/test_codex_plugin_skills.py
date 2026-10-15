@@ -240,11 +240,27 @@ def test_unavailable_plugin_inventory_keeps_standalone_skills(
 
     # The menu learns what failed without host paths; the host log keeps the output.
     message = f"Codex plugin skills unavailable: {summary}"
-    assert warnings == [f"{message}; see the host log for details."]
+    assert warnings == [f"{message}; see the host log for details." if logged else f"{message}."]
     assert "/" not in warnings[0]
     assert [record.getMessage() for record in caplog.records] == [
         f"{message}: {logged}" if logged else message
     ]
+
+
+def test_plugin_cache_without_a_codex_binary_warns(
+    tmp_path: Path, codex_cli: Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("omnigent.inner.codex_executor._find_codex_cli", lambda: None)
+    codex_home = tmp_path / ".codex"
+    standalone = _skill(codex_home / "skills")
+    warnings: list[str] = []
+    # Without a plugin cache there are no plugin skills to miss.
+    assert _discover(tmp_path, warnings=warnings) == {"review": standalone}
+    assert warnings == []
+    _skill(_plugin(codex_home) / "skills")
+    assert _discover(tmp_path, warnings=warnings) == {"review": standalone}
+    assert warnings == ["Codex plugin skills unavailable: `codex` was not found on the host."]
+    codex_cli.assert_not_called()
 
 
 def test_unavailable_plugin_inventory_without_a_collector_only_logs(

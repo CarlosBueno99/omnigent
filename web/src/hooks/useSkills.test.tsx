@@ -76,6 +76,21 @@ describe("useSkills", () => {
     },
   );
 
+  it("clears the warning once a retry reads the full catalog", async () => {
+    const warning =
+      "Codex plugin skills unavailable: `codex plugin list` exited 1; see the host log for details.";
+    fetchMock.mockResolvedValueOnce(response([], 200, [warning]));
+    const { result } = renderHook(() => useSkills({ target }), { wrapper });
+    await waitFor(() => expect(result.current.skillsWarnings).toEqual([warning]));
+    fetchMock.mockResolvedValueOnce(response());
+    await act(async () => {
+      await result.current.refetch();
+    });
+    await waitFor(() => expect(result.current.skills).toEqual(skills));
+    expect(result.current.skillsWarnings).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("surfaces why a ready catalog is incomplete, once per distinct warning", async () => {
     const warning = "Codex plugin skills unavailable: `codex plugin list` exited 1";
     fetchMock.mockResolvedValue(response([], 200, [warning, warning]));
