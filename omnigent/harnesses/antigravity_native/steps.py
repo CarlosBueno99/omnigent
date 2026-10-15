@@ -1051,29 +1051,18 @@ def map_step_to_events(
         idx = _step_index(step)
         step_idx = idx if idx is not None else 0
         events: list[OutboundEvent] = []
-        planner = step.get("plannerResponse")
-        if isinstance(planner, dict):
-            response_text = planner.get("response")
-            # modifiedResponse is the post-moderation text; prefer it over
-            # response when present.  Both fields appear in live fixtures and
-            # are equal when no moderation has occurred.
-            modified = planner.get("modifiedResponse")
-            planner_text = (
-                modified
-                if isinstance(modified, str) and modified
-                else response_text
-                if isinstance(response_text, str)
-                else None
-            )
-            if planner_text:
-                # ONE message event — NO delta (the double-render fix).
-                events.append(
-                    _message_event(
-                        conversation_id=conversation_id,
-                        step_idx=step_idx,
-                        text=planner_text,
-                    )
+        # Reuse the shared selector so the committed message text is byte-identical
+        # to the text the completion gate reports (:func:`planner_response_text`).
+        planner_text = planner_response_text(step)
+        if planner_text:
+            # ONE message event — NO delta (the double-render fix).
+            events.append(
+                _message_event(
+                    conversation_id=conversation_id,
+                    step_idx=step_idx,
+                    text=planner_text,
                 )
+            )
         return events
 
     # Tool steps. BOTH items are emitted here, from this one step: the reader is
@@ -1127,19 +1116,10 @@ def map_step_to_events(
 # ---------------------------------------------------------------------------
 # Turn-state classification
 #
-# The predicates below answer "has agy finished the turn, and how did it end?"
-# from the same RPC trajectory this module maps to items. They live here — pure,
-# no I/O — because TWO callers need the identical answer:
-#
-# * the read driver (:mod:`omnigent.harnesses.antigravity_native.reader`), which fires the
-#   ``idle`` / ``failed`` session-status edges; and
-# * the write path's completion gate
-#   (:mod:`omnigent.inner.antigravity_native_executor`), which must not report a
-#   web/orchestrator turn complete until agy has actually finished the work.
-#
-# Before the gate existed the write path reported completion as soon as the text
-# was typed into the TUI, so a dispatched implementation task returned an empty
-# success before agy had run a single tool.
+# Pure predicates (no I/O) answering "has agy finished the turn, and how?" from
+# the RPC trajectory. Shared by the read driver (its ``idle`` / ``failed`` status
+# edges) and the write path's completion gate, which must not report a turn
+# complete until agy has actually finished the work.
 # ---------------------------------------------------------------------------
 
 # agy's OWN per-cascade run status, published in every ``GetAllCascadeTrajectories``
@@ -1198,9 +1178,10 @@ def planner_response_text(step: dict[str, object]) -> str | None:
     """
     Return a planner step's assistant text, or ``None`` when it carries none.
 
-    Mirrors :func:`map_step_to_events`' precedence — ``modifiedResponse`` (the
-    post-moderation text) over ``response`` — so the gate reports byte-identical
-    text to the item the mapper commits.
+    The single text selector shared by :func:`map_step_to_events` and the
+    completion gate, so both agree byte-for-byte: ``modifiedResponse`` (the
+    post-moderation text) is preferred over ``response``, and a whitespace-only
+    value counts as no text.
 
     :param step: One RPC step dict.
     :returns: The assistant text, or ``None`` for a non-planner step or an
@@ -1213,7 +1194,7 @@ def planner_response_text(step: dict[str, object]) -> str | None:
         return None
     for key in ("modifiedResponse", "response"):
         text = planner.get(key)
-        if isinstance(text, str) and text:
+        if isinstance(text, str) and text.strip():
             return text
     return None
 
@@ -1266,10 +1247,8 @@ def is_assistant_text_close_step(step: dict[str, object]) -> bool:
     :returns: ``True`` when the step is a DONE PLANNER_RESPONSE with non-empty
         text and an empty/absent ``toolCalls`` list.
     """
-    # The turn-close edge must fire only on the DONE closing step. A GENERATING
-    # planner frame already carries growing ``modifiedResponse`` text with no
-    # ``toolCalls`` yet, so without this gate the reader would fire the IDLE
-    # status edge mid-response (the spinner closes early) on the stream path.
+    # Fire only on the DONE closing step: a GENERATING frame already carries
+    # growing text with no toolCalls, and would close the turn mid-response.
     if step.get("status") != _STATUS_DONE:
         return False
     text = planner_response_text(step)

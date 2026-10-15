@@ -70,8 +70,8 @@ at or past that index can be the one it just delivered. That snapshot is retried
 (:data:`_SNAPSHOT_TIMEOUT_S`) because nothing else can substitute for it — an
 earlier revision fell back to matching the delivered TEXT, which silently
 accepted the PREVIOUS turn whenever the same text was sent twice and the new step
-had not yet appeared. A turn whose snapshot never succeeds is reported as
-delivered-but-unverifiable, never guessed at.
+had not yet appeared. A turn whose snapshot never succeeds is rejected
+undelivered, never guessed at.
 
 The gate is bounded by two named budgets, :data:`_TURN_START_TIMEOUT_S` and
 :data:`_TURN_COMPLETION_TIMEOUT_S`; the latter documents why the harness idle
@@ -160,69 +160,39 @@ _USER_INPUT_STEP_TYPE = "CORTEX_STEP_TYPE_USER_INPUT"
 
 # --- Completion-gate budgets (see the module docstring) --------------------
 #
-# These are the ONLY task-completion budgets on this path. The bridge's tmux
-# timeouts bound local TUI delivery, not the work; agy's ``--print-timeout``
+# These are the ONLY task-completion budgets on this path: the bridge's tmux
+# timeouts bound local TUI delivery, not the work, and agy's ``--print-timeout``
 # never applies because this path does not use ``--print``.
 
-# Seconds between trajectory polls while waiting for the turn to finish. agy's
-# steps finalize at DONE (no token streaming on this surface) and the gate only
-# needs the terminal edge, not a live mirror — that is the read driver's job at
-# its own much faster cadence — so this is deliberately slow enough to be free
-# next to a multi-minute agent turn.
+# Seconds between trajectory polls while waiting for the turn to finish. The gate
+# only needs agy's terminal edge, not a live mirror (the read driver's job), so
+# this stays slow enough to be free next to a multi-minute agent turn.
 _TURN_POLL_INTERVAL_S = 2.0
 
-# Seconds after a SUCCESSFUL delivery in which agy must record the turn — a
-# USER_INPUT step past the pre-delivery baseline must appear on a reachable
-# cascade. The submit was already footer-verified by the injector, so this only
-# has to absorb agy minting its cascade on a first turn plus RPC-port discovery.
-# Blowing this budget means the paste landed somewhere that is not a turn, which
-# is a failure, not a slow agent: it is reported as one rather than waiting out
-# the full completion budget.
+# Seconds after a successful delivery in which agy must record the turn as a
+# USER_INPUT step past the pre-delivery baseline. Overrunning means the paste
+# landed somewhere that is not a turn — a failure to report, not a slow agent.
 _TURN_START_TIMEOUT_S = 180.0
 
-# Total seconds an OPEN turn may run before the gate gives up.
-#
-# **This is NOT the effective production budget on its own.** The harness wraps
-# every ``run_turn`` in an IDLE watchdog (``_scaffold._TURN_IDLE_TIMEOUT_S``, env
-# ``HARNESS_TURN_TIMEOUT_S``, default 3600s at the time of writing — raised from
-# 600s in #6204). That watchdog is reset only by a NON-HEARTBEAT ``ctx.emit``,
-# and this gate emits nothing while it polls: the read driver mirrors agy's
-# output by POSTing session events directly, not through the harness stream. So
-# a healthy but silent gated turn is racing the harness watchdog, and the real
-# ceiling is whichever of the two fires first.
-#
-# The gate budget therefore sits deliberately BELOW the harness default, so a
-# turn that overruns fails with the diagnosable message below rather than an
-# opaque harness ``response.failed``. Raising it past ``HARNESS_TURN_TIMEOUT_S``
-# buys nothing: the watchdog would win. Emitting a real progress signal from here
-# would need a change in the harness adapter (out of this change's scope), and
-# every event the adapter currently translates would double-render against the
-# read driver's mirror.
-#
-# 50 minutes is sized for the case that motivated the gate — a dispatched worker
-# editing several files, running a build and a test suite, routinely tens of
-# minutes. Anything in the low minutes (agy's own 5-minute ``--print-timeout``
-# default, say) would abort real work and be worse than the bug; anything past
-# the harness watchdog is fiction. A turn that hits this yields an ExecutorError
-# naming the budget; it never degrades into a success.
+# Ceiling on an open turn before the gate gives up. Kept below the harness idle
+# watchdog, which the gate reconciles with at run time so it fails diagnosably
+# before the watchdog could replay the already-typed turn.
 _TURN_COMPLETION_TIMEOUT_S = 3000.0
 
-# Budget for the PRE-delivery trajectory snapshot, which is the sole signal that
-# identifies this turn's USER_INPUT step (see :func:`find_turn_start_index` — the
-# unsound text-matching fallback was removed). Without it the turn cannot be
-# verified at all, so a transient RPC blip is retried rather than accepted; a
-# failure that outlives this budget is reported, never guessed around.
+# Slack between the gate deadline and the harness watchdog; must exceed one poll
+# iteration's worst case (two 30s RPC reads plus a poll sleep) so the gate
+# always returns before the watchdog could replay the turn.
+_WATCHDOG_SAFETY_MARGIN_S = 90.0
+
+# Budget for the PRE-delivery trajectory snapshot — the sole signal that
+# identifies this turn's USER_INPUT step (:func:`find_turn_start_index`). A
+# transient RPC blip is retried within it rather than waved through.
 _SNAPSHOT_TIMEOUT_S = 10.0
 _SNAPSHOT_RETRY_INTERVAL_S = 1.0
 
-# The idle backstop. A turn can close without a text-carrying planner step (the
-# degenerate shape the read driver documents), which no step-based rule can tell
-# apart from a dispatch. agy's own cascade run status settles it — but agy
-# publishes the USER_INPUT step BEFORE it starts generating and reports the
-# cascade idle throughout that window, so consecutive idle readings alone do not
-# close the gap; they only require it to persist. The backstop is therefore
-# gated on ``TurnOutcome.model_started`` (a planner or tool step recorded FOR
-# THIS TURN) as well as on consecutive idle readings spaced by whole poll cycles.
+# The idle backstop closes a textless (degenerate) turn, gated on
+# ``TurnOutcome.model_started`` plus consecutive idle readings spaced by whole
+# poll cycles, since agy also reports idle before the model starts.
 _IDLE_CHECK_EVERY_N_POLLS = 5
 _IDLE_CONFIRM_CHECKS = 2
 
@@ -246,6 +216,11 @@ class _GateResult:
         would just burn the budget again).
     :param cancelled: ``True`` when the gate stopped because the turn was
         interrupted. Neither a success nor a failure of the turn's work.
+    :param preserve_session: ``True`` when the failure leaves the executor idle
+        and reusable even though agy may still be running the turn in its own
+        loop — a gate timeout that stops waiting without cancelling the cascade.
+        The caller threads it onto the :class:`ExecutorError` so the adapter does
+        not interrupt the externally running agent.
     """
 
     completed: bool
@@ -253,6 +228,7 @@ class _GateResult:
     error: str | None = None
     retryable: bool = False
     cancelled: bool = False
+    preserve_session: bool = False
 
 
 async def _sleep(seconds: float) -> None:
@@ -266,6 +242,24 @@ async def _sleep(seconds: float) -> None:
     :returns: None after the sleep completes.
     """
     await asyncio.sleep(seconds)
+
+
+def _harness_idle_watchdog_s() -> float | None:
+    """
+    The harness idle-watchdog budget the gate must beat, or ``None`` if disabled.
+
+    Read dynamically from the scaffold rather than captured at import, so a
+    lowered or raised ``HARNESS_TURN_TIMEOUT_S`` — and a test that monkeypatches
+    it — governs the gate too. The import is deferred because the scaffold lives
+    in the runtime layer, above this inner executor.
+
+    :returns: ``_scaffold._TURN_IDLE_TIMEOUT_S`` when the watchdog is enabled
+        (``> 0``), else ``None``.
+    """
+    from omnigent.runtime.harnesses import _scaffold
+
+    watchdog_s = _scaffold._TURN_IDLE_TIMEOUT_S
+    return watchdog_s if watchdog_s > 0 else None
 
 
 class AntigravityNativeExecutor(Executor):
@@ -317,6 +311,12 @@ class AntigravityNativeExecutor(Executor):
         holding that turn is what waits for the steered work to finish; gating
         here too would block the caller that is trying to steer.
 
+        Known limitation: a steer delivered in the narrow window between agy
+        recording the open turn's DONE text planner and the gate's next poll is
+        read as that turn's close, so the gate reports completion while the
+        steer runs as a fresh turn with nothing waiting on it. agy still runs the
+        steer; only the completion signal races it.
+
         :param session_key: Adapter session key. Unused; the native bridge is
             per conversation.
         :param content: User-supplied content (string or content blocks).
@@ -357,13 +357,14 @@ class AntigravityNativeExecutor(Executor):
             failed.
         """
         del session_key
-        # Release the completion gate FIRST and unconditionally: the user asked
-        # to stop, so the turn must stop being waited on whether or not agy
-        # accepts the cancel below.
-        self._interrupted.set()
         state = await asyncio.to_thread(read_bridge_state, self._bridge_dir)
         if state is None or not _session_is_active(state.session_id, self._request_session_id):
             return False
+        # Release the completion gate now that there is an ACTIVE session to
+        # stop, whether or not agy accepts the cancel below. Setting it before
+        # this guard would poison the next turn's gate when there is nothing to
+        # stop (an interrupt that lands with no live session).
+        self._interrupted.set()
         cascade_id = state.conversation_id
         # No live cascade exists before agy mints its real id, so never RPC the
         # ``agy_conv_*`` placeholder.
@@ -430,12 +431,13 @@ class AntigravityNativeExecutor(Executor):
         if not text:
             yield ExecutorError(message="Antigravity native turn had no user text to send")
             return
-        # A stop that arrived before this turn began running (the harness
-        # registers the turn context before it starts iterating ``run_turn``, so
-        # an interrupt CAN land in that window). Honour it here instead of
-        # clearing it: clearing at entry is what dropped such a stop, and
-        # delivering text for a request the user already cancelled is worse than
-        # reporting it cancelled.
+        # The scaffold arms its idle watchdog as it starts iterating run_turn, so
+        # anchor the gate's watchdog reconciliation here, as early in the body as
+        # possible, rather than at the later gate entry.
+        turn_started_at = time.monotonic()
+        # Honour a stop that landed before the turn began running: the harness
+        # registers the turn context before iterating ``run_turn``, so an
+        # interrupt can arrive in that window; delivering it anyway is worse.
         if self._interrupted.is_set():
             self._interrupted.clear()
             yield TurnCancelled()
@@ -445,28 +447,47 @@ class AntigravityNativeExecutor(Executor):
             # tells this turn's USER_INPUT step apart from the previous turn's,
             # whose closing planner would otherwise satisfy the gate instantly.
             baseline = await self._snapshot_step_count()
+            # Re-check after the snapshot's RPC window: a stop can land while the
+            # snapshot is in flight, and delivering then would type a turn the
+            # user already cancelled.
+            if self._interrupted.is_set():
+                yield TurnCancelled()
+                return
+            if baseline is None:
+                # A missing bridge state or an inactive session is a hard,
+                # specific failure, not merely an unverifiable turn: delegate to
+                # _deliver, which surfaces its actionable message and injects
+                # nothing in those cases.
+                state = await asyncio.to_thread(read_bridge_state, self._bridge_dir)
+                if state is None or not _session_is_active(
+                    state.session_id, self._request_session_id
+                ):
+                    failure = await self._deliver(text)
+                    yield ExecutorError(
+                        message=failure or "Antigravity native turn was not delivered"
+                    )
+                    return
+                # Deliverable, but unverifiable: with no baseline the gate cannot
+                # tell this turn from an earlier one, so reject it undelivered and
+                # retryable rather than typing work it could never attribute.
+                yield ExecutorError(
+                    message=(
+                        "Antigravity native turn was not delivered: agy's trajectory was "
+                        f"unreadable for {_SNAPSHOT_TIMEOUT_S:.0f}s, so this turn could not be "
+                        "told apart from the previous one; it was not typed into the TUI"
+                    ),
+                    retryable=True,
+                    preserve_session=True,
+                    undelivered=True,
+                )
+                return
             failure = await self._deliver(text)
             if failure is not None:
                 yield ExecutorError(message=failure)
                 return
-            if baseline is None:
-                # Delivered, but unverifiable: agy's trajectory stayed unreadable
-                # across the whole snapshot budget, so there is no way to tell
-                # this turn's USER_INPUT step from an earlier one. Guessing is
-                # what produced the original false success, so this reports the
-                # truth instead. NOT retryable: the text was already typed into
-                # the TUI, and a retry would deliver it twice.
-                yield ExecutorError(
-                    message=(
-                        "Antigravity native turn was delivered to the agy TUI but could not be "
-                        "verified: agy's trajectory was unreadable for "
-                        f"{_SNAPSHOT_TIMEOUT_S:.0f}s before delivery, so this turn cannot be "
-                        "told apart from the previous one. agy may still run the turn; its "
-                        "completion is NOT confirmed"
-                    ),
-                )
-                return
-            result = await self._await_turn_completion(baseline=baseline)
+            result = await self._await_turn_completion(
+                baseline=baseline, turn_started_at=turn_started_at
+            )
             if result.cancelled:
                 yield TurnCancelled()
             elif result.completed:
@@ -475,13 +496,12 @@ class AntigravityNativeExecutor(Executor):
                 yield ExecutorError(
                     message=result.error or "Antigravity native turn did not complete",
                     retryable=result.retryable,
+                    preserve_session=result.preserve_session,
                 )
         finally:
-            # Consume the interrupt HERE rather than at entry. The harness calls
-            # ``interrupt_session`` a second time once it sees the cancelled
-            # event, and that call lands before this generator is closed — so
-            # clearing on the way out leaves no stale stop for the next turn,
-            # while an interrupt racing the START of a turn is no longer lost.
+            # Clear the interrupt on the way out, not at entry: the harness may
+            # call ``interrupt_session`` again after the cancelled event, and
+            # clearing here leaves no stale stop without dropping an early one.
             self._interrupted.clear()
 
     async def _deliver(self, text: str) -> str | None:
@@ -543,7 +563,9 @@ class AntigravityNativeExecutor(Executor):
             )
             return None
 
-    async def _await_turn_completion(self, *, baseline: int) -> _GateResult:
+    async def _await_turn_completion(
+        self, *, baseline: int, turn_started_at: float
+    ) -> _GateResult:
         """
         Block until agy finishes the delivered turn, or a budget runs out.
 
@@ -585,6 +607,10 @@ class AntigravityNativeExecutor(Executor):
 
         :param baseline: Step count observed before delivery (see
             :meth:`_snapshot_step_count`).
+        :param turn_started_at: ``time.monotonic()`` captured at run_turn entry,
+            where the harness arms its idle watchdog. The gate returns its own
+            diagnosable timeout before that watchdog could fire and replay the
+            already-typed turn (see :func:`_harness_idle_watchdog_s`).
         :returns: The turn's :class:`_GateResult`.
         """
         started_at = time.monotonic()
@@ -617,6 +643,7 @@ class AntigravityNativeExecutor(Executor):
                             "longer this turn's user input). The turn was delivered and may "
                             "still be running; its completion is NOT confirmed"
                         ),
+                        preserve_session=True,
                     )
                 if start_index is not None:
                     polls_since_open += 1
@@ -643,17 +670,9 @@ class AntigravityNativeExecutor(Executor):
                             # may retry; a structural gate failure below is not.
                             retryable=True,
                         )
-                    # Still running. The degenerate close (a turn that ends with
-                    # no text-carrying planner) is only visible in agy's own
-                    # cascade status — but that status is ALSO idle in the window
-                    # between agy recording the user step and the model starting,
-                    # and consecutive readings do not close that window, they only
-                    # require it to persist. So the backstop additionally demands
-                    # positive evidence the model started on THIS turn: a planner
-                    # or tool step recorded after its user input. (A non-idle
-                    # cascade reading is deliberately NOT accepted as that
-                    # evidence — ``_cascade_reports_idle`` fails closed, so False
-                    # is indistinguishable from a failed read.)
+                    # Still running. A degenerate (textless) close shows only in
+                    # agy's cascade status, so require model_started plus confirmed
+                    # idle readings; a failed-closed idle read never counts.
                     ready_to_check = (
                         outcome.model_started
                         and polls_since_open > 0
@@ -681,6 +700,29 @@ class AntigravityNativeExecutor(Executor):
                         "(no matching USER_INPUT step; the agy connect-RPC may be unreachable "
                         "or the submitted text never opened a cascade turn)"
                     ),
+                    # The turn was typed into the TUI; agy may yet record it, so
+                    # leave the executor reusable and the cascade uncancelled.
+                    preserve_session=True,
+                )
+            watchdog_s = _harness_idle_watchdog_s()
+            if (
+                watchdog_s is not None
+                and time.monotonic() - turn_started_at >= watchdog_s - _WATCHDOG_SAFETY_MARGIN_S
+            ):
+                # Beat the harness idle watchdog, which this silent gate never
+                # resets: once delivery has succeeded, letting the watchdog fire
+                # would REPLAY run_turn and re-type the turn. Return our own
+                # timeout first and leave the cascade uncancelled so agy keeps
+                # working.
+                return _GateResult(
+                    completed=False,
+                    text=latest_text,
+                    error=(
+                        "Antigravity native turn did not reach a terminal state before the "
+                        f"harness idle watchdog ({watchdog_s:.0f}s). The turn was delivered and "
+                        "may still be running in the agy TUI; its work is NOT confirmed"
+                    ),
+                    preserve_session=True,
                 )
             if elapsed >= _TURN_COMPLETION_TIMEOUT_S:
                 blocked = (
@@ -697,6 +739,7 @@ class AntigravityNativeExecutor(Executor):
                         f"{_TURN_COMPLETION_TIMEOUT_S:.0f}s{blocked}. The turn was delivered "
                         "and may still be running in the agy TUI; its work is NOT confirmed"
                     ),
+                    preserve_session=True,
                 )
             await _sleep(_TURN_POLL_INTERVAL_S)
 
@@ -714,14 +757,15 @@ class AntigravityNativeExecutor(Executor):
         :returns: ``0`` when agy has not minted the conversation yet (a first
             turn has no earlier step to be confused with), the current step count
             when the trajectory reads cleanly, or ``None`` when it stayed
-            unreadable for the whole budget — the caller reports that turn as
-            unverifiable rather than guessing which USER_INPUT step is its own.
+            unreadable for the whole budget — the caller rejects that turn
+            undelivered rather than guessing which USER_INPUT step is its own.
         """
         deadline = time.monotonic() + _SNAPSHOT_TIMEOUT_S
         while True:
             state = await asyncio.to_thread(read_bridge_state, self._bridge_dir)
             if state is None:
-                # Broken wiring, not a transient fault; ``_deliver`` reports it.
+                # Broken wiring, not a transient fault: retrying cannot fix it,
+                # so reject the turn undelivered now instead of burning the budget.
                 return None
             if is_placeholder_conversation_id(state.conversation_id):
                 return 0
@@ -731,7 +775,8 @@ class AntigravityNativeExecutor(Executor):
             if time.monotonic() >= deadline:
                 _logger.warning(
                     "antigravity native could not snapshot the trajectory in %.0fs; "
-                    "this turn will be delivered but cannot be verified",
+                    "this turn cannot be told apart from the previous one and will "
+                    "not be delivered",
                     _SNAPSHOT_TIMEOUT_S,
                 )
                 return None

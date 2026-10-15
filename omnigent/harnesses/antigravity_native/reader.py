@@ -85,7 +85,6 @@ from omnigent.harnesses.antigravity_native.rpc import (
 # (relocated from the retired transcript forwarder). The reader reuses the SAME
 # event shape so the mapped events post identically.
 from omnigent.harnesses.antigravity_native.steps import (
-    CASCADE_RUN_STATUS_IDLE,
     OutboundEvent,
     PendingInteraction,
     _execution_discriminator,
@@ -172,12 +171,6 @@ _POST_RETRY_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 # Session-status edge values (mirror the transcript forwarder's vocabulary).
 _STATUS_RUNNING = "running"
 _STATUS_IDLE = "idle"
-# agy's OWN per-cascade run status, published in every ``GetAllCascadeTrajectories``
-# summary. This is the authoritative "is this turn over" signal — the step-type
-# close detection below only INFERS it, and every agy step type it does not know
-# about is a turn that never closes. Defined in the mapper module (shared with the
-# write path's completion gate); re-exported here under the reader's private name.
-_CASCADE_RUN_STATUS_IDLE = CASCADE_RUN_STATUS_IDLE
 # Consecutive idle observations required before the backstop closes a turn. One
 # reading can catch the gap between delivering a turn and agy starting it.
 _QUIESCENT_TICKS_TO_CLOSE = 2

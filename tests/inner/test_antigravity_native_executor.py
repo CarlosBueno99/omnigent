@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -33,6 +32,11 @@ from omnigent.harnesses.antigravity_native.bridge import (
 from omnigent.inner.antigravity_native_executor import AntigravityNativeExecutor
 from omnigent.inner.executor import ExecutorError, ExecutorEvent, TurnComplete
 from omnigent.inner.native_attachments import attachment_cache_dir
+from tests.harnesses.antigravity_native._trajectory_steps import (
+    planner_step,
+    tool_step,
+    user_step,
+)
 
 _CONVERSATION_ID = "90468e33-38c3-4e48-ae9f-03c843196227"
 _PLACEHOLDER_ID = "agy_conv_placeholder123"
@@ -40,56 +44,6 @@ _PORT = 52548
 _ECHOED_MODEL = "MODEL_PLACEHOLDER_M20"
 _RECOMMENDED_MODEL = "MODEL_PLACEHOLDER_M132"
 _DEFAULT_REPLY_TEXT = "all done"
-
-
-def _user_step(text: str) -> dict[str, Any]:
-    """
-    Build the USER_INPUT step agy records for a delivered turn.
-
-    :param text: The delivered text agy echoed back onto the cascade.
-    :returns: One USER_INPUT step dict.
-    """
-    return {"type": "CORTEX_STEP_TYPE_USER_INPUT", "userInput": {"userResponse": text}}
-
-
-def _planner_step(
-    *, status: str, text: str | None = None, error: str | None = None
-) -> dict[str, Any]:
-    """
-    Build a PLANNER_RESPONSE step at ``status``.
-
-    :param status: ``CORTEX_STEP_STATUS_*`` value.
-    :param text: Assistant text the planner carries, if any.
-    :param error: agy error detail, for the ERROR shape.
-    :returns: One PLANNER_RESPONSE step dict.
-    """
-    planner: dict[str, Any] = {}
-    if text is not None:
-        planner["response"] = text
-    if error is not None:
-        planner["error"] = error
-    return {
-        "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
-        "status": status,
-        "plannerResponse": planner,
-    }
-
-
-def _tool_step(status: str) -> dict[str, Any]:
-    """
-    Build a RUN_COMMAND tool step at ``status``.
-
-    :param status: ``CORTEX_STEP_STATUS_*`` value.
-    :returns: One tool step dict.
-    """
-    return {
-        "type": "CORTEX_STEP_TYPE_RUN_COMMAND",
-        "status": status,
-        "runCommand": {"command": "pytest"},
-        # ``metadata.toolAction`` is what marks a step as a tool call on the live
-        # wire, in both RPC shapes (see ``_is_tool_step``).
-        "metadata": {"toolAction": "Running command"},
-    }
 
 
 def _executor(tmp_path: Path) -> AntigravityNativeExecutor:
@@ -200,8 +154,8 @@ def injected(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
         reply = rec["reply"]
         if reply is None:
             reply = [
-                _user_step(content),
-                _planner_step(status="CORTEX_STEP_STATUS_DONE", text=_DEFAULT_REPLY_TEXT),
+                user_step(content),
+                planner_step(status="CORTEX_STEP_STATUS_DONE", text=_DEFAULT_REPLY_TEXT),
             ]
         steps = rec["steps"]
         assert isinstance(steps, list) and isinstance(reply, list)
@@ -563,15 +517,15 @@ def test_gate_waits_for_a_terminal_done_state(
     """
     _seed_state(tmp_path)
     injected["reply"] = [
-        _user_step("implement the thing"),
-        _tool_step("CORTEX_STEP_STATUS_RUNNING"),
+        user_step("implement the thing"),
+        tool_step("CORTEX_STEP_STATUS_RUNNING"),
     ]
 
     def _finish_on_third_read(rec: dict[str, object], index: int) -> None:
         if index == 3:
             steps = rec["steps"]
             assert isinstance(steps, list)
-            steps.append(_planner_step(status="CORTEX_STEP_STATUS_DONE", text="refactor applied"))
+            steps.append(planner_step(status="CORTEX_STEP_STATUS_DONE", text="refactor applied"))
 
     injected["on_poll"] = _finish_on_third_read
 
@@ -597,12 +551,12 @@ def test_gate_does_not_complete_on_the_previous_turns_close(
     """
     _seed_state(tmp_path)
     injected["steps"] = [
-        _user_step("previous question"),
-        _planner_step(status="CORTEX_STEP_STATUS_DONE", text="previous answer"),
+        user_step("previous question"),
+        planner_step(status="CORTEX_STEP_STATUS_DONE", text="previous answer"),
     ]
     injected["reply"] = [
-        _user_step("implement the thing"),
-        _tool_step("CORTEX_STEP_STATUS_RUNNING"),
+        user_step("implement the thing"),
+        tool_step("CORTEX_STEP_STATUS_RUNNING"),
     ]
 
     events = _drive_gate(tmp_path, monkeypatch, completion_timeout_s=0.0)
@@ -623,8 +577,8 @@ def test_gate_reports_an_agy_error_state_as_a_failure(
     """
     _seed_state(tmp_path)
     injected["reply"] = [
-        _user_step("implement the thing"),
-        _planner_step(status="CORTEX_STEP_STATUS_ERROR", error="resource exhausted"),
+        user_step("implement the thing"),
+        planner_step(status="CORTEX_STEP_STATUS_ERROR", error="resource exhausted"),
     ]
 
     events = _drive_gate(tmp_path, monkeypatch)
@@ -648,8 +602,8 @@ def test_gate_times_out_with_a_diagnosable_failure(
     """
     _seed_state(tmp_path)
     injected["reply"] = [
-        _user_step("implement the thing"),
-        _tool_step("CORTEX_STEP_STATUS_WAITING"),
+        user_step("implement the thing"),
+        tool_step("CORTEX_STEP_STATUS_WAITING"),
     ]
 
     events = _drive_gate(tmp_path, monkeypatch, completion_timeout_s=0.0)
@@ -716,8 +670,8 @@ def test_gate_closes_a_degenerate_turn_on_agys_own_idle_status(
     """
     _seed_state(tmp_path)
     injected["reply"] = [
-        _user_step("implement the thing"),
-        _planner_step(status="CORTEX_STEP_STATUS_DONE"),
+        user_step("implement the thing"),
+        planner_step(status="CORTEX_STEP_STATUS_DONE"),
     ]
     injected["cascade_status"] = "CASCADE_RUN_STATUS_IDLE"
 
@@ -759,8 +713,8 @@ def test_snapshot_is_retried_through_a_transient_failure(
     """
     _seed_state(tmp_path)
     injected["steps"] = [
-        _user_step("previous question"),
-        _planner_step(status="CORTEX_STEP_STATUS_DONE", text="previous answer"),
+        user_step("previous question"),
+        planner_step(status="CORTEX_STEP_STATUS_DONE", text="previous answer"),
     ]
 
     def _fail_first_snapshot_read(index: int) -> Exception | None:
@@ -784,17 +738,16 @@ def test_repeated_text_with_no_snapshot_never_adopts_the_previous_turn(
     planner. With the pre-delivery snapshot failing for the whole budget there is
     no positional signal, and an earlier revision fell back to matching the
     delivered text — which selects that old turn and reports its completion as
-    this one's. The gate must instead report the turn as unverifiable, and must
-    never hand back the prior turn's reply.
+    this one's. Rather than guess, the executor rejects the turn as undelivered
+    BEFORE typing anything into the TUI: nothing was sent, so the workflow may
+    retry, and the prior turn's reply is never handed back.
     """
     _seed_state(tmp_path)
     repeated = "implement the thing"
     injected["steps"] = [
-        _user_step(repeated),
-        _planner_step(status="CORTEX_STEP_STATUS_DONE", text="stale answer from last turn"),
+        user_step(repeated),
+        planner_step(status="CORTEX_STEP_STATUS_DONE", text="stale answer from last turn"),
     ]
-    # agy has not yet recorded the new turn when the gate would look.
-    injected["reply"] = []
     injected["read_error"] = lambda _index: httpx.ConnectError("agy unreachable")
 
     monkeypatch.setattr(executor_mod, "_SNAPSHOT_TIMEOUT_S", 0.0)
@@ -802,11 +755,56 @@ def test_repeated_text_with_no_snapshot_never_adopts_the_previous_turn(
     assert len(events) == 1
     assert isinstance(events[0], ExecutorError)
     assert not any(isinstance(event, TurnComplete) for event in events)
-    assert "could not be verified" in events[0].message
-    assert "NOT confirmed" in events[0].message
+    assert "was not delivered" in events[0].message
+    assert "could not be told apart" in events[0].message
     assert "stale answer from last turn" not in events[0].message
-    # The turn was still delivered; only its completion is unverified.
-    assert _injected(injected)[0]["content"] == repeated
+    # Nothing was typed into the TUI, so there is no duplicate turn to clean up
+    # and the error is safe to retry.
+    assert _injected(injected) == []
+    assert events[0].undelivered is True
+    assert events[0].retryable is True
+    assert events[0].preserve_session is True
+
+
+def test_gate_returns_before_the_configured_harness_idle_watchdog(
+    tmp_path: Path, injected: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    REGRESSION: the gate reconciles with the CONFIGURED harness idle watchdog.
+
+    The gate emits no progress events while it polls, so the harness idle
+    watchdog (``_scaffold._TURN_IDLE_TIMEOUT_S``, env ``HARNESS_TURN_TIMEOUT_S``)
+    is never reset by this turn. If the gate outlived that watchdog the harness
+    would treat the turn as wedged, REPLAY ``run_turn`` and re-type the prompt
+    into agy. With a short configured watchdog and a turn that never terminates,
+    the gate must return its own diagnosable failure first — keyed to the
+    watchdog actually configured, not the module default — and must leave the
+    cascade uncancelled so agy keeps working.
+    """
+    from omnigent.runtime.harnesses import _scaffold
+
+    _seed_state(tmp_path)
+    # agy records the turn and keeps running a tool; it never reaches a terminal
+    # planner, so only the watchdog reconciliation can end the gate.
+    injected["reply"] = [
+        user_step("implement the thing"),
+        tool_step("CORTEX_STEP_STATUS_RUNNING"),
+    ]
+    # A watchdog shorter than the safety margin forces the reconciliation branch
+    # on the first poll, independently of real elapsed time.
+    monkeypatch.setattr(_scaffold, "_TURN_IDLE_TIMEOUT_S", 30.0)
+    monkeypatch.setattr(executor_mod, "_WATCHDOG_SAFETY_MARGIN_S", 60.0)
+
+    events = _drive_gate(tmp_path, monkeypatch)
+    assert len(events) == 1
+    assert isinstance(events[0], ExecutorError)
+    assert not any(isinstance(event, TurnComplete) for event in events)
+    # The configured 30s watchdog, not the module default, bounds the gate.
+    assert "harness idle watchdog (30s)" in events[0].message
+    assert "NOT confirmed" in events[0].message
+    assert events[0].preserve_session is True
+    # Delivered exactly once: the gate returned before the harness could replay.
+    assert len(_injected(injected)) == 1
 
 
 def test_idle_backstop_waits_for_evidence_the_model_started(
@@ -824,7 +822,7 @@ def test_idle_backstop_waits_for_evidence_the_model_started(
     """
     _seed_state(tmp_path)
     # agy records the user step, then sits: no planner, no tool, cascade idle.
-    injected["reply"] = [_user_step("implement the thing")]
+    injected["reply"] = [user_step("implement the thing")]
     injected["cascade_status"] = "CASCADE_RUN_STATUS_IDLE"
 
     def _start_the_model_late(rec: dict[str, object], index: int) -> None:
@@ -835,7 +833,7 @@ def test_idle_backstop_waits_for_evidence_the_model_started(
             steps = rec["steps"]
             assert isinstance(steps, list)
             steps.append(
-                _planner_step(status="CORTEX_STEP_STATUS_DONE", text="finally got started")
+                planner_step(status="CORTEX_STEP_STATUS_DONE", text="finally got started")
             )
 
     injected["on_poll"] = _start_the_model_late
@@ -866,12 +864,12 @@ def test_trajectory_mutation_under_the_gate_fails_rather_than_guesses(
     """
     _seed_state(tmp_path)
     injected["steps"] = [
-        _user_step("previous question"),
-        _planner_step(status="CORTEX_STEP_STATUS_DONE", text="previous answer"),
+        user_step("previous question"),
+        planner_step(status="CORTEX_STEP_STATUS_DONE", text="previous answer"),
     ]
     injected["reply"] = [
-        _user_step("implement the thing"),
-        _tool_step("CORTEX_STEP_STATUS_RUNNING"),
+        user_step("implement the thing"),
+        tool_step("CORTEX_STEP_STATUS_RUNNING"),
     ]
 
     def _prune_history_after_the_gate_locks_on(rec: dict[str, object], index: int) -> None:
@@ -1289,8 +1287,8 @@ def test_gate_releases_on_interrupt_without_claiming_completion(
 
     _seed_state(tmp_path)
     injected["reply"] = [
-        _user_step("implement the thing"),
-        _tool_step("CORTEX_STEP_STATUS_RUNNING"),
+        user_step("implement the thing"),
+        tool_step("CORTEX_STEP_STATUS_RUNNING"),
     ]
     monkeypatch.setattr(executor_mod, "cancel_cascade_steps", lambda _p, _c: True)
     monkeypatch.setattr(executor_mod, "_TURN_COMPLETION_TIMEOUT_S", 3600.0)

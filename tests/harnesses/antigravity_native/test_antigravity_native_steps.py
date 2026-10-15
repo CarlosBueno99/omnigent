@@ -32,6 +32,12 @@ from omnigent.harnesses.antigravity_native.steps import (
     map_step_to_events,
     output_reasoning_delta_event,
     pending_interaction,
+    planner_response_text,
+)
+from tests.harnesses.antigravity_native._trajectory_steps import (
+    planner_step,
+    tool_step,
+    user_step,
 )
 
 # ---------------------------------------------------------------------------
@@ -655,6 +661,25 @@ class TestModifiedResponsePrecedence:
         assert isinstance(content, list)
         assert content[0]["text"] == "Non-empty response."
 
+    def test_whitespace_only_response_counts_as_no_text(self) -> None:
+        """A planner whose only text is whitespace is treated as no reply.
+
+        The selector strips before deciding, so a DONE planner carrying only
+        blank text commits no message (no empty bubble) and reports no text to
+        the completion gate, which then falls back to its cascade-idle backstop.
+        """
+        import copy
+
+        base = _load("planner_response_text")
+        step = copy.deepcopy(base)
+        planner = step.get("plannerResponse")
+        assert isinstance(planner, dict)
+        planner["response"] = "   \n\t "
+        planner["modifiedResponse"] = "  "
+
+        assert planner_response_text(step) is None
+        assert map_step_to_events(step, conversation_id=_CID) == []
+
 
 # ---------------------------------------------------------------------------
 # Real-id pairing: planner → run_command sequence (OPUS-IMP1)
@@ -1266,63 +1291,9 @@ class TestStreamProjection:
 
 
 # ---------------------------------------------------------------------------
-# Turn-state classification (the completion gate's pure core)
-#
-# These pin the answer both callers depend on — the read driver's session-status
-# edges and the write path's completion gate. The gate exists because the
-# executor used to report a turn complete as soon as the text was typed into the
-# agy TUI; every case below distinguishes "delivered" from "finished".
+# Turn-state classification (the completion gate's pure core): every case
+# below distinguishes "delivered to the TUI" from "agy actually finished".
 # ---------------------------------------------------------------------------
-
-
-def _user_step(text: str) -> dict[str, Any]:
-    """
-    Build a USER_INPUT step carrying ``text``.
-
-    :param text: The user turn text agy recorded.
-    :returns: One USER_INPUT step dict.
-    """
-    return {"type": "CORTEX_STEP_TYPE_USER_INPUT", "userInput": {"userResponse": text}}
-
-
-def _planner_step(
-    *, status: str, text: str | None = None, error: str | None = None
-) -> dict[str, Any]:
-    """
-    Build a PLANNER_RESPONSE step at ``status``.
-
-    :param status: ``CORTEX_STEP_STATUS_*`` value.
-    :param text: Assistant text the planner carries, if any.
-    :param error: agy error detail, for the ERROR shape.
-    :returns: One PLANNER_RESPONSE step dict.
-    """
-    planner: dict[str, Any] = {}
-    if text is not None:
-        planner["response"] = text
-    if error is not None:
-        planner["error"] = error
-    return {
-        "type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
-        "status": status,
-        "plannerResponse": planner,
-    }
-
-
-def _tool_step(status: str) -> dict[str, Any]:
-    """
-    Build a RUN_COMMAND tool step at ``status``.
-
-    :param status: ``CORTEX_STEP_STATUS_*`` value.
-    :returns: One tool step dict.
-    """
-    return {
-        "type": "CORTEX_STEP_TYPE_RUN_COMMAND",
-        "status": status,
-        "runCommand": {"command": "pytest"},
-        # ``metadata.toolAction`` is what marks a step as a tool call on the live
-        # wire, in both RPC shapes (see ``_is_tool_step``).
-        "metadata": {"toolAction": "Running command"},
-    }
 
 
 class TestFindTurnStartIndex:
@@ -1333,9 +1304,9 @@ class TestFindTurnStartIndex:
         from omnigent.harnesses.antigravity_native.steps import find_turn_start_index
 
         steps = [
-            _user_step("old"),
-            _planner_step(status="CORTEX_STEP_STATUS_DONE", text="old answer"),
-            _user_step("new"),
+            user_step("old"),
+            planner_step(status="CORTEX_STEP_STATUS_DONE", text="old answer"),
+            user_step("new"),
         ]
         assert find_turn_start_index(steps, baseline_step_count=2) == 2
 
@@ -1351,8 +1322,8 @@ class TestFindTurnStartIndex:
         from omnigent.harnesses.antigravity_native.steps import find_turn_start_index
 
         steps = [
-            _user_step("old"),
-            _planner_step(status="CORTEX_STEP_STATUS_DONE", text="old answer"),
+            user_step("old"),
+            planner_step(status="CORTEX_STEP_STATUS_DONE", text="old answer"),
         ]
         assert find_turn_start_index(steps, baseline_step_count=2) is None
 
@@ -1370,12 +1341,12 @@ class TestFindTurnStartIndex:
 
         same_text = "run the test suite"
         steps = [
-            _user_step(same_text),
-            _planner_step(status="CORTEX_STEP_STATUS_DONE", text="ran it, all green"),
+            user_step(same_text),
+            planner_step(status="CORTEX_STEP_STATUS_DONE", text="ran it, all green"),
         ]
         assert find_turn_start_index(steps, baseline_step_count=2) is None
         # Once agy records the repeat, the NEW step is found — not the old one.
-        steps.append(_user_step(same_text))
+        steps.append(user_step(same_text))
         assert find_turn_start_index(steps, baseline_step_count=2) == 2
 
     def test_no_user_step_yields_none(self) -> None:
@@ -1385,7 +1356,7 @@ class TestFindTurnStartIndex:
         assert find_turn_start_index([], baseline_step_count=0) is None
         assert (
             find_turn_start_index(
-                [_planner_step(status="CORTEX_STEP_STATUS_DONE", text="x")],
+                [planner_step(status="CORTEX_STEP_STATUS_DONE", text="x")],
                 baseline_step_count=0,
             )
             is None
@@ -1400,9 +1371,9 @@ class TestClassifyTurnOutcome:
         from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
 
         steps = [
-            _user_step("go"),
-            _tool_step("CORTEX_STEP_STATUS_DONE"),
-            _planner_step(status="CORTEX_STEP_STATUS_DONE", text="finished the refactor"),
+            user_step("go"),
+            tool_step("CORTEX_STEP_STATUS_DONE"),
+            planner_step(status="CORTEX_STEP_STATUS_DONE", text="finished the refactor"),
         ]
         outcome = classify_turn_outcome(steps, start_index=0)
         assert outcome.state == "done"
@@ -1418,8 +1389,8 @@ class TestClassifyTurnOutcome:
         from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
 
         steps = [
-            _user_step("go"),
-            _planner_step(status="CORTEX_STEP_STATUS_ERROR", error="resource exhausted"),
+            user_step("go"),
+            planner_step(status="CORTEX_STEP_STATUS_ERROR", error="resource exhausted"),
         ]
         outcome = classify_turn_outcome(steps, start_index=0)
         assert outcome.state == "error"
@@ -1430,9 +1401,9 @@ class TestClassifyTurnOutcome:
         from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
 
         steps = [
-            _user_step("go"),
-            _planner_step(status="CORTEX_STEP_STATUS_GENERATING", text="I'll start by"),
-            _tool_step("CORTEX_STEP_STATUS_RUNNING"),
+            user_step("go"),
+            planner_step(status="CORTEX_STEP_STATUS_GENERATING", text="I'll start by"),
+            tool_step("CORTEX_STEP_STATUS_RUNNING"),
         ]
         outcome = classify_turn_outcome(steps, start_index=0)
         assert outcome.state == "running"
@@ -1446,14 +1417,14 @@ class TestClassifyTurnOutcome:
         """
         from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
 
-        steps = [_user_step("go"), _tool_step("CORTEX_STEP_STATUS_ERROR")]
+        steps = [user_step("go"), tool_step("CORTEX_STEP_STATUS_ERROR")]
         assert classify_turn_outcome(steps, start_index=0).state == "running"
 
     def test_waiting_interaction_is_reported_while_running(self) -> None:
         """A WAITING step keeps the turn running and flags WHY it is not progressing."""
         from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
 
-        steps = [_user_step("go"), _tool_step("CORTEX_STEP_STATUS_WAITING")]
+        steps = [user_step("go"), tool_step("CORTEX_STEP_STATUS_WAITING")]
         outcome = classify_turn_outcome(steps, start_index=0)
         assert outcome.state == "running"
         assert outcome.waiting_on_user is True
@@ -1468,9 +1439,9 @@ class TestClassifyTurnOutcome:
         from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
 
         steps = [
-            _user_step("old"),
-            _planner_step(status="CORTEX_STEP_STATUS_DONE", text="old answer"),
-            _user_step("new"),
+            user_step("old"),
+            planner_step(status="CORTEX_STEP_STATUS_DONE", text="old answer"),
+            user_step("new"),
         ]
         assert classify_turn_outcome(steps, start_index=2).state == "running"
 
@@ -1483,7 +1454,7 @@ class TestClassifyTurnOutcome:
         """
         from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
 
-        steps = [_user_step("go"), _planner_step(status="CORTEX_STEP_STATUS_DONE")]
+        steps = [user_step("go"), planner_step(status="CORTEX_STEP_STATUS_DONE")]
         outcome = classify_turn_outcome(steps, start_index=0)
         assert outcome.state == "running"
         assert outcome.model_started is True
@@ -1500,7 +1471,7 @@ class TestClassifyTurnOutcome:
         """
         from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
 
-        outcome = classify_turn_outcome([_user_step("go")], start_index=0)
+        outcome = classify_turn_outcome([user_step("go")], start_index=0)
         assert outcome.state == "running"
         assert outcome.model_started is False
 
@@ -1508,14 +1479,14 @@ class TestClassifyTurnOutcome:
         """A mid-turn steering USER_INPUT is another delivery, not the model working."""
         from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
 
-        steps = [_user_step("go"), _user_step("actually, do it this way")]
+        steps = [user_step("go"), user_step("actually, do it this way")]
         assert classify_turn_outcome(steps, start_index=0).model_started is False
 
     def test_a_tool_step_is_model_activity(self) -> None:
         """A tool step recorded for this turn proves agy started working on it."""
         from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
 
-        steps = [_user_step("go"), _tool_step("CORTEX_STEP_STATUS_RUNNING")]
+        steps = [user_step("go"), tool_step("CORTEX_STEP_STATUS_RUNNING")]
         assert classify_turn_outcome(steps, start_index=0).model_started is True
 
 

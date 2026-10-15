@@ -165,13 +165,18 @@ def test_turn_completion_waits_for_agy_reply(
     completed = stream.first_completed_after(sent_at)
     assert completed is not None
     completed_s = completed - sent_at
-    assert completed_s >= reply_s - 1.0, (
-        f"turn reported complete at +{completed_s:.1f}s "
-        f"but agy's reply only arrived at +{reply_s:.1f}s"
+    # Deterministic oracle: agy cannot finish before its own model delay has
+    # elapsed, so a turn reported complete earlier was reported on delivery —
+    # the exact regression. Compare against that fixed floor, not the DOM reply
+    # bubble whose render time carries polling and transport jitter.
+    floor_s = _MODEL_DELAY_S - 1.0
+    assert completed_s >= floor_s, (
+        f"turn reported complete at +{completed_s:.1f}s, before agy's "
+        f"{_MODEL_DELAY_S}s model delay could have elapsed"
     )
-    assert placeholder_dropped_s is None or placeholder_dropped_s >= reply_s - 1.0, (
-        f"composer left its queued state at +{placeholder_dropped_s:.1f}s, "
-        f"before agy's reply at +{reply_s:.1f}s"
+    assert placeholder_dropped_s is None or placeholder_dropped_s >= floor_s, (
+        f"composer left its queued state at +{placeholder_dropped_s:.1f}s, before "
+        f"agy's {_MODEL_DELAY_S}s model delay could have elapsed"
     )
     expect(page.get_by_test_id("working-indicator")).to_have_count(0, timeout=60_000)
     page.close()
