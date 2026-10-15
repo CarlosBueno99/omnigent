@@ -7530,6 +7530,23 @@ def test_list_items_propagates_backend_failures_unchanged(db_uri: str, error: Ex
     assert store.decode_calls == 1
 
 
+def test_list_items_propagates_when_every_row_is_refused(db_uri: str) -> None:
+    """A payload refusal of every row on a page is a backend-wide fault — a
+    rotated decryption key, a request-format bug — not isolated bad payloads:
+    the original error propagates instead of a page of placeholders."""
+    error = _rpc_error("DATA_LOSS", "ciphertext corrupt")
+    store = _FailingDecodeStore(db_uri, error)
+    conv = store.create_conversation()
+    store.append(conv.id, [_user_message("a", "resp_a"), _user_message("b", "resp_b")])
+    store.decode_calls = 0
+
+    with pytest.raises(type(error)) as excinfo:
+        store.list_items(conv.id)
+
+    assert excinfo.value is error
+    assert store.decode_calls == 3
+
+
 def test_single_row_quota_refusal_propagates_for_list_and_point_lookup(db_uri: str) -> None:
     """A quota-style RESOURCE_EXHAUSTED carries no size rejection, so a one-row
     page and a point lookup both propagate it after a single call instead of

@@ -2422,9 +2422,11 @@ class SqlAlchemyConversationStore(ConversationStore):
         until each unreadable row stands alone, so it degrades to a placeholder
         instead of hiding the whole page. Any other exception — a denial,
         cancellation or outage, a local decode error, a defect inside the seam —
-        propagates unchanged for the app's existing handling. Placeholders are
-        never persisted: the next read decodes the rows again, so a page with an
-        unreadable row costs the halving on every read.
+        propagates unchanged for the app's existing handling, and so does a
+        refusal of every row on a multi-row page, which points at a backend-wide
+        fault (a rotated key, a request-format bug) rather than bad payloads.
+        Placeholders are never persisted: the next read decodes the rows again,
+        so a page with an unreadable row costs the halving on every read.
 
         Only the decode seam is covered; parsing the decoded JSON in
         :func:`_to_item` is not. Writes, the append dedup probe and forks keep
@@ -2443,6 +2445,8 @@ class SqlAlchemyConversationStore(ConversationStore):
             _logger.debug("decoding a page of %d items was refused", len(stored), exc_info=True)
         decoded = self._isolate_unreadable_rows(stored)
         unreadable = sum(1 for d in decoded if d is None)
+        if unreadable == len(stored) > 1:
+            raise refused
         if unreadable:
             _logger.warning(
                 "%d of %d items could not be decoded (%s: %s); serving placeholders",
