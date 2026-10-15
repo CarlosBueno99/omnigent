@@ -160,6 +160,7 @@ from omnigent.process_logging import (
 )
 from omnigent.runner._zygote import ZYGOTE_ENABLED_ENV_VAR
 from omnigent.runner.identity import (
+    RUNNER_AUTH_REJECTED_EXIT_CODE,
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_DELEGATED_AUTH_ENV_VAR,
     RUNNER_HOST_OWNS_GLOBAL_CLEANUP_ENV_VAR,
@@ -2521,6 +2522,21 @@ class HostProcess:
             )
             await self._report_runner_exit(runner_id, report.error, had_connected=had_connected)
             return
+        if (
+            report.category is not ErrorCategory.CONFIG
+            and handle.proc.returncode == RUNNER_AUTH_REJECTED_EXIT_CODE
+            and had_connected is not True
+        ):
+            # The exit code still marks a credential refusal when the log lost its line.
+            report = _RunnerExitReport(
+                error=(
+                    "The server rejected this host's credentials, so the runner could not "
+                    f"connect. Sign in again with `{cli_invocation()} login {self._login_hint_url()}` "
+                    f"on this host, then retry. Details: {report.error}"
+                ),
+                category=ErrorCategory.CONFIG,
+                phase=ErrorPhase.RUNNER_LAUNCH,
+            )
         _logger.warning(
             "Runner %s died unexpectedly: %s",
             runner_id,

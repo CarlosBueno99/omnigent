@@ -170,6 +170,10 @@ def _reauth_hint(server_url: str | None) -> str:
     return f"run `{cli_invocation()} login {display_server_url(server_url)}` to re-authenticate"
 
 
+class RunnerTunnelAuthRejectedError(RuntimeError):
+    """The tunnel's credential was refused or is unavailable."""
+
+
 # Schemes that, when surfaced through ``InvalidURI.uri``, indicate
 # the WebSocket upgrade request was redirected somewhere the
 # websockets library cannot follow. The common case on Databricks
@@ -534,7 +538,7 @@ async def serve_tunnel(
                 if not ever_connected and login_redirect_streak >= _LOGIN_REDIRECT_FATAL_ATTEMPTS:
                     # The hint precedes the long redirect URL so the session's
                     # stored (255-char) message still carries the command.
-                    raise RuntimeError(
+                    raise RunnerTunnelAuthRejectedError(
                         f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
                         f"(login-page redirect persisted across {login_redirect_streak} "
                         "attempts); the server likely requires auth — "
@@ -560,7 +564,7 @@ async def serve_tunnel(
                         # Same streak as the rejection below: a transient mint
                         # failure (factory returned None) still gets the loop-top
                         # re-mint; only the message names the local cause.
-                        raise RuntimeError(
+                        raise RunnerTunnelAuthRejectedError(
                             f"{RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX}"
                             f"(HTTP {http_status} persisted across "
                             f"{http_auth_rejection_streak} unauthenticated attempts); "
@@ -572,7 +576,7 @@ async def serve_tunnel(
                         not ever_connected
                         and http_auth_rejection_streak >= _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
                     ):
-                        raise RuntimeError(
+                        raise RunnerTunnelAuthRejectedError(
                             f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
                             f"(HTTP {http_status} persisted across "
                             f"{http_auth_rejection_streak} attempts); "
