@@ -8,7 +8,7 @@ import itertools
 import secrets
 import time
 import weakref
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -332,6 +332,22 @@ _METADATA_OBSERVATION_EVENT_TYPES = frozenset(
         _SUBAGENT_STATUS_TYPE,
     }
 )
+
+
+def _forwarded_status_error(data: Mapping[str, object]) -> dict[str, str]:
+    """
+    Return the ``error_*`` card fields a forwarder attached to a failed edge.
+
+    :param data: The ``external_session_status`` event data.
+    :returns: Non-blank string fields keyed ``code`` / ``title`` / ``cause`` /
+        ``remediation``; an older runner's edge yields ``{}``.
+    """
+    forwarded: dict[str, str] = {}
+    for field in ("code", "title", "cause", "remediation"):
+        value = data.get(f"error_{field}")
+        if isinstance(value, str) and value.strip():
+            forwarded[field] = value.strip()
+    return forwarded
 
 
 def _is_batchable_external_item(event: SessionEventInput) -> bool:
@@ -1961,9 +1977,14 @@ def register_events_routes(
                     agent_store=agent_store,
                     agent_cache=agent_cache,
                 )
-                # Native forwarders share the output and reauth fields.
-                # Codex-specific codes require a resolved Codex session.
-                if harness == "codex-native" and data.get("reauth_required") is True:
+                # A forwarder that diagnosed the failure itself names its code
+                # and card fields. Otherwise native forwarders share the output
+                # and reauth fields; Codex-specific codes require a resolved
+                # Codex session.
+                forwarded = _forwarded_status_error(data)
+                if "code" in forwarded:
+                    error_code = forwarded["code"]
+                elif harness == "codex-native" and data.get("reauth_required") is True:
                     error_code = "codex_reauth_required"
                 elif harness == "codex-native" and body.data.get("output"):
                     error_code = "codex_turn_error"
@@ -1984,9 +2005,10 @@ def register_events_routes(
                 status_error = ErrorDetail(
                     code=classified_code,
                     message=output.strip(),
-                    title=diagnosis.title if diagnosis else None,
-                    cause=diagnosis.cause if diagnosis else None,
-                    remediation=diagnosis.remediation if diagnosis else None,
+                    title=forwarded.get("title") or (diagnosis.title if diagnosis else None),
+                    cause=forwarded.get("cause") or (diagnosis.cause if diagnosis else None),
+                    remediation=forwarded.get("remediation")
+                    or (diagnosis.remediation if diagnosis else None),
                 )
             if status_error is not None:
                 failed_agent_name = await asyncio.to_thread(

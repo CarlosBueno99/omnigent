@@ -34,11 +34,18 @@ def _publish_native_status(
     *,
     response_id: str,
     output: str | None = None,
+    error_detail: dict[str, str] | None = None,
 ) -> None:
-    """Publish the status payload used by native harness forwarders."""
+    """Publish the status payload used by native harness forwarders.
+
+    :param error_detail: The ``error_*`` card fields a forwarder attaches when it
+        diagnosed the failure itself.
+    """
     data: dict[str, object] = {"status": status, "response_id": response_id}
     if output is not None:
         data["output"] = output
+    if error_detail:
+        data.update(error_detail)
     response = httpx.post(
         f"{base_url}/v1/sessions/{session_id}/events",
         json={"type": "external_session_status", "data": data},
@@ -412,6 +419,90 @@ def test_codex_model_rejection_shows_recovery_hint_live_and_after_reload(
         if screenshot_dir := os.environ.get("E2E_SCREENSHOT_DIR"):
             Path(screenshot_dir).mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(Path(screenshot_dir) / "codex-model-rejection.png"))
+    finally:
+        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0).raise_for_status()
+
+
+def test_codex_provider_auth_failure_names_databricks_recovery_live_and_after_reload(
+    request: pytest.FixtureRequest,
+    live_server: str,
+) -> None:
+    """A failed Databricks bearer helper shows its provider, profile and sign-in step, not ``sh``.
+
+    The forwarder diagnoses the recorded helper run and attaches the card fields
+    to the failed status edge; this guards the real API, stream, saved state and
+    card for those fields. The page is created after the session exists so a
+    recording starts at the first navigation.
+    """
+    from omnigent.harnesses.codex_native.provider_auth import (
+        OUTCOME_EXITED,
+        PROVIDER_AUTH_FAILED_CODE,
+        ProviderAuthFailure,
+        ProviderAuthHelper,
+        diagnose_provider_auth_failure,
+    )
+
+    codex_message = "provider auth command `sh` exited with status exit status: 1"
+    diagnosis = diagnose_provider_auth_failure(
+        codex_message,
+        ProviderAuthFailure(
+            helper=ProviderAuthHelper(provider="DatabricksOSS", databricks_profile="oss"),
+            outcome=OUTCOME_EXITED,
+            exit_status=1,
+            stdout="null",
+            stderr="",
+        ),
+    )
+    created = create_native_session(httpx, live_server, harness="codex")
+    session_id = created["session_id"]
+    try:
+        page: Page = request.getfixturevalue("page")
+        page.goto(f"{live_server}/c/{session_id}")
+        expect(page.get_by_test_id("view-mode-chat")).to_be_visible(timeout=15_000)
+        page.get_by_test_id("view-mode-chat").click()
+        expect(page.get_by_role("textbox", name="Message the agent")).to_be_visible()
+        _publish_native_status(live_server, session_id, "running", response_id="provider_auth")
+        _publish_native_status(
+            live_server,
+            session_id,
+            "failed",
+            response_id="provider_auth",
+            output=diagnosis.message(codex_message),
+            error_detail={
+                "error_code": PROVIDER_AUTH_FAILED_CODE,
+                "error_title": diagnosis.title,
+                "error_cause": diagnosis.cause,
+                "error_remediation": diagnosis.remediation,
+            },
+        )
+
+        pill = page.get_by_test_id("error-pill")
+        for reload in (False, True):
+            if reload:
+                page.reload()
+            expect(pill, f"reload={reload}").to_contain_text(
+                "Codex could not get a Databricks token", timeout=15_000
+            )
+            expect(pill).to_be_visible()
+            pill.locator('button[aria-expanded="false"]').click()
+            content = pill.get_by_test_id("error-message-content")
+            content.scroll_into_view_if_needed()
+            expect(content).to_be_visible()
+            expect(content).to_contain_text(
+                "provider 'DatabricksOSS' (Databricks profile 'oss') exited with status 1"
+            )
+            expect(content).to_contain_text("printed `null` instead of a token")
+            expect(content).to_contain_text(
+                "Try this: On the host that runs this agent, run "
+                "`databricks auth token --profile oss --output json`"
+            )
+            expect(content).to_contain_text("`databricks auth login --profile oss`")
+            expect(pill).not_to_contain_text("codex login")
+            expect(pill).not_to_contain_text("Codex ran into an error during this turn.")
+            expect(pill.get_by_role("button", name="Retry", exact=True)).to_have_count(0)
+            expect(pill.get_by_role("button", name="Resume session", exact=True)).to_have_count(0)
+            # Hold the expanded card so a recording shows it legibly.
+            page.wait_for_timeout(2_500)
     finally:
         httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0).raise_for_status()
 

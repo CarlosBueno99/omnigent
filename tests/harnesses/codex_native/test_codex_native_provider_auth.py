@@ -1,0 +1,394 @@
+"""The provider bearer-helper wrapper and the failure card it feeds.
+
+Codex reports a failed ``auth.command`` as a bare ``sh`` exit status. The
+wrapper keeps what the helper printed (redacted, bounded) in the bridge
+directory, and the diagnosis names the provider/profile and the recovery step
+for that provider instead of ``codex login``.
+"""
+
+from __future__ import annotations
+
+import json
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from omnigent.harnesses.codex_native import provider_auth
+from omnigent.harnesses.codex_native.bridge import (
+    clear_bridge_state,
+    codex_home_for_bridge_dir,
+    read_provider_auth_failure,
+    record_provider_auth_failure,
+)
+from omnigent.harnesses.codex_native.provider_auth import (
+    OUTCOME_EMPTY_TOKEN,
+    OUTCOME_EXITED,
+    OUTCOME_TIMED_OUT,
+    ProviderAuthFailure,
+    ProviderAuthHelper,
+    databricks_cli_selector,
+    diagnose_provider_auth_failure,
+    is_provider_auth_error,
+    wrap_provider_auth_command,
+)
+
+_UNAUTHENTICATED = json.dumps(
+    {
+        "error_code": "UNAUTHENTICATED",
+        "message": "the refresh token is invalid; run `databricks auth login --profile oss`",
+    }
+)
+_OSS_HELPER = ProviderAuthHelper(provider="DatabricksOSS", databricks_profile="oss")
+_CODEX_EXIT_1 = "provider auth command `sh` exited with status exit status: 1"
+
+
+def _run_wrapped(
+    bridge_dir: Path, auth_command: str, helper: ProviderAuthHelper, *, timeout_ms: int = 15_000
+) -> subprocess.CompletedProcess[bytes]:
+    """Run *auth_command* through the wrapper exactly as Codex does: ``sh -c``."""
+    codex_home = codex_home_for_bridge_dir(bridge_dir)
+    codex_home.mkdir(parents=True, exist_ok=True)
+    wrapped = wrap_provider_auth_command(auth_command, helper, timeout_ms=timeout_ms)
+    return subprocess.run(
+        ["sh", "-c", wrapped],
+        capture_output=True,
+        timeout=60,
+        env={"PATH": "/usr/bin:/bin", "CODEX_HOME": str(codex_home)},
+        check=False,
+    )
+
+
+def test_wrapped_helper_passes_a_minted_token_through(tmp_path: Path) -> None:
+    """The wrapper is transparent on success: the token reaches Codex, nothing is recorded."""
+    record_provider_auth_failure(
+        tmp_path,
+        ProviderAuthFailure(_OSS_HELPER, OUTCOME_EXITED, 1, "null", ""),
+    )
+
+    result = _run_wrapped(tmp_path, "printf '%s\\n' eyJ-fake-token-value", _OSS_HELPER)
+
+    assert result.returncode == 0
+    assert result.stdout == b"eyJ-fake-token-value\n"
+    # A successful mint clears the previous failure so the next error is not blamed on it.
+    assert read_provider_auth_failure(tmp_path) is None
+
+
+def test_wrapped_helper_records_the_null_a_jq_filter_leaves(tmp_path: Path) -> None:
+    """The reported shape: the CLI's JSON error becomes ``null`` + exit 1 under ``jq -er``."""
+    helper = f"printf '%s' {shlex.quote(_UNAUTHENTICATED)} | jq -er .access_token"
+
+    result = _run_wrapped(tmp_path, helper, _OSS_HELPER)
+
+    assert result.returncode == 1
+    failure = read_provider_auth_failure(tmp_path)
+    assert failure is not None
+    assert failure.helper == _OSS_HELPER
+    assert failure.outcome == OUTCOME_EXITED
+    assert failure.exit_status == 1
+    assert failure.stdout == "null"
+    assert failure.stderr == ""
+
+
+def test_wrapped_helper_records_structured_stdout_and_stderr(tmp_path: Path) -> None:
+    """A helper that passes the CLI's JSON through keeps its error code and message."""
+    helper = (
+        f"printf '%s' {shlex.quote(_UNAUTHENTICATED)}; echo 'Error: not logged in' >&2; exit 3"
+    )
+
+    result = _run_wrapped(tmp_path, helper, _OSS_HELPER)
+
+    assert result.returncode == 3
+    assert result.stderr == b"Error: not logged in\n"
+    failure = read_provider_auth_failure(tmp_path)
+    assert failure is not None
+    assert failure.exit_status == 3
+    assert failure.reported_error() == (
+        "UNAUTHENTICATED",
+        "the refresh token is invalid; run `databricks auth login --profile oss`",
+    )
+    assert failure.stderr == "Error: not logged in"
+
+
+def test_wrapped_helper_records_an_empty_token(tmp_path: Path) -> None:
+    """Exit 0 with no token (the generated Databricks helper's failure shape) is recorded too."""
+    result = _run_wrapped(
+        tmp_path,
+        "echo 'Error: token refresh failed' >&2; printf '\\n'",
+        ProviderAuthHelper(provider="Databricks", databricks_profile="oss"),
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == b""
+    failure = read_provider_auth_failure(tmp_path)
+    assert failure is not None
+    assert failure.outcome == OUTCOME_EMPTY_TOKEN
+    assert failure.stderr == "Error: token refresh failed"
+
+
+def test_wrapped_helper_redacts_and_bounds_what_it_records(tmp_path: Path) -> None:
+    """Credentials in the helper's output never reach the record; long output is capped."""
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlc2lnbmF0dXJl"
+    helper = (
+        f"echo 'access_token: {jwt}' >&2; echo 'Authorization: Bearer dapi{'a' * 40}' >&2; "
+        "head -c 6000 /dev/zero | tr '\\0' x; exit 1"
+    )
+
+    result = _run_wrapped(tmp_path, helper, _OSS_HELPER)
+
+    assert result.returncode == 1
+    failure = read_provider_auth_failure(tmp_path)
+    assert failure is not None
+    assert jwt not in failure.stderr
+    assert "dapi" + "a" * 40 not in failure.stderr
+    assert failure.stderr.count("[REDACTED]") == 2
+    assert len(failure.stdout.encode()) < 2200
+    assert "more bytes" in failure.stdout
+
+
+def test_wrapped_helper_times_out_before_codex_and_records_it(tmp_path: Path) -> None:
+    """A hung helper is ended, with its whole process group, inside Codex's budget."""
+    result = _run_wrapped(tmp_path, "sleep 30", _OSS_HELPER, timeout_ms=2_000)
+
+    assert result.returncode == 124
+    failure = read_provider_auth_failure(tmp_path)
+    assert failure is not None
+    assert failure.outcome == OUTCOME_TIMED_OUT
+    assert failure.exit_status is None
+
+
+def test_wrapped_helper_without_a_bridge_home_only_passes_through(tmp_path: Path) -> None:
+    """Outside an Omnigent session (no bridge ``CODEX_HOME``) nothing is written anywhere."""
+    wrapped = wrap_provider_auth_command("echo oops >&2; exit 2", _OSS_HELPER, timeout_ms=15_000)
+    result = subprocess.run(
+        ["sh", "-c", wrapped],
+        capture_output=True,
+        timeout=60,
+        env={"PATH": "/usr/bin:/bin", "CODEX_HOME": str(tmp_path / "elsewhere")},
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == b"oops\n"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_wrapped_command_names_the_interpreter_and_keeps_the_helper_verbatim() -> None:
+    """The wrapper runs with the runner's own interpreter and quotes the helper as one argument."""
+    helper = 'databricks auth token --profile oss --output json | jq -er ".access_token"'
+    wrapped = wrap_provider_auth_command(
+        helper,
+        ProviderAuthHelper(provider="DatabricksOSS", databricks_profile="oss"),
+        timeout_ms=15_000,
+    )
+
+    words = shlex.split(wrapped)
+    assert words[:3] == [sys.executable, "-m", "omnigent.harnesses.codex_native.provider_auth"]
+    assert words[-1] == helper
+    assert words[words.index("--provider") + 1] == "DatabricksOSS"
+    assert words[words.index("--databricks-profile") + 1] == "oss"
+    assert "--databricks-host" not in words
+
+
+@pytest.mark.parametrize(
+    ("auth_command", "expected"),
+    [
+        (
+            "databricks auth token --profile oss --output json | jq -er .access_token",
+            ("oss", None),
+        ),
+        ("databricks auth token -p dev --output json | jq -r .access_token", ("dev", None)),
+        ("databricks auth token --profile=qa | jq -r .access_token", ("qa", None)),
+        (
+            "env -u DATABRICKS_CONFIG_PROFILE databricks auth token --host https://x.databricks.com",
+            (None, "https://x.databricks.com"),
+        ),
+        ("databricks auth token | jq -r .access_token --profile stray", (None, None)),
+        ("printf %s sk-static", (None, None)),
+        ("databricks auth login --profile oss", (None, None)),
+        ("unbalanced 'quote databricks auth token --profile oss", (None, None)),
+    ],
+)
+def test_databricks_cli_selector(
+    auth_command: str, expected: tuple[str | None, str | None]
+) -> None:
+    assert databricks_cli_selector(auth_command) == expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        _CODEX_EXIT_1,
+        "provider auth command `sh` exited with status exit status: 1: Error: not logged in",
+        "provider auth command `sh` produced an empty token",
+        "provider auth command `sh` timed out after 15000 ms",
+    ],
+)
+def test_codex_provider_auth_messages_are_recognized(message: str) -> None:
+    assert is_provider_auth_error(message)
+
+
+@pytest.mark.parametrize(
+    "message", ["401 Unauthorized", "disk full", "Please run codex login", "stream disconnected"]
+)
+def test_other_codex_errors_are_not_provider_auth(message: str) -> None:
+    assert not is_provider_auth_error(message)
+
+
+def test_diagnosis_for_the_reported_incident_names_profile_and_databricks_login() -> None:
+    """``null`` + exit 1 from ``oss``: name the profile and the lost error; no ``codex login``."""
+    failure = ProviderAuthFailure(_OSS_HELPER, OUTCOME_EXITED, 1, "null", "")
+
+    diagnosis = diagnose_provider_auth_failure(_CODEX_EXIT_1, failure)
+
+    assert diagnosis.title == "Codex could not get a Databricks token"
+    assert "provider 'DatabricksOSS' (Databricks profile 'oss')" in diagnosis.cause
+    assert "exited with status 1" in diagnosis.cause
+    assert "printed `null` instead of a token" in diagnosis.cause
+    assert "`databricks auth token --profile oss --output json`" in diagnosis.remediation
+    assert "`databricks auth login --profile oss`" in diagnosis.remediation
+    assert diagnosis.login_required is False
+    message = diagnosis.message(_CODEX_EXIT_1)
+    assert message.startswith(diagnosis.cause)
+    assert f"Try this: {diagnosis.remediation}" in message
+    assert message.endswith(f"Codex reported: {_CODEX_EXIT_1}")
+    assert "codex login" not in message
+
+
+def test_diagnosis_surfaces_a_structured_unauthenticated_error_as_login_required() -> None:
+    failure = ProviderAuthFailure(_OSS_HELPER, OUTCOME_EXITED, 1, _UNAUTHENTICATED, "")
+
+    diagnosis = diagnose_provider_auth_failure(_CODEX_EXIT_1, failure)
+
+    assert diagnosis.login_required is True
+    assert diagnosis.title == "Databricks sign-in required for Codex"
+    assert "the Databricks CLI reported UNAUTHENTICATED: the refresh token is invalid" in (
+        diagnosis.cause
+    )
+    assert diagnosis.remediation.startswith(
+        "Sign in to Databricks again on the host that runs this agent: "
+        "`databricks auth login --profile oss`."
+    )
+
+
+def test_diagnosis_for_an_ordinary_stderr_failure_does_not_assume_a_login() -> None:
+    failure = ProviderAuthFailure(
+        _OSS_HELPER, OUTCOME_EXITED, 127, "", "sh: 1: databricks: not found"
+    )
+
+    diagnosis = diagnose_provider_auth_failure(f"{_CODEX_EXIT_1}27", failure)
+
+    assert diagnosis.login_required is False
+    assert "exited with status 127; it reported: sh: 1: databricks: not found" in diagnosis.cause
+    assert diagnosis.remediation.startswith("On the host that runs this agent, run")
+    assert "codex login" not in diagnosis.remediation
+
+
+def test_diagnosis_for_the_generated_databricks_helper_uses_its_stderr() -> None:
+    """The ``databricks`` kind prints nothing on failure; its CLI stderr carries the cause."""
+    failure = ProviderAuthFailure(
+        ProviderAuthHelper(provider="Databricks", databricks_profile="oss"),
+        OUTCOME_EMPTY_TOKEN,
+        0,
+        "",
+        "Error: the refresh token is invalid, please run `databricks auth login --profile oss`",
+    )
+
+    diagnosis = diagnose_provider_auth_failure(
+        "provider auth command `sh` produced an empty token", failure
+    )
+
+    assert diagnosis.login_required is True
+    assert "printed no token; it reported: Error: the refresh token is invalid" in diagnosis.cause
+    assert "`databricks auth login --profile oss`" in diagnosis.remediation
+
+
+def test_diagnosis_for_a_timeout_points_at_a_waiting_browser_login() -> None:
+    failure = ProviderAuthFailure(_OSS_HELPER, OUTCOME_TIMED_OUT, None, "", "")
+
+    diagnosis = diagnose_provider_auth_failure(
+        "provider auth command `sh` timed out after 15000 ms", failure
+    )
+
+    assert "did not finish in time" in diagnosis.cause
+    assert "waiting for a browser sign-in" in diagnosis.remediation
+    assert "`databricks auth login --profile oss`" in diagnosis.remediation
+
+
+def test_diagnosis_for_a_host_selected_helper_signs_in_by_host() -> None:
+    failure = ProviderAuthFailure(
+        ProviderAuthHelper(provider="Gateway", databricks_host="https://x.databricks.com"),
+        OUTCOME_EXITED,
+        1,
+        "",
+        "not logged in",
+    )
+
+    diagnosis = diagnose_provider_auth_failure(_CODEX_EXIT_1, failure)
+
+    assert "Databricks workspace https://x.databricks.com" in diagnosis.cause
+    assert "`databricks auth login --host https://x.databricks.com`" in diagnosis.remediation
+
+
+def test_diagnosis_for_a_non_databricks_helper_points_at_the_provider_setup() -> None:
+    failure = ProviderAuthFailure(
+        ProviderAuthHelper(provider="OpenRouter"), OUTCOME_EXITED, 1, "", "vault: sealed"
+    )
+
+    diagnosis = diagnose_provider_auth_failure(_CODEX_EXIT_1, failure)
+
+    assert diagnosis.title == "Codex could not get a provider token"
+    assert (
+        "provider 'OpenRouter' exited with status 1; it reported: vault: sealed" in diagnosis.cause
+    )
+    assert "the auth command for provider 'OpenRouter'" in diagnosis.remediation
+    assert "setup`" in diagnosis.remediation
+    assert "databricks" not in diagnosis.remediation
+    assert "codex login" not in diagnosis.remediation
+
+
+def test_diagnosis_without_a_record_uses_codex_message_and_never_codex_login() -> None:
+    message = "provider auth command `sh` exited with status exit status: 1: Please log in first"
+
+    diagnosis = diagnose_provider_auth_failure(message, None)
+
+    assert diagnosis.title == "Codex could not get a provider token"
+    assert diagnosis.cause.endswith(message + ".") or message in diagnosis.cause
+    assert diagnosis.login_required is True
+    assert "sign in to the provider again" in diagnosis.remediation
+    assert "codex login" not in diagnosis.remediation
+
+
+def test_record_round_trips_and_rejects_malformed_records(tmp_path: Path) -> None:
+    failure = ProviderAuthFailure(
+        ProviderAuthHelper(provider="Gateway", databricks_host="https://x.databricks.com"),
+        OUTCOME_TIMED_OUT,
+        None,
+        "",
+        "tail",
+    )
+    record_provider_auth_failure(tmp_path, failure)
+    assert read_provider_auth_failure(tmp_path) == failure
+
+    (tmp_path / "provider_auth_failure.json").write_text('{"outcome": "weird"}', encoding="utf-8")
+    assert read_provider_auth_failure(tmp_path) is None
+    (tmp_path / "provider_auth_failure.json").write_text("not json", encoding="utf-8")
+    assert read_provider_auth_failure(tmp_path) is None
+
+
+def test_relaunch_clears_a_recorded_helper_failure(tmp_path: Path) -> None:
+    """A new app-server must not inherit the previous launch's helper failure."""
+    record_provider_auth_failure(
+        tmp_path, ProviderAuthFailure(_OSS_HELPER, OUTCOME_EXITED, 1, "null", "")
+    )
+    assert read_provider_auth_failure(tmp_path) is not None
+
+    clear_bridge_state(tmp_path)
+
+    assert read_provider_auth_failure(tmp_path) is None
+
+
+def test_main_is_the_module_entry_point() -> None:
+    assert provider_auth.main(["--provider", "p", "--timeout-ms", "15000", "--", "exit 0"]) == 0
