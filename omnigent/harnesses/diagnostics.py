@@ -209,10 +209,12 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
 _SIGN_IN_ELSEWHERE = re.compile(
     r"waiting for another process to finish (?:oauth|sign[ -]?in|log[ -]?in)", re.IGNORECASE
 )
-# Lines a launcher may print below that message while still waiting ("still
-# waiting...", "press Ctrl-C to cancel"). Kept narrower than a sign-in prompt's
-# trailer: Claude Code's own boot output can mention authentication or a browser.
-_SIGN_IN_ELSEWHERE_TRAILER = re.compile(r"waiting|wait for|press |expire", re.IGNORECASE)
+# Progress lines a parked launcher prints below its wait message ("still
+# waiting...", "press Ctrl-C to cancel"). Anything else below it, launcher or
+# agent output alike, means the launcher moved on.
+_SIGN_IN_ELSEWHERE_TRAILER = re.compile(
+    r"still waiting|wait(?:ing)? for (?:another|the) |press ctrl", re.IGNORECASE
+)
 
 
 def sign_in_running_elsewhere(screen: str | None) -> bool:

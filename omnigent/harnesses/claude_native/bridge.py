@@ -6263,8 +6263,15 @@ def _wait_for_claude_prompt_ready(
             )
         sign_in_url = sign_in.url if sign_in is not None else None
         # Another launch's sign-in holds the launcher's lock. Reaping the pane at
-        # the budget would kill this wait, so report the sign-in instead.
-        sign_in_elsewhere_now = sign_in is None and sign_in_running_elsewhere(pane)
+        # the budget would kill this wait, so report the sign-in instead. The
+        # joined capture keeps the wait line whole when a narrow pane wraps it.
+        sign_in_elsewhere_now = (
+            sign_in is None
+            and "waiting" in pane.casefold()
+            and sign_in_running_elsewhere(
+                _capture_pane(socket_path, tmux_target, join_wrapped=True)
+            )
+        )
         if sign_in_elsewhere_now and sign_in_elsewhere_prev:
             raise ClaudeSignInPending(
                 "Claude Code is waiting for a sign-in that another session started, "

@@ -421,6 +421,9 @@ def test_sign_in_running_elsewhere_ignores_other_output(screen: str | None) -> N
         "Claude Code — connecting to host...\n",
         "Authenticating with API key...\n",
         "Opening browser to sign in...\n",
+        "Waiting for server...\n",
+        "Press Enter to continue\n",
+        "Token expired, refreshing credentials...\n",
     ],
 )
 def test_sign_in_running_elsewhere_ignores_a_wait_line_the_launcher_moved_past(

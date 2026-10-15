@@ -9686,12 +9686,13 @@ def test_wait_for_claude_prompt_ready_reports_a_sign_in_running_elsewhere(
     A launcher waiting on another session's sign-in fails delivery as a pending
     sign-in instead of waiting out the budget and reaping the waiting pane.
     """
-    monkeypatch.setattr(
-        "omnigent.harnesses.claude_native.bridge._capture_pane",
-        lambda socket_path, tmux_target, *, join_wrapped=False: (
-            "Waiting for another process to finish OAuth on port 8020...\n^[^[\n"
-        ),
-    )
+    captures: list[bool] = []
+
+    def _capture(socket_path: str, tmux_target: str, *, join_wrapped: bool = False) -> str:
+        captures.append(join_wrapped)
+        return "Waiting for another process to finish OAuth on port 8020...\n^[^[\n"
+
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._capture_pane", _capture)
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._claude_pane_state",
         lambda socket_path, tmux_target: claude_native_bridge._ClaudePaneState(True),
@@ -9705,6 +9706,9 @@ def test_wait_for_claude_prompt_ready_reports_a_sign_in_running_elsewhere(
     assert raised.value.code == "databricks_sign_in_pending"
     assert raised.value.remediation.startswith("Finish the sign-in that another session opened")
     assert not isinstance(raised.value, claude_native_bridge.ClaudePromptTimeout)
+    # Two plain polls saw the wait line (one frame alone does not raise); each
+    # looked again with wrapped rows joined.
+    assert captures == [False, True, False, True]
 
 
 _STALE_WAIT_PANE = (
@@ -9721,11 +9725,14 @@ def test_wait_for_claude_prompt_ready_waits_out_a_boot_below_a_stale_wait_line(
     Claude Code boots below the stale wait line once the other sign-in completes;
     a send in that window waits for the input box like any slow boot.
     """
-    frames = iter([_STALE_WAIT_PANE, _STALE_WAIT_PANE, _STALE_WAIT_PANE, _READY_PANE])
-    monkeypatch.setattr(
-        "omnigent.harnesses.claude_native.bridge._capture_pane",
-        lambda socket_path, tmux_target, *, join_wrapped=False: next(frames, _READY_PANE),
-    )
+    polls = {"plain": 0}
+
+    def _capture(socket_path: str, tmux_target: str, *, join_wrapped: bool = False) -> str:
+        if not join_wrapped:
+            polls["plain"] += 1
+        return _STALE_WAIT_PANE if polls["plain"] <= 3 else _READY_PANE
+
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._capture_pane", _capture)
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._claude_pane_state",
         lambda socket_path, tmux_target: claude_native_bridge._ClaudePaneState(True),
@@ -9735,6 +9742,32 @@ def test_wait_for_claude_prompt_ready_waits_out_a_boot_below_a_stale_wait_line(
         "claude:0.0",
         timeout_s=30.0,
     )
+
+
+_WAIT_ELSEWHERE_PANE = "Waiting for another process to finish OAuth on port 8020...\n"
+# The same line captured from a 40-column pane without joining its wrapped rows.
+_WRAPPED_WAIT_ELSEWHERE_PANE = "Waiting for another process to finish OA\nuth on port 8020...\n"
+
+
+def test_wait_for_claude_prompt_ready_reads_the_wait_line_across_wrapped_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A narrow pane wraps the wait line; the joined capture still reads it whole."""
+
+    def _capture(socket_path: str, tmux_target: str, *, join_wrapped: bool = False) -> str:
+        return _WAIT_ELSEWHERE_PANE if join_wrapped else _WRAPPED_WAIT_ELSEWHERE_PANE
+
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._capture_pane", _capture)
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._claude_pane_state",
+        lambda socket_path, tmux_target: claude_native_bridge._ClaudePaneState(True),
+    )
+    with pytest.raises(claude_native_bridge.ClaudeSignInPending):
+        claude_native_bridge._wait_for_claude_prompt_ready(
+            "/tmp/example/tmux.sock",
+            "claude:0.0",
+            timeout_s=30.0,
+        )
 
 
 def test_wait_for_claude_prompt_ready_prefers_a_rendered_prompt_over_a_link(
