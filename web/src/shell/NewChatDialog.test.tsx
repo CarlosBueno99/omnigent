@@ -9330,6 +9330,10 @@ describe("NewChatLandingScreen smart routing", () => {
   // no models there; unchecking Smart Routing must still turn it off, as the
   // Default row does for Claude Code.
   it("lets a Codex sandbox session switch back from Smart Routing to the default model", async () => {
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_sandbox_unrouted" }),
+    } as unknown as Response);
     renderLanding({
       smart_routing_enabled: true,
       managed_sandboxes_enabled: true,
@@ -9347,6 +9351,10 @@ describe("NewChatLandingScreen smart routing", () => {
     expect(screen.getByTestId("new-chat-landing-agent-select").getAttribute("aria-label")).toBe(
       "Codex, Model Smart Routing, Effort —",
     );
+    // The checkbox is the only way out: no model or Default row is offered.
+    const models = screen.getByTestId("new-chat-landing-agent-models");
+    expect(within(models).getByText("Models unavailable")).toBeVisible();
+    expect(within(models).queryByRole("menuitemcheckbox", { name: "Default" })).toBeNull();
 
     fireEvent.click(smartRouting());
 
@@ -9354,6 +9362,14 @@ describe("NewChatLandingScreen smart routing", () => {
     expect(screen.getByTestId("new-chat-landing-agent-select").getAttribute("aria-label")).toBe(
       "Codex, Model Default",
     );
+    closePrimaryPicker();
+
+    const { body } = await submitAndReadBody();
+    expect(body).toMatchObject({ agent_id: "a2", host_type: "managed" });
+    expect(body.cost_control_mode_override).toBeUndefined();
+    expect(body.smart_routing_message).toBeUndefined();
+    expect(body.model_override).toBeUndefined();
+    expect(body.reasoning_effort).toBeUndefined();
   });
 
   it("disables effort choices while Smart Routing owns effort and hands them back once it is unchecked", () => {
