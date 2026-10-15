@@ -2125,12 +2125,13 @@ def main() -> None:
     """
     from omnigent.process_logging import configure_process_logging
 
-    # Spawned with -P, so the workspace is not on sys.path. Append it so
+    # Spawned with -P, so the workspace is not on sys.path. Put it last so
     # spec-declared local tools living in the workspace still import without
     # shadowing the installed runtime or its dependencies.
     cwd = os.getcwd()
-    if cwd not in sys.path:
-        sys.path.append(cwd)
+    if cwd in sys.path:
+        sys.path.remove(cwd)
+    sys.path.append(cwd)
 
     configure_process_logging("runner", force=True)
     _install_crash_logging()

@@ -96,8 +96,11 @@ def _console_script(root: Path) -> Path:
 def _launcher(entry: str, root: Path) -> list[str]:
     if entry == "console_script":
         return [sys.executable, str(_console_script(root))]
-    # The product spawns its own CLI children this way (see local_server.py).
-    return [sys.executable, "-P", "-m", "omnigent.cli"]
+    if entry == "module":
+        # The product spawns its own CLI children this way (see local_server.py).
+        return [sys.executable, "-P", "-m", "omnigent.cli"]
+    # A plain module run starts with the launch directory at sys.path[0].
+    return [sys.executable, "-m", "omnigent.cli"]
 
 
 def _run_diagnose(
@@ -131,7 +134,7 @@ def _read_marker(marker: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in lines if line.strip()]
 
 
-@pytest.mark.parametrize("entry", ["console_script", "module"])
+@pytest.mark.parametrize("entry", ["console_script", "module", "module_without_safe_path"])
 def test_cli_dispatch_ignores_workspace_shadow_of_runtime_dependency(
     tmp_path: Path, entry: str
 ) -> None:
@@ -155,24 +158,6 @@ def test_cli_dispatch_ignores_workspace_shadow_of_runtime_dependency(
         f"`diagnose` no longer imports {_SHADOWED_DEPENDENCY!r} after dispatch; "
         "pick another dependency it imports lazily so this test stays meaningful."
     )
-    preloaded = subprocess.run(
-        [
-            sys.executable,
-            "-P",
-            "-c",
-            f"import sys, omnigent.cli; print({_SHADOWED_DEPENDENCY!r} in sys.modules)",
-        ],
-        cwd=tmp_path / "clean",
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=_CLI_TIMEOUT_S,
-    )
-    assert preloaded.returncode == 0 and preloaded.stdout.strip() == "False", (
-        f"importing omnigent.cli already loads {_SHADOWED_DEPENDENCY!r}, so the workspace run "
-        f"would not exercise dispatch.\n{preloaded.stdout}\n{preloaded.stderr}"
-    )
-
     shadowed = _run_diagnose(launcher, cwd=workspace, env=env)
     workspace_imports = _read_marker(marker)
     assert (
@@ -188,10 +173,32 @@ def test_cli_dispatch_ignores_workspace_shadow_of_runtime_dependency(
     )
 
 
-def test_console_entry_appends_workspace_after_startup_entries(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_importing_the_cli_does_not_preload_the_shadowed_dependency(tmp_path: Path) -> None:
+    """The regression relies on the dependency arriving after dispatch, not with the import."""
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            f"import sys, omnigent.cli; print({_SHADOWED_DEPENDENCY!r} in sys.modules)",
+        ],
+        cwd=tmp_path,
+        env=_isolated_env(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=_CLI_TIMEOUT_S,
+    )
+    assert probe.returncode == 0 and probe.stdout.strip() == "False", (
+        f"importing omnigent.cli already loads {_SHADOWED_DEPENDENCY!r}, so the workspace runs "
+        f"would not exercise dispatch.\n{probe.stdout}\n{probe.stderr}"
+    )
+
+
+@pytest.mark.parametrize("workspace_first", [False, True])
+def test_console_entry_puts_workspace_last(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workspace_first: bool
 ) -> None:
-    """``main()`` adds the launch directory behind every entry the interpreter started with."""
+    """``main()`` leaves the launch directory behind every other entry, adding or moving it."""
     from omnigent.cli import main
 
     for key in _ENV_TO_CLEAR:
@@ -199,12 +206,11 @@ def test_console_entry_appends_workspace_after_startup_entries(
     for key, value in _isolated_state(tmp_path).items():
         monkeypatch.setenv(key, value)
     monkeypatch.chdir(tmp_path)
-    startup_path = [entry for entry in sys.path if entry != str(tmp_path)]
-    monkeypatch.setattr(sys, "path", list(startup_path))
-    monkeypatch.setattr(sys, "argv", ["omnigent", "--version"])
+    others = [entry for entry in sys.path if entry != str(tmp_path)]
+    monkeypatch.setattr(sys, "path", [str(tmp_path), *others] if workspace_first else list(others))
 
     with pytest.raises(SystemExit) as exc_info:
         main()
 
     assert exc_info.value.code == 0
-    assert sys.path == [*startup_path, str(tmp_path)]
+    assert sys.path == [*others, str(tmp_path)]
