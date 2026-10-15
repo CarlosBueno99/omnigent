@@ -2355,7 +2355,7 @@ class _SessionsChatReplAdapter:
                     after=cursor,
                     order="asc",
                 )
-                for item in page:
+                for item in page.data:
                     item_id = item.get("id")
                     if isinstance(item_id, str) and item_id:
                         self._last_streamed_item_id = item_id
@@ -2364,7 +2364,7 @@ class _SessionsChatReplAdapter:
                     if item.get("type") == "message" and item.get("role") == "user":
                         continue
                     self._on_event(_ItemDoneEv(type="response.output_item.done", item=item))
-                if len(page) < _LIST_ITEMS_PAGE_SIZE or self._last_streamed_item_id == cursor:
+                if not page.has_more or self._last_streamed_item_id == cursor:
                     break
                 cursor = self._last_streamed_item_id
         except StaleCursorError:

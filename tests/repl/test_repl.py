@@ -3473,10 +3473,10 @@ async def test_stream_pump_reconciles_output_and_status_missed_during_reconnect(
         settled.set()
         await asyncio.Event().wait()
 
-    async def _list_items(session_id: str, **kwargs: object):
+    async def _list_items(session_id: str, **kwargs: object) -> PaginatedList:
         list_calls.append(kwargs)
         user = {"id": "u2", "type": "message", "role": "user", "content": "next"}
-        return [user, _GAP_FINAL]
+        return PaginatedList(data=[user, _GAP_FINAL], last_id="m2")
 
     async def _get(session_id: str):
         return types.SimpleNamespace(status="idle")
@@ -3530,8 +3530,8 @@ async def test_stream_pump_reconciles_a_turn_that_ends_while_resubscribing() -> 
         settled.set()
         await asyncio.Event().wait()
 
-    async def _list_items(session_id: str, **kwargs: object):
-        return list(server["items"])  # type: ignore[call-overload]
+    async def _list_items(session_id: str, **kwargs: object) -> PaginatedList:
+        return PaginatedList(data=list(server["items"]))  # type: ignore[call-overload]
 
     async def _get(session_id: str):
         return types.SimpleNamespace(status=server["status"])
@@ -3562,7 +3562,10 @@ async def test_stream_gap_reconciliation_pages_through_a_long_gap() -> None:
         {"id": f"i{n:03d}", "type": "function_call_output", "call_id": f"c{n}", "output": "ok"}
         for n in range(100)
     ]
-    pages = {"m1": page_one, "i099": [_GAP_FINAL]}
+    pages = {
+        "m1": PaginatedList(data=page_one, last_id="i099", has_more=True),
+        "i099": PaginatedList(data=[_GAP_FINAL], last_id="m2"),
+    }
     cursors: list[object] = []
     subscriptions = 0
     rendered: list[object] = []
@@ -3579,7 +3582,7 @@ async def test_stream_gap_reconciliation_pages_through_a_long_gap() -> None:
         settled.set()
         await asyncio.Event().wait()
 
-    async def _list_items(session_id: str, **kwargs: object):
+    async def _list_items(session_id: str, **kwargs: object) -> PaginatedList:
         cursors.append(kwargs["after"])
         return pages[kwargs["after"]]  # type: ignore[index]
 
@@ -3625,7 +3628,7 @@ async def test_stream_gap_reconciliation_survives_a_stale_cursor() -> None:
         settled.set()
         await asyncio.Event().wait()
 
-    async def _list_items(session_id: str, **kwargs: object):
+    async def _list_items(session_id: str, **kwargs: object) -> PaginatedList:
         raise StaleCursorError(f"cursor {kwargs['after']!r} no longer exists", 400, "stale_cursor")
 
     async def _get(session_id: str):
