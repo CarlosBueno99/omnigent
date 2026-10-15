@@ -169,6 +169,9 @@ def test_refresh_adopts_changed_config_over_settings_model(tmp_path: Path) -> No
     fwd._refresh_model_from_config(tmp_path, state)
 
     assert state.model == "gpt-5.6-sol"
+    # The next unchanged re-read must not revert to the older settings model.
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == "gpt-5.6-sol"
 
 
 def test_refresh_launch_race_ends_on_routed_model(tmp_path: Path) -> None:
@@ -415,6 +418,35 @@ def test_refresh_after_resume_keeps_thread_model_until_config_is_rewritten(
 
     # The user picks a model in the TUI: /model rewrites config.toml.
     _write_codex_config(tmp_path, 'model = "gpt-5.5"\n')
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == "gpt-5.5"
+
+    # The next unchanged re-read must not revert to the resumed thread's model.
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == "gpt-5.5"
+
+
+def test_refresh_after_resume_without_pinned_model_adopts_first_tui_pick(
+    tmp_path: Path,
+) -> None:
+    """A config.toml with no model line still mirrors the first in-TUI ``/model``.
+
+    An unpinned launch copies a config without a top-level ``model``; the
+    resumed thread's model is mirrored from ``thread/resume``. The first
+    ``/model`` that writes a model is a change against that known-empty read,
+    not a baseline seed, so the user's pick replaces the thread model.
+    """
+    _write_codex_config(tmp_path, 'model_reasoning_effort = "medium"\n')
+    state = fwd._CodexForwarderState()
+    state.note_resume_response({"result": {"model": "gpt-5.4-mini"}})
+
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == "gpt-5.4-mini"
+
+    _write_codex_config(tmp_path, 'model = "gpt-5.5"\nmodel_reasoning_effort = "medium"\n')
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == "gpt-5.5"
+
     fwd._refresh_model_from_config(tmp_path, state)
     assert state.model == "gpt-5.5"
 

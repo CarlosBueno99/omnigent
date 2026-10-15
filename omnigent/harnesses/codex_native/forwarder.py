@@ -451,6 +451,9 @@ class _CodexForwarderState:
     # The config.toml model as of the last _refresh_model_from_config read,
     # so the refresh can tell an unchanged file from a rewritten one.
     last_config_model: str | None = None
+    # Whether config.toml has been read at all: the first read only seeds the
+    # baseline, even when the file carries no model yet.
+    config_model_read: bool = False
     developer_instructions: str | None = None
     developer_instructions_known: bool = False
     effort: str | None = None
@@ -2667,10 +2670,9 @@ async def _subscribe_until_ready_inner(
             return
         if forwarder_state is not None:
             forwarder_state.note_resume_response(response)
-            # Read config.toml (what /model writes) now so the mirror reflects
-            # the session's model from the first tool call, not a turn later.
-            # The resumed thread's model from the response wins over a
-            # divergent launch pin; see _refresh_model_from_config.
+            # Read config.toml (what /model writes) now so the mirror reflects the
+            # model from the first tool call, not a turn later; the thread/resume
+            # model wins over a divergent launch pin (see _refresh_model_from_config).
             _refresh_model_from_config(bridge_dir, forwarder_state)
             _refresh_developer_instructions_from_config(bridge_dir, forwarder_state)
             _refresh_effort_from_config(bridge_dir, forwarder_state)
@@ -3316,17 +3318,19 @@ def _refresh_model_from_config(bridge_dir: Path, forwarder_state: _CodexForwarde
 
     Precedence: a config.toml value that CHANGED since the last read wins
     (an in-TUI ``/model`` or the executor's mirror write — the freshest
-    signal). The first read only seeds that baseline: a resume relaunch
-    pins config.toml to the saved pick or the default before Codex resumes
-    the thread, and Codex may keep the thread's rollout model instead, so
-    adopting the pin over the ``thread/resume`` model would show the picker
-    a model the terminal is not running. An unchanged (or first-read)
-    config defers to the running thread's model when one was seen — the
-    ``thread/resume`` response or a live ``thread/settings/updated``: an
-    Omnigent-initiated ``thread/settings/update`` switches the running
-    thread without touching config.toml, so re-adopting the stale file
-    would revert a routed model one turn after it applied. No-op when
-    nothing is known, leaving the prior value.
+    signal), and becomes the running thread's model so later unchanged
+    re-reads keep it. The first read only seeds that baseline, whether or
+    not the file carries a model: a resume relaunch pins config.toml to the
+    saved pick or the default before Codex resumes the thread, and Codex may
+    keep the thread's rollout model instead, so adopting the pin over the
+    ``thread/resume`` model would show the picker a model the terminal is
+    not running. An unchanged (or first-read) config defers to the running
+    thread's model when one was seen — the ``thread/resume`` response or a
+    live ``thread/settings/updated``: an Omnigent-initiated
+    ``thread/settings/update`` switches the running thread without touching
+    config.toml, so re-adopting the stale file would revert a routed model
+    one turn after it applied. No-op when nothing is known, leaving the
+    prior value.
 
     :param bridge_dir: The session's native-Codex bridge directory.
     :param forwarder_state: Mutable forwarder state whose ``model`` is
@@ -3334,16 +3338,16 @@ def _refresh_model_from_config(bridge_dir: Path, forwarder_state: _CodexForwarde
     :returns: None.
     """
     config_model = read_codex_config_model(bridge_dir)
-    previous_config_model = forwarder_state.last_config_model
+    first_read = not forwarder_state.config_model_read
+    forwarder_state.config_model_read = True
     config_changed = (
-        bool(config_model)
-        and previous_config_model is not None
-        and config_model != previous_config_model
+        bool(config_model) and not first_read and config_model != forwarder_state.last_config_model
     )
     if config_model:
         forwarder_state.last_config_model = config_model
     if config_changed:
         forwarder_state.model = config_model
+        forwarder_state.settings_model = config_model
     elif forwarder_state.settings_model:
         forwarder_state.model = forwarder_state.settings_model
     elif config_model:
