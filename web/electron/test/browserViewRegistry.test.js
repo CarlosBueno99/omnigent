@@ -324,30 +324,30 @@ function makeLoadTrackingRegistry() {
   return { registry, loaded };
 }
 
-describe("browserViewRegistry — agent-navigation allowlist", () => {
-  it("rejects agent navigation to file:// and never calls loadURL", () => {
+describe("browserViewRegistry — navigation allowlist (gated by default)", () => {
+  it("rejects a gated navigation to file:// and never calls loadURL", () => {
     const { registry, loaded } = makeLoadTrackingRegistry();
     const r = registry.openOrNavigate("conv_1", "file:///home/user/.ssh/id_rsa");
     assert.equal(r.ok, false);
     assert.match(r.error, /navigation blocked/);
-    assert.equal(loaded.length, 0, "loadURL must not run on a rejected agent nav");
+    assert.equal(loaded.length, 0, "loadURL must not run on a rejected gated nav");
   });
 
-  it("rejects agent navigation to the cloud-metadata IP (169.254.169.254)", () => {
+  it("rejects a gated navigation to the cloud-metadata IP (169.254.169.254)", () => {
     const { registry, loaded } = makeLoadTrackingRegistry();
     const r = registry.openOrNavigate("conv_1", "http://169.254.169.254/latest/meta-data/");
     assert.equal(r.ok, false);
     assert.equal(loaded.length, 0);
   });
 
-  it("rejects agent navigation to localhost", () => {
+  it("rejects a gated navigation to localhost", () => {
     const { registry, loaded } = makeLoadTrackingRegistry();
     const r = registry.openOrNavigate("conv_1", "http://localhost:6767/health");
     assert.equal(r.ok, false);
     assert.equal(loaded.length, 0);
   });
 
-  it("allows agent navigation to a normal public https URL (loadURL runs)", () => {
+  it("allows a gated navigation to a normal public https URL (loadURL runs)", () => {
     const { registry, loaded } = makeLoadTrackingRegistry();
     const r = registry.openOrNavigate("conv_1", "https://example.com/");
     assert.equal(r.ok, true);
@@ -544,16 +544,18 @@ describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every h
     assert.equal(ev.prevented, false, "main-owned nav stays permissive");
   });
 
-  it("re-locks correctly: a main-owned nav after a gated nav flips enforcement off", () => {
+  it("re-locks correctly: enforcement follows the latest navigation on a reused view", () => {
     const { registry, fire } = makeEventCapturingRegistry();
     registry.openOrNavigate("conv_1", "https://example.com/");
-    // Then a main-owned nav reuses the same view.
+    // A main-owned nav reuses the same view and unlocks it.
     registry.openOrNavigate("conv_1", "https://intranet.example.com/", undefined, {
       force: true,
       mainOwned: true,
     });
-    const ev = fire("will-redirect", "http://192.168.1.10/");
-    assert.equal(ev.prevented, false, "the later main-owned nav unlocked the view");
+    assert.equal(fire("will-redirect", "http://192.168.1.10/").prevented, false, "unlocked");
+    // The next gated nav locks it again.
+    registry.openOrNavigate("conv_1", "https://example.com/again");
+    assert.equal(fire("will-redirect", "http://192.168.1.10/").prevented, true, "re-locked");
   });
 });
 

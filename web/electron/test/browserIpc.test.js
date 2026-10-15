@@ -247,6 +247,7 @@ describe("browser IPC Arca context", () => {
           agent: true,
           sourceHostId: "actual-host",
           allowLocalhost: true,
+          mainOwned: true,
           isArca: true,
           agentContext: { serverTarget: "forged" },
         },
@@ -841,7 +842,15 @@ describe("browser IPC — URL policy independent of renderer intent", () => {
   it("rejects blocked destinations whatever intent the renderer claims, without loading them", async () => {
     const { navigate, loaded } = makeRealRegistryIpc();
     const accepted = [];
-    for (const opts of [undefined, {}, { agent: false }, { force: true }, { agent: true }]) {
+    // A renderer-supplied `mainOwned` must not opt out either.
+    for (const opts of [
+      undefined,
+      {},
+      { agent: false },
+      { force: true },
+      { agent: true },
+      { mainOwned: true },
+    ]) {
       for (const url of ["http://127.0.0.1:8080/", "file:///etc/passwd"]) {
         // oxlint-disable-next-line no-await-in-loop -- Sequential requests against one view.
         const r = await navigate(url, opts);

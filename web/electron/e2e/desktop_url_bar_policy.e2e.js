@@ -59,11 +59,11 @@ function serveLoopback() {
   });
 }
 
-/** Poll the view's committed URL and the pane's alert until the URL reaches
- *  `target` or an alert appears (or the window elapses). */
+/** Poll the view's committed URL and the pane's policy alert until the URL
+ *  reaches `target` or the alert appears (or the window elapses). */
 async function observeNavigation(window, pane, viewId, target, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
-  const alerts = pane.getByRole("alert");
+  const alerts = pane.getByRole("alert").filter({ hasText: /navigation blocked/ });
   // An alert that re-renders between the count and the read counts as "no alert yet".
   const readAlert = async () =>
     (await alerts.count()) > 0
@@ -134,7 +134,6 @@ describe("desktop shell — embedded browser address bar applies the URL policy"
     const observations = {
       sessionId: backend.sessionId,
       loopbackUrl: loopback.url,
-      captureStartedAtMs: displayCaptureStartMs(RECORD_DIR),
       timeline: [],
     };
     const mark = (event) => observations.timeline.push({ event, atMs: Date.now() });
@@ -177,14 +176,15 @@ describe("desktop shell — embedded browser address bar applies the URL policy"
       // Hold the outcome on film before closing.
       await window.waitForTimeout(5_000);
     } finally {
+      // Stop filming while the pane still shows the outcome; a capture failure
+      // must not leak the shell. The raw capture exists only once it has stopped.
+      await stopDisplayCapture().catch(() => {});
+      observations.captureStartedAtMs = displayCaptureStartMs(RECORD_DIR);
       fs.mkdirSync(RECORD_DIR, { recursive: true });
       fs.writeFileSync(
         path.join(RECORD_DIR, "observations.json"),
         JSON.stringify(observations, null, 2),
       );
-      // Stop filming while the pane still shows the outcome, then close; a
-      // capture failure must not leak the shell.
-      await stopDisplayCapture().catch(() => {});
       await electronApp.close().catch(() => {});
       try {
         saveRecording(RECORD_DIR, "url-bar-policy");

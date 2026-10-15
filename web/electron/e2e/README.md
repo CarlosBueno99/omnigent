@@ -115,7 +115,10 @@ Run on an interactive desktop and keep the test app foregrounded for its native
 focus assertions. The suite skips when `OMNIGENT_DESKTOP_EXECUTABLE` points to a
 packaged binary: its fixtures are served on loopback, which the renderer URL
 policy refuses, so they are opened through `openBrowserFixture` in
-`desktopHarness.js`, a main-process hook only the dev app can preload.
+`desktopHarness.js`, a main-process hook only the dev app can preload. To check
+a packaged build by hand, open its Workspace **+** → **Browser** tab, confirm
+`https://example.com/` loads, and confirm `http://127.0.0.1:8000/` is refused
+with the "navigation blocked" message.
 `OMNIGENT_DESKTOP_COMPOSITED_VIDEO=1` records the native window on macOS (requires
 Screen Recording permission). Set `OMNIGENT_DESKTOP_RECORD_DIR` outside the
 checkout; each fixture's subdirectory receives `design-prompt-native.mov`.

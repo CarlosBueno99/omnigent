@@ -362,7 +362,7 @@ function createBrowserViewRegistry({
     // Gated unless a main-process caller opts out with `mainOwned` (only the E2E
     // fixture driver does; renderer requests never can). Checked before
     // getOrCreate so a rejected nav creates no blank view.
-    const gated = !(opts && opts.mainOwned);
+    const gated = !opts?.mainOwned;
     if (gated && url) {
       const verdict = isAgentNavigationAllowed(url, {
         allowLocalhost: isArcaAgentContext(opts?.agentContext),
