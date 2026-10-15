@@ -104,7 +104,6 @@ def test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog(
         "OPENAI_API_KEY": "mock-key",
         "OPENAI_BASE_URL": f"{mock_llm_server_url}/v1",
     }
-    page = None
     with (
         httpx.Client(base_url=live_server, timeout=30.0) as client,
         isolated_host(tmp_path / "host", live_server, env=host_env) as host,
@@ -144,11 +143,7 @@ def test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog(
             plugin_rows = page.get_by_test_id(f"slash-menu-item-{_PLUGIN_SKILL}").count()
             api = client.get("/v1/skills", params={"session_id": session_id})
         finally:
-            try:
-                if page is not None and not page.is_closed():
-                    page.context.close()
-            finally:
-                client.delete(f"/v1/sessions/{session_id}", timeout=10.0)
+            client.delete(f"/v1/sessions/{session_id}", timeout=10.0)
 
     observed = (
         f"session {session_id}: picker rows {observed_rows!r}, plugin rows {plugin_rows}, "
