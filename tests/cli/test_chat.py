@@ -2103,6 +2103,52 @@ def test_pick_agent_menu_accepts_a_typed_name(
     assert "Available agents" in out and "2. scribe" in out
 
 
+@pytest.mark.parametrize("failing_route", ["/v1/sessions", "/v1/agents"])
+def test_pick_agent_reports_a_failed_listing_as_a_cli_error(
+    monkeypatch: pytest.MonkeyPatch, failing_route: str
+) -> None:
+    """An HTTP error from either discovery listing is a clean CLI error, hint withheld."""
+
+    def _get(url: str, **_kwargs: object) -> SimpleNamespace:
+        if not url.endswith(failing_route):
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"data": []})
+        request = httpx.Request("GET", url)
+        response = httpx.Response(404, request=request)
+
+        def _raise() -> None:
+            raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+        return SimpleNamespace(raise_for_status=_raise, json=dict)
+
+    monkeypatch.setattr(chat_module.httpx, "get", _get)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _pick_agent("http://127.0.0.1:6767")
+
+    message = str(excinfo.value)
+    assert "Agent discovery failed" in message
+    assert failing_route in message and "404" in message
+    assert suppresses_recovery_hint(excinfo.value)
+
+
+def test_pick_agent_reports_a_listing_that_times_out_as_a_cli_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read timeout after connecting is a discovery error, not a traceback."""
+
+    def _get(*_args: object, **_kwargs: object) -> object:
+        raise httpx.ReadTimeout("read timed out")
+
+    monkeypatch.setattr(chat_module.httpx, "get", _get)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _pick_agent("http://127.0.0.1:6767")
+
+    message = str(excinfo.value)
+    assert "/v1/sessions" in message and "ReadTimeout" in message
+    assert suppresses_recovery_hint(excinfo.value)
+
+
 @pytest.mark.parametrize(
     ("body", "detail"),
     [
