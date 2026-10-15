@@ -232,8 +232,25 @@ def is_static_key_command(auth_command: str) -> bool:
     return (
         len(words) == 3
         and words[:2] == ["printf", "%s"]
-        and not any(character in words[2] for character in "$`")
+        and not _has_shell_expansion(auth_command)
     )
+
+
+def _has_shell_expansion(command: str) -> bool:
+    """Report whether *command* has a ``$`` or backtick the shell would expand."""
+    in_single = in_double = escaped = False
+    for character in command:
+        if escaped:
+            escaped = False
+        elif character == "\\" and not in_single:
+            escaped = True
+        elif character == "'" and not in_double:
+            in_single = not in_single
+        elif character == '"' and not in_single:
+            in_double = not in_double
+        elif character in "$`" and not in_single:
+            return True
+    return False
 
 
 def databricks_cli_selector(auth_command: str) -> tuple[str | None, str | None]:

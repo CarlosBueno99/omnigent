@@ -283,7 +283,12 @@ def test_resolve_native_codex_launch_wraps_a_custom_auth_command(_isolated: Path
     assert provider["base_url"] == "https://oss.example.com/ai-gateway/codex/v1"
     assert provider["auth"]["command"] == "sh"
     words = shlex.split(provider["auth"]["args"][-1])
-    assert words[:3] == [sys.executable, "-m", "omnigent.harnesses.codex_native.provider_auth"]
+    assert words[:4] == [
+        sys.executable,
+        "-I",
+        "-m",
+        "omnigent.harnesses.codex_native.provider_auth",
+    ]
     assert words[words.index("--provider") + 1] == "DatabricksOSS"
     assert words[words.index("--databricks-profile") + 1] == "oss"
     assert words[words.index("--timeout-ms") + 1] == str(provider["auth"]["timeout_ms"])

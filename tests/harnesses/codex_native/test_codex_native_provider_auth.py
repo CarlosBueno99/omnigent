@@ -450,7 +450,10 @@ def test_relaunch_clears_a_recorded_helper_failure(tmp_path: Path) -> None:
     [
         ("printf %s sk-static", True),
         ("printf '%s' sk-static", True),
+        # A quoted literal dollar is still static; only an expansion can fail.
+        (f"printf %s {shlex.quote('test-$KEY_FRAGMENT-' + chr(39) + 'quoted' + chr(39))}", True),
         ('printf %s "$TOKEN"', False),
+        ("printf %s `cat key`", False),
         ("printf %s $(cat key)", False),
         ("printf %s", False),
         ("databricks auth token --profile oss | jq -r .access_token", False),
