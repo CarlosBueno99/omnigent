@@ -9,9 +9,10 @@ again.") once a later message is answered. Drives the real Claude CLI.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import shutil
-import subprocess
 import time
 import uuid
 from collections.abc import Iterator
@@ -21,14 +22,11 @@ from typing import Any
 import httpx
 import pytest
 from playwright.sync_api import Page, expect
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from tests._helpers.native_session import create_native_session
 from tests.e2e_ui.conftest import (
     _REPO_ROOT,
-    _bind_session_runner,
-    _ensure_runner_online,
-    _server_state,
-    _temp_omnigent_mock_config,
+    native_claude_mock_session_scope,
     reset_mock_llm,
     set_fallback_mock_llm,
 )
@@ -61,7 +59,6 @@ _HOOK_SCRIPT = (
     "exit 0\n"
 )
 # Claude records the block within seconds of the paste; the mirror follows on the next poll.
-_BLOCK_SETTLE_TIMEOUT_S = 30.0
 _SETTLE_TIMEOUT_S = 45.0
 
 
@@ -95,30 +92,12 @@ def hook_blocked_claude_session(
     hook = {"type": "command", "command": str(script)}
     settings = {"hooks": {"UserPromptSubmit": [{"hooks": [hook]}]}}
     (workspace / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
-
-    respawned = _ensure_runner_online(live_server, tmp_path_factory)
-    runner_id = str(_server_state["runner_id"])
     try:
-        with _temp_omnigent_mock_config(
-            mock_llm_server_url, "claude", workflow_owned=bool(_server_state.get("workflow_owned"))
-        ):
-            created = create_native_session(
-                httpx, live_server, harness="claude", metadata={"workspace": str(workspace)}
-            )
-            session_id = str(created["session_id"])
-            _bind_session_runner(live_server, session_id, runner_id)
-            try:
-                yield (live_server, session_id)
-            finally:
-                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        with native_claude_mock_session_scope(
+            live_server, mock_llm_server_url, tmp_path_factory, workspace=str(workspace)
+        ) as session:
+            yield session
     finally:
-        if respawned is not None:
-            respawned.terminate()
-            try:
-                respawned.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                respawned.kill()
-                respawned.wait(timeout=5)
         shutil.rmtree(workspace, ignore_errors=True)
 
 
@@ -128,6 +107,12 @@ def _compose(page: Page, text: str) -> None:
     expect(box).to_be_enabled(timeout=30_000)
     box.fill(text)
     box.press("Enter")
+
+
+def _hold(page: Page, ms: int, filming: bool) -> None:
+    """Keep the current state on screen long enough to read, only while filming."""
+    if filming:
+        page.wait_for_timeout(ms)
 
 
 def _mark(t0: float, label: str) -> None:
@@ -169,17 +154,18 @@ def _dump(base_url: str, session_id: str, label: str) -> None:
     print(f"[http] {label} GET /v1/sessions/{session_id}/items error_items={errors}", flush=True)
 
 
-def _wait_for_block_settlement(
-    base_url: str, session_id: str
+def _wait_for_settlement(
+    base_url: str, session_id: str, *, notice: bool
 ) -> tuple[Any, list[tuple[Any, Any]]]:
-    """Poll until the blocked message left the queue and its notice was persisted, or give up."""
-    deadline = time.monotonic() + _BLOCK_SETTLE_TIMEOUT_S
+    """Poll until the queue is empty (and, for a block, its notice is persisted), or give up."""
+    deadline = time.monotonic() + _SETTLE_TIMEOUT_S
     while True:
         pending = _snapshot(base_url, session_id).get("pending_inputs")
         errors = _error_items(base_url, session_id)
-        if not pending and any(code == _BLOCKED_CODE for code, _message in errors):
-            return pending, errors
-        if time.monotonic() >= deadline:
+        settled = not pending and (
+            not notice or any(code == _BLOCKED_CODE for code, _message in errors)
+        )
+        if settled or time.monotonic() >= deadline:
             return pending, errors
         time.sleep(1.0)
 
@@ -192,15 +178,6 @@ def _wait_until_idle(base_url: str, session_id: str) -> Any:
         time.sleep(1.0)
         status = _snapshot(base_url, session_id).get("status")
     return status
-
-
-def _wait_until_settled(base_url: str, session_id: str) -> dict[str, Any]:
-    deadline = time.monotonic() + _SETTLE_TIMEOUT_S
-    snapshot = _snapshot(base_url, session_id)
-    while snapshot.get("pending_inputs") and time.monotonic() < deadline:
-        time.sleep(2.0)
-        snapshot = _snapshot(base_url, session_id)
-    return snapshot
 
 
 def _arm_mock_reply(mock_llm_server_url: str, token: str) -> None:
@@ -221,6 +198,9 @@ def test_hook_blocked_web_message_settles_with_the_hook_reason(
     _arm_mock_reply(mock_llm_server_url, token)
     shots = Path(request.config.getoption("--output")) / request.node.name
     shots.mkdir(parents=True, exist_ok=True)
+    filming = bool(os.environ.get("OMNIGENT_E2E_RECORD_DIR")) or request.config.getoption(
+        "--video", default="off"
+    ) not in (None, "off")
 
     page: Page = request.getfixturevalue("page")
     t0 = time.monotonic()
@@ -234,28 +214,33 @@ def test_hook_blocked_web_message_settles_with_the_hook_reason(
     _compose(page, blocked)
     _mark(t0, f"sent {blocked!r}")
     expect(page.locator(_USER, has_text=blocked).first).to_be_visible(timeout=30_000)
-    pending_after_block, errors_after_block = _wait_for_block_settlement(base_url, session_id)
+    pending_after_block, errors_after_block = _wait_for_settlement(
+        base_url, session_id, notice=True
+    )
     _mark(t0, f"after the block: pending={pending_after_block} errors={errors_after_block}")
     _dump(base_url, session_id, "after-hook-block")
-    page.wait_for_timeout(2_000)
-    page.screenshot(path=str(shots / "chat-after-hook-block.png"))
     notice = page.get_by_test_id("error-pill").filter(has_text=_BLOCKED_HEADLINE)
+    with contextlib.suppress(PlaywrightTimeoutError):
+        notice.first.wait_for(state="visible", timeout=15_000)
+    page.screenshot(path=str(shots / "chat-after-hook-block.png"))
     headlines = page.get_by_test_id("error-headline").all_inner_texts()
     notice_text = ""
     if notice.count():
         notice.first.click()
-        page.wait_for_timeout(1_500)
+        expect(notice.first.get_by_text(_HOOK_REASON)).to_be_visible(timeout=10_000)
+        _hold(page, 1_500, filming)
         notice_text = notice.first.inner_text()
     print(f"[probe] pill headlines={headlines} expanded notice={notice_text!r}", flush=True)
     page.screenshot(path=str(shots / "chat-notice-expanded.png"))
     _mark(t0, "notice under the blocked message")
     _open_terminal_view(page)
-    page.wait_for_timeout(4_000)
+    _hold(page, 4_000, filming)
     page.screenshot(path=str(shots / "terminal-after-hook-block.png"))
     _mark(t0, "terminal view: Claude's own refusal")
     _ensure_chat_view(page)
     status = _wait_until_idle(base_url, session_id)
     print(f"[probe] session status before the follow-up: {status}", flush=True)
+    assert status == "idle", f"session did not return to idle after the block: {status}"
 
     followup = f"Reply with exactly this token and nothing else: {token}"
     _compose(page, followup)
@@ -265,11 +250,10 @@ def test_hook_blocked_web_message_settles_with_the_hook_reason(
     )
     expect(page.locator(_WORKING)).to_have_count(0, timeout=60_000)
     _mark(t0, "follow-up answered")
-    settled = _wait_until_settled(base_url, session_id)
-    page.wait_for_timeout(4_000)
+    pending_after_followup, errors = _wait_for_settlement(base_url, session_id, notice=False)
+    _hold(page, 4_000, filming)
     page.screenshot(path=str(shots / "chat-after-follow-up.png"))
     _mark(t0, "chat view after settlement")
-    errors = _error_items(base_url, session_id)
     _dump(base_url, session_id, "after-follow-up")
     print(
         "[probe] on screen: "
@@ -278,14 +262,14 @@ def test_hook_blocked_web_message_settles_with_the_hook_reason(
         f"'{_BLOCKED_HEADLINE}'={page.get_by_text(_BLOCKED_HEADLINE).count()}",
         flush=True,
     )
-    page.wait_for_timeout(3_000)
+    _hold(page, 3_000, filming)
 
     expect(page.locator(_USER, has_text=blocked)).to_have_count(1)
     expect(page.locator(_USER, has_text=followup)).to_have_count(1)
     failures: list[str] = []
     if pending_after_block:
         failures.append(
-            f"{blocked!r} was still pending {_BLOCK_SETTLE_TIMEOUT_S:.0f}s after the hook "
+            f"{blocked!r} was still pending {_SETTLE_TIMEOUT_S:.0f}s after the hook "
             f"refused it: {pending_after_block}"
         )
     if not any(
@@ -302,9 +286,9 @@ def test_hook_blocked_web_message_settles_with_the_hook_reason(
             f"headlines={headlines} expanded={notice_text!r}"
         )
     missing = [error for error in errors if error[0] == _MISSING_CODE]
-    if settled.get("pending_inputs") or missing:
+    if pending_after_followup or missing:
         failures.append(
             f"once {followup!r} was answered, {blocked!r} was persisted as never recorded: "
-            f"{missing}; pending={settled.get('pending_inputs')}; all errors: {errors}"
+            f"{missing}; pending={pending_after_followup}; all errors: {errors}"
         )
     assert not failures, "\n".join(failures)

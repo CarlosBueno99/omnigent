@@ -1382,6 +1382,8 @@ _HEADER = "UserPromptSubmit operation blocked by hook:\n"
             ),
             "Blocked.",
         ),
+        (_blocked_prompt_entry("No.", "hi", content=None), "No."),
+        (_blocked_prompt_entry("No.", "hi", content="A notice in a different shape"), "No."),
     ],
     ids=[
         "separator-in-reason",
@@ -1389,6 +1391,8 @@ _HEADER = "UserPromptSubmit operation blocked by hook:\n"
         "notice-without-prompt",
         "structured-without-prompt",
         "structured-reason-mismatch",
+        "structured-without-content",
+        "structured-foreign-content",
     ],
 )
 def test_transcript_emits_only_the_notice_when_the_prompt_is_unrecoverable(

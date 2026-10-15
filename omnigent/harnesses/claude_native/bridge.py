@@ -8218,23 +8218,28 @@ def _blocked_prompt_transcript_items(
         the prompt cannot be recovered from the record unambiguously.
     """
     content = entry.get("content")
-    if not isinstance(content, str) or not content.startswith(_BLOCKED_PROMPT_HEADER):
-        return []
-    body = content.removeprefix(_BLOCKED_PROMPT_HEADER)
+    body = (
+        content.removeprefix(_BLOCKED_PROMPT_HEADER)
+        if isinstance(content, str) and content.startswith(_BLOCKED_PROMPT_HEADER)
+        else None
+    )
     structured = outcome.get("reason")
     structured = structured if isinstance(structured, str) else None
-    if structured is not None and body.startswith(structured + _BLOCKED_PROMPT_SEPARATOR):
+    if (
+        body is not None
+        and structured is not None
+        and body.startswith(structured + _BLOCKED_PROMPT_SEPARATOR)
+    ):
         # The structured reason marks where the prompt starts even when either
         # one contains the separator text.
         reason, prompt = structured, body[len(structured + _BLOCKED_PROMPT_SEPARATOR) :]
-    elif body.count(_BLOCKED_PROMPT_SEPARATOR) == 1:
+    elif body is not None and body.count(_BLOCKED_PROMPT_SEPARATOR) == 1:
         notice_reason, _separator, prompt = body.partition(_BLOCKED_PROMPT_SEPARATOR)
         reason = structured if structured is not None else notice_reason
     else:
-        # No separator, or a repeated one with nothing to anchor on: any split
-        # is a guess, so emit only the notice and leave the queued message to
-        # the server's own settlement.
-        reason, prompt = (structured if structured is not None else body), ""
+        # No usable notice text, or a split that would be a guess: emit only
+        # the notice and leave the queued message to the server's own settlement.
+        reason, prompt = (structured if structured is not None else body or ""), ""
     prompt = _unwrap_pasted_content_markers(prompt)
     source_key = _transcript_source_key(entry, line_number, record_offset)
     response_id = _response_id_from_source(source_key)

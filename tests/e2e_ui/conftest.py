@@ -2606,6 +2606,7 @@ def _create_native_claude_session(
     runner_id: str,
     *,
     terminal_launch_args: list[str] | None = None,
+    workspace: str | None = None,
 ) -> str:
     """Register the ``claude-native`` wrapper agent and bind its session.
 
@@ -2632,11 +2633,15 @@ def _create_native_claude_session(
         by the plan-mode fixture to pass ``["--permission-mode", "plan"]`` so
         Claude boots into plan mode and reaches for ``ExitPlanMode``. ``None``
         launches with the production defaults.
+    :param workspace: Session workspace (Claude's cwd), e.g. a directory whose
+        ``.claude/settings.json`` the test seeded. ``None`` keeps the runner's cwd.
     :returns: The new session/conversation id.
     """
     metadata: dict[str, object] = {}
     if terminal_launch_args:
         metadata["terminal_launch_args"] = terminal_launch_args
+    if workspace is not None:
+        metadata["workspace"] = workspace
     created = create_native_session(httpx, base_url, harness="claude", metadata=metadata)
     session_id = str(created["session_id"])
     _bind_session_runner(base_url, session_id, runner_id)
@@ -2816,23 +2821,28 @@ def native_codex_session(
                 respawned.wait(timeout=5)
 
 
-@pytest.fixture
-def native_claude_mock_session(
+@contextlib.contextmanager
+def native_claude_mock_session_scope(
     live_server: str,
     mock_llm_server_url: str,
     tmp_path_factory: pytest.TempPathFactory,
+    *,
+    workspace: str | None = None,
 ) -> Iterator[tuple[str, str]]:
     """A real Claude CLI using an explicitly configured mock provider.
 
     Workflow-owned runners are already configured. Standalone tests temporarily
     install a mock provider regardless of ambient credential placeholders.
+
+    :param workspace: Session workspace for :func:`_create_native_claude_session`;
+        tests that seed project settings (hooks) pass their prepared directory.
     """
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
     with _temp_omnigent_mock_config(
         mock_llm_server_url, "claude", workflow_owned=bool(_server_state.get("workflow_owned"))
     ):
-        session_id = _create_native_claude_session(live_server, runner_id)
+        session_id = _create_native_claude_session(live_server, runner_id, workspace=workspace)
         try:
             yield (live_server, session_id)
         finally:
@@ -2844,6 +2854,19 @@ def native_claude_mock_session(
                 except subprocess.TimeoutExpired:
                     respawned.kill()
                     respawned.wait(timeout=5)
+
+
+@pytest.fixture
+def native_claude_mock_session(
+    live_server: str,
+    mock_llm_server_url: str,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, str]]:
+    """A real Claude CLI using an explicitly configured mock provider in the runner's cwd."""
+    with native_claude_mock_session_scope(
+        live_server, mock_llm_server_url, tmp_path_factory
+    ) as session:
+        yield session
 
 
 @pytest.fixture
