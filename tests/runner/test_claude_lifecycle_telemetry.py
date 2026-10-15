@@ -446,3 +446,55 @@ async def test_explicit_close_and_cleanup_are_distinct_and_sink_json_remains_par
         json.loads(request["attributes"]["terminal_control_requests"])[0]["action"]
         == "close_terminal"
     )
+
+
+async def test_idle_required_terminal_exit_records_the_launcher_output(
+    launch: _Launch, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A launcher that dies before any turn must leave its exit cause in the runner log."""
+    caplog.set_level(logging.INFO)
+    launcher_output = "Failed to start session: Expecting value: line 1 column 1 (char 0)"
+    launch.callbacks["on_activity"]()
+    launch.callbacks["on_idle"]()
+    await asyncio.sleep(0)
+    instance = launch.instance
+    instance._remember_pane_snapshot(
+        f"{launcher_output}\n" + "\n" * 20 + "Pane is dead (status 1, Thu Oct 15 03:27:06 2026)"
+    )
+    instance._remember_exit_status("1 1")
+    instance.running = False
+    launch.callbacks["on_exit"]()
+    await asyncio.wait_for(launch.resources.wait_for_terminal_exit_cleanup(), timeout=2)
+    await asyncio.sleep(0)
+
+    [exit_row] = _rows(caplog, "terminal_exit_observed")
+    assert exit_row["attributes"]["session_status_before_exit"] == "idle"
+    assert exit_row["attributes"]["terminal_exit_status"] == "1"
+    statuses = _drain_session_event_queue(_session_event_queues_ref.get(_SESSION))
+    assert not any(event.get("status") == "failed" for event in statuses), statuses
+
+    rows = [row for row in _rows_after_exit(caplog) if _SESSION in json.dumps(row)]
+    assert any(launcher_output in json.dumps(row) for row in rows), (
+        "no runner-log row carries the dead terminal's output; rows after the exit: "
+        + json.dumps(
+            [
+                {
+                    "event": row.get("event_name") or row.get("message"),
+                    "terminal_exit_status": row.get("attributes", {}).get("terminal_exit_status"),
+                    "terminal_last_output": row.get("attributes", {}).get("terminal_last_output"),
+                }
+                for row in rows
+            ]
+        )
+    )
+
+
+def _rows_after_exit(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    """Every runner record emitted from the exit observation onward, serialized as sink rows."""
+    records = caplog.records
+    start = next(
+        index
+        for index, record in enumerate(records)
+        if getattr(record, "event_name", None) == "terminal_exit_observed"
+    )
+    return [record_to_row(record, source="runner") for record in records[start:]]

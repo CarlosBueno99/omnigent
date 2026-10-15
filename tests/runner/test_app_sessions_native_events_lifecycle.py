@@ -4654,6 +4654,7 @@ async def test_required_terminal_exit_while_idle_logs_its_diagnostics(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An idle exit fails no turn, so its log line is the only record of the cause."""
+    from omnigent.errors import ErrorImpact
     from omnigent.runner.app import _session_event_queues_ref
     from omnigent.runner.resource_registry import TerminalExitEvent, TerminalLifecycle
 
@@ -4675,7 +4676,11 @@ async def test_required_terminal_exit_while_idle_logs_its_diagnostics(
                     session_key="main",
                     lifecycle=TerminalLifecycle.REQUIRED,
                     command="claude",
-                    last_output="Error: launcher config is unreadable",
+                    last_output=(
+                        "Error: launcher config is unreadable\n"
+                        "Cookie: s3cr3t-cookie-value-9f8a\n"
+                        "password hunter2-super-secret-pw"
+                    ),
                     exit_status=1,
                     session_was_idle=True,
                 )
@@ -4690,10 +4695,18 @@ async def test_required_terminal_exit_while_idle_logs_its_diagnostics(
         for record in caplog.records
         if getattr(record, "event_name", None) == "required_terminal_exited_idle"
     ]
+    message = record.getMessage()
     assert record.levelno == logging.WARNING
-    assert "Error: launcher config is unreadable" in record.getMessage()
+    # The cause survives sanitization, but captured credentials the default log
+    # redactor misses (whitespace-delimited values, cookies) must not.
+    assert "Error: launcher config is unreadable" in message
+    assert "s3cr3t-cookie-value-9f8a" not in message
+    assert "hunter2-super-secret-pw" not in message
+    assert "[REDACTED]" in message
     assert record.attributes["terminal_exit_status"] == 1
     assert record.attributes["error_code"] == "required_terminal_exited"
+    # An idle exit is recoverable, not lost progress.
+    assert record.attributes["error_impact"] == ErrorImpact.TRANSIENT.value
     assert not [
         event
         for event in events
