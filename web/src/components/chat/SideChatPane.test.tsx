@@ -14,7 +14,9 @@ import { SideChatPane } from "./SideChatPane";
 
 vi.mock("@/store/chatStore", async (importOriginal) => ({
   ...(await importOriginal<typeof ChatStoreModule>()),
-  ensureConversationStreamed: vi.fn().mockResolvedValue(undefined),
+  // The no-op result from the real `Promise<boolean>` contract; cases that
+  // drive a load override this with a `true` resolution.
+  ensureConversationStreamed: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock("@/components/composer/ComposerAddMenu", () => ({ ComposerAddMenu: () => null }));

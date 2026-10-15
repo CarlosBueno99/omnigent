@@ -75,12 +75,10 @@ function writeInheritedBoundary(childId: string, ids: Set<string>): void {
   }
 }
 
-// Snapshot the forked-in history once the child's first load has settled, unless
-// a boundary is already persisted. Null while loading or failed, and for a
-// native Codex fork, which holds only its own turns.
-function captureInheritedBoundary(childId: string, state: ConversationState): Set<string> | null {
-  const persisted = readInheritedBoundary(childId);
-  if (persisted !== null) return persisted;
+// The forked-in item ids to hide once the child's first load has settled, or
+// null while it is still loading or failed, and for a native Codex fork (which
+// holds only its own turns). Pure: callers decide when to persist the result.
+function forkedInBoundary(state: ConversationState): Set<string> | null {
   if (
     state.loadingConversation ||
     state.conversationLoadError !== null ||
@@ -88,12 +86,20 @@ function captureInheritedBoundary(childId: string, state: ConversationState): Se
   ) {
     return null;
   }
-  const ids = new Set(
+  return new Set(
     state.blocks
       .map((b) => (b as { ctx?: { itemId?: string | null } }).ctx?.itemId)
       .filter((id): id is string => typeof id === "string"),
   );
-  writeInheritedBoundary(childId, ids);
+}
+
+// Snapshot and persist the boundary for a child whose load settled OFF SCREEN
+// (the pane unmounted mid-load), reusing an already-persisted boundary.
+function captureInheritedBoundary(childId: string, state: ConversationState): Set<string> | null {
+  const persisted = readInheritedBoundary(childId);
+  if (persisted !== null) return persisted;
+  const ids = forkedInBoundary(state);
+  if (ids !== null) writeInheritedBoundary(childId, ids);
   return ids;
 }
 
@@ -190,27 +196,32 @@ export function SideChatPane({
     childId: string;
     ids: Set<string> | null;
     loadSeen: boolean;
+    persisted: boolean;
   } | null>(null);
   if (boundaryRef.current === null || boundaryRef.current.childId !== childId) {
-    boundaryRef.current = {
-      childId,
-      ids: filterHistory && !pending ? readInheritedBoundary(childId) : null,
-      loadSeen: false,
-    };
+    const stored = filterHistory && !pending ? readInheritedBoundary(childId) : null;
+    boundaryRef.current = { childId, ids: stored, loadSeen: false, persisted: stored !== null };
   }
   if (loadingConversation) boundaryRef.current.loadSeen = true;
-  // Capture once the fork's load has actually completed — even if it is EMPTY
-  // (a parent with no history), so the side chat's first message isn't mistaken
-  // for inherited history and hidden (see captureInheritedBoundary).
+  // Compute the boundary in render once the fork's load has completed — even if
+  // it is EMPTY (a parent with no history) — so visibleBlocks is correct the
+  // same frame and the first message isn't mistaken for inherited history. The
+  // effect below persists it, keeping storage writes out of the render body.
   if (
     boundaryRef.current.ids === null &&
     !pending &&
     filterHistory &&
     boundaryRef.current.loadSeen
   ) {
-    boundaryRef.current.ids = captureInheritedBoundary(childId, state);
+    boundaryRef.current.ids = forkedInBoundary(state);
   }
   const inherited = boundaryRef.current.ids;
+  useEffect(() => {
+    const ref = boundaryRef.current;
+    if (ref === null || ref.persisted || inherited === null) return;
+    writeInheritedBoundary(childId, inherited);
+    ref.persisted = true;
+  }, [childId, inherited]);
   const visibleBlocks = useMemo(
     () =>
       inherited === null

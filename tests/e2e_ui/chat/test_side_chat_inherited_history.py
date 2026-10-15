@@ -41,6 +41,7 @@ def test_side_chat_left_while_loading_hides_parent_transcript(
     ]
     # Longer than the parent-turn tokens so the mock routes the side turn to its own queue.
     side_token = f"sidechat-question-{parent_id}"
+    side_question = f"{side_token}: answer this side question"
     side_reply = f"Side answer {parent_id[:8]}."
     child_ids: list[str] = []
     held: list[Route] = []
@@ -76,7 +77,7 @@ def test_side_chat_left_while_loading_hides_parent_transcript(
         rail = page.get_by_role("complementary", name="Workspace")
         rail.get_by_role("button", name="Open new", exact=True).click()
         page.get_by_role("menuitem", name="Side chat", exact=True).click()
-        page.get_by_test_id("side-chat-input").fill(f"{side_token}: answer this side question")
+        page.get_by_test_id("side-chat-input").fill(side_question)
         page.get_by_test_id("side-chat-send").click()
 
         deadline = time.monotonic() + 60
@@ -106,6 +107,7 @@ def test_side_chat_left_while_loading_hides_parent_transcript(
         expect(pane.get_by_test_id("working-indicator")).to_have_count(0, timeout=30_000)
         expect(pane.get_by_text(marker)).to_have_count(0)
         expect(pane.locator(_USER)).to_have_count(1)
+        expect(pane.locator(_USER).filter(has_text=side_question)).to_have_count(1)
         expect(pane.locator(_ASSISTANT)).to_have_count(1)
         assert _items(base_url, parent_id) == parent_items
 
@@ -116,6 +118,7 @@ def test_side_chat_left_while_loading_hides_parent_transcript(
         expect(pane.locator(_ASSISTANT).filter(has_text=side_reply)).to_be_visible(timeout=30_000)
         expect(pane.get_by_text(marker)).to_have_count(0)
         expect(pane.locator(_USER)).to_have_count(1)
+        expect(pane.locator(_USER).filter(has_text=side_question)).to_have_count(1)
         expect(pane.locator(_ASSISTANT)).to_have_count(1)
     finally:
         # Release any still-held route so a mid-test failure can't hang teardown.
