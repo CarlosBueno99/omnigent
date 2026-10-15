@@ -30,6 +30,7 @@ from omnigent.harnesses.codex_native.provider_auth import (
     OUTCOME_TIMED_OUT,
     ProviderAuthFailure,
     ProviderAuthHelper,
+    codex_message_outcome,
     databricks_cli_selector,
     diagnose_provider_auth_failure,
     is_provider_auth_error,
@@ -209,6 +210,27 @@ def test_wrapped_helper_times_out_before_codex_and_records_it(tmp_path: Path) ->
     assert failure.exit_status is None
 
 
+def test_wrapped_helper_times_out_inside_a_tiny_budget(tmp_path: Path) -> None:
+    """A budget smaller than the usual margin still leaves the wrapper time to record."""
+    result = _run_wrapped(tmp_path, "sleep 5", _OSS_HELPER, timeout_ms=600)
+
+    assert result.returncode == 124
+    failure = read_provider_auth_failure(tmp_path)
+    assert failure is not None
+    assert failure.outcome == OUTCOME_TIMED_OUT
+
+
+def test_helper_is_left_alone_without_an_interpreter_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an interpreter path the helper is left bare; python3 cannot import omnigent."""
+    monkeypatch.setattr(sys, "executable", "")
+
+    assert wrap_provider_auth_command("my-helper token", _OSS_HELPER, timeout_ms=15_000) == (
+        "my-helper token"
+    )
+
+
 def test_wrapped_helper_without_a_bridge_home_only_passes_through(tmp_path: Path) -> None:
     """Outside an Omnigent session (no bridge ``CODEX_HOME``) nothing is written anywhere."""
     wrapped = wrap_provider_auth_command("echo oops >&2; exit 2", _OSS_HELPER, timeout_ms=15_000)
@@ -264,6 +286,10 @@ def test_wrapped_command_names_the_interpreter_and_keeps_the_helper_verbatim() -
         # A flag or separator where the value should be is not a profile.
         ("databricks auth token --profile --output json | jq -er .access_token", (None, None)),
         ("databricks auth token --profile | jq -r .access_token", (None, None)),
+        # Operators glued to the value or the next word still end the CLI's arguments.
+        ("databricks auth token --profile oss; jq -r .access_token", ("oss", None)),
+        ("databricks auth token --profile oss|jq -r .access_token", ("oss", None)),
+        ("databricks auth token --profile oss --output json|jq -er .access_token", ("oss", None)),
         ("printf %s sk-static", (None, None)),
         ("databricks auth login --profile oss", (None, None)),
         ("unbalanced 'quote databricks auth token --profile oss", (None, None)),
@@ -313,6 +339,19 @@ def test_diagnosis_for_the_reported_incident_names_profile_and_databricks_login(
     assert f"Try this: {diagnosis.remediation}" in message
     assert message.endswith(f"Codex reported: {_CODEX_EXIT_1}")
     assert "codex login" not in message
+
+
+def test_diagnosis_quotes_only_the_first_line_of_a_long_report() -> None:
+    """The structured cause stays a sentence or two; the record keeps the full report."""
+    report = "Error: " + "x" * 300 + "\nsecond line"
+    failure = ProviderAuthFailure(_OSS_HELPER, OUTCOME_EXITED, 1, "", report)
+
+    diagnosis = diagnose_provider_auth_failure(_CODEX_EXIT_1, failure)
+
+    assert "it reported: Error: " + "x" * 113 + "…" in diagnosis.cause
+    assert "second line" not in diagnosis.cause
+    assert len(diagnosis.cause) < 256
+    assert failure.stderr == report
 
 
 def test_diagnosis_surfaces_a_structured_unauthenticated_error_as_login_required() -> None:
@@ -405,6 +444,30 @@ def test_diagnosis_for_a_non_databricks_helper_points_at_the_provider_setup() ->
     assert "setup`" in diagnosis.remediation
     assert "databricks" not in diagnosis.remediation
     assert "codex login" not in diagnosis.remediation
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (_CODEX_EXIT_1, OUTCOME_EXITED),
+        ("provider auth command `sh` produced an empty token", OUTCOME_EMPTY_TOKEN),
+        ("provider auth command `sh` timed out after 15000 ms", OUTCOME_TIMED_OUT),
+        ("provider auth command `sh` could not be spawned", None),
+    ],
+)
+def test_codex_message_outcome(message: str, expected: str | None) -> None:
+    assert codex_message_outcome(message) == expected
+
+
+def test_diagnosis_ignores_a_record_from_a_different_failure() -> None:
+    """A record left by an earlier timeout must not describe a later exit-status failure."""
+    stale = ProviderAuthFailure(_OSS_HELPER, OUTCOME_TIMED_OUT, None, "", "")
+
+    diagnosis = diagnose_provider_auth_failure(_CODEX_EXIT_1, stale)
+
+    assert diagnosis.title == "Codex could not get a provider token"
+    assert "did not finish in time" not in diagnosis.cause
+    assert _CODEX_EXIT_1 in diagnosis.cause
 
 
 def test_diagnosis_without_a_record_uses_codex_message_and_never_codex_login() -> None:

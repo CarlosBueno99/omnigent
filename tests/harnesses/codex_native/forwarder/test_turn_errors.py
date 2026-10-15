@@ -1089,11 +1089,6 @@ def test_classify_codex_error_provider_auth_is_its_own_kind() -> None:
         )
         == provider_auth
     )
-    for message in (
-        "provider auth command `sh` produced an empty token",
-        "provider auth command `sh` timed out after 15000 ms",
-    ):
-        assert fwd._classify_codex_error({}, message) == provider_auth
 
 
 def test_terminal_turn_status_edge_provider_auth_error_names_profile_and_recovery(

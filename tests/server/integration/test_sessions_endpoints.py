@@ -5774,8 +5774,7 @@ _PROVIDER_AUTH_CARD = {
     "title": "Codex could not get a Databricks token",
     "cause": (
         "The auth command for provider 'DatabricksOSS' (Databricks profile 'oss') exited with "
-        "status 1 and printed `null` instead of a token, so the CLI's own error was lost in the "
-        "command's output filter."
+        "status 1 and printed `null` instead of a token."
     ),
     "remediation": (
         "On the host that runs this agent, run `databricks auth token --profile oss --output "
@@ -5837,8 +5836,23 @@ _PROVIDER_AUTH_FORWARDED = {
             "native_turn_error",
             {},
         ),
+        # The live event keeps a long card in full; the reload labels keep a bounded prefix.
+        (
+            "codex-native-ui",
+            {**_PROVIDER_AUTH_FORWARDED, "error_cause": _PROVIDER_AUTH_CARD["cause"] + " x" * 200},
+            _PROVIDER_AUTH_OUTPUT,
+            "codex_provider_auth_failed",
+            {**_PROVIDER_AUTH_CARD, "cause": _PROVIDER_AUTH_CARD["cause"] + " x" * 200},
+        ),
     ],
-    ids=["forwarder-diagnosed", "ignored-blanks", "unknown-code", "reclassified", "other-harness"],
+    ids=[
+        "forwarder-diagnosed",
+        "ignored-blanks",
+        "unknown-code",
+        "reclassified",
+        "other-harness",
+        "long-cause",
+    ],
 )
 async def test_forwarder_diagnosed_native_failure_keeps_its_card(
     client: httpx.AsyncClient,
@@ -5902,13 +5916,11 @@ async def test_forwarder_diagnosed_native_failure_keeps_its_card(
     snapshot_resp = await client.get(f"/v1/sessions/{session_id}")
     assert snapshot_resp.status_code == 200, snapshot_resp.text
     last_task_error = snapshot_resp.json()["last_task_error"]
-    # The persisted label keeps a bounded prefix of the long message.
+    # The persisted labels keep a bounded prefix of each long field.
     assert output.startswith(last_task_error.pop("message").rstrip("…"))
-    assert last_task_error == {
-        "code": expected_code,
-        "agent_name": wrapper,
-        **expected_card,
-    }
+    for field, expected in expected_card.items():
+        assert expected.startswith(last_task_error.pop(field).rstrip("…"))
+    assert last_task_error == {"code": expected_code, "agent_name": wrapper}
 
 
 async def test_post_external_session_status_propagates_runner_delivery_failure(

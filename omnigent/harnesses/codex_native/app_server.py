@@ -4203,6 +4203,8 @@ def resolve_native_codex_launch(
                 "native-codex routing: managed connect host — Databricks Unity Gateway "
                 "via the credential broker (host-only [omnigent] profile + sidecar).",
             )
+            # The broker-minted helper stays unwrapped: a failed mint here means
+            # the managed host lost its connection, which no profile login fixes.
             return NativeCodexLaunch(
                 config_overrides=_databricks_codex_config_overrides(
                     model=resolved_model,

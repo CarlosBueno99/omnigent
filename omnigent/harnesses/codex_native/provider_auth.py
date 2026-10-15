@@ -32,7 +32,8 @@ OUTCOME_TIMED_OUT = "timed_out"
 
 _CODEX_PROVIDER_AUTH_ERROR = "provider auth command"
 _DATABRICKS_TOKEN_COMMAND = ("databricks", "auth", "token")
-_SHELL_SEPARATORS = frozenset({"|", "||", "&&", ";", "&"})
+# A pipe, list or background operator ends the Databricks CLI's own arguments.
+_SHELL_OPERATOR = re.compile(r"[|;&]")
 # Each captured stream is kept to this many bytes in the record and the card.
 _OUTPUT_LIMIT_BYTES = 2048
 # The only stdout kept verbatim: what ``jq -e`` prints for a missing field.
@@ -44,10 +45,19 @@ _OPAQUE_WORD = re.compile(
     r"(?<![\w./:@%-])(?=[A-Za-z0-9_+=-]*\d)[A-Za-z0-9_+=-]{20,}(?![\w./:@%-])"
 )
 _CODEX_MESSAGE_LIMIT_BYTES = 512
+# The card's cause stays a sentence or two: it quotes only the first line of
+# the helper's report, this long; the record and message keep the rest.
+_CAUSE_REPORT_LIMIT = 120
 # Finish (and record) before Codex's own timeout kills this process.
 _TIMEOUT_MARGIN_MS = 1000
 _EXIT_TIMED_OUT = 124
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
+# How Codex words each helper outcome, so a stale record cannot describe a new failure.
+_CODEX_OUTCOME_FRAGMENTS = (
+    ("produced an empty token", OUTCOME_EMPTY_TOKEN),
+    ("timed out", OUTCOME_TIMED_OUT),
+    ("exited with status", OUTCOME_EXITED),
+)
 _LOGIN_REQUIRED_FRAGMENTS = (
     "unauthenticated",
     "databricks auth login",
@@ -213,6 +223,22 @@ def is_provider_auth_error(message: str) -> bool:
     return _CODEX_PROVIDER_AUTH_ERROR in message.lower()
 
 
+def codex_message_outcome(message: str) -> str | None:
+    """
+    Return the helper outcome Codex's own error text describes.
+
+    :param message: Codex's error text, e.g. ``"provider auth command `sh` timed out
+        after 15000 ms"``.
+    :returns: :data:`OUTCOME_EXITED`, :data:`OUTCOME_EMPTY_TOKEN`,
+        :data:`OUTCOME_TIMED_OUT`, or ``None`` when the wording is unfamiliar.
+    """
+    lowered = message.lower()
+    for fragment, outcome in _CODEX_OUTCOME_FRAGMENTS:
+        if fragment in lowered:
+            return outcome
+    return None
+
+
 def is_static_key_command(auth_command: str) -> bool:
     """
     Report whether *auth_command* only prints a stored key.
@@ -277,10 +303,11 @@ def databricks_cli_selector(auth_command: str) -> tuple[str | None, str | None]:
     profile = host = None
     arguments = words[start:]
     for position, word in enumerate(arguments):
-        if word in _SHELL_SEPARATORS:
-            break
+        word, ends_arguments = _before_shell_operator(word)
         following = arguments[position + 1] if position + 1 < len(arguments) else None
-        if following is not None and (following in _SHELL_SEPARATORS or following.startswith("-")):
+        if following is not None:
+            following = _before_shell_operator(following)[0] or None
+        if following is not None and following.startswith("-"):
             following = None
         if word in {"--profile", "-p"}:
             profile = following
@@ -290,7 +317,17 @@ def databricks_cli_selector(auth_command: str) -> tuple[str | None, str | None]:
             host = following
         elif word.startswith("--host="):
             host = word.partition("=")[2]
+        if ends_arguments:
+            break
     return profile or None, host or None
+
+
+def _before_shell_operator(word: str) -> tuple[str, bool]:
+    """Split ``oss;`` or ``oss|jq`` into the CLI argument and whether the CLI's arguments end."""
+    match = _SHELL_OPERATOR.search(word)
+    if match is None:
+        return word, False
+    return word[: match.start()], True
 
 
 def wrap_provider_auth_command(
@@ -303,10 +340,14 @@ def wrap_provider_auth_command(
     :param helper: Who the helper mints for, named in the failure card.
     :param timeout_ms: Codex's ``timeout_ms`` for the helper; the recorder
         finishes slightly earlier so a timeout is recorded too.
-    :returns: A shell command printing the token the helper prints.
+    :returns: A shell command printing the token the helper prints, or
+        *auth_command* itself when no interpreter path is known (an embedded
+        interpreter), since a bare ``python3`` could not import omnigent.
     """
+    if not sys.executable:
+        return auth_command
     argv = [
-        sys.executable or "python3",
+        sys.executable,
         # Isolated mode: the helper inherits the session workspace as cwd,
         # which must not shadow the installed omnigent package.
         "-I",
@@ -336,6 +377,10 @@ def diagnose_provider_auth_failure(
     :param failure: The recorded failed run, or ``None``.
     :returns: Title, cause and the provider-appropriate next step.
     """
+    expected_outcome = codex_message_outcome(codex_message)
+    if failure is not None and expected_outcome not in (None, failure.outcome):
+        # A record left by an earlier, different failure must not describe this one.
+        failure = None
     if failure is None:
         return _diagnose_from_codex_message(codex_message)
     helper = failure.helper
@@ -352,22 +397,19 @@ def diagnose_provider_auth_failure(
     elif error_code or error_message:
         reporter = "the Databricks CLI" if helper.uses_databricks_cli else "the helper"
         reported = ": ".join(part for part in (error_code, error_message) if part)
-        cause = f"{subject} failed; {reporter} reported {reported}"
+        cause = f"{subject} failed; {reporter} reported {_report_excerpt(reported)}"
     elif failure.outcome == OUTCOME_EMPTY_TOKEN:
         cause = f"{subject} printed no token"
         if failure.stderr:
-            cause += f"; it reported: {failure.stderr}"
+            cause += f"; it reported: {_report_excerpt(failure.stderr)}"
     else:
         cause = f"{subject} exited with status {failure.exit_status}"
         if failure.stdout.strip() == "null":
-            cause += (
-                " and printed `null` instead of a token, so the CLI's own error was lost "
-                "in the command's output filter"
-            )
+            cause += " and printed `null` instead of a token"
         elif failure.stdout:
-            cause += f" and printed: {failure.stdout}"
+            cause += f" and printed: {_report_excerpt(failure.stdout)}"
         if failure.stderr:
-            cause += f"; it reported: {failure.stderr}"
+            cause += f"; it reported: {_report_excerpt(failure.stderr)}"
     cause = cause.rstrip(".") + "."
     if helper.uses_databricks_cli:
         remediation = _databricks_remediation(helper, failure.outcome, login_required)
@@ -454,6 +496,21 @@ def _json_object(text: str) -> dict[str, object] | None:
         if isinstance(parsed, dict):
             return parsed
     return None
+
+
+def _report_excerpt(text: str) -> str:
+    """One line of a helper report, cut to fit the card's one-sentence cause.
+
+    Prefers the report's ``Error:`` line (the Databricks CLI's convention and a
+    traceback's last line) over its first line; an ellipsis marks dropped text.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    chosen = next((line for line in lines if line.lower().startswith("error")), lines[0])
+    if len(chosen) <= _CAUSE_REPORT_LIMIT and len(lines) == 1:
+        return chosen
+    return chosen[:_CAUSE_REPORT_LIMIT].rstrip() + "…"
 
 
 def _optional_str(value: object) -> str | None:
@@ -549,7 +606,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     bridge_dir = _bridge_dir_from_env(os.environ)
-    timeout_s = max(args.timeout_ms - _TIMEOUT_MARGIN_MS, _TIMEOUT_MARGIN_MS) / 1000
+    margin_ms = min(_TIMEOUT_MARGIN_MS, max(args.timeout_ms // 2, 1))
+    timeout_s = max(args.timeout_ms - margin_ms, margin_ms) / 1000
     proc = subprocess.Popen(
         ["sh", "-c", args.command],
         stdin=subprocess.DEVNULL,

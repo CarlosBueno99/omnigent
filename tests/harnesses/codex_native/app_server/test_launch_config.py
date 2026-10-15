@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 import tomlkit
-import tomllib
 from cachetools import TTLCache
 
 try:
