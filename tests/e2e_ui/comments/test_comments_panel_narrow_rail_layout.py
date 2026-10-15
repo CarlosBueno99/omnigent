@@ -180,7 +180,7 @@ def _panel_controls(panel: Locator) -> dict[str, Locator]:
         "Comments header": panel.locator("span.font-semibold", has_text="Comments"),
         "Address All button": panel.get_by_role("button", name="Address All"),
         "Open tab": panel.get_by_role("button", name=re.compile(r"^Open\b")),
-        "Addressed tab": panel.get_by_role("button", name=re.compile(r"^Addressed\b")),
+        "Sent tab": panel.get_by_role("button", name=re.compile(r"^Sent\b")),
         "Add Comment button": panel.get_by_role("button", name="Add Comment"),
     }
 
