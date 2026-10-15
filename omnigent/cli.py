@@ -12962,7 +12962,7 @@ def _databricks_login(
         click.echo(
             f"First pairing: {server} would receive credentials for the Databricks workspace "
             f"{workspace_host}. Answer below; a script (or an older `omnigent sandbox auth`) "
-            "cannot and should pass --yes."
+            "cannot answer and should pass --yes instead."
         )
         try:
             approved = click.confirm(
