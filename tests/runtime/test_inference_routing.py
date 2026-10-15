@@ -287,6 +287,73 @@ def test_pi_single_model_policy_preserves_literal_ids_and_stays_curated() -> Non
             resolve_pi_native_provider(model="unlisted")
 
 
+@pytest.mark.parametrize(
+    "allowlist",
+    [
+        ["claude-example", "claude-second"],
+        ["gateway/literal-model", "omnigent/claude-example"],
+    ],
+    ids=["bare-ids", "slash-ids-overlapping-generated-provider-names"],
+)
+def test_pi_picker_rows_resolve_to_their_allowlisted_models(
+    allowlist: list[str], tmp_path: Path
+) -> None:
+    from omnigent.harnesses.pi_native.credentials import (
+        pi_native_model_options,
+        pi_native_provider_launch,
+    )
+
+    profile = _profile()
+    profile["inference"] = {
+        "harnesses": {
+            "pi-native": {
+                "provider": "bifrost",
+                "default_model": allowlist[0],
+                "model_allowlist": allowlist,
+            }
+        }
+    }
+    with inference_config_scope(profile):
+        for unknown in ("unlisted", "omnigent/unlisted"):
+            with pytest.raises(OmnigentError, match="configured model list"):
+                resolve_pi_native_provider(model=unknown)
+        rows = pi_native_model_options(config_loader=lambda: profile)
+        assert {row["displayName"] for row in rows} == set(allowlist)
+        for row in rows:
+            provider = resolve_pi_native_provider(model=row["id"])
+            assert provider is not None
+            assert provider.model == row["displayName"]
+            launch = pi_native_provider_launch(tmp_path / row["id"], provider, selection=row["id"])
+            # Pi receives the literal id; a slash-bearing literal is qualified
+            # by the serving provider so Pi's parser keeps it intact.
+            assert launch.args[3].removeprefix(f"{launch.args[1]}/") == row["displayName"]
+
+
+def test_pi_picker_rows_resolve_without_an_allowlist() -> None:
+    from omnigent.harnesses.pi_native.credentials import pi_native_model_options
+
+    profile = _profile()
+    profile["inference"] = {
+        "harnesses": {"pi-native": {"provider": "bifrost", "default_model": "model-a"}}
+    }
+
+    def _listing(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "model-a"}, {"id": "model-c"}]})
+
+    with inference_config_scope(profile):
+        rows = pi_native_model_options(
+            config_loader=lambda: profile, transport=httpx.MockTransport(_listing)
+        )
+        assert {row["displayName"] for row in rows} == {"model-a", "model-c"}
+        for row in rows:
+            provider = resolve_pi_native_provider(model=row["id"])
+            assert provider is not None
+            assert provider.model == row["displayName"]
+        literal = resolve_pi_native_provider(model="model-c")
+        assert literal is not None
+        assert literal.model == "model-c"
+
+
 def test_acp_slug_binding_preserves_one_model_restriction() -> None:
     profile = _profile()
     profile["inference"] = {
