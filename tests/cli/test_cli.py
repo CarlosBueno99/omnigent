@@ -5902,6 +5902,31 @@ def test_config_list_shows_scalar_harness_without_note(
     assert "per-harness overrides" not in result.output
 
 
+def test_config_list_hides_project_harness_launch_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``config list`` shows a project ``harness.default`` but not project command/args."""
+    monkeypatch.chdir(tmp_path)
+    local_path = tmp_path / ".omnigent" / "config.yaml"
+    local_path.parent.mkdir()
+    local_path.write_text(
+        "harness:\n  default: codex\n  codex-native:\n    command: /project/project-codex\n"
+        "    args: [--from-project]\n"
+    )
+    monkeypatch.setattr("omnigent.cli._load_global_config", dict)
+    monkeypatch.setattr("omnigent.cli._print_credentials_by_harness", lambda: None)
+
+    result = CliRunner().invoke(cli, ["config", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "harness=codex" in result.output
+    # Project launch overrides are user-owned; they must not surface here.
+    assert "per-harness overrides" not in result.output
+    assert "/project/project-codex" not in result.output
+    assert "--from-project" not in result.output
+
+
 def test_config_unset_removes_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

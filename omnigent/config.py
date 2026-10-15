@@ -62,50 +62,32 @@ def _merge_effective_config(
     global_cfg: _Config,
     local_cfg: _Config,
 ) -> _Config:
-    """Merge global+local config, deep-merging the ``harness`` mapping.
+    """Merge project defaults while retaining user-owned harness launch settings.
 
-    A flat ``{**global, **local}`` would make a local ``harness`` mapping
-    replace the global one entirely, dropping the user's global
-    per-harness overrides. So the ``harness`` key is merged one level deep
-    (per-harness sub-keys, local winning per-field) while every other key
-    stays a shallow replace (local wins outright). See
-    :mod:`omnigent.harness_startup_config` for the ``harness:`` shape.
+    A project may select the default harness, but executables and arguments
+    come from user configuration or explicit command-line options.
 
     :param global_cfg: User-level config (``~/.omnigent/config.yaml``).
     :param local_cfg: Project-level config (``.omnigent/config.yaml``).
     :returns: The merged effective config dict.
     """
-    merged: _Config = {**global_cfg, **local_cfg}
+    merged: _Config = {**global_cfg, **{k: v for k, v in local_cfg.items() if k != "harness"}}
     g_harness = global_cfg.get("harness")
     l_harness = local_cfg.get("harness")
-    # Only deep-merge when BOTH are mappings. A scalar on either side is
-    # an explicit whole-value override (legacy scalar form, or a project
-    # that intentionally pins the whole harness key), so the shallow
-    # ``{**global, **local}`` result already in ``merged`` is correct.
-    if isinstance(g_harness, dict) and isinstance(l_harness, dict):
-        combined: _Config = {**g_harness, **l_harness}
-        # Per-harness sub-keys (anything but ``default``): merge one level
-        # deep so a local per-harness entry augments rather than replaces
-        # the global one (local fields win per-field).
-        for key in set(g_harness) | set(l_harness):
-            if key == "default":
-                continue
-            g_entry = g_harness.get(key)
-            l_entry = l_harness.get(key)
-            if isinstance(g_entry, dict) and isinstance(l_entry, dict):
-                combined[key] = {**g_entry, **l_entry}
-        merged["harness"] = combined
+    if isinstance(l_harness, str):
+        l_harness = {"default": l_harness}
+    if isinstance(l_harness, dict) and "default" in l_harness:
+        trusted = g_harness if isinstance(g_harness, dict) else {}
+        merged["harness"] = {**trusted, "default": l_harness["default"]}
     return merged
 
 
 def load_effective_config(*, workspace: str | Path | None = None) -> _Config:
-    """Merge global and project config, with project values taking precedence.
+    """Merge global and project config, preserving user-owned launch settings.
 
-    The ``harness`` mapping is deep-merged (per-harness sub-keys, local
-    winning per-field) so a project's per-harness overrides augment —
-    rather than replace — the user's global ones. Every other key is a
-    shallow replace. When supplied, *workspace* selects the project config
-    directory instead of the process cwd.
+    Project values take precedence except for harness executables and arguments.
+    When supplied, *workspace* selects the project config directory instead
+    of the process cwd.
     """
     local_path = Path(workspace) / _LOCAL_CONFIG_RELPATH if workspace is not None else None
     return _merge_effective_config(load_global_config(), load_local_config(local_path))

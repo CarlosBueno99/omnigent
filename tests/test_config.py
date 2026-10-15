@@ -17,9 +17,14 @@ from omnigent.config import (
     save_global_config,
     set_github_account_preference,
 )
+from omnigent.harness_startup_config import (
+    resolve_harness_args,
+    resolve_harness_command,
+    resolve_harness_config,
+)
 
 
-def test_effective_config_deep_merges_harness_mapping(
+def test_effective_config_keeps_user_harness_launch_settings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config_home = tmp_path / "home"
@@ -31,27 +36,34 @@ def test_effective_config_deep_merges_harness_mapping(
         "  codex:\n    args: [--config, k=v]\n"
     )
     (project / ".omnigent" / "config.yaml").write_text(
-        "harness:\n  codex:\n    command: /local/codex\n"
+        "harness:\n  default: codex\n  claude-sdk:\n    command: /local/claude\n"
+        "  codex:\n    command: /local/codex\n    args: [--project-option]\n"
+        "  pi:\n    command: /local/pi\n"
     )
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
     monkeypatch.chdir(project)
 
     cfg = load_effective_config()
     harness = cfg["harness"]
-    assert harness["default"] == "claude-sdk"
-    # Global-only entry preserved (a flat merge would have dropped it).
+    assert harness["default"] == "codex"
+    # User command wins over a conflicting project command override.
     assert harness["claude-sdk"] == {"command": "/global/claude"}
-    # Local per-harness entry augments the global one: local command wins,
-    # global args preserved (per-field, not whole-entry replace).
-    assert harness["codex"] == {"args": ["--config", "k=v"], "command": "/local/codex"}
+    assert harness["codex"] == {"args": ["--config", "k=v"]}
+    assert "pi" not in harness
+    assert resolve_harness_command("codex", default="codex", cfg=cfg) == "codex"
+    assert resolve_harness_args("codex", ["--verbose"], cfg=cfg) == [
+        "--config",
+        "k=v",
+        "--verbose",
+    ]
 
 
-def test_merge_effective_config_scalar_local_overrides_mapping_global() -> None:
-    # A scalar on either side is an explicit whole-value override: the
-    # shallow {**global, **local} result holds (no deep-merge).
+def test_merge_effective_config_scalar_local_preserves_user_overrides() -> None:
     g = {"harness": {"default": "claude-sdk", "codex": {"args": ["x"]}}}
     loc = {"harness": "codex"}
-    assert _merge_effective_config(g, loc) == {"harness": "codex"}
+    assert _merge_effective_config(g, loc) == {
+        "harness": {"default": "codex", "codex": {"args": ["x"]}}
+    }
 
 
 def test_merge_effective_config_scalar_global_no_deep_merge() -> None:
@@ -120,7 +132,7 @@ def test_effective_config_uses_explicit_workspace(
 
     assert load_effective_config(workspace=workspace) == {
         "profile": "global",
-        "harness": {"claude-native": {"command": "project-claude", "args": ["--verbose"]}},
+        "harness": {"claude-native": {"command": "global-claude", "args": ["--verbose"]}},
     }
 
 
@@ -235,3 +247,83 @@ def test_load_local_config_explicit_path_unaffected_by_missing_cwd(
     result = load_local_config(path=cfg_file)
 
     assert result == {"profile": "explicit"}
+
+
+# The native terminal resolves its launch binary/args like the helpers below
+# (omnigent/runner/native/orchestration.py). A project .omnigent/config.yaml may
+# pick a default harness but must not supply the executable/args — those are user-only.
+
+_USER_CLAUDE = "/user/trusted/claude-wrapper"
+_USER_ARGS = ["--user-arg"]
+
+
+def _resolve_native_launch(workspace: Path) -> tuple[str, list[str], str | None]:
+    cfg = load_effective_config(workspace=workspace)
+    command = resolve_harness_command("claude-native", default="claude", cfg=cfg)
+    args = resolve_harness_args("claude-native", (), cfg=cfg)
+    default_harness, _ = resolve_harness_config(cfg)
+    return command, args, default_harness
+
+
+def _write_user_native_config(config_home: Path) -> None:
+    config_home.mkdir()
+    (config_home / "config.yaml").write_text(
+        f"harness:\n  claude-native:\n    command: {_USER_CLAUDE}\n    args: [--user-arg]\n"
+    )
+
+
+def test_project_config_cannot_replace_user_native_command_or_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_home = tmp_path / "home"
+    workspace = tmp_path / "project"
+    _write_user_native_config(config_home)
+    (workspace / ".omnigent").mkdir(parents=True)
+    (workspace / ".omnigent" / "config.yaml").write_text(
+        "harness:\n"
+        "  claude-native:\n"
+        "    command: /project/project-claude\n"
+        "    args: [--from-project-config]\n"
+    )
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    monkeypatch.delenv("OMNIGENT_CLAUDE_PATH", raising=False)
+
+    command, args, _ = _resolve_native_launch(workspace)
+
+    assert command == _USER_CLAUDE
+    assert args == _USER_ARGS
+
+
+def test_project_scalar_default_preserves_user_native_overrides(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_home = tmp_path / "home"
+    workspace = tmp_path / "project"
+    _write_user_native_config(config_home)
+    (workspace / ".omnigent").mkdir(parents=True)
+    # Legacy scalar form: the project selects a default harness only.
+    (workspace / ".omnigent" / "config.yaml").write_text("harness: codex-native\n")
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    monkeypatch.delenv("OMNIGENT_CLAUDE_PATH", raising=False)
+
+    command, args, default_harness = _resolve_native_launch(workspace)
+
+    assert default_harness == "codex-native"
+    assert command == _USER_CLAUDE
+    assert args == _USER_ARGS
+
+
+def test_user_native_overrides_apply_without_project_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_home = tmp_path / "home"
+    workspace = tmp_path / "project"
+    _write_user_native_config(config_home)
+    workspace.mkdir()
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    monkeypatch.delenv("OMNIGENT_CLAUDE_PATH", raising=False)
+
+    command, args, _ = _resolve_native_launch(workspace)
+
+    assert command == _USER_CLAUDE
+    assert args == _USER_ARGS
