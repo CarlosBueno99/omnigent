@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -585,11 +587,18 @@ def test_login_keeps_legacy_command_for_older_sandbox_cli(
     ]
 
 
+@pytest.mark.parametrize(
+    ("verdict", "returncode", "detail"),
+    [("probe-failed:127\n", 0, "probe-failed:127"), ("", 1, "exit 1")],
+    ids=["cli-missing", "launcher-error"],
+)
 def test_login_fails_fast_when_sandbox_cli_probe_fails(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, verdict: str, returncode: int, detail: str
 ) -> None:
     """A broken ``--yes`` probe is reported; guessing "legacy" could hang the login."""
-    launcher = _FakeLauncher(login_lines=["Logged in.\r\n"], login_help="probe-failed:127\n")
+    launcher = _FakeLauncher(
+        login_lines=["Logged in.\r\n"], login_help=verdict, login_help_returncode=returncode
+    )
     _patch_saved_local_pairing(monkeypatch)
 
     with pytest.raises(click.ClickException) as exc:
@@ -600,11 +609,54 @@ def test_login_fails_fast_when_sandbox_cli_probe_fails(
             workspace=DerivedWorkspace(host="https://ws.example.com", workspace_id="123456"),
         )
 
-    assert "omnigent login --help" in str(exc.value) and "127" in str(exc.value)
+    assert "omnigent login --help" in str(exc.value) and detail in str(exc.value)
     # No login was spawned against an unknown CLI.
     assert launcher.stream_calls == []
     # ...and the sandbox was left untouched: no cfg seed ran.
     assert launcher.run_commands == [_LOGIN_HELP_COMMAND]
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="the probe is a POSIX shell line for Linux sandboxes"
+)
+@pytest.mark.parametrize(
+    ("fake_cli", "expected"),
+    [
+        (
+            "printf 'Usage: omnigent login [OPTIONS] SERVER_URL\\n\\nOptions:\\n"
+            "  -y, --yes  Approve sending credentials.\\n  --help  Show this message.\\n'",
+            "supports-yes",
+        ),
+        (
+            "printf 'Usage: omnigent login [OPTIONS] SERVER_URL\\n\\nOptions:\\n"
+            "  --help  Show this message.\\n'",
+            "legacy",
+        ),
+        ("echo 'omnigent: cannot start' >&2; exit 3", "probe-failed:3"),
+    ],
+    ids=["current", "legacy", "failing"],
+)
+def test_login_help_probe_command_classifies_a_real_cli(
+    tmp_path: Path, fake_cli: str, expected: str
+) -> None:
+    """The probe shell line yields one verdict token for a current, legacy or broken CLI."""
+    fake = tmp_path / "omnigent"
+    fake.write_text(f"#!/bin/sh\n{fake_cli}\n")
+    fake.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    result = subprocess.run(
+        bootstrap_mod._LOGIN_HELP_PROBE_COMMAND,
+        shell=True,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip().splitlines()[-1] == expected
 
 
 def test_login_requires_prior_local_login_when_unattended(

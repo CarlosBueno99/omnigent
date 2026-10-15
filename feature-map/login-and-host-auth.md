@@ -103,7 +103,7 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
   `omnigent host --server <url> --non-interactive` without a saved pairing fails
   with the `omnigent login` hint. Component tests:
   `tests/cli/test_login_databricks.py`, `tests/cli/test_backend.py -k preflight`,
-  `tests/onboarding/sandboxes/test_bootstrap.py -k consent`.
+  `tests/onboarding/sandboxes/test_bootstrap.py -k "pairing or unattended or legacy or probe"`.
 - **`proxy-env`:**
   `tests/e2e/test_login_accounts_proxy_env.py::test_login_detects_accounts_auth_despite_proxy_env`
   (starts its own accounts server; run with plain `uv run pytest`).

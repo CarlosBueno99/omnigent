@@ -12957,6 +12957,13 @@ def _databricks_login(
                 "yet, and approving that needs a terminal. Nothing was sent or stored. "
                 "Pass --yes to pre-approve the pairing in scripted logins."
             )
+        # Printed as a full line so a PTY driver that only streams output
+        # (an older `omnigent sandbox auth`) still shows why this is waiting.
+        click.echo(
+            f"First pairing: {server} would receive credentials for the Databricks workspace "
+            f"{workspace_host}. Answer below; a script (or an older `omnigent sandbox auth`) "
+            "cannot and should pass --yes."
+        )
         try:
             approved = click.confirm(
                 databricks_pairing_question(server, workspace_host), default=False
