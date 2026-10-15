@@ -681,6 +681,11 @@ tools:
 
 For client-provided tools, use `runtime: client` and do not set `callable`.
 
+The CLI appends its working directory to Python's import path, so a `callable:`
+module that lives in the project resolves without being installed. Installed
+packages take precedence: a project module with the same top-level name as an
+installed package is not imported in its place.
+
 ### Linux desktop keyrings
 
 The host and runner inherit `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`

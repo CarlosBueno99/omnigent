@@ -2244,13 +2244,11 @@ def main() -> None:
     shape (``omnigent [--flags] [prompt]``) is rejected here so it
     cannot fall back to the legacy in-process runner path.
 
-    Also inserts the current working directory at ``sys.path[0]``
-    so dotted callables declared in user YAMLs (``callable:
-    mypackage.mymodule.my_fn``) resolve against the user's project,
-    not the console-script's install directory. Console entry
-    points put the script's own directory at sys.path[0] by
-    default, which is almost never what a CLI that imports
-    user-authored modules wants.
+    Also appends the current working directory to ``sys.path`` so
+    dotted callables declared in user YAMLs (``callable:
+    mypackage.mymodule.my_fn``) resolve against the user's project.
+    It goes after the installed packages so a workspace module can
+    never shadow the runtime or its dependencies.
 
     Sets up the always-on CLI diagnostics log before Click dispatch
     so unhandled exceptions are captured even when the user didn't
@@ -2273,7 +2271,7 @@ def main() -> None:
 
     cwd = os.getcwd()
     if cwd not in sys.path:
-        sys.path.insert(0, cwd)
+        sys.path.append(cwd)
 
     # Legacy-codepage stdio (Windows ANSI, C locale, PYTHONIOENCODING)
     # can't encode the CLI's glyphs; harden the streams before any command
@@ -14030,8 +14028,8 @@ _register_native_commands(cli)
 
 
 if __name__ == "__main__":
-    # Omnigent is already loaded from the selected installation. Restore the
+    # Omnigent is already loaded from the selected installation. Append the
     # workspace path for local tools, matching the console entry point.
     if (_cwd := os.getcwd()) not in sys.path:
-        sys.path.insert(0, _cwd)
+        sys.path.append(_cwd)
     cli()
