@@ -399,6 +399,7 @@ _WAIT_ELSEWHERE_LINE = "Waiting for another process to finish OAuth on port 8020
         # Keys echoed into the waiting pane are not launcher output.
         _WAIT_ELSEWHERE_LINE + "^[^[\n^[[A\n",
         _WAIT_ELSEWHERE_LINE + "Still waiting...\n",
+        _WAIT_ELSEWHERE_LINE + "Press Ctrl-C to cancel.\n",
         "waiting for another process to finish sign-in\n",
         "Waiting for another process to finish login...\n",
     ],
