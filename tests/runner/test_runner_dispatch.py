@@ -8688,11 +8688,8 @@ async def test_session_tools_reject_route_escaping_identifiers_before_any_reques
     tmp_path: Path,
 ) -> None:
     """
-    An identifier that is not a single session id must be refused before the
-    runner builds a URL from it. Spliced into ``/v1/sessions/{id}``, a
-    dot-segment or extra path segment steers the runner's privileged client
-    to a different route (``../hosts`` becomes ``GET /v1/hosts``) and a query
-    suffix rewrites the request's parameters.
+    A model-supplied id that is not one route segment must be refused before
+    any URL is built: ``../hosts`` would otherwise become ``GET /v1/hosts``.
     """
     from omnigent.runner.tool_dispatch import execute_tool
 
