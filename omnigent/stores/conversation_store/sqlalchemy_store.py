@@ -87,7 +87,13 @@ from omnigent.entities import (
     PagedList,
     parse_item_data,
 )
-from omnigent.errors import ErrorCode, OmnigentError, StaleCursorError
+from omnigent.errors import (
+    ErrorCode,
+    OmnigentError,
+    StaleCursorError,
+    is_payload_rejected_rpc_error,
+    rpc_error_status_name,
+)
 from omnigent.native.native_coding_agents import native_coding_agent_for_wrapper_label
 from omnigent.native.session_todos import validate_session_todos
 from omnigent.session_import.models import IMPORT_SOURCE_LABEL_KEY
@@ -738,12 +744,14 @@ def _to_item(row: SqlConversationItem, data_json: str) -> ConversationItem:
 
 
 def _to_unreadable_item(row: SqlConversationItem) -> ConversationItem:
-    """Represent an undecodable row as an error while preserving identity and ordering.
+    """Represent a row whose data cannot be decoded as an error item.
 
-    Clients render the error; the agent excludes it from LLM context.
+    Keeps the row's id, ordering metadata and timestamps so cursors still
+    resolve; the agent loop excludes error items from LLM context.
 
     :param row: Stored row whose data could not be decoded.
-    :returns: Error item retaining the row metadata."""
+    :returns: Error placeholder carrying the row's metadata.
+    """
     return ConversationItem(
         id=row.id,
         type="error",
@@ -753,14 +761,32 @@ def _to_unreadable_item(row: SqlConversationItem) -> ConversationItem:
         data=ErrorData(
             source="execution",
             code="item_data_unreadable",
+            title="Part of this conversation couldn't be loaded",
             message=(
-                "This item's content could not be read from conversation "
-                "storage (for example, an attachment too large to decode). "
-                "The rest of the conversation is unaffected."
+                "Its stored content could not be read from conversation storage "
+                "(for example, an attachment too large to decode). The rest of "
+                "the conversation is unaffected."
             ),
         ),
         created_by=row.created_by,
     )
+
+
+def _is_payload_decode_failure(exc: BaseException) -> bool:
+    """Whether a decode-seam failure is about the rows being decoded, not the backend.
+
+    An RPC error counts only when its status says the peer refused the payload
+    (:func:`is_payload_rejected_rpc_error`); a denial, cancellation or outage is
+    the backend's own state. Outside gRPC, a decode error (corrupt compression,
+    bad encoding) is about the row, while an ``OSError`` (connection, timeout)
+    is not.
+
+    :param exc: The exception the decode seam raised.
+    :returns: ``True`` when only the affected rows should degrade.
+    """
+    if rpc_error_status_name(exc) is not None:
+        return is_payload_rejected_rpc_error(exc)
+    return not isinstance(exc, OSError)
 
 
 def _remap_item_file_references(
@@ -2403,33 +2429,58 @@ class SqlAlchemyConversationStore(ConversationStore):
         return stored
 
     def _decode_item_data_batch_for_read(self, stored: list[str]) -> list[str | None]:
-        """Retry a failed batch row by row so one decode failure cannot hide a page.
+        """Decode a page for a read, isolating rows that cannot be decoded.
 
-        Subclass transports can reject oversized pages or individual attachments.
+        Returns one decoded ``data`` JSON per row, or ``None`` for a row the
+        decode seam refuses. A failure the backend attributes to the payload
+        (an oversized decrypt frame, corrupt data) is narrowed by halving the
+        page until each unreadable row stands alone, so it degrades to a
+        placeholder instead of hiding the whole page. A failure of the backend
+        itself — denial, cancellation, outage — propagates unchanged for the
+        app's existing handling. Placeholders are never persisted: the next
+        read decodes the rows again.
 
-        :param stored: Raw data column values.
-        :returns: Decoded JSON in input order, with None for undecodable rows."""
+        :param stored: Raw ``data`` column values of the page, in order.
+        :returns: Decoded JSON per row, ``None`` where the row is unreadable.
+        """
         try:
             return list(self._decode_item_data_batch(stored))
-        except Exception:  # noqa: BLE001 — a subclass decode can raise any transport error; degrade, never fail the read
+        except Exception as exc:
+            if not _is_payload_decode_failure(exc):
+                raise
             _logger.warning(
-                "decoding a page of %d items failed; retrying row by row",
+                "decoding a page of %d items failed (%s: %s); isolating unreadable rows",
                 len(stored),
-                exc_info=True,
+                type(exc).__name__,
+                exc,
             )
-        decoded: list[str | None] = []
-        for encoded in stored:
-            try:
-                decoded.append(self._decode_item_data_batch([encoded])[0])
-            except Exception:  # noqa: BLE001 — same boundary; a still-failing row degrades to a placeholder
-                decoded.append(None)
-        undecodable = sum(1 for d in decoded if d is None)
-        if undecodable:
+        decoded = self._isolate_unreadable_rows(stored)
+        unreadable = sum(1 for d in decoded if d is None)
+        if unreadable:
             _logger.warning(
                 "%d of %d items could not be decoded; serving placeholders",
-                undecodable,
+                unreadable,
                 len(stored),
             )
+        return decoded
+
+    def _isolate_unreadable_rows(self, failed: list[str]) -> list[str | None]:
+        """Halve a slice whose batch decode failed until each unreadable row stands alone.
+
+        :param failed: Stored values whose batch decode was refused.
+        :returns: Decoded JSON per row, ``None`` for a row refused on its own.
+        """
+        if len(failed) == 1:
+            return [None]
+        mid = len(failed) // 2
+        decoded: list[str | None] = []
+        for half in (failed[:mid], failed[mid:]):
+            try:
+                decoded.extend(self._decode_item_data_batch(half))
+            except Exception as exc:
+                if not _is_payload_decode_failure(exc):
+                    raise
+                decoded.extend(self._isolate_unreadable_rows(half))
         return decoded
 
     def _item_search_text(self, item: NewConversationItem) -> str | None:

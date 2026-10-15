@@ -7352,34 +7352,68 @@ def test_item_data_seam_subclass_encodes_and_decodes(db_uri: str) -> None:
     assert item.data.content[0]["text"] == "secret-payload"
 
 
+def _rpc_error(status_name: str, detail: str) -> Exception:
+    """A structural stand-in for a grpc ``RpcError`` (the deployed build vendors
+    grpc, so the match is on class name and ``code()`` shape, not identity)."""
+
+    class _Status:
+        name = status_name
+
+    class RpcError(Exception):
+        def code(self) -> object:
+            return _Status()
+
+    return RpcError(detail)
+
+
 class _FrameLimitedDecodeStore(SqlAlchemyConversationStore):
-    """Batch decode rejects a page whose combined payload exceeds a limit —
-    the shape of a batched decrypt RPC hitting its transport frame cap."""
+    """Batch decode refuses a page whose combined payload exceeds a limit — the
+    shape of a batched decrypt RPC hitting the sidecar's inbound frame cap."""
 
     frame_limit = 4096
 
+    def __init__(self, db_uri: str) -> None:
+        super().__init__(db_uri)
+        self.decode_calls = 0
+
     def _decode_item_data_batch(self, stored: list[str]) -> list[str]:
+        self.decode_calls += 1
         frame = sum(len(s) for s in stored)
         if frame > self.frame_limit:
-            raise RuntimeError(
-                f"RPC terminated with RESOURCE_EXHAUSTED. "
-                f"Frame size {frame} exceeds maximum: {self.frame_limit}"
+            raise _rpc_error(
+                "RESOURCE_EXHAUSTED", f"Frame size {frame} exceeds maximum: {self.frame_limit}"
             )
         return super()._decode_item_data_batch(stored)
 
 
+class _FailingDecodeStore(SqlAlchemyConversationStore):
+    """Batch decode raises the same error for every call, whatever the page holds."""
+
+    def __init__(self, db_uri: str, error: Exception) -> None:
+        super().__init__(db_uri)
+        self.error = error
+        self.decode_calls = 0
+
+    def _decode_item_data_batch(self, stored: list[str]) -> list[str]:
+        self.decode_calls += 1
+        raise self.error
+
+
 def test_list_items_survives_batch_decode_overflow(db_uri: str) -> None:
-    """A page whose combined size trips the batch decode still lists intact:
-    the per-row retry decodes every row, so no content is lost."""
+    """A page whose combined size trips the batch decode still lists intact: the
+    page is split until every slice fits, so no content is lost and the store
+    issues fewer decode calls than one per row."""
     store = _FrameLimitedDecodeStore(db_uri)
     conv = store.create_conversation()
     texts = [f"turn {i} " + "x" * 1200 for i in range(6)]
     store.append(conv.id, [_user_message(text, "resp_bulk") for text in texts])
+    store.decode_calls = 0
 
     page = store.list_items(conv.id)
 
     assert [item.type for item in page.data] == ["message"] * 6
     assert [item.data.content[0]["text"] for item in page.data] == texts
+    assert store.decode_calls < len(texts)
 
 
 def test_list_items_degrades_undecodable_item_instead_of_failing(db_uri: str) -> None:
@@ -7389,7 +7423,7 @@ def test_list_items_degrades_undecodable_item_instead_of_failing(db_uri: str) ->
     store = _FrameLimitedDecodeStore(db_uri)
     conv = store.create_conversation()
     store.append(conv.id, [_user_message("before", "resp_a")])
-    store.append(conv.id, [_user_message("y" * (store.frame_limit + 1), "resp_big")])
+    [big] = store.append(conv.id, [_user_message("y" * (store.frame_limit + 1), "resp_big")])
     store.append(conv.id, [_user_message("after", "resp_b")])
 
     page = store.list_items(conv.id)
@@ -7398,9 +7432,73 @@ def test_list_items_degrades_undecodable_item_instead_of_failing(db_uri: str) ->
     placeholder = page.data[1]
     assert isinstance(placeholder.data, ErrorData)
     assert placeholder.data.code == "item_data_unreadable"
+    assert placeholder.data.title
+    assert placeholder.id == big.id
     assert placeholder.response_id == "resp_big"
     assert page.data[0].data.content[0]["text"] == "before"
     assert page.data[2].data.content[0]["text"] == "after"
+
+
+def test_list_items_degrades_sole_oversized_row(db_uri: str) -> None:
+    """A page made of one oversized row degrades to one placeholder rather than
+    failing: a one-message conversation stays openable."""
+    store = _FrameLimitedDecodeStore(db_uri)
+    conv = store.create_conversation()
+    store.append(conv.id, [_user_message("z" * (store.frame_limit + 1), "resp_only")])
+
+    page = store.list_items(conv.id)
+
+    assert [item.type for item in page.data] == ["error"]
+    assert page.data[0].response_id == "resp_only"
+
+
+def test_list_items_degrades_row_with_corrupt_data(db_uri: str) -> None:
+    """A row whose stored data fails local decoding (corrupt compression, bad
+    encoding) degrades to a placeholder just like a refused payload."""
+
+    class _CorruptRowStore(SqlAlchemyConversationStore):
+        def _decode_item_data_batch(self, stored: list[str]) -> list[str]:
+            if any("corrupt-me" in s for s in stored):
+                raise ValueError("zstd: data corruption detected")
+            return super()._decode_item_data_batch(stored)
+
+    store = _CorruptRowStore(db_uri)
+    conv = store.create_conversation()
+    store.append(conv.id, [_user_message("before", "resp_a")])
+    store.append(conv.id, [_user_message("corrupt-me", "resp_bad")])
+    store.append(conv.id, [_user_message("after", "resp_b")])
+
+    page = store.list_items(conv.id)
+
+    assert [item.type for item in page.data] == ["message", "error", "message"]
+    assert page.data[1].response_id == "resp_bad"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _rpc_error("PERMISSION_DENIED", "Received http2 header with status: 403"),
+        _rpc_error("UNAVAILABLE", "failed to connect to all addresses"),
+        _rpc_error("CANCELLED", "Cancelled"),
+        ConnectionError("decrypt sidecar unreachable"),
+    ],
+    ids=["permission_denied", "unavailable", "cancelled", "connection_error"],
+)
+def test_list_items_propagates_backend_failures_unchanged(db_uri: str, error: Exception) -> None:
+    """A decode failure that is the backend's own state — a denial, an outage,
+    a cancelled or refused connection — is not an unreadable row: it propagates
+    as raised, after a single call, so the app's existing 403/499/500 handling
+    still applies instead of a page of placeholders."""
+    store = _FailingDecodeStore(db_uri, error)
+    conv = store.create_conversation()
+    store.append(conv.id, [_user_message("a", "resp_a"), _user_message("b", "resp_b")])
+    store.decode_calls = 0
+
+    with pytest.raises(type(error)) as excinfo:
+        store.list_items(conv.id)
+
+    assert excinfo.value is error
+    assert store.decode_calls == 1
 
 
 def test_latest_message_summaries_survive_undecodable_item(db_uri: str) -> None:

@@ -23,6 +23,7 @@ from omnigent.errors import (
     impact_for_code,
     is_before_harness_start,
     is_cancelled_rpc_error,
+    is_payload_rejected_rpc_error,
     is_permission_denied_rpc_error,
     phase_for_code,
     restart_on_stale_cursor,
@@ -561,3 +562,40 @@ async def test_restart_on_stale_cursor_reraises_from_an_async_walk() -> None:
     with pytest.raises(StaleCursorError):
         await walk()
     assert calls == _STALE_CURSOR_ATTEMPTS
+
+
+def test_is_payload_rejected_rpc_error_matches_refused_payload_statuses() -> None:
+    """Statuses that blame the request content — an oversized decrypt frame,
+    corrupt data — match regardless of which module defines ``RpcError``."""
+    for status in ("RESOURCE_EXHAUSTED", "INVALID_ARGUMENT", "OUT_OF_RANGE", "DATA_LOSS"):
+        assert is_payload_rejected_rpc_error(_make_rpc_error(status)) is True, status
+
+
+def test_is_payload_rejected_rpc_error_ignores_backend_state_statuses() -> None:
+    """A denial, cancellation or outage is the backend's own state, not a
+    refused payload, and the three detectors never overlap."""
+    for status in (
+        "PERMISSION_DENIED",
+        "CANCELLED",
+        "UNAVAILABLE",
+        "DEADLINE_EXCEEDED",
+        "UNAUTHENTICATED",
+        None,
+    ):
+        assert is_payload_rejected_rpc_error(_make_rpc_error(status)) is False, status
+    assert is_cancelled_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED")) is False
+    assert is_permission_denied_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED")) is False
+
+
+def test_is_payload_rejected_rpc_error_requires_rpc_error_ancestry() -> None:
+    """A non-RpcError exception never matches, even with a matching code()."""
+
+    class NotAnRpcFailure(Exception):
+        def code(self) -> object:
+            class _Status:
+                name = "RESOURCE_EXHAUSTED"
+
+            return _Status()
+
+    assert is_payload_rejected_rpc_error(NotAnRpcFailure("nope")) is False
+    assert is_payload_rejected_rpc_error(ValueError("nope")) is False

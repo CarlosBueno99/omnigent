@@ -1,4 +1,4 @@
-"""Backend permission denials are handled consistently across session APIs."""
+"""Backend gRPC failures are mapped consistently across session APIs."""
 
 from __future__ import annotations
 
@@ -17,6 +17,14 @@ from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConver
 from tests.server.helpers import create_test_session
 
 _DENIAL_DETAILS = "Received http2 header with status: 403"
+
+
+def _user_item(text: str) -> NewConversationItem:
+    return NewConversationItem(
+        type="message",
+        response_id="resp_seed",
+        data=MessageData(role="user", content=[{"type": "input_text", "text": text}]),
+    )
 
 
 @pytest.fixture
@@ -138,3 +146,66 @@ async def test_other_rpc_errors_remain_500(
     assert record.getMessage().startswith("Unhandled exception:")
     assert record.exc_info is not None
     assert record.attributes["http_status"] == "500"
+
+
+async def test_payload_rejected_decrypt_degrades_only_that_item(
+    catchall_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A decrypt backend refusing one oversized item (RESOURCE_EXHAUSTED) no
+    longer fails the items page: the readable items load and the refused one is
+    served as an ``item_data_unreadable`` placeholder, with no unhandled 500."""
+    session = await create_test_session(catchall_client, name="oversized-item")
+    store = SqlAlchemyConversationStore(db_uri)
+    store.append(
+        session["id"], [_user_item("before"), _user_item("x" * 4096), _user_item("after")]
+    )
+    original = SqlAlchemyConversationStore._decode_item_data_batch
+
+    def frame_limited(self: SqlAlchemyConversationStore, stored: list[str]) -> list[str]:
+        if sum(len(s) for s in stored) > 2048:
+            raise _rpc_error("RESOURCE_EXHAUSTED")
+        return original(self, stored)
+
+    monkeypatch.setattr(SqlAlchemyConversationStore, "_decode_item_data_batch", frame_limited)
+    with caplog.at_level(logging.WARNING):
+        response = await catchall_client.get(
+            f"/v1/sessions/{session['id']}/items", params={"order": "asc", "limit": 100}
+        )
+
+    assert response.status_code == 200, response.text
+    items = response.json()["data"]
+    assert [item["type"] for item in items] == ["message", "error", "message"]
+    assert items[1]["code"] == "item_data_unreadable"
+    assert [items[0]["content"][0]["text"], items[2]["content"][0]["text"]] == ["before", "after"]
+    assert not [
+        r for r in caplog.records if r.name == "omnigent.server.app" and r.levelno >= logging.ERROR
+    ]
+
+
+async def test_backend_outage_on_decrypt_remains_500(
+    catchall_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An UNAVAILABLE decrypt backend is an outage, not a page of unreadable
+    rows: the items read keeps the unhandled-500 contract instead of serving
+    placeholders that would mask it."""
+    session = await create_test_session(catchall_client, name="decrypt-outage")
+    store = SqlAlchemyConversationStore(db_uri)
+    store.append(session["id"], [_user_item("hello")])
+    monkeypatch.setattr(
+        SqlAlchemyConversationStore,
+        "_decode_item_data_batch",
+        Mock(side_effect=_rpc_error("UNAVAILABLE")),
+    )
+    with caplog.at_level(logging.WARNING, logger="omnigent.server.app"):
+        response = await catchall_client.get(f"/v1/sessions/{session['id']}/items")
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "internal_error"
+    (record,) = [r for r in caplog.records if r.name == "omnigent.server.app"]
+    assert record.levelno == logging.ERROR
