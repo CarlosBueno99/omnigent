@@ -245,6 +245,70 @@ def test_stale_host_classified_before_fragile_lazy_imports(
     assert "Restart the host" in payload["remediation"]
 
 
+def test_stale_host_guidance_survives_label_limit_import_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The restart guidance still goes out if the label-limit import fails too.
+
+    The branch loads ``LABEL_VALUE_MAX_LEN`` lazily from the ORM module, which
+    is not in the runner's startup import graph. On a genuinely stale host that
+    import can raise the same mixed-version ``ImportError``; the branch must
+    fall back to the known schema limit so this exact failure mode still gets
+    its classified restart card instead of crashing the payload builder.
+    """
+    # A ``db_models`` stand-in without the constant makes the lazy
+    # ``from ... import LABEL_VALUE_MAX_LEN`` raise ImportError, as it would on
+    # a stale host that cannot import the upgraded ORM module.
+    stub = types.ModuleType("omnigent.db.db_models")
+    monkeypatch.setitem(sys.modules, "omnigent.db.db_models", stub)
+
+    payload = _native_terminal_start_error_payload(
+        _stale_host_import_error(), "Claude", session_id="conv_1"
+    )
+
+    assert payload["title"] == "Claude can't start until you restart the host"
+    assert "Restart the host" in payload["remediation"]
+    assert "keeping `--server`" in payload["remediation"]
+    cause = payload["cause"]
+    assert "mixed-version" in cause
+    assert payload["error_id"] in cause
+    assert len(cause) <= LABEL_VALUE_MAX_LEN
+
+
+def test_long_runtime_name_keeps_error_id_within_label_budget() -> None:
+    """A long runtime name must not clip the error ID carried in the cause.
+
+    ``cause`` ends with the log-correlation ID. An unusually long runtime name
+    would push the diagnosis past the per-field label budget and, without
+    reserving room, truncate exactly the ID this design preserves. The
+    diagnosis is trimmed instead, so the complete ID survives the label
+    persistence/read-back boundary intact.
+    """
+    long_runtime_name = "Experimental " + "native runtime " * 4
+
+    payload = _native_terminal_start_error_payload(
+        _stale_host_import_error(), long_runtime_name, session_id="conv_1"
+    )
+    cause = payload["cause"]
+    # The diagnosis is trimmed with the shared marker so the ID keeps its room.
+    assert "\u2026" in cause
+    assert len(cause) <= LABEL_VALUE_MAX_LEN
+    assert _ERROR_ID_RE.search(cause) is not None
+
+    reloaded = _last_task_error_from_labels(
+        {
+            _LAST_TASK_ERROR_CODE_LABEL_KEY: _truncate_label(payload["code"]),
+            _LAST_TASK_ERROR_MESSAGE_LABEL_KEY: _truncate_label(payload["message"]),
+            _LAST_TASK_ERROR_TITLE_LABEL_KEY: _truncate_label(payload["title"]),
+            _LAST_TASK_ERROR_CAUSE_LABEL_KEY: _truncate_label(payload["cause"]),
+            _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY: _truncate_label(payload["remediation"]),
+        }
+    )
+    assert reloaded is not None
+    assert reloaded["cause"] == cause
+    assert payload["error_id"] in reloaded["cause"]
+
+
 def _third_party_cannot_import_name() -> ImportError:
     """A dependency "cannot import name" failure with ``name_from`` set.
 

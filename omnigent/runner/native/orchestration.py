@@ -7804,20 +7804,28 @@ def _native_terminal_start_error_payload(
     # state those imports can raise the same stale-host ImportError and lose
     # the guidance, so this path must not depend on them.
     if _is_stale_host_import_error(exc):
-        # Load the shared label-length limit lazily: it lives in the ORM module,
-        # and importing it at module scope would pull SQLAlchemy into the
-        # runner's import graph for one constant used only on this error path.
-        from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
+        # The label-length limit lives in the ORM module; import it lazily to
+        # keep SQLAlchemy out of the runner's import graph, and fall back to the
+        # known schema limit if this stale host cannot import it either.
+        try:
+            from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
+        except ImportError:
+            LABEL_VALUE_MAX_LEN = 256
 
         cli = cli_invocation()
         # The web card shows `cause`/`remediation` and hides `message` once a
-        # cause is set, so carry the log-correlation ID in the cause field.
+        # cause is set, so carry the log-correlation ID at the end of `cause`,
+        # reserving room so a long runtime name cannot clip it on reload.
+        error_id_suffix = f" Error ID: {error_id}."
         cause = (
             f"Native {runtime_name} terminal failed to start: this host is "
             "likely running an older Omnigent build than the one now on disk, "
-            "which an in-place upgrade can leave behind (mixed-version). "
-            f"Error ID: {error_id}."
+            "which an in-place upgrade can leave behind (mixed-version)."
         )
+        cause_room = LABEL_VALUE_MAX_LEN - len(error_id_suffix)
+        if len(cause) > cause_room:
+            cause = cause[: cause_room - 1] + "…"
+        cause = f"{cause}{error_id_suffix}"
         remediation = (
             "Restart the host so it loads the upgraded code. For a foreground "
             f"host, re-run `{cli} host`. For a host user service, re-enable it "
