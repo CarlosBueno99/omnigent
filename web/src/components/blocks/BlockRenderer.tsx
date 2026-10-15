@@ -733,13 +733,21 @@ function partitionToolRun(
   return fragments;
 }
 
-/** Id-less native tools use positional keys, which may change after re-layout. */
+/** Id-less native tools key by position, which can shift mid-stream, so they stay untracked. */
+function trackedOpenState(
+  item: RenderItem,
+  toolOpenState: ToolOpenState | undefined,
+): ToolOpenState | undefined {
+  return item.kind === "native_tool" && item.itemId === null ? undefined : toolOpenState;
+}
+
 function isUserOpenedTool(
   item: RenderItem,
   index: number,
   toolOpenState: ToolOpenState | undefined,
 ): boolean {
-  return toolOpenState !== undefined && toolOpenState.isOpen(keyFor(item, index));
+  const tracked = trackedOpenState(item, toolOpenState);
+  return tracked !== undefined && tracked.isOpen(keyFor(item, index));
 }
 
 function renderToolRunFragment(
@@ -876,10 +884,11 @@ function renderItem(
           onOpenChange={toolOpenState && ((open) => toolOpenState.setOpen(key, open))}
         />
       );
-    case "native_tool":
+    case "native_tool": {
       // Reuse the same tool card. Native tools are server-side
       // (provider-managed) so they're always "completed" by the
       // time we see them; render the raw provider data as input.
+      const openState = trackedOpenState(item, toolOpenState);
       return (
         <ToolCard
           key={key}
@@ -888,10 +897,11 @@ function renderItem(
           arguments={item.data}
           output={null}
           state="output-available"
-          defaultOpen={toolOpenState?.isOpen(key) ?? false}
-          onOpenChange={toolOpenState && ((open) => toolOpenState.setOpen(key, open))}
+          defaultOpen={openState?.isOpen(key) ?? false}
+          onOpenChange={openState && ((open) => openState.setOpen(key, open))}
         />
       );
+    }
     case "slash_command":
       return (
         <SlashCommandCard

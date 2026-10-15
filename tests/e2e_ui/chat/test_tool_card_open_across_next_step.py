@@ -82,7 +82,7 @@ def _step_call(step: int) -> dict[str, object]:
 
 
 def _gate_pending(mock_url: str) -> bool:
-    resp = httpx.get(f"{mock_url}/gate/pending", timeout=5.0)
+    resp = httpx.get(f"{mock_url}/gate/pending", timeout=5.0, trust_env=False)
     resp.raise_for_status()
     return bool(resp.json()["pending"])
 
@@ -97,7 +97,7 @@ def _wait_gate_pending(mock_url: str, timeout_s: float = 90.0) -> None:
 
 
 def _release_gate(mock_url: str) -> None:
-    resp = httpx.post(f"{mock_url}/gate/release", timeout=5.0)
+    resp = httpx.post(f"{mock_url}/gate/release", timeout=5.0, trust_env=False)
     resp.raise_for_status()
     assert resp.json()["released"], "no gated mock response to release"
 
@@ -108,11 +108,12 @@ def _release_remaining_gates(mock_url: str, quiet_s: float = 3.0, timeout_s: flo
     quiet_since = time.monotonic()
     while time.monotonic() < deadline:
         if _gate_pending(mock_url):
-            httpx.post(f"{mock_url}/gate/release", timeout=5.0)
+            httpx.post(f"{mock_url}/gate/release", timeout=5.0, trust_env=False).raise_for_status()
             quiet_since = time.monotonic()
         elif time.monotonic() - quiet_since >= quiet_s:
             return
         time.sleep(0.25)
+    raise AssertionError("mock LLM gate still pending after the release deadline")
 
 
 @pytest.fixture
@@ -146,9 +147,15 @@ def four_step_session(
     try:
         yield (live_server, session_id, mock_llm_server_url)
     finally:
-        _release_remaining_gates(mock_llm_server_url)
-        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-        shutil.rmtree(ws, ignore_errors=True)
+        try:
+            _release_remaining_gates(mock_llm_server_url)
+        finally:
+            try:
+                httpx.delete(
+                    f"{live_server}/v1/sessions/{session_id}", timeout=10.0, trust_env=False
+                )
+            finally:
+                shutil.rmtree(ws, ignore_errors=True)
 
 
 def _send(page: Page, text: str) -> None:
@@ -214,7 +221,6 @@ def test_expanded_tool_card_survives_next_step(
     fold_state = fold.first.get_attribute("data-state") if fold.count() else None
     row_visible = first_row.is_visible()
     parameters_visible = parameters.is_visible()
-    page.wait_for_timeout(3_000)
 
     problems: list[str] = []
     if not row_visible:
