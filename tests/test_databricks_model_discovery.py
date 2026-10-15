@@ -382,7 +382,9 @@ def _probe_first_served(
     *,
     erroring: set[str] | None = None,
     timing_out: set[str] | None = None,
+    connect_timing_out: set[str] | None = None,
     not_found_as_400: set[str] | None = None,
+    not_found_code: str = "RESOURCE_DOES_NOT_EXIST",
     slow: set[str] | None = None,
     seen: list[str] | None = None,
     route_error: bool = False,
@@ -390,8 +392,10 @@ def _probe_first_served(
     """Probe *candidates* against a codex route that serves only *served*.
 
     Ids in *erroring* answer with a transient ``500``, ids in *timing_out*
-    never answer, ids in *not_found_as_400* report the gateway's not-found
-    code as a validation error, and ids in *slow* answer after a short delay.
+    never answer (a read timeout), ids in *connect_timing_out* never complete
+    the handshake (a connect timeout), ids in *not_found_as_400* report
+    *not_found_code* as a validation error, and ids in *slow* answer after a
+    short delay.
     """
     from omnigent.models.databricks_model_discovery import first_served_codex_model
 
@@ -410,13 +414,15 @@ def _probe_first_served(
             time.sleep(_SLOW_PROBE_S)
         if timing_out and model in timing_out:
             raise httpx.ReadTimeout("no answer", request=request)
+        if connect_timing_out and model in connect_timing_out:
+            raise httpx.ConnectTimeout("slow handshake", request=request)
         if erroring and model in erroring:
             return httpx.Response(500, json={"error": "upstream hiccup"}, request=request)
         if not_found_as_400 and model in not_found_as_400:
             return httpx.Response(
                 400,
                 json={
-                    "error_code": "RESOURCE_DOES_NOT_EXIST",
+                    "error_code": not_found_code,
                     "message": f"Endpoint with name '{model}' does not exist.",
                 },
                 request=request,
@@ -525,6 +531,25 @@ def test_first_served_codex_model_skips_a_timed_out_candidate() -> None:
     assert seen == ["system.ai.gpt-5-6-sol", "system.ai.gpt-5-5", "system.ai.glm-5-2"]
 
 
+def test_first_served_codex_model_skips_a_connect_timed_out_candidate() -> None:
+    """A connect timeout is a per-candidate skip, not a route-down signal.
+
+    A connect timeout is a sibling of ``httpx.ConnectError``, not a subclass,
+    so it must not abort the walk the way a refused route does — aborting
+    would hand back the ranked default, which may be the unserved id the
+    probe exists to avoid.
+    """
+    seen: list[str] = []
+    picked = _probe_first_served(
+        ("system.ai.gpt-5-6-sol", "system.ai.gpt-5-5", "system.ai.glm-5-2"),
+        served={"system.ai.glm-5-2"},
+        connect_timing_out={"system.ai.gpt-5-6-sol"},
+        seen=seen,
+    )
+    assert picked == "system.ai.glm-5-2"
+    assert seen == ["system.ai.gpt-5-6-sol", "system.ai.gpt-5-5", "system.ai.glm-5-2"]
+
+
 def test_first_served_codex_model_rejects_a_not_found_validation_error() -> None:
     """A 400 naming the gateway's not-found code is a rejection, not a confirmation."""
     seen: list[str] = []
@@ -532,6 +557,25 @@ def test_first_served_codex_model_rejects_a_not_found_validation_error() -> None
         ("system.ai.gpt-5-6-sol", "system.ai.glm-5-2"),
         served={"system.ai.gpt-5-6-sol", "system.ai.glm-5-2"},
         not_found_as_400={"system.ai.gpt-5-6-sol"},
+        seen=seen,
+    )
+    assert picked == "system.ai.glm-5-2"
+    assert seen == ["system.ai.gpt-5-6-sol", "system.ai.glm-5-2"]
+
+
+def test_first_served_codex_model_rejects_an_alternate_not_found_code() -> None:
+    """A 400 naming another Databricks not-found spelling is also a rejection.
+
+    Some gateways report a missing model as ``model_not_found`` rather than
+    ``RESOURCE_DOES_NOT_EXIST``; a validation body naming it must not be
+    confirmed as served.
+    """
+    seen: list[str] = []
+    picked = _probe_first_served(
+        ("system.ai.gpt-5-6-sol", "system.ai.glm-5-2"),
+        served={"system.ai.gpt-5-6-sol", "system.ai.glm-5-2"},
+        not_found_as_400={"system.ai.gpt-5-6-sol"},
+        not_found_code="model_not_found",
         seen=seen,
     )
     assert picked == "system.ai.glm-5-2"

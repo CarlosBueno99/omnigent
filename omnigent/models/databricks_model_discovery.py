@@ -31,9 +31,12 @@ _HTTP_TIMEOUT_S = 10.0
 _CODEX_PROBE_MAX_MODELS = 5
 _CODEX_PROBE_TIMEOUT_S = 5.0
 _CODEX_PROBE_BUDGET_S = 10.0
-# Enough of an error body to recognize the gateway's not-found code.
+# Enough of an error body to recognize the gateway's not-found codes.
 _CODEX_PROBE_BODY_PEEK_BYTES = 4096
-_CODEX_MODEL_NOT_FOUND_CODE = b"RESOURCE_DOES_NOT_EXIST"
+# Databricks gateways spell a missing model differently across routes
+# (``RESOURCE_DOES_NOT_EXIST`` on the codex route, ``model_not_found`` on the
+# OpenAI-shaped path), so a validation body naming any of them is a rejection.
+_CODEX_MODEL_NOT_FOUND_CODES = (b"RESOURCE_DOES_NOT_EXIST", b"model_not_found")
 
 
 #: Catalog spellings the same endpoint can be served under. Ordered by
@@ -442,15 +445,16 @@ def first_served_codex_model(
     probe request, in rank order, and the first one the route confirms wins.
 
     A success, or a validation ``400``/``422`` for the deliberately minimal
-    probe body, confirms the model resource exists — unless that body names
-    the gateway's not-found code, which some gateways report as a validation
-    error. A ``404`` rejects the candidate. Anything else (``5xx``, ``429``,
-    auth errors, a per-request timeout) leaves the candidate unconfirmed and
-    the walk moves on: a confirmed lower-ranked model is a better launch
-    default than an unconfirmed higher-ranked one. When nothing is confirmed
-    — the route is unreachable, every candidate was rejected, or the probe
-    budget ran out — the result is ``None`` and the caller keeps its ranked
-    default, so the probe can never leave the launch without a model.
+    probe body, confirms the model resource exists — unless that body names a
+    gateway not-found code, which some gateways report as a validation error.
+    A ``404`` rejects the candidate. Anything else (``5xx``, ``429``, auth
+    errors, a per-candidate connect or read timeout) leaves that one candidate
+    unconfirmed and the walk moves on: a confirmed lower-ranked model is a
+    better launch default than an unconfirmed higher-ranked one. Only a refused
+    connection or DNS failure proves the route itself is down. When nothing is
+    confirmed — the route is unreachable, every candidate was rejected, or the
+    probe budget ran out — the result is ``None`` and the caller keeps its
+    ranked default, so the probe can never leave the launch without a model.
 
     :param workspace_url: Workspace origin, e.g. ``"https://example.com"``.
     :param token: Workspace bearer token.
@@ -479,11 +483,14 @@ def first_served_codex_model(
                     timeout=min(_CODEX_PROBE_TIMEOUT_S, remaining),
                 ) as response:
                     confirmed = _codex_probe_confirms_model(response)
-            except (httpx.ConnectError, httpx.ConnectTimeout):
-                # The route itself is unreachable, so no candidate can answer.
+            except httpx.ConnectError:
+                # A refused connection or DNS failure means the route itself is
+                # down, so no candidate can answer; keep the ranked default.
                 return None
             except httpx.HTTPError:
-                # One slow or dropped answer says nothing about the others.
+                # A per-candidate failure (a connect or read timeout, a dropped
+                # answer) says nothing about the remaining candidates, so one
+                # slow probe cannot re-pin an unserved default: skip and go on.
                 continue
             if confirmed:
                 return model_id
@@ -501,7 +508,7 @@ def _codex_probe_confirms_model(response: httpx.Response) -> bool:
     if response.status_code not in (400, 422):
         return False
     head = next(response.iter_bytes(_CODEX_PROBE_BODY_PEEK_BYTES), b"")
-    return _CODEX_MODEL_NOT_FOUND_CODE not in head
+    return not any(code in head for code in _CODEX_MODEL_NOT_FOUND_CODES)
 
 
 def select_servable_model(requested: str, servable: Iterable[str]) -> str | None:

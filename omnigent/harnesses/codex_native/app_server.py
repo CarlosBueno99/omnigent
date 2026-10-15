@@ -3269,7 +3269,6 @@ def _resolve_databricks_codex_model(
         from omnigent.runtime.credentials.databricks import resolve_databricks_workspace
 
         creds = resolve_databricks_workspace(profile)
-        token = creds.token
         # Discover against the host the launch actually posts to. This resolver
         # honors ``DATABRICKS_HOST`` while the launch host comes from the
         # profile section alone (``_databricks_gateway_host``), so using
@@ -3278,6 +3277,11 @@ def _resolve_databricks_codex_model(
         # simply fails the listing and drops to the ucode-state fallback below,
         # which is already keyed by ``host``.
         servable = discover_databricks_codex_models(host, creds.token)
+        # Only trust the token for the servability probe once the listing has
+        # proven it works for ``host``; a failed listing drops to ucode state
+        # with ``token`` unset, so the probe never spends its budget on a token
+        # this host rejects.
+        token = creds.token
     except Exception as exc:  # noqa: BLE001 — cached ucode state is the launch fallback
         # Recoverable fallback; frames are debug-only so a TTY-mirrored
         # host console stays concise.

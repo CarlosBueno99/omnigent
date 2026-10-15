@@ -358,3 +358,40 @@ def test_resolve_databricks_codex_model_prefers_a_route_served_default() -> None
             == "system.ai.gpt-5-6-sol"
         )
         probe.assert_not_called()
+
+
+def test_resolve_databricks_codex_model_skips_probe_when_discovery_fails() -> None:
+    """A ucode-state fallback keeps its ranked default without a route probe.
+
+    When live discovery fails, the token has not been proven against ``host``,
+    so probing it would spend the launch budget on a listing the route just
+    rejected. The resolver must take the cached ucode-state default directly.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from omnigent.harnesses.codex_native.app_server import _resolve_databricks_codex_model
+
+    cached = ("system.ai.gpt-5-6-sol", "system.ai.glm-5-2")
+    with (
+        patch(
+            "omnigent.runtime.credentials.databricks.resolve_databricks_workspace",
+            return_value=SimpleNamespace(token="tok"),
+        ),
+        patch(
+            "omnigent.models.databricks_model_discovery.discover_databricks_codex_models",
+            side_effect=RuntimeError("listing rejected the token"),
+        ),
+        patch(
+            "omnigent.onboarding.ucode_state.read_ucode_state",
+            return_value=SimpleNamespace(codex_models=cached),
+        ),
+        patch(
+            "omnigent.models.databricks_model_discovery.first_served_codex_model",
+        ) as probe,
+    ):
+        assert (
+            _resolve_databricks_codex_model("https://h.example.com", "prof", None)
+            == "system.ai.gpt-5-6-sol"
+        )
+        probe.assert_not_called()
