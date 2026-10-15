@@ -21,6 +21,7 @@ import {
   Kbd,
   MOD_KEY,
   SHIFT_KEY,
+  VIEW_MODE_TOGGLE_KEYS,
 } from "@/components/KeyboardShortcut";
 import {
   Dialog,
@@ -57,6 +58,8 @@ interface Shortcut {
    *  arrow-pairs, the two interchangeable keys for that action. */
   keys: string[];
   lastKeySeparator?: string;
+  /** Another chord for the same action, shown after "or". */
+  alternateKeys?: string[];
 }
 
 interface ShortcutGroup {
@@ -86,6 +89,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { label: "Recall next prompt", keys: [DOWN] },
       { label: "Accept approval prompt", keys: [MOD_KEY, ENTER_KEY] },
       { label: "Open model picker", keys: [CTRL_KEY, SHIFT_KEY, "M"] },
+      { label: "Focus chat input", keys: [CTRL_KEY, SHIFT_KEY, "L"] },
       { label: "Toggle voice dictation", keys: [MOD_KEY, ALT_KEY, "V"] },
       { label: "Stop response", keys: ["Esc"] },
     ],
@@ -100,6 +104,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     title: "View",
     items: [
+      { label: "Toggle Chat / Terminal view", keys: [...VIEW_MODE_TOGGLE_KEYS] },
       { label: "Toggle conversations sidebar", keys: [MOD_KEY, ALT_KEY, "["] },
       { label: "Focus or close workspace sidebar", keys: [MOD_KEY, ALT_KEY, "]"] },
       {
@@ -154,6 +159,8 @@ function shortcutGroupsFor(
           {
             label: "New line in message",
             keys: composerNewLineShortcutKeys(submitWithModEnter),
+            // Alt+Enter is a newline in both modes; plain Enter already is in alternate mode.
+            alternateKeys: submitWithModEnter ? undefined : [ALT_KEY, ENTER_KEY],
           },
           ...group.items,
         ],
@@ -239,6 +246,14 @@ export function KeyboardShortcutsList({
                       <Kbd>{key}</Kbd>
                     </Fragment>
                   ))}
+                  {item.alternateKeys ? (
+                    <>
+                      <span className="px-0.5 text-sm text-muted-foreground/70">or</span>
+                      {item.alternateKeys.map((key) => (
+                        <Kbd key={`${item.label}-alternate-${key}`}>{key}</Kbd>
+                      ))}
+                    </>
+                  ) : null}
                 </span>
               </li>
             ))}
