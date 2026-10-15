@@ -12004,11 +12004,15 @@ async def test_hook_evaluate_endpoint_allows(
         assert client.calls == 2, f"every event must evaluate upstream, saw {client.calls}"
         # The relay wrote the shell-sourceable env file the curl hooks use.
         env_text = (bridge_dir / claude_native_bridge.TOOL_RELAY_ENV_FILE).read_text("utf-8")
-        assert "OMNIGENT_RELAY_URL=" in env_text and "OMNIGENT_RELAY_TOKEN=" in env_text
-        # ...and the owner-only curl config that carries the bearer for ``-K``.
+        assert "OMNIGENT_RELAY_URL=" in env_text
+        # The bearer lives only in the owner-only curl config read with ``-K``.
+        token = json.loads((bridge_dir / claude_native_bridge._TOOL_RELAY_FILE).read_text())[
+            "token"
+        ]
+        assert token not in env_text
         curl_path = bridge_dir / claude_native_bridge.TOOL_RELAY_CURL_FILE
         assert os.stat(curl_path).st_mode & 0o777 == 0o600
-        assert curl_path.read_text("utf-8").startswith('header = "Authorization: Bearer ')
+        assert curl_path.read_text("utf-8") == f'header = "Authorization: Bearer {token}"\n'
     finally:
         relay.close()
 

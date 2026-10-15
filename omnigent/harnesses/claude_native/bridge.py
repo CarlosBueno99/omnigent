@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import contextlib
 import functools
 import hashlib
@@ -6420,17 +6421,10 @@ def start_tool_relay(
     if session_id is not None:
         relay_info["session_id"] = session_id
     _write_json_file(bridge_dir / _TOOL_RELAY_FILE, relay_info)
-    # token_urlsafe's alphabet is [A-Za-z0-9_-], safe inside single quotes.
-    env_path = bridge_dir / TOOL_RELAY_ENV_FILE
-    env_path.write_text(
-        f"OMNIGENT_RELAY_URL='{advertised_url}'\nOMNIGENT_RELAY_TOKEN='{token}'\n",
-        encoding="utf-8",
-    )
-    os.chmod(env_path, 0o600)
-    # The curl hooks read the bearer from this file (``-K``), never from argv.
-    curl_path = bridge_dir / TOOL_RELAY_CURL_FILE
-    curl_path.write_text(relay_curl_config(token), encoding="utf-8")
-    os.chmod(curl_path, 0o600)
+    # The curl hooks source the URL from the env file and read the bearer
+    # through curl's own config (``-K``), so neither reaches a process argument.
+    _write_owner_only(bridge_dir / TOOL_RELAY_ENV_FILE, f"OMNIGENT_RELAY_URL='{advertised_url}'\n")
+    _write_owner_only(bridge_dir / TOOL_RELAY_CURL_FILE, relay_curl_config(token))
     relay = ClaudeNativeToolRelay(
         bridge_dir=bridge_dir,
         httpd=httpd,
@@ -6704,6 +6698,19 @@ _HOOK_EVALUATE_ROUTES = {
 }
 
 
+def _write_owner_only(path: Path, text: str) -> None:
+    """Create or replace *path* with mode 0600 from the start, never world-readable."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _log_lost_observation(future: concurrent.futures.Future[None]) -> None:
+    """Surface a file-change observer failure the detached relay path would otherwise drop."""
+    if not future.cancelled() and future.exception() is not None:
+        _logger.warning("native file-change observer failed: %r", future.exception())
+
+
 def _tool_relay_handler_factory(
     token: str,
     tool_executor: ToolExecutor,
@@ -6785,7 +6792,7 @@ def _tool_relay_handler_factory(
                         # refetch signal once the record lands.
                         asyncio.run_coroutine_threadsafe(
                             _observe_in_order(file_change_observer, payload), loop
-                        )
+                        ).add_done_callback(_log_lost_observation)
                 self._respond_hook_output(None)
                 return
             if self.path in _HOOK_EVALUATE_ROUTES:

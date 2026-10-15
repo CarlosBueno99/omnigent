@@ -54,22 +54,31 @@ def relay_hook_command(
         ``"/venv/bin/python -I -m omnigent.harnesses.codex_native.hook evaluate-policy
         --bridge-dir /b"``.
     :param max_time_s: curl's total budget in seconds.
-    :param max_bytes: When set, read at most this many bytes of stdin. An
-        oversized payload is truncated, so the relay and the fallback both
-        reject it as malformed JSON instead of buffering it whole. Policy
-        hooks leave it unset: a truncated ``PreToolUse`` payload would turn
-        the verdict into "no opinion".
+    :param max_bytes: When set, a payload larger than this many bytes is
+        dropped without contacting the relay or starting the fallback, as
+        the Python observer drops it; nothing larger is ever buffered. Policy
+        hooks leave it unset: a dropped ``PreToolUse`` payload would turn the
+        verdict into "no opinion".
     :returns: The shell command string.
     """
     env = shlex.quote(str(bridge_dir / TOOL_RELAY_ENV_FILE))
     curlrc = shlex.quote(str(bridge_dir / TOOL_RELAY_CURL_FILE))
-    read_stdin = "cat" if max_bytes is None else f"head -c {int(max_bytes)}"
+    if max_bytes is None:
+        read_stdin = "p=$(cat); "
+    else:
+        limit = int(max_bytes)
+        read_stdin = (
+            f"p=$(head -c {limit + 1}); "
+            f'[ "$(printf \'%s\' "$p" | wc -c)" -gt {limit} ] && exit 0; '
+        )
+    # The env file is sourced inside the command substitution: a special
+    # builtin failing in the main shell (the file pruned between the test and
+    # the dot) would abort the script before the fallback could run.
+    # ``-q`` first: an ambient ~/.curlrc (an extra ``url``, say) must not see
+    # the payload or the bearer; only the relay's own config applies.
     script = (
-        f"p=$({read_stdin}); "
-        f"if [ -r {env} ] && [ -r {curlrc} ]; then . {env}; "
-        # ``-q`` first: an ambient ~/.curlrc (an extra ``url``, say) must not
-        # see the payload or the bearer; only the relay's own config applies.
-        f"out=$(printf '%s' \"$p\" | curl -q -sf --max-time {max_time_s} -K {curlrc} "
+        read_stdin + f"if [ -r {env} ] && [ -r {curlrc} ]; then "
+        f"out=$(. {env} && printf '%s' \"$p\" | curl -q -sf --max-time {max_time_s} -K {curlrc} "
         "-H 'Content-Type: application/json' --data-binary @- "
         f'"$OMNIGENT_RELAY_URL{route}" 2>/dev/null) '
         "&& { printf '%s' \"$out\"; exit 0; }; fi; "

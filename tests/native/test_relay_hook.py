@@ -129,7 +129,7 @@ async def test_relay_hook_command_replays_stdin_unless_the_relay_answers(
         argv = argv_log.read_text().splitlines()
         assert argv[0] == "-q"
         assert argv[argv.index("-K") + 1] == str(curlrc)
-        assert token not in command and all(token not in arg for arg in argv)
+        assert all(token not in arg for arg in argv)
         assert stray.hits == []
 
         # An older relay without this route answers 404: curl -f rejects it
@@ -162,14 +162,16 @@ async def test_relay_hook_command_replays_stdin_unless_the_relay_answers(
 
 
 def test_relay_hook_command_bounds_its_stdin_when_asked(tmp_path: Path) -> None:
-    """``max_bytes`` keeps an oversized payload from being buffered whole."""
+    """``max_bytes`` drops an oversized payload before the relay or the fallback see it."""
     command = relay_hook_command(
         tmp_path, "/hook/observe-tool", "wc -c", max_time_s=5, max_bytes=64
     )
     oversized = "x" * 1000
-    bounded = _run(command, oversized)
-    assert bounded.returncode == 0, bounded.stderr
-    assert bounded.stdout.strip() == "64"
+    dropped = _run(command, oversized)
+    assert dropped.returncode == 0, dropped.stderr
+    assert dropped.stdout == "", "an oversized payload must not reach the fallback"
+    kept = _run(command, "y" * 64)
+    assert kept.stdout.strip() == "64", "a payload at the bound still reaches the fallback whole"
     unbounded = _run(
         relay_hook_command(tmp_path, "/hook/observe-tool", "wc -c", max_time_s=5), oversized
     )

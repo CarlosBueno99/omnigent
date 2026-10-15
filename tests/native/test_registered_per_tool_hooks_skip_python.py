@@ -92,10 +92,7 @@ def test_registered_per_tool_hooks_do_not_start_python(
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        env_text = (
-            f"OMNIGENT_RELAY_URL='http://127.0.0.1:{server.server_address[1]}'\n"
-            "OMNIGENT_RELAY_TOKEN='t'\n"
-        )
+        env_text = f"OMNIGENT_RELAY_URL='http://127.0.0.1:{server.server_address[1]}'\n"
         spawned: dict[str, list[str]] = {}
         for label, (bridge_dir, command) in _registered_per_tool_commands(
             tmp_path, monkeypatch, str(stub)
