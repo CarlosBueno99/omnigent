@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -2626,3 +2627,69 @@ async def test_default_read_still_follows_a_symlink_into_a_read_grant(tmp_path: 
             await fs.read("escape/note.txt")
     finally:
         os_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query_template", "expected_path"),
+    [
+        ("{root}/src/main.py", "src/main.py"),
+        ("{root}/src", "src"),
+        ("./src/main.py", "src/main.py"),
+        ("{folder}/src/main.py", "src/main.py"),
+    ],
+    ids=["absolute_file", "absolute_dir", "dot_prefixed", "workspace_folder_prefixed"],
+)
+async def test_search_matches_path_shaped_queries(
+    client: httpx.AsyncClient,
+    workspace: Path,
+    query_template: str,
+    expected_path: str,
+) -> None:
+    """A query spelled as a path to an existing entry still finds that entry."""
+    query = query_template.format(root=workspace, folder=workspace.name)
+    resp = await client.get(
+        f"/v1/sessions/conv_test/resources/environments/{DEFAULT_ENVIRONMENT_ID}/search"
+        f"?q={urllib.parse.quote(query, safe='')}"
+    )
+    assert resp.status_code == 200, resp.text
+    paths = {e["path"] for e in resp.json()["data"]}
+    assert expected_path in paths, f"q={query!r} returned {paths}"
+
+
+def test_search_indexed_paths_matches_an_absolute_path(workspace: Path) -> None:
+    """The git-index matcher finds a tracked file by its absolute path."""
+    entries = search_indexed_paths(workspace, ["src/main.py"], f"{workspace}/src/main.py")
+    assert [e.path for e in entries] == ["src/main.py"]
+
+
+@pytest.mark.asyncio
+async def test_search_plain_query_ignores_the_root_path(
+    client: httpx.AsyncClient, workspace: Path
+) -> None:
+    """A word from the workspace's own path matches nothing inside it."""
+    resp = await client.get(
+        f"/v1/sessions/conv_test/resources/environments/{DEFAULT_ENVIRONMENT_ID}/search"
+        f"?q={workspace.name}"
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"] == []
+
+
+@pytest.mark.parametrize(
+    ("query_template", "expected_paths"),
+    [
+        ("{root}/src", ["src", "src/main.py"]),
+        ("./src/main.py", ["src/main.py"]),
+        ("{folder}/src/main.py", ["src/main.py"]),
+        ("{folder}", []),
+    ],
+    ids=["absolute_dir", "dot_prefixed", "workspace_folder_prefixed", "plain_root_name"],
+)
+def test_search_indexed_paths_matches_path_shaped_queries(
+    workspace: Path, query_template: str, expected_paths: list[str]
+) -> None:
+    """The git-index matcher applies the same path-shaped rule as the walk."""
+    query = query_template.format(root=workspace, folder=workspace.name)
+    entries = search_indexed_paths(workspace, ["src/main.py", "hello.txt"], query)
+    assert [e.path for e in entries] == expected_paths, f"q={query!r}"

@@ -46,6 +46,16 @@ def _put_file(base_url: str, session_id: str, path: str) -> None:
     resp.raise_for_status()
 
 
+def _environment_root(base_url: str, session_id: str) -> str:
+    """Absolute workspace root, as the Files header's "Copy folder path" copies it."""
+    resp = httpx.get(
+        f"{base_url}/v1/sessions/{session_id}/resources/environments/default",
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    return resp.json()["metadata"]["root"]
+
+
 @pytest.fixture
 def all_search_session(seeded_session: tuple[str, str]) -> Iterator[tuple[str, str]]:
     """Three files PUT to the workspace so they populate the All tree listing."""
@@ -224,3 +234,37 @@ def test_search_says_when_it_stopped_early(
     expect(
         rail.get_by_text("the search stopped early, so results may be incomplete")
     ).to_be_visible(timeout=30_000)
+
+
+@pytest.mark.flaky(reruns=2, reruns_delay=5)
+def test_search_finds_a_file_by_its_absolute_path(
+    page: Page,
+    dir_search_session: tuple[str, str],
+) -> None:
+    """Pasting an existing file's absolute path into the All search box lists it.
+
+    A relative subpath already matches. The same file spelled as its absolute
+    path (the Files header's "Copy folder path" value plus the relative path)
+    names a file that exists, so it must be listed too.
+    """
+    base_url, session_id = dir_search_session
+    root = _environment_root(base_url, session_id)
+    page.goto(f"{base_url}/c/{session_id}?view=explore")
+
+    rail = page.get_by_role("complementary", name="Workspace")
+    search = rail.get_by_role("searchbox", name="Search all files")
+    expect(search).to_be_visible(timeout=30_000)
+    expect(rail.get_by_role("button", name=f"{_DIR_NAME}/", exact=True)).to_be_visible(
+        timeout=30_000
+    )
+
+    _search_for(search, f"{_DIR_NAME}/gadget")
+    expect(_row(rail, "gadget.py")).to_be_visible(timeout=15_000)
+
+    # Back to the tree, where the collapsed folder hides the file, so the next
+    # query cannot pass on the previous query's rows.
+    _search_for(search, "")
+    expect(_row(rail, "gadget.py")).to_have_count(0)
+
+    _search_for(search, f"{root}/{_DIR_FILE}")
+    expect(_row(rail, "gadget.py")).to_be_visible(timeout=15_000)
