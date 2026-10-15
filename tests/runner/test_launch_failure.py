@@ -11,6 +11,7 @@ from omnigent.runner.launch_failure import (
     classify_terminal_failure,
     describe_failure_code,
     diagnose_client_update_required,
+    diagnose_codex_model_rejection,
 )
 
 # The tail Claude Code prints when refusing --dangerously-skip-permissions as
@@ -201,6 +202,40 @@ def test_rate_limit_text_does_not_override_specific_failure_codes(code: str) -> 
     assert classify_native_turn_error(code, "HTTP 429: rate limit exceeded") == code
 
 
+_CONTENT_LENGTH_REJECTION = (
+    '{"error_code":"BAD_REQUEST","message":"Server received a request which '
+    "exceeds maximum allowed content length. RequestSize(bytes): 33967957, "
+    'Limit(bytes): 33554432"}'
+)
+
+
+@pytest.mark.parametrize("code", ["native_turn_error", "codex_turn_error"])
+@pytest.mark.parametrize(
+    "message",
+    [
+        _CONTENT_LENGTH_REJECTION,
+        (
+            "Server received a request which exceeds maximum allowed content "
+            "length. RequestSize(bytes): 33967957, Limit(bytes): 33554432"
+        ),
+    ],
+)
+def test_classifies_content_length_cap_rejection_as_context_overflow(
+    code: str, message: str
+) -> None:
+    assert classify_native_turn_error(code, message) == "context_length_exceeded"
+
+
+def test_content_length_text_without_sizes_stays_generic() -> None:
+    message = "Server received a request which exceeds maximum allowed content length."
+    assert classify_native_turn_error("native_turn_error", message) == "native_turn_error"
+
+
+@pytest.mark.parametrize("code", ["codex_reauth_required", "workspace_missing"])
+def test_content_length_text_does_not_override_specific_failure_codes(code: str) -> None:
+    assert classify_native_turn_error(code, _CONTENT_LENGTH_REJECTION) == code
+
+
 @pytest.mark.parametrize(
     "code",
     # Budget detection runs before the early-return guard, so it applies to
@@ -381,6 +416,38 @@ def test_client_update_diagnosis_without_installed_version_still_names_required(
 def test_client_update_diagnosis_ignores_unrelated_errors() -> None:
     assert diagnose_client_update_required(_GATEWAY_499_OUTPUT) is None
     assert diagnose_client_update_required("") is None
+
+
+@pytest.mark.parametrize(
+    "model", ["system.ai.gpt-6-1-sol", "openai/example-model", "future-model-id"]
+)
+def test_codex_model_rejection_explains_how_to_fix_configuration(model: str) -> None:
+    message = f"The '{model}' model is not supported when using Codex with a ChatGPT account."
+    diagnosis = diagnose_codex_model_rejection(message)
+
+    assert diagnosis is not None
+    assert diagnosis.title == "Model unavailable with ChatGPT login"
+    assert diagnosis.cause == message
+    assert diagnosis.remediation is not None
+    assert "model picker or /model" in diagnosis.remediation
+    assert "another provider, configure it for Codex" in diagnosis.remediation
+    assert "start a new session" in diagnosis.remediation
+    assert diagnosis.category is ErrorCategory.CONFIG
+    assert classify_native_turn_error("codex_turn_error", message) == "codex_turn_error"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "",
+        "The model is not supported by this provider.",
+        "Your ChatGPT account has hit its usage limit.",
+        "401 Unauthorized: please log in to your ChatGPT account.",
+        _CLIENT_UPDATE_OUTPUT,
+    ],
+)
+def test_codex_model_rejection_ignores_unrelated_errors(message: str) -> None:
+    assert diagnose_codex_model_rejection(message) is None
 
 
 @pytest.mark.parametrize(
