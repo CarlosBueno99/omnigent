@@ -22,6 +22,7 @@ describe("Windows packaging", () => {
       releaseScript,
       "no build:win:release script: the only Windows build is the unsigned dev build",
     );
+    assert.match(releaseScript, /electron-builder\b[^&|]*--win\b/);
     assert.match(
       releaseScript,
       /-c\.win\.forceCodeSigning=true/,
