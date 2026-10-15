@@ -129,7 +129,7 @@ def test_journey(browser, native_session):
     page = OPEN_PAGE
     STATE["page"] = page
     page.set_content("<body style='background:#1d4ed8'><h1>live</h1></body>")
-    page.wait_for_timeout(1_000)"""
+    page.wait_for_timeout(2_000)"""
 )
 
 # A fixture owns the recorded page and closes its context after ``yield``; the probe
@@ -153,16 +153,26 @@ def touch_page(browser):
 
 def test_journey(touch_page, native_session):
     touch_page.set_content("<body style='background:#1d4ed8'><h1>live</h1></body>")
-    touch_page.wait_for_timeout(1_000)"""
+    touch_page.wait_for_timeout(2_000)"""
 )
 
-# An async-API page left open on the test's event loop, which outlives the body; the
-# probe closes the browser it launched once it has reported.
-_ASYNC_OWN_PAGE_JOURNEY = (
+# Async-API journeys share a browser fixture and an awaiting teardown probe.
+_ASYNC_JOURNEY_PRELUDE = (
     _JOURNEY_PRELUDE
     + """
 import pytest_asyncio
 from playwright.async_api import async_playwright
+
+
+@pytest_asyncio.fixture
+async def async_browser():
+    playwright = await async_playwright().start()
+    browser = await playwright.chromium.launch()
+    try:
+        yield browser
+    finally:
+        await browser.close()
+        await playwright.stop()
 
 
 @pytest_asyncio.fixture
@@ -178,26 +188,50 @@ async def native_session():
             "<body style='background:#dc2626'>Bridge closed: terminal session ended</body>"
         )
         await page.wait_for_timeout(1_000)
-    await STATE["browser"].close()
-    await STATE["playwright"].stop()
+"""
+)
+
+# The body opens an async page and never closes it.
+_ASYNC_OWN_PAGE_JOURNEY = (
+    _ASYNC_JOURNEY_PRELUDE
+    + """
+
+@pytest.mark.asyncio
+async def test_journey(async_browser, native_session):
+    page = await async_browser.new_page()
+    STATE["page"] = page
+    await page.set_content("<body style='background:#1d4ed8'><h1>live</h1></body>")
+    await page.wait_for_timeout(2_000)"""
+)
+
+# An async fixture owns the context and closes it again after ``yield``.
+_ASYNC_FIXTURE_OWNED_CONTEXT_JOURNEY = (
+    _ASYNC_JOURNEY_PRELUDE
+    + """
+
+@pytest_asyncio.fixture
+async def owned_page(async_browser):
+    context = await async_browser.new_context()
+    try:
+        page = await context.new_page()
+        STATE["page"] = page
+        yield page
+    finally:
+        await context.close()
 
 
 @pytest.mark.asyncio
-async def test_journey(native_session):
-    playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch()
-    STATE.update(playwright=playwright, browser=browser)
-    page = OPEN_PAGE
-    STATE["page"] = page
-    await page.set_content("<body style='background:#1d4ed8'><h1>live</h1></body>")
-    await page.wait_for_timeout(1_000)"""
+async def test_journey(owned_page, native_session):
+    await owned_page.set_content("<body style='background:#1d4ed8'><h1>live</h1></body>")
+    await owned_page.wait_for_timeout(2_000)"""
 )
 
-# ``_close_recorded_context`` with an async context whose loop is closed or running.
-_UNAVAILABLE_LOOP_PROBE = """
+# ``_close_recorded_context`` with an unavailable loop or a ``close()`` that raises.
+_UNFINALIZABLE_CONTEXT_PROBE = """
 import asyncio
 
 import pytest
+from playwright.sync_api import Error
 
 from tests.e2e_ui.conftest import _close_recorded_context
 
@@ -210,20 +244,36 @@ class FakeContext:
         self.closed = True
 
 
-@pytest.mark.parametrize("state", ["closed", "running"])
-def test_unavailable_loop(request, state):
+class FailingAsyncContext(FakeContext):
+    async def close(self):
+        raise RuntimeError("driver gone")
+
+
+class FailingSyncContext(FakeContext):
+    def close(self):
+        raise Error("driver gone")
+
+
+@pytest.mark.parametrize("state", ["closed", "running", "async-raises", "sync-raises"])
+def test_unfinalizable_context(request, state):
     context = FakeContext()
     loop = asyncio.new_event_loop()
     try:
         if state == "closed":
             loop.close()
             _close_recorded_context(request.node, context, loop)
-        else:
+        elif state == "running":
 
             async def probe():
                 _close_recorded_context(request.node, context, asyncio.get_running_loop())
 
             loop.run_until_complete(probe())
+        elif state == "async-raises":
+            context = FailingAsyncContext()
+            _close_recorded_context(request.node, context, loop)
+        else:
+            context = FailingSyncContext()
+            _close_recorded_context(request.node, context)
     finally:
         loop.close()
     assert not context.closed"""
@@ -453,16 +503,16 @@ def test_fixture_owned_page_video_is_finalized_before_a_later_fixture_tears_down
 
 
 @pytest.mark.parametrize(
-    "open_page",
-    ["await browser.new_page()", "await (await browser.new_context()).new_page()"],
-    ids=["new_page", "new_context"],
+    "journey",
+    [_ASYNC_OWN_PAGE_JOURNEY, _ASYNC_FIXTURE_OWNED_CONTEXT_JOURNEY],
+    ids=["new_page", "fixture_new_context"],
 )
 def test_async_own_page_video_is_finalized_before_a_later_fixture_tears_down(
-    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, open_page: str
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, journey: str
 ) -> None:
     raw = tmp_path / "raw"
     report = _configure(pytester, monkeypatch, tmp_path, record_dir=raw)
-    pytester.makepyfile(_ASYNC_OWN_PAGE_JOURNEY.replace("OPEN_PAGE", open_page))
+    pytester.makepyfile(journey)
 
     result = pytester.runpytest_subprocess("-q", *_PLAYWRIGHT_PLUGINS, "-p", "asyncio")
 
@@ -480,24 +530,22 @@ def test_async_own_page_video_is_finalized_before_a_later_fixture_tears_down(
     )
 
 
-@pytest.mark.parametrize("warnings_as_errors", [False, True], ids=["default", "werror"])
-def test_unavailable_async_loop_only_warns(
-    pytester: pytest.Pytester,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    warnings_as_errors: bool,
+def test_unfinalizable_recording_only_warns(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _configure(pytester, monkeypatch, tmp_path, record_dir=None)
-    pytester.makepyfile(_UNAVAILABLE_LOOP_PROBE)
-    args = ["-q", *_PLAYWRIGHT_PLUGINS]
-    if warnings_as_errors:
-        args += ["-W", "error::pytest.PytestWarning"]
+    pytester.makepyfile(_UNFINALIZABLE_CONTEXT_PROBE)
 
-    result = pytester.runpytest_subprocess(*args)
+    result = pytester.runpytest_subprocess(
+        "-q", *_PLAYWRIGHT_PLUGINS, "-W", "error::pytest.PytestWarning"
+    )
 
-    result.assert_outcomes(passed=2, warnings=2)
+    result.assert_outcomes(passed=4, warnings=4)
     result.stdout.fnmatch_lines(
-        ["*Could not finalize recording for*its event loop is no longer available*"]
+        [
+            "*Could not finalize recording for*its event loop is no longer available*",
+            "*Could not finalize recording for*driver gone*",
+        ]
     )
 
 
