@@ -7,12 +7,14 @@ import {
   type ConversationsInfiniteData,
   type SessionListWireItem,
   collectConversationIds,
+  commitMergedList,
   filtersFromConversationQueryKey,
   firstPageOnly,
   insertNewRowsIntoPages,
   mergeItemsIntoPages,
   nullsToUndefined,
   overlayArchivedIntoCaches,
+  overlayTitleIntoCaches,
   removeIdsFromPages,
 } from "./sessionListCache";
 
@@ -510,6 +512,91 @@ describe("overlayArchivedIntoCaches", () => {
 
     const folder = qc.getQueryData<ConversationsInfiniteData>(["project-sessions", "proj"])!;
     expect(folder.pages[0].data.map((c) => c.id)).toEqual([]);
+  });
+});
+
+describe("overlayTitleIntoCaches", () => {
+  it("patches the title in place and reconciles a cursor the rename stranded", () => {
+    const qc = new QueryClient();
+    const key = ["conversations", "", false];
+    // Single-row last page with more to load: the renamed row IS the cursor
+    // anchor, so bumping its updated_at strands last_id.
+    const page = data([conv("a", { updated_at: 10, title: "old" })]);
+    page.pages[0].has_more = true;
+    qc.setQueryData(key, page);
+
+    overlayTitleIntoCaches(qc, "a", "new", 50);
+
+    const list = qc.getQueryData<ConversationsInfiniteData>(key)!;
+    expect(list.pages[0].data[0].title).toBe("new");
+    expect(list.pages[0].last_id).toBeNull();
+    expect(qc.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+
+  it("patches in place without invalidating when the rename keeps a valid cursor", () => {
+    const qc = new QueryClient();
+    const key = ["conversations", "", false];
+    const page = data([conv("a", { updated_at: 30 }), conv("b", { updated_at: 20 })]);
+    page.pages[0].has_more = true;
+    qc.setQueryData(key, page);
+
+    overlayTitleIntoCaches(qc, "a", "renamed", 40);
+
+    const list = qc.getQueryData<ConversationsInfiniteData>(key)!;
+    expect(list.pages[0].data.find((c) => c.id === "a")!.title).toBe("renamed");
+    expect(list.pages[0].last_id).toBe("b");
+    expect(qc.getQueryState(key)?.isInvalidated).toBe(false);
+  });
+});
+
+describe("commitMergedList", () => {
+  it("invalidates a list whose merge stranded the tail cursor", () => {
+    const qc = new QueryClient();
+    const key = ["conversations", "", false];
+    const prev = data([conv("a", { updated_at: 10 })]);
+    prev.pages[0].has_more = true;
+    qc.setQueryData(key, prev);
+    const { data: next } = mergeItemsIntoPages(
+      prev,
+      new Map([["a", { id: "a", updated_at: 50 }]]),
+      DEFAULT_FILTERS,
+    );
+    expect(next!.pages[0].last_id).toBeNull();
+
+    commitMergedList(qc, key, prev, next);
+
+    expect(qc.getQueryData<ConversationsInfiniteData>(key)!.pages[0].last_id).toBeNull();
+    expect(qc.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+
+  it("writes without invalidating when the cursor survives the merge", () => {
+    const qc = new QueryClient();
+    const key = ["conversations", "", false];
+    const prev = data([conv("a", { updated_at: 30 }), conv("b", { updated_at: 20 })]);
+    prev.pages[0].has_more = true;
+    qc.setQueryData(key, prev);
+    const { data: next } = mergeItemsIntoPages(
+      prev,
+      new Map([["a", { id: "a", updated_at: 40 }]]),
+      DEFAULT_FILTERS,
+    );
+    expect(next!.pages[0].last_id).toBe("b");
+
+    commitMergedList(qc, key, prev, next);
+
+    expect(qc.getQueryState(key)?.isInvalidated).toBe(false);
+  });
+
+  it("is a no-op when the merge changed nothing", () => {
+    const qc = new QueryClient();
+    const key = ["conversations", "", false];
+    const prev = data([conv("a")]);
+    qc.setQueryData(key, prev);
+
+    commitMergedList(qc, key, prev, prev);
+
+    expect(qc.getQueryData(key)).toBe(prev);
+    expect(qc.getQueryState(key)?.isInvalidated).toBe(false);
   });
 });
 

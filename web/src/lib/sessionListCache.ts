@@ -9,7 +9,7 @@
 // useRenameConversation (overlaying the PATCH response after a rename), and
 // the chat store's `session.title` handler (a terminal-side `/rename`).
 
-import type { InfiniteData, QueryClient } from "@tanstack/react-query";
+import type { InfiniteData, QueryClient, QueryKey } from "@tanstack/react-query";
 import type { Conversation, ConversationsPage, SessionSortBy } from "@/hooks/useConversations";
 import type { Session } from "@/lib/types";
 import { compareSessionRows } from "@/lib/sidebarData";
@@ -546,6 +546,28 @@ export function collectConversationIds(datas: (ConversationsInfiniteData | undef
 export const PROJECT_FOLDER_FILTERS = { searchQuery: "", includeArchived: false } as const;
 
 /**
+ * Write a locally merged list back, reconciling a cursor the re-sort stranded.
+ * {@link mergeItemsIntoPages} can null a `has_more` tail page's `last_id` when a
+ * bump leaves a reordered row as that page's anchor; `getNextPageParam` then
+ * reads the page as fully loaded and paging stops. Invalidate so the list
+ * reloads with a fresh cursor; the overlay still paints first, then the refetch
+ * converges the tail.
+ */
+export function commitMergedList(
+  queryClient: QueryClient,
+  key: QueryKey,
+  prev: ConversationsInfiniteData | undefined,
+  next: ConversationsInfiniteData | undefined,
+): void {
+  if (next === prev) return;
+  queryClient.setQueryData(key, next);
+  const tail = next?.pages.at(-1);
+  if (tail?.has_more && !tail.last_id) {
+    void queryClient.invalidateQueries({ queryKey: key, exact: true });
+  }
+}
+
+/**
  * Overlay a title into every cache that holds a row for one session.
  *
  * Only the fields a rename changes are written — a full session snapshot
@@ -587,13 +609,13 @@ export function overlayTitleIntoCaches(
       itemsById,
       filtersFromConversationQueryKey(key),
     );
-    if (next !== data) queryClient.setQueryData(key, next);
+    commitMergedList(queryClient, key, data, next);
   }
   for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
     queryKey: ["project-sessions"],
   })) {
     const { data: next } = mergeItemsIntoPages(data, itemsById, PROJECT_FOLDER_FILTERS);
-    if (next !== data) queryClient.setQueryData(key, next);
+    commitMergedList(queryClient, key, data, next);
   }
   queryClient.setQueryData<Conversation | null>(["conversation-backfill", id], (old) =>
     old ? { ...old, title, ...(updatedAt !== undefined ? { updated_at: updatedAt } : {}) } : old,
@@ -634,13 +656,13 @@ export function overlayArchivedIntoCaches(
       itemsById,
       filtersFromConversationQueryKey(key),
     );
-    if (next !== data) queryClient.setQueryData(key, next);
+    commitMergedList(queryClient, key, data, next);
   }
   for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
     queryKey: ["project-sessions"],
   })) {
     const { data: next } = mergeItemsIntoPages(data, itemsById, PROJECT_FOLDER_FILTERS);
-    if (next !== data) queryClient.setQueryData(key, next);
+    commitMergedList(queryClient, key, data, next);
   }
   queryClient.setQueryData<Conversation | null>(["conversation-backfill", id], (old) =>
     old ? { ...old, archived } : old,
