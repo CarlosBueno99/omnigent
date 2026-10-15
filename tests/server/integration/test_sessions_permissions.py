@@ -720,12 +720,13 @@ async def _bind_token_runner(
     async def _no_runner_client(*_args: object, **_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr(sessions_module, "_get_runner_client", _no_runner_client)
-    resp = await client.patch(
-        f"/v1/sessions/{session_id}",
-        json={"runner_id": runner_id},
-        headers={"X-Forwarded-Email": owner},
-    )
+    with monkeypatch.context() as bind_scope:
+        bind_scope.setattr(sessions_module, "_get_runner_client", _no_runner_client)
+        resp = await client.patch(
+            f"/v1/sessions/{session_id}",
+            json={"runner_id": runner_id},
+            headers={"X-Forwarded-Email": owner},
+        )
     assert resp.status_code == 200, resp.text
 
 
