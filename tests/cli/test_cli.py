@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock
 
+import click
 import pytest
 import yaml
 from click import ClickException
@@ -7248,6 +7249,39 @@ def _native_dispatch_kwargs(**overrides: object) -> dict[str, object]:
     }
     base.update(overrides)
     return base
+
+
+@pytest.mark.parametrize(
+    "resume_kwargs",
+    [
+        {"resume_conversation_id": "conv_a"},
+        {"resume_picker": True},
+        {"resume_latest": True},
+    ],
+    ids=["resume-id", "resume-picker", "continue"],
+)
+def test_run_claude_native_prompt_with_resume_fails_before_backend(
+    monkeypatch: pytest.MonkeyPatch, resume_kwargs: dict[str, object]
+) -> None:
+    """``run --harness claude-native`` refuses ``-p`` with a resume before backend work.
+
+    The dedicated ``omni claude`` command already fails fast; the generic
+    dispatcher must not start the backend or look up the latest conversation
+    for a combination the launcher would reject anyway.
+    """
+    monkeypatch.setattr(
+        "omnigent.cli._ensure_backend",
+        lambda *_: pytest.fail("invalid args must not start the backend"),
+    )
+    monkeypatch.setattr(
+        "omnigent.chat._resolve_latest_conversation_id",
+        lambda **_: pytest.fail("invalid args must not look up a conversation"),
+    )
+
+    with pytest.raises(click.UsageError, match="cannot be combined with --resume"):
+        _dispatch_native_terminal_harness(
+            **_native_dispatch_kwargs(harness="claude-native", prompt="hi", **resume_kwargs)
+        )
 
 
 def test_native_terminal_dispatch_specs_cover_registered_native_agents() -> None:

@@ -8282,7 +8282,7 @@ async def _clear_session_model_override(
 async def _consume_claude_initial_prompt(
     session_id: str,
     server_client: httpx.AsyncClient,
-    launch_args: list[str],
+    prompt: str,
 ) -> None:
     """
     Clear the one-shot prompt from a session's stored launch args after launching with it.
@@ -8290,23 +8290,32 @@ async def _consume_claude_initial_prompt(
     ``omni claude -p`` persists the prompt as the leading ``terminal_launch_args``
     entry so the runner's launch can pass it as Claude's positional prompt. Once
     a launch has carried it, a later relaunch of the pane must not submit it
-    again, so the remaining pass-through flags are written back without it.
-    Best-effort: a failed write leaves the prompt stored, and a relaunch may
-    submit it once more.
+    again. The stored args are re-read first so flags merged meanwhile (a
+    permission-mode pin) survive and a prompt replaced meanwhile stays pending;
+    only a still-leading copy of the delivered prompt is removed. Best-effort: a
+    failed write leaves the prompt stored, and a relaunch may submit it once more.
 
     :param session_id: Session/conversation identifier.
     :param server_client: Runner Omnigent server client.
-    :param launch_args: Stored launch args this launch used, prompt first.
+    :param prompt: The prompt this launch delivered.
     """
+    session_path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}"
     try:
+        current = await server_client.get(
+            session_path, params=_SESSION_METADATA_PARAMS, timeout=10.0
+        )
+        current.raise_for_status()
+        stored = current.json().get("terminal_launch_args")
+        if not (isinstance(stored, list) and stored and stored[0] == prompt):
+            return
         resp = await server_client.patch(
-            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
-            json={"terminal_launch_args": launch_args[1:]},
+            session_path,
+            json={"terminal_launch_args": stored[1:]},
             params={"include_usage": "false"},
             timeout=10.0,
         )
         resp.raise_for_status()
-    except (httpx.HTTPError, RuntimeError):
+    except (httpx.HTTPError, RuntimeError, ValueError):
         _logger.warning(
             "native terminal: could not clear the delivered initial prompt from the "
             "launch args of session %s; a relaunch may submit it again",
@@ -8688,9 +8697,7 @@ async def _auto_create_claude_terminal(
                     session_id,
                     exc_info=True,
                 )
-    # A leading positional in the stored args is the one-shot ``-p`` prompt this
-    # launch delivers; it is cleared from the session afterwards so a relaunch
-    # cannot submit it again.
+    # A leading positional is the one-shot ``-p`` prompt; cleared after launch.
     initial_prompt_pending = _leads_with_claude_prompt(session_launch_args)
     _logger.info(
         "Claude terminal cold-resume decision: session=%s external_session_id_set=%s "
@@ -9170,10 +9177,8 @@ async def _auto_create_claude_terminal(
         raise
     if reset_pick_after_launch:
         await _clear_session_model_override(session_id, server_client)
-    if initial_prompt_pending:
-        await _consume_claude_initial_prompt(
-            session_id, server_client, list(session_launch_args or [])
-        )
+    if initial_prompt_pending and session_launch_args:
+        await _consume_claude_initial_prompt(session_id, server_client, session_launch_args[0])
     # Surface the terminal on the live SSE stream so an already-connected
     # web UI enables the Terminal toggle immediately. The required-terminal
     # launch helper registers the resource and starts the activity watcher but

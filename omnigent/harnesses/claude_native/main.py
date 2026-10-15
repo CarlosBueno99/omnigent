@@ -1610,7 +1610,9 @@ def run_claude_native(
         intact (one argv entry — never a tmux paste). Placed before
         the pass-through args: a trailing variadic value flag (e.g.
         ``--mcp-config <configs...>``) would consume a trailing
-        positional as another value. ``None`` starts the TUI empty.
+        positional as another value. A prompt starting with ``-`` is
+        given a leading space so it stays a positional. ``None`` starts
+        the TUI empty.
         Refused together with a resume on the remote path, where the
         prompt could only travel as a persisted launch arg that every
         later relaunch of the pane would replay.
@@ -1657,6 +1659,11 @@ def run_claude_native(
     # ``--mcp-config <configs...>``) that would swallow a trailing positional
     # as another value, while every later merge point only appends flags.
     if prompt and prompt.strip():
+        # A prompt starting with ``-`` would be parsed as an option, by Claude
+        # Code and by the runner's launch-arg handling; a leading space keeps
+        # it a positional.
+        if prompt.startswith("-"):
+            prompt = " " + prompt
         sanitized_args = (prompt, *sanitized_args)
     startup_profiler.mark("claude args normalized")
     # Resolve the launch config across all offerings: a configured provider

@@ -38,6 +38,9 @@ from rich.table import Table
 from omnigent._platform import IS_WINDOWS, resolve_repo_symlink
 from omnigent._startup_events import capture_cli_entry, record_startup_event
 from omnigent.cli_common import (
+    CLAUDE_PROMPT_WITH_RESUME_ERROR as _CLAUDE_PROMPT_WITH_RESUME_ERROR,
+)
+from omnigent.cli_common import (
     RESUME_PICKER_SENTINEL as _RESUME_PICKER_SENTINEL,
 )
 
@@ -7844,6 +7847,16 @@ def _dispatch_native_terminal_harness(
             f"`run --harness {harness}` launches the {native_agent.display_name} TUI directly; "
             f"the REPL-only option(s) {', '.join(unsupported)} have no effect there — remove them."
         )
+
+    # A Claude resume-time prompt could only reach the session as persisted
+    # launch config; refuse it before any backend or conversation lookup.
+    if (
+        native_agent.key == "claude"
+        and prompt
+        and prompt.strip()
+        and (resume_conversation_id is not None or resume_picker or resume_latest)
+    ):
+        raise click.UsageError(_CLAUDE_PROMPT_WITH_RESUME_ERROR)
 
     server = _ensure_backend(server)
     passthrough = ("--model", model) if model else ()

@@ -1173,26 +1173,49 @@ async def test_auto_create_claude_terminal_passes_session_effort(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stored_args", "claude_session_id", "expected_patch"),
+    ("stored_args", "claude_session_id", "merged_during_launch", "write_back", "expected_patch"),
     [
         # First launch: the prompt reaches Claude and is then cleared from the
         # stored args; the flags after it stay persisted.
-        (["review the last commit", "--verbose"], None, ["--verbose"]),
+        (["review the last commit", "--verbose"], None, [], "ok", ["--verbose"]),
         # Relaunch of a session whose prompt was already consumed: nothing to
         # deliver or clear; the stored flags apply to the resumed Claude.
-        (["--verbose"], "02857840-6362-408f-b41f-309e396ed7c6", None),
+        (["--verbose"], "02857840-6362-408f-b41f-309e396ed7c6", [], "ok", None),
         # An older CLI's ``--resume <id> -p`` stored a new prompt: the resumed
         # Claude receives it once and it is cleared like a first prompt.
-        (["new request"], "02857840-6362-408f-b41f-309e396ed7c6", []),
+        (["new request"], "02857840-6362-408f-b41f-309e396ed7c6", [], "ok", []),
+        # A permission-mode pin merged into the stored args while Claude was
+        # launching must survive the write-back.
+        (
+            ["review the last commit"],
+            None,
+            ["--permission-mode", "plan"],
+            "ok",
+            ["--permission-mode", "plan"],
+        ),
+        # The write-back is best-effort: a rejected or unreachable server
+        # leaves the launch intact and only logs a warning.
+        (["review the last commit"], None, [], "http-500", []),
+        (["review the last commit"], None, [], "transport-error", []),
     ],
-    ids=["first-launch", "relaunch-consumed", "older-client-resume-prompt"],
+    ids=[
+        "first-launch",
+        "relaunch-consumed",
+        "older-client-resume-prompt",
+        "keeps-flags-pinned-during-launch",
+        "write-back-rejected",
+        "write-back-unreachable",
+    ],
 )
 async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
     stored_args: list[str],
     claude_session_id: str | None,
+    merged_during_launch: list[str],
+    write_back: str,
     expected_patch: list[str] | None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
     A prompt stored in ``terminal_launch_args`` reaches Claude exactly once.
@@ -1204,9 +1227,12 @@ async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
 
     :param stored_args: Persisted ``terminal_launch_args`` in the init envelope.
     :param claude_session_id: Captured Claude session id enabling a cold resume.
+    :param merged_during_launch: Flags the server appended while Claude launched.
+    :param write_back: How the server answers the write-back PATCH.
     :param expected_patch: ``terminal_launch_args`` written back, or ``None``.
     :param tmp_path: Pytest-provided temporary directory.
     :param monkeypatch: Pytest monkeypatch fixture.
+    :param caplog: Pytest log capture fixture.
     """
     monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
@@ -1233,10 +1259,21 @@ async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
     )
     session_id = "4c1f0d2e9b8a7c6d5e4f3a2b1c0d9e8f"
     patches: list[dict[str, Any]] = []
+    # Server-side state at the time the runner writes back: the launch args plus
+    # whatever another writer merged meanwhile.
+    server_args = [*stored_args, *merged_during_launch]
 
     def _handle_request(request: httpx.Request) -> httpx.Response:
-        if request.method == "PATCH" and request.url.path == f"/v1/sessions/{session_id}":
+        if request.url.path != f"/v1/sessions/{session_id}":
+            raise AssertionError(f"unexpected server call {request.method} {request.url}")
+        if request.method == "GET":
+            return httpx.Response(200, json={"terminal_launch_args": server_args, "labels": {}})
+        if request.method == "PATCH":
             patches.append(json.loads(request.content))
+            if write_back == "http-500":
+                return httpx.Response(500, json={"error": "boom"})
+            if write_back == "transport-error":
+                raise httpx.ConnectError("server unreachable", request=request)
             return httpx.Response(200, json={"id": session_id})
         raise AssertionError(f"unexpected server call {request.method} {request.url}")
 
@@ -1264,13 +1301,14 @@ async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
         }
     )
 
-    await _auto_create_claude_terminal(
-        session_id,
-        _RecordingClaudeRegistry(captured),
-        lambda _sid, _evt: None,
-        server_client=fake_client,
-        session_init=session_init,
-    )
+    with caplog.at_level(logging.WARNING, logger="omnigent.runner.app"):
+        await _auto_create_claude_terminal(
+            session_id,
+            _RecordingClaudeRegistry(captured),
+            lambda _sid, _evt: None,
+            server_client=fake_client,
+            session_init=session_init,
+        )
     await fake_client.aclose()
 
     args = list(captured["spec"].args)
@@ -1284,6 +1322,8 @@ async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
         assert patches == []
     else:
         assert patches == [{"terminal_launch_args": expected_patch}]
+    cleanup_warned = "could not clear the delivered initial prompt" in caplog.text
+    assert cleanup_warned == (write_back != "ok")
 
 
 @pytest.mark.asyncio

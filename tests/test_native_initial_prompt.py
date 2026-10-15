@@ -115,6 +115,24 @@ def test_prompt_is_added_after_resume_args_are_stripped(
     assert captured["claude_args"] == ("hello", "--verbose")
 
 
+def test_dash_leading_prompt_stays_a_positional(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A prompt that starts with ``-`` is not handed over as an option.
+
+    Claude Code rejects ``claude "- fix the lint"`` as an unknown option, and the
+    runner would keep replaying a stored prompt it mistakes for a flag.
+    """
+    captured = _capture_remote(monkeypatch)
+
+    claude_native.run_claude_native(
+        server="https://example.com/",
+        session_id=None,
+        extra_args=("--verbose",),
+        prompt="- fix the lint\n- run the tests",
+    )
+
+    assert captured["claude_args"] == (" - fix the lint\n- run the tests", "--verbose")
+
+
 def test_local_launch_path_also_receives_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = _capture_local(monkeypatch)
 

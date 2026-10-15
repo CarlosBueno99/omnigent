@@ -139,10 +139,8 @@ def test_build_claude_native_base_args(
         # No resume id → no --resume (fresh launch, or no local
         # transcript could be synthesized).
         (None, None, ["--verbose"], None, ("--verbose",)),
-        # An older CLI's ``--resume <id> -p <text>`` replaces the stored args
-        # with that prompt; the resumed Claude must still receive it. Replay
-        # of an already-delivered prompt is prevented upstream, where the
-        # runner removes a prompt from the stored args after launching with it.
+        # A resume with a stored prompt still passes it through to Claude;
+        # replay prevention is the runner's write-back after launch, not here.
         (
             None,
             "claude-opus-4-7",
