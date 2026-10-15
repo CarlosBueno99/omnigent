@@ -7041,12 +7041,10 @@ async def _post_session_change_to_runner_client(
     timeout_s: float = 5.0,
 ) -> _RunnerForwardResult | None:
     """
-    POST a control event for ``session_id`` to a runner client the caller chose.
+    POST a control ``event`` for ``session_id`` to a runner client the caller chose.
 
     :param runner_client: Runner client, e.g. the parent's live runner.
-    :param session_id: Session the event is about, e.g. ``"conv_child456"``.
-    :param event: The ``/events`` POST body.
-    :param timeout_s: Request budget, e.g. ``5.0``.
+    :param timeout_s: Request budget in seconds.
     :returns: The runner's status/body, or ``None`` on a transport failure.
     """
     try:
