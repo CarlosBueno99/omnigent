@@ -1224,6 +1224,7 @@ def test_history_and_close_preserve_colon_rich_titles(
         kind="sub_agent",
         title="researcher:auth:phase-1",
         parent_conversation_id=session_fixture.parent_conv_id,
+        sub_agent_name="researcher",
     )
 
     history = json.loads(
@@ -1286,6 +1287,7 @@ def test_close_same_named_child_does_not_close_another_parent_tree(
         kind="sub_agent",
         title="researcher:auth",
         parent_conversation_id=other_parent.id,
+        sub_agent_name="researcher",
     )
 
     closed = json.loads(
@@ -1523,20 +1525,25 @@ def test_session_list_returns_open_children_and_filters_non_resumable_rows(
     session_fixture: _Fixture,
 ) -> None:
     """Listing includes open named children but hides malformed/closed rows."""
+    # A stamped framework child whose title lost its "<agent>:" prefix is malformed;
+    # an unstamped colon-free title would be a verbatim sys_session_create child.
     session_fixture.conv_store.create_conversation(
         kind="sub_agent",
         title="legacy-child",
         parent_conversation_id=session_fixture.parent_conv_id,
+        sub_agent_name="researcher",
     )
     session_fixture.conv_store.create_conversation(
         kind="sub_agent",
         title=f"researcher:old{_CLOSED_TITLE_INFIX}legacy",
         parent_conversation_id=session_fixture.parent_conv_id,
+        sub_agent_name="researcher",
     )
     labelled_closed = session_fixture.conv_store.create_conversation(
         kind="sub_agent",
         title="researcher:labelled",
         parent_conversation_id=session_fixture.parent_conv_id,
+        sub_agent_name="researcher",
     )
     session_fixture.conv_store.set_labels(
         labelled_closed.id,
