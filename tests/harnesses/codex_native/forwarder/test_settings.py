@@ -392,31 +392,6 @@ def _model_posts(client: _RecordingClient) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_subscribe_mirrors_resumed_thread_model_over_divergent_launch_pin(
-    tmp_path: Path,
-) -> None:
-    """A cold resume mirrors the model the resumed thread runs, not the launch pin.
-
-    The resume relaunch pins config.toml to ``model_override or the spec
-    default`` before Codex resumes the thread, and Codex can keep the thread's
-    rollout model instead — the ``thread/resume`` response reports which. The
-    subscription must bring config.toml in line with that model and mirror it,
-    or the composer picker shows the default while the Codex TUI keeps running
-    the thread's model.
-    """
-    _write_codex_config(tmp_path, 'model = "gpt-5.6-sol"\n')
-    client = _RecordingClient()
-
-    state = await _subscribe_resumed_thread(tmp_path, client, thread_model="databricks-kimi-k3")
-
-    assert _model_posts(client) == ["databricks-kimi-k3"]
-    assert state.posted_model == "databricks-kimi-k3"
-    # Every config.toml reader (cost-gate hook, executor) now sees the thread's model.
-    assert read_codex_config_model(tmp_path) == "databricks-kimi-k3"
-    assert read_unmirrored_codex_settings(tmp_path) == {}
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("launch_config", "pick"),
     [
@@ -427,10 +402,12 @@ async def test_subscribe_mirrors_resumed_thread_model_over_divergent_launch_pin(
 async def test_refresh_after_resume_keeps_thread_model_until_config_is_rewritten(
     tmp_path: Path, launch_config: str, pick: str
 ) -> None:
-    """After a resume, only a rewritten config.toml replaces the thread's model.
+    """A cold resume mirrors the resumed thread's model; only a rewrite replaces it.
 
-    The subscription writes the resumed thread's model into the launch config,
-    whether that config pinned another model or had no ``model`` line. The next
+    The relaunch pins config.toml before Codex resumes the thread, and Codex can
+    keep the thread's rollout model; ``thread/resume`` reports which. The
+    subscription writes that model into the launch config, whether it pinned
+    another model or had no ``model`` line, and mirrors it to Omnigent. The next
     ``turn/started`` re-read of the unchanged file keeps it; an in-TUI
     ``/model`` that rewrites the file wins, even when the pick is the model the
     relaunch had pinned, and stays won on the following unchanged re-read.
@@ -439,7 +416,10 @@ async def test_refresh_after_resume_keeps_thread_model_until_config_is_rewritten
     client = _RecordingClient()
     state = await _subscribe_resumed_thread(tmp_path, client, thread_model="databricks-kimi-k3")
     assert _model_posts(client) == ["databricks-kimi-k3"]
+    assert state.posted_model == "databricks-kimi-k3"
+    # Every config.toml reader (executor, cost-gate hook) now sees the thread's model.
     assert read_codex_config_model(tmp_path) == "databricks-kimi-k3"
+    assert read_unmirrored_codex_settings(tmp_path) == {}
 
     fwd._refresh_model_from_config(tmp_path, state)
     assert state.model == "databricks-kimi-k3"

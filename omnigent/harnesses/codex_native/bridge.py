@@ -897,7 +897,8 @@ def mirror_applied_codex_settings(
     recorded earlier that *applied* does not replace stay recorded. With
     ``expected_revision``, the model is written only while config.toml is still
     the revision the caller observed; a newer rewrite (a terminal ``/model``)
-    wins and nothing is recorded.
+    wins and nothing is recorded. The check is best-effort, since Codex does
+    not take this lock.
 
     :param bridge_dir: The session's native-Codex bridge directory.
     :param applied: Applied values keyed ``"model"`` / ``"effort"``.
@@ -964,7 +965,8 @@ def _upsert_top_level_config_key(
         applied before serializing; used by the model writer to clamp a stale
         effort. Only top-level keys are visible to it.
     :param expected_revision: When given, the replace is skipped once the file
-        no longer has this inode/mtime, so a concurrent rewrite is kept.
+        no longer has this inode/mtime. Best-effort: Codex writes without our
+        lock, so a rewrite between that check and the replace is still lost.
     :returns: ``True`` when the file was updated; ``False`` when it could not
         be read, parsed (malformed/undecodable — never made worse), or
         written, or when another writer replaced it first.
