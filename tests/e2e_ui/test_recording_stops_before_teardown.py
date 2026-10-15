@@ -88,6 +88,118 @@ def test_journey(page, search_sessions):
     page.wait_for_timeout(1_000)"""
 
 
+# The journey films a page it opened itself from the session browser and never closes.
+_OWN_PAGE_JOURNEY = """
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+REPORT = Path(os.environ["RECORDING_REPORT"])
+RAW = Path(os.environ["OMNIGENT_E2E_RECORD_DIR"])
+STATE = {}
+
+
+@pytest.fixture
+def native_session():
+    yield "session"
+    # Torn down after the body, like a fixture deleting the session the pane shows.
+    page = STATE["page"]
+    REPORT.write_text(json.dumps({
+        "page_closed": page.is_closed(),
+        "videos": sorted(path.name for path in RAW.glob("*.webm")),
+    }))
+    if not page.is_closed():
+        page.set_content(
+            "<body style='background:#dc2626'>Bridge closed: terminal session ended</body>"
+        )
+        page.wait_for_timeout(1_000)
+
+
+def test_journey(browser, native_session):
+    page = OPEN_PAGE
+    STATE["page"] = page
+    page.set_content("<body style='background:#1d4ed8'><h1>live</h1></body>")
+    page.wait_for_timeout(1_000)"""
+
+# A fixture owns the recorded page and closes its context after ``yield``; a fixture
+# set up later tears down first, like a session fixture deleting its session.
+_FIXTURE_OWNED_PAGE_JOURNEY = """
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+REPORT = Path(os.environ["RECORDING_REPORT"])
+RAW = Path(os.environ["OMNIGENT_E2E_RECORD_DIR"])
+STATE = {}
+
+
+@pytest.fixture
+def touch_page(browser):
+    context = browser.new_context(has_touch=True)
+    try:
+        page = context.new_page()
+        STATE["page"] = page
+        yield page
+    finally:
+        context.close()
+
+
+@pytest.fixture
+def native_session():
+    yield "session"
+    page = STATE["page"]
+    REPORT.write_text(json.dumps({
+        "page_closed": page.is_closed(),
+        "videos": sorted(path.name for path in RAW.glob("*.webm")),
+    }))
+    if not page.is_closed():
+        page.set_content(
+            "<body style='background:#dc2626'>Bridge closed: terminal session ended</body>"
+        )
+        page.wait_for_timeout(1_000)
+
+
+def test_journey(touch_page, native_session):
+    touch_page.set_content("<body style='background:#1d4ed8'><h1>live</h1></body>")
+    touch_page.wait_for_timeout(1_000)"""
+
+# An async-API page left open on the test's event loop, which outlives the body.
+_ASYNC_OWN_PAGE_JOURNEY = """
+import json
+import os
+from pathlib import Path
+
+import pytest
+from playwright.async_api import async_playwright
+
+REPORT = Path(os.environ["RECORDING_REPORT"])
+RAW = Path(os.environ["OMNIGENT_E2E_RECORD_DIR"])
+STATE = {}
+
+
+@pytest.fixture
+def native_session():
+    yield "session"
+    REPORT.write_text(json.dumps({
+        "page_closed": STATE["page"].is_closed(),
+        "videos": sorted(path.name for path in RAW.glob("*.webm")),
+    }))
+
+
+@pytest.mark.asyncio
+async def test_journey(native_session):
+    playwright = await async_playwright().start()
+    browser = await playwright.chromium.launch()
+    page = await browser.new_page()
+    STATE["page"] = page
+    await page.set_content("<body style='background:#1d4ed8'><h1>live</h1></body>")
+    await page.wait_for_timeout(1_000)"""
+
+
 def _browsers_path() -> str:
     """Playwright's browser cache as resolved from the real home, not pytester's."""
     configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
@@ -237,6 +349,76 @@ def test_marker_recording_stops_before_cleanup(
     result.assert_outcomes(passed=1)
     assert json.loads(report.read_text())["page_closed"]
     assert list((tmp_path / "raw").glob("*.webm"))
+
+
+@pytest.mark.parametrize(
+    "open_page",
+    ["browser.new_page()", "browser.new_context().new_page()"],
+    ids=["new_page", "new_context"],
+)
+def test_own_page_video_is_finalized_before_a_later_fixture_tears_down(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, open_page: str
+) -> None:
+    raw = tmp_path / "raw"
+    report = _configure(pytester, monkeypatch, tmp_path, record_dir=raw)
+    pytester.makepyfile(_OWN_PAGE_JOURNEY.replace("OPEN_PAGE", open_page))
+
+    result = pytester.runpytest_subprocess("-q", *_PLAYWRIGHT_PLUGINS)
+
+    result.assert_outcomes(passed=1)
+    observed = json.loads(report.read_text())
+    assert observed["page_closed"], (
+        "a page the test opened itself was still filming when the session fixture tore down"
+    )
+    videos = sorted(path.name for path in raw.glob("*.webm"))
+    assert observed["videos"] == videos
+    assert len(videos) == 1
+    frames = extract_frames(raw / videos[0], tmp_path / "frames")
+    assert fraction_near(frames[-1], (0x1D, 0x4E, 0xD8)) > 0.5, (
+        "the final video frame shows the teardown state instead of the live page"
+    )
+
+
+def test_fixture_owned_page_video_is_finalized_before_a_later_fixture_tears_down(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw = tmp_path / "raw"
+    report = _configure(pytester, monkeypatch, tmp_path, record_dir=raw)
+    pytester.makepyfile(_FIXTURE_OWNED_PAGE_JOURNEY)
+
+    result = pytester.runpytest_subprocess("-q", *_PLAYWRIGHT_PLUGINS)
+
+    # The owning fixture's own ``context.close()`` after ``yield`` must stay harmless.
+    result.assert_outcomes(passed=1, errors=0)
+    observed = json.loads(report.read_text())
+    assert observed["page_closed"], (
+        "a fixture-owned page was still filming when the session fixture tore down"
+    )
+    videos = sorted(path.name for path in raw.glob("*.webm"))
+    assert observed["videos"] == videos
+    assert len(videos) == 1
+    frames = extract_frames(raw / videos[0], tmp_path / "frames")
+    assert fraction_near(frames[-1], (0x1D, 0x4E, 0xD8)) > 0.5, (
+        "the final video frame shows the teardown state instead of the live page"
+    )
+
+
+def test_async_own_page_video_is_finalized_before_a_later_fixture_tears_down(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw = tmp_path / "raw"
+    report = _configure(pytester, monkeypatch, tmp_path, record_dir=raw)
+    pytester.makepyfile(_ASYNC_OWN_PAGE_JOURNEY)
+
+    result = pytester.runpytest_subprocess("-q", *_PLAYWRIGHT_PLUGINS, "-p", "asyncio")
+
+    result.assert_outcomes(passed=1)
+    observed = json.loads(report.read_text())
+    assert observed["page_closed"], (
+        "an async-API page the test opened was still filming when the session fixture tore down"
+    )
+    assert observed["videos"] == sorted(path.name for path in raw.glob("*.webm"))
+    assert len(observed["videos"]) == 1
 
 
 def test_route_cleanup_fixtures_tolerate_early_close(

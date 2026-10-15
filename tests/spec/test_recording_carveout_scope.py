@@ -61,3 +61,18 @@ def test_caption_rules_reach_the_agent_without_treating_hidden_labels_as_visible
     assert "Quote only text the viewer can see" in lanes
     assert "quote only visibly rendered text" in instructions
     assert "hidden accessibility labels and backend logs are not screen evidence" in instructions
+
+
+def test_lane_rules_stop_every_recorded_context_with_the_test_body() -> None:
+    lanes = _normalized(_DEV / "recording-lanes.md")
+
+    assert "closes the pytest-playwright context as soon as the test body finishes" in lanes
+    assert (
+        "every page or context the test or its fixtures open through `browser.new_page()` / "
+        "`browser.new_context()` (sync or async API) is closed at the same point" in lanes
+    )
+    assert "Cleanup inside the test body still films" in lanes
+    assert (
+        "a brightness or colour statistic cannot tell a live pane from the greyed-out overlay"
+        in lanes
+    )
