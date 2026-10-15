@@ -30,6 +30,7 @@ __all__ = [
     "describe_failure_code",
     "diagnose_client_update_required",
     "diagnose_codex_model_rejection",
+    "diagnose_model_unavailable",
 ]
 
 
@@ -319,6 +320,32 @@ def diagnose_codex_model_rejection(message: str) -> FailureDiagnosis | None:
             "Choose a model supported by your ChatGPT account using the model picker or /model. "
             f"To use another provider, configure it for Codex with `{cli_invocation()} setup` "
             "on the host, then start a new session."
+        ),
+    )
+
+
+# The provider's model-not-found text (e.g. Claude Code's "There's an issue with
+# the selected model (<id>)..."). Narrow on purpose, so unrelated 404s, auth,
+# rate-limit, and budget failures keep their own handling.
+_MODEL_UNAVAILABLE_MARKER = "issue with the selected model"
+
+
+def diagnose_model_unavailable(message: str) -> FailureDiagnosis | None:
+    """Explain a provider rejecting the selected model, with a recovery hint.
+
+    The in-process SDK path gets no next step from the harness, unlike the
+    Claude Code CLI, which appends its own ``/model`` hint. Returns ``None`` for
+    anything that is not a model-not-found rejection, so auth, rate-limit,
+    budget, and plain-404 handling is unchanged.
+    """
+    if _MODEL_UNAVAILABLE_MARKER not in message.lower():
+        return None
+    return FailureDiagnosis(
+        title="Model unavailable",
+        cause=message.strip(),
+        remediation=(
+            "Choose a different model with the model picker or /model, or check that the "
+            "provider is configured and your account can access this model."
         ),
     )
 
