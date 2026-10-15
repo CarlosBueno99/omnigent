@@ -237,6 +237,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _session_sandbox_status_cache,
     _session_status_cache,
     _session_terminal_pending_cache,
+    _session_terminal_response_cache,
     build_policy_engine,
     get_agent_cache,
     get_caps,
@@ -4908,6 +4909,9 @@ def _publish_status(
     :param failure_context: Untrusted optional native evidence, normalized at
         the failure-log boundary. Malformed values cannot reject the status edge.
     """
+    # A real status edge supersedes the short-lived terminal-response marker
+    # used only to bridge the response.* -> session.status delivery gap.
+    _session_terminal_response_cache.pop(session_id, None)
     # ``failed`` is sticky against a trailing ``idle``. A turn error is
     # terminal — it must not be silently downgraded to ``idle`` by a
     # follow-on quiescence signal. This matters for claude-native: the

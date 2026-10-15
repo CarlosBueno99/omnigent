@@ -17,8 +17,10 @@ import secrets
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+import cachetools
 import httpx
 from fastapi import (
     HTTPException,
@@ -230,6 +232,8 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _session_sandbox_status_cache,
     _session_status_cache,
     _session_terminal_pending_cache,
+    _session_terminal_response_cache,
+    _TerminalResponseObservation,
     get_caps,
     get_server_runner_router,
     session_stream,
@@ -344,6 +348,7 @@ from omnigent.server.routes._sessions.helpers import (
     _spec_harness,
     _stable_id_reuse_is_exact_retry,
     _stop_session_via_runner,
+    _truncate_label,
     _usage_by_model_for_display,
     _validate_session_workspace,
     _validate_terminal_launch_args,
@@ -3751,6 +3756,9 @@ async def _publish_runner_recovered_status_impl(
     conversation_store: ConversationStore,
     *,
     require_disconnect_code: bool = False,
+    response_id: str | None = None,
+    recovery_evidence: str = "session_init",
+    observed_status: str = "idle",
 ) -> None:
     """
     Clear a stale failed session status after runner recovery.
@@ -3788,6 +3796,9 @@ async def _publish_runner_recovered_status_impl(
         ``runner_disconnected``; when ``False`` (default, explicit
         rebind/handshake), clear any stale ``failed`` state. Labels are
         cleared in both cases.
+    :param response_id: Turn identity reported by the recovering runner, when known.
+    :param recovery_evidence: Stable slug naming the recovery signal.
+    :param observed_status: Runner status carried by the recovery signal.
     :returns: None.
     """
     if _session_status_cache.get(session_id) != "failed":
@@ -3803,6 +3814,13 @@ async def _publish_runner_recovered_status_impl(
         last_error = _last_task_error_from_labels(conv.labels) if conv is not None else None
         if last_error is None or last_error.get("code") != "runner_disconnected":
             return
+    await _observe_runner_disconnect_outcome(
+        session_id,
+        conversation_store,
+        status=observed_status,
+        response_id=response_id,
+        evidence=recovery_evidence,
+    )
     _session_status_cache[session_id] = "idle"
     session_live_state.persist_live_status(session_id, "idle")
     event = SessionStatusEvent(
@@ -3954,7 +3972,29 @@ async def _mark_runner_sessions_offline_once(
         ):
             continue
         turn_id = _session_active_response_cache.get(conv.id)
-        _publish_status(conv.id, "failed", error, failure_origin="runner_offline_sweep")
+        previous_status = _session_status_cache.get(conv.id, conv.live_status)
+        failed_at_ms = int(time.time() * 1000)
+        await _persist_runner_disconnect_outage(
+            conv.id,
+            _RunnerDisconnectOutage(
+                outage_id=uuid.uuid4().hex,
+                runner_id=handle.runner_id if handle is not None else conv.runner_id,
+                turn_id=turn_id,
+                origin="runner_offline_sweep",
+                started_at_ms=failed_at_ms,
+                failed_at_ms=failed_at_ms,
+                previous_status=previous_status,
+                live_subscriber_at_failure=session_stream.has_subscribers(conv.id),
+            ),
+            conversation_store,
+        )
+        _publish_status(
+            conv.id,
+            "failed",
+            error,
+            response_id=turn_id,
+            failure_origin="runner_offline_sweep",
+        )
         await record_subagent_activity(
             conv.id, "returned", conversation_store, turn_id=turn_id, status="failed"
         )
@@ -5323,7 +5363,18 @@ async def _ensure_runner_session_initialized(
             ) from exc
         return False
 
-    await _publish_runner_recovered_status(session_id, conversation_store)
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = None
+    observed_status = payload.get("status") if isinstance(payload, dict) else None
+    await _publish_runner_recovered_status(
+        session_id,
+        conversation_store,
+        observed_status=(
+            observed_status if isinstance(observed_status, str) and observed_status else "idle"
+        ),
+    )
     from omnigent.server.child_session_recovery import (
         restore_active_children,
         schedule_child_restoration,
@@ -5338,9 +5389,7 @@ async def _ensure_runner_session_initialized(
                 session_id, conv.runner_id, runner_client, conversation_store, conversation=conv
             )
             await restore_active_children(conv, runner_client, conversation_store, initializer)
-    try:
-        payload = resp.json()
-    except ValueError:
+    if not isinstance(payload, dict):
         return False
     return bool(
         isinstance(payload, dict)
@@ -7742,6 +7791,29 @@ _RELAY_RETRY_INTERVAL_S: float = 0.5
 # Version marker for the bounded relay recovery event contract. Keep this on
 # every connected/ready row so rollout queries can separate old and new shapes.
 _RELAY_TELEMETRY_SCHEMA = "runner_stream_recovery.v1"
+# Version marker for outcomes observed after the relay has already published a
+# failed turn. This identity survives a later relay adoption and lets KPI queries
+# distinguish same-turn recovery from a replacement turn or an unresolved loss.
+_RUNNER_DISCONNECT_OUTCOME_SCHEMA = "runner_disconnect_outcome.v1"
+_RUNNER_DISCONNECT_OUTAGE_CACHE_TTL_S = 24 * 60 * 60
+_RUNNER_DISCONNECT_OUTAGE_ID_LABEL_KEY = "omnigent.runner_disconnect_outage_id"
+_RUNNER_DISCONNECT_RUNNER_ID_LABEL_KEY = "omnigent.runner_disconnect_runner_id"
+_RUNNER_DISCONNECT_TURN_ID_LABEL_KEY = "omnigent.runner_disconnect_turn_id"
+_RUNNER_DISCONNECT_ORIGIN_LABEL_KEY = "omnigent.runner_disconnect_origin"
+_RUNNER_DISCONNECT_STARTED_AT_MS_LABEL_KEY = "omnigent.runner_disconnect_started_at_ms"
+_RUNNER_DISCONNECT_FAILED_AT_MS_LABEL_KEY = "omnigent.runner_disconnect_failed_at_ms"
+_RUNNER_DISCONNECT_PREVIOUS_STATUS_LABEL_KEY = "omnigent.runner_disconnect_previous_status"
+_RUNNER_DISCONNECT_LIVE_SUBSCRIBER_LABEL_KEY = "omnigent.runner_disconnect_live_subscriber"
+_RUNNER_DISCONNECT_LABEL_KEYS = (
+    _RUNNER_DISCONNECT_OUTAGE_ID_LABEL_KEY,
+    _RUNNER_DISCONNECT_RUNNER_ID_LABEL_KEY,
+    _RUNNER_DISCONNECT_TURN_ID_LABEL_KEY,
+    _RUNNER_DISCONNECT_ORIGIN_LABEL_KEY,
+    _RUNNER_DISCONNECT_STARTED_AT_MS_LABEL_KEY,
+    _RUNNER_DISCONNECT_FAILED_AT_MS_LABEL_KEY,
+    _RUNNER_DISCONNECT_PREVIOUS_STATUS_LABEL_KEY,
+    _RUNNER_DISCONNECT_LIVE_SUBSCRIBER_LABEL_KEY,
+)
 # A tunnel that drops mid-ensure usually belongs to a runner that is alive but
 # stalled and re-registers once it can (observed: 24 s). Hold the message that
 # long before failing it instead of discarding it on a drop the runner outlives.
@@ -7752,6 +7824,281 @@ _NATIVE_TERMINAL_ENSURE_RECONNECT_GRACE_S: float = 30.0
 # failure. ``waiting`` counts because the turn's background work (shells,
 # sub-agents) outlives the turn and dies with the runner.
 _MID_TURN_STATUSES = ("running", "waiting")
+
+
+@dataclass
+class _RunnerDisconnectOutage:
+    """Durable identity for a disconnect that published a failed turn."""
+
+    outage_id: str
+    runner_id: str | None
+    turn_id: str | None
+    origin: str
+    started_at_ms: int
+    failed_at_ms: int
+    previous_status: str | None
+    live_subscriber_at_failure: bool
+    recovery_observed: bool = False
+    recovery_turn_id: str | None = None
+
+
+_runner_disconnect_outages: WorkspaceScopedCache[str, _RunnerDisconnectOutage] = (
+    WorkspaceScopedCache(
+        lambda: cachetools.TTLCache(
+            maxsize=math.inf,
+            ttl=_RUNNER_DISCONNECT_OUTAGE_CACHE_TTL_S,
+            timer=lambda: time.monotonic(),
+        )
+    )
+)
+
+
+def _runner_disconnect_outage_label_updates(
+    outage: _RunnerDisconnectOutage | None,
+) -> dict[str, str]:
+    """Build the internal labels for one pending outage, or clear them."""
+    if outage is None:
+        return dict.fromkeys(_RUNNER_DISCONNECT_LABEL_KEYS, "")
+    return {
+        _RUNNER_DISCONNECT_OUTAGE_ID_LABEL_KEY: _truncate_label(outage.outage_id),
+        _RUNNER_DISCONNECT_RUNNER_ID_LABEL_KEY: _truncate_label(outage.runner_id or ""),
+        _RUNNER_DISCONNECT_TURN_ID_LABEL_KEY: _truncate_label(outage.turn_id or ""),
+        _RUNNER_DISCONNECT_ORIGIN_LABEL_KEY: _truncate_label(outage.origin),
+        _RUNNER_DISCONNECT_STARTED_AT_MS_LABEL_KEY: str(outage.started_at_ms),
+        _RUNNER_DISCONNECT_FAILED_AT_MS_LABEL_KEY: str(outage.failed_at_ms),
+        _RUNNER_DISCONNECT_PREVIOUS_STATUS_LABEL_KEY: _truncate_label(
+            outage.previous_status or ""
+        ),
+        _RUNNER_DISCONNECT_LIVE_SUBSCRIBER_LABEL_KEY: (
+            "true" if outage.live_subscriber_at_failure else "false"
+        ),
+    }
+
+
+def _runner_disconnect_outage_from_labels(
+    labels: Mapping[str, str],
+) -> _RunnerDisconnectOutage | None:
+    """Parse a pending disconnect outage from internal conversation labels."""
+    outage_id = labels.get(_RUNNER_DISCONNECT_OUTAGE_ID_LABEL_KEY)
+    origin = labels.get(_RUNNER_DISCONNECT_ORIGIN_LABEL_KEY)
+    raw_started = labels.get(_RUNNER_DISCONNECT_STARTED_AT_MS_LABEL_KEY)
+    raw_failed = labels.get(_RUNNER_DISCONNECT_FAILED_AT_MS_LABEL_KEY)
+    if not outage_id or not origin or not raw_started or not raw_failed:
+        return None
+    try:
+        started_at_ms = int(raw_started)
+        failed_at_ms = int(raw_failed)
+    except ValueError:
+        return None
+    if started_at_ms <= 0 or failed_at_ms <= 0:
+        return None
+    return _RunnerDisconnectOutage(
+        outage_id=outage_id,
+        runner_id=labels.get(_RUNNER_DISCONNECT_RUNNER_ID_LABEL_KEY) or None,
+        turn_id=labels.get(_RUNNER_DISCONNECT_TURN_ID_LABEL_KEY) or None,
+        origin=origin,
+        started_at_ms=started_at_ms,
+        failed_at_ms=failed_at_ms,
+        previous_status=labels.get(_RUNNER_DISCONNECT_PREVIOUS_STATUS_LABEL_KEY) or None,
+        live_subscriber_at_failure=(
+            labels.get(_RUNNER_DISCONNECT_LIVE_SUBSCRIBER_LABEL_KEY) == "true"
+        ),
+    )
+
+
+async def _persist_runner_disconnect_outage(
+    session_id: str,
+    outage: _RunnerDisconnectOutage,
+    conversation_store: ConversationStore,
+) -> None:
+    """Keep a failed disconnect correlated across a later relay adoption."""
+    _runner_disconnect_outages[session_id] = outage
+    try:
+        await asyncio.to_thread(
+            conversation_store.set_labels,
+            session_id,
+            _runner_disconnect_outage_label_updates(outage),
+        )
+    except Exception:  # noqa: BLE001 — diagnostics must not change failure behavior
+        _logger.warning(
+            "Could not persist runner disconnect outage for session=%s",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+
+
+async def _clear_runner_disconnect_outage(
+    session_id: str,
+    conversation_store: ConversationStore,
+) -> None:
+    """Clear the pending outage after a final post-reconnect turn outcome."""
+    _runner_disconnect_outages.pop(session_id, None)
+    try:
+        await asyncio.to_thread(
+            conversation_store.set_labels,
+            session_id,
+            _runner_disconnect_outage_label_updates(None),
+        )
+    except Exception:  # noqa: BLE001 — diagnostics must not break the relay
+        _logger.warning(
+            "Could not clear runner disconnect outage for session=%s",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+
+
+def _runner_disconnect_outcome(
+    outage: _RunnerDisconnectOutage,
+    status: str,
+    response_id: str | None,
+) -> tuple[str, bool]:
+    """Classify one runner status against the turn interrupted by the outage."""
+    same_turn = bool(outage.turn_id and response_id and outage.turn_id == response_id)
+    different_turn = bool(outage.turn_id and response_id and outage.turn_id != response_id)
+    if status in {"running", "waiting"}:
+        if different_turn:
+            return "turn_replaced_after_disconnect", True
+        if same_turn:
+            return "same_turn_resumed", False
+        return "runner_resumed_turn_unknown", False
+    if status == "completed":
+        if same_turn:
+            return "same_turn_completed", True
+        if different_turn:
+            return "different_turn_completed", True
+        return "turn_completed_identity_unknown", True
+    if status == "idle":
+        if same_turn:
+            return "same_turn_completed", True
+        if different_turn:
+            return "different_turn_completed", True
+        return "runner_idle_turn_unknown", False
+    if status in {"failed", "cancelled", "incomplete"}:
+        if same_turn:
+            return f"same_turn_{status}", True
+        if different_turn:
+            return f"different_turn_{status}", True
+        return f"turn_{status}_identity_unknown", True
+    return "runner_status_unknown", False
+
+
+def _runner_event_response_id(
+    event: Mapping[str, Any],
+    fallback: str | None = None,
+) -> str | None:
+    """Return the response id carried by a runner lifecycle event."""
+    raw_response_id = event.get("response_id")
+    if isinstance(raw_response_id, str) and raw_response_id:
+        return raw_response_id
+    raw_response = event.get("response")
+    if isinstance(raw_response, Mapping):
+        nested_response_id = raw_response.get("id")
+        if isinstance(nested_response_id, str) and nested_response_id:
+            return nested_response_id
+    return fallback
+
+
+async def _observe_runner_disconnect_outcome(
+    session_id: str,
+    conversation_store: ConversationStore,
+    *,
+    status: str,
+    response_id: str | None,
+    evidence: str,
+) -> None:
+    """Log a conservative recovery outcome for a previously failed disconnect."""
+    outage = _runner_disconnect_outages.get(session_id)
+    if outage is None:
+        return
+    outcome, final = _runner_disconnect_outcome(outage, status, response_id)
+    has_new_identity = response_id is not None and response_id != outage.recovery_turn_id
+    if not final and outage.recovery_observed and not has_new_identity:
+        return
+    outage.recovery_observed = True
+    if response_id is not None:
+        outage.recovery_turn_id = response_id
+    confirmed_impact = outage.live_subscriber_at_failure or outcome in {
+        "turn_replaced_after_disconnect",
+        "different_turn_completed",
+        "same_turn_failed",
+        "same_turn_cancelled",
+        "same_turn_incomplete",
+        "different_turn_failed",
+        "different_turn_cancelled",
+        "different_turn_incomplete",
+        "turn_failed_identity_unknown",
+        "turn_cancelled_identity_unknown",
+        "turn_incomplete_identity_unknown",
+    }
+    now_ms = int(time.time() * 1000)
+    _logger.info(
+        "Runner disconnect outcome for session=%s: %s",
+        session_id,
+        outcome,
+        extra=debug_event(
+            "runner_disconnect_outcome",
+            session_id=session_id,
+            turn_id=outage.turn_id,
+            outage_id=outage.outage_id,
+            runner_id=outage.runner_id,
+            failure_origin=outage.origin,
+            failure_published=True,
+            previous_status=outage.previous_status,
+            outage_started_at_ms=outage.started_at_ms,
+            failure_published_at_ms=outage.failed_at_ms,
+            outage_s=round(max(0, now_ms - outage.started_at_ms) / 1000, 3),
+            recovery_status=status,
+            recovery_turn_id=response_id,
+            recovery_evidence=evidence,
+            recovery_outcome=outcome,
+            outcome_final=final,
+            live_subscriber_at_failure=outage.live_subscriber_at_failure,
+            live_subscriber_at_recovery=session_stream.has_subscribers(session_id),
+            user_impact="confirmed" if confirmed_impact else "unknown",
+            telemetry_schema=_RUNNER_DISCONNECT_OUTCOME_SCHEMA,
+        ),
+    )
+    if final:
+        await _clear_runner_disconnect_outage(session_id, conversation_store)
+
+
+async def _reconcile_terminal_response_disconnect(
+    session_id: str,
+    conversation_store: ConversationStore,
+) -> None:
+    """Apply the terminal edge whose trailing runner status was lost."""
+    terminal_response = _session_terminal_response_cache.get(session_id)
+    if terminal_response is None:
+        return
+    response_id = terminal_response.response_id
+    outcome = terminal_response.outcome
+    if outcome == "failed":
+        error = terminal_response.error or ErrorDetail(
+            code="runner_error",
+            message="Runner reported that the turn failed before its final status arrived.",
+        )
+        _publish_status(
+            session_id,
+            "failed",
+            error,
+            response_id=response_id,
+            failure_origin="terminal_response_without_status",
+        )
+        await _persist_session_status_error_labels(session_id, error, conversation_store)
+        child_status = "failed"
+    else:
+        _publish_status(session_id, "idle", response_id=response_id)
+        child_status = "cancelled" if outcome == "cancelled" else "completed"
+    await record_subagent_activity(
+        session_id,
+        "returned",
+        conversation_store,
+        turn_id=response_id,
+        status=child_status,
+        from_runner=True,
+    )
 
 
 class _RelayTransportLost(Exception):
@@ -7815,7 +8162,7 @@ def _owned_by_parent_runtime(conv: Conversation | _RelayStatusSnapshot | None) -
     return conv is not None and is_parent_owned_subagent(conv)
 
 
-async def _runner_disconnect_requires_failure(
+async def _runner_disconnect_decision(
     session_id: str,
     conversation_store: ConversationStore,
     *,
@@ -7823,7 +8170,7 @@ async def _runner_disconnect_requires_failure(
     snapshot: Conversation | None = None,
     fail_idle_top_level: bool = False,
     error_code: str = "runner_disconnected",
-) -> bool:
+) -> str:
     """Decide whether runner loss interrupted work, recording the state used.
 
     Local turn edges are newer than asynchronous persistence. A cold cache
@@ -7873,6 +8220,14 @@ async def _runner_disconnect_requires_failure(
         live, source = None, "unknown"
 
     conv = persisted if persisted is not None else fallback
+    active_response_id = _session_active_response_cache.get(session_id)
+    terminal_response = _session_terminal_response_cache.get(session_id)
+    terminal_response_matches_active = terminal_response is not None and (
+        active_response_id is None
+        or terminal_response.response_id is None
+        or terminal_response.response_id == active_response_id
+    )
+    cached_background_task_count = _session_background_task_count_cache.get(session_id)
     if (
         snapshot is not None
         and snapshot.runner_id is not None
@@ -7880,6 +8235,14 @@ async def _runner_disconnect_requires_failure(
     ):
         # A Stop can arrive while the sweep refreshes its row.
         decision = "intentional_stop"
+    elif (
+        live in _MID_TURN_STATUSES
+        and terminal_response_matches_active
+        and cached_background_task_count is None
+    ):
+        # response.* is the definitive turn edge. The trailing status update can
+        # lose a race with the tunnel, leaving a stale running cache behind.
+        decision = "terminal_response_no_failure"
     elif live in _MID_TURN_STATUSES and source != "cache" and _owned_by_parent_runtime(conv):
         decision = "subagent_unobserved"
     elif live in _MID_TURN_STATUSES:
@@ -7939,14 +8302,26 @@ async def _runner_disconnect_requires_failure(
         extra=debug_event(
             "runner_disconnect_decision",
             session_id=session_id,
-            turn_id=_session_active_response_cache.get(session_id),
+            turn_id=active_response_id,
             origin=origin,
             decision=decision,
+            failure_published=decision in ("failed_mid_turn", "failed_before_start"),
+            live_subscriber_present=session_stream.has_subscribers(session_id),
             error_code=error_code,
             status_source=source,
             cached_session_status=cached,
             # The cache retains positive counts only; absence is not an observed zero.
             cached_background_task_count=_session_background_task_count_cache.get(session_id),
+            terminal_response_outcome=(
+                terminal_response.outcome if terminal_response is not None else None
+            ),
+            terminal_response_id=(
+                terminal_response.response_id if terminal_response is not None else None
+            ),
+            terminal_response_observed_at_ms=(
+                terminal_response.observed_at_ms if terminal_response is not None else None
+            ),
+            terminal_response_matches_active=terminal_response_matches_active,
             persisted_session_status=persisted.live_status if persisted is not None else None,
             snapshot_session_status=fallback.live_status if fallback is not None else None,
             status_lookup=lookup,
@@ -7958,6 +8333,29 @@ async def _runner_disconnect_requires_failure(
             fail_idle_top_level=fail_idle_top_level,
         ),
     )
+    return decision
+
+
+async def _runner_disconnect_requires_failure(
+    session_id: str,
+    conversation_store: ConversationStore,
+    *,
+    origin: str,
+    snapshot: Conversation | None = None,
+    fail_idle_top_level: bool = False,
+    error_code: str = "runner_disconnected",
+) -> bool:
+    """Return whether the attributed disconnect decision publishes failure."""
+    decision = await _runner_disconnect_decision(
+        session_id,
+        conversation_store,
+        origin=origin,
+        snapshot=snapshot,
+        fail_idle_top_level=fail_idle_top_level,
+        error_code=error_code,
+    )
+    if decision == "terminal_response_no_failure":
+        await _reconcile_terminal_response_disconnect(session_id, conversation_store)
     return decision in ("failed_mid_turn", "failed_before_start")
 
 
@@ -8040,6 +8438,7 @@ async def _relay_runner_stream(
     loop = asyncio.get_running_loop()
     deadline: float | None = None
     outage_started: float | None = None
+    outage_started_at_ms: int | None = None
     outage_id: str | None = None
     outage_runner_id: str | None = None
     outage_turn_id: str | None = None
@@ -8047,7 +8446,7 @@ async def _relay_runner_stream(
 
     def _on_stream_ready() -> None:
         """Record one ready-confirmed recovery for the active outage."""
-        nonlocal outage_id, outage_started, outage_runner_id, outage_turn_id
+        nonlocal outage_id, outage_started, outage_started_at_ms, outage_runner_id, outage_turn_id
         if outage_id is None or outage_started is None:
             # The first ready heartbeat is ordinary relay startup, not recovery.
             return
@@ -8057,6 +8456,7 @@ async def _relay_runner_stream(
         recovered_turn_id = outage_turn_id
         outage_id = None
         outage_started = None
+        outage_started_at_ms = None
         outage_runner_id = None
         outage_turn_id = None
         attributes = {
@@ -8098,6 +8498,7 @@ async def _relay_runner_stream(
             if deadline is None or lost.stream_ready or now - started > RUNNER_DISCONNECT_GRACE_S:
                 deadline = now + RUNNER_DISCONNECT_GRACE_S
                 outage_started = now
+                outage_started_at_ms = int(time.time() * 1000)
                 retries = 0
                 outage_id = uuid.uuid4().hex
                 outage_runner_id = runner_id
@@ -8146,12 +8547,13 @@ async def _relay_runner_stream(
                 decision = "server_shutdown"
             elif await _relay_runner_live_elsewhere(session_id, conversation_store):
                 decision = "live_elsewhere"
-            elif await _runner_disconnect_requires_failure(
-                session_id, conversation_store, origin="runner_disconnected_mid_turn"
-            ):
-                decision = "failed_mid_turn"
             else:
-                decision = "idle_no_failure"
+                decision = await _runner_disconnect_decision(
+                    session_id,
+                    conversation_store,
+                    origin="runner_disconnected_mid_turn",
+                )
+            live_subscriber_present = session_stream.has_subscribers(session_id)
             # One row per outage outcome: which branch below fired, how long the
             # runner was gone against the grace, and how many retries it got.
             _logger.warning(
@@ -8168,6 +8570,8 @@ async def _relay_runner_stream(
                     intentional_stop=lost.intentional,
                     cached_session_status=_session_status_cache.get(session_id),
                     decision=decision,
+                    failure_published=decision == "failed_mid_turn",
+                    live_subscriber_present=live_subscriber_present,
                     grace_s=RUNNER_DISCONNECT_GRACE_S,
                     outage_s=(
                         round(now - outage_started, 3) if outage_started is not None else None
@@ -8205,9 +8609,19 @@ async def _relay_runner_stream(
                     session_id,
                     extra={"session_id": session_id},
                 )
-            elif decision == "idle_no_failure":
-                # No evidence of an interrupted turn. Liveness drives the
-                # reconnect affordance; preserve status and prior error labels.
+            elif decision in {
+                "idle_no_failure",
+                "unknown_no_failure",
+                "subagent_unobserved",
+                "terminal_response_no_failure",
+            }:
+                if decision == "terminal_response_no_failure":
+                    await _reconcile_terminal_response_disconnect(
+                        session_id,
+                        conversation_store,
+                    )
+                # No evidence of an interrupted turn. The terminal-response
+                # branch applies its missing status; the others preserve state.
                 _logger.info(
                     "Relay: runner gone without a known interrupted turn for session=%s; "
                     "no failure to report",
@@ -8222,14 +8636,36 @@ async def _relay_runner_stream(
                     message="Runner disconnected unexpectedly.",
                 )
                 turn_id = _session_active_response_cache.get(session_id)
+                interrupted_turn_id = outage_turn_id or turn_id
+                previous_status = _session_status_cache.get(session_id)
+                failed_at_ms = int(time.time() * 1000)
+                await _persist_runner_disconnect_outage(
+                    session_id,
+                    _RunnerDisconnectOutage(
+                        outage_id=outage_id or uuid.uuid4().hex,
+                        runner_id=outage_runner_id or runner_id,
+                        turn_id=interrupted_turn_id,
+                        origin="runner_disconnected_mid_turn",
+                        started_at_ms=outage_started_at_ms or failed_at_ms,
+                        failed_at_ms=failed_at_ms,
+                        previous_status=previous_status,
+                        live_subscriber_at_failure=live_subscriber_present,
+                    ),
+                    conversation_store,
+                )
                 _publish_status(
                     session_id,
                     "failed",
                     disconnect_error,
+                    response_id=interrupted_turn_id,
                     failure_origin="runner_disconnected_mid_turn",
                 )
                 await record_subagent_activity(
-                    session_id, "returned", conversation_store, turn_id=turn_id, status="failed"
+                    session_id,
+                    "returned",
+                    conversation_store,
+                    turn_id=interrupted_turn_id,
+                    status="failed",
                 )
                 # Persist the disconnect cause as durable labels so the
                 # distinction survives into snapshots and child-session
@@ -8438,6 +8874,39 @@ async def _relay_runner_stream_once(
                         ):
                             continue
 
+                    if evt_type in _TERMINAL_RESPONSE_EVENT_TYPES:
+                        terminal_response_id = _runner_event_response_id(
+                            event,
+                            current_response_id,
+                        )
+                        raw_terminal_response = event.get("response")
+                        raw_terminal_error = (
+                            raw_terminal_response.get("error")
+                            if isinstance(raw_terminal_response, Mapping)
+                            else None
+                        )
+                        terminal_error: ErrorDetail | None = None
+                        if isinstance(raw_terminal_error, Mapping):
+                            try:
+                                terminal_error = ErrorDetail.model_validate(raw_terminal_error)
+                            except ValidationError:
+                                terminal_error = None
+                        _session_terminal_response_cache[session_id] = (
+                            _TerminalResponseObservation(
+                                response_id=terminal_response_id,
+                                outcome=evt_type.removeprefix("response."),
+                                observed_at_ms=int(time.time() * 1000),
+                                error=terminal_error,
+                            )
+                        )
+                        await _observe_runner_disconnect_outcome(
+                            session_id,
+                            conversation_store,
+                            status=evt_type.removeprefix("response."),
+                            response_id=terminal_response_id,
+                            evidence="terminal_response",
+                        )
+
                     if evt_type == "session.status":
                         status = event.get("status", "")
                         if status in {"idle", "failed"} and pending_subagent_return_id is not None:
@@ -8461,10 +8930,23 @@ async def _relay_runner_stream_once(
                             # surfaces a real error message downstream
                             # instead of ending the turn silently.
                             raw_err = event.get("error")
+                            raw_response_id = event.get("response_id")
+                            status_response_id = (
+                                raw_response_id
+                                if isinstance(raw_response_id, str) and raw_response_id
+                                else None
+                            )
                             status_error = (
                                 ErrorDetail.model_validate(raw_err)
                                 if isinstance(raw_err, dict)
                                 else None
+                            )
+                            await _observe_runner_disconnect_outcome(
+                                session_id,
+                                conversation_store,
+                                status=status,
+                                response_id=status_response_id,
+                                evidence="runner_status",
                             )
                             if status == "failed" and status_error is not None:
                                 await _persist_session_status_error_labels(
@@ -8487,7 +8969,6 @@ async def _relay_runner_stream_once(
                             # — the PTY idle oscillates on mid-turn lulls and
                             # would deliver a premature, lock-out completion.
                             raw_blocked_on = event.get("blocked_on")
-                            raw_response_id = event.get("response_id")
                             # The runner finishing a turn the server had written
                             # off as a runner drop proves the drop was transient:
                             # honor the completion and clear the disconnect cause.
@@ -8502,6 +8983,8 @@ async def _relay_runner_stream_once(
                                         session_id,
                                         conversation_store,
                                         require_disconnect_code=True,
+                                        response_id=status_response_id,
+                                        recovery_evidence="runner_status",
                                     )
                                 except Exception:  # noqa: BLE001 — a read error must not kill the relay
                                     # Fail soft: the session keeps its existing
@@ -8522,11 +9005,7 @@ async def _relay_runner_stream_once(
                                 status_error,
                                 # The runner names the turn a failed edge closes so
                                 # the web can fold it into that turn's error card.
-                                response_id=(
-                                    raw_response_id
-                                    if isinstance(raw_response_id, str) and raw_response_id
-                                    else None
-                                ),
+                                response_id=status_response_id,
                                 failure_origin="relayed_runner_status",
                                 blocked_on=(
                                     raw_blocked_on
@@ -8562,11 +9041,19 @@ async def _relay_runner_stream_once(
                         _turn_start_s = time.monotonic()
                         pending_subagent_return_id = None
                         resp_obj = event.get("response", {})
-                        _rid = resp_obj.get("id")
+                        _rid = _runner_event_response_id(event)
                         if isinstance(_rid, str) and _rid:
+                            _session_terminal_response_cache.pop(session_id, None)
                             current_response_id = _rid
                             # Keep the turn identity across transport retries until final status.
                             _session_active_response_cache[session_id] = _rid
+                            await _observe_runner_disconnect_outcome(
+                                session_id,
+                                conversation_store,
+                                status="running",
+                                response_id=_rid,
+                                evidence="response_in_progress",
+                            )
                         _model = resp_obj.get("model")
                         failure_agent_name = _model if isinstance(_model, str) and _model else None
                         if isinstance(_model, str) and _model:
@@ -9128,6 +9615,10 @@ def _ensure_runner_relay(
             extra={"session_id": session_id},
         )
         return None
+    if conversation is not None and _runner_disconnect_outages.get(session_id) is None:
+        pending_outage = _runner_disconnect_outage_from_labels(conversation.labels)
+        if pending_outage is not None:
+            _runner_disconnect_outages[session_id] = pending_outage
     stopped_runner_id = _intentional_stop_sessions.get(session_id)
     if stopped_runner_id is not None and stopped_runner_id != runner_id:
         _intentional_stop_sessions.pop(session_id, None)

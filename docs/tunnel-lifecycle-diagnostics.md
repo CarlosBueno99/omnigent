@@ -194,6 +194,45 @@ ultimately failed. Replay uses source IDs to avoid duplicating persisted events.
 The structured fields contain no event bodies or credentials. Existing exception
 tracebacks and log severity are unchanged; successful retries add no error row.
 
+## Disconnect outcome attribution
+
+`runner_stream_disconnected` and `runner_disconnect_decision` include
+`failure_published` and the local `live_subscriber_present` observation. A
+missing subscriber is not evidence of no user impact: the turn can still be
+delayed, replaced, or observed after the client reconnects.
+
+If a runner drop publishes `runner_disconnected`, the server persists a bounded
+internal outage identity and later emits `runner_disconnect_outcome`. The row
+contains `outage_id`, the interrupted `turn_id`, `failure_origin`, outage timing,
+the recovery status and turn ID, the recovery evidence, `recovery_outcome`, and
+`outcome_final`. `same_turn_resumed` is interim; a matching terminal response
+emits final `same_turn_completed`, `same_turn_failed`, `same_turn_cancelled`, or
+`same_turn_incomplete`. A different response ID records that the interrupted
+turn was replaced. Identity-less idle recovery stays non-final so a later
+terminal event can still establish the outcome. A terminal completion without
+the interrupted turn ID closes as `turn_completed_identity_unknown`.
+
+The server also records `live_subscriber_at_failure` and
+`live_subscriber_at_recovery`. `user_impact` is deliberately conservative:
+`confirmed` requires direct viewing evidence or a replacement/failure outcome;
+otherwise it remains `unknown`. This version never emits `user_impact = none`.
+Do not exclude the complete heartbeat/keepalive family from KPI. A future KPI
+exception should require an explicit final `user_impact = none` classification,
+not infer harmlessness from reconnect alone.
+
+A terminal `response.completed`, `response.failed`, `response.cancelled`, or
+`response.incomplete` can arrive before the tunnel drops, while the trailing
+`session.status` edge is still in flight. The bounded terminal marker spans the
+relay timeout and repeated liveness/grace windows, preventing the stale cached
+`running` status from creating a second, spurious disconnect failure. The
+decision is `terminal_response_no_failure`; a later status or new response
+supersedes the marker. If the disconnect wins the race, the server reconciles
+the missing terminal status (`idle` for completed/cancelled/incomplete, `failed`
+for a reported failure) so the UI is not left working indefinitely. A known
+positive background-task count still fails on disconnect. This removes the
+synthetic `runner_disconnected` failed-status row from turn-failure KPI while
+retaining the transport-loss rows for a separate connectivity SLO.
+
 ## Correlation
 
 The disconnect grace task rechecks the local tunnel after loading bound

@@ -689,9 +689,10 @@ async def test_relay_publishes_failed_status_on_tunnel_close(
     failure_path: str,
     terminal_response: bool,
 ) -> None:
-    """A confirmed disconnect persists one Failed notice even without child output."""
+    """Only a disconnect before the terminal response fails the turn."""
     from omnigent.runtime import session_stream
     from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions import orchestration
     from omnigent.server.schemas import ErrorDetail
     from omnigent.server.subagent_activity import record_subagent_activity
 
@@ -740,26 +741,54 @@ async def test_relay_publishes_failed_status_on_tunnel_close(
                 [child], ErrorDetail(code="runner_disconnected", message="Disconnected"), store
             )
 
-        # Wait for the failed-status event to arrive at the collector.
-        event = await asyncio.wait_for(collector.queue.get(), timeout=_TASK_TIMEOUT_S)
-        while event.get("type") != "session.status":
-            event = await asyncio.wait_for(collector.queue.get(), timeout=_TASK_TIMEOUT_S)
-        assert event.get("status") == "failed"
-        assert event["error"]["code"] == "runner_disconnected"
-        items = store.list_items(parent.id).data
-        assert [item.data.event_type for item in items] == [
-            "session.subagent.delegated",
-            "session.subagent.returned",
+        expected_failed = not terminal_response
+        relayed_events: list[dict[str, Any]] = []
+        while not collector.queue.empty():
+            relayed_events.append(collector.queue.get_nowait())
+        failed_events = [
+            event
+            for event in relayed_events
+            if event.get("type") == "session.status" and event.get("status") == "failed"
         ]
-        assert items[-1].data.resource == {"title": "Audit", "status": "failed"}
-        await record_subagent_activity(
-            session_id,
-            "returned",
-            store,
-            status="failed",
-            turn_id=child.id if failure_path == "sweep_after_restart" else "child-turn",
-        )
-        assert len(store.list_items(parent.id).data) == 2
+        assert bool(failed_events) is expected_failed
+        if expected_failed:
+            assert failed_events[0]["error"]["code"] == "runner_disconnected"
+            if failure_path == "sweep_after_restart":
+                assert failed_events[0].get("response_id") is None
+            else:
+                assert failed_events[0]["response_id"] == "child-turn"
+        else:
+            idle_events = [
+                event
+                for event in relayed_events
+                if event.get("type") == "session.status" and event.get("status") == "idle"
+            ]
+            assert idle_events[-1]["response_id"] == "child-turn"
+            assert sessions_module._session_status_cache[session_id] == "idle"
+        items = store.list_items(parent.id).data
+        if expected_failed:
+            assert [item.data.event_type for item in items] == [
+                "session.subagent.delegated",
+                "session.subagent.returned",
+            ]
+            assert items[-1].data.resource == {"title": "Audit", "status": "failed"}
+            await record_subagent_activity(
+                session_id,
+                "returned",
+                store,
+                status="failed",
+                turn_id=child.id if failure_path == "sweep_after_restart" else "child-turn",
+            )
+            assert len(store.list_items(parent.id).data) == 2
+        else:
+            assert [item.data.event_type for item in items] == [
+                "session.subagent.delegated",
+                "session.subagent.returned",
+            ]
+            assert items[-1].data.resource == {"title": "Audit", "status": "completed"}
+            refreshed = store.get_conversation(session_id)
+            assert refreshed is not None
+            assert sessions_module._last_task_error_from_labels(refreshed.labels) is None
         if failure_path == "relay":
             record = next(
                 r
@@ -769,7 +798,9 @@ async def test_relay_publishes_failed_status_on_tunnel_close(
             assert record.session_id == session_id
             assert record.attributes["intentional_stop"] is False
             assert record.attributes["cached_session_status"] == "running"
-            assert record.attributes["decision"] == "failed_mid_turn"
+            assert record.attributes["decision"] == (
+                "failed_mid_turn" if expected_failed else "terminal_response_no_failure"
+            )
             assert record.exc_info is not None
     finally:
         gate.set()
@@ -783,6 +814,8 @@ async def test_relay_publishes_failed_status_on_tunnel_close(
         sessions_module._runner_relay_tasks.clear()
         sessions_module._session_status_cache.pop(session_id, None)
         sessions_module._session_active_response_cache.pop(session_id, None)
+        sessions_module._session_terminal_response_cache.pop(session_id, None)
+        orchestration._runner_disconnect_outages.pop(session_id, None)
         session_stream.close(session_id)
 
 
@@ -823,6 +856,294 @@ class _RecordingLabelStore:
             labels=dict(self.labels.get(conversation_id, {})),
             live_status=self.live_status,
         )
+
+
+@pytest.mark.asyncio
+async def test_runner_disconnect_outage_persists_until_same_turn_completes(
+    db_uri: str,
+) -> None:
+    """A resumed interrupted turn emits interim and final correlated outcomes."""
+    from omnigent.server.routes._sessions import orchestration
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conversation = store.create_conversation(runner_id="runner_recovered")
+    outage = orchestration._RunnerDisconnectOutage(
+        outage_id="outage_same_turn",
+        runner_id="runner_recovered",
+        turn_id="turn_interrupted",
+        origin="runner_disconnected_mid_turn",
+        started_at_ms=1_000,
+        failed_at_ms=2_000,
+        previous_status="running",
+        live_subscriber_at_failure=False,
+    )
+
+    try:
+        await orchestration._persist_runner_disconnect_outage(conversation.id, outage, store)
+        persisted = store.get_conversation(conversation.id)
+        assert persisted is not None
+        restored = orchestration._runner_disconnect_outage_from_labels(persisted.labels)
+        assert restored is not None
+        assert restored.outage_id == "outage_same_turn"
+        assert restored.turn_id == "turn_interrupted"
+
+        with capture_debug_rows("server") as rows:
+            await orchestration._observe_runner_disconnect_outcome(
+                conversation.id,
+                store,
+                status="running",
+                response_id="turn_interrupted",
+                evidence="response_in_progress",
+            )
+            assert orchestration._runner_disconnect_outages.get(conversation.id) is outage
+            await orchestration._observe_runner_disconnect_outcome(
+                conversation.id,
+                store,
+                status="completed",
+                response_id="turn_interrupted",
+                evidence="terminal_response",
+            )
+
+        outcomes = [row for row in rows if row["event_name"] == "runner_disconnect_outcome"]
+        assert [row["attributes"]["recovery_outcome"] for row in outcomes] == [
+            "same_turn_resumed",
+            "same_turn_completed",
+        ]
+        assert outcomes[0]["attributes"]["outcome_final"] == "False"
+        assert outcomes[1]["attributes"]["outcome_final"] == "True"
+        assert outcomes[1]["attributes"]["user_impact"] == "unknown"
+        assert orchestration._runner_disconnect_outages.get(conversation.id) is None
+        cleared = store.get_conversation(conversation.id)
+        assert cleared is not None
+        assert orchestration._runner_disconnect_outage_from_labels(cleared.labels) is None
+    finally:
+        orchestration._runner_disconnect_outages.pop(conversation.id, None)
+
+
+@pytest.mark.asyncio
+async def test_runner_disconnect_identity_unknown_idle_stays_pending(db_uri: str) -> None:
+    """Session-init reachability alone does not discard later same-turn evidence."""
+    from omnigent.server.routes._sessions import orchestration
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conversation = store.create_conversation()
+    outage = orchestration._RunnerDisconnectOutage(
+        outage_id="outage_idle_unknown",
+        runner_id="runner_idle_unknown",
+        turn_id="turn_interrupted",
+        origin="runner_offline_sweep",
+        started_at_ms=1_000,
+        failed_at_ms=2_000,
+        previous_status="running",
+        live_subscriber_at_failure=False,
+    )
+
+    try:
+        await orchestration._persist_runner_disconnect_outage(conversation.id, outage, store)
+        with capture_debug_rows("server") as rows:
+            await orchestration._observe_runner_disconnect_outcome(
+                conversation.id,
+                store,
+                status="idle",
+                response_id=None,
+                evidence="session_init",
+            )
+
+        outcome = next(row for row in rows if row["event_name"] == "runner_disconnect_outcome")
+        assert outcome["attributes"]["recovery_outcome"] == "runner_idle_turn_unknown"
+        assert outcome["attributes"]["outcome_final"] == "False"
+        assert orchestration._runner_disconnect_outages.get(conversation.id) is outage
+    finally:
+        await orchestration._clear_runner_disconnect_outage(conversation.id, store)
+
+
+@pytest.mark.asyncio
+async def test_runner_disconnect_identity_unknown_terminal_completion_is_final(
+    db_uri: str,
+) -> None:
+    """A terminal completion closes an outage even if the failed turn ID was lost."""
+    from omnigent.server.routes._sessions import orchestration
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conversation = store.create_conversation()
+    outage = orchestration._RunnerDisconnectOutage(
+        outage_id="outage_completion_unknown",
+        runner_id="runner_completion_unknown",
+        turn_id=None,
+        origin="runner_offline_sweep",
+        started_at_ms=1_000,
+        failed_at_ms=2_000,
+        previous_status="running",
+        live_subscriber_at_failure=False,
+    )
+
+    try:
+        await orchestration._persist_runner_disconnect_outage(conversation.id, outage, store)
+        with capture_debug_rows("server") as rows:
+            await orchestration._observe_runner_disconnect_outcome(
+                conversation.id,
+                store,
+                status="completed",
+                response_id="turn_recovered",
+                evidence="terminal_response",
+            )
+
+        outcome = next(row for row in rows if row["event_name"] == "runner_disconnect_outcome")
+        assert outcome["attributes"]["recovery_outcome"] == "turn_completed_identity_unknown"
+        assert outcome["attributes"]["outcome_final"] == "True"
+        assert orchestration._runner_disconnect_outages.get(conversation.id) is None
+        cleared = store.get_conversation(conversation.id)
+        assert cleared is not None
+        assert orchestration._runner_disconnect_outage_from_labels(cleared.labels) is None
+    finally:
+        orchestration._runner_disconnect_outages.pop(conversation.id, None)
+
+
+@pytest.mark.parametrize(
+    ("event", "fallback", "expected"),
+    [
+        ({"response_id": "turn_top", "response": {"id": "turn_nested"}}, None, "turn_top"),
+        ({"response": {"id": "turn_nested"}}, None, "turn_nested"),
+        ({"response": {}}, "turn_fallback", "turn_fallback"),
+    ],
+)
+def test_runner_event_response_id_prefers_top_level_then_nested_then_fallback(
+    event: dict[str, Any],
+    fallback: str | None,
+    expected: str,
+) -> None:
+    """Lifecycle events retain turn identity across runner wire shapes."""
+    from omnigent.server.routes._sessions import orchestration
+
+    assert orchestration._runner_event_response_id(event, fallback) == expected
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_before_disconnect_keeps_real_failure(db_uri: str) -> None:
+    """A lost trailing status attributes the terminal failure, not the disconnect."""
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions import orchestration
+    from omnigent.server.schemas import ErrorDetail
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conversation = store.create_conversation()
+    error = ErrorDetail(code="harness_failed", message="Harness exited unexpectedly.")
+    sessions_module._session_status_cache[conversation.id] = "running"
+    sessions_module._session_active_response_cache[conversation.id] = "turn_failed"
+    sessions_module._session_terminal_response_cache[conversation.id] = (
+        sessions_module._TerminalResponseObservation(
+            response_id="turn_failed",
+            outcome="failed",
+            observed_at_ms=1_000,
+            error=error,
+        )
+    )
+    collector = await start_session_stream_collector(conversation.id)
+
+    try:
+        requires_disconnect_failure = await orchestration._runner_disconnect_requires_failure(
+            conversation.id,
+            store,
+            origin="runner_disconnected_mid_turn",
+            snapshot=conversation,
+        )
+
+        assert requires_disconnect_failure is False
+        event = collector.queue.get_nowait()
+        assert event["type"] == "session.status"
+        assert event["status"] == "failed"
+        assert event["response_id"] == "turn_failed"
+        assert event["error"]["code"] == "harness_failed"
+        persisted = store.get_conversation(conversation.id)
+        assert persisted is not None
+        assert sessions_module._last_task_error_from_labels(persisted.labels) == {
+            "code": "harness_failed",
+            "message": "Harness exited unexpectedly.",
+        }
+    finally:
+        await collector.stop()
+        sessions_module._session_status_cache.pop(conversation.id, None)
+        sessions_module._session_active_response_cache.pop(conversation.id, None)
+        sessions_module._session_terminal_response_cache.pop(conversation.id, None)
+        session_stream.close(conversation.id)
+
+
+@pytest.mark.asyncio
+async def test_runner_relay_adoption_restores_pending_outage_from_idle_snapshot(
+    db_uri: str,
+) -> None:
+    """A new relay restores durable outage identity after status recovery."""
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions import orchestration
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conversation = store.create_conversation(runner_id="runner_adopted")
+    outage = orchestration._RunnerDisconnectOutage(
+        outage_id="outage_adopted",
+        runner_id="runner_adopted",
+        turn_id="turn_adopted",
+        origin="runner_disconnected_mid_turn",
+        started_at_ms=1_000,
+        failed_at_ms=2_000,
+        previous_status="running",
+        live_subscriber_at_failure=False,
+    )
+    store.set_labels(
+        conversation.id,
+        orchestration._runner_disconnect_outage_label_updates(outage),
+    )
+    store.set_session_live_status(conversation.id, "idle")
+    snapshot = store.get_conversation(conversation.id)
+    assert snapshot is not None and snapshot.live_status == "idle"
+    release = asyncio.Event()
+    handle = None
+
+    try:
+        orchestration._runner_disconnect_outages.pop(conversation.id, None)
+        handle = sessions_module._ensure_runner_relay(
+            conversation.id,
+            "runner_adopted",
+            _HeartbeatRunnerClient(release),  # type: ignore[arg-type]
+            store,
+            conversation=snapshot,
+        )
+        assert handle is not None
+        restored = orchestration._runner_disconnect_outages.get(conversation.id)
+        assert restored is not None
+        assert restored.outage_id == "outage_adopted"
+        assert restored.turn_id == "turn_adopted"
+    finally:
+        release.set()
+        if handle is not None:
+            await asyncio.wait_for(handle.task, timeout=_TASK_TIMEOUT_S)
+        sessions_module._runner_relay_tasks.clear()
+        orchestration._runner_disconnect_outages.pop(conversation.id, None)
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        {},
+        {
+            "omnigent.runner_disconnect_outage_id": "outage_bad_time",
+            "omnigent.runner_disconnect_origin": "runner_offline_sweep",
+            "omnigent.runner_disconnect_started_at_ms": "not-an-int",
+            "omnigent.runner_disconnect_failed_at_ms": "2000",
+        },
+        {
+            "omnigent.runner_disconnect_outage_id": "outage_negative_time",
+            "omnigent.runner_disconnect_origin": "runner_offline_sweep",
+            "omnigent.runner_disconnect_started_at_ms": "-1",
+            "omnigent.runner_disconnect_failed_at_ms": "2000",
+        },
+    ],
+)
+def test_runner_disconnect_outage_ignores_malformed_labels(labels: dict[str, str]) -> None:
+    """Partial or malformed durable context never creates a pending outage."""
+    from omnigent.server.routes._sessions import orchestration
+
+    assert orchestration._runner_disconnect_outage_from_labels(labels) is None
 
 
 @pytest.mark.asyncio

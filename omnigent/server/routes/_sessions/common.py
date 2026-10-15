@@ -49,6 +49,7 @@ from omnigent.runner.routing import RunnerRouter
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.schemas import (
     BackgroundTaskInfo,
+    ErrorDetail,
     McpServerStartup,
     SandboxStatus,
     ServerStreamEvent,
@@ -627,6 +628,29 @@ _runner_status_probe_inflight: WorkspaceScopedCache[str, asyncio.Task[str | None
 
 
 _session_active_response_cache: WorkspaceScopedCache[str, str] = WorkspaceScopedCache()
+
+
+@dataclass(frozen=True)
+class _TerminalResponseObservation:
+    """Terminal response seen before the runner's trailing status edge."""
+
+    response_id: str | None
+    outcome: str
+    observed_at_ms: int
+    error: ErrorDetail | None = None
+
+
+_session_terminal_response_cache: WorkspaceScopedCache[str, _TerminalResponseObservation] = (
+    WorkspaceScopedCache(
+        lambda: cachetools.TTLCache(
+            maxsize=math.inf,
+            # A relay timeout can pass through multiple liveness/grace windows
+            # before the server publishes its final disconnect decision.
+            ttl=10 * RUNNER_LIVENESS_TTL_S,
+            timer=lambda: time.monotonic(),
+        )
+    )
+)
 
 
 _session_background_task_count_cache: WorkspaceScopedCache[str, int] = WorkspaceScopedCache()
@@ -1218,6 +1242,7 @@ __all__ = [
     "_RelayHandle",
     "_RelayStatusSnapshot",
     "_RunnerStatusProbeBackoff",
+    "_TerminalResponseObservation",
     "_browser_action_claim_events",
     "_browser_action_claims",
     "_browser_action_owners",
@@ -1252,6 +1277,7 @@ __all__ = [
     "_session_sandbox_status_cache",
     "_session_status_cache",
     "_session_terminal_pending_cache",
+    "_session_terminal_response_cache",
     "get_server_host_registry",
     "get_server_runner_router",
     "host_interactive_shells_for_request",
