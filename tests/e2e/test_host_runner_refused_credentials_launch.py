@@ -23,6 +23,7 @@ import os
 import threading
 import time
 import uuid
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -67,15 +68,26 @@ class _CredentialFrontDoor:
         self._backend_host = parts.hostname or "127.0.0.1"
         self._backend_port = parts.port or 80
         self._accepted = set(accepted_tokens)
-        self.rejections: list[tuple[str, str, int]] = []
+        self._rejections: list[tuple[str, str, int]] = []
+        self._rejections_lock = threading.Lock()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
-        self._server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_server(self._handle, "127.0.0.1", 0), self._loop
-        ).result(timeout=10)
+        try:
+            self._server = asyncio.run_coroutine_threadsafe(
+                asyncio.start_server(self._handle, "127.0.0.1", 0), self._loop
+            ).result(timeout=10)
+        except BaseException:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=5)
+            raise
         self.port = self._server.sockets[0].getsockname()[1]
         self.url = f"http://127.0.0.1:{self.port}"
+
+    def rejections(self) -> list[tuple[str, str, int]]:
+        """Return the ``(method, path, status)`` rejections recorded so far."""
+        with self._rejections_lock:
+            return list(self._rejections)
 
     def revoke(self, token: str) -> None:
         """Revoke ``token`` on the proxy loop and wait until the loop applied it."""
@@ -86,25 +98,33 @@ class _CredentialFrontDoor:
         asyncio.run_coroutine_threadsafe(_revoke(), self._loop).result(timeout=5)
 
     def close(self) -> None:
-        def _shutdown() -> None:
+        async def _shutdown() -> None:
             # Piped tunnels stay open until the host exits, so cancel them
             # instead of awaiting wait_closed().
             self._server.close()
-            for task in asyncio.all_tasks(self._loop):
+            tasks = [t for t in asyncio.all_tasks(self._loop) if t is not asyncio.current_task()]
+            for task in tasks:
                 task.cancel()
-            self._loop.call_soon(self._loop.stop)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._loop.stop()
 
-        self._loop.call_soon_threadsafe(_shutdown)
-        self._thread.join(timeout=5)
-        if not self._thread.is_alive():
-            self._loop.close()
+        asyncio.run_coroutine_threadsafe(_shutdown(), self._loop)
+        self._thread.join(timeout=10)
+        if self._thread.is_alive():
+            warnings.warn("front door loop did not stop; leaking it", stacklevel=2)
+            return
+        self._loop.close()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=30)
-        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
+            await self._serve(reader, writer)
+        except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
+            pass  # a peer that dropped mid-request is not a test failure
+        finally:
             writer.close()
-            return
+
+    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=30)
         request_line, *header_lines = head.decode("latin-1").split("\r\n")
         method, path = [*request_line.split(" "), "", ""][:2]
         headers = {
@@ -118,7 +138,8 @@ class _CredentialFrontDoor:
             return
         if not bearer or bearer not in self._accepted:
             await self._drain_body(reader, headers)
-            self.rejections.append((method, path, 401))
+            with self._rejections_lock:
+                self._rejections.append((method, path, 401))
             body = json.dumps(
                 {
                     "error_code": 401,
@@ -149,10 +170,16 @@ class _CredentialFrontDoor:
     @staticmethod
     async def _drain_body(reader: asyncio.StreamReader, headers: dict[str, str]) -> None:
         """Read a rejected request's body so closing never resets the client's socket."""
+        if headers.get("transfer-encoding", "").lower() == "chunked":
+            while True:
+                size_line = await asyncio.wait_for(reader.readline(), timeout=10)
+                size = int(size_line.split(b";")[0].strip() or b"0", 16)
+                await asyncio.wait_for(reader.readexactly(size + 2), timeout=10)
+                if size == 0:
+                    return
         body_len = int(headers.get("content-length", "0") or 0)
         if body_len:
-            with contextlib.suppress(asyncio.IncompleteReadError, TimeoutError):
-                await asyncio.wait_for(reader.readexactly(min(body_len, 1 << 20)), timeout=10)
+            await asyncio.wait_for(reader.readexactly(body_len), timeout=10)
 
     @staticmethod
     async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -360,7 +387,7 @@ def refused_launch(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[st
         outcome = {
             "session": session,
             "seconds_to_failed": seconds_to_failed,
-            "front_door_rejections": list(front_door.rejections),
+            "front_door_rejections": front_door.rejections(),
             "runner_logs": _runner_log_texts(host.home),
             "host_rows": _attribution_rows(rows, "host", runner_id),
             "server_rows": _attribution_rows(rows, "server", runner_id),

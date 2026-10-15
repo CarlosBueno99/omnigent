@@ -13,6 +13,7 @@ _REFUSAL = (
     "run `omnigent login https://ws.example.com` to re-authenticate"
 )
 _EXITED = "runner process exited with code 1 (log on host: ~/.omnigent/logs/runner/r.log)"
+_CRASH = f"{_EXITED}\n--- runner log tail ---\nModuleNotFoundError: No module named 'x'"
 
 
 @pytest.mark.parametrize(
@@ -30,14 +31,20 @@ _EXITED = "runner process exited with code 1 (log on host: ~/.omnigent/logs/runn
         ),
         # A fatal protocol close can refuse a runner that had connected: not a launch failure.
         (f"{_REFUSAL}\n{_EXITED}", True, "config", "unknown"),
-        (
-            f"{_EXITED}\n--- runner log tail ---\nModuleNotFoundError: No module named 'x'",
-            False,
-            "runner",
-            "unknown",
-        ),
+        # An unexplained crash stays the runner's fault; only proof it never
+        # connected localizes it to the launch phase, as on the host.
+        (_CRASH, None, "runner", "unknown"),
+        (_CRASH, True, "runner", "unknown"),
+        (_CRASH, False, "runner", "runner_launch"),
     ],
-    ids=["refusal-first", "refusal-in-tail", "refusal-after-connect", "unexplained-crash"],
+    ids=[
+        "refusal-first",
+        "refusal-in-tail",
+        "refusal-after-connect",
+        "unexplained-crash",
+        "unexplained-crash-after-connect",
+        "unexplained-crash-before-connect",
+    ],
 )
 def test_runner_exited_row_attributes_declared_refusals_to_config(
     caplog: pytest.LogCaptureFixture,

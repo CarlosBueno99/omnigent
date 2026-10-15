@@ -2503,24 +2503,9 @@ class HostProcess:
                 had_connected = await asyncio.to_thread(handle.connect_marker.exists)
             except OSError:
                 _logger.warning("Could not read connect marker for %s", runner_id, exc_info=True)
-        if handle.proc.returncode == 0:
-            if had_connected is not False:
-                # Post-connect code 0 includes graceful idle-reaper exits.
-                _logger.info("Runner %s exited cleanly (code 0); no crash report", runner_id)
-                return
-            # Pre-connect code 0 is a failed launch; send its cause to the server.
-            report = await asyncio.to_thread(
-                _runner_exit_report,
-                handle.proc.returncode,
-                handle.log_path,
-                had_connected=had_connected,
-            )
-            error = report.error
-            _logger.info(
-                "Runner %s exited cleanly (code 0) before connecting; reporting exit",
-                runner_id,
-            )
-            await self._report_runner_exit(runner_id, error, had_connected=had_connected)
+        if handle.proc.returncode == 0 and had_connected is not False:
+            # Post-connect code 0 includes graceful idle-reaper exits.
+            _logger.info("Runner %s exited cleanly (code 0); no crash report", runner_id)
             return
         report = await asyncio.to_thread(
             _runner_exit_report,
@@ -2528,6 +2513,14 @@ class HostProcess:
             handle.log_path,
             had_connected=had_connected,
         )
+        if handle.proc.returncode == 0:
+            # Pre-connect code 0 is a failed launch; send its cause to the server.
+            _logger.info(
+                "Runner %s exited cleanly (code 0) before connecting; reporting exit",
+                runner_id,
+            )
+            await self._report_runner_exit(runner_id, report.error, had_connected=had_connected)
+            return
         _logger.warning(
             "Runner %s died unexpectedly: %s",
             runner_id,
@@ -2563,12 +2556,12 @@ class HostProcess:
         if handle.stop_requested:
             # A stop may arrive while the marker check runs off-loop.
             return
-        refusal = None
-        if await asyncio.to_thread(handle.proc.poll) is not None:
-            tail = await asyncio.to_thread(_read_log_tail, handle.log_path)
-            refusal = runner_tunnel_refusal(tail)
-            if refusal is not None:
-                refusal = _redact_log_tail(refusal)
+        # The runner prints its refusal only when giving up for good, so the log
+        # names the cause even while the process is still shutting down.
+        tail = await asyncio.to_thread(_read_log_tail, handle.log_path)
+        refusal = runner_tunnel_refusal(tail)
+        if refusal is not None:
+            refusal = _redact_log_tail(refusal)
         _logger.error(
             "Runner %s for session %s never connected its tunnel within "
             "%.0fs of launch (pid=%d): %s. Runner log: %s",

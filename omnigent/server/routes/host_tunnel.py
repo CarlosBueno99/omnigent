@@ -110,16 +110,16 @@ def log_runner_exited(
     :param runner_id: The dead runner, e.g. ``"runner_abc123..."``.
     :param error: Daemon-composed cause (exit code + log tail).
     :param session_id: Session bound to the runner, if known.
-    :param had_connected: Whether the runner had connected its tunnel, when the
-        host's evidence is available; ``True`` keeps a refusal out of the
-        launch phase, mirroring the host's own row.
+    :param had_connected: The host's connection evidence for the runner, when
+        available; it mirrors the host's phase: ``True`` keeps a refusal out of
+        the launch phase and ``False`` localizes any other crash to it.
     :returns: None.
     """
-    # A tunnel refusal the runner declared is a launch configuration failure.
-    # Any other cause is an unparsed runner-process fault, and that runner may
-    # have died before or during a turn, so its lifecycle stage is unknown.
+    # A declared tunnel refusal is a launch configuration failure; anything else
+    # is an unparsed runner fault. The phase mirrors the host's row: refusals are
+    # launch-phase unless the runner connected, other crashes only if it never did.
     refused = runner_tunnel_refusal(error) is not None
-    launch_refusal = refused and had_connected is not True
+    launch_phase = had_connected is not True if refused else had_connected is False
     _logger.warning(
         "Host %s reported runner %s exited: %s",
         host_id,
@@ -132,7 +132,7 @@ def log_runner_exited(
             runner_id=runner_id,
             error_category=(ErrorCategory.CONFIG if refused else ErrorCategory.RUNNER).value,
             error_impact=ErrorImpact.BLOCKING.value,
-            error_phase=(ErrorPhase.RUNNER_LAUNCH if launch_refusal else ErrorPhase.UNKNOWN).value,
+            error_phase=(ErrorPhase.RUNNER_LAUNCH if launch_phase else ErrorPhase.UNKNOWN).value,
         ),
     )
 

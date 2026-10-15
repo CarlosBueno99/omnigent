@@ -3688,23 +3688,25 @@ def create_app(
         _cancel_disconnect_grace(runner_id)
         # Host connection evidence survives tunnel moves between replicas. Older
         # hosts fall back to this replica's observed liveness.
+        had_connected = runner_exit_reports.had_connected(runner_id)
         runner_ran = (
-            runner_exit_reports.was_connected(runner_id)
-            or session_live_state.last_liveness_stamp(runner_id) is not None
+            had_connected is True or session_live_state.last_liveness_stamp(runner_id) is not None
         )
+        if runner_ran:
+            had_connected = True
         try:
             affected = await asyncio.to_thread(
                 conversation_store.list_conversations_by_runner_id, runner_id
             )
         except Exception:
             # Never lose the crash event to a failed session lookup.
-            log_runner_exited(host_id, runner_id, error, had_connected=runner_ran)
+            log_runner_exited(host_id, runner_id, error, had_connected=had_connected)
             raise
         # One row per bound session so every crash is attributable; a runner
         # with no bound session still gets a session-less row.
         for session_id in [conv.id for conv in affected] or [None]:
             log_runner_exited(
-                host_id, runner_id, error, session_id=session_id, had_connected=runner_ran
+                host_id, runner_id, error, session_id=session_id, had_connected=had_connected
             )
         await _mark_runner_sessions_offline(
             affected,

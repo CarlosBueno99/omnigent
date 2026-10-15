@@ -260,6 +260,17 @@ class RunnerExitReports:
             report = self._reports.get(runner_id)
         return report is not None and report.had_connected is True
 
+    def had_connected(self, runner_id: str) -> bool | None:
+        """Return the host's connection evidence from this runner's exit report.
+
+        :param runner_id: Runner whose exit report is wanted.
+        :returns: ``True`` or ``False`` as the host reported, or ``None`` without
+            a report or when the host could not tell.
+        """
+        with self._lock:
+            report = self._reports.get(runner_id)
+        return None if report is None else report.had_connected
+
     def get(self, runner_id: str) -> str | None:
         """Look up a report's error without owner scoping.
 
