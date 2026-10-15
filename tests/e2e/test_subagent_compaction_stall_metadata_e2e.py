@@ -6,8 +6,8 @@ prompt. The child's Claude Code reads files until the mock model reports a
 near-full context, auto-compacts, reads again, auto-compacts a second time, and
 then its next model reply is held on the mock gate so the turn never advances
 (no further tool calls, no writes). The orchestrator then runs two status
-checks a few seconds apart through ``sys_session_get_info`` and
-``sys_read_inbox``.
+checks ten seconds apart through ``sys_session_get_info``, ``sys_session_list``,
+``sys_session_get_history`` and ``sys_read_inbox``.
 
 Claude Code only enforces a context window it knows; a third-party base URL
 leaves the window unenforced, so the child's HOME carries
@@ -25,10 +25,8 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import shutil
 import subprocess
-import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -41,12 +39,13 @@ import pytest
 import yaml
 
 from omnigent.onboarding.ambient import CLAUDE_CODE_MANAGED_SETTINGS_PATHS
-from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN, token_bound_runner_id
+from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
+from tests._helpers.server_runner import ServerRunner, server_runner
 from tests._helpers.session import bundle_files, post_session_bundle
-from tests.e2e.conftest import _mock_llm_server_process, find_free_port
+from tests.e2e.conftest import _mock_llm_server_process
 
 pytestmark = pytest.mark.timeout(900, method="signal")
-_REPO = Path(__file__).resolve().parents[2]
+
 _PARENT_MODEL = "mock-compaction-stall-parent"
 _CHILD_MODEL = "claude-sonnet-4-20250514"
 # Claude Code compacts once the last reply's prompt usage reaches the enforced
@@ -64,7 +63,13 @@ _SMALL_USAGE = {
 }
 _DOC_COUNT = 6
 _HELD_REPLY = "HELD-REPLY: never delivered while the gate is closed."
-_POLL_GAP_S = 3.0
+_POLL_GAP_S = 10.0
+_STATUS_TOOLS = (
+    "sys_session_get_info",
+    "sys_session_list",
+    "sys_session_get_history",
+    "sys_read_inbox",
+)
 
 
 def _write_docs(workspace: Path) -> None:
@@ -81,18 +86,20 @@ def _write_docs(workspace: Path) -> None:
 
 def _git(workspace: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", *args], cwd=workspace, check=True, capture_output=True, text=True
+        ["git", "-c", "user.email=repro@example.com", "-c", "user.name=repro", *args],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
 
 @dataclass
 class Rig:
     client: httpx.Client
-    runner_id: str
+    stack: ServerRunner
     mock_url: str
     workspace: Path
-    tmp: Path
-    base_url: str
 
 
 @pytest.fixture(scope="module")
@@ -103,44 +110,12 @@ def rig(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rig]:
             pytest.skip(f"requires the real {binary} binary")
     if any(path.is_file() for path in CLAUDE_CODE_MANAGED_SETTINGS_PATHS):
         pytest.skip("machine-managed Claude settings override mock auth; run in a clean container")
-    tmp_path = tmp_path_factory.mktemp("compaction-stall")
-    (tmp_path / "mock-logs").mkdir()
-    mock_iter = _mock_llm_server_process(tmp_path / "mock-logs")
+    root = tmp_path_factory.mktemp("compaction-stall")
+    (root / "mock-logs").mkdir()
+    mock_iter = _mock_llm_server_process(root / "mock-logs")
     mock_url = next(mock_iter)
-    workspace = tmp_path / "workspace"
-    config_dir = tmp_path / "config"
-    native_home = tmp_path / "home"
-    claude_home = native_home / ".claude"
-    for directory in (workspace, config_dir, claude_home):
-        directory.mkdir(parents=True)
-    _write_docs(workspace)
-    _git(workspace, "init", "-q", "-b", "main")
-    _git(workspace, "-c", "user.email=repro@example.com", "-c", "user.name=repro", "add", ".")
-    _git(
-        workspace,
-        "-c",
-        "user.email=repro@example.com",
-        "-c",
-        "user.name=repro",
-        "commit",
-        "-q",
-        "-m",
-        "docs baseline",
-    )
-    (native_home / ".claude.json").write_text(
-        json.dumps(
-            {
-                "hasCompletedOnboarding": True,
-                "theme": "dark",
-                "projects": {str(workspace.resolve()): {"hasTrustDialogAccepted": True}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    (claude_home / "settings.json").write_text(
-        json.dumps({"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(_AUTO_COMPACT_WINDOW)}}),
-        encoding="utf-8",
-    )
+    config_dir = root / "config"
+    config_dir.mkdir()
     (config_dir / "config.yaml").write_text(
         yaml.safe_dump(
             {
@@ -170,124 +145,55 @@ def rig(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rig]:
         ),
         encoding="utf-8",
     )
-    token = uuid.uuid4().hex
-    runner_id = token_bound_runner_id(token)
-    port = find_free_port()
-    base_url = f"http://127.0.0.1:{port}"
-    env = {
-        **{
-            key: value
-            for key, value in os.environ.items()
-            if key
-            in {
-                "PATH",
-                "LANG",
-                "LC_ALL",
-                "TMPDIR",
-                "TMP",
-                "TEMP",
-                "SSL_CERT_FILE",
-                "SSL_CERT_DIR",
-                "REQUESTS_CA_BUNDLE",
-                "NODE_EXTRA_CA_CERTS",
-            }
-        },
-        "HOME": str(native_home),
-        "OMNIGENT_CONFIG_HOME": str(config_dir),
-        "OMNIGENT_DATA_DIR": str(tmp_path / "data"),
-        "OMNIGENT_RUNNER_WORKSPACE": str(workspace),
-        "OMNIGENT_SKIP_ONBOARD": "1",
-        "OMNIGENT_NO_UPDATE_CHECK": "1",
-        "OMNIGENT_CLAUDE_PATH": str(shutil.which("claude")),
-        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(_AUTO_COMPACT_WINDOW),
-        "PYTHONPATH": str(_REPO),
-        "NO_PROXY": "127.0.0.1,localhost",
-        "no_proxy": "127.0.0.1,localhost",
-    }
-    # The web SPA is only needed when a recording driver attaches a browser.
-    if not os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
-        env["OMNIGENT_SKIP_WEB_UI"] = "true"
-    processes: list[subprocess.Popen[bytes]] = []
-    with (
-        (tmp_path / "server.log").open("w") as server_log,
-        (tmp_path / "runner.log").open("w") as runner_log,
-        httpx.Client(
-            base_url=base_url,
-            timeout=30,
-            trust_env=False,
-            headers={
-                "Origin": OMNIGENT_INTERNAL_WS_ORIGIN,
-                "x-omnigent-background-session-titles": "off",
-            },
-        ) as client,
-    ):
-        try:
-            processes.append(
-                subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-m",
-                        "omnigent.cli",
-                        "server",
-                        "--host",
-                        "127.0.0.1",
-                        "--port",
-                        str(port),
-                        "--database-uri",
-                        f"sqlite:///{tmp_path / 'test.db'}",
-                        "--artifact-location",
-                        str(tmp_path / "artifacts"),
-                    ],
-                    cwd=_REPO,
-                    env={**env, "OMNIGENT_RUNNER_TUNNEL_TOKEN": token},
-                    stdout=server_log,
-                    stderr=subprocess.STDOUT,
-                )
+    try:
+        with server_runner(
+            root / "stack", server_env={"OMNIGENT_CONFIG_HOME": str(config_dir)}
+        ) as stack:
+            _write_docs(stack.workspace)
+            _git(stack.workspace, "init", "-q", "-b", "main")
+            _git(stack.workspace, "add", ".")
+            _git(stack.workspace, "commit", "-q", "-m", "docs baseline")
+            claude_dir = stack.runner_home / ".claude"
+            claude_dir.mkdir(parents=True, exist_ok=True)
+            (claude_dir / "settings.json").write_text(
+                json.dumps(
+                    {"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(_AUTO_COMPACT_WINDOW)}}
+                ),
+                encoding="utf-8",
             )
-            processes.append(
-                subprocess.Popen(
-                    [sys.executable, "-m", "omnigent.runner._entry"],
-                    cwd=_REPO,
-                    env={
-                        **env,
-                        "OMNIGENT_RUNNER_ID": runner_id,
-                        "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN": token,
-                        "OMNIGENT_RUNNER_PARENT_PID": str(os.getpid()),
-                        "RUNNER_SERVER_URL": base_url,
-                    },
-                    stdout=runner_log,
-                    stderr=subprocess.STDOUT,
-                )
+            (stack.runner_home / ".claude.json").write_text(
+                json.dumps(
+                    {
+                        "hasCompletedOnboarding": True,
+                        "theme": "dark",
+                        "projects": {
+                            str(stack.workspace.resolve()): {"hasTrustDialogAccepted": True}
+                        },
+                    }
+                ),
+                encoding="utf-8",
             )
-            deadline = time.monotonic() + 90
-            while time.monotonic() < deadline:
-                assert all(proc.poll() is None for proc in processes), "server/runner exited"
-                with contextlib.suppress(httpx.HTTPError):
-                    response = client.get(f"/v1/runners/{runner_id}/status", timeout=2)
-                    if response.status_code == 200 and response.json().get("online"):
-                        break
-                time.sleep(0.5)
-            else:
-                pytest.fail("server/runner did not become ready")
-            yield Rig(
-                client=client,
-                runner_id=runner_id,
-                mock_url=mock_url,
-                workspace=workspace,
-                tmp=tmp_path,
-                base_url=base_url,
+            stack.start_runner(
+                env={
+                    "OMNIGENT_CONFIG_HOME": str(config_dir),
+                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(_AUTO_COMPACT_WINDOW),
+                    "OMNIGENT_SKIP_ONBOARD": "1",
+                    "OMNIGENT_NO_UPDATE_CHECK": "1",
+                }
             )
-        finally:
-            for proc in reversed(processes):
-                if proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait(timeout=5)
-            with contextlib.suppress(StopIteration):
-                next(mock_iter)
+            with httpx.Client(
+                base_url=stack.base_url,
+                timeout=30,
+                trust_env=False,
+                headers={
+                    "Origin": OMNIGENT_INTERNAL_WS_ORIGIN,
+                    "x-omnigent-background-session-titles": "off",
+                },
+            ) as client:
+                yield Rig(client=client, stack=stack, mock_url=mock_url, workspace=stack.workspace)
+    finally:
+        with contextlib.suppress(StopIteration):
+            next(mock_iter)
 
 
 def _mock_post(mock_url: str, path: str, body: dict[str, Any]) -> None:
@@ -387,6 +293,8 @@ def _configure_parent_status_check(mock_url: str, child_id: str, n: int) -> None
             "key": _PARENT_MODEL,
             "responses": [
                 call("sys_session_get_info", {"session_id": child_id}),
+                call("sys_session_list", {}),
+                call("sys_session_get_history", {"conversation_id": child_id, "tail_items": 5}),
                 call("sys_read_inbox", {}),
                 {"text": f"Status check {n} recorded."},
             ],
@@ -400,8 +308,9 @@ def _register_parent(client: httpx.Client, mock_url: str) -> str:
         "name": name,
         "prompt": (
             "You are an orchestrator. Dispatch the implementer sub-agent via "
-            "sys_session_send when asked, and check on it with sys_session_get_info "
-            "when asked for a status check."
+            "sys_session_send when asked, and check on it with sys_session_get_info, "
+            "sys_session_list, sys_session_get_history and sys_read_inbox when asked "
+            "for a status check."
         ),
         "executor": {
             "harness": "openai-agents",
@@ -496,16 +405,17 @@ def _send_user_message(client: httpx.Client, session_id: str, text: str) -> None
 
 def _status_check(
     client: httpx.Client, mock_url: str, parent_id: str, child_id: str, n: int
-) -> tuple[dict[str, Any], str]:
-    """Run status check *n* on the orchestrator; return its get_info payload and inbox text."""
+) -> dict[str, str]:
+    """Run status check *n* on the orchestrator; return each status tool's raw output."""
     _configure_parent_status_check(mock_url, child_id, n)
     _send_user_message(client, parent_id, f"Status check {n}: how is the implementer doing?")
     assert _wait_until(
         lambda: f"sys_read_inbox_{n}" in _tool_outputs(_items(client, parent_id)), timeout=120
     ), f"orchestrator status check {n} did not complete"
     outputs = _tool_outputs(_items(client, parent_id))
-    assert f"sys_session_get_info_{n}" in outputs, f"get_info output missing: {sorted(outputs)}"
-    return json.loads(outputs[f"sys_session_get_info_{n}"]), outputs[f"sys_read_inbox_{n}"]
+    missing = [name for name in _STATUS_TOOLS if f"{name}_{n}" not in outputs]
+    assert not missing, f"status check {n} outputs missing {missing}: {sorted(outputs)}"
+    return {name: outputs[f"{name}_{n}"] for name in _STATUS_TOOLS}
 
 
 def _stop(client: httpx.Client, *session_ids: str) -> None:
@@ -518,9 +428,8 @@ def _stop(client: httpx.Client, *session_ids: str) -> None:
 class StallObservation:
     parent_id: str
     child_id: str
-    get_info: dict[str, Any]
-    get_info_again: dict[str, Any]
-    inbox: str
+    check_1: dict[str, str]
+    check_2: dict[str, str]
     compaction_items: list[dict[str, Any]]
     git_status_before: str
     git_status_after: str
@@ -529,6 +438,18 @@ class StallObservation:
     gate_pending: bool
     scripted_child_replies: int
     child_tool_requests: int
+
+    def get_info(self, n: int) -> dict[str, Any]:
+        return json.loads((self.check_1, self.check_2)[n - 1]["sys_session_get_info"])
+
+    def session_list(self, n: int) -> dict[str, Any]:
+        return json.loads((self.check_1, self.check_2)[n - 1]["sys_session_list"])
+
+    def history_tail(self, n: int) -> list[dict[str, Any]]:
+        return json.loads((self.check_1, self.check_2)[n - 1]["sys_session_get_history"])["items"]
+
+    def inbox(self, n: int) -> str:
+        return (self.check_1, self.check_2)[n - 1]["sys_read_inbox"]
 
 
 @pytest.fixture(scope="module")
@@ -541,7 +462,9 @@ def stalled_subagent(rig: Rig) -> Iterator[StallObservation]:
     create = client.post("/v1/sessions", json={"agent_id": agent_id})
     create.raise_for_status()
     parent_id = str(create.json()["id"])
-    client.patch(f"/v1/sessions/{parent_id}", json={"runner_id": rig.runner_id}).raise_for_status()
+    client.patch(
+        f"/v1/sessions/{parent_id}", json={"runner_id": rig.stack.runner_id}
+    ).raise_for_status()
     git_status_before = _git(workspace, "status", "--porcelain")
     head_before = _git(workspace, "rev-parse", "HEAD")
 
@@ -576,15 +499,14 @@ def stalled_subagent(rig: Rig) -> Iterator[StallObservation]:
         )
         # Let the forwarder persist anything still in flight before polling.
         time.sleep(5)
-        get_info, inbox = _status_check(client, mock_url, parent_id, child_id, 1)
+        check_1 = _status_check(client, mock_url, parent_id, child_id, 1)
         time.sleep(_POLL_GAP_S)
-        get_info_again, _ = _status_check(client, mock_url, parent_id, child_id, 2)
+        check_2 = _status_check(client, mock_url, parent_id, child_id, 2)
         observation = StallObservation(
             parent_id=parent_id,
             child_id=child_id,
-            get_info=get_info,
-            get_info_again=get_info_again,
-            inbox=inbox,
+            check_1=check_1,
+            check_2=check_2,
             compaction_items=_compaction_items(client, child_id),
             git_status_before=git_status_before,
             git_status_after=_git(workspace, "status", "--porcelain"),
@@ -594,7 +516,7 @@ def stalled_subagent(rig: Rig) -> Iterator[StallObservation]:
             scripted_child_replies=scripted_child_replies,
             child_tool_requests=_child_tool_requests(mock_url),
         )
-        print("STALL_OBSERVATION " + json.dumps(asdict(observation), default=str)[:20000])
+        print("STALL_OBSERVATION " + json.dumps(asdict(observation), default=str)[:40000])
         yield observation
     finally:
         with contextlib.suppress(httpx.HTTPError):
@@ -617,20 +539,25 @@ def test_parked_subagent_metadata_reports_compactions(stalled_subagent: StallObs
     new_paths = set(obs.git_status_after.splitlines()) - set(obs.git_status_before.splitlines())
     assert not new_paths, f"sub-agent wrote to the workspace: {sorted(new_paths)}"
     assert obs.head_before == obs.head_after
-    assert "docs-ia" not in obs.inbox and obs.child_id not in obs.inbox, obs.inbox
-    info = obs.get_info
+    for n in (1, 2):
+        assert "docs-ia" not in obs.inbox(n) and obs.child_id not in obs.inbox(n), obs.inbox(n)
+    assert obs.history_tail(1) == obs.history_tail(2), "history tail advanced while parked"
+    assert any(item.get("type") == "compaction" for item in obs.history_tail(2)), obs.history_tail(
+        2
+    )
+    info = obs.get_info(1)
     assert info.get("status") == "running", info
     assert info.get("runner_online") is True, info
     assert info.get("pending_elicitation_count") == 0, info
+    last_activity_at = info.get("last_activity_at")
+    assert isinstance(last_activity_at, int), info
     # get_info metadata must expose the compaction aggregate without transcript scraping.
     assert info.get("compaction_count") == 2, info
     last_compaction_at = info.get("last_compaction_at")
-    assert isinstance(last_compaction_at, int), info
-    last_activity_at = info.get("last_activity_at")
-    assert isinstance(last_activity_at, int) and last_activity_at >= last_compaction_at, info
+    assert isinstance(last_compaction_at, int) and last_activity_at >= last_compaction_at, info
     # A second reading while the reply is still held must show the same aggregate
     # and an unchanged heartbeat: the parked session has produced nothing since.
-    again = obs.get_info_again
+    again = obs.get_info(2)
     assert again.get("compaction_count") == 2, again
     assert again.get("last_compaction_at") == last_compaction_at, again
     assert again.get("last_activity_at") == last_activity_at, again
