@@ -620,8 +620,8 @@ def load_databricks_org_id(server_url: str) -> str | None:
 
 def _url_origin(url: str) -> tuple[str, str, int | None] | None:
     """``(scheme, lowercased host, port)`` for *url*, or ``None`` when malformed."""
-    parts = urllib.parse.urlsplit(url)
     try:
+        parts = urllib.parse.urlsplit(url)
         port = parts.port
     except ValueError:
         return None

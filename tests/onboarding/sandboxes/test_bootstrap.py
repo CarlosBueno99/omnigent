@@ -493,12 +493,13 @@ def _patch_saved_local_pairing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_unpaired_login_consent(
-    monkeypatch: pytest.MonkeyPatch, *, tty: bool, answer: bool | None = None
+    monkeypatch: pytest.MonkeyPatch, *, tty: bool, answer: bool | BaseException | None = None
 ) -> list[str]:
     """Stage a first cross-origin pairing: no saved local login, scripted prompt.
 
     :param tty: What ``sys.stdin.isatty()`` reports.
-    :param answer: The scripted answer; ``None`` fails the test if a prompt is shown.
+    :param answer: The scripted answer, an exception the prompt raises (Ctrl-C/EOF),
+        or ``None`` to fail the test if a prompt is shown.
     :returns: Capture list of the confirmation prompts shown.
     """
     monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda server: None)
@@ -508,6 +509,8 @@ def _patch_unpaired_login_consent(
     def _confirm(text: str, **kwargs: object) -> bool:
         prompts.append(text)
         assert answer is not None, f"unexpected confirmation prompt: {text}"
+        if isinstance(answer, BaseException):
+            raise answer
         return answer
 
     monkeypatch.setattr(bootstrap_mod.click, "confirm", _confirm)
@@ -540,12 +543,13 @@ def test_login_asks_before_first_cross_origin_pairing_on_tty(
     ]
 
 
+@pytest.mark.parametrize("answer", [False, click.Abort()], ids=["no", "aborted"])
 def test_login_declined_cross_origin_pairing_touches_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, answer: bool | BaseException
 ) -> None:
-    """Declining the pairing stops before anything reaches the sandbox."""
+    """Declining (or aborting) the pairing stops before anything reaches the sandbox."""
     launcher = _FakeLauncher(login_lines=["Logged in.\r\n"])
-    _patch_unpaired_login_consent(monkeypatch, tty=True, answer=False)
+    _patch_unpaired_login_consent(monkeypatch, tty=True, answer=answer)
 
     with pytest.raises(click.ClickException) as exc:
         login_app_oauth_in_sandbox(
@@ -619,6 +623,9 @@ def test_login_requires_prior_local_login_when_unattended(
         )
 
     assert "login https://app.example.com" in str(exc.value)
+    # The remedy must work unattended too, and must not name a flag this command lacks.
+    assert "login --yes https://app.example.com" in str(exc.value)
+    assert "--no-auth" not in str(exc.value)
     assert prompts == []
     assert launcher.log == []
 

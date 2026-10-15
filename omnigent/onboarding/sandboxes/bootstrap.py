@@ -614,10 +614,16 @@ def _confirm_sandbox_workspace_pairing(server_url: str, workspace_host: str, dis
         raise click.ClickException(
             f"No saved login pairs {display} with workspace {workspace_host}. The sandbox "
             "login would send that workspace's credentials to a server on another origin, "
-            f"which needs your approval: run `{cli_invocation()} login {display}` first "
-            "(or pass --no-auth) and retry."
+            f"which needs your approval: run `{cli_invocation()} login {display}` "
+            f"(or `{cli_invocation()} login --yes {display}` unattended) first and retry."
         )
-    if not click.confirm(databricks_pairing_question(display, workspace_host), default=False):
+    try:
+        approved = click.confirm(
+            databricks_pairing_question(display, workspace_host), default=False
+        )
+    except click.Abort:
+        approved = False
+    if not approved:
         raise click.ClickException(
             f"Sandbox login cancelled: no workspace credentials were sent to {display}."
         )

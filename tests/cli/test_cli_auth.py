@@ -256,9 +256,12 @@ def test_databricks_pairing_trusted_normalizes_origin_and_saved_host(token_dir) 
     assert databricks_pairing_trusted(
         "https://myapp-123.aws.databricksapps.com", "https://Example.Databricks.com"
     )
-    # A redirect naming a malformed port is untrusted, not a crash.
+    # A redirect naming a malformed port or host is untrusted, not a crash.
     assert not databricks_pairing_trusted(
         "https://myapp-123.aws.databricksapps.com", "https://example.databricks.com:bad"
+    )
+    assert not databricks_pairing_trusted(
+        "https://myapp-123.aws.databricksapps.com", "https://[::1"
     )
 
 
