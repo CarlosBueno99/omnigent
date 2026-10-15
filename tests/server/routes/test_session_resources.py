@@ -9688,19 +9688,19 @@ async def test_hook_blocked_prompt_is_not_reclassified_as_missing_by_later_mirro
     transcript.write_text(
         "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
     )
-    blocked_pending = pending_inputs.record(
-        session_id,
-        [{"type": "input_text", "text": blocked_text}],
-        created_by="alice@example.com",
-        stable_id="1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
-    )
-    later_pending = pending_inputs.record(
-        session_id,
-        [{"type": "input_text", "text": later_text}],
-        created_by="alice@example.com",
-        stable_id="2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
-    )
     try:
+        blocked_pending = pending_inputs.record(
+            session_id,
+            [{"type": "input_text", "text": blocked_text}],
+            created_by="alice@example.com",
+            stable_id="1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        )
+        later_pending = pending_inputs.record(
+            session_id,
+            [{"type": "input_text", "text": later_text}],
+            created_by="alice@example.com",
+            stable_id="2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        )
         _cursor, _response_id, items = read_transcript_items_since(
             transcript, 0, agent_name=CLAUDE_NATIVE_AGENT_NAME
         )
@@ -9760,9 +9760,9 @@ async def test_ambiguous_hook_block_notice_keeps_the_queued_original(tmp_path: P
     store = _ConversationStore()
     conversation = store.get_conversation(session_id)
     assert conversation is not None
-    blocked_text = "c"
+    blocked_text = "deploy the blue build"
     later_text = "continue"
-    reason = "a\n\nOriginal prompt: b"
+    reason = "Not now.\n\nOriginal prompt: was echoed by the hook"
     records = [
         {
             "type": "system",
@@ -9784,17 +9784,17 @@ async def test_ambiguous_hook_block_notice_keeps_the_queued_original(tmp_path: P
     transcript.write_text(
         "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
     )
-    for text, stable_id in (
-        (blocked_text, "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"),
-        (later_text, "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"),
-    ):
-        pending_inputs.record(
-            session_id,
-            [{"type": "input_text", "text": text}],
-            created_by="alice@example.com",
-            stable_id=stable_id,
-        )
     try:
+        for text, stable_id in (
+            (blocked_text, "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"),
+            (later_text, "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"),
+        ):
+            pending_inputs.record(
+                session_id,
+                [{"type": "input_text", "text": text}],
+                created_by="alice@example.com",
+                stable_id=stable_id,
+            )
         _cursor, _response_id, items = read_transcript_items_since(
             transcript, 0, agent_name=CLAUDE_NATIVE_AGENT_NAME
         )
@@ -9819,7 +9819,8 @@ async def test_ambiguous_hook_block_notice_keeps_the_queued_original(tmp_path: P
             "native_prompt_blocked_by_hook",
             "native_prompt_not_recorded",
         ]
-        assert errors[0][1].endswith(f"{reason}\n\nOriginal prompt: {blocked_text}")
+        assert errors[0][1].endswith("the Terminal view shows the full text.")
+        assert blocked_text not in errors[0][1]
         assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == []
     finally:
         pending_inputs.reset_for_tests()

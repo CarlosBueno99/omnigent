@@ -8169,6 +8169,10 @@ _BLOCKED_PROMPT_SEPARATOR = "\n\nOriginal prompt: "
 _BLOCKED_PROMPT_NOTICE = (
     "Claude Code did not run this message: a UserPromptSubmit hook blocked it."
 )
+_BLOCKED_PROMPT_UNSEPARATED = (
+    "The hook's reason could not be told apart from the prompt in Claude's notice; "
+    "the Terminal view shows the full text."
+)
 
 
 def _hook_block_outcome(entry: _JsonObject) -> _JsonObject | None:
@@ -8239,7 +8243,14 @@ def _blocked_prompt_transcript_items(
     else:
         # No usable notice text, or a split that would be a guess: emit only
         # the notice and leave the queued message to the server's own settlement.
-        reason, prompt = (structured if structured is not None else body or ""), ""
+        prompt = ""
+        if structured is not None:
+            reason = structured
+        elif body is None or _BLOCKED_PROMPT_SEPARATOR in body:
+            # Echoing the whole notice would repeat the prompt the message shows.
+            reason = _BLOCKED_PROMPT_UNSEPARATED
+        else:
+            reason = body
     prompt = _unwrap_pasted_content_markers(prompt)
     source_key = _transcript_source_key(entry, line_number, record_offset)
     response_id = _response_id_from_source(source_key)

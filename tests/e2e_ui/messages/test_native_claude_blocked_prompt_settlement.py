@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import shutil
+import tempfile
 import time
 import uuid
 from collections.abc import Iterator
@@ -75,15 +76,19 @@ def hook_blocked_claude_session(
     """
     workspaces_root = _REPO_ROOT / ".omnigent" / "e2e-hook-workspaces"
     workspaces_root.mkdir(parents=True, exist_ok=True)
-    # A killed run leaves its workspace behind; anything an hour old is not in use.
+    # Each workspace is named by its pytest pid; a killed run's leftovers are
+    # swept only once that process is gone, so a live run is never touched.
     for stale in workspaces_root.iterdir():
+        pid = stale.name.partition("-")[0]
         try:
-            is_stale = stale.is_dir() and time.time() - stale.stat().st_mtime > 3600
+            if not pid.isdigit() or not stale.is_dir():
+                continue
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            shutil.rmtree(stale, ignore_errors=True)
         except OSError:
             continue
-        if is_stale:
-            shutil.rmtree(stale, ignore_errors=True)
-    workspace = workspaces_root / uuid.uuid4().hex[:8]
+    workspace = Path(tempfile.mkdtemp(prefix=f"{os.getpid()}-", dir=workspaces_root))
     hooks_dir = workspace / ".claude" / "hooks"
     hooks_dir.mkdir(parents=True)
     script = hooks_dir / "block_marker.sh"

@@ -1359,18 +1359,19 @@ def test_transcript_mirrors_prompt_blocked_by_hook_from_notice_text(tmp_path: Pa
 
 
 _HEADER = "UserPromptSubmit operation blocked by hook:\n"
+_UNSEPARATED = (
+    "The hook's reason could not be told apart from the prompt in Claude's notice; "
+    "the Terminal view shows the full text."
+)
 
 
 @pytest.mark.parametrize(
     "entry,expected_reason",
     [
-        (
-            _notice_only_blocked_prompt_entry("a\n\nOriginal prompt: b", "c"),
-            "a\n\nOriginal prompt: b\n\nOriginal prompt: c",
-        ),
+        (_notice_only_blocked_prompt_entry("a\n\nOriginal prompt: b", "c"), _UNSEPARATED),
         (
             _notice_only_blocked_prompt_entry("No.", "line one\n\nOriginal prompt: quoted"),
-            "No.\n\nOriginal prompt: line one\n\nOriginal prompt: quoted",
+            _UNSEPARATED,
         ),
         ({"type": "system", "subtype": "informational", "content": f"{_HEADER}No."}, "No."),
         (_blocked_prompt_entry("No.", "", content=f"{_HEADER}No."), "No."),
