@@ -70,11 +70,11 @@ _GRACEFUL_SHUTDOWN_TUNNEL_TIMEOUT_S = 15.0
 # expires, so a live session's HTTP callbacks never present an expired
 # token. Well under the server-side token TTL.
 _MANAGED_MINT_REFRESH_SKEW_S = 300.0
-# A host-launched runner swaps its bootstrap bearer for a runner-owned token
-# this long after the factory is built, on the next ordinary call. The boot
-# path stays on the bearer (no mint before the tunnel connects), and a
-# transient mint failure retries after the same delay.
+# Swap the bootstrap bearer for the runner's own token on the first ordinary
+# call at least this long after construction (boot-time calls stay on the
+# bearer); transient mint failures retry with doubling delays up to the cap.
 _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S = 30.0
+_BOOTSTRAP_BEARER_EXCHANGE_MAX_DELAY_S = 300.0
 # Cadence of the runner's credential keepalive. Stays under
 # _MANAGED_MINT_REFRESH_SKEW_S so a tick lands inside the re-mint window even
 # when no callback has run for the token's whole lifetime.
@@ -520,6 +520,7 @@ class _InitialAuthTokenFactory:
         self._fallback_factory: Callable[[], str | None] | None = None
         self._retry_discovery_at = 0.0
         self._exchange_due_at = time.monotonic() + _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S
+        self._exchange_retry_s = _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S
         self._exchange_unavailable = False
         self._no_credential_logged = False
         self._lock = threading.Lock()
@@ -596,7 +597,11 @@ class _InitialAuthTokenFactory:
             # rejected: keep the bearer until the server rejects it.
             self._exchange_unavailable = True
             return
-        self._exchange_due_at = now + _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S
+        # Transient failure: the mint blocks callers on the lock, so back off.
+        self._exchange_due_at = now + self._exchange_retry_s
+        self._exchange_retry_s = min(
+            self._exchange_retry_s * 2, _BOOTSTRAP_BEARER_EXCHANGE_MAX_DELAY_S
+        )
 
     @property
     def declined(self) -> bool:

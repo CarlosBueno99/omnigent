@@ -11,6 +11,7 @@ import signal
 import sys
 import tarfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +48,10 @@ from omnigent.runner._entry import (
     main,
 )
 from omnigent.runner.identity import (
+    RUNNER_DELEGATED_AUTH_ENV_VAR,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
     RUNNER_INTERACTIVE_SHELLS_ENV_VAR,
+    RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
     RUNNER_TUNNEL_TOKEN_HEADER,
 )
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
@@ -629,6 +632,71 @@ async def test_tunnel_boot_hands_its_auth_resolution_to_create_app(
         await entry_mod._run_tunnel_from_env()
 
     assert seen == {"auth_token_factory": None, "auth_resolved": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_factory", [True, False], ids=["factory", "no-factory"])
+async def test_tunnel_boot_owns_the_credential_keepalive(
+    monkeypatch: pytest.MonkeyPatch, has_factory: bool
+) -> None:
+    """The runner starts the credential keepalive with its factory and cancels it on exit.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :param has_factory: Whether boot resolved an auth token factory at all.
+    :returns: None.
+    """
+    import types
+
+    import omnigent.runner._entry as entry_mod
+
+    class _NullLifespan:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+    fake_app = types.SimpleNamespace(
+        state=types.SimpleNamespace(),
+        router=types.SimpleNamespace(lifespan_context=lambda app: _NullLifespan()),
+    )
+    factory = (lambda: "tok") if has_factory else None
+    events: list[tuple[object, ...]] = []
+
+    async def _keepalive(
+        keepalive_factory: Callable[[], str | None], *, interval_s: float
+    ) -> None:
+        events.append(("started", keepalive_factory, interval_s))
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            events.append(("cancelled",))
+            raise
+
+    async def _tunnel(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(entry_mod, "_runner_auth_factory", None)
+    monkeypatch.setattr(entry_mod, "_server_url_from_env", lambda: "http://runner.test")
+    monkeypatch.setattr(entry_mod, "_make_auth_token_factory", lambda: factory)
+    monkeypatch.setattr(entry_mod, "_runner_tunnel_binding_token_from_env", lambda: None)
+    monkeypatch.setattr(entry_mod, "_runner_parent_pid_from_env", lambda: None)
+    monkeypatch.setattr(entry_mod, "_load_runner_idle_timeout_s_from_config", lambda: 0)
+    monkeypatch.setattr(entry_mod, "_install_signal_handlers", lambda *a, **k: None)
+    monkeypatch.setattr(entry_mod, "create_app", lambda **kwargs: fake_app)
+    monkeypatch.setattr(entry_mod, "_run_credential_keepalive", _keepalive)
+    monkeypatch.setattr("omnigent.runner.identity.get_stable_runner_id", lambda: "runner-test-id")
+    monkeypatch.setattr("omnigent.runner.transports.ws_tunnel.serve.serve_tunnel", _tunnel)
+
+    await asyncio.wait_for(entry_mod._run_tunnel_from_env(), timeout=10.0)
+
+    expected = (
+        [("started", factory, entry_mod._CREDENTIAL_KEEPALIVE_INTERVAL_S), ("cancelled",)]
+        if has_factory
+        else []
+    )
+    assert events == expected
 
 
 def test_make_auth_token_factory_none_without_creds_or_binding_token(
@@ -1425,8 +1493,8 @@ def _host_launched_runner_behind_validating_edge(
 
     monkeypatch.setenv("RUNNER_SERVER_URL", "https://app.databricksapps.com")
     monkeypatch.setenv(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, "host-bootstrap-token")
-    monkeypatch.setenv("OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN", "host-binding-token")
-    monkeypatch.setenv("OMNIGENT_RUNNER_DELEGATED_AUTH", "1")
+    monkeypatch.setenv(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR, "host-binding-token")
+    monkeypatch.setenv(RUNNER_DELEGATED_AUTH_ENV_VAR, "1")
     monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url, **_kw: None)
     monkeypatch.setattr("omnigent.cli_auth.refresh_stored_token", lambda _url, **_kw: None)
     monkeypatch.setattr("omnigent.inner.databricks_executor._resolve_databricks_auth", _no_sdk)
@@ -1437,13 +1505,7 @@ def _host_launched_runner_behind_validating_edge(
 def test_host_launched_runner_exchanges_bootstrap_bearer_before_it_lapses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A host-launched runner swaps to its own owner JWT while the host bearer is accepted.
-
-    An Apps edge validates the bearer on the mint request too, so a runner that
-    only exchanges after the rejection can no longer mint; with no SDK/OIDC
-    credential in the runner process it is left with nothing, and every HTTP
-    callback — including the policy relay behind the native prompt hook — fails
-    until the host restarts. The exchange must happen while the bearer is live.
+    """Exchanges the host bearer before it expires, without SDK/OIDC credentials.
 
     :param monkeypatch: Pytest environment patch fixture.
     :returns: None.
@@ -1544,8 +1606,8 @@ def test_bootstrap_bearer_stays_in_use_when_server_declines_to_mint(
 
     monkeypatch.setenv("RUNNER_SERVER_URL", "https://omnigent.example.com")
     monkeypatch.setenv(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, "host-bootstrap-token")
-    monkeypatch.setenv("OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN", "bind-tok")
-    monkeypatch.setenv("OMNIGENT_RUNNER_DELEGATED_AUTH", "1")
+    monkeypatch.setenv(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR, "bind-tok")
+    monkeypatch.setenv(RUNNER_DELEGATED_AUTH_ENV_VAR, "1")
     monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url, **_kw: None)
     monkeypatch.setattr("omnigent.cli_auth.refresh_stored_token", lambda _url, **_kw: None)
     monkeypatch.setattr("omnigent.inner.databricks_executor._resolve_databricks_auth", _resolve)
@@ -1565,6 +1627,77 @@ def test_bootstrap_bearer_stays_in_use_when_server_declines_to_mint(
     unauthorized = httpx.Response(401)
     captured = _drive_auth_flow(_RunnerDatabricksAuth(factory), request, unauthorized)
     assert captured == ["Bearer host-bootstrap-token", "Bearer sdk-token"]
+
+
+def _transient_connect_error(mint_url: str) -> Exception:
+    return httpx.ConnectError("refused", request=httpx.Request("POST", mint_url))
+
+
+def _transient_bad_gateway(mint_url: str) -> Exception:
+    request = httpx.Request("POST", mint_url)
+    return httpx.HTTPStatusError(
+        "Bad Gateway", request=request, response=httpx.Response(502, request=request)
+    )
+
+
+@pytest.mark.parametrize(
+    "transient_failure",
+    [_transient_connect_error, _transient_bad_gateway],
+    ids=["connect-error", "http-5xx"],
+)
+def test_bootstrap_bearer_exchange_retries_after_transient_mint_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    transient_failure: Callable[[str], Exception],
+) -> None:
+    """Transient mint failures keep the host bearer, back off, and still exchange later.
+
+    The mint runs under the factory lock, so fixed 30s retries would stall
+    ordinary callbacks on every attempt while the server is unreachable.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :param transient_failure: Builds the exception the mint raises while failing.
+    :returns: None.
+    """
+    from omnigent.runner._entry import (
+        _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S,
+        _BOOTSTRAP_BEARER_EXCHANGE_MAX_DELAY_S,
+    )
+
+    mint_calls: list[int] = []
+    failures_left = 4
+
+    def _flaky_mint(mint_url: str, *args: Any, **kwargs: Any) -> tuple[str, float]:
+        del args, kwargs
+        nonlocal failures_left
+        mint_calls.append(1)
+        if failures_left:
+            failures_left -= 1
+            raise transient_failure(mint_url)
+        return "owner-jwt", time.time() + 1800
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "https://app.databricksapps.com")
+    monkeypatch.setenv(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, "host-bootstrap-token")
+    monkeypatch.setenv(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR, "bind-tok")
+    monkeypatch.setenv(RUNNER_DELEGATED_AUTH_ENV_VAR, "1")
+    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", _flaky_mint)
+
+    factory = _make_auth_token_factory()
+    assert isinstance(factory, _InitialAuthTokenFactory)
+    expected_delay = _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S
+    for attempt in range(1, 5):
+        factory._exchange_due_at = 0.0
+        before = time.monotonic()
+        assert factory() == "host-bootstrap-token"
+        assert len(mint_calls) == attempt
+        assert factory._exchange_due_at >= before + expected_delay
+        expected_delay = min(expected_delay * 2, _BOOTSTRAP_BEARER_EXCHANGE_MAX_DELAY_S)
+    # Not yet due: no mint attempt stalls this call.
+    assert factory() == "host-bootstrap-token"
+    assert len(mint_calls) == 4
+    # The server recovers: the next due call completes the exchange.
+    factory._exchange_due_at = 0.0
+    assert factory() == "owner-jwt"
+    assert len(mint_calls) == 5
 
 
 def test_mint_managed_owner_token_posts_binding_token_and_parses_response(
