@@ -124,12 +124,13 @@ def test_discover_child_session_returns_newest_child(tmp_path: Path) -> None:
         ],
     )
     con.commit()
+    con.close()
     assert f._discover_child_session(db, "parent") == "child_new"
     # No children -> None (forwarder stays pinned to the parent).
     assert f._discover_child_session(db, "child_new") is None
     # A parent that is still live (or ended for another reason) has no continuation.
-    con.execute("UPDATE sessions SET end_reason = NULL WHERE id = 'parent'")
-    con.commit()
+    with sqlite3.connect(db) as con:
+        con.execute("UPDATE sessions SET end_reason = NULL WHERE id = 'parent'")
     con.close()
     assert f._discover_child_session(db, "parent") is None
 
@@ -209,6 +210,7 @@ def test_is_side_session_binds_markers_to_the_queried_parent() -> None:
     assert f._is_side_session("subagent", None, parent_id="main") is True
     assert f._is_side_session("cli", "not json", parent_id="main") is False
     assert f._is_side_session("cli", '{"_delegate_from": null}') is False
+    assert f._is_side_session("cli", '{"_branched_from": ""}') is False
 
 
 def test_side_session_checks_ignore_inherited_markers(tmp_path: Path) -> None:
@@ -1005,6 +1007,71 @@ async def test_forward_loop_repin_waits_for_the_parent_compression_stamp(
             base_url="http://x",
             headers={},
             session_id="conv_retry",
+            bridge_dir=bridge_dir,
+            agent_name="hermes-native-ui",
+            workspace=workspace,
+            launch_epoch_s=1000.0,
+            db_path=db,
+        )
+
+    assert f._read_state(bridge_dir).hermes_session_id == "child_1"
+    assert _mirrored_texts(posted) == ["child hi", "child reply"]
+
+
+async def test_forward_loop_repins_when_parent_ends_by_compression_without_compacted_rows(
+    tmp_path, monkeypatch
+) -> None:
+    """A fork compaction that marks no ``compacted`` rows still re-pins once the parent ended."""
+    workspace = str(tmp_path)
+    db = tmp_path / "state.db"
+    con = sqlite3.connect(db)
+    con.executescript(_SCHEMA)
+    con.executemany(
+        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason)"
+        " VALUES (?,?,?,?,?,?)",
+        [
+            ("parent_1", "cli", workspace, 1000.0, None, "compression"),
+            ("child_1", "cli", workspace, 1005.0, "parent_1", None),
+        ],
+    )
+    con.executemany(
+        "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
+        [
+            ("parent_1", "assistant", "last parent reply", 1, 0),
+            ("child_1", "user", "child hi", 1, 0),
+            ("child_1", "assistant", "child reply", 1, 0),
+        ],
+    )
+    con.commit()
+    con.close()
+
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    f._write_state(bridge_dir, f._ForwardState(hermes_session_id="parent_1", last_id=1))
+
+    posted: list[f._MirrorItem] = []
+
+    async def _fake_post(_client, *, session_id, item):
+        posted.append(item)
+
+    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
+    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
+    _capture_server_client(monkeypatch)
+
+    iteration = {"n": 0}
+
+    async def _sleep(_s):
+        iteration["n"] += 1
+        if iteration["n"] >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await f.forward_hermes_store_to_session(
+            base_url="http://x",
+            headers={},
+            session_id="conv_fork",
             bridge_dir=bridge_dir,
             agent_name="hermes-native-ui",
             workspace=workspace,

@@ -470,7 +470,7 @@ def _is_side_session(
         return False
     if not isinstance(data, dict):
         return False
-    markers = [data[key] for key in _FORK_MARKERS if data.get(key) is not None]
+    markers = [data[key] for key in _FORK_MARKERS if data.get(key)]
     if parent_id is None:
         return bool(markers)
     return parent_id in markers
@@ -501,6 +501,28 @@ def _is_side_session_id(db_path: Path, hermes_session_id: str) -> bool:
     if row is None:
         return False
     return _is_side_session(row[0], row[1], parent_id=_optional_id(row[2]))
+
+
+def _ended_by_compression(db_path: Path, hermes_session_id: str) -> bool:
+    """Whether Hermes ended *hermes_session_id* with ``end_reason = 'compression'``.
+
+    ``False`` when the column is absent or the store is unreadable.
+    """
+    con = _connect_ro(db_path)
+    if con is None:
+        return False
+    try:
+        if "end_reason" not in _table_columns(con, "sessions"):
+            return False
+        row = con.execute(
+            "SELECT end_reason FROM sessions WHERE id = ?", (hermes_session_id,)
+        ).fetchone()
+    except sqlite3.Error as exc:
+        _warn_sqlite_once("end-reason check", exc)
+        return False
+    finally:
+        con.close()
+    return row is not None and row[0] == "compression"
 
 
 def _discover_session_id(
@@ -1240,8 +1262,10 @@ async def forward_hermes_store_to_session(
     async with open_server_client(base_url, headers=headers, auth=auth, timeout=timeout) as client:
         usage_tracker = _HermesUsageTracker(client, session_id, bridge_dir)
         compaction_persisted = False
-        # Polls left to look for a compression continuation (see _REPIN_RETRY_POLLS).
+        # Polls left to look for a compression continuation (see _REPIN_RETRY_POLLS),
+        # and whether the pinned session was already seen ended by compression.
         repin_polls_left = 0
+        compression_end_seen = False
         while True:
             try:
                 if hermes_session_id is None:
@@ -1307,6 +1331,7 @@ async def forward_hermes_store_to_session(
                         hermes_session_id = None
                         active_turn_id = None
                         repin_polls_left = 0
+                        compression_end_seen = False
                     else:
                         # ``last_id`` is the last row whose items ALL posted, so a row
                         # that failed partway is re-read here. Drop the items of it
@@ -1426,6 +1451,13 @@ async def forward_hermes_store_to_session(
                                     exc_info=True,
                                 )
                             repin_polls_left = _REPIN_RETRY_POLLS
+                        if not compression_end_seen and await asyncio.to_thread(
+                            _ended_by_compression, db, hermes_session_id
+                        ):
+                            # A fork compaction ends the pinned session even when no
+                            # compacted rows (or no such column) mark it.
+                            compression_end_seen = True
+                            repin_polls_left = _REPIN_RETRY_POLLS
                         if repin_polls_left > 0:
                             repin_polls_left -= 1
                             # Re-pin to the compression continuation so the mirror
@@ -1445,6 +1477,7 @@ async def forward_hermes_store_to_session(
                                     active_turn_id = None
                                     compaction_persisted = False
                                     repin_polls_left = 0
+                                    compression_end_seen = False
                                     _external_id_synced = False
                                     # The idle dedup baseline is per-terminal but
                                     # the completed-turn count is per
