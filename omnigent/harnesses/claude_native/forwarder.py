@@ -3616,7 +3616,8 @@ def _stop_failure_detail(
     Return the reason a ``StopFailure`` hook gives for its failed turn.
 
     When ``error_details`` is absent, prefer an explicit API error from the
-    same response before falling back to the hook's category.
+    same response; only the category-or-nothing fallback is logged as a
+    WARNING so the missing field stays observable in structured logs.
 
     :param record: ``StopFailure`` hook record.
     :param session_id: Session id for structured warning logs on fallback.
@@ -3625,6 +3626,10 @@ def _stop_failure_detail(
     """
     if record.failure_message is not None:
         return record.failure_message
+    if transcript_context is not None:
+        message = transcript_context.get("native_error_message")
+        if isinstance(message, str):
+            return _display_text(message, is_api_error=True)
     _logger.warning(
         "StopFailure hook carried no error_details; using fallback detail; "
         "session=%s event_cursor=%s category=%s",
@@ -3633,10 +3638,6 @@ def _stop_failure_detail(
         record.failure_category,
         extra={"session_id": session_id},
     )
-    if transcript_context is not None:
-        message = transcript_context.get("native_error_message")
-        if isinstance(message, str):
-            return _display_text(message, is_api_error=True)
     if record.failure_category is not None:
         return f"Claude Code ended the turn with an API error ({record.failure_category})."
     return None
@@ -3709,9 +3710,12 @@ def _stop_failure_context(
 ) -> FailureContext:
     """Preserve hook evidence separately from the displayed error detail."""
     reason = _subagent_hook_reason(record, parent_claude_session_ids)
+    # Transcript evidence only stands in for absent ``error_details``, matching
+    # the precedence ``_stop_failure_detail`` applies to the displayed detail.
+    explicit_api_error = transcript_context if record.failure_message is None else None
     context: dict[str, object] = {
         **(record.failure_context or {}),
-        **(transcript_context or {}),
+        **(explicit_api_error or {}),
         "failure_id": native_failure_id(
             "claude_hook",
             session_id,
@@ -3734,10 +3738,10 @@ def _stop_failure_context(
         "failure_decision": "suppressed" if reason else "session_failed",
         "suppression_reason": reason,
         "detail_source": (
-            "explicit_api_error"
-            if transcript_context is not None
-            else "hook_error_details"
+            "hook_error_details"
             if record.failure_message is not None
+            else "explicit_api_error"
+            if explicit_api_error is not None
             else "hook_error_category"
             if record.failure_category is not None
             else "missing"
