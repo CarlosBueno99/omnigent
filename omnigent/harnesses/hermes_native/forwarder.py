@@ -530,6 +530,23 @@ def _ended_by_compression(db_path: Path, hermes_session_id: str) -> bool:
     return row is not None and row[0] == "compression"
 
 
+def _session_high_water(db_path: Path, hermes_session_id: str) -> int:
+    """``MAX(messages.id)`` of *hermes_session_id*, or ``0`` when unreadable or empty."""
+    con = _connect_ro(db_path)
+    if con is None:
+        return 0
+    try:
+        row = con.execute(
+            "SELECT MAX(id) FROM messages WHERE session_id = ?", (hermes_session_id,)
+        ).fetchone()
+    except sqlite3.Error as exc:
+        _warn_sqlite_once("high-water read", exc)
+        return 0
+    finally:
+        con.close()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def _discover_session_id(
     db_path: Path,
     workspace: str,
@@ -1237,6 +1254,7 @@ async def forward_hermes_store_to_session(
     # written) keeps the check pending for the next poll.
     binding_verdict: bool | None = False if hermes_session_id is None else None
     binding_check_polls = 0
+    skip_mirrored_history = False
     last_id = persisted.last_id if hermes_session_id is not None else 0
     # A row whose mirroring failed partway, and how many of its items already
     # posted; both ``0`` when ``last_id`` is a clean fully-mirrored high-water mark.
@@ -1276,6 +1294,11 @@ async def forward_hermes_store_to_session(
                         # The row never became readable: drop the binding so
                         # discovery can rebind the live session instead.
                         binding_verdict = True
+                    elif binding_verdict:
+                        # Main's earlier rows were mirrored before the side session
+                        # replaced it; resume past its current rows instead of
+                        # replaying them (the item POST has no dedup key).
+                        skip_mirrored_history = True
                     if binding_verdict:
                         # A helper or fork must never back the main transcript: drop
                         # the binding and its idle poster count (rebased onto the
@@ -1306,6 +1329,9 @@ async def forward_hermes_store_to_session(
                         binding_verdict = False
                         resuming = persisted.hermes_session_id == resolved
                         last_id = persisted.last_id if resuming else 0
+                        if skip_mirrored_history:
+                            last_id = await asyncio.to_thread(_session_high_water, db, resolved)
+                            skip_mirrored_history = False
                         partial_row_id = persisted.partial_row_id if resuming else 0
                         partial_row_items = persisted.partial_row_items if resuming else 0
                         # Discovery only (re)binds on a cold start or a

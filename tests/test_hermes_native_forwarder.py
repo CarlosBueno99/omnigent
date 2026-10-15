@@ -874,6 +874,16 @@ def _seed_main_with_finished_helper(db: Path, workspace: str, *, compacted: bool
     con.close()
 
 
+def _append_main_row(db: Path, text: str) -> None:
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
+        ("main", "user", text, 1, 0),
+    )
+    con.commit()
+    con.close()
+
+
 def _mirrored_texts(posted: list[f._MirrorItem]) -> list[str]:
     return [str(i.item_data["content"][0]["text"]) for i in posted if i.item_type == "message"]
 
@@ -1103,7 +1113,9 @@ async def test_forward_loop_drops_persisted_helper_binding(tmp_path, monkeypatch
 
     async def _sleep(_s):
         iteration["n"] += 1
-        if iteration["n"] >= 2:
+        if iteration["n"] == 1:
+            _append_main_row(db, "after recovery")
+        if iteration["n"] >= 3:
             raise asyncio.CancelledError
 
     monkeypatch.setattr(f.asyncio, "sleep", _sleep)
@@ -1120,14 +1132,12 @@ async def test_forward_loop_drops_persisted_helper_binding(tmp_path, monkeypatch
             db_path=db,
         )
 
+    # Main's rows 1-5 were mirrored before the helper took over: resume past them
+    # (no replay) and only mirror what lands afterwards.
     assert f._read_state(bridge_dir).hermes_session_id == "main"
-    assert _mirrored_texts(posted) == [
-        "please delegate a tiny task",
-        "dispatching a helper",
-        "the helper finished",
-    ]
+    assert _mirrored_texts(posted) == ["after recovery"]
     assert _patched_external_ids(patched) == ["main"]
-    # Main's completions are reported again from a clean baseline, then deduped.
+    # Main's completions are still reported once from the clean baseline, then deduped.
     assert idle_posts == ["idle"]
     assert hstatus.read_posted_count(bridge_dir) == 2
 
@@ -1162,7 +1172,9 @@ async def test_forward_loop_defers_binding_check_until_the_store_is_readable(
             # Hermes brings the store up two polls later.
             db.parent.mkdir()
             _seed_main_with_finished_helper(db, workspace, compacted=False)
-        if iteration["n"] >= 4:
+        if iteration["n"] == 3:
+            _append_main_row(db, "after recovery")
+        if iteration["n"] >= 5:
             raise asyncio.CancelledError
 
     monkeypatch.setattr(f.asyncio, "sleep", _sleep)
@@ -1180,11 +1192,7 @@ async def test_forward_loop_defers_binding_check_until_the_store_is_readable(
         )
 
     assert f._read_state(bridge_dir).hermes_session_id == "main"
-    assert _mirrored_texts(posted) == [
-        "please delegate a tiny task",
-        "dispatching a helper",
-        "the helper finished",
-    ]
+    assert _mirrored_texts(posted) == ["after recovery"]
     # The unverified helper binding was never advertised as the external session.
     assert _patched_external_ids(patched) == ["main"]
 
