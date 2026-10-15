@@ -21,7 +21,7 @@ import pytest
 
 from omnigent.debug_logging import record_to_row
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.inner.terminal import TerminalInstance
+from omnigent.inner.terminal import TerminalInstance, TmuxUnavailableError
 from omnigent.runner.native import orchestration
 from omnigent.runner.native.orchestration import (
     _NATIVE_TERMINAL_START_FAILED_CODE,
@@ -102,6 +102,7 @@ def test_other_causes_keep_generic_startup_failure_code(cause: Exception) -> Non
             OmnigentError("workspace gone", code=ErrorCode.WORKSPACE_MISSING),
             "user",
         ),
+        (TmuxUnavailableError("tmux is not installed or not on PATH."), "config"),
     ],
 )
 def test_start_failure_log_row_is_blocking_with_derived_category(
@@ -243,6 +244,130 @@ def test_codex_early_exit_diagnostic_failure_preserves_exit_cause(
     assert "Codex startup terminal output:" not in payload["message"]
     assert "private diagnostic failure detail" not in payload["message"]
     read_output.assert_called_once_with()
+
+
+def test_outdated_pi_cli_surfaces_its_actionable_message() -> None:
+    """An outdated Pi CLI shows the upgrade message, not the log pointer.
+
+    The raise site composes a client-safe message (installed version, floor,
+    upgrade command); the payload must carry it verbatim so the person sees
+    the remedy instead of "see the runner log".
+    """
+    from omnigent.harnesses.pi_native.main import PiNativeCliOutdatedError
+
+    remedy = (
+        "The installed Pi CLI (0.83.0) is older than the minimum Omnigent "
+        "supports (0.84.2). Upgrade with: npm install -g "
+        "@earendil-works/pi-coding-agent, then start the session again."
+    )
+    payload = _native_terminal_start_error_payload(
+        PiNativeCliOutdatedError(remedy), "Pi", session_id="conv_1"
+    )
+
+    assert payload["code"] == _NATIVE_TERMINAL_START_FAILED_CODE
+    assert remedy in payload["message"]
+    assert "see the runner log" not in payload["message"]
+    assert _ERROR_ID_RE.search(payload["message"]) is not None
+
+
+def test_host_setup_error_surfaces_its_remedy() -> None:
+    """A host without usable tmux shows how to fix it, not the log pointer."""
+    remedy = "tmux 3.2 is too old; managed terminals require tmux 3.3 or newer"
+    payload = _native_terminal_start_error_payload(
+        TmuxUnavailableError(remedy), "Claude", session_id="conv_1"
+    )
+
+    assert payload["code"] == _NATIVE_TERMINAL_START_FAILED_CODE
+    assert remedy in payload["message"]
+    assert "see the runner log" not in payload["message"]
+    assert _ERROR_ID_RE.search(payload["message"]) is not None
+
+
+def test_claude_early_exit_surfaces_classified_diagnosis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-Codex runtime's exit-at-spawn is classified like Codex's.
+
+    The exit status and captured output ride on the exception for every
+    runtime, so a Claude terminal whose CLI reports missing credentials must
+    surface the shared diagnosis instead of the generic log pointer — without
+    echoing the raw pane text.
+    """
+    monkeypatch.setenv("OMNIGENT_HARNESS_STDERR_ENABLED", "1")
+    instance = TerminalInstance(
+        name="claude",
+        session_key="main",
+        socket_path=tmp_path / "terminal.sock",
+        private_dir=tmp_path,
+        command="claude",
+    )
+    instance._remember_exit_status("1 1")
+    monkeypatch.setattr(instance, "last_exit_text", lambda: "Not logged in · Please run /login")
+
+    payload = _native_terminal_start_error_payload(
+        TerminalExitedDuringLaunch(instance), "Claude", session_id="conv_1"
+    )
+
+    message = payload["message"]
+    assert "Agent isn't signed in" in message
+    assert "no valid credentials" in message
+    assert "/login" in message
+    assert "Native Claude terminal failed to start" not in message
+    assert "see the runner log" not in message
+    # The diagnosis is rendered, never the raw pane text.
+    assert "Not logged in" not in message
+    assert _ERROR_ID_RE.search(message) is not None
+
+
+def test_pi_early_exit_without_match_falls_back_to_exit_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unclassified exit keeps the runtime's exit summary plus gated output."""
+    monkeypatch.setenv("OMNIGENT_HARNESS_STDERR_ENABLED", "1")
+    instance = TerminalInstance(
+        name="pi",
+        session_key="main",
+        socket_path=tmp_path / "terminal.sock",
+        private_dir=tmp_path,
+        command="pi",
+    )
+    instance._remember_exit_status("1 3")
+    monkeypatch.setattr(instance, "last_exit_text", lambda: "some unrecognized pane text")
+
+    payload = _native_terminal_start_error_payload(
+        TerminalExitedDuringLaunch(instance), "Pi", session_id="conv_1"
+    )
+
+    message = payload["message"]
+    assert "Pi terminal exited with status 3 before becoming available." in message
+    assert "Pi startup terminal output:\nsome unrecognized pane text" in message
+    assert "Native Pi terminal failed to start" not in message
+
+
+def test_claude_early_exit_output_gated_when_capture_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With stderr capture disabled, a non-Codex exit reads no pane output."""
+    monkeypatch.delenv("OMNIGENT_HARNESS_STDERR_ENABLED", raising=False)
+    instance = TerminalInstance(
+        name="claude",
+        session_key="main",
+        socket_path=tmp_path / "terminal.sock",
+        private_dir=tmp_path,
+        command="claude",
+    )
+    instance._remember_exit_status("1 1")
+    read_output = Mock(side_effect=AssertionError("capture is disabled"))
+    monkeypatch.setattr(instance, "last_exit_text", read_output)
+
+    payload = _native_terminal_start_error_payload(
+        TerminalExitedDuringLaunch(instance), "Claude", session_id="conv_1"
+    )
+
+    message = payload["message"]
+    assert "Claude terminal exited with status 1 before becoming available." in message
+    assert "startup terminal output:" not in message
+    read_output.assert_not_called()
 
 
 def test_unrelated_omnigent_error_is_not_treated_as_missing_agent() -> None:
