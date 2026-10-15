@@ -26,12 +26,23 @@ import secrets
 import shlex
 import sys
 import time
+import types
 from collections.abc import Callable, Mapping
 from typing import NotRequired, TypedDict
 
-import httpx
+# httpx's package import also loads its optional command-line client and its
+# click/pygments/rich dependencies, which hook processes never use and the
+# harness waits on. An empty stand-in makes httpx fall back to its stub ``main``.
+_skip_httpx_cli = "httpx" not in sys.modules
+if _skip_httpx_cli:
+    sys.modules["httpx._main"] = types.ModuleType("httpx._main")
+try:
+    import httpx
+finally:
+    if _skip_httpx_cli:
+        del sys.modules["httpx._main"]
 
-from omnigent.util.http_retry import bounded_retry_after_seconds
+from omnigent.util.http_retry import bounded_retry_after_seconds  # noqa: E402
 
 # How long to keep retrying transient 429 / 5xx / connect errors on the
 # policy evaluate POST before failing closed. Keeps the pre-execution

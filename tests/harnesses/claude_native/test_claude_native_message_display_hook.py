@@ -342,7 +342,7 @@ def test_policy_hook_skips_the_httpx_command_line_client() -> None:
             "sys.stdin = io.StringIO('{}')",
             "assert hook.main(['evaluate-policy', '--bridge-dir', '/nonexistent/bridge']) == 0",
             "assert 'httpx' in sys.modules",
-            "cli = sorted({'click', 'pygments', 'rich'} & set(sys.modules))",
+            "cli = sorted({'httpx._main', 'click', 'pygments', 'rich'} & set(sys.modules))",
             "assert not cli, cli",
         )
     )

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import select
 import shlex
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1971,29 +1974,33 @@ def test_evaluate_policy_fails_closed_when_reauth_unavailable(
     )
 
 
-def test_generated_policy_command_delivers_its_verdict_through_the_fast_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    The generated PreToolUse command still prints a deny verdict before exiting.
+class _DenyEveryPolicyRequest(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = b'{"result":"POLICY_ACTION_DENY","reason":"Blocked by policy"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-    The hook leaves through ``os._exit`` with stdout on a pipe, so a verdict
-    still buffered there would be lost and Claude Code would run the tool.
-    """
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
 
-    class _DenyEveryPolicyRequest(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            body = b'{"result":"POLICY_ACTION_DENY","reason":"Blocked by policy"}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
 
-        def log_message(self, format: str, *args: object) -> None:
-            del format, args
+_PRE_TOOL_USE_PAYLOAD = json.dumps(
+    {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}
+)
+# Claude Code waits for the hook process to exit, not for the verdict bytes.
+# Module teardown used to hold the exit for about 40 ms; a plain exit takes a
+# few milliseconds even through the generated ``/bin/sh`` wrapper.
+_MAX_VERDICT_TO_EXIT_S = 0.015
+_HOOK_TIMEOUT_S = 60.0
 
+
+@pytest.fixture
+def generated_policy_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """The generated PreToolUse command, pointed at a server that denies every call."""
     # The command runs the hook with TMPDIR set to the trusted parent, so the
     # child derives this same bridge root.
     monkeypatch.setattr(
@@ -2012,26 +2019,85 @@ def test_generated_policy_command_delivers_its_verdict_through_the_fast_exit(
         [command] = [
             hook["command"] for group in settings["hooks"]["PreToolUse"] for hook in group["hooks"]
         ]
-        result = subprocess.run(
-            ["/bin/sh", "-c", command],
-            input=json.dumps(
-                {
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "rm -rf /"},
-                }
-            ),
-            text=True,
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
+        yield command
         server.shutdown()
 
-    assert result.returncode == 0, result.stderr
-    verdict = json.loads(result.stdout)
+
+def _run_generated_policy_command(command: str) -> tuple[bytes, float]:
+    """
+    Run *command* as Claude Code does.
+
+    :returns: The hook's stdout and the seconds from its first stdout byte to EOF.
+    """
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", command],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    proc.stdin.write(_PRE_TOOL_USE_PAYLOAD.encode())
+    proc.stdin.close()
+    fd = proc.stdout.fileno()
+    deadline = time.monotonic() + _HOOK_TIMEOUT_S
+    first_byte_at: float | None = None
+    chunks: list[bytes] = []
+    while True:
+        ready, _, _ = select.select([fd], [], [], max(0.0, deadline - time.monotonic()))
+        if not ready:
+            proc.kill()
+            pytest.fail(
+                f"hook did not exit within {_HOOK_TIMEOUT_S}s; stderr={proc.stderr.read()!r}"
+            )
+        data = os.read(fd, 65536)
+        now = time.monotonic()
+        if not data:
+            break
+        if first_byte_at is None:
+            first_byte_at = now
+        chunks.append(data)
+    proc.wait(timeout=10)
+    stderr = proc.stderr.read()
+    assert proc.returncode == 0, stderr
+    assert first_byte_at is not None, f"hook wrote no verdict; stderr={stderr!r}"
+    return b"".join(chunks), now - first_byte_at
+
+
+def test_generated_policy_command_delivers_its_verdict_through_the_fast_exit(
+    generated_policy_command: str,
+) -> None:
+    """
+    The generated PreToolUse command still prints a deny verdict before exiting.
+
+    The hook leaves through ``os._exit`` with stdout on a pipe, so a verdict
+    still buffered there would be lost and Claude Code would run the tool.
+    """
+    stdout, _ = _run_generated_policy_command(generated_policy_command)
+
+    verdict = json.loads(stdout)
     assert verdict["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert verdict["hookSpecificOutput"]["permissionDecisionReason"] == "Blocked by policy"
+
+
+def test_generated_policy_command_exits_promptly_after_its_verdict(
+    generated_policy_command: str,
+) -> None:
+    """
+    Process exit follows the verdict within milliseconds, not after module teardown.
+
+    Claude Code blocks on the exit, so this measures the wait it pays after the
+    verdict is already on the pipe. The minimum of three runs keeps scheduler
+    noise from failing a healthy hook.
+    """
+    gaps: list[float] = []
+    for _ in range(3):
+        stdout, gap = _run_generated_policy_command(generated_policy_command)
+        assert json.loads(stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+        gaps.append(gap)
+
+    assert min(gaps) < _MAX_VERDICT_TO_EXIT_S, (
+        f"process exit lagged the verdict by {[round(g * 1000, 1) for g in gaps]} ms"
+    )
 
 
 def test_policy_hook_fast_exit_finalizes_in_interpreter_order() -> None:

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+
 import httpx
 import pytest
 
@@ -14,6 +18,57 @@ from omnigent.native.native_policy_hook import (
     hook_payload_to_evaluation_request,
     post_evaluate_with_retry,
 )
+
+
+def _modules_loaded_by(statements: str, watched: tuple[str, ...]) -> list[str]:
+    """Run *statements* in a fresh isolated interpreter; return the *watched* modules it loaded."""
+    code = (
+        f"import json, sys\n{statements}\n"
+        f"print(json.dumps([m for m in {watched!r} if m in sys.modules]))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_import_loads_httpx_without_its_command_line_client() -> None:
+    """
+    A hook process that imports this module gets httpx, but not httpx's CLI.
+
+    Every native policy hook imports this module in a fresh interpreter while
+    the harness waits on it, and httpx's command-line client would pull in
+    click, pygments and rich for nothing.
+    """
+    loaded = _modules_loaded_by(
+        "import omnigent.native.native_policy_hook",
+        ("httpx", "httpx._main", "click", "pygments", "rich"),
+    )
+    assert loaded == ["httpx"]
+
+
+def test_import_after_httpx_leaves_the_loaded_httpx_alone() -> None:
+    """
+    In a process that already imported httpx (server, runner), nothing changes.
+
+    The CLI stays importable and ``sys.modules`` keeps the real module.
+    """
+    loaded = _modules_loaded_by(
+        "\n".join(
+            (
+                "import httpx",
+                "import omnigent.native.native_policy_hook",
+                "import httpx._main",
+                "assert httpx.main is httpx._main.main",
+            )
+        ),
+        ("httpx", "httpx._main"),
+    )
+    assert loaded == ["httpx", "httpx._main"]
 
 
 def test_pre_tool_use_maps_to_phase_tool_call() -> None:

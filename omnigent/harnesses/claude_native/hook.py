@@ -12,7 +12,6 @@ import secrets
 import sys
 import threading
 import time
-import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
@@ -947,20 +946,6 @@ def _main_permission_request(argv: list[str]) -> int:
     return 0
 
 
-def _skip_httpx_cli_import() -> None:
-    """
-    Keep httpx from importing its command-line client, and with it rich and click.
-
-    httpx imports ``httpx._main`` inside ``try/except ImportError``, so a
-    placeholder without ``main`` gives it the fallback stub. The policy hook
-    never runs that client, and Claude Code waits on the hook's imports.
-
-    :returns: None.
-    """
-    if "httpx" not in sys.modules:
-        sys.modules.setdefault("httpx._main", types.ModuleType("httpx._main"))
-
-
 def _main_evaluate_policy(argv: list[str]) -> int:
     """
     Evaluate a Claude Code ``PreToolUse`` / ``PostToolUse`` /
@@ -1012,7 +997,6 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     :returns: Process exit code. Always ``0`` — blocking verdicts
         are expressed via the JSON output, not exit codes.
     """
-    _skip_httpx_cli_import()
     from omnigent.native.native_policy_hook import (
         evaluation_response_to_hook_output,
         fail_ask_hook_output,
