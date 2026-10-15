@@ -7575,6 +7575,62 @@ def test_clone_claude_transcript_returns_none_when_source_missing(
     assert not clone_project_dir.exists() or not any(clone_project_dir.iterdir())
 
 
+def test_clone_claude_transcript_follows_claude_config_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    With ``CLAUDE_CONFIG_DIR`` set, a fork clone reads the source transcript from
+    and writes its copy under ``$CLAUDE_CONFIG_DIR/projects``, where Claude Code
+    keeps them; a copy under ``~/.claude/projects`` is never found by ``--resume``.
+    """
+    config_dir = tmp_path / "claude-config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    source_workspace = tmp_path / "source"
+    source_workspace.mkdir()
+    clone_workspace = tmp_path / "clone"
+    clone_workspace.mkdir()
+    source_uuid = "33333333-3333-3333-3333-333333333333"
+    target_uuid = "44444444-4444-4444-4444-444444444444"
+    source_project_dir = (
+        config_dir
+        / "projects"
+        / claude_native._sanitize_claude_project_name(str(source_workspace.resolve()))
+    )
+    source_project_dir.mkdir(parents=True)
+    (source_project_dir / f"{source_uuid}.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "cwd": str(source_workspace.resolve()),
+                "sessionId": source_uuid,
+                "uuid": "u1",
+                "parentUuid": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = claude_native._clone_claude_transcript(
+        source_external_session_id=source_uuid,
+        target_external_session_id=target_uuid,
+        clone_workspace=clone_workspace.resolve(),
+    )
+
+    expected_target = (
+        config_dir
+        / "projects"
+        / claude_native._sanitize_claude_project_name(str(clone_workspace.resolve()))
+        / f"{target_uuid}.jsonl"
+    )
+    assert result == expected_target, (
+        f"clone transcript resolved to {result!r}; the source under {source_project_dir} "
+        "was not found or the clone was written outside CLAUDE_CONFIG_DIR"
+    )
+    assert expected_target.is_file()
+
+
 def test_find_claude_transcript_follows_claude_config_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
