@@ -385,6 +385,8 @@ def _probe_first_served(
     connect_timing_out: set[str] | None = None,
     not_found_as_400: set[str] | None = None,
     not_found_code: str = "RESOURCE_DOES_NOT_EXIST",
+    not_found_status: int = 400,
+    served_status: int = 400,
     slow: set[str] | None = None,
     seen: list[str] | None = None,
     route_error: bool = False,
@@ -394,8 +396,9 @@ def _probe_first_served(
     Ids in *erroring* answer with a transient ``500``, ids in *timing_out*
     never answer (a read timeout), ids in *connect_timing_out* never complete
     the handshake (a connect timeout), ids in *not_found_as_400* report
-    *not_found_code* as a validation error, and ids in *slow* answer after a
-    short delay.
+    *not_found_code* with HTTP *not_found_status*, served ids answer with
+    *served_status* (a bodyless validation error), and ids in *slow* answer
+    after a short delay.
     """
     from omnigent.models.databricks_model_discovery import first_served_codex_model
 
@@ -420,7 +423,7 @@ def _probe_first_served(
             return httpx.Response(500, json={"error": "upstream hiccup"}, request=request)
         if not_found_as_400 and model in not_found_as_400:
             return httpx.Response(
-                400,
+                not_found_status,
                 json={
                     "error_code": not_found_code,
                     "message": f"Endpoint with name '{model}' does not exist.",
@@ -428,9 +431,11 @@ def _probe_first_served(
                 request=request,
             )
         if model in served:
-            # A validation 400 for the minimal probe body still proves the
+            # A validation 400/422 for the minimal probe body still proves the
             # model resource exists on the route.
-            return httpx.Response(400, json={"error": "invalid request"}, request=request)
+            return httpx.Response(
+                served_status, json={"error": "invalid request"}, request=request
+            )
         return httpx.Response(404, json={"error_code": "RESOURCE_DOES_NOT_EXIST"}, request=request)
 
     return first_served_codex_model(
@@ -580,6 +585,42 @@ def test_first_served_codex_model_rejects_an_alternate_not_found_code() -> None:
     )
     assert picked == "system.ai.glm-5-2"
     assert seen == ["system.ai.gpt-5-6-sol", "system.ai.glm-5-2"]
+
+
+def test_first_served_codex_model_rejects_a_not_found_422() -> None:
+    """A 422 naming the not-found code is a rejection, like the 400 form.
+
+    Some gateways surface a missing model as ``422`` rather than ``400``;
+    the not-found code in the body, not the status, decides the rejection.
+    """
+    seen: list[str] = []
+    picked = _probe_first_served(
+        ("system.ai.gpt-5-6-sol", "system.ai.glm-5-2"),
+        served={"system.ai.gpt-5-6-sol", "system.ai.glm-5-2"},
+        not_found_as_400={"system.ai.gpt-5-6-sol"},
+        not_found_status=422,
+        seen=seen,
+    )
+    assert picked == "system.ai.glm-5-2"
+    assert seen == ["system.ai.gpt-5-6-sol", "system.ai.glm-5-2"]
+
+
+def test_first_served_codex_model_confirms_a_non_not_found_422() -> None:
+    """A 422 without a not-found code confirms the model, like the 400 form.
+
+    This is the control for the rejection above: the status alone is not a
+    rejection, so a plain validation 422 for the minimal body still proves
+    the model resource exists.
+    """
+    seen: list[str] = []
+    picked = _probe_first_served(
+        ("system.ai.gpt-5-6-sol", "system.ai.glm-5-2"),
+        served={"system.ai.gpt-5-6-sol"},
+        served_status=422,
+        seen=seen,
+    )
+    assert picked == "system.ai.gpt-5-6-sol"
+    assert seen == ["system.ai.gpt-5-6-sol"]
 
 
 def test_first_served_codex_model_stops_when_the_probe_budget_is_spent() -> None:

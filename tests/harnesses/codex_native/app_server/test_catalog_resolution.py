@@ -211,6 +211,10 @@ def test_resolve_databricks_codex_model_matches_servable_ids(
             "omnigent.models.databricks_model_discovery.discover_databricks_codex_models",
             return_value=servable,
         ),
+        patch(
+            "omnigent.models.databricks_model_discovery.first_served_codex_model",
+            return_value=None,
+        ),
     ):
         assert (
             _resolve_databricks_codex_model("https://h.example.com", "prof", None)

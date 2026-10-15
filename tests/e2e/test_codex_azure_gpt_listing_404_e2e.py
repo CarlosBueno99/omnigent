@@ -20,8 +20,9 @@ The journey is the user's own, driven end to end through a real codex CLI:
    launch runs) and runs the first turn on it.
 
 Expected: the first turn completes -- omnigent must not pin a model the
-workspace refuses to serve when a servable one exists. Before a fix the
-launch pins ``system.ai.gpt-5-6-sol`` and the turn dies with the gateway's
+workspace refuses to serve when a servable one exists. Without the
+launch-time servability check this guards, the launch pins
+``system.ai.gpt-5-6-sol`` and the turn dies with the gateway's
 ``404 RESOURCE_DOES_NOT_EXIST``.
 
 Self-contained: mocks only the workspace HTTP endpoints and the
@@ -95,6 +96,9 @@ class _FakeAzureWorkspace(http.server.ThreadingHTTPServer):
 
 class _FakeAzureWorkspaceHandler(http.server.BaseHTTPRequestHandler):
     server: _FakeAzureWorkspace
+    # Match the UI e2e fake and the real gateway; every response sets
+    # Content-Length, so keep-alive is safe.
+    protocol_version = "HTTP/1.1"
 
     def _send(self, status: int, content_type: str, body: bytes) -> None:
         self.send_response(status)

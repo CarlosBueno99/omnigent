@@ -447,6 +447,9 @@ def first_served_codex_model(
     A success, or a validation ``400``/``422`` for the deliberately minimal
     probe body, confirms the model resource exists — unless that body names a
     gateway not-found code, which some gateways report as a validation error.
+    Reading a generic validation error as confirmation assumes the gateway
+    resolves the model before it validates the request body; the observed
+    Azure gateway does, but a live-Azure check remains a maintainer step.
     A ``404`` rejects the candidate. Anything else (``5xx``, ``429``, auth
     errors, a per-candidate connect or read timeout) leaves that one candidate
     unconfirmed and the walk moves on: a confirmed lower-ranked model is a
@@ -460,8 +463,11 @@ def first_served_codex_model(
     :param token: Workspace bearer token.
     :param candidates: Codex-servable ids, best first, e.g. the result of
         :func:`discover_databricks_codex_models`. Probing stops after
-        ``_CODEX_PROBE_MAX_MODELS`` ids or ``_CODEX_PROBE_BUDGET_S`` seconds
-        so a large listing or a slow gateway cannot stall the launch.
+        ``_CODEX_PROBE_MAX_MODELS`` ids, or once ``_CODEX_PROBE_BUDGET_S``
+        seconds have elapsed. The budget is a soft bound checked between
+        candidates, not a hard deadline: one in-flight probe can still run up
+        to its ``_CODEX_PROBE_TIMEOUT_S`` timeout, so a single slow answer can
+        overshoot the budget before the walk stops.
     :param transport: Optional HTTP transport used by tests.
     :returns: The first confirmed id, or ``None`` when no probed candidate
         was confirmed.

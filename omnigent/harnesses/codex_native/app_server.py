@@ -3277,10 +3277,8 @@ def _resolve_databricks_codex_model(
         # simply fails the listing and drops to the ucode-state fallback below,
         # which is already keyed by ``host``.
         servable = discover_databricks_codex_models(host, creds.token)
-        # Only trust the token for the servability probe once the listing has
-        # proven it works for ``host``; a failed listing drops to ucode state
-        # with ``token`` unset, so the probe never spends its budget on a token
-        # this host rejects.
+        # Expose the token to the route probe only after the listing proved it
+        # works for this host; a failed listing leaves ``token`` unset.
         token = creds.token
     except Exception as exc:  # noqa: BLE001 — cached ucode state is the launch fallback
         # Recoverable fallback; frames are debug-only so a TTY-mirrored
@@ -3310,11 +3308,13 @@ def _resolve_databricks_codex_model(
             try:
                 served = first_served_codex_model(host, token, servable)
             except Exception:  # noqa: BLE001 — the ranked default is the fallback
+                # Frames are debug-only so a TTY-mirrored host console stays
+                # concise, matching the discovery-failure warning above.
                 _logger.warning(
                     "native-codex: codex-route servability probe failed for "
                     "profile %r; keeping the ranked default",
                     profile,
-                    exc_info=True,
+                    exc_info=_logger.isEnabledFor(logging.DEBUG),
                 )
                 served = None
             if served is not None and served != servable[0]:
