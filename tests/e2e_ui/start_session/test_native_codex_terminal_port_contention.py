@@ -1,13 +1,6 @@
-"""Native Codex terminal startup when another process contends for its loopback port.
+"""Native Codex terminal startup while another process contends for its loopback port.
 
-A codex wrapper selected through ``OMNIGENT_CODEX_PATH`` plays the competing
-process: once per armed launch, if the runner hands ``codex app-server --listen``
-a fixed loopback port, the wrapper binds that port from a detached holder before
-handing the unchanged argv to the real codex binary. A launch that lets Codex
-bind a kernel-assigned port (``ws://127.0.0.1:0``) leaves nothing to take and is
-journaled as such. Everything else (runner, codex, TUI, web UI) is the real
-product.
-"""
+A codex wrapper on ``OMNIGENT_CODEX_PATH`` seizes any fixed port the runner passes."""
 
 from __future__ import annotations
 
@@ -107,8 +100,7 @@ else:
     os.close(ready_w)
     os.read(ready_r, 1)
     os.close(ready_r)
-os.execv(REAL_CODEX, [REAL_CODEX, *argv])
-'''
+os.execv(REAL_CODEX, [REAL_CODEX, *argv])'''
 
 
 @dataclass(frozen=True)

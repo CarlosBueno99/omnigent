@@ -785,8 +785,7 @@ async def main():
         await asyncio.Future()
 
 
-asyncio.run(main())
-"""
+asyncio.run(main())"""
 )
 
 

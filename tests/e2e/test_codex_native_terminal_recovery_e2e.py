@@ -58,11 +58,7 @@ def _wait_for(check: Callable[[], Any], description: str, timeout: float = 60.0)
 
 
 def _app_server_pid(listen_url: str) -> int:
-    """Return the app-server process bound to ``listen_url``.
-
-    Codex binds a kernel-assigned port, so the endpoint is not in its argv; the
-    listening socket identifies the native child rather than npm's Node launcher.
-    """
+    """Return the PID listening on ``listen_url``; Codex's argv no longer names its port."""
     port = int(listen_url.rsplit(":", 1)[1])
     matches: list[int] = []
     for process in psutil.process_iter(["cmdline"]):

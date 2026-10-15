@@ -1,14 +1,4 @@
-"""Real Codex binds a kernel-assigned loopback port and startup adopts it.
-
-The installed ``codex`` CLI starts without a model request or credentials in an
-isolated environment, so this checks the real bind banner Codex prints, that the
-endpoint it reports accepts an initialized client, and that cancelling startup
-reaps the child it owns.
-
-Usage::
-
-    python -m pytest tests/e2e/test_codex_native_app_server_port_assignment_e2e.py -v
-"""
+"""Real Codex binds a kernel-assigned port; startup adopts it and cancellation reaps the child."""
 
 from __future__ import annotations
 
