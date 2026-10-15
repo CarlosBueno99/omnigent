@@ -61,6 +61,7 @@ _HOOK_SCRIPT = (
 )
 # Claude records the block within seconds of the paste; the mirror follows on the next poll.
 _SETTLE_TIMEOUT_S = 45.0
+_STALE_WORKSPACE_S = 24 * 3600.0
 
 
 @pytest.fixture
@@ -77,27 +78,32 @@ def hook_blocked_claude_session(
     workspaces_root = _REPO_ROOT / ".omnigent" / "e2e-hook-workspaces"
     workspaces_root.mkdir(parents=True, exist_ok=True)
     # Each workspace is named by its pytest pid; a killed run's leftovers are
-    # swept only once that process is gone, so a live run is never touched.
+    # swept once that process is gone (or after a day, far beyond the test's
+    # timeout, when the pid was reused or cannot be probed).
     for stale in workspaces_root.iterdir():
         pid = stale.name.partition("-")[0]
         try:
             if not pid.isdigit() or not stale.is_dir():
                 continue
+            if time.time() - stale.stat().st_mtime > _STALE_WORKSPACE_S:
+                raise ProcessLookupError
             os.kill(int(pid), 0)
         except ProcessLookupError:
             shutil.rmtree(stale, ignore_errors=True)
         except OSError:
             continue
     workspace = Path(tempfile.mkdtemp(prefix=f"{os.getpid()}-", dir=workspaces_root))
-    hooks_dir = workspace / ".claude" / "hooks"
-    hooks_dir.mkdir(parents=True)
-    script = hooks_dir / "block_marker.sh"
-    script.write_text(_HOOK_SCRIPT, encoding="utf-8")
-    script.chmod(0o755)
-    hook = {"type": "command", "command": str(script)}
-    settings = {"hooks": {"UserPromptSubmit": [{"hooks": [hook]}]}}
-    (workspace / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
     try:
+        hooks_dir = workspace / ".claude" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        script = hooks_dir / "block_marker.sh"
+        script.write_text(_HOOK_SCRIPT, encoding="utf-8")
+        script.chmod(0o755)
+        hook = {"type": "command", "command": str(script)}
+        settings = {"hooks": {"UserPromptSubmit": [{"hooks": [hook]}]}}
+        (workspace / ".claude" / "settings.json").write_text(
+            json.dumps(settings), encoding="utf-8"
+        )
         with native_claude_mock_session_scope(
             live_server, mock_llm_server_url, tmp_path_factory, workspace=str(workspace)
         ) as session:
