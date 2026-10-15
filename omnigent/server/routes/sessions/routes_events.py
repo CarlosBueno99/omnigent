@@ -219,6 +219,7 @@ from omnigent.server.routes._sessions.helpers import (
     _signal_harness_elicitation_resolved_by_id,
     _stop_session_via_runner,
     _stream_live_events,
+    _subagent_forward_lost,
     _wait_for_runner_client,
     reconcile_orphaned_running_status,
     require_filesystem_attachment_runtime,
@@ -2075,14 +2076,11 @@ def register_events_routes(
                 # collab threads live in the app-server thread tree, and a
                 # devin sub-agent is a reconstructed chain of the parent
                 # session, never an omnigent-dispatched runner sub-agent.
-                if runner_result is None:
-                    # The child's pinned runner_id is stale — its runner was
-                    # relaunched under a new id and only the parent was
-                    # rebound, so the child points at a dead runner forever and
-                    # this terminal status would 503 indefinitely while the
-                    # parent hangs waiting for the child's inbox result. Heal
-                    # the binding and re-deliver through the parent's live
-                    # runner before failing.
+                if _subagent_forward_lost(runner_result):
+                    # The result missed the parent's inbox: no runner answered
+                    # (stale child binding), or the child's own runner has no
+                    # inbox for the parent and answered 503. Re-deliver through
+                    # the parent's live runner; rebind only a child whose runner is gone.
                     from omnigent.server.routes import sessions as _sf
 
                     recovered = await _sf._recover_subagent_status_forward_via_parent(
@@ -2091,6 +2089,7 @@ def register_events_routes(
                         getattr(request.app.state, "tunnel_registry", None),
                         conversation_store,
                         forward_body,
+                        rebind_child=runner_result is None,
                     )
                     if recovered is not None:
                         runner_result = recovered
@@ -2540,6 +2539,7 @@ def register_events_routes(
                             runner_router,
                             created_by=created_by,
                             host_error_code=host_error_code,
+                            tunnel_registry=getattr(request.app.state, "tunnel_registry", None),
                         )
                         return {"queued": True, "item_id": item_id}
                     relaunched_runner_id = launch_attempt.runner_id
@@ -2693,6 +2693,7 @@ def register_events_routes(
                     offline_error,
                     runner_router,
                     created_by=created_by,
+                    tunnel_registry=getattr(request.app.state, "tunnel_registry", None),
                 )
                 return {"queued": True, "item_id": item_id}
             # Raise so the Omnigent server doesn't persist an item the

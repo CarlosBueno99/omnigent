@@ -2017,39 +2017,6 @@ async def test_subagent_message_heals_stale_runner_binding_via_parent(
     assert healed_for == [child["id"]], "heal was not invoked for the stale child"
 
 
-async def test_subagent_message_503s_when_heal_finds_no_live_ancestor(
-    client: httpx.AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    When both the child's runner and the parent runner are unavailable, the
-    message-send path still returns 503 — recovery must not silently pick an
-    unrelated runner.
-    """
-    child = await _create_native_child(client, name="msg-heal-no-ancestor")
-
-    async def _runner_none(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    async def _heal_none(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr(routes_events_module, "_get_runner_client", _runner_none)
-    monkeypatch.setattr(
-        routes_events_module, "_heal_subagent_runner_binding_via_parent", _heal_none
-    )
-
-    resp = await client.post(
-        f"/v1/sessions/{child['id']}/events",
-        json={
-            "type": "message",
-            "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
-        },
-    )
-
-    assert resp.status_code == 503, resp.text
-
-
 @pytest.mark.parametrize(
     ("parent_runner", "expected_status"),
     [("runner_replacement", 409), ("runner_side", 409), ("runner_side", 202)],
@@ -2347,3 +2314,189 @@ async def test_fork_of_child_promotes_it_into_the_sidebar(
     assert child_ids == {child.id}, (
         f"parent's children must be exactly the untouched source, got {child_ids}"
     )
+
+
+# ── re-delivery when the child's own runner has no inbox for the parent ───────
+
+
+def _delivery_not_confirmed_503() -> Any:
+    """The runner's answer when the parent's inbox is not on the runner that got the status."""
+    return sessions_module._RunnerForwardResult(
+        status_code=503,
+        body=json.dumps(
+            {
+                "error": "subagent_delivery_not_confirmed",
+                "reason": "missing_parent_inbox",
+                "detail": "Sub-agent terminal status arrived, but the parent inbox is "
+                "missing on this runner.",
+            }
+        ),
+    )
+
+
+async def test_subagent_idle_forward_reroutes_when_child_runner_lacks_parent_inbox(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A child live on its own runner answers 503 ``missing_parent_inbox``; re-deliver via the parent.
+
+    Recovery used to run only when no runner answered, so this 503 looped in the
+    forwarder for hours. It must run here too and keep the live child's binding
+    (``rebind_child=False``).
+    """
+    child = await _create_native_child(client, name="orch-reroute-own-runner")
+
+    async def _forward_not_confirmed(*_args: Any, **_kwargs: Any) -> Any:
+        return _delivery_not_confirmed_503()
+
+    recoveries: list[tuple[str, bool | None]] = []
+
+    async def _recover_spy(child_conv: Any, *_args: Any, **kwargs: Any) -> Any:
+        recoveries.append((child_conv.id, kwargs.get("rebind_child")))
+        return sessions_module._RunnerForwardResult(status_code=204, body="")
+
+    monkeypatch.setattr(
+        sessions_module, "_forward_session_change_to_runner", _forward_not_confirmed
+    )
+    monkeypatch.setattr(
+        sessions_module, "_recover_subagent_status_forward_via_parent", _recover_spy
+    )
+
+    resp = await client.post(
+        f"/v1/sessions/{child['id']}/events",
+        json={"type": "external_session_status", "data": {"status": "idle"}},
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert recoveries == [(child["id"], False)]
+
+
+async def test_subagent_idle_forward_keeps_503_for_unrelated_runner_rejection(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner 503 unrelated to the parent's inbox is not re-routed; the forwarder retries it."""
+    child = await _create_native_child(client, name="orch-unrelated-503")
+
+    async def _forward_rejected(*_args: Any, **_kwargs: Any) -> Any:
+        return sessions_module._RunnerForwardResult(
+            status_code=503, body=json.dumps({"error": "pane_not_ready"})
+        )
+
+    recoveries: list[str] = []
+
+    async def _recover_spy(child_conv: Any, *_args: Any, **_kwargs: Any) -> Any:
+        recoveries.append(child_conv.id)
+        return sessions_module._RunnerForwardResult(status_code=204, body="")
+
+    monkeypatch.setattr(sessions_module, "_forward_session_change_to_runner", _forward_rejected)
+    monkeypatch.setattr(
+        sessions_module, "_recover_subagent_status_forward_via_parent", _recover_spy
+    )
+
+    resp = await client.post(
+        f"/v1/sessions/{child['id']}/events",
+        json={"type": "external_session_status", "data": {"status": "idle"}},
+    )
+
+    assert resp.status_code == 503, resp.text
+    assert recoveries == []
+
+
+# ── native boot failure: wake the parent through its live runner ─────────────
+
+
+async def _message_native_child_without_runner(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str,
+    recovery_result: Any,
+) -> tuple[dict[str, Any], httpx.Response, list[tuple[str, str, bool | None]]]:
+    """
+    Message a native child whose runner is gone while the message-path heal finds no runner.
+
+    The server then consumes the message into a failed turn and forwards the
+    ``failed`` edge to wake the parent; the direct forward reaches no runner, so
+    delivery depends on recovery through the parent's live runner (spied here).
+    """
+    child = await _create_native_child(client, name=name)
+
+    async def _no_runner(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    recoveries: list[tuple[str, str, bool | None]] = []
+
+    async def _recover_spy(child_conv: Any, *args: Any, **kwargs: Any) -> Any:
+        recoveries.append((child_conv.id, args[3]["data"]["status"], kwargs.get("rebind_child")))
+        return recovery_result
+
+    monkeypatch.setattr(routes_events_module, "_get_runner_client", _no_runner)
+    monkeypatch.setattr(
+        routes_events_module, "_heal_subagent_runner_binding_via_parent", _no_runner
+    )
+    monkeypatch.setattr(sessions_module, "_forward_session_change_to_runner", _no_runner)
+    monkeypatch.setattr(
+        sessions_module, "_recover_subagent_status_forward_via_parent", _recover_spy
+    )
+
+    resp = await client.post(
+        f"/v1/sessions/{child['id']}/events",
+        json={
+            "type": "message",
+            "data": {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        },
+    )
+    return child, resp, recoveries
+
+
+async def _assert_failed_turn_persisted(client: httpx.AsyncClient, child_id: str) -> None:
+    snapshot = (await client.get(f"/v1/sessions/{child_id}")).json()
+    assert snapshot["status"] == "failed", snapshot
+    items = (await client.get(f"/v1/sessions/{child_id}/items")).json()["data"]
+    assert [item["type"] for item in items] == ["message", "error"], items
+    assert items[1]["code"] == "runner_failed_to_start", items[1]
+
+
+async def test_native_subagent_boot_failure_is_rerouted_to_parent_runner(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A native child that cannot boot wakes its parent through the parent's runner.
+
+    The ``failed`` edge used to go only to the child's own dead runner and the
+    request then failed with 503 although the message was already recorded.
+    """
+    child, resp, recoveries = await _message_native_child_without_runner(
+        client,
+        monkeypatch,
+        name="boot-fail-reroute",
+        recovery_result=sessions_module._RunnerForwardResult(status_code=204, body=""),
+    )
+
+    assert resp.status_code in {200, 202}, resp.text
+    assert resp.json()["queued"] is True
+    assert recoveries == [(child["id"], "failed", True)]
+    await _assert_failed_turn_persisted(client, child["id"])
+
+
+async def test_native_subagent_boot_failure_without_live_parent_runner_still_accepts_message(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    With no live runner anywhere, the consumed message is accepted, not refused.
+
+    The failed turn is persisted on the child and recovered when the parent next
+    initializes; a 503 here only told the user a recorded message was refused.
+    """
+    child, resp, recoveries = await _message_native_child_without_runner(
+        client, monkeypatch, name="boot-fail-no-runner", recovery_result=None
+    )
+
+    assert resp.status_code in {200, 202}, resp.text
+    assert resp.json()["queued"] is True
+    assert recoveries == [(child["id"], "failed", True)]
+    await _assert_failed_turn_persisted(client, child["id"])

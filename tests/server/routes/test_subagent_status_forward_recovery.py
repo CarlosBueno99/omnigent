@@ -9,16 +9,21 @@ the parent never receives the child result.
 
 from __future__ import annotations
 
+import json
+import logging
 import types
 from typing import Any
 
 import httpx
 import pytest
 
+from omnigent.entities import ErrorData
 from omnigent.server.routes import sessions as sessions_mod
 from omnigent.server.routes.sessions import (
+    _forward_native_subagent_terminal_failure,
     _recover_subagent_status_forward_via_parent,
     _RunnerForwardResult,
+    _subagent_forward_lost,
 )
 from omnigent.stores.conversation_store import ConversationNotFoundError
 
@@ -351,3 +356,230 @@ async def test_recover_real_body_retry_resolves_healed_runner() -> None:
     # ...and the retry forwarded via the CHILD id, which the resolver — reading
     # the freshly healed runner_id — routed to the live runner.
     assert posted == ["/v1/sessions/conv_child/events"]
+
+
+# ── re-delivery when the child's own runner answered but could not deliver ──────
+
+
+def _not_confirmed(reason: str) -> _RunnerForwardResult:
+    return _RunnerForwardResult(
+        status_code=503,
+        body=json.dumps({"error": "subagent_delivery_not_confirmed", "reason": reason}),
+    )
+
+
+@pytest.mark.parametrize(
+    ("runner_result", "lost"),
+    [
+        (None, True),
+        (_not_confirmed("missing_parent_inbox"), True),
+        (_not_confirmed("missing_work_entry"), True),
+        (_RunnerForwardResult(503, json.dumps({"error": "runner_unavailable"})), False),
+        (_RunnerForwardResult(503, "tmux pane not advertised"), False),
+        (
+            _RunnerForwardResult(500, json.dumps({"error": "subagent_delivery_not_confirmed"})),
+            False,
+        ),
+        (_RunnerForwardResult(204, ""), False),
+        (_RunnerForwardResult(202, ""), False),
+    ],
+    ids=[
+        "no-runner",
+        "missing-parent-inbox",
+        "missing-work-entry",
+        "other-503-json",
+        "other-503-text",
+        "not-confirmed-but-500",
+        "204",
+        "202",
+    ],
+)
+def test_subagent_forward_lost_only_when_parent_inbox_missed(
+    runner_result: _RunnerForwardResult | None, lost: bool
+) -> None:
+    """Only an unreachable runner or a 503 ``subagent_delivery_not_confirmed`` is re-routed."""
+    assert _subagent_forward_lost(runner_result) is lost
+
+
+async def test_recover_posts_through_parent_runner_without_rebinding_live_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A child live on a runner of its own keeps that binding; its result goes to the parent's runner.
+
+    The reported loop: the child was relaunched alone while the parent's runner was
+    down, so at turn end its own runner answers 503 ``missing_parent_inbox``. The
+    child's ``runner_id`` is correct and must not be repointed, and the by-id
+    forward would only reach the same runner again. The status is posted straight
+    to the parent's live client instead.
+    """
+    child = _conv("conv_child", runner_id="runner_child_own", parent_id="conv_parent")
+    store = _FakeStore(_conv("conv_parent", runner_id="runner_parent"))
+    posted: list[tuple[str, dict[str, Any]]] = []
+
+    def _parent_runner(request: httpx.Request) -> httpx.Response:
+        posted.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(204)
+
+    parent_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(_parent_runner), base_url="http://parent-runner"
+    )
+    waited_for: list[str] = []
+
+    async def _fake_wait(session_id: str, *_a: Any, **_k: Any) -> httpx.AsyncClient:
+        waited_for.append(session_id)
+        return parent_client
+
+    async def _forward_by_id(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("a by-id forward would resolve the child's own runner again")
+
+    monkeypatch.setattr(sessions_mod, "_wait_for_runner_client", _fake_wait)
+    monkeypatch.setattr(sessions_mod, "_forward_session_change_to_runner", _forward_by_id)
+    body = {"type": "external_session_status", "data": {"status": "idle", "output": "done"}}
+    try:
+        result = await _recover_subagent_status_forward_via_parent(
+            child,
+            runner_router=None,
+            tunnel_registry=object(),
+            conversation_store=store,  # type: ignore[arg-type]
+            forward_body=body,
+            rebind_child=False,
+        )
+    finally:
+        await parent_client.aclose()
+
+    assert result is not None and result.status_code == 204
+    assert store.rebinds == []
+    assert waited_for == ["conv_parent"]
+    assert posted == [("/v1/sessions/conv_child/events", body)]
+
+
+# ── native boot failure: the ``failed`` edge must reach the parent too ──────────
+
+
+_BOOT_ERROR = ErrorData(
+    source="execution",
+    code="runner_failed_to_start",
+    message="The runner for this session is not available - it may have failed to start.",
+)
+_BOOT_FORWARD_BODY = {
+    "type": "external_session_status",
+    "data": {"status": "failed", "output": _BOOT_ERROR.message},
+}
+
+
+def _subagent_conv(runner_id: str = "runner_old") -> Any:
+    return types.SimpleNamespace(
+        id="conv_child",
+        kind="sub_agent",
+        runner_id=runner_id,
+        parent_conversation_id="conv_parent",
+        root_conversation_id="conv_parent",
+        labels={},
+    )
+
+
+@pytest.fixture
+def _patch_boot_failure_forward(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Stub the direct forward and spy on recovery for the boot-failure forward."""
+    state: dict[str, Any] = {
+        "forward_result": None,
+        "recovery_result": _RunnerForwardResult(status_code=204, body=""),
+        "recoveries": [],
+    }
+
+    async def _fake_forward(*_a: Any, **_k: Any) -> Any:
+        return state["forward_result"]
+
+    async def _recover_spy(child_conv: Any, *args: Any, **kwargs: Any) -> Any:
+        state["recoveries"].append((child_conv.id, args[3], kwargs.get("rebind_child")))
+        return state["recovery_result"]
+
+    monkeypatch.setattr(sessions_mod, "_forward_session_change_to_runner", _fake_forward)
+    monkeypatch.setattr(sessions_mod, "_recover_subagent_status_forward_via_parent", _recover_spy)
+    return state
+
+
+async def test_boot_failure_forward_heals_through_parent_when_child_runner_is_gone(
+    _patch_boot_failure_forward: dict[str, Any],
+) -> None:
+    """No runner answered: the failure is re-delivered via the parent, healing the child."""
+    await _forward_native_subagent_terminal_failure(
+        "conv_child",
+        _subagent_conv(),
+        _BOOT_ERROR,
+        None,
+        conversation_store=_FakeStore(None),  # type: ignore[arg-type]
+    )
+
+    assert _patch_boot_failure_forward["recoveries"] == [("conv_child", _BOOT_FORWARD_BODY, True)]
+
+
+async def test_boot_failure_forward_reroutes_without_rebind_when_parent_inbox_is_elsewhere(
+    _patch_boot_failure_forward: dict[str, Any],
+) -> None:
+    """The child's own runner answered 503 ``missing_parent_inbox``.
+
+    Deliver through the parent's runner and keep the child's own binding.
+    """
+    _patch_boot_failure_forward["forward_result"] = _not_confirmed("missing_parent_inbox")
+
+    await _forward_native_subagent_terminal_failure(
+        "conv_child",
+        _subagent_conv(runner_id="runner_child_own"),
+        _BOOT_ERROR,
+        None,
+        conversation_store=_FakeStore(None),  # type: ignore[arg-type]
+    )
+
+    assert _patch_boot_failure_forward["recoveries"] == [("conv_child", _BOOT_FORWARD_BODY, False)]
+
+
+async def test_boot_failure_forward_logs_instead_of_failing_the_consumed_message(
+    _patch_boot_failure_forward: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    No live runner holds the parent's inbox: warn, do not raise.
+
+    The caller has already consumed the user's message into a persisted failed
+    turn; raising turned that into a 503 the user read as a refused send. The
+    failed status is durable and the parent's runner rebuilds the result from it
+    when the parent next initializes.
+    """
+    _patch_boot_failure_forward["recovery_result"] = None
+    caplog.set_level(logging.WARNING)
+
+    await _forward_native_subagent_terminal_failure(
+        "conv_child",
+        _subagent_conv(),
+        _BOOT_ERROR,
+        None,
+        conversation_store=_FakeStore(None),  # type: ignore[arg-type]
+    )
+
+    assert _patch_boot_failure_forward["recoveries"] == [("conv_child", _BOOT_FORWARD_BODY, True)]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("conv_child" in m and "runner_failed_to_start" in m for m in warnings), warnings
+
+
+async def test_boot_failure_forward_skips_non_subagent_and_codex_children(
+    _patch_boot_failure_forward: dict[str, Any],
+) -> None:
+    """Top-level sessions and codex-internal children have no parent inbox to wake."""
+    top_level = types.SimpleNamespace(
+        id="conv_top", kind="agent", runner_id=None, parent_conversation_id=None, labels={}
+    )
+    codex_child = _subagent_conv()
+    codex_child.labels = {"omnigent.wrapper": "codex-native-ui-subagent"}
+
+    for conv in (top_level, codex_child):
+        await _forward_native_subagent_terminal_failure(
+            conv.id,
+            conv,
+            _BOOT_ERROR,
+            None,
+            conversation_store=_FakeStore(None),  # type: ignore[arg-type]
+        )
+
+    assert _patch_boot_failure_forward["recoveries"] == []

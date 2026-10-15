@@ -4617,6 +4617,33 @@ class _RunnerForwardResult:
     body: str
 
 
+_SUBAGENT_DELIVERY_NOT_CONFIRMED_ERROR = "subagent_delivery_not_confirmed"
+
+
+def _subagent_forward_lost(runner_result: _RunnerForwardResult | None) -> bool:
+    """
+    Return whether a sub-agent terminal-status forward missed the parent's inbox.
+
+    That is the case when no runner could be reached (``None``) or when the
+    child's own runner answered 503 ``subagent_delivery_not_confirmed`` because
+    the parent's inbox is not on that runner. Other rejections (a pane not
+    advertised yet, a malformed event) are unrelated to where the parent lives.
+
+    :param runner_result: The direct forward's HTTP result, or ``None`` when
+        no runner client resolved.
+    :returns: ``True`` when the result must be re-delivered via the parent.
+    """
+    if runner_result is None:
+        return True
+    if runner_result.status_code != 503:
+        return False
+    try:
+        body = json.loads(runner_result.body) if runner_result.body else None
+    except json.JSONDecodeError:
+        return False
+    return isinstance(body, dict) and body.get("error") == _SUBAGENT_DELIVERY_NOT_CONFIRMED_ERROR
+
+
 def _require_external_status_forward(
     session_id: str,
     status: str,
@@ -7007,6 +7034,32 @@ async def _forward_session_change_to_runner_impl(
         runner_client = cast("httpx.AsyncClient | None", get_runner_client())
     if runner_client is None:
         return None
+    return await _post_session_change_to_runner_client(
+        runner_client, session_id, event, timeout_s=timeout_s
+    )
+
+
+async def _post_session_change_to_runner_client(
+    runner_client: httpx.AsyncClient,
+    session_id: str,
+    event: dict[str, Any],
+    *,
+    timeout_s: float = 5.0,
+) -> _RunnerForwardResult | None:
+    """
+    POST a control event for ``session_id`` to an already-resolved runner client.
+
+    The transport half of :func:`_forward_session_change_to_runner_impl`, for a
+    caller that picked the runner itself (a sub-agent result re-delivered through
+    the parent's runner while the child stays bound to its own).
+
+    :param runner_client: Client for the runner that should handle the event.
+    :param session_id: Session the event is about, e.g. ``"conv_child456"``.
+    :param event: The ``/events`` POST body.
+    :param timeout_s: Request budget, e.g. ``5.0``.
+    :returns: The runner's HTTP status/body, or ``None`` when the POST failed
+        at the transport layer.
+    """
     try:
         resp = await runner_client.post(
             f"/v1/sessions/{session_id}/events",

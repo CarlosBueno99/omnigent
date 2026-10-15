@@ -1002,21 +1002,22 @@ async def test_native_subagent_terminal_boot_failure_wakes_parent(
 
 
 @pytest.mark.asyncio
-async def test_native_subagent_terminal_boot_failure_surfaces_unreachable_runner(
+async def test_native_subagent_terminal_boot_failure_with_unreachable_runner_is_accepted(
     client: httpx.AsyncClient,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
-    The parent-wake forward must fail loud if the runner is unreachable.
+    A parent-wake forward that reaches no runner is logged, not turned into a 503.
 
-    The forward reuses ``_require_external_status_forward``: dropping
-    the failed edge silently would strand the parent waiting forever,
-    so a forward that does not land surfaces a 503 to the caller
-    instead of a misleading 202. Here the terminal-ensure POST fails
-    definitively (so the failure branch runs), and the subsequent
-    status-forward POST raises a transport error (no runner reachable).
+    The failed terminal boot has already been consumed into a persisted failed
+    turn by the time the forward runs, so refusing the request only told the
+    caller a recorded message was rejected. With no live runner holding the
+    parent's inbox (the child's runner is gone and the parent has no runner),
+    the route keeps the 202, attempts the forward on the child's events
+    endpoint, and warns; the parent's runner rebuilds the failed result from the
+    persisted turn when the parent next initializes.
 
-    This fails if the forward is best-effort (swallowed) rather than
-    required: the route would return 202 with the parent never woken.
+    This fails if the forward raises again (503) or is skipped entirely.
     """
     fake_runner = _FakeRunnerClient(
         responses={
@@ -1056,6 +1057,7 @@ async def test_native_subagent_terminal_boot_failure_surfaces_unreachable_runner
     fake_runner.post = _post  # type: ignore[method-assign]
     set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
     set_runner_client(fake_runner)  # type: ignore[arg-type]
+    caplog.set_level(logging.WARNING, logger="omnigent.server.routes.sessions")
 
     resp = await client.post(
         "/v1/sessions/01d6217454439d2ce8fdace0d4e089b2/events",
@@ -1068,16 +1070,21 @@ async def test_native_subagent_terminal_boot_failure_surfaces_unreachable_runner
         },
     )
 
-    # 503 RUNNER_UNAVAILABLE: the required parent-wake forward could not
-    # be delivered, so the route must not pretend the message landed.
-    assert resp.status_code == 503, resp.text
-    # The forward was attempted on the child's events endpoint.
-    assert (
-        fake_runner.post_json_calls[-1][0]
-        == "/v1/sessions/01d6217454439d2ce8fdace0d4e089b2/events"
+    # The message was consumed into a failed turn; the route still acknowledges it.
+    assert resp.status_code == 202, resp.text
+    # The forward was attempted on the child's events endpoint. The parent is
+    # not seeded in this store, so no re-delivery through its runner is possible.
+    assert fake_runner.post_json_calls[-1][0] == (
+        "/v1/sessions/01d6217454439d2ce8fdace0d4e089b2/events"
     )
     assert fake_runner.post_json_calls[-1][1]["type"] == "external_session_status"
     assert fake_runner.post_json_calls[-1][1]["data"]["status"] == "failed"
+    assert any(
+        "01d6217454439d2ce8fdace0d4e089b2" in record.getMessage()
+        and "no live runner" in record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ), [r.getMessage() for r in caplog.records]
 
 
 # ── Phase 1b: typed collections & single-resource proxy tests ────
