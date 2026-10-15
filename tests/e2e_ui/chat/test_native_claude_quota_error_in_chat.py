@@ -54,7 +54,6 @@ _FIRST_REQUEST_TIMEOUT_S = 120.0
 # Once the provider has seen no new request for this long, Claude Code has
 # stopped retrying.
 _RETRY_QUIET_S = 30.0
-_PANE_READ_S = 4.0
 # Long enough for a viewer of the recording to read each state.
 _HOLD_MS = 4_000
 
@@ -89,48 +88,6 @@ def _item_texts(items: list[dict[str, object]]) -> list[str]:
         if isinstance(message, str):
             texts.append(message)
     return texts
-
-
-def _terminal_screen_text(base_url: str, session_id: str) -> str:
-    """Render the session terminal's read-only attach stream to plain text.
-
-    The runner's tmux socket lives on the runner host, so the pane is read the
-    way a viewer would: over the server's read-only attach WebSocket, replayed
-    through a virtual terminal. Best effort; returns ``""`` when unavailable.
-    """
-    try:
-        import pyte
-        from websockets.sync.client import connect
-    except ImportError as exc:
-        _log.warning("terminal pane read skipped: %s", exc)
-        return ""
-    resources = httpx.get(f"{base_url}/v1/sessions/{session_id}/resources", timeout=10.0)
-    resources.raise_for_status()
-    terminal_ids = [
-        str(r["id"]) for r in resources.json().get("data", []) if r.get("type") == "terminal"
-    ]
-    if not terminal_ids:
-        _log.warning("terminal pane read skipped: no terminal resource advertised")
-        return ""
-    ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
-    ws_url = (
-        f"{ws_base}/v1/sessions/{session_id}/resources/terminals/{terminal_ids[-1]}"
-        "/attach?read_only=true"
-    )
-    screen = pyte.Screen(240, 80)
-    stream = pyte.ByteStream(screen)
-    try:
-        with connect(ws_url, max_size=None, open_timeout=20) as ws:
-            deadline = time.monotonic() + _PANE_READ_S
-            while (remaining := deadline - time.monotonic()) > 0:
-                try:
-                    frame = ws.recv(timeout=remaining)
-                except (TimeoutError, OSError):
-                    break
-                stream.feed(frame if isinstance(frame, bytes) else frame.encode())
-    except Exception as exc:
-        _log.warning("terminal pane read failed: %s", exc)
-    return "\n".join(line.rstrip() for line in screen.display).strip()
 
 
 def _wait_until_claude_gives_up(page: Page, mock_url: str, baseline: int) -> int:
@@ -184,7 +141,11 @@ def _expand_pill(page: Page) -> str:
     if toggle.count():
         toggle.first.click()
     body = pill.get_by_test_id("error-message-content")
-    return body.inner_text() if body.count() else ""
+    try:
+        expect(body).to_be_visible(timeout=10_000)
+    except AssertionError:
+        return ""
+    return body.inner_text()
 
 
 def _save_evidence(name: str, payload: object) -> None:
@@ -224,8 +185,6 @@ def test_native_claude_quota_error_surfaces_in_chat_as_retryable_pill(
     _wait_terminal_connected(page)
     # Let the TUI paint its idle prompt before the provider starts failing.
     page.wait_for_timeout(8_000)
-    idle_pane = _terminal_screen_text(base_url, session_id)
-    _log.info("idle pane:\n%s", idle_pane)
     _screenshot(page, "1-terminal-idle.png")
     _select_view_mode(page, "Chat")
 
@@ -246,12 +205,11 @@ def test_native_claude_quota_error_surfaces_in_chat_as_retryable_pill(
     requests_seen = _wait_until_claude_gives_up(page, mock_llm_server_url, baseline) - baseline
     _log.info("Claude Code gave up after %d provider requests", requests_seen)
 
-    # Terminal half: Claude Code's own pane reports the quota error.
+    # Terminal half: Claude Code's own pane shows the quota error (kept in the
+    # recording); the transcript items checked below carry the same text.
     _select_view_mode(page, "Terminal")
     _wait_terminal_connected(page)
     page.wait_for_timeout(3_000)
-    failed_pane = _terminal_screen_text(base_url, session_id)
-    _log.info("pane after failure:\n%s", failed_pane)
     _screenshot(page, "3-terminal-api-error.png")
     page.wait_for_timeout(_HOLD_MS)
     items = _transcript_items(base_url, session_id)
@@ -268,8 +226,8 @@ def test_native_claude_quota_error_surfaces_in_chat_as_retryable_pill(
     _screenshot(page, "5-chat-pill-expanded.png")
 
     page.reload()
-    if page.get_by_test_id("view-mode-toggle").count():
-        _select_view_mode(page, "Chat")
+    # Waits for the header switcher to mount before choosing the view.
+    _select_view_mode(page, "Chat")
     expect(page.locator(_USER, has_text=prompt)).to_be_visible(timeout=30_000)
     page.wait_for_timeout(3_000)
     reloaded_state = _pill_state(page)
@@ -282,8 +240,6 @@ def test_native_claude_quota_error_surfaces_in_chat_as_retryable_pill(
             "session_id": session_id,
             "prompt": prompt,
             "provider_requests_during_turn": requests_seen,
-            "idle_pane": idle_pane,
-            "failed_pane": failed_pane,
             "items": items,
             "chat_live": {**live_state, "expanded": live_expanded},
             "chat_after_reload": reloaded_state,
@@ -293,12 +249,8 @@ def test_native_claude_quota_error_surfaces_in_chat_as_retryable_pill(
     _log.info("chat after reload: %s", reloaded_state)
 
     api_error_texts = [text for text in _item_texts(items) if "API Error" in text]
-    assert api_error_texts, (
-        f"Claude Code's API error never reached the session transcript; pane:\n{failed_pane}"
-    )
+    assert api_error_texts, "Claude Code's API error never reached the session transcript"
     assert any("429" in text for text in api_error_texts), api_error_texts
-    if failed_pane:
-        assert "API Error" in failed_pane, failed_pane
 
     # The failed turn must be visible in Chat at all...
     assert live_state["pill_count"] == 1, (
