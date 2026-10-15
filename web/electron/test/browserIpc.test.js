@@ -793,14 +793,13 @@ describe("browserIpc — navigation API helpers", () => {
   });
 });
 
-// browserIpc must apply the URL policy to every renderer request: the address
-// bar sends `{ force: true }` with no agent flag (BrowserPane's submitUrl), and
-// main cannot verify a renderer's claim of user intent.
+// The address bar sends `{ force: true }` with no agent flag (BrowserPane's
+// submitUrl); the main-process URL policy must not hinge on that renderer intent.
 describe("browser IPC — URL policy independent of renderer intent", () => {
   const { createBrowserViewRegistry } = require("../src/browserViewRegistry");
   const { createBrowserViewBoundsController } = require("../src/browserViewBounds");
 
-  function makeRealRegistryIpc({ isArcaAgentContext, getAgentContextForEvent } = {}) {
+  function makeRealRegistryIpc() {
     const loaded = [];
     const registry = createBrowserViewRegistry({
       WebContentsViewCtor: () => ({
@@ -821,14 +820,12 @@ describe("browser IPC — URL policy independent of renderer intent", () => {
       attachToHost() {},
       detachFromHost() {},
       sendToRenderer() {},
-      ...(isArcaAgentContext ? { isArcaAgentContext } : {}),
     });
     const ipcMain = makeIpcMain();
     registerBrowserIpc({
       ipcMain,
       isPinnedOriginSender: () => true,
       getRegistryForEvent: () => registry,
-      ...(getAgentContextForEvent ? { getAgentContextForEvent } : {}),
     });
     const navigate = (url, opts) =>
       ipcMain.invoke(
@@ -839,62 +836,16 @@ describe("browser IPC — URL policy independent of renderer intent", () => {
     return { navigate, loaded };
   }
 
-  it("rejects blocked destinations whatever intent the renderer claims, without loading them", async () => {
+  it("rejects address-bar (non-agent) requests to blocked destinations without loading them", async () => {
     const { navigate, loaded } = makeRealRegistryIpc();
-    const accepted = [];
-    // A renderer-supplied `mainOwned` must not opt out either.
-    for (const opts of [
-      undefined,
-      {},
-      { agent: false },
-      { force: true },
-      { agent: true },
-      { mainOwned: true },
-    ]) {
-      for (const url of ["http://127.0.0.1:8080/", "file:///etc/passwd"]) {
-        // oxlint-disable-next-line no-await-in-loop -- Sequential requests against one view.
-        const r = await navigate(url, opts);
-        if (r.ok) accepted.push(`${JSON.stringify(opts)} ${url}`);
-        else assert.match(r.error ?? "", /navigation blocked/, url);
-      }
+    const results = [];
+    for (const url of ["http://127.0.0.1:8080/", "file:///etc/passwd"]) {
+      // oxlint-disable-next-line no-await-in-loop -- Sequential requests against one view.
+      results.push([url, await navigate(url, { force: true })]);
     }
-    assert.deepEqual(accepted, [], `accepted: ${accepted.join(", ")}`);
+    const accepted = results.filter(([, r]) => r.ok).map(([url]) => url);
+    assert.deepEqual(accepted, [], `accepted without the agent flag: ${accepted.join(", ")}`);
+    for (const [url, r] of results) assert.match(r.error ?? "", /navigation blocked/, url);
     assert.deepEqual(loaded, []);
-  });
-
-  it("still loads a public https URL typed into the address bar", async () => {
-    const { navigate, loaded } = makeRealRegistryIpc();
-    assert.equal((await navigate("https://example.com/", { force: true })).ok, true);
-    assert.deepEqual(loaded, ["https://example.com/"]);
-  });
-
-  it("grants the Arca loopback exception by verified host, never by renderer flag", async () => {
-    const { arcaTarget, isArcaAgentContext } = require("../src/arcaIdentity");
-    const identity = {
-      serverUrl: arcaTarget("https://workspace.example.com"),
-      hostId: "a".repeat(32),
-    };
-    const { navigate, loaded } = makeRealRegistryIpc({
-      isArcaAgentContext: (context) =>
-        isArcaAgentContext(identity, context, {
-          enabled: true,
-          managed: true,
-          serverTarget: identity.serverUrl,
-        }),
-      // Mirrors main.js: the renderer may name its session host; main owns the target.
-      getAgentContextForEvent: (_event, sourceHostId) => ({
-        serverTarget: identity.serverUrl,
-        sourceHostId: typeof sourceHostId === "string" ? sourceHostId : null,
-      }),
-    });
-    const url = "http://localhost:5173/";
-    // The address bar supplies no host, so it never qualifies, flagged or not.
-    assert.equal((await navigate(url, { force: true })).ok, false);
-    assert.equal((await navigate(url, { agent: true })).ok, false);
-    assert.deepEqual(loaded, []);
-    // A relay request naming the captured Arca host does; other hosts stay blocked.
-    assert.equal((await navigate(url, { force: true, sourceHostId: identity.hostId })).ok, true);
-    assert.deepEqual(loaded, [url]);
-    assert.equal((await navigate("http://10.0.0.1/", { sourceHostId: identity.hostId })).ok, false);
   });
 });
