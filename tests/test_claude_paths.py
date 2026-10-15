@@ -40,7 +40,7 @@ def test_claude_config_dir_follows_claude_config_dir(
 
 
 def test_claude_config_dir_expands_tilde(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``~``-relative ``CLAUDE_CONFIG_DIR`` resolves against the user's home."""
+    """A ``~``-relative ``CLAUDE_CONFIG_DIR`` is expanded as a shell would (Omnigent's rule)."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~/profiles/work")
 
     assert claude_config_dir() == home / "profiles" / "work"

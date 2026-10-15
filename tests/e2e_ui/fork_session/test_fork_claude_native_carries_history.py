@@ -18,6 +18,7 @@ whether history was carried.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
@@ -374,4 +375,6 @@ def test_fork_claude_native_clone_carries_history_with_relocated_config_dir(
         finally:
             for session_id in (fork_id, source_id):
                 if session_id:
-                    client.delete(f"/v1/sessions/{session_id}", timeout=30.0)
+                    # Best-effort cleanup; a dead host must not mask the test's own failure.
+                    with contextlib.suppress(httpx.HTTPError):
+                        client.delete(f"/v1/sessions/{session_id}", timeout=30.0)

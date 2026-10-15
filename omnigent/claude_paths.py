@@ -18,6 +18,9 @@ def _configured_dir() -> Path | None:
 def claude_config_dir() -> Path:
     """Return Claude's config dir: ``$CLAUDE_CONFIG_DIR`` when set, else ``~/.claude``.
 
+    A ``~``-relative value is expanded as a shell would, like the resolvers this
+    helper replaced; Claude itself joins such a value to its own working directory.
+
     :returns: The directory holding ``settings.json``, ``projects/`` and ``sessions/``.
     """
     return _configured_dir() or Path.home() / ".claude"
