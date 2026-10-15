@@ -203,9 +203,8 @@ export function SideChatPane({
     boundaryRef.current = { childId, ids: stored, loadSeen: false, persisted: stored !== null };
   }
   if (loadingConversation) boundaryRef.current.loadSeen = true;
-  // Compute the boundary in render once the fork's load has completed — even if
-  // it is EMPTY (a parent with no history) — so visibleBlocks is correct the
-  // same frame and the first message isn't mistaken for inherited history. The
+  // Compute the boundary in render once the load has settled — even if EMPTY
+  // (a parent with no history) — so visibleBlocks is right the same frame; the
   // effect below persists it, keeping storage writes out of the render body.
   if (
     boundaryRef.current.ids === null &&
