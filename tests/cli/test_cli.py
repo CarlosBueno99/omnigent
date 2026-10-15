@@ -5925,6 +5925,33 @@ def test_config_list_hides_project_harness_launch_overrides(
     assert "per-harness overrides" not in result.output
     assert "/project/project-codex" not in result.output
     assert "--from-project" not in result.output
+    # ...but the user is told which project launch overrides were ignored.
+    assert "ignored project harness launch override(s): codex-native" in result.output
+
+
+def test_config_list_notes_project_harness_overrides_without_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A project that sets only harness launch overrides is not reported as empty."""
+    monkeypatch.chdir(tmp_path)
+    local_path = tmp_path / ".omnigent" / "config.yaml"
+    local_path.parent.mkdir()
+    local_path.write_text(
+        "harness:\n  codex-native:\n    command: /project/project-codex\n"
+        "    args: [--from-project]\n"
+    )
+    monkeypatch.setattr("omnigent.cli._load_global_config", dict)
+    monkeypatch.setattr("omnigent.cli._print_credentials_by_harness", lambda: None)
+
+    result = CliRunner().invoke(cli, ["config", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "(none set" not in result.output
+    assert "ignored project harness launch override(s): codex-native" in result.output
+    # The ignored executable and arguments themselves stay hidden.
+    assert "/project/project-codex" not in result.output
+    assert "--from-project" not in result.output
 
 
 def test_config_unset_removes_key(

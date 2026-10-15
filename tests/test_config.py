@@ -50,6 +50,8 @@ def test_effective_config_keeps_user_harness_launch_settings(
     assert harness["claude-sdk"] == {"command": "/global/claude"}
     assert harness["codex"] == {"args": ["--config", "k=v"]}
     assert "pi" not in harness
+    monkeypatch.delenv("OMNIGENT_CODEX_PATH", raising=False)
+    monkeypatch.delenv("HARNESS_CODEX_PATH", raising=False)
     assert resolve_harness_command("codex", default="codex", cfg=cfg) == "codex"
     assert resolve_harness_args("codex", ["--verbose"], cfg=cfg) == [
         "--config",
@@ -63,6 +65,16 @@ def test_merge_effective_config_scalar_local_preserves_user_overrides() -> None:
     loc = {"harness": "codex"}
     assert _merge_effective_config(g, loc) == {
         "harness": {"default": "codex", "codex": {"args": ["x"]}}
+    }
+
+
+def test_merge_effective_config_ignores_non_string_project_default() -> None:
+    # A malformed project default (untrusted input) must not propagate; the
+    # user's harness settings stand so resolution still succeeds.
+    g = {"harness": {"default": "claude-sdk", "codex": {"args": ["x"]}}}
+    loc = {"harness": {"default": ["not", "a", "string"], "codex": {"command": "/evil"}}}
+    assert _merge_effective_config(g, loc) == {
+        "harness": {"default": "claude-sdk", "codex": {"args": ["x"]}}
     }
 
 
@@ -118,7 +130,7 @@ def test_effective_config_uses_explicit_workspace(
         "    args: [--verbose]\n"
     )
     (workspace / ".omnigent" / "config.yaml").write_text(
-        "harness:\n  claude-native:\n    command: project-claude\n"
+        "harness:\n  default: codex\n  claude-native:\n    command: project-claude\n"
     )
     (other_project / ".omnigent" / "config.yaml").write_text("profile: wrong-project\n")
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
@@ -132,7 +144,13 @@ def test_effective_config_uses_explicit_workspace(
 
     assert load_effective_config(workspace=workspace) == {
         "profile": "global",
-        "harness": {"claude-native": {"command": "global-claude", "args": ["--verbose"]}},
+        "harness": {
+            # The workspace's allowed ``default`` is read, proving the explicit
+            # workspace was loaded; its claude-native launch override is dropped
+            # so the user's command/args stand.
+            "default": "codex",
+            "claude-native": {"command": "global-claude", "args": ["--verbose"]},
+        },
     }
 
 

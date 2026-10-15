@@ -11116,6 +11116,12 @@ def _print_config_defaults() -> None:
     ignored_local_keys = (
         [] if local_is_global else sorted(raw_local_cfg.keys() & _USER_LEVEL_ONLY_CONFIG_KEYS)
     )
+    raw_local_harness = raw_local_cfg.get("harness")
+    ignored_harness_overrides = (
+        []
+        if local_is_global or not isinstance(raw_local_harness, dict)
+        else sorted(key for key in raw_local_harness if key != "default")
+    )
     local_cfg = {
         k: v
         for k, v in raw_local_cfg.items()
@@ -11125,7 +11131,12 @@ def _print_config_defaults() -> None:
         # A project may set harness.default but not launch overrides; strip
         # project command/args so config list shows only what takes effect.
         local_cfg = _merge_effective_config({}, local_cfg)
-    if not global_cfg and not local_cfg and not ignored_local_keys:
+    if (
+        not global_cfg
+        and not local_cfg
+        and not ignored_local_keys
+        and not ignored_harness_overrides
+    ):
         click.echo(
             f"  (none set — `{cli_invocation()} config set key=value` for project,\n"
             f"   or `{cli_invocation()} config set --global key=value` for user-level)"
@@ -11148,6 +11159,13 @@ def _print_config_defaults() -> None:
         click.echo(
             "  # ignored user-level-only setting(s): "
             f"{', '.join(ignored_local_keys)} (set with --global)"
+        )
+    if ignored_harness_overrides:
+        if not local_cfg and not ignored_local_keys:
+            click.echo(f"  # {local_path}")
+        click.echo(
+            "  # ignored project harness launch override(s): "
+            f"{', '.join(ignored_harness_overrides)} (command/args are user-owned)"
         )
 
 
