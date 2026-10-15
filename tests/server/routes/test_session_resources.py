@@ -9621,8 +9621,9 @@ async def test_native_message_that_is_not_a_claude_btw_is_still_queued(
 async def test_hook_blocked_prompt_is_not_reclassified_as_missing_by_later_mirror(
     tmp_path: Path,
 ) -> None:
-    """A web message a ``UserPromptSubmit`` hook blocked must not be reported as never recorded.
+    """A web message a ``UserPromptSubmit`` hook blocked settles with the hook's reason.
 
+    It must not be reported as never recorded once a later message is mirrored.
     Claude Code 2.1.283 records the block only as a ``system`` notice without
     ``promptSubmitEnding``; the records below were captured from a live session.
     """
@@ -9722,6 +9723,18 @@ async def test_hook_blocked_prompt_is_not_reclassified_as_missing_by_later_mirro
             f"when the later mirror settled {later_pending}; persisted={missing_errors}; "
             f"parsed items={[(item.item_type, item.data) for item in items]}"
         )
+        notices = [
+            (item.data.code, item.data.level, item.data.message)
+            for item in store.appended_items
+            if item.type == "error" and item.data.code == "native_prompt_blocked_by_hook"
+        ]
+        assert [(code, level) for code, level, _message in notices] == [
+            ("native_prompt_blocked_by_hook", "info")
+        ], f"parsed items={[(item.item_type, item.data) for item in items]}"
+        assert "Blocked: test" in notices[0][2]
+        assert [
+            item.data.content[0]["text"] for item in store.appended_items if item.type == "message"
+        ] == [blocked_text, later_text]
         assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == []
     finally:
         pending_inputs.reset_for_tests()

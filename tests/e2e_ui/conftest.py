@@ -2606,7 +2606,6 @@ def _create_native_claude_session(
     runner_id: str,
     *,
     terminal_launch_args: list[str] | None = None,
-    workspace: str | None = None,
 ) -> str:
     """Register the ``claude-native`` wrapper agent and bind its session.
 
@@ -2633,15 +2632,11 @@ def _create_native_claude_session(
         by the plan-mode fixture to pass ``["--permission-mode", "plan"]`` so
         Claude boots into plan mode and reaches for ``ExitPlanMode``. ``None``
         launches with the production defaults.
-    :param workspace: Session workspace (Claude's cwd), e.g. a directory whose
-        ``.claude/settings.json`` the test seeded. ``None`` keeps the runner's cwd.
     :returns: The new session/conversation id.
     """
     metadata: dict[str, object] = {}
     if terminal_launch_args:
         metadata["terminal_launch_args"] = terminal_launch_args
-    if workspace is not None:
-        metadata["workspace"] = workspace
     created = create_native_session(httpx, base_url, harness="claude", metadata=metadata)
     session_id = str(created["session_id"])
     _bind_session_runner(base_url, session_id, runner_id)
