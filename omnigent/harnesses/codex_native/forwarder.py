@@ -3307,8 +3307,9 @@ async def _mirror_resumed_model(bridge_dir: Path, response: CodexMessage) -> Non
     model instead; ``thread/resume`` reports which. Every reader treats the
     file as the running model (this mirror, the cost-gate hook, the
     executor), so write the reported model when the file disagrees, as the
-    executor does for a routed switch. A failed write is recorded for those
-    readers like any other applied setting.
+    executor does for a routed switch. The write is bound to the revision
+    read, so a terminal ``/model`` landing meanwhile keeps its newer pick. A
+    failed write is recorded for those readers like any other applied setting.
 
     :param bridge_dir: The session's native-Codex bridge directory.
     :param response: Codex ``thread/resume`` response envelope.
@@ -3316,12 +3317,19 @@ async def _mirror_resumed_model(bridge_dir: Path, response: CodexMessage) -> Non
     """
     result = response.get("result")
     model = result.get("model") if isinstance(result, dict) else None
-    if not isinstance(model, str) or not model or read_codex_config_model(bridge_dir) == model:
+    if not isinstance(model, str) or not model:
         return
-    try:
-        failed = await asyncio.to_thread(
-            mirror_applied_codex_settings, bridge_dir, {"model": model}
+
+    def adopt() -> dict[str, str]:
+        revision = codex_config_revision(bridge_dir)
+        if read_codex_config_model(bridge_dir) == model:
+            return {}
+        return mirror_applied_codex_settings(
+            bridge_dir, {"model": model}, expected_revision=revision
         )
+
+    try:
+        failed = await asyncio.to_thread(adopt)
     except Exception:  # noqa: BLE001 - a mirror file must not break the subscription.
         _logger.warning("Failed to record resumed Codex model %s", model, exc_info=True)
         return

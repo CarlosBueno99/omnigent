@@ -499,6 +499,37 @@ async def test_subscribe_records_unmirrored_model_when_config_write_fails(
     assert state.model == "gpt-5.5"
 
 
+@pytest.mark.asyncio
+async def test_subscribe_keeps_a_model_the_tui_picked_during_resume_mirroring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``/model`` that lands while the resumed model is being written wins.
+
+    The TUI runs independently of the subscription. If it rewrites config.toml
+    between the forwarder's read and its write, the newer pick must survive:
+    the write is skipped, nothing is recorded as unmirrored, and the refresh
+    adopts the pick.
+    """
+    config = _write_codex_config(tmp_path, 'model = "gpt-5.6-sol"\n')
+    real_mirror = fwd.mirror_applied_codex_settings
+
+    def tui_rewrites_first(*args: object, **kwargs: object) -> dict[str, str]:
+        replacement = config.with_name("config.toml.new")
+        replacement.write_text('model = "gpt-5.5"\n')
+        replacement.replace(config)
+        return real_mirror(*args, **kwargs)
+
+    monkeypatch.setattr(fwd, "mirror_applied_codex_settings", tui_rewrites_first)
+    client = _RecordingClient()
+
+    state = await _subscribe_resumed_thread(tmp_path, client, thread_model="databricks-kimi-k3")
+
+    assert read_codex_config_model(tmp_path) == "gpt-5.5"
+    assert read_unmirrored_codex_settings(tmp_path) == {}
+    assert state.model == "gpt-5.5"
+    assert _model_posts(client) == ["gpt-5.5"]
+
+
 def test_thread_settings_updated_records_effort_and_collaboration_mode() -> None:
     """
     ``thread/settings/updated`` records Codex's live thinking settings.
