@@ -72,6 +72,29 @@ const LEVEL_LABELS: Record<number, string> = {
   [LEVEL_OWNER]: "Owner",
 };
 
+/**
+ * Focus the dialog's first enabled control that is not a tooltip trigger. Radix
+ * opens a tooltip when its trigger gains non-pointer focus, so auto-focusing the
+ * file-access info button would show its tooltip the moment the modal opens.
+ */
+function focusFirstNonTooltipControl(content: HTMLElement) {
+  const controls = content.querySelectorAll<HTMLElement>(
+    'button, input, select, textarea, [tabindex]:not([tabindex="-1"])',
+  );
+  for (const control of controls) {
+    if (
+      control.tabIndex < 0 ||
+      control.matches(":disabled") ||
+      control.closest('[data-slot="tooltip-trigger"]')
+    ) {
+      continue;
+    }
+    control.focus();
+    if (document.activeElement === control) return;
+  }
+  content.focus();
+}
+
 interface PermissionsModalProps {
   sessionId: string;
   workspace?: string | null;
@@ -211,10 +234,11 @@ export function PermissionsModal({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="sm:max-w-md"
-        // Radix opens a tooltip when its trigger gains non-pointer focus, and
-        // the file-access info button is the first tabbable control while
-        // grants load, so the dialog's auto-focus would show it on open.
-        onOpenAutoFocus={(e) => e.preventDefault()}
+        // The info button is the first tabbable control while grants load.
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          focusFirstNonTooltipControl(e.currentTarget as HTMLElement);
+        }}
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">Share this session</DialogTitle>

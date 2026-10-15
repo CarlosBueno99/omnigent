@@ -1124,6 +1124,11 @@ describe("PermissionsModal", () => {
       const info = screen.getByRole("button", {
         name: "File access for Comment and Edit permissions",
       });
+      // Opening focus skips the info icon and lands on the next control.
+      expect(info).not.toHaveFocus();
+      expect(
+        screen.getByRole("switch", { name: "Workspace files for Read permission" }),
+      ).toHaveFocus();
       expect(screen.queryByRole("tooltip")).toBeNull();
 
       info.focus();
