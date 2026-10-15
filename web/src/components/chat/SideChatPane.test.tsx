@@ -665,10 +665,16 @@ describe("inherited history boundary", () => {
     expect(screen.getByText("side: answer this side question")).toBeInTheDocument();
   });
 
-  it("shows a native Codex child's own first turn", async () => {
-    const { settleLoad } = mountLoadingChild();
-    await settleLoad([sideTurn], "codex-native");
+  it("never persists a native Codex child's own first turn as inherited", async () => {
+    const first = mountLoadingChild();
+    await first.settleLoad([sideTurn], "codex-native");
+    expect(screen.getByText("side: answer this side question")).toBeInTheDocument();
 
+    // A boundary wrongly captured here would hide this turn on the next mount.
+    first.view.unmount();
+    conversationRegistry.clear();
+    const reloaded = mountLoadingChild();
+    await reloaded.settleLoad([sideTurn], "codex-native");
     expect(screen.getByText("side: answer this side question")).toBeInTheDocument();
   });
 });

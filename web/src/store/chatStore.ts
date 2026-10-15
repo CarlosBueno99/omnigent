@@ -3788,8 +3788,9 @@ function mirrorActiveEntry(): void {
  * can recover on retry (a plain membership check would strand it forever).
  *
  * @param id Conversation id to stream, e.g. a side-chat child.
- * @returns `true` once this call bound the stream and its history load settled
- *   (successfully or with `conversationLoadError` set); `false` for a no-op.
+ * @returns `true` once this call initiated a bind (the load usually settles by
+ *   then, but a dispose while binding can abandon it — re-check the registry);
+ *   `false` for a no-op.
  */
 export async function ensureConversationStreamed(id: string): Promise<boolean> {
   if (id === "" || isTempConvId(id)) return false;

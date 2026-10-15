@@ -4,6 +4,7 @@ slow deployment. Staying on the pane is covered by ``test_side_chat_entrypoints`
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 
@@ -89,7 +90,13 @@ def test_side_chat_left_while_loading_hides_parent_transcript(
         expect(rail.get_by_role("tab", name="Side chat 2", exact=True)).to_be_visible()
         with page.expect_response(lambda r: f"/v1/sessions/{child_id}/items" in r.url):
             held[0].continue_()
-        page.wait_for_timeout(2_000)
+        # Return only once the OFF-SCREEN load persisted its boundary: Side chat 1
+        # is still unmounted, so this proves the fix, not the on-screen path.
+        boundary_key = f"omnigent.sideChatInherited:{child_id}"
+        deadline = time.monotonic() + 30
+        while not page.evaluate("(k) => localStorage.getItem(k)", boundary_key):
+            assert time.monotonic() < deadline, "off-screen load never persisted the boundary"
+            page.wait_for_timeout(100)
 
         rail.get_by_role("tab", name="Side chat 1", exact=True).click()
         pane = page.locator(".side-chat-backdrop")
@@ -111,5 +118,9 @@ def test_side_chat_left_while_loading_hides_parent_transcript(
         expect(pane.locator(_USER)).to_have_count(1)
         expect(pane.locator(_ASSISTANT)).to_have_count(1)
     finally:
+        # Release any still-held route so a mid-test failure can't hang teardown.
+        for route in held:
+            with contextlib.suppress(Exception):
+                route.continue_()
         for child_id in child_ids:
             httpx.delete(f"{base_url}/v1/sessions/{child_id}", timeout=10.0)

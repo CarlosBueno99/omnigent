@@ -199,10 +199,9 @@ export function SideChatPane({
     };
   }
   if (loadingConversation) boundaryRef.current.loadSeen = true;
-  // Capture once, when the fork's load has actually completed — even if it is
-  // EMPTY (a parent with no history), so the side chat's first message isn't
-  // mistaken for inherited history and hidden. Persisting lets later
-  // mounts/reloads hide the same set, not new turns.
+  // Capture once the fork's load has actually completed — even if it is EMPTY
+  // (a parent with no history), so the side chat's first message isn't mistaken
+  // for inherited history and hidden (see captureInheritedBoundary).
   if (
     boundaryRef.current.ids === null &&
     !pending &&
