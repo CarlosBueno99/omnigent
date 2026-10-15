@@ -245,6 +245,17 @@ CREATE TABLE messages (
 """
 
 
+def test_side_session_checks_defer_when_schema_introspection_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failed PRAGMA must not disable the gates: both checks report 'unknown' instead."""
+    db = tmp_path / "state.db"
+    _seed_compressed_main_with_late_helper(db, source="subagent", model_config="{}")
+    monkeypatch.setattr(f, "_table_columns", lambda _con, _table: frozenset())
+    assert f._is_side_session_id(db, "late-helper") is None
+    assert f._discover_child_session(db, "main") is None
+
+
 def _seed_db_v11(path: Path, *, started_at: float, session_id: str = "20260710_1") -> None:
     """Seed a schema-11 Hermes DB (no cwd / active / compacted columns)."""
     con = sqlite3.connect(path)
@@ -1202,7 +1213,7 @@ async def test_forward_loop_keeps_a_valid_binding_through_an_unreadable_store_wi
     patched = _capture_server_client(monkeypatch)
 
     def _bring_store_up(poll: int) -> None:
-        if poll == 2:
+        if poll == 3:
             # The store comes back after the window expired, with one new row.
             db.parent.mkdir()
             _seed_main_with_finished_helper(db, workspace, compacted=False)
@@ -1216,7 +1227,7 @@ async def test_forward_loop_keeps_a_valid_binding_through_an_unreadable_store_wi
         bridge_dir=bridge_dir,
         workspace=workspace,
         statuses=idle_posts,
-        stop_after_iterations=4,
+        stop_after_iterations=5,
         posted=posted,
         on_sleep=_bring_store_up,
         session_id="conv_outage",

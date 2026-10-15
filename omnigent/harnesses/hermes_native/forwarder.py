@@ -491,6 +491,8 @@ def _is_side_session_id(db_path: Path, hermes_session_id: str) -> bool | None:
         return None
     try:
         cols = _table_columns(con, "sessions")
+        if not cols:
+            return None  # introspection failed or no table yet: verdict unknown
         row = con.execute(
             f"SELECT {_column_or_null(cols, 'source')}, {_column_or_null(cols, 'model_config')}, "
             f"{_column_or_null(cols, 'parent_session_id')} "
@@ -510,8 +512,8 @@ def _is_side_session_id(db_path: Path, hermes_session_id: str) -> bool | None:
 def _ended_by_compression(db_path: Path, hermes_session_id: str) -> bool:
     """Whether Hermes ended *hermes_session_id* with ``end_reason = 'compression'``.
 
-    Polled every cycle, so this is one indexed SELECT: an older schema without the
-    column or a store mid-checkpoint simply reads as "not ended" this time.
+    Polled every cycle, so this is one indexed SELECT; an older schema without the
+    column warns once and reads as "not ended".
     """
     con = _connect_ro(db_path)
     if con is None:
@@ -520,7 +522,8 @@ def _ended_by_compression(db_path: Path, hermes_session_id: str) -> bool:
         row = con.execute(
             "SELECT end_reason FROM sessions WHERE id = ?", (hermes_session_id,)
         ).fetchone()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        _warn_sqlite_once("compression-end check", exc)
         return False
     finally:
         con.close()
@@ -612,6 +615,9 @@ def _discover_child_session(db_path: Path, parent_session_id: str) -> str | None
         return None
     try:
         cols = _table_columns(con, "sessions")
+        if not cols:
+            # Without the live schema neither gate can run; retry next poll.
+            return None
         if "end_reason" in cols:
             parent = con.execute(
                 "SELECT end_reason FROM sessions WHERE id = ?", (parent_session_id,)
@@ -1294,11 +1300,9 @@ async def forward_hermes_store_to_session(
                         hermes_session_id = None
                         binding_verdict = False
                     elif binding_verdict:
-                        # A helper or fork must never back the main transcript: drop
-                        # the binding and its idle poster count (rebased onto the
-                        # helper) so discovery and completion reporting start clean.
-                        # The rediscovered session mirrors from its start: nothing is
-                        # lost, and the item POST has no dedup key anyway.
+                        # A side binding may have rebased the cursor and idle count:
+                        # reset both before rediscovery (the rediscovered session is
+                        # mirrored from its start, so nothing is lost).
                         _logger.warning(
                             "hermes forwarder persisted binding %s is a side session; "
                             "rediscovering; session=%s",
