@@ -167,11 +167,8 @@ interface UseTerminalsOptions {
 // instead of throwing, so React Query does not enter an error state.
 const SOFT_TERMINAL_LIST_STATUSES = new Set([404, 409, 502, 503]);
 
-/**
- * Whether `res` is a sharded server's structured ``400 wrong_replica`` miss —
- * the runner is live but on a replica this request did not reach. That is the
- * soft "not reachable from here" case above, not a bad request.
- */
+// A sharded server's structured 400 wrong_replica miss: the runner is live but
+// on another replica, so it is soft like the statuses above, not a bad request.
 async function isWrongReplica400(res: Response): Promise<boolean> {
   if (res.status !== 400) return false;
   try {
