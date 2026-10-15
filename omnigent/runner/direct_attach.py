@@ -152,7 +152,7 @@ def create_direct_attach_app(
 
     - ``/probe``: validates the handshake, accepts, closes. Lets the
       browser test reachability without touching any terminal (a real
-      attach forks a tmux client and seeds a capture, so probing the
+      attach starts a tmux control client and seeds a capture, so probing the
       attach route itself would cost real work per page load).
     - ``/v1/sessions/{sid}/resources/terminals/{tid}/attach``: the same
       path shape and handler as the tunnel-dispatched attach route, so
@@ -189,7 +189,6 @@ def create_direct_attach_app(
         session_id: str,
         terminal_id: str,
         read_only: bool = Query(default=False),
-        transport: str | None = Query(default=None),
     ) -> None:
         """Token-gated wrapper around the runner's attach handler."""
         if not _authorized(websocket):
@@ -200,7 +199,6 @@ def create_direct_attach_app(
             session_id,
             terminal_id,
             read_only=read_only,
-            transport=transport,
         )
 
     return app
@@ -260,6 +258,9 @@ async def start_direct_attach_listener(app: FastAPI) -> DirectAttachListener | N
         port=0,
         log_level="warning",
         access_log=False,
+        # The default dictConfig closes process-wide handlers and can block
+        # startup while asynchronous handlers drain. Reuse runner logging.
+        log_config=None,
     )
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve(), name="runner-direct-attach")

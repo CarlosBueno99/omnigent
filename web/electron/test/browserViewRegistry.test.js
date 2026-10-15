@@ -52,6 +52,21 @@ describe("browserViewRegistry — first-navigate activation signal", () => {
     ctx = makeRegistry();
   });
 
+  it("keeps the agent view and two user tabs independent through switch and close", () => {
+    const ids = ["conv_1", "browser-tab:conv_1:first", "browser-tab:conv_1:second"];
+    for (const id of ids) ctx.registry.openOrNavigate(id, "https://example.com");
+    const views = ids.map((id) => ctx.registry.get(id).view);
+    assert.equal(new Set(views).size, 3);
+    ctx.registry.setActive(ids[1]);
+    ctx.registry.setActive(ids[2]);
+    assert.deepEqual(ctx.detached, [views[1]]);
+    ctx.registry.close(ids[1]);
+    assert.equal(ctx.registry.get(ids[1]), null);
+    assert.equal(ctx.registry.get(ids[0]).view, views[0]);
+    assert.equal(ctx.registry.get(ids[2]).view, views[2]);
+    assert.equal(ctx.registry.activeConversationId(), ids[2]);
+  });
+
   it("emits browser-view-created on first openOrNavigate for a fresh conversation", () => {
     const r = ctx.registry.openOrNavigate("conv_1", "https://example.com");
     assert.equal(r.ok, true);
@@ -140,6 +155,149 @@ describe("browserViewRegistry — first-navigate activation signal", () => {
   });
 });
 
+function makeRecentSessionInputRegistry({
+  isHostFocused = () => true,
+  supportsRecentSessionSwitch = true,
+} = {}) {
+  const listeners = new Map();
+  const sent = [];
+  const webContents = {
+    loadURL() {},
+    close() {},
+    removeListener() {},
+    on(name, listener) {
+      listeners.set(name, listener);
+    },
+    setWindowOpenHandler() {},
+  };
+  const registry = createBrowserViewRegistry({
+    WebContentsViewCtor: () => ({ setBounds() {}, webContents }),
+    createBoundsController: createBrowserViewBoundsController,
+    attachToHost() {},
+    detachFromHost() {},
+    sendToRenderer: (channel, payload) => sent.push({ channel, payload }),
+    isHostFocused,
+  });
+  registry.openOrNavigate("conv_1", "https://example.com");
+  registry.setActive("conv_1");
+  registry.setRecentSessionSwitchSupported(supportsRecentSessionSwitch);
+  return { registry, listeners, sent };
+}
+
+describe("browserViewRegistry — recent-session input forwarding", () => {
+  it("leaves page shortcuts untouched until the renderer advertises support", () => {
+    const { listeners, sent } = makeRecentSessionInputRegistry({
+      supportsRecentSessionSwitch: false,
+    });
+    const forward = listeners.get("before-input-event");
+    const prevented = [];
+    const event = () => ({ preventDefault: () => prevented.push(true) });
+
+    forward(event(), { type: "keyDown", key: "Tab", code: "Tab", control: true });
+    forward(event(), { type: "keyDown", key: "Escape", code: "Escape", control: true });
+
+    assert.equal(prevented.length, 0);
+    assert.equal(sent.filter((item) => item.channel === "browser-recent-session-input").length, 0);
+  });
+
+  it("forwards Ctrl+Tab, Control release, and Escape from an embedded page", () => {
+    const { listeners, sent } = makeRecentSessionInputRegistry();
+    const forward = listeners.get("before-input-event");
+    const prevented = [];
+    const event = () => ({ preventDefault: () => prevented.push(true) });
+    forward(event(), { type: "keyDown", key: "Tab", code: "Tab", control: false });
+    forward(event(), {
+      type: "keyDown",
+      key: "Tab",
+      code: "Tab",
+      control: true,
+      shift: true,
+    });
+    forward(event(), {
+      type: "keyDown",
+      key: "Escape",
+      code: "Escape",
+      control: true,
+    });
+    forward(event(), {
+      type: "keyUp",
+      key: "Control",
+      code: "ControlLeft",
+      control: false,
+    });
+    forward(event(), { type: "keyDown", key: "Tab", code: "Tab", control: true });
+    forward(event(), {
+      type: "keyUp",
+      key: "Control",
+      code: "ControlLeft",
+      control: false,
+    });
+
+    const forwarded = sent.filter((item) => item.channel === "browser-recent-session-input");
+    assert.deepEqual(
+      forwarded.map((item) => [item.payload.type, item.payload.key, item.payload.shiftKey]),
+      [
+        ["keydown", "Tab", true],
+        ["keydown", "Escape", false],
+        ["keydown", "Tab", false],
+        ["keyup", "Control", false],
+      ],
+    );
+    assert.equal(prevented.length, 3, "claim Tab and Escape keydowns, not Control release");
+  });
+
+  it("clears a pending switch on focus loss without intercepting a later Escape", () => {
+    let hostFocused = true;
+    const { listeners, sent } = makeRecentSessionInputRegistry({
+      isHostFocused: () => hostFocused,
+    });
+    const forward = listeners.get("before-input-event");
+    const blur = listeners.get("blur");
+    const prevented = [];
+    const event = () => ({ preventDefault: () => prevented.push(true) });
+
+    forward(event(), { type: "keyDown", key: "Tab", code: "Tab", control: true });
+    hostFocused = false;
+    blur();
+    const countAfterBlur = sent.length;
+    forward(event(), { type: "keyDown", key: "Escape", code: "Escape", control: false });
+
+    assert.equal(prevented.length, 1, "only Ctrl+Tab is claimed");
+    assert.equal(sent.length, countAfterBlur, "ordinary Escape is not forwarded");
+    assert.equal(sent.at(-1).payload.key, "Escape", "focus loss cancels the renderer switcher");
+  });
+
+  it("leaves later page input alone when the renderer declines the switch", () => {
+    const { registry, listeners, sent } = makeRecentSessionInputRegistry();
+    const forward = listeners.get("before-input-event");
+    const prevented = [];
+    const event = () => ({ preventDefault: () => prevented.push(true) });
+
+    forward(event(), { type: "keyDown", key: "Tab", code: "Tab", control: true });
+    registry.cancelRecentSessionSwitch();
+    const countAfterCancellation = sent.length;
+    forward(event(), { type: "keyDown", key: "Escape", code: "Escape", control: false });
+
+    assert.equal(prevented.length, 1, "only Ctrl+Tab is claimed");
+    assert.equal(sent.length, countAfterCancellation, "ordinary Escape is not forwarded");
+  });
+
+  it("releases a pending switch when renderer support ends", () => {
+    const { registry, listeners, sent } = makeRecentSessionInputRegistry();
+    const forward = listeners.get("before-input-event");
+    const prevented = [];
+    const event = () => ({ preventDefault: () => prevented.push(true) });
+
+    forward(event(), { type: "keyDown", key: "Tab", code: "Tab", control: true });
+    registry.setRecentSessionSwitchSupported(false);
+    const countAfterUnsubscribe = sent.length;
+    forward(event(), { type: "keyDown", key: "Escape", code: "Escape", control: false });
+
+    assert.equal(prevented.length, 1, "only Ctrl+Tab is claimed");
+    assert.equal(sent.length, countAfterUnsubscribe, "ordinary Escape is not forwarded");
+  });
+});
+
 // Build a registry whose stub views record every loadURL call, so we can
 // assert the agent-navigation allowlist blocks BEFORE loadURL is reached.
 function makeLoadTrackingRegistry() {
@@ -224,8 +382,13 @@ describe("browserViewRegistry — agent-navigation allowlist", () => {
 // A stub view that captures the webContents event handlers (will-navigate /
 // will-redirect / will-frame-navigate) and the window-open handler, so tests
 // can fire a redirect and assert whether it was cancelled (preventDefault).
-function makeEventCapturingRegistry() {
+function makeEventCapturingRegistry(extra = {}) {
   const sent = []; // { channel, payload }
+  const loaded = []; // loadURL targets on the created view
+  const clipboardWrites = []; // copyTextToClipboard payloads
+  const externalOpens = []; // openUrlExternal payloads
+  const menus = []; // showContextMenu item lists
+  let copyCalls = 0; // webContents.copy() invocations
   let handlers; // { [event]: fn } for the single created view
   let windowOpenHandler;
   const registry = createBrowserViewRegistry({
@@ -234,8 +397,13 @@ function makeEventCapturingRegistry() {
       return {
         setBounds() {},
         webContents: {
-          loadURL() {},
+          loadURL(url) {
+            loaded.push(url);
+          },
           close() {},
+          copy() {
+            copyCalls += 1;
+          },
           removeListener() {},
           on(event, fn) {
             handlers[event] = fn;
@@ -251,10 +419,19 @@ function makeEventCapturingRegistry() {
     detachFromHost() {},
     sendToRenderer: (channel, payload) => sent.push({ channel, payload }),
     getHostZoomFactor: () => 1,
+    openUrlExternal: (url) => externalOpens.push(url),
+    copyTextToClipboard: (text) => clipboardWrites.push(text),
+    showContextMenu: (items) => menus.push(items),
+    ...extra,
   });
   return {
     registry,
     sent,
+    loaded,
+    clipboardWrites,
+    externalOpens,
+    menus,
+    copyCalls: () => copyCalls,
     fire: (event, targetUrl) => {
       const ev = {
         url: targetUrl,
@@ -266,11 +443,74 @@ function makeEventCapturingRegistry() {
       handlers[event](ev, targetUrl);
       return ev;
     },
+    fireContextMenu: (params) => handlers["context-menu"]({}, params),
     windowOpen: (url) => windowOpenHandler({ url }),
   };
 }
 
 describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every hop)", () => {
+  it("uses the same live Arca context for initial URL, redirect, frame and popup", () => {
+    let eligible = true;
+    const context = { serverTarget: "selected-server", sourceHostId: "actual-host" };
+    const { registry, fire, windowOpen, loaded } = makeEventCapturingRegistry({
+      isArcaAgentContext: (ctx) => eligible && ctx === context,
+    });
+    assert.equal(
+      registry.openOrNavigate("arca", "http://localhost:5173", undefined, {
+        agent: true,
+        agentContext: context,
+      }).ok,
+      true,
+    );
+    for (const event of ["will-navigate", "will-redirect", "will-frame-navigate"]) {
+      assert.equal(fire(event, "http://127.0.0.1:5173").prevented, false);
+      assert.equal(fire(event, "http://169.254.169.254").prevented, true);
+      assert.equal(fire(event, "http://192.168.1.1").prevented, true);
+    }
+    const before = loaded.length;
+    windowOpen("http://[::1]:5173");
+    assert.equal(loaded.length, before + 1);
+    windowOpen("file:///tmp/test");
+    windowOpen("http://10.0.0.1");
+    assert.equal(loaded.length, before + 1);
+    eligible = false;
+    assert.equal(fire("will-redirect", "http://localhost:5173").prevented, true);
+    windowOpen("http://localhost:5173");
+    assert.equal(loaded.length, before + 1);
+    assert.equal(
+      registry.openOrNavigate("unknown", "http://localhost:5173", undefined, {
+        agent: true,
+        agentContext: context,
+      }).ok,
+      false,
+    );
+    assert.equal(registry.has("unknown"), false);
+  });
+
+  it("does not carry a previous Arca context into another navigation or registry", () => {
+    const context = {};
+    const options = { isArcaAgentContext: (ctx) => ctx === context };
+    const first = makeEventCapturingRegistry(options);
+    const second = makeEventCapturingRegistry();
+    assert.equal(
+      first.registry.openOrNavigate("same-id", "http://localhost", undefined, {
+        agent: true,
+        agentContext: context,
+      }).ok,
+      true,
+    );
+    assert.equal(
+      second.registry.openOrNavigate("same-id", "http://localhost", undefined, {
+        agent: true,
+        agentContext: context,
+      }).ok,
+      false,
+    );
+    first.registry.openOrNavigate("same-id", "https://example.com", undefined, { agent: true });
+    assert.equal(first.fire("will-redirect", "http://localhost").prevented, true);
+    first.registry.openOrNavigate("same-id", "http://localhost", undefined, { force: true });
+    assert.equal(first.fire("will-redirect", "http://10.0.0.1").prevented, false);
+  });
   it("blocks an agent-locked will-redirect to the cloud-metadata IP", () => {
     const { registry, sent, fire } = makeEventCapturingRegistry();
     // Agent navigates to an allowed host (locks the view to agent policy).
@@ -329,11 +569,87 @@ describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every h
 });
 
 describe("browserViewRegistry — child window.open is denied (S3)", () => {
-  it("installs a window-open handler that denies every popup", () => {
+  it("never opens a window: every window.open target is answered with deny", () => {
     const { registry, windowOpen } = makeEventCapturingRegistry();
     registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
     assert.deepEqual(windowOpen("https://evil.example.com/popup"), { action: "deny" });
     assert.deepEqual(windowOpen("https://example.com/ok"), { action: "deny" });
+  });
+
+  it("navigates the SAME view in place for an http(s) link target", () => {
+    const { registry, windowOpen, loaded } = makeEventCapturingRegistry();
+    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    loaded.length = 0; // ignore the initial openOrNavigate load
+    assert.deepEqual(windowOpen("https://example.com/linked-page"), { action: "deny" });
+    assert.deepEqual(loaded, ["https://example.com/linked-page"]);
+  });
+
+  it("blocks an agent-locked window.open to an internal host (no in-place nav)", () => {
+    const { registry, windowOpen, loaded, sent } = makeEventCapturingRegistry();
+    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    loaded.length = 0;
+    assert.deepEqual(windowOpen("http://169.254.169.254/latest/meta-data/"), {
+      action: "deny",
+    });
+    assert.deepEqual(loaded, [], "no in-place navigation to a blocked host");
+    const blocked = sent.filter((s) => s.channel === "browser-nav-blocked");
+    assert.equal(blocked.length, 1, "the SSRF block surfaces to the renderer");
+  });
+
+  it("still denies non-web schemes with no in-place nav", () => {
+    const { registry, windowOpen, loaded } = makeEventCapturingRegistry();
+    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    loaded.length = 0;
+    assert.deepEqual(windowOpen("file:///etc/passwd"), { action: "deny" });
+    assert.deepEqual(windowOpen("javascript:alert(1)"), { action: "deny" });
+    assert.deepEqual(loaded, []);
+  });
+});
+
+describe("browserViewRegistry — pane context menu", () => {
+  it("offers Open Link in Browser + Copy Link Address over a link", () => {
+    const { registry, fireContextMenu, menus, externalOpens, clipboardWrites } =
+      makeEventCapturingRegistry();
+    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    fireContextMenu({ linkURL: "https://example.com/page", selectionText: "" });
+    assert.equal(menus.length, 1);
+    assert.deepEqual(
+      menus[0].map((item) => item.label),
+      ["Open Link in Browser", "Copy Link Address"],
+    );
+    menus[0][0].click();
+    menus[0][1].click();
+    assert.deepEqual(externalOpens, ["https://example.com/page"]);
+    assert.deepEqual(clipboardWrites, ["https://example.com/page"]);
+  });
+
+  it("omits Open Link in Browser for a non-web link but still offers Copy Link Address", () => {
+    const { registry, fireContextMenu, menus } = makeEventCapturingRegistry();
+    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    fireContextMenu({ linkURL: "javascript:alert(1)", selectionText: "" });
+    assert.deepEqual(
+      menus[0].map((item) => item.label),
+      ["Copy Link Address"],
+    );
+  });
+
+  it("offers Copy over selected text and routes it to webContents.copy()", () => {
+    const { registry, fireContextMenu, menus, copyCalls } = makeEventCapturingRegistry();
+    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    fireContextMenu({ linkURL: "", selectionText: "hello" });
+    assert.deepEqual(
+      menus[0].map((item) => item.label),
+      ["Copy"],
+    );
+    menus[0][0].click();
+    assert.equal(copyCalls(), 1);
+  });
+
+  it("shows nothing over dead space", () => {
+    const { registry, fireContextMenu, menus } = makeEventCapturingRegistry();
+    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    fireContextMenu({ linkURL: "", selectionText: "   " });
+    assert.equal(menus.length, 0);
   });
 });
 

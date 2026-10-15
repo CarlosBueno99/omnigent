@@ -1,8 +1,8 @@
 /**
  * Per-conversation WebContentsView registry.
  *
- * Keyed by `conversationId` for Omnigent's session model. Each entry owns its
- * own bounds controller so per-conversation state never cross-contaminates.
+ * Keyed by the agent's conversation ID or a user tab's view ID. Each entry owns
+ * its bounds and navigation; tabs in one conversation share storage.
  *
  * Pure factory — no Electron imports at module scope. All deps are injected
  * so a unit test can drive create/swap/close/closeAll/cap behavior with a
@@ -21,6 +21,45 @@ const { isAgentNavigationAllowed } = require("./browserUrlPolicy");
 
 const DEFAULT_CAP = 10;
 
+/**
+ * Storage partition shared by one conversation's browser views. Without an
+ * explicit partition, Electron places the view on
+ * `session.defaultSession`, sharing one cookie/localStorage/cache store across
+ * all agents and the main window (agent A's login bleeds into agent B's view).
+ * Deliberately NOT `persist:`-prefixed — an in-memory partition keeps
+ * agent-visited cookies off disk and leaves nothing to clean up when a
+ * conversation is deleted, while Electron still reuses the same in-memory
+ * session for the name within an app run (a reopened view keeps its login).
+ *
+ * `scope` namespaces the partition per REGISTRY (i.e. per shell window):
+ * Electron sessions are app-global, but conversation ids are only unique per
+ * server — two windows connected to different servers could carry the same
+ * conversationId and would otherwise share a cookie jar.
+ *
+ * @param {string} scope Registry-unique namespace (one per shell window).
+ * @param {string} viewId Conversation ID or encoded browser-tab view ID.
+ * @returns {string}
+ */
+function agentPartition(scope, viewId) {
+  let conversationId = viewId;
+  // Session IDs are UUID hex strings; tab keys follow browserViewId in
+  // web/src/hooks/useBrowserTabs.ts. Only storage uses the owning session ID.
+  const tab = /^browser-tab:([^:]+):[^:]+$/.exec(viewId);
+  if (tab) {
+    try {
+      conversationId = decodeURIComponent(tab[1]);
+    } catch {
+      // An invalid tab key keeps its own isolated partition.
+    }
+  }
+  return `omnigent-agent-${scope}-${conversationId}`;
+}
+
+// Monotonic per-process counter: each registry (shell window) gets a distinct
+// default partition scope. In-memory partitions never outlive the process, so
+// no cross-run uniqueness is needed.
+let registrySeq = 0;
+
 function createBrowserViewRegistry({
   WebContentsViewCtor, // (opts) => new WebContentsView(opts) — injectable for tests
   createBoundsController, // bounds-controller factory (createBrowserViewBoundsController)
@@ -29,7 +68,18 @@ function createBrowserViewRegistry({
   sendToRenderer, // (channel, payload) => mainWindow.webContents.send(...)
   getHostZoomFactor = () => 1,
   getHostDisplayScaleFactor = () => null,
+  isHostFocused = () => true,
+  // Desktop affordances for the pane's context menu; injected so the registry
+  // stays Electron-free. No-op defaults keep tests and non-menu hosts simple.
+  openUrlExternal = () => {}, // (url) => shell.openExternal(url)
+  copyTextToClipboard = () => {}, // (text) => clipboard.writeText(text)
+  showContextMenu = () => {}, // (items) => Menu.buildFromTemplate(items).popup(...)
+  onSuppressionChange = () => {}, // dismiss shell-owned UI when an overlay hides the pane
+  isArcaAgentContext = () => false,
   cap = DEFAULT_CAP,
+  // Partition namespace for this registry's views — see agentPartition.
+  // Injectable so tests can pin it; defaults to a per-instance unique value.
+  partitionScope = `w${++registrySeq}`,
 } = {}) {
   const entries = new Map(); // conversationId -> BrowserViewEntry
   let activeConversationId = null;
@@ -38,6 +88,7 @@ function createBrowserViewRegistry({
   // layer, which always paints above the renderer regardless of z-index. Sticky
   // across attaches: a view that becomes active while suppressed stays hidden.
   let overlaySuppressed = false;
+  let recentSessionSwitchSupported = false;
 
   // Apply the current suppress flag to the active view (no-op with none active).
   function applyActiveVisibility() {
@@ -54,6 +105,7 @@ function createBrowserViewRegistry({
   function setSuppressed(suppressed) {
     overlaySuppressed = !!suppressed;
     applyActiveVisibility();
+    onSuppressionChange(overlaySuppressed);
     return { ok: true };
   }
 
@@ -86,12 +138,14 @@ function createBrowserViewRegistry({
       // this, the allowlist only guards the first hop and a redirect to an
       // internal host slips through (SSRF via screenshot).
       agentNavLocked: false,
+      agentContext: null,
       // Design-mode listeners + webContents, set by browserIpc's enable handler
       // and cleared on disable/close (console-message forwarder + native-gesture
       // tracker). Null until design mode is enabled for this entry.
       designModeListener: null,
       designModeInputListener: null,
       designModeWebContents: null,
+      recentSessionSwitching: false,
     };
     return entry;
   }
@@ -108,6 +162,8 @@ function createBrowserViewRegistry({
     }
     const view = WebContentsViewCtor({
       webPreferences: {
+        // Per-conversation storage isolation — see agentPartition.
+        partition: agentPartition(partitionScope, conversationId),
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,
@@ -115,20 +171,85 @@ function createBrowserViewRegistry({
     });
     const entry = makeEntry(conversationId, view);
     entries.set(conversationId, entry);
-    denyChildWindowOpen(entry);
+    installWindowOpenPolicy(entry);
+    attachViewContextMenu(entry);
     attachAgentNavGuard(conversationId, entry);
+    attachRecentSessionInput(entry);
     return { ok: true, entry, created: true };
   }
 
-  // SECURITY: a visited page must not spawn windows from the desktop shell.
-  // Deny every window.open / target=_blank on the child view (the safe default;
-  // unlike the main shell window we do NOT route to shell.openExternal, since an
-  // agent-visited page popping the user's real browser to an arbitrary URL is
-  // itself an abuse vector).
-  function denyChildWindowOpen(entry) {
+  // SECURITY: a visited page must not spawn windows from the desktop shell, so
+  // window.open / target=_blank still never creates a window here and is never
+  // routed to shell.openExternal (an agent-visited page popping the user's real
+  // browser to an arbitrary URL is itself an abuse vector). Instead an http(s)
+  // target navigates the SAME view in place — nothing the page couldn't already
+  // do with location.href — so a clicked link goes somewhere instead of dying
+  // silently. The agent nav guard cannot see this hop (will-navigate skips
+  // programmatic loadURL), so an agent-locked view is allowlist-checked here.
+  function installWindowOpenPolicy(entry) {
     const wc = entry.view && entry.view.webContents;
     if (!wc || typeof wc.setWindowOpenHandler !== "function") return;
-    wc.setWindowOpenHandler(() => ({ action: "deny" }));
+    wc.setWindowOpenHandler(({ url }) => {
+      let parsed;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return { action: "deny" }; // unparseable URL — nothing safe to open
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return { action: "deny" };
+      }
+      if (entry.agentNavLocked) {
+        const verdict = isAgentNavigationAllowed(url, {
+          allowLocalhost: isArcaAgentContext(entry.agentContext),
+        });
+        if (!verdict.ok) {
+          sendToRenderer("browser-nav-blocked", {
+            conversationId: entry.conversationId,
+            url,
+            error: verdict.error,
+          });
+          return { action: "deny" };
+        }
+      }
+      try {
+        wc.loadURL(url);
+      } catch {
+        /* view destroyed mid-click */
+      }
+      return { action: "deny" };
+    });
+  }
+
+  // Right-click menu for the child view — the shell window's own menu covers
+  // only the shell webContents, so without one a pane link can be neither
+  // opened externally nor copied. "Open Link in Browser" is user-chosen, so
+  // shell.openExternal is safe here (unlike the page-initiated path above).
+  // Items are plain data; the host (main.js) builds the actual Electron Menu.
+  function attachViewContextMenu(entry) {
+    const wc = entry.view && entry.view.webContents;
+    if (!wc || typeof wc.on !== "function") return;
+    wc.on("context-menu", (_event, params) => {
+      const items = [];
+      if (params.linkURL) {
+        if (/^https?:\/\//i.test(params.linkURL)) {
+          items.push({
+            label: "Open Link in Browser",
+            click: () => openUrlExternal(params.linkURL),
+          });
+        }
+        items.push({
+          label: "Copy Link Address",
+          click: () => copyTextToClipboard(params.linkURL),
+        });
+      }
+      if (typeof params.selectionText === "string" && params.selectionText.trim() !== "") {
+        if (items.length > 0) items.push({ type: "separator" });
+        items.push({ label: "Copy", click: () => wc.copy() });
+      }
+      if (items.length === 0) return;
+      showContextMenu(items);
+    });
   }
 
   // SECURITY (SSRF): enforce the agent-navigation allowlist on the child view's
@@ -146,7 +267,9 @@ function createBrowserViewRegistry({
     if (!wc || typeof wc.on !== "function") return;
     const guard = (event, targetUrl) => {
       if (!entry.agentNavLocked) return; // user-driven nav: permissive
-      const verdict = isAgentNavigationAllowed(targetUrl);
+      const verdict = isAgentNavigationAllowed(targetUrl, {
+        allowLocalhost: isArcaAgentContext(entry.agentContext),
+      });
       if (!verdict.ok) {
         try {
           event.preventDefault();
@@ -170,6 +293,81 @@ function createBrowserViewRegistry({
     });
   }
 
+  // The embedded page owns a separate WebContents, so Ctrl+Tab never reaches
+  // the shell renderer's window listener. Forward only the recent-session
+  // gesture; all other page keyboard input remains local to the page.
+  function cancelRecentSessionInput(entry, notifyRenderer) {
+    if (!entry.recentSessionSwitching) return;
+    entry.recentSessionSwitching = false;
+    if (notifyRenderer) {
+      sendToRenderer("browser-recent-session-input", {
+        type: "keydown",
+        key: "Escape",
+        code: "Escape",
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        metaKey: false,
+        repeat: false,
+      });
+    }
+  }
+
+  function cancelRecentSessionSwitch() {
+    if (activeConversationId === null) return { ok: true };
+    const entry = entries.get(activeConversationId);
+    if (entry) cancelRecentSessionInput(entry, false);
+    return { ok: true };
+  }
+
+  function setRecentSessionSwitchSupported(supported) {
+    recentSessionSwitchSupported = !!supported;
+    if (!recentSessionSwitchSupported) {
+      entries.forEach((entry) => cancelRecentSessionInput(entry, false));
+    }
+    return { ok: true };
+  }
+
+  function attachRecentSessionInput(entry) {
+    const wc = entry.view && entry.view.webContents;
+    if (!wc || typeof wc.on !== "function") return;
+    wc.on("before-input-event", (event, input) => {
+      if (!recentSessionSwitchSupported) return;
+      const type =
+        input && input.type === "keyDown"
+          ? "keydown"
+          : input && input.type === "keyUp"
+            ? "keyup"
+            : null;
+      if (type === null) return;
+      const key = input.key || "";
+      const startsSwitching =
+        type === "keydown" && key === "Tab" && input.control && !input.alt && !input.meta;
+      const commitsSwitching =
+        type === "keyup" && key === "Control" && entry.recentSessionSwitching;
+      const cancelsSwitching =
+        type === "keydown" && key === "Escape" && entry.recentSessionSwitching;
+      if (!startsSwitching && !commitsSwitching && !cancelsSwitching) return;
+
+      if (startsSwitching || cancelsSwitching) event.preventDefault();
+      sendToRenderer("browser-recent-session-input", {
+        type,
+        key,
+        code: input.code || key,
+        ctrlKey: !!input.control,
+        shiftKey: !!input.shift,
+        altKey: !!input.alt,
+        metaKey: !!input.meta,
+        repeat: !!input.isAutoRepeat,
+      });
+      if (startsSwitching) entry.recentSessionSwitching = true;
+      else entry.recentSessionSwitching = false;
+    });
+    wc.on("blur", () => {
+      cancelRecentSessionInput(entry, !isHostFocused());
+    });
+  }
+
   function openOrNavigate(conversationId, url, bounds, opts) {
     const force = !!(opts && opts.force);
     // Agent-driven nav (opts.agent) is gated by an allowlist (see
@@ -178,7 +376,9 @@ function createBrowserViewRegistry({
     // (user-typed) nav stays permissive. Checked before getOrCreate so a
     // rejected nav creates no blank view.
     if (opts && opts.agent && url) {
-      const verdict = isAgentNavigationAllowed(url);
+      const verdict = isAgentNavigationAllowed(url, {
+        allowLocalhost: isArcaAgentContext(opts.agentContext),
+      });
       if (!verdict.ok) {
         return { ok: false, error: verdict.error };
       }
@@ -189,7 +389,10 @@ function createBrowserViewRegistry({
     // Latch who drives THIS navigation so the will-navigate/will-redirect guard
     // enforces the allowlist on an agent nav's whole redirect chain, and leaves
     // user-typed URL-bar nav permissive. Set only when a url is actually issued.
-    if (url) entry.agentNavLocked = !!(opts && opts.agent);
+    if (url) {
+      entry.agentNavLocked = !!(opts && opts.agent);
+      entry.agentContext = entry.agentNavLocked ? (opts.agentContext ?? null) : null;
+    }
     if (bounds) entry.boundsController.setRendererBounds(bounds);
     // Only attach immediately when this is the active conversation; otherwise
     // create-detached and let `setActive(conversationId)` attach on user switch.
@@ -231,6 +434,7 @@ function createBrowserViewRegistry({
       if (activeConversationId !== null) {
         const prev = entries.get(activeConversationId);
         if (prev) {
+          cancelRecentSessionInput(prev, true);
           try {
             detachFromHost(prev.view);
           } catch {
@@ -249,6 +453,7 @@ function createBrowserViewRegistry({
       if (activeConversationId !== null) {
         const prev = entries.get(activeConversationId);
         if (prev) {
+          cancelRecentSessionInput(prev, true);
           try {
             detachFromHost(prev.view);
           } catch {
@@ -268,6 +473,7 @@ function createBrowserViewRegistry({
     if (activeConversationId !== null) {
       const prev = entries.get(activeConversationId);
       if (prev) {
+        cancelRecentSessionInput(prev, true);
         try {
           detachFromHost(prev.view);
         } catch {
@@ -291,6 +497,7 @@ function createBrowserViewRegistry({
   function close(conversationId, reason) {
     const entry = entries.get(conversationId);
     if (!entry) return { ok: true, removed: false };
+    cancelRecentSessionInput(entry, true);
     if (activeConversationId === conversationId) {
       try {
         detachFromHost(entry.view);
@@ -344,6 +551,8 @@ function createBrowserViewRegistry({
     openOrNavigate,
     setActive,
     setSuppressed,
+    cancelRecentSessionSwitch,
+    setRecentSessionSwitchSupported,
     close,
     closeAll,
     // Introspection
@@ -359,5 +568,6 @@ function createBrowserViewRegistry({
 
 module.exports = {
   createBrowserViewRegistry,
+  agentPartition,
   DEFAULT_CAP,
 };

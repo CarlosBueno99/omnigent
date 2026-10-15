@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import pytest_asyncio
@@ -48,33 +51,15 @@ from omnigent.stores.host_store import HostStore
 from tests.server.helpers import (
     FakeSandboxLauncher,
     HostStartInvocation,
+    build_agent_bundle,
     create_test_agent,
     install_fake_modal_launcher,
 )
+from tests.server.helpers import websocket_scope as _websocket_scope
 
 pytestmark = pytest.mark.asyncio
 
 _HOST_ID = "3f866cafac81246fb60ae6ceb1a738da"
-
-
-def _websocket_scope(path: str) -> dict[str, object]:
-    """Build an ASGI WebSocket scope.
-
-    :param path: WebSocket path.
-    :returns: Minimal ASGI WebSocket scope.
-    """
-    return {
-        "type": "websocket",
-        "asgi": {"version": "3.0"},
-        "scheme": "ws",
-        "path": path,
-        "raw_path": path.encode("ascii"),
-        "query_string": b"",
-        "headers": [],
-        "client": ("127.0.0.1", 50000),
-        "server": ("testserver", 80),
-        "subprotocols": [],
-    }
 
 
 def _make_hello(
@@ -108,6 +93,7 @@ def binding_app(
     """
     registry = HostRegistry()
     host_store = HostStore(db_uri)
+    registry.launch_authorizer = host_store.admit_launch
     conv_store = SqlAlchemyConversationStore(db_uri)
     app = FastAPI()
     app.include_router(
@@ -205,6 +191,37 @@ async def test_launch_runner_writes_host_id_and_runner_id(
     assert updated.runner_id is not None, "runner_id should be written to session row"
     assert updated.runner_id.startswith("runner_token_"), "runner_id should be a token-bound id"
     assert updated.host_id == _HOST_ID, "host_id should be written to session row"
+
+
+async def test_sandbox_fork_cannot_launch_on_ordinary_host(
+    binding_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, registry, _hs, conv_store = binding_app
+    comm = await _connect_host(app, registry)
+    source = conv_store.create_conversation(
+        inference_snapshot={"runtime_config": {"providers": {}}}
+    )
+    fork = conv_store.fork_conversation(source.id)
+    assert fork.inference_snapshot == source.inference_snapshot
+    send = Mock(wraps=registry.send_text)
+    monkeypatch.setattr(registry, "send_text", send)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            with pytest.raises(OmnigentError, match="saved sandbox inference profile") as error:
+                await client.post(
+                    f"/v1/hosts/{_HOST_ID}/runners",
+                    json={"session_id": fork.id, "workspace": "/tmp"},
+                )
+        assert error.value.code == ErrorCode.INVALID_INPUT
+        send.assert_not_called()
+        saved = conv_store.get_conversation(fork.id)
+        assert saved is not None
+        assert saved.host_id is None
+        assert saved.runner_id is None
+    finally:
+        await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+        await comm.wait(timeout=1.0)
 
 
 async def test_host_id_in_session_response(
@@ -486,7 +503,11 @@ async def test_managed_session_create_end_to_end(
     # the picker (no offline ghost lingering after the session).
     delete_resp = await env.client.delete(f"/v1/sessions/{session_id}")
     assert delete_resp.status_code == 200, delete_resp.text
-    assert fake.terminated == ["sb-fake-1"]
+    # Provider terminate is best-effort and idempotent: with no runner ever
+    # connecting here, the background launch's failure teardown can race the
+    # delete's teardown and both fire it. Assert the sandbox (and only it) was
+    # torn down, not the number of best-effort attempts.
+    assert set(fake.terminated) == {"sb-fake-1"}
     assert env.host_store.get_host(conv.host_id) is None
     assert env.host_store.list_hosts(RESERVED_USER_LOCAL) == []
     # The tunnels list holds the fake hosts open through the delete;
@@ -559,6 +580,88 @@ async def test_managed_session_create_with_repo_workspace_binds_cloned_dir(
     del tunnels
 
 
+async def test_managed_multipart_bundle_create_end_to_end(
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Multipart ``POST /v1/sessions`` with ``host_type="managed"`` uploads
+    a bundle AND provisions a sandbox in one call — the gap this feature
+    closes. The freshly-created session-scoped agent is what the managed
+    runner runs on the sandbox, so the same background launch as the JSON
+    path binds the session to a sandbox host with a runner. Also confirms
+    the caller owns the session (grant happens BEFORE the managed launch
+    is scheduled, so a launch failure can't orphan an unowned row).
+    """
+    env = managed_session_env
+    monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S", 0.2
+    )
+    loop = asyncio.get_running_loop()
+    host_futures: list[asyncio.Future[ApplicationCommunicator]] = []
+
+    def _start_fake_sandbox_host(invocation: HostStartInvocation) -> None:
+        """Spawn the fake sandbox host when the launcher 'starts' it."""
+        future = asyncio.run_coroutine_threadsafe(
+            _fake_sandbox_host(
+                env.app, invocation.host_id, invocation.host_name, invocation.token
+            ),
+            loop,
+        )
+        host_futures.append(asyncio.wrap_future(future, loop=loop))
+
+    fake = FakeSandboxLauncher(on_host_start=_start_fake_sandbox_host)
+    install_fake_modal_launcher(monkeypatch, fake)
+
+    bundle = build_agent_bundle(name="managed-multipart-e2e-agent")
+    resp = await env.client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({"host_type": "managed"})},
+        files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
+    )
+    assert resp.status_code == 201, resp.text
+    session_id = resp.json()["session_id"]
+
+    # The uploaded bundle's session-scoped agent is what runs on the
+    # provisioned sandbox — the background launch binds the session the
+    # same way the JSON path does.
+    conv = await _wait_for_managed_binding(env, session_id)
+    tunnels = [await future for future in host_futures]
+    assert len(tunnels) == 1
+    assert conv.host_id is not None
+    assert conv.workspace == "/root/workspace"
+    assert conv.runner_id is not None
+    assert conv.runner_id.startswith("runner_token_")
+
+    host = env.host_store.get_host(conv.host_id)
+    assert host is not None
+    assert host.user_id == RESERVED_USER_LOCAL
+    assert host.status == "online"
+    assert host.sandbox_provider == "modal"
+    assert host.sandbox_id == "sb-fake-1"
+    del tunnels
+
+
+async def test_managed_multipart_bundle_create_rejects_path_workspace(
+    managed_session_env: ManagedSessionEnv,
+) -> None:
+    """
+    A multipart managed create with a filesystem-path workspace is
+    rejected at metadata validation — a managed workspace is a git
+    repository URL, mirroring the JSON path's contract — before any
+    sandbox provisioning is scheduled.
+    """
+    bundle = build_agent_bundle(name="managed-multipart-badws-agent")
+    resp = await managed_session_env.client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({"host_type": "managed", "workspace": "/tmp/w"})},
+        files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
+    )
+    assert resp.status_code >= 400, resp.text
+    assert "git repository URL" in resp.text
+
+
 async def test_managed_session_create_validator_errors_serialize_as_422(
     managed_session_env: ManagedSessionEnv,
 ) -> None:
@@ -583,7 +686,7 @@ async def test_managed_session_create_validator_errors_serialize_as_422(
     # The list-of-errors shape with a human-readable msg is what
     # describeCreateError picks the message from.
     assert isinstance(detail, list) and len(detail) == 1
-    assert "takes a git repository URL" in detail[0]["msg"]
+    assert "git repository URL" in detail[0]["msg"]
 
 
 async def test_managed_session_create_rejects_unconfigured_provider(
@@ -1244,10 +1347,12 @@ async def test_managed_wake_fails_when_runner_never_reconnects(
     session_id = "1a9de2e74d453be7cd665c5290b481b9"
     conv = SimpleNamespace(
         id=session_id,
+        labels={},
         host_id="cae8b33eab0bd659c87b00dd29946ade",
         workspace="/root/workspace",
         agent_id=None,
         sub_agent_name=None,
+        inference_snapshot=None,
     )
     tracker = ManagedLaunchTracker()
     tracker.begin(session_id)
@@ -1302,17 +1407,28 @@ async def test_managed_wake_fails_when_runner_never_reconnects(
 async def test_managed_launch_fails_when_runner_never_connects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Initial managed launch settlement also depends on the runner tunnel."""
+    """Initial managed launch settlement also depends on the runner tunnel.
+
+    A launch that fails here — after the host is already online — must tear
+    the fresh sandbox down, not just settle the tracker and leave the Job
+    running with a live launch token and no one who will ever use it.
+    """
     from omnigent.server.routes import sessions as sessions_module
 
     session_id = "1a41e11887aca4570e42c0be40f24833"
+    host_id = "3c8cdcdb61903904849174c864620a5c"
     conv = SimpleNamespace(id=session_id)
     tracker = ManagedLaunchTracker()
     tracker.begin(session_id)
     stages: list[tuple[str, str | None]] = []
+    terminated: list[object] = []
+    sentinel_host = object()
 
     async def _launch_runner(*_args: object, **_kwargs: object) -> object:
         return sessions_module._HostLaunchAttempt(runner_id="runner_never_connects")
+
+    async def _fake_terminate(host: object, *_args: object, **_kwargs: object) -> None:
+        terminated.append(host)
 
     class _HostRegistry:
         def get(self, _host_id: str) -> object:
@@ -1322,17 +1438,23 @@ async def test_managed_launch_fails_when_runner_never_connects(
         async def wait_for_runner(self, _runner_id: str, *, timeout_s: float) -> None:
             del timeout_s
 
+    class _HostStore:
+        def get_host(self, requested_id: str) -> object:
+            assert requested_id == host_id
+            return sentinel_host
+
     monkeypatch.setattr(sessions_module, "_launch_runner_on_host", _launch_runner)
     monkeypatch.setattr(
         sessions_module,
         "_publish_sandbox_status",
         lambda _sid, stage, error=None: stages.append((stage, error)),
     )
+    monkeypatch.setattr("omnigent.server.managed_hosts.terminate_managed_host", _fake_terminate)
 
     await sessions_module._bind_and_launch_managed_runner(
         session_id=session_id,
         managed=ManagedHostLaunch(
-            host_id="3c8cdcdb61903904849174c864620a5c",
+            host_id=host_id,
             workspace="/root/workspace",
         ),
         sandbox_config=ManagedSandboxDeployment.single(
@@ -1346,7 +1468,7 @@ async def test_managed_launch_fails_when_runner_never_connects(
         conversation_store=SimpleNamespace(
             set_host_id=lambda _sid, _host_id, _workspace: conv,
         ),
-        host_store=SimpleNamespace(),
+        host_store=_HostStore(),  # type: ignore[arg-type]
         host_registry=_HostRegistry(),  # type: ignore[arg-type]
         tunnel_registry=_TunnelRegistry(),  # type: ignore[arg-type]
     )
@@ -1356,6 +1478,151 @@ async def test_managed_launch_fails_when_runner_never_connects(
     assert launch.settled.is_set()
     assert launch.error == "managed runner did not connect after launch"
     assert stages[-1] == ("failed", "managed runner did not connect after launch")
+    assert terminated == [sentinel_host]
+
+
+async def test_managed_launch_fails_and_tears_down_when_harness_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host that refuses the harness is a fresh sandbox that will never
+    serve this session, so it must be torn down the same as the
+    delete-during-provisioning branch already is.
+    """
+    from omnigent.server.routes import sessions as sessions_module
+
+    session_id = "3f3aa440b7274531a889fa4c25f4bb1b"
+    host_id = "b4e372ad19634c62966a2c56aab8cfab"
+    conv = SimpleNamespace(id=session_id)
+    tracker = ManagedLaunchTracker()
+    tracker.begin(session_id)
+    stages: list[tuple[str, str | None]] = []
+    terminated: list[object] = []
+    sentinel_host = object()
+
+    async def _launch_runner(*_args: object, **_kwargs: object) -> object:
+        return sessions_module._HostLaunchAttempt(
+            runner_id="runner_refused_harness",
+            error_code=sessions_module._HARNESS_NOT_CONFIGURED_ERROR_CODE,
+            error="harness not configured on the sandbox host",
+        )
+
+    async def _fake_terminate(host: object, *_args: object, **_kwargs: object) -> None:
+        terminated.append(host)
+
+    class _HostRegistry:
+        def get(self, _host_id: str) -> object:
+            return object()
+
+    class _HostStore:
+        def get_host(self, requested_id: str) -> object:
+            assert requested_id == host_id
+            return sentinel_host
+
+    monkeypatch.setattr(sessions_module, "_launch_runner_on_host", _launch_runner)
+    monkeypatch.setattr(
+        sessions_module,
+        "_publish_sandbox_status",
+        lambda _sid, stage, error=None: stages.append((stage, error)),
+    )
+    monkeypatch.setattr("omnigent.server.managed_hosts.terminate_managed_host", _fake_terminate)
+
+    await sessions_module._bind_and_launch_managed_runner(
+        session_id=session_id,
+        managed=ManagedHostLaunch(
+            host_id=host_id,
+            workspace="/root/workspace",
+        ),
+        sandbox_config=ManagedSandboxDeployment.single(
+            ManagedSandboxConfig(
+                server_url="https://managed-test.example.com",
+                launcher_factory=lambda: FakeSandboxLauncher(),
+                token_ttl_s=3600,
+            )
+        ),
+        tracker=tracker,
+        conversation_store=SimpleNamespace(
+            set_host_id=lambda _sid, _host_id, _workspace: conv,
+        ),
+        host_store=_HostStore(),  # type: ignore[arg-type]
+        host_registry=_HostRegistry(),  # type: ignore[arg-type]
+        tunnel_registry=None,
+    )
+
+    launch = tracker.get(session_id)
+    assert launch is not None
+    assert launch.settled.is_set()
+    assert launch.error == "harness not configured on the sandbox host"
+    assert stages[-1] == ("failed", "harness not configured on the sandbox host")
+    assert terminated == [sentinel_host]
+
+
+async def test_managed_relaunch_failure_leaves_the_host_identity_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed runner connect on a RELAUNCH generation must not tear down
+    the host row: unlike a first launch, ``managed.host_id`` here is an
+    existing, persistent identity, not something freshly minted for this
+    attempt. Deleting it on a slow connect would destroy the user's host
+    binding, not just clean up an orphaned Job.
+    """
+    from omnigent.server.routes import sessions as sessions_module
+
+    session_id = "d3a6e13f0dbf4b6ea4b6e37f4a76f2a9"
+    host_id = "9e6cf6f52ebb4a2c9c9a1a5f8e8f5f42"
+    conv = SimpleNamespace(id=session_id)
+    tracker = ManagedLaunchTracker()
+    tracker.begin(session_id)
+    terminated: list[object] = []
+
+    async def _launch_runner(*_args: object, **_kwargs: object) -> object:
+        return sessions_module._HostLaunchAttempt(runner_id="runner_never_connects")
+
+    async def _fake_terminate(host: object, *_args: object, **_kwargs: object) -> None:
+        terminated.append(host)
+
+    class _HostRegistry:
+        def get(self, _host_id: str) -> object:
+            return object()
+
+    class _TunnelRegistry:
+        async def wait_for_runner(self, _runner_id: str, *, timeout_s: float) -> None:
+            del timeout_s
+
+    class _HostStore:
+        def get_host(self, _requested_id: str) -> object:
+            # Should never be called: relaunch_host being set must short-circuit
+            # before the lookup, not just before the terminate call.
+            raise AssertionError("get_host should not be called for a relaunch failure")
+
+    monkeypatch.setattr(sessions_module, "_launch_runner_on_host", _launch_runner)
+    monkeypatch.setattr(sessions_module, "_publish_sandbox_status", lambda *_a, **_kw: None)
+    monkeypatch.setattr("omnigent.server.managed_hosts.terminate_managed_host", _fake_terminate)
+
+    await sessions_module._bind_and_launch_managed_runner(
+        session_id=session_id,
+        managed=ManagedHostLaunch(host_id=host_id, workspace="/root/workspace"),
+        sandbox_config=ManagedSandboxDeployment.single(
+            ManagedSandboxConfig(
+                server_url="https://managed-test.example.com",
+                launcher_factory=lambda: FakeSandboxLauncher(),
+                token_ttl_s=3600,
+            )
+        ),
+        tracker=tracker,
+        conversation_store=SimpleNamespace(
+            set_host_id=lambda _sid, _host_id, _workspace: conv,
+        ),
+        host_store=_HostStore(),  # type: ignore[arg-type]
+        host_registry=_HostRegistry(),  # type: ignore[arg-type]
+        tunnel_registry=_TunnelRegistry(),  # type: ignore[arg-type]
+        relaunch_host=object(),  # type: ignore[arg-type]
+    )
+
+    launch = tracker.get(session_id)
+    assert launch is not None
+    assert launch.settled.is_set()
+    assert launch.error == "managed runner did not connect after launch"
+    assert terminated == []
 
 
 async def test_cancel_managed_launch_tasks_returns_while_provision_parked(
@@ -1463,3 +1730,521 @@ async def test_managed_session_deleted_during_provision_terminates_sandbox(
     # don't surface as unretrieved-exception noise after the test.
     for future in host_futures:
         future.cancel()
+
+
+async def test_delete_reaped_managed_session_removes_durable_host(
+    managed_session_env: ManagedSessionEnv,
+) -> None:
+    """Deleting a reaped session removes its provider-marked durable host row."""
+    env = managed_session_env
+    host = env.host_store.register_managed_host(
+        host_id="8e616af6da4245de923023927b2f36d7",
+        name="managed-reaped-delete",
+        user_id=RESERVED_USER_LOCAL,
+        token="managed-reaped-delete-token",
+        provider="modal",
+        sandbox_id="sb-reaped-delete",
+        token_expires_at=int(time.time()) + 3600,
+    )
+    assert env.host_store.detach_stale_managed_sandbox(
+        host.host_id,
+        sandbox_id="sb-reaped-delete",
+        expected_updated_at=host.updated_at,
+    )
+    assert env.host_store.mark_sandbox_terminated(
+        host.host_id,
+        sandbox_id="sb-reaped-delete",
+    )
+    agent = await create_test_agent(env.client, name="managed-reaped-delete-agent")
+    conversation = env.conv_store.create_conversation(
+        agent_id=agent["id"],
+        host_id=host.host_id,
+        workspace="/tmp/managed-reaped-delete",
+    )
+
+    response = await env.client.delete(f"/v1/sessions/{conversation.id}")
+
+    assert response.status_code == 200, response.text
+    assert env.conv_store.get_conversation(conversation.id) is None
+    assert env.host_store.get_host(host.host_id) is None
+
+
+def _runner_exited_app(db_uri: str, tmp_path: Path) -> tuple[FastAPI, SqlAlchemyConversationStore]:
+    """Build the full server app so ``host.runner_exited`` hits ``_on_runner_exited``.
+
+    :param db_uri: SQLite URI.
+    :param tmp_path: Scratch dir for artifacts and the agent cache.
+    :returns: Tuple of (app, conversation store).
+    """
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    app = create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=conv_store,
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        comment_store=SqlAlchemyCommentStore(db_uri),
+        host_store=HostStore(db_uri),
+    )
+    return app, conv_store
+
+
+async def _report_runner_exited(
+    app: FastAPI, runner_id: str, *, had_connected: bool | None = None
+) -> ApplicationCommunicator:
+    """Connect a host to ``app`` and send a ``host.runner_exited`` frame.
+
+    :param app: The full server app.
+    :param runner_id: Runner the host reports dead.
+    :returns: The live tunnel communicator; keep it referenced while asserting.
+    """
+    from omnigent.host.frames import HostRunnerExitedFrame
+
+    comm = ApplicationCommunicator(app, _websocket_scope(f"/v1/hosts/{_HOST_ID}/tunnel"))
+    await comm.send_input({"type": "websocket.connect"})
+    accepted = await comm.receive_output(timeout=5.0)
+    assert accepted["type"] == "websocket.accept", f"tunnel refused: {accepted!r}"
+    await comm.send_input({"type": "websocket.receive", "text": _make_hello()})
+    report = json.loads(
+        encode_host_frame(HostRunnerExitedFrame(runner_id=runner_id, error="exited with code 1"))
+    )
+    if had_connected is not None:
+        report["had_connected"] = had_connected
+    await comm.send_input({"type": "websocket.receive", "text": json.dumps(report)})
+    return comm
+
+
+def _runner_exited_events(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """Return captured ``runner_exited`` debug-event records."""
+    return [r for r in caplog.records if getattr(r, "event_name", None) == "runner_exited"]
+
+
+async def test_runner_exited_logs_one_event_per_bound_session(
+    db_uri: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A ``host.runner_exited`` report logs one ``runner_exited`` row per session
+    bound to the dead runner, each carrying that session's id.
+
+    The frame names only the runner, so without the server-side lookup the
+    debug-table row has no ``session_id`` and cannot be joined to a session.
+    """
+    app, conv_store = _runner_exited_app(db_uri, tmp_path)
+    parent = conv_store.create_conversation(agent_id=None, runner_id="runner_crashed")
+    child = conv_store.create_conversation(
+        agent_id=None,
+        runner_id="runner_crashed",
+        parent_conversation_id=parent.id,
+    )
+    conv_store.create_conversation(agent_id=None, runner_id="runner_other")
+
+    caplog.set_level("WARNING", logger="omnigent.server.routes.host_tunnel")
+    _comm = await _report_runner_exited(app, "runner_crashed")
+    async with asyncio.timeout(5.0):
+        while len(_runner_exited_events(caplog)) < 2:
+            await asyncio.sleep(0.01)
+
+    events = _runner_exited_events(caplog)
+    assert sorted(getattr(r, "session_id", None) for r in events) == sorted([parent.id, child.id])
+    for record in events:
+        attributes = getattr(record, "attributes", {})
+        assert attributes["host_id"] == _HOST_ID
+        assert attributes["runner_id"] == "runner_crashed"
+
+
+async def test_runner_exited_without_bound_sessions_logs_sessionless_event(
+    db_uri: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A crash of a runner with no bound session still emits one session-less row."""
+    app, _conv_store = _runner_exited_app(db_uri, tmp_path)
+
+    caplog.set_level("WARNING", logger="omnigent.server.routes.host_tunnel")
+    _comm = await _report_runner_exited(app, "runner_orphan")
+    async with asyncio.timeout(5.0):
+        while not _runner_exited_events(caplog):
+            await asyncio.sleep(0.01)
+    # Let any (incorrect) extra rows from the same frame land before counting.
+    await asyncio.sleep(0.05)
+
+    events = _runner_exited_events(caplog)
+    assert len(events) == 1
+    assert getattr(events[0], "session_id", None) is None
+    attributes = getattr(events[0], "attributes", {})
+    assert attributes["host_id"] == _HOST_ID
+    assert attributes["runner_id"] == "runner_orphan"
+
+
+async def test_runner_exited_lookup_failure_logs_event_and_keeps_tunnel(
+    db_uri: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A failed bound-session lookup still logs the crash and leaves the host online.
+
+    The report is one-way; letting the callback's error escape would tear down
+    the host tunnel and take every other runner on that host offline with it.
+    """
+    app, conv_store = _runner_exited_app(db_uri, tmp_path)
+
+    def _raise(_runner_id: str) -> list[Conversation]:
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(conv_store, "list_conversations_by_runner_id", _raise)
+    caplog.set_level("WARNING", logger="omnigent.server.routes.host_tunnel")
+    _comm = await _report_runner_exited(app, "runner_crashed")
+
+    def _callback_failures() -> list[logging.LogRecord]:
+        return [r for r in caplog.records if "on_runner_exited callback failed" in r.getMessage()]
+
+    async with asyncio.timeout(5.0):
+        while not _callback_failures():
+            await asyncio.sleep(0.01)
+
+    events = _runner_exited_events(caplog)
+    assert len(events) == 1
+    assert getattr(events[0], "session_id", None) is None
+    assert getattr(events[0], "attributes", {})["runner_id"] == "runner_crashed"
+    # The tunnel survived the callback error, so the host is still registered.
+    assert app.state.host_registry.get(_HOST_ID) is not None
+
+
+def _disconnect_decisions(
+    caplog: pytest.LogCaptureFixture, session_id: str
+) -> list[logging.LogRecord]:
+    """Return captured ``runner_disconnect_decision`` records for a session."""
+    return [
+        r
+        for r in caplog.records
+        if getattr(r, "event_name", None) == "runner_disconnect_decision"
+        and getattr(r, "session_id", None) == session_id
+    ]
+
+
+def _turn_failed_events(
+    caplog: pytest.LogCaptureFixture, session_id: str
+) -> list[logging.LogRecord]:
+    """Return captured ``session_turn_failed`` records for a session."""
+    return [
+        r
+        for r in caplog.records
+        if getattr(r, "event_name", None) == "session_turn_failed"
+        and getattr(r, "session_id", None) == session_id
+    ]
+
+
+def _persisted_task_error(
+    conv_store: SqlAlchemyConversationStore, session_id: str
+) -> dict[str, str] | None:
+    """Return the session's persisted failure-cause labels, if any."""
+    from omnigent.server.routes import sessions as sessions_module
+
+    refreshed = conv_store.get_conversation(session_id)
+    assert refreshed is not None
+    return sessions_module._last_task_error_from_labels(refreshed.labels)
+
+
+@pytest.mark.parametrize("connection_source", ["replica", "host"])
+async def test_runner_exited_after_connect_keeps_idle_session_idle(
+    db_uri: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    connection_source: str,
+) -> None:
+    """
+    A host death after its runner connected does not fail the idle session.
+
+    When a host process dies (e.g. SSH logout), its runners exit with it and
+    the host reports ``host.runner_exited`` for each. A session whose runner
+    had connected and finished its last turn lost no work: failing it as
+    ``failed_before_start`` painted a red crash banner on an idle session.
+    The runner's absence is already surfaced through liveness.
+    """
+    from omnigent.server import session_live_state
+
+    app, conv_store = _runner_exited_app(db_uri, tmp_path)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        agent = await create_test_agent(client, name="runner-idle")
+    conv = conv_store.create_conversation(agent_id=agent["id"], runner_id="runner_ran_idle")
+    conv_store.set_session_live_status(conv.id, "idle")
+    if connection_source == "replica":
+        session_live_state.touch_runner_liveness(["runner_ran_idle"])
+    else:
+        assert session_live_state.last_liveness_stamp("runner_ran_idle") is None
+
+    caplog.set_level("WARNING", logger="omnigent")
+    _comm = await _report_runner_exited(
+        app, "runner_ran_idle", had_connected=True if connection_source == "host" else None
+    )
+    async with asyncio.timeout(5.0):
+        while not _disconnect_decisions(caplog, conv.id):
+            await asyncio.sleep(0.01)
+    # Let any (incorrect) failure edge from the same report land before asserting.
+    await asyncio.sleep(0.05)
+
+    decision = _disconnect_decisions(caplog, conv.id)[0]
+    attributes = getattr(decision, "attributes", {})
+    assert attributes["decision"] == "idle_no_failure"
+    assert attributes["fail_idle_top_level"] is False
+    assert not _turn_failed_events(caplog, conv.id)
+    refreshed = conv_store.get_conversation(conv.id)
+    assert refreshed is not None
+    assert refreshed.live_status == "idle"
+    assert _persisted_task_error(conv_store, conv.id) is None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/v1/sessions/{conv.id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "idle"
+    assert response.json()["last_task_error"] is None
+
+
+@pytest.mark.parametrize("had_connected", [None, False])
+async def test_runner_exited_before_connect_fails_idle_session(
+    db_uri: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    had_connected: bool | None,
+) -> None:
+    """
+    A runner that died before connecting still fails its idle session.
+
+    That session never reached ``running`` and would otherwise spin on
+    "starting" until a timeout; the crash report is its only failure signal.
+    """
+    app, conv_store = _runner_exited_app(db_uri, tmp_path)
+    conv = conv_store.create_conversation(agent_id=None, runner_id="runner_never_connected")
+    conv_store.set_session_live_status(conv.id, "idle")
+
+    caplog.set_level("WARNING", logger="omnigent")
+    _comm = await _report_runner_exited(app, "runner_never_connected", had_connected=had_connected)
+    async with asyncio.timeout(5.0):
+        while _persisted_task_error(conv_store, conv.id) is None:
+            await asyncio.sleep(0.01)
+
+    error = _persisted_task_error(conv_store, conv.id)
+    assert error is not None
+    assert error["code"] == "runner_failed_to_start"
+    decision = _disconnect_decisions(caplog, conv.id)[0]
+    attributes = getattr(decision, "attributes", {})
+    assert attributes["decision"] == "failed_before_start"
+    assert attributes["fail_idle_top_level"] is True
+    failed = _turn_failed_events(caplog, conv.id)
+    assert failed
+    assert getattr(failed[0], "attributes", {})["code"] == "runner_failed_to_start"
+
+
+@pytest.mark.parametrize("connection_source", ["replica", "host"])
+async def test_runner_exited_after_connect_fails_mid_turn_session(
+    db_uri: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    connection_source: str,
+) -> None:
+    """
+    A connected runner's death still fails a session that was mid-turn.
+
+    The host dying interrupts in-flight work, so the turn fails with the
+    daemon-reported crash cause.
+    """
+    from omnigent.server import session_live_state
+
+    app, conv_store = _runner_exited_app(db_uri, tmp_path)
+    conv = conv_store.create_conversation(agent_id=None, runner_id="runner_ran_mid_turn")
+    conv_store.set_session_live_status(conv.id, "running")
+    if connection_source == "replica":
+        session_live_state.touch_runner_liveness(["runner_ran_mid_turn"])
+    else:
+        assert session_live_state.last_liveness_stamp("runner_ran_mid_turn") is None
+
+    caplog.set_level("WARNING", logger="omnigent")
+    _comm = await _report_runner_exited(
+        app, "runner_ran_mid_turn", had_connected=True if connection_source == "host" else None
+    )
+    async with asyncio.timeout(5.0):
+        while _persisted_task_error(conv_store, conv.id) is None:
+            await asyncio.sleep(0.01)
+
+    error = _persisted_task_error(conv_store, conv.id)
+    assert error is not None
+    assert error["code"] == "runner_failed_to_start"
+    decision = _disconnect_decisions(caplog, conv.id)[0]
+    attributes = getattr(decision, "attributes", {})
+    assert attributes["decision"] == "failed_mid_turn"
+    assert attributes["fail_idle_top_level"] is False
+
+
+_CONCRETE_FAILURE = "Claude Code could not continue: the project settings file is not valid JSON."
+
+
+async def _answer_host_launch(comm: ApplicationCommunicator) -> None:
+    """Acknowledge one launch (and any workspace stat) without spawning a runner."""
+    from omnigent.host.frames import HostStatFrame, HostStatResultFrame
+
+    for _ in range(40):
+        output = await comm.receive_output(timeout=5.0)
+        if output["type"] != "websocket.send":
+            continue
+        frame = decode_host_frame(output["text"])
+        if isinstance(frame, HostStatFrame):
+            reply = HostStatResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                exists=True,
+                type="directory",
+                canonical_path=frame.path,
+            )
+        elif isinstance(frame, HostLaunchRunnerFrame):
+            reply = HostLaunchRunnerResultFrame(
+                request_id=frame.request_id, status="launched", runner_id="runner_token_test"
+            )
+        else:
+            continue
+        await comm.send_input({"type": "websocket.receive", "text": encode_host_frame(reply)})
+        if isinstance(reply, HostLaunchRunnerResultFrame):
+            return
+    raise AssertionError("host launch was not requested within 40 frames")
+
+
+async def _failed_native_session_on_never_connected_runner(
+    app: FastAPI, client: AsyncClient
+) -> tuple[str, str, dict[str, str], ApplicationCommunicator]:
+    """Create a native session, bind it to a host-launched runner that never
+    tunnels, then deliver the forwarder's ``external_session_status: failed``.
+
+    :returns: Session id, bound runner id, the persisted ``last_task_error``, and
+        the scripted host's tunnel (keep it referenced while asserting).
+    """
+    from omnigent._wrapper_labels import (
+        CLAUDE_NATIVE_WRAPPER_VALUE,
+        UI_MODE_LABEL_KEY,
+        UI_MODE_TERMINAL_VALUE,
+        WRAPPER_LABEL_KEY,
+    )
+
+    agent = await create_test_agent(client, name="claude-native-ui")
+    created = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "labels": {
+                UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
+                WRAPPER_LABEL_KEY: CLAUDE_NATIVE_WRAPPER_VALUE,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+
+    host = await _connect_host(app, app.state.host_registry)
+    responder = asyncio.create_task(_answer_host_launch(host))
+    launched = await client.post(
+        f"/v1/hosts/{_HOST_ID}/runners", json={"session_id": session_id, "workspace": "/tmp"}
+    )
+    assert launched.status_code == 200, launched.text
+    await responder
+
+    failed = await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "external_session_status",
+            "data": {"status": "failed", "output": _CONCRETE_FAILURE},
+        },
+    )
+    assert failed.status_code in (200, 202), failed.text
+    snapshot = (await client.get(f"/v1/sessions/{session_id}")).json()
+    runner_id = snapshot["runner_id"]
+    assert isinstance(runner_id, str) and runner_id.startswith("runner_token_")
+    assert snapshot["host_id"] == _HOST_ID
+    assert snapshot["status"] == "failed"
+    assert snapshot["last_task_error"]["message"] == _CONCRETE_FAILURE
+    return session_id, runner_id, snapshot["last_task_error"], host
+
+
+async def test_runner_exited_keeps_existing_failure_cause(
+    db_uri: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A runner exit report does not replace a session's persisted failure cause.
+
+    A native session that already failed with a concrete reason keeps that
+    reason, and gets no second failed turn, when its never-connected runner
+    is later reported dead.
+    """
+    from tests.server.helpers import start_session_stream_collector
+
+    app, conv_store = _runner_exited_app(db_uri, tmp_path)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        (
+            session_id,
+            runner_id,
+            original_error,
+            _host,
+        ) = await _failed_native_session_on_never_connected_runner(app, client)
+        assert _persisted_task_error(conv_store, session_id) == original_error
+
+        collector = await start_session_stream_collector(session_id)
+        caplog.set_level("WARNING", logger="omnigent")
+        _comm = await _report_runner_exited(app, runner_id)
+        async with asyncio.timeout(5.0):
+            while not _disconnect_decisions(caplog, session_id):
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.5)
+        await collector.stop()
+        edges = []
+        while not collector.queue.empty():
+            edges.append(collector.queue.get_nowait())
+        after = (await client.get(f"/v1/sessions/{session_id}")).json()
+
+    sweep_failures = [
+        r
+        for r in _turn_failed_events(caplog, session_id)
+        if getattr(r, "attributes", {}).get("origin") == "runner_offline_sweep"
+    ]
+    assert not sweep_failures
+    assert not [
+        e for e in edges if e.get("type") == "session.status" and e.get("status") == "failed"
+    ]
+    assert _persisted_task_error(conv_store, session_id) == original_error
+    assert after["status"] == "failed"
+    assert after["last_task_error"] == original_error
+
+
+async def test_session_response_keeps_existing_failure_cause_while_exit_report_is_held(
+    db_uri: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The session response does not swap a persisted failure cause for a cached exit report.
+
+    With connection evidence the exit handler leaves the failed session alone,
+    so the snapshot must keep reporting the cause the labels still hold.
+    """
+    app, conv_store = _runner_exited_app(db_uri, tmp_path)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        (
+            session_id,
+            runner_id,
+            original_error,
+            _host,
+        ) = await _failed_native_session_on_never_connected_runner(app, client)
+
+        caplog.set_level("WARNING", logger="omnigent")
+        _comm = await _report_runner_exited(app, runner_id, had_connected=True)
+        async with asyncio.timeout(5.0):
+            while not _disconnect_decisions(caplog, session_id):
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.5)
+        after = (await client.get(f"/v1/sessions/{session_id}")).json()
+
+    decision = getattr(_disconnect_decisions(caplog, session_id)[0], "attributes", {})
+    assert decision["decision"] == "idle_no_failure"
+    assert _persisted_task_error(conv_store, session_id) == original_error
+    assert after["status"] == "failed"
+    assert after["last_task_error"] == original_error

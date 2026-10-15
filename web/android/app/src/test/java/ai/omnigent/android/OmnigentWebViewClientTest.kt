@@ -3,8 +3,10 @@ package ai.omnigent.android
 import android.content.Context
 import android.net.Uri
 import android.os.Looper
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.ValueCallback
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
@@ -19,12 +21,58 @@ import org.robolectric.Shadows.shadowOf
 @RunWith(RobolectricTestRunner::class)
 class OmnigentWebViewClientTest {
     @Test
-    fun `page start does not inject into the outgoing document`() {
+    fun `pinned main-frame client and server errors report their status to the shell`() {
         val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
-        val client = client(shouldInjectBridgeAtPageReady = false)
+        val reportedStatuses = mutableListOf<Int>()
+        val client = client(onMainFrameHttpError = reportedStatuses::add)
+
+        listOf(503, 500, 403, 404).forEach { status ->
+            client.onReceivedHttpError(webView, request(PINNED_URL), httpError(status))
+        }
+
+        assertEquals(listOf(503, 500, 403, 404), reportedStatuses)
+    }
+
+    @Test
+    fun `subresource http errors are ignored`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        val reportedStatuses = mutableListOf<Int>()
+        val client = client(onMainFrameHttpError = reportedStatuses::add)
+
+        client.onReceivedHttpError(
+            webView,
+            request(PINNED_URL, isForMainFrame = false),
+            httpError(503),
+        )
+
+        assertTrue(reportedStatuses.isEmpty())
+    }
+
+    @Test
+    fun `off-origin main-frame http errors are ignored`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        val reportedStatuses = mutableListOf<Int>()
+        val client = client(onMainFrameHttpError = reportedStatuses::add)
+
+        client.onReceivedHttpError(webView, request(IDP_URL), httpError(503))
+
+        assertTrue(reportedStatuses.isEmpty())
+    }
+
+    @Test
+    fun `page start notifies the shell without injecting into the outgoing document`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        var navigationStarts = 0
+        val client =
+            client(
+                shouldInjectBridgeAtPageReady = false,
+                onNavigationStarted = { navigationStarts++ },
+            )
 
         client.onPageStarted(webView, PINNED_URL, null)
+        client.onPageStarted(webView, "about:blank", null)
 
+        assertEquals(1, navigationStarts)
         assertTrue(webView.evaluatedScripts.isEmpty())
     }
 
@@ -33,9 +81,10 @@ class OmnigentWebViewClientTest {
         val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
         var readyUrl: String? = null
         val client =
-            client(shouldInjectBridgeAtPageReady = true) { url ->
-                readyUrl = url
-            }
+            client(
+                shouldInjectBridgeAtPageReady = true,
+                onPageReady = { url -> readyUrl = url },
+            )
 
         client.onPageFinished(webView, PINNED_URL)
 
@@ -288,6 +337,36 @@ class OmnigentWebViewClientTest {
         assertNull(webView.loadedUrl)
     }
 
+    @Test
+    fun `renderer death hands the dying WebView and crash flag to the recovery callback`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        var recovered: WebView? = null
+        var reportedCrash: Boolean? = null
+        val client =
+            client(
+                onRendererGone = { view, didCrash ->
+                    recovered = view
+                    reportedCrash = didCrash
+                },
+            )
+
+        val handled =
+            client.onRenderProcessGone(
+                webView,
+                object : RenderProcessGoneDetail() {
+                    override fun didCrash(): Boolean = true
+
+                    override fun rendererPriorityAtExit(): Int = WebView.RENDERER_PRIORITY_IMPORTANT
+                },
+            )
+
+        assertTrue(handled)
+        assertEquals(webView, recovered)
+        // The client must forward detail.didCrash() so the host can budget
+        // recovery for real crashes distinctly from system reclaims.
+        assertEquals(true, reportedCrash)
+    }
+
     /** Run posted bounces (see the client's mainHandler) before asserting. */
     private fun idleMainLooper() = shadowOf(Looper.getMainLooper()).idle()
 
@@ -295,21 +374,28 @@ class OmnigentWebViewClientTest {
         shouldInjectBridgeAtPageReady: Boolean = false,
         pinnedOrigin: String = PINNED_ORIGIN,
         onLoginRequired: () -> Unit = {},
+        onRendererGone: (WebView, Boolean) -> Unit = { _, _ -> },
         onPageReady: (String?) -> Unit = {},
+        onNavigationStarted: () -> Unit = {},
+        onMainFrameHttpError: (Int) -> Unit = {},
     ) = OmnigentWebViewClient(
         pinnedOrigin = { pinnedOrigin },
         shouldInjectBridgeAtPageReady = { shouldInjectBridgeAtPageReady },
         onPageReady = onPageReady,
+        onNavigationStarted = onNavigationStarted,
         onLoginRequired = onLoginRequired,
+        onRendererGone = onRendererGone,
+        onMainFrameHttpError = onMainFrameHttpError,
     )
 
     private fun request(
         url: String,
         hasGesture: Boolean = false,
+        isForMainFrame: Boolean = true,
     ) = object : WebResourceRequest {
         override fun getUrl(): Uri = Uri.parse(url)
 
-        override fun isForMainFrame(): Boolean = true
+        override fun isForMainFrame(): Boolean = isForMainFrame
 
         override fun isRedirect(): Boolean = !hasGesture
 
@@ -319,6 +405,16 @@ class OmnigentWebViewClientTest {
 
         override fun getRequestHeaders(): Map<String, String> = emptyMap()
     }
+
+    private fun httpError(statusCode: Int) =
+        WebResourceResponse(
+            "text/html",
+            "UTF-8",
+            statusCode,
+            "HTTP error",
+            emptyMap(),
+            null,
+        )
 
     private class RecordingWebView(
         context: Context,

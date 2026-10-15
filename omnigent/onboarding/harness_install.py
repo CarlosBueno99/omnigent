@@ -50,12 +50,13 @@ from packaging.version import InvalidVersion, Version
 
 from omnigent._platform import resolve_cli_binary
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
+from omnigent.cli_invocation import cli_invocation
 from omnigent.harness_install_spec import HarnessInstallSpec, SetupStep
-from omnigent.onboarding.provider_config import ANTHROPIC_FAMILY, GEMINI_FAMILY, OPENAI_FAMILY
-from omnigent.opencode_native_client import (
+from omnigent.harnesses.opencode_native.client import (
     OPENCODE_MAX_VERSION_EXCLUSIVE,
     OPENCODE_MIN_VERSION,
 )
+from omnigent.onboarding.provider_config import ANTHROPIC_FAMILY, GEMINI_FAMILY, OPENAI_FAMILY
 
 # Pi is not a configure-menu family (the menu is Claude + Codex), but the
 # first-run ``run`` flow falls back to it, so it has install metadata too.
@@ -88,7 +89,9 @@ KIRO_KEY = "kiro"
 # - codex: native policy hook requires >= 0.129.0
 #   (`omnigent/codex_native_app_server.py`).
 # - pi: non-interactive ``--approve`` override requires >= 0.79.0
-#   (``omnigent/pi_native.py``).
+#   (``omnigent/pi_native.py``). Adaptive thinking (thinking.type.adaptive
+#   for claude-4+/claude-5) requires >= 0.84.2
+#   (``omnigent/pi_native_credentials.py``).
 # - qwen: ``--input-file`` / ``--json-file`` bridge verified on v0.18.1
 #   (``omnigent/qwen_native_forwarder.py`` / ``docs/QWEN_NATIVE_DESIGN.md``).
 # - goose: SQLite forwarder schema verified on Goose 1.38.0
@@ -116,7 +119,7 @@ KIRO_KEY = "kiro"
 #   semver version with the build date alongside it
 #   (``Hermes Agent v0.19.1 (2026.7.30)``), so the floor is that semver.
 _CODEX_MIN_VERSION = "0.137.0"
-_PI_MIN_VERSION = "0.79.0"
+_PI_MIN_VERSION = "0.84.2"
 _QWEN_MIN_VERSION = "0.18.1"
 _GOOSE_MIN_VERSION = "1.38.0"
 _HERMES_MIN_VERSION = "0.17.0"
@@ -124,6 +127,7 @@ _KIRO_MIN_VERSION = "2.10.0"
 _CLAUDE_MIN_VERSION = "2.1.161"
 _CURSOR_MIN_VERSION = "2026.06.02"
 _KIMI_MIN_VERSION = "0.7.0"
+_ANTIGRAVITY_MIN_VERSION = "1.1.13"
 
 # OpenCode native harness CLI (``opencode serve`` / ``opencode attach``),
 # installed via the ``opencode-ai`` npm package. No login/logout/status argv
@@ -149,6 +153,15 @@ COPILOT_KEY = "copilot"
 HERMES_KEY = "hermes"
 
 _HERMES_INSTALL_HINT = "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
+
+# Devin (Cognition) ships via a curl installer rather than npm and authenticates
+# through its own ``devin auth login``, which writes a credential file it reads
+# back at spawn — Omnigent stores no Devin credential. ``devin auth status``
+# exits 0 only while logged in, giving the same revocation-aware status probe
+# Codex gets from ``codex login status``.
+DEVIN_KEY = "devin"
+
+_DEVIN_INSTALL_HINT = "curl -fsSL https://cli.devin.ai/install.sh | bash"
 
 # Anthropic recommends its native installer over ``npm install -g``: it writes
 # to a user-writable ``~/.local/bin`` and self-updates, so it sidesteps the
@@ -290,6 +303,8 @@ _HARNESS_INSTALL: dict[str, HarnessInstallSpec] = {
         status_args=("models",),
         install_hint="curl -fsSL https://antigravity.google/cli/install.sh | bash",
         auth_hint="run `agy` and complete the browser sign-in",
+        # Direct GEMINI_API_KEY authentication first shipped in agy 1.1.13.
+        min_version=_ANTIGRAVITY_MIN_VERSION,
     ),
     GOOSE_KEY: HarnessInstallSpec(
         "Goose",
@@ -305,6 +320,16 @@ _HARNESS_INSTALL: dict[str, HarnessInstallSpec] = {
         install_hint=_HERMES_INSTALL_HINT,
         install_command=("bash", "-c", _HERMES_INSTALL_HINT),
         min_version=_HERMES_MIN_VERSION,
+    ),
+    DEVIN_KEY: HarnessInstallSpec(
+        "Devin",
+        "devin",
+        package=None,
+        login_args=("auth", "login"),
+        status_args=("auth", "status"),
+        install_hint=_DEVIN_INSTALL_HINT,
+        install_command=("bash", "-c", _DEVIN_INSTALL_HINT),
+        auth_hint="run `devin auth login` (Omnigent stores no Devin credential)",
     ),
 }
 
@@ -339,12 +364,13 @@ _HARNESS_NAME_TO_KEY: dict[str, str] = {
     "native-cursor": CURSOR_KEY,
     "kiro-native": KIRO_KEY,
     "native-kiro": KIRO_KEY,
-    # The native agy TUI bridge wraps the ``agy`` CLI; both spellings map to
-    # the Gemini family's install spec. (The in-process ``antigravity`` SDK
-    # harness is deliberately absent — like the other SDK harnesses it needs no
-    # CLI binary.)
+    # The native agy TUI bridge wraps the ``agy`` CLI. The in-process
+    # ``antigravity`` SDK harness is deliberately absent because it needs no
+    # CLI binary.
     "antigravity-native": GEMINI_FAMILY,
     "native-antigravity": GEMINI_FAMILY,
+    "agy-native": GEMINI_FAMILY,
+    "native-agy": GEMINI_FAMILY,
     "goose-native": GOOSE_KEY,
     "native-goose": GOOSE_KEY,
     # Headless Goose (``harness: goose``, drives ``goose acp``) wraps the same
@@ -370,6 +396,12 @@ _HARNESS_NAME_TO_KEY: dict[str, str] = {
     # gates on the same binary.
     "hermes-native": HERMES_KEY,
     "native-hermes": HERMES_KEY,
+    # Native Devin TUI (``devin-native``, via ``omni devin``) wraps the ``devin``
+    # CLI; ``native-devin`` gates on the same binary. The bare ``devin`` spelling
+    # canonicalizes to ``devin-native``, so it lands here too, and the ACP row
+    # gates on the same binary through the catalog.
+    "devin-native": DEVIN_KEY,
+    "native-devin": DEVIN_KEY,
 }
 
 
@@ -694,7 +726,10 @@ def harness_setup_hint(harness: str | None) -> str:
         elif spec.auth_hint:
             login = f", then {spec.auth_hint}"
         return f"install the {spec.binary} CLI on that machine with `{spec.install_hint}`{login}"
-    return "run `omni setup` on that machine to install the CLI and set a default credential"
+    return (
+        f"run `{cli_invocation(name='omni')} setup` on that machine to install "
+        "the CLI and set a default credential"
+    )
 
 
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:[-.][0-9A-Za-z]+)*)")
@@ -727,7 +762,7 @@ def _parse_harness_cli_version(text: str) -> str | None:
     """Extract a semver-ish string from ``<binary> --version`` output.
 
     Mirrors the OpenCode-specific parser in
-    :func:`omnigent.opencode_native_app_server.parse_opencode_version` but is
+    :func:`omnigent.harnesses.opencode_native.app_server.parse_opencode_version` but is
     kept generic so any harness can declare a version range in its install spec.
     Date-shaped versions (e.g. Cursor's ``2026.06.22`` or
     ``2026.06.19-20-24-33-653a7fb``) are normalized to ``YYYY.MM.DD``.
@@ -838,6 +873,19 @@ def harness_install_spec(key: str) -> HarnessInstallSpec | None:
     return _all_harness_install().get(key)
 
 
+def harness_cli_binary(key: str) -> str | None:
+    """Resolve the CLI selected for an install key, including Pi's path override."""
+    spec = harness_install_spec(key)
+    if spec is None:
+        return None
+    command = spec.binary
+    if key == PI_KEY:
+        from omnigent.harness_startup_config import resolve_harness_path
+
+        command = resolve_harness_path("pi") or command
+    return resolve_cli_binary(command)
+
+
 def harness_cli_version_satisfies(key: str) -> bool:
     """Return whether the installed CLI for *key* satisfies its version range.
 
@@ -853,7 +901,7 @@ def harness_cli_version_satisfies(key: str) -> bool:
     spec = harness_install_spec(key)
     if spec is None:
         return False
-    binary = resolve_cli_binary(spec.binary)
+    binary = harness_cli_binary(key)
     if binary is None:
         return False
     return _harness_cli_version_satisfies(spec, binary)
@@ -881,7 +929,7 @@ def harness_cli_installed(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
     spec = harness_install_spec(key)
     if spec is None:
         return False
-    binary = resolve_cli_binary(spec.binary)
+    binary = harness_cli_binary(key)
     if binary is None:
         return False
     return _harness_cli_version_satisfies(spec, binary, timeout)
@@ -904,7 +952,7 @@ def harness_cli_version(key: str) -> tuple[str | None, str | None]:
     spec = harness_install_spec(key)
     if spec is None:
         return None, None
-    binary = resolve_cli_binary(spec.binary)
+    binary = harness_cli_binary(key)
     if binary is None:
         return None, None
     version = _harness_cli_version_string(spec, binary)
@@ -948,12 +996,16 @@ def _harness_cli_version_string(
     try:
         completed = subprocess.run(
             [binary, "--version"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
+        return None
+    # Failed launchers can print a runtime version, not the CLI's version.
+    if completed.returncode != 0:
         return None
     version = _parse_harness_cli_version(
         (completed.stdout or "") + "\n" + (completed.stderr or "")
@@ -1148,6 +1200,8 @@ def harness_cli_logged_in(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
             [argv_binary, *spec.status_args],
             check=False,
             timeout=timeout,
+            # Concurrent probes must not change or restore a shared terminal's input mode.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
         )

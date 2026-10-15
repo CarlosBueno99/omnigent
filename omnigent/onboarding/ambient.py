@@ -34,11 +34,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
-from omnigent.env_credentials import getenv_nonempty_with_omnigent_prefix
 from omnigent.onboarding import codex_auth_readiness
 from omnigent.onboarding.provider_config import ANTHROPIC_FAMILY, GEMINI_FAMILY, OPENAI_FAMILY
 from omnigent.onboarding.providers import PROVIDER_ENV_VARS
+from omnigent.util.env_credentials import getenv_nonempty_with_omnigent_prefix
 
 DetectedKind = Literal["key", "subscription", "local", "cli-config"]
 
@@ -46,7 +47,7 @@ DetectedKind = Literal["key", "subscription", "local", "cli-config"]
 # ``subscription`` is a logged-in CLI; ``local`` is a self-hosted endpoint;
 # ``cli-config`` is a custom model provider a harness CLI's own config file
 # defines (today: a ``[model_providers.X]`` table in ``~/.codex/config.toml``
-# that carries its own auth, e.g. the Databricks AI Gateway written by
+# that carries its own auth, e.g. the Databricks Unity Gateway written by
 # ``isaac configure codex``).
 KEY_KIND: DetectedKind = "key"
 SUBSCRIPTION_KIND: DetectedKind = "subscription"
@@ -61,6 +62,20 @@ _OLLAMA_URL = f"http://{_OLLAMA_HOST}:{_OLLAMA_PORT}"
 # Timeout (seconds) for the Ollama TCP probe — short so setup stays snappy
 # when nothing is listening.
 _OLLAMA_PROBE_TIMEOUT = 0.25
+
+# Claude Code's enterprise "managed settings" chain, highest precedence first.
+# An enterprise install (the shape ``isaac configure claude`` writes) configures
+# Claude Code here and nowhere else: an ``env`` block pinning
+# ``ANTHROPIC_BASE_URL`` at a gateway plus a top-level ``apiKeyHelper`` that
+# prints the bearer token. Managed settings win at Claude Code's own launch, so
+# this file alone is a complete, working credential — but it belongs to Claude
+# Code, not omnigent: we reflect it (readiness + label), we never adopt it into
+# a ``providers:`` shape (see ``claude_managed_gateway``).
+CLAUDE_CODE_MANAGED_SETTINGS_PATHS: tuple[Path, ...] = (
+    Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
+    Path("/etc/claude-code/managed-settings.json"),
+    Path(os.environ.get("PROGRAMDATA", "C:/ProgramData")) / "ClaudeCode" / "managed-settings.json",
+)
 
 # Maps each provider whose env key we surface to the served model family.
 # Providers absent here (or mapped to ``None``) are reported with
@@ -167,35 +182,57 @@ def codex_auth_has_credential(auth_path: Path) -> bool:
         when it is missing, unreadable, not valid JSON, not a JSON object, or
         carries no credential field.
     """
+    # Delegate so the credential set can never drift from the mode resolver.
+    return codex_auth_effective_mode(auth_path) is not None
+
+
+def codex_auth_effective_mode(auth_path: Path) -> str | None:
+    """Return the auth mode a Codex ``auth.json``'s credential effectively uses.
+
+    Mirrors the Codex CLI's own resolution (``openai/codex``,
+    ``codex-rs/login``): ChatGPT OAuth tokens win when present, else a baked-in
+    API key, else an enterprise personal access token. This is what ``codex``
+    itself reports as ``auth_mode`` — surfacing it keeps omnigent's listing
+    from calling an API-key-backed login a bare "subscription", which points a
+    quota diagnosis at the wrong credential.
+
+    :param auth_path: Path to the Codex ``auth.json`` to inspect, e.g.
+        ``Path("~/.codex/auth.json").expanduser()``.
+    :returns: ``"chatgpt"``, ``"apikey"``, or ``"pat"``; ``None`` when the file
+        is missing, malformed, or carries no usable credential (the same cases
+        :func:`codex_auth_has_credential` rejects).
+    """
     try:
-        raw = auth_path.read_text(encoding="utf-8")
-    except OSError:
-        # Missing or unreadable file — no login.
-        return False
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        # Malformed JSON — treat as no usable login rather than crash.
-        return False
+        data = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
     if not isinstance(data, dict):
-        return False
-    # apikey mode: a baked-in OpenAI API key.
-    api_key = data.get("OPENAI_API_KEY")
-    if isinstance(api_key, str) and api_key.strip():
-        return True
-    # chatgpt / OAuth mode: an access token, or a refresh token the CLI can
-    # exchange for a fresh access token.
+        return None
     tokens = data.get("tokens")
     if isinstance(tokens, dict):
         for field in ("access_token", "refresh_token"):
             value = tokens.get(field)
             if isinstance(value, str) and value.strip():
-                return True
-    # Enterprise / external-token integrations.
+                return "chatgpt"
+    api_key = data.get("OPENAI_API_KEY")
+    if isinstance(api_key, str) and api_key.strip():
+        return "apikey"
     personal_access_token = data.get("personal_access_token")
     if isinstance(personal_access_token, str) and personal_access_token.strip():
-        return True
-    return False
+        return "pat"
+    return None
+
+
+def codex_cli_effective_auth_mode() -> str | None:
+    """Return the effective auth mode of the Codex CLI's own login, if any.
+
+    Reads the default ``~/.codex/auth.json`` (honoring ``$HOME``) through
+    :func:`codex_auth_effective_mode`.
+
+    :returns: ``"chatgpt"``, ``"apikey"``, or ``"pat"``; ``None`` when there is
+        no usable login.
+    """
+    return codex_auth_effective_mode(_codex_auth_path())
 
 
 def _codex_config_path() -> Path:
@@ -215,7 +252,7 @@ class CodexConfigProvider:
     :param provider_id: The ``model_provider`` id the config selects, i.e.
         the key under ``[model_providers.<id>]``, e.g. ``"Databricks"``.
     :param display_name: The provider table's ``name`` field, e.g.
-        ``"Databricks AI Gateway"``; falls back to :attr:`provider_id` when
+        ``"Databricks Unity Gateway"``; falls back to :attr:`provider_id` when
         the table names none.
     """
 
@@ -290,7 +327,7 @@ class CodexConfigTransport:
     The runtime-routing counterpart of :class:`CodexConfigProvider` (which
     only carries the id / display name for the setup menu). This reads the
     fields a harness needs to actually talk to the provider — the ones
-    ``isaac configure codex`` writes for the Databricks AI Gateway.
+    ``isaac configure codex`` writes for the Databricks Unity Gateway.
 
     :param base_url: The provider table's ``base_url``, e.g.
         ``"https://<workspace>.ai-gateway.cloud.databricks.com/codex/v1"``.
@@ -311,7 +348,7 @@ def codex_config_provider_transport(
     """Read the base URL + auth command for one Codex ``[model_providers.X]``.
 
     A harness that pinned a ``cli-config`` provider (e.g. pi-native routing the
-    user's Databricks AI Gateway) needs the *transport* — where to send
+    user's Databricks Unity Gateway) needs the *transport* — where to send
     requests and how to authenticate — not just the id. This parses the named
     ``[model_providers.<provider_id>]`` table out of ``config.toml`` and returns
     its ``base_url`` plus a shell command (rebuilt from ``[X.auth]``
@@ -453,6 +490,110 @@ def claude_auth_has_credential(creds_path: Path) -> bool:
     if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool):
         return expires_at > time.time() * 1000
     return False
+
+
+def claude_managed_gateway(
+    paths: tuple[Path, ...] | None = None,
+) -> tuple[str | None, bool]:
+    """Read the credential Claude Code applies from its managed settings chain.
+
+    The single canonical parser for Claude Code's managed-settings credential,
+    shared by ambient detection, the readiness gate, and the Smart-Routing
+    gateway check (:func:`omnigent.harnesses.claude_native.main.managed_claude_gateway_signal`
+    delegates here). A credential counts as delivered when the file carries a
+    top-level ``apiKeyHelper`` (a token-printing command) or a truthy
+    ``env.CLAUDE_CODE_USE_GATEWAY``.
+
+    The **first readable, object-shaped** file decides, matching Claude Code's
+    own precedence: a settings file that exists but pins no credential reports
+    "none" rather than falling through to a lower-precedence file it would
+    itself override.
+
+    :param paths: Settings files to read, highest precedence first; defaults to
+        :data:`CLAUDE_CODE_MANAGED_SETTINGS_PATHS`.
+    :returns: ``(base_url, has_credential)`` from the first readable file, or
+        ``(None, False)`` when none is present or parseable. ``base_url`` is the
+        gateway ``env.ANTHROPIC_BASE_URL`` (``None`` when unset — a helper alone
+        credentials api.anthropic.com); ``has_credential`` is whether Claude
+        Code has a usable credential to apply at launch.
+    """
+    for path in CLAUDE_CODE_MANAGED_SETTINGS_PATHS if paths is None else paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        raw_env = payload.get("env")
+        env = raw_env if isinstance(raw_env, dict) else {}
+        raw_base_url = env.get("ANTHROPIC_BASE_URL")
+        base_url = raw_base_url.strip() if isinstance(raw_base_url, str) else None
+        has_helper = bool(payload.get("apiKeyHelper"))
+        use_gateway = str(env.get("CLAUDE_CODE_USE_GATEWAY", "")).strip().lower() not in (
+            "",
+            "0",
+            "false",
+        )
+        return base_url or None, has_helper or use_gateway
+    return None, False
+
+
+def claude_managed_model_picker(
+    paths: tuple[Path, ...] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Read a replacement model picker from Claude Code's managed settings."""
+    for path in CLAUDE_CODE_MANAGED_SETTINGS_PATHS if paths is None else paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        picker = payload.get("modelPicker")
+        if not isinstance(picker, dict) or picker.get("replaceBuiltInOptions") is not True:
+            return ()
+        options = picker.get("options")
+        if not isinstance(options, list):
+            return ()
+        return tuple(
+            (model.strip(), label.strip())
+            for option in options
+            if isinstance(option, dict)
+            and isinstance((model := option.get("model")), str)
+            and model.strip()
+            and isinstance((label := option.get("label", model)), str)
+            and label.strip()
+        )
+    return ()
+
+
+def claude_managed_gateway_display_name(paths: tuple[Path, ...] | None = None) -> str | None:
+    """A human label for the managed-settings credential, when one is delivered.
+
+    Used by the setup / ``/model`` display layer to show the Claude credential
+    as its actual backing (e.g. ``"Databricks Unity Gateway"``) rather than the
+    generic ``"Subscription"``. Purely a display derivation from live managed
+    settings — nothing is persisted.
+
+    :param paths: Settings files to read; defaults to
+        :data:`CLAUDE_CODE_MANAGED_SETTINGS_PATHS`.
+    :returns: ``"Databricks Unity Gateway"`` for a recognized Databricks gateway,
+        the gateway host for another gateway, ``"Claude Code gateway"`` for a
+        credential with no pinned base URL, or ``None`` when no credential is
+        delivered.
+    """
+    base_url, has_credential = claude_managed_gateway(paths)
+    if not has_credential:
+        return None
+    if base_url is None:
+        return "Claude Code gateway"
+    # Lazy: the gateway-URL allowlist lives in its own module and is only
+    # needed once a base URL is actually present.
+    from omnigent.databricks_ai_gateway import is_databricks_ai_gateway_url
+
+    if is_databricks_ai_gateway_url(base_url):
+        return "Databricks Unity Gateway"
+    return urlsplit(base_url).hostname or "Claude Code gateway"
 
 
 def _claude_login_detected() -> bool:
@@ -640,12 +781,27 @@ def _detect_providers_now() -> list[DetectedProvider]:
             )
         )
 
-    # 2. Claude CLI login. Like codex (below), existence alone is not enough —
-    #    an empty / logged-out ``.credentials.json`` carries no usable login.
-    #    On macOS the credential lives in the Keychain rather than the file, so
-    #    detection falls back to the CLI's own status check there. See
-    #    ``_claude_login_detected`` / ``claude_auth_has_credential``.
-    if _claude_login_detected():
+    # 2. Claude Code credential. Prefer the managed-settings gateway — read
+    #    straight from the enterprise settings file (no subprocess, works on
+    #    Linux where there is no Keychain, and it is what Claude Code actually
+    #    applies at launch). Fall back to a CLI login otherwise (which on macOS
+    #    reads the Keychain via ``claude auth status``). Either way it is
+    #    surfaced as a ``subscription``: the credential lives in Claude Code's
+    #    own files and Claude Code applies it itself, so omnigent must NOT adopt
+    #    a gateway/cli-config provider shape for it — native routing defers to
+    #    Claude Code's settings (a subscription resolves to "no override"), and
+    #    the in-process SDK falls back to its own auth. Persisting a new shape
+    #    here is exactly what a released/stale runner's parser rejects.
+    if claude_managed_gateway()[1]:
+        detected.append(
+            DetectedProvider(
+                name="claude",
+                kind=SUBSCRIPTION_KIND,
+                family=ANTHROPIC_FAMILY,
+                source="Claude Code managed settings",
+            )
+        )
+    elif _claude_login_detected():
         detected.append(
             DetectedProvider(
                 name="claude",
@@ -656,7 +812,7 @@ def _detect_providers_now() -> list[DetectedProvider]:
         )
 
     # 3. A custom model provider in ~/.codex/config.toml (e.g. the
-    #    Databricks AI Gateway written by ``isaac configure codex``, which
+    #    Databricks Unity Gateway written by ``isaac configure codex``, which
     #    writes config.toml only — never auth.json — so the login check
     #    below cannot see it). Ordered BEFORE the codex login check so that
     #    on a machine with both, the auto-default matches what a plain

@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { validateHeaderName, validateHeaderValue } from "node:http";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import type { Plugin, ProxyOptions } from "vite";
 import { defineConfig } from "vitest/config";
+import { shikiManualChunk } from "./vite.shiki";
+import { streamdownManualChunk } from "./vite.streamdown";
 
 // Databricks workspace-hosted omnigent is mounted behind the api-proxy at this
 // path; a local / self-hosted server mounts at the root. Mirrors the Python
@@ -98,26 +100,45 @@ function configureProxy(target: string, useAuth: boolean): NonNullable<ProxyOpti
 function createProxyConfig(target: string, useAuth: boolean): Record<string, ProxyOptions> {
   const origin = new URL(target).origin;
   const configure = configureProxy(target, useAuth);
+  const byOrigin = JSON.parse(process.env.OMNIGENT_PROXY_HEADERS || "{}");
+  if (!byOrigin || typeof byOrigin !== "object" || Array.isArray(byOrigin)) {
+    throw new Error("OMNIGENT_PROXY_HEADERS must be a JSON object keyed by server origin");
+  }
+  const headers = byOrigin[origin] === undefined ? {} : byOrigin[origin];
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) {
+    throw new Error("OMNIGENT_PROXY_HEADERS entries must be header objects");
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    validateHeaderName(name);
+    if (typeof value !== "string") {
+      throw new Error("OMNIGENT_PROXY_HEADERS header values must be strings");
+    }
+    validateHeaderValue(name, value);
+  }
 
   return {
     "/v1": {
       target: origin,
+      headers,
       changeOrigin: true,
       ws: true,
       configure,
     },
     "/api": {
       target: origin,
+      headers,
       changeOrigin: true,
       configure,
     },
     "/auth": {
       target: origin,
+      headers,
       changeOrigin: true,
       configure,
     },
     "/health": {
       target: origin,
+      headers,
       changeOrigin: true,
       configure,
     },
@@ -128,6 +149,7 @@ function createProxyConfig(target: string, useAuth: boolean): Record<string, Pro
     // "pre-manifest", making the capability invisible in local development.
     "/.well-known": {
       target: origin,
+      headers,
       changeOrigin: true,
       configure,
     },
@@ -163,30 +185,6 @@ if (useAuth) {
   }
 } else {
   console.log(`[dev-proxy] target=${OMNIGENT_URL}`);
-}
-
-const proxyConfig = createProxyConfig(OMNIGENT_URL, useAuth);
-
-/**
- * Emit the tombstone `sw.js` for the standalone build (see `sw-src/sw.js`): the
- * retired PWA service worker's self-unregistering replacement. Registered ONLY
- * here (not in `vite.embed.config.ts`), so the embed island still ships no
- * service worker.
- *
- * @deprecated Delete this plugin together with `sw-src/sw.js` in 0.11.0, once
- * existing registrations have had time to unregister themselves.
- */
-function emitServiceWorkerTombstone(): Plugin {
-  return {
-    name: "emit-service-worker-tombstone",
-    generateBundle() {
-      this.emitFile({
-        type: "asset",
-        fileName: "sw.js",
-        source: readFileSync(path.resolve(__dirname, "sw-src/sw.js"), "utf8"),
-      });
-    },
-  };
 }
 
 // Safari < 16.4 cannot parse regex lookbehind; these dependency regexes would
@@ -238,8 +236,17 @@ function safariLookbehindWorkarounds(): Plugin {
   };
 }
 
-export default defineConfig({
-  plugins: [emitServiceWorkerTombstone(), safariLookbehindWorkarounds(), react(), tailwindcss()],
+export default defineConfig(({ command }) => ({
+  // Relative asset base for production builds so the SPA can be served under
+  // any path prefix (e.g. code-server's `/proxy/6767/`), decided purely at
+  // server runtime via OMNIGENT_WEB_BASE_PATH — no separate build needed per
+  // deployment. Dynamic code-split chunks and the Monaco worker then resolve
+  // relative to `import.meta.url` instead of a hardcoded `/assets/...`. The
+  // server rewrites the entry/asset refs in `index.html` to absolute
+  // `{base}/assets/...` at serve time (see `_rewrite_web_ui_index` in
+  // omnigent/server/app.py). Dev (`vite serve`) stays at root.
+  base: command === "build" ? "./" : "/",
+  plugins: [safariLookbehindWorkarounds(), react(), tailwindcss()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
@@ -263,8 +270,20 @@ export default defineConfig({
         "src/**/*.test.{ts,tsx}",
         "src/**/*.d.ts",
         "src/test-setup.ts",
+        // Storybook-only modules are covered by the pinned visual snapshot suite.
+        "src/**/*.stories.{ts,tsx}",
+        "src/storybook/**",
+        "src/**/*storyFixtures.{ts,tsx}",
+        "src/**/*StoryFixtures.{ts,tsx}",
         // Vendored UI kit, not product code (see tests/e2e_ui/COVERAGE_GAPS.md).
         "src/components/ai-elements/**",
+        // Onboarding wizard pieces with no jsdom-testable logic: the WebGL2
+        // shader + its canvas wrapper (no GL context in jsdom) and the Electron
+        // entry (createRoot against the preload bridge). The flow's real logic
+        // (steps, URL normalization) stays counted and is unit-tested.
+        "src/components/onboarding/PixelBlast.tsx",
+        "src/components/onboarding/AnimatedOmnigentPanel.tsx",
+        "src/server-selector-v2.tsx",
       ],
       reportsDirectory: "./coverage",
       // text-summary: human-readable console line; json-summary: machine-
@@ -273,7 +292,7 @@ export default defineConfig({
     },
   },
   server: {
-    proxy: proxyConfig,
+    proxy: createProxyConfig(OMNIGENT_URL, useAuth),
   },
   build: {
     // default baseline is Safari 16.4+; iPadOS 15 can't parse dep regex lookbehinds (#1978)
@@ -282,28 +301,8 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       output: {
-        manualChunks(id) {
-          const normalized = id.replaceAll("\\", "/");
-          // Shiki lazily imports each language grammar (`@shikijs/langs/<lang>`)
-          // via dynamic import; leave those as their own on-demand chunks
-          // instead of folding ~200 grammars into the eagerly-loaded core.
-          if (normalized.includes("/@shikijs/langs/")) {
-            return;
-          }
-          // Keep Shiki's core, engines, and bundle glue (incl. the language
-          // index + alias map) in one chunk. pnpm's symlinks + Vite's default
-          // split otherwise expose a top-level cyclic import between the
-          // language bundle and the alias-map chunk that executes before its
-          // data dependency is initialized, producing "Cannot read properties
-          // of undefined (reading 'flatMap')" and a blank Monaco/file-viewer
-          // screen. The engines must stay here too: excluding them splits the
-          // cyclic core across chunks and reintroduces the bug.
-          if (normalized.includes("/shiki") || normalized.includes("/@shikijs/")) {
-            return "shiki";
-          }
-          return undefined;
-        },
+        manualChunks: (id: string) => streamdownManualChunk(id) ?? shikiManualChunk(id),
       },
     },
   },
-});
+}));
