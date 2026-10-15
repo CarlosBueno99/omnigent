@@ -61,6 +61,7 @@ from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_run
 from omnigent.runner.launch_failure import (
     classify_native_turn_error,
     diagnose_client_update_required,
+    diagnose_codex_model_rejection,
 )
 from omnigent.runner.routing import RunnerRouter, routing_host_id
 from omnigent.runner.transports.ws_tunnel.frames import (
@@ -1981,6 +1982,11 @@ def register_events_routes(
                     if classified_code == "client_update_required"
                     else None
                 )
+                if harness == "codex-native" and classified_code in {
+                    "codex_turn_error",
+                    "native_turn_error",
+                }:
+                    diagnosis = diagnose_codex_model_rejection(output)
                 status_error = ErrorDetail(
                     code=classified_code,
                     message=output.strip(),
