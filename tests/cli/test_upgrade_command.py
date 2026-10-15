@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -80,6 +82,11 @@ def _wheel_install(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _live_daemon_record(_target: str) -> SimpleNamespace:
+    """A local daemon record whose process (this test) is alive."""
+    return SimpleNamespace(pid=os.getpid())
+
+
 def test_upgrade_up_to_date(monkeypatch: pytest.MonkeyPatch, _wheel_install: None) -> None:
     """Latest == installed → reports up to date, exit 0, nothing stopped/run."""
     monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda *_a, **_k: "0.1.0")
@@ -123,7 +130,7 @@ def test_upgrade_runs_installer_and_drains_first(
     monkeypatch.setattr(
         "omnigent.cli._wait_for_local_sessions_to_drain", lambda: events.append("drained")
     )
-    monkeypatch.setattr("omnigent.cli._find_daemon_record", lambda _target: object())
+    monkeypatch.setattr("omnigent.cli._find_daemon_record", _live_daemon_record)
 
     def _stop(*, force: bool) -> bool:
         events.append(f"stop(force={force})")
@@ -194,14 +201,21 @@ def test_upgrade_force_skips_drain_and_force_stops(
 def test_upgrade_install_failure_surfaces(
     monkeypatch: pytest.MonkeyPatch, _wheel_install: None
 ) -> None:
-    """A non-zero installer exit → ClickException naming the status, exit non-zero."""
+    """A non-zero installer exit → ClickException naming the status, exit non-zero.
+
+    The old install is still in place, so the stopped server comes back on it.
+    """
     monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda *_a, **_k: "0.2.0")
+    monkeypatch.setattr("omnigent.cli._stop_local_server_and_daemon", lambda *, force: True)
     monkeypatch.setattr("omnigent.update_check._run_upgrade_command", lambda *_a, **_k: 3)
+    restarted: list[_StoppedLocalProcesses] = []
+    monkeypatch.setattr("omnigent.cli._restart_local_processes_after_upgrade", restarted.append)
 
     result = CliRunner().invoke(cli, ["upgrade"])
 
     assert result.exit_code != 0
     assert "exited with status 3" in result.output
+    assert restarted == [_StoppedLocalProcesses(server=True, daemon=False)]
 
 
 @pytest.mark.parametrize(
@@ -213,7 +227,7 @@ def test_upgrade_restart_flag_controls_the_relaunch(
 ) -> None:
     """Restarting what the upgrade stopped is the default; ``--no-restart`` leaves it down."""
     monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda *_a, **_k: "0.2.0")
-    monkeypatch.setattr("omnigent.cli._find_daemon_record", lambda _target: object())
+    monkeypatch.setattr("omnigent.cli._find_daemon_record", _live_daemon_record)
     monkeypatch.setattr("omnigent.cli._stop_local_server_and_daemon", lambda *, force: True)
     monkeypatch.setattr("omnigent.update_check._run_upgrade_command", lambda *_a, **_k: 0)
     monkeypatch.setattr(
@@ -234,21 +248,27 @@ def test_upgrade_restart_flag_controls_the_relaunch(
         assert " start` to bring it back" in result.output
 
 
-def test_upgrade_restarts_the_server_even_when_the_installer_fails(
+def test_upgrade_ignores_a_stale_daemon_record(
     monkeypatch: pytest.MonkeyPatch, _wheel_install: None
 ) -> None:
-    """A failed install leaves the old code in place, so the stopped server comes back on it."""
+    """A local daemon record whose process is gone must not make the upgrade start hosting."""
     monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda *_a, **_k: "0.2.0")
-    monkeypatch.setattr("omnigent.cli._stop_local_server_and_daemon", lambda *, force: True)
-    monkeypatch.setattr("omnigent.update_check._run_upgrade_command", lambda *_a, **_k: 3)
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    monkeypatch.setattr(
+        "omnigent.cli._find_daemon_record", lambda _target: SimpleNamespace(pid=gone.pid)
+    )
+    monkeypatch.setattr("omnigent.update_check._run_upgrade_command", lambda *_a, **_k: 0)
+    monkeypatch.setattr(
+        "omnigent.update_check._probe_installed_distribution", lambda: ("0.2.0", None)
+    )
     restarted: list[_StoppedLocalProcesses] = []
     monkeypatch.setattr("omnigent.cli._restart_local_processes_after_upgrade", restarted.append)
 
     result = CliRunner().invoke(cli, ["upgrade"])
 
-    assert result.exit_code != 0
-    assert "exited with status 3" in result.output
-    assert restarted == [_StoppedLocalProcesses(server=True, daemon=False)]
+    assert result.exit_code == 0, result.output
+    assert restarted == [_StoppedLocalProcesses(server=False, daemon=False)]
 
 
 def _completed(returncode: int) -> subprocess.CompletedProcess[bytes]:
@@ -308,17 +328,42 @@ def test_restart_after_upgrade_is_a_no_op_when_nothing_was_running(
     assert capsys.readouterr().out == ""
 
 
-def test_restart_after_upgrade_failure_points_at_start(
+@pytest.mark.parametrize(
+    ("stopped", "hint"),
+    [
+        (_StoppedLocalProcesses(server=True, daemon=True), " start`"),
+        (_StoppedLocalProcesses(server=True, daemon=False), " server --background`"),
+    ],
+)
+def test_restart_after_upgrade_failure_hints_the_matching_command(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stopped: _StoppedLocalProcesses,
+    hint: str,
+) -> None:
+    """A restart that fails leaves the manual command for what was stopped."""
+    monkeypatch.setattr("omnigent.cli.subprocess.run", lambda *_a, **_k: _completed(1))
+
+    _restart_local_processes_after_upgrade(stopped)
+
+    err = capsys.readouterr().err
+    assert "Could not restart the background server (exit status 1)" in err
+    assert hint in err
+
+
+def test_restart_after_upgrade_reports_an_unlaunchable_command(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A restart that fails leaves the manual command instead of failing the upgrade."""
-    monkeypatch.setattr("omnigent.cli.subprocess.run", lambda *_a, **_k: _completed(1))
+    def _boom(*_a: object, **_k: object) -> subprocess.CompletedProcess[bytes]:
+        raise OSError("No such file or directory")
+
+    monkeypatch.setattr("omnigent.cli.subprocess.run", _boom)
 
     _restart_local_processes_after_upgrade(_StoppedLocalProcesses(server=True, daemon=True))
 
     err = capsys.readouterr().err
-    assert "Could not restart the background server (exit status 1)" in err
-    assert " start`" in err
+    assert "Could not launch the restart command (No such file or directory)" in err
+    assert "exit status" not in err
 
 
 def test_upgrade_index_unreachable(monkeypatch: pytest.MonkeyPatch, _wheel_install: None) -> None:

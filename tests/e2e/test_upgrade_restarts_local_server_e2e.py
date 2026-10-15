@@ -68,7 +68,11 @@ if [ "$1 $2 $3" != "tool upgrade omnigent" ]; then
   echo "fake uv: unexpected arguments: $*" >&2
   exit 1
 fi
-sed -i 's/^Version: .*/Version: {new}/' "{metadata}"
+"{python}" - <<'PY'
+import pathlib, re
+path = pathlib.Path("{metadata}")
+path.write_text(re.sub(r"(?m)^Version: .*", "Version: {new}", path.read_text()))
+PY
 echo "Updated omnigent v{old} -> v{new}" >&2
 """
 
@@ -95,7 +99,12 @@ def _fabricate_uv_tool_install(root: Path) -> dict[str, str]:
     bin_dir.mkdir()
     fake_uv = bin_dir / "uv"
     fake_uv.write_text(
-        _FAKE_UV.format(metadata=metadata, old=_INSTALLED_VERSION, new=_AVAILABLE_VERSION)
+        _FAKE_UV.format(
+            python=sys.executable,
+            metadata=metadata,
+            old=_INSTALLED_VERSION,
+            new=_AVAILABLE_VERSION,
+        )
     )
     fake_uv.chmod(0o755)
     return {
@@ -120,11 +129,14 @@ def _simple_index(root: Path) -> Iterator[str]:
         ("127.0.0.1", 0),
         lambda *a, **k: _Handler(*a, directory=str(root / "index"), **k),
     )
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_address[1]}/simple"
     finally:
         server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
 
 
 def _isolated_env(home: Path, overrides: dict[str, str]) -> dict[str, str]:
@@ -154,6 +166,15 @@ def _server_status(env: dict[str, str]) -> dict[str, object]:
     return json.loads(result.stdout)
 
 
+def _local_daemon_pid(env: dict[str, str]) -> int | None:
+    result = _omnigent(["host", "status", "--json"], env)
+    assert result.returncode == 0, result.stderr
+    for daemon in json.loads(result.stdout)["daemons"]:
+        if daemon.get("mode") == "local":
+            return daemon.get("pid")
+    return None
+
+
 def _health_ok(url: str) -> bool:
     try:
         return httpx.get(f"{url}/health", timeout=2.0, trust_env=False).status_code == 200
@@ -161,14 +182,18 @@ def _health_ok(url: str) -> bool:
         return False
 
 
-def _stop_everything(home: Path, env: dict[str, str]) -> None:
-    with contextlib.suppress(subprocess.SubprocessError):
-        _omnigent(["stop", "--force"], env)
-    pidfile = home / ".omnigent" / "local_server.pid"
-    try:
-        pid = int(pidfile.read_text().splitlines()[0])
-    except (OSError, ValueError, IndexError):
-        return
+def _recorded_pids(home: Path) -> list[int]:
+    """PIDs the CLI recorded under HOME: the server pidfile and the daemon registry."""
+    pids: list[int] = []
+    with contextlib.suppress(OSError, ValueError, IndexError):
+        pids.append(int((home / ".omnigent" / "local_server.pid").read_text().splitlines()[0]))
+    for record in (home / ".omnigent" / "daemons").glob("*.json"):
+        with contextlib.suppress(OSError, ValueError, TypeError, KeyError):
+            pids.append(int(json.loads(record.read_text())["pid"]))
+    return pids
+
+
+def _terminate(pid: int) -> None:
     with contextlib.suppress(OSError):
         os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + 10.0
@@ -180,6 +205,15 @@ def _stop_everything(home: Path, env: dict[str, str]) -> None:
         time.sleep(POLL_INTERVAL_S)
     with contextlib.suppress(OSError):
         os.kill(pid, signal.SIGKILL)
+
+
+def _stop_everything(home: Path, env: dict[str, str]) -> None:
+    """`omnigent stop --force`, then reap whatever it left behind by recorded PID."""
+    pids = _recorded_pids(home)
+    with contextlib.suppress(subprocess.SubprocessError):
+        _omnigent(["stop", "--force"], env)
+    for pid in pids:
+        _terminate(pid)
 
 
 @pytest.mark.timeout(300)
@@ -197,6 +231,8 @@ def test_upgrade_restarts_running_local_server_and_host(tmp_path: Path) -> None:
             assert before["running"] and before["daemon_attached"], before
             url = str(before["url"])
             assert _health_ok(url)
+            before_daemon_pid = _local_daemon_pid(env)
+            assert before_daemon_pid is not None
 
             upgrade = _omnigent(["upgrade"], env)
             assert upgrade.returncode == 0, f"{upgrade.stdout}\n{upgrade.stderr}"
@@ -214,5 +250,12 @@ def test_upgrade_restarts_running_local_server_and_host(tmp_path: Path) -> None:
                 f"upgrade output:\n{upgrade.stdout}"
             )
             assert _health_ok(str(after["url"]))
+            # Both processes were replaced, not merely left running.
+            assert after["pid"] != before["pid"], (before["pid"], after["pid"])
+            after_daemon_pid = _local_daemon_pid(env)
+            assert after_daemon_pid not in (None, before_daemon_pid), (
+                before_daemon_pid,
+                after_daemon_pid,
+            )
         finally:
             _stop_everything(home, env)

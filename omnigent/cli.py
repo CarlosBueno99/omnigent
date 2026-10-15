@@ -5473,11 +5473,16 @@ def _drain_and_stop_local_server(*, force: bool) -> _StoppedLocalProcesses:
     """
     if not force:
         _wait_for_local_sessions_to_drain()
-    daemon = _find_daemon_record(_LOCAL_DAEMON_MARKER) is not None
+    daemon = _host_daemon_alive()
     server = _stop_local_server_and_daemon(force=force)
     if server:
         click.echo("Stopped the background server before upgrading.")
     return _StoppedLocalProcesses(server=server, daemon=daemon)
+
+
+def _manual_restart_command(stopped: _StoppedLocalProcesses) -> str:
+    """The command that brings back what the upgrade stopped, for user hints."""
+    return f"{cli_invocation()} {'start' if stopped.daemon else 'server --background'}"
 
 
 def _restart_local_processes_after_upgrade(stopped: _StoppedLocalProcesses) -> None:
@@ -5497,7 +5502,7 @@ def _restart_local_processes_after_upgrade(stopped: _StoppedLocalProcesses) -> N
         args = ["server", "--background"]
     else:
         return
-    hint = f"Start it again with `{cli_invocation()} start`."
+    hint = f"Start it again with `{_manual_restart_command(stopped)}`."
     if not sys.executable:
         click.echo(f"Could not restart the background server. {hint}", err=True)
         return
@@ -5509,8 +5514,9 @@ def _restart_local_processes_after_upgrade(stopped: _StoppedLocalProcesses) -> N
             stdin=subprocess.DEVNULL,
             check=False,
         ).returncode
-    except OSError:
-        code = -1
+    except OSError as exc:
+        click.echo(f"Could not launch the restart command ({exc}). {hint}", err=True)
+        return
     if code != 0:
         click.echo(
             f"Could not restart the background server (exit status {code}). {hint}", err=True
@@ -5538,7 +5544,7 @@ def _local_server_stopped_for_upgrade(*, force: bool, restart: bool) -> Iterator
         elif stopped.server or stopped.daemon:
             click.echo(
                 "Left the background server stopped (--no-restart). "
-                f"Run `{cli_invocation()} start` to bring it back."
+                f"Run `{_manual_restart_command(stopped)}` to bring it back."
             )
 
 
@@ -6060,12 +6066,9 @@ def upgrade(
                 _upgrade_failure_message(code, set(info.extras) | set(extra_overrides))
             )
 
-        # Trust the installed version, not the installer's exit code. The running
-        # process still has the OLD version loaded, so re-read it in a fresh
-        # subprocess. A no-op upgrade (version-pinned spec, a cooldown /
-        # exclude-newer that excludes the new release, or a stale index cache)
-        # exits 0 without moving — claiming "✓ Upgraded" there is exactly the
-        # "I upgraded but it still says an update is available" bug.
+        # Trust the installed version, not the exit code: re-read it in a fresh
+        # subprocess, since a no-op upgrade (pinned spec, cooldown/exclude-newer,
+        # stale index cache) exits 0 without moving.
         new_version, _ = _probe_installed_distribution()
         if new_version is None:
             click.echo(
