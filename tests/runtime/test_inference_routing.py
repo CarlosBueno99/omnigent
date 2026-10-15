@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -288,15 +289,20 @@ def test_pi_single_model_policy_preserves_literal_ids_and_stays_curated() -> Non
 
 
 @pytest.mark.parametrize(
-    "allowlist",
+    ("allowlist", "openai_wire_api", "provider_ids"),
     [
-        ["claude-example", "claude-second"],
-        ["gateway/literal-model", "omnigent/claude-example"],
+        (["claude-example", "claude-second"], None, {"omnigent"}),
+        (
+            ["gateway/literal-model", "omnigent/claude-example"],
+            None,
+            {"omnigent", "omnigent-openai"},
+        ),
+        (["claude-example", "glm-example"], "chat", {"omnigent", "omnigent-completions"}),
     ],
-    ids=["bare-ids", "slash-ids-overlapping-generated-provider-names"],
+    ids=["bare-ids", "slash-ids-overlapping-generated-provider-names", "completions-routed-ids"],
 )
 def test_pi_picker_rows_resolve_to_their_allowlisted_models(
-    allowlist: list[str], tmp_path: Path
+    allowlist: list[str], openai_wire_api: str | None, provider_ids: set[str], tmp_path: Path
 ) -> None:
     from omnigent.harnesses.pi_native.credentials import (
         pi_native_model_options,
@@ -304,6 +310,8 @@ def test_pi_picker_rows_resolve_to_their_allowlisted_models(
     )
 
     profile = _profile()
+    if openai_wire_api is not None:
+        profile["providers"]["bifrost"]["openai"]["wire_api"] = openai_wire_api
     profile["inference"] = {
         "harnesses": {
             "pi-native": {
@@ -315,10 +323,12 @@ def test_pi_picker_rows_resolve_to_their_allowlisted_models(
     }
     with inference_config_scope(profile):
         for unknown in ("unlisted", "omnigent/unlisted"):
-            with pytest.raises(OmnigentError, match="configured model list"):
+            # The rejection names what was picked, not a stripped variant.
+            with pytest.raises(OmnigentError, match=f"Model {re.escape(repr(unknown))} is not in"):
                 resolve_pi_native_provider(model=unknown)
         rows = pi_native_model_options(config_loader=lambda: profile)
         assert {row["displayName"] for row in rows} == set(allowlist)
+        assert {row["id"].removesuffix("/" + row["displayName"]) for row in rows} == provider_ids
         for row in rows:
             provider = resolve_pi_native_provider(model=row["id"])
             assert provider is not None

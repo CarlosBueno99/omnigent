@@ -11,10 +11,12 @@ the host daemon, the runner it spawns, the server and the SPA are real.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 from collections.abc import Iterator
@@ -39,6 +41,8 @@ _PICKER_VALUE = f"omnigent/{_PICKED_MODEL}"
 _HOST_NAME = "bound-pi-picker-host"
 # Stable identity so an environment check can address the journey's host.
 _HOST_ID = hashlib.sha1(b"bound-pi-picker-host").hexdigest()[:32]
+# Pauses only matter for a recorded run, where they keep each step readable.
+_PACE_MS = 1_000 if os.environ.get("OMNIGENT_E2E_RECORD_DIR") else 0
 
 
 def _bound_pi_config(model_url: str) -> dict[str, object]:
@@ -73,6 +77,11 @@ def bound_pi_host(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[dict[str, Any]]:
     """A real host daemon whose config binds pi-native to a two-model allowlist."""
+    # The host reports pi-native as not installed without the CLI, and the
+    # picker then disables the Pi row before the journey can start.
+    for tool in ("pi", "tmux"):
+        if shutil.which(tool) is None:
+            pytest.skip(f"the {tool!r} CLI is required for a native Pi terminal e2e")
     root = tmp_path_factory.mktemp("bound_pi_host")
     workspace = root / "workspace"
     workspace.mkdir()
@@ -105,8 +114,8 @@ def bound_pi_host(
         yield {**row, "workspace": str(workspace), "home": host.home, "root": root}
 
 
-def _pi_agent_id(base_url: str) -> str:
-    agents = httpx.get(f"{base_url}/v1/agents", timeout=10.0).json().get("data", [])
+def _pi_agent_id(api: httpx.Client, base_url: str) -> str:
+    agents = api.get("/v1/agents").json().get("data", [])
     builtin = next((a for a in agents if a.get("harness") == "pi-native"), None)
     if builtin is not None:
         return str(builtin["id"])
@@ -177,7 +186,8 @@ def test_bound_pi_picker_selection_launches_the_native_terminal(
 
 
 async def _drive(base_url: str, host: dict[str, Any], tmp_path: Path) -> None:
-    agent_id = _pi_agent_id(base_url)
+    api = httpx.Client(base_url=base_url, trust_env=False, timeout=10.0)
+    agent_id = _pi_agent_id(api, base_url)
     create_bodies: list[dict[str, Any]] = []
     session_id: str | None = None
 
@@ -217,15 +227,16 @@ async def _drive(base_url: str, host: dict[str, Any], tmp_path: Path) -> None:
                 page.get_by_test_id(f"new-chat-landing-agent-model-omnigent/{_DEFAULT_MODEL}")
             ).to_be_visible()
             mark("models menu lists the host's bound Pi catalog")
-            await page.wait_for_timeout(1_500)
+            await page.wait_for_timeout(_PACE_MS)
             await picked_row.click()
+            await expect(picked_row).to_have_attribute("aria-checked", "true")
             mark(f"picked {_PICKED_MODEL}")
-            await page.wait_for_timeout(1_000)
+            await page.wait_for_timeout(_PACE_MS)
             await _close_entry_models(page)
 
             prompt = "hello from the bound Pi picker journey"
             await page.get_by_test_id("new-chat-landing-input").fill(prompt)
-            await page.wait_for_timeout(1_000)
+            await page.wait_for_timeout(_PACE_MS)
             await page.get_by_test_id("new-chat-landing-submit").click()
             mark("submitted new session")
             await page.wait_for_url(re.compile(r"/c/[0-9a-f]+"), timeout=60_000)
@@ -240,11 +251,7 @@ async def _drive(base_url: str, host: dict[str, Any], tmp_path: Path) -> None:
             resources: list[dict[str, Any]] = []
             deadline = time.monotonic() + _LAUNCH_OUTCOME_TIMEOUT_S
             while time.monotonic() < deadline:
-                resources = (
-                    httpx.get(f"{base_url}/v1/sessions/{session_id}/resources", timeout=10.0)
-                    .json()
-                    .get("data", [])
-                )
+                resources = api.get(f"/v1/sessions/{session_id}/resources").json().get("data", [])
                 if any(r.get("type") == "terminal" for r in resources):
                     break
                 if await error_pill.count() and await error_pill.is_visible():
@@ -257,15 +264,11 @@ async def _drive(base_url: str, host: dict[str, Any], tmp_path: Path) -> None:
             )
             if headline:
                 await error_pill.click()
-                await page.wait_for_timeout(2_500)
+                await page.wait_for_timeout(2 * _PACE_MS)
             terminals = [r for r in resources if r.get("type") == "terminal"]
             mark(f"outcome observed: terminals={len(terminals)} error={headline!r}")
             await page.screenshot(path=str(tmp_path / "observation.png"))
-            items = (
-                httpx.get(f"{base_url}/v1/sessions/{session_id}/items", timeout=10.0)
-                .json()
-                .get("data", [])
-            )
+            items = api.get(f"/v1/sessions/{session_id}/items").json().get("data", [])
             errors = [i for i in items if i.get("type") == "error"]
             runner_log = _runner_log_text(host["home"])
             rejections = [
@@ -288,7 +291,7 @@ async def _drive(base_url: str, host: dict[str, Any], tmp_path: Path) -> None:
                 ),
                 flush=True,
             )
-            await page.wait_for_timeout(1_500)
+            await page.wait_for_timeout(_PACE_MS)
             assert any(r.get("type") == "terminal" for r in resources), (
                 f"Pi terminal did not start for picker value {_PICKER_VALUE!r}; "
                 f"session error: {headline!r}; runner log: {rejections}"
@@ -298,4 +301,6 @@ async def _drive(base_url: str, host: dict[str, Any], tmp_path: Path) -> None:
             await context.close()
             await browser.close()
             if session_id is not None:
-                httpx.delete(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+                with contextlib.suppress(httpx.HTTPError):
+                    api.delete(f"/v1/sessions/{session_id}")
+            api.close()
