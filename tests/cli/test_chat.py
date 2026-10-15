@@ -2160,14 +2160,6 @@ def test_run_prompt_url_target_runs_the_requested_agent(monkeypatch: pytest.Monk
     }
 
 
-def test_run_prompt_rejects_agent_name_for_a_local_agent_path(tmp_path: Path) -> None:
-    """The headless entry point applies the same local-path guard as ``run_chat``."""
-    with pytest.raises(click.ClickException, match="--agent"):
-        chat_module.run_prompt(
-            str(tmp_path / "agent.yaml"), None, prompt="hi", agent_name="scribe"
-        )
-
-
 def test_run_chat_checks_agent_flag_against_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """``--agent`` is validated before connecting, then starts the session as given."""
     checked: dict[str, str] = {}
@@ -2192,10 +2184,20 @@ def test_run_chat_checks_agent_flag_against_the_server(monkeypatch: pytest.Monke
     assert captured["initial_message"] == "hi"
 
 
-def test_run_chat_rejects_agent_flag_for_a_local_agent_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "entry_point",
+    [
+        lambda target: run_chat(target, None, agent_name="scribe"),
+        lambda target: chat_module.run_prompt(target, None, prompt="hi", agent_name="scribe"),
+    ],
+    ids=["run_chat", "run_prompt"],
+)
+def test_agent_name_is_rejected_for_a_local_agent_path(
+    tmp_path: Path, entry_point: Callable[[str], None]
+) -> None:
     """``--agent`` picks a server-registered agent; a local YAML already is the agent."""
     with pytest.raises(click.ClickException, match="--agent"):
-        run_chat(str(tmp_path / "agent.yaml"), None, agent_name="scribe")
+        entry_point(str(tmp_path / "agent.yaml"))
 
 
 class _NoRunnerSessions:

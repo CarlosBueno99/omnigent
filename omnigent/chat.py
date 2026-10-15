@@ -1550,6 +1550,7 @@ def _server_agent_names(base_url: str, *, stop_at: str | None = None) -> list[st
         reports more agents without a usable cursor.
     """
     names: list[str] = []
+    seen: set[str] = set()
     after: str | None = None
     while True:
         params: dict[str, Any] = {"limit": 1000}
@@ -1558,9 +1559,10 @@ def _server_agent_names(base_url: str, *, stop_at: str | None = None) -> list[st
         page = _discovery_get(base_url, "/v1/agents", params)
         for item in _listing_items(page, base_url, "/v1/agents"):
             name = item.get("name")
-            if isinstance(name, str) and name and name not in names:
+            if isinstance(name, str) and name and name not in seen:
+                seen.add(name)
                 names.append(name)
-        if (stop_at is not None and stop_at in names) or not page.get("has_more"):
+        if (stop_at is not None and stop_at in seen) or not page.get("has_more"):
             return names
         last_id = page.get("last_id")
         if not last_id or last_id == after:

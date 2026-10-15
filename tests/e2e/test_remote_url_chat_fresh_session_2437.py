@@ -39,7 +39,7 @@ import pytest
 import yaml as _yaml
 
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
-from tests._helpers.live_server import isolated_local_server, local_server_env
+from tests._helpers.live_server import isolated_local_server, isolated_process_env
 from tests.e2e.conftest import (
     configure_mock_llm,
     find_free_port,
@@ -512,9 +512,8 @@ def _run_cli(home: Path, *args: str, timeout: float = 120.0) -> subprocess.Compl
     top-level error handling (hints, crash screen) is part of what is observed.
     """
     home.mkdir(parents=True, exist_ok=True)
-    env = local_server_env(
-        {"HOME": str(home), "OMNIGENT_DATA_DIR": str(home / ".omnigent"), "TERM": "dumb"}
-    )
+    # Strip ambient OMNIGENT_* settings so an outside config cannot steer the run.
+    env = isolated_process_env(home, {"TERM": "dumb"}, None)
     return subprocess.run(
         [sys.executable, "-c", "from omnigent.cli import main\n\nmain()\n", *args],
         env=env,
