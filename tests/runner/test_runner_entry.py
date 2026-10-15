@@ -1629,9 +1629,9 @@ async def test_credential_keepalive_first_call_waits_only_the_initial_delay(
         )
     )
     try:
-        for _ in range(200):
-            if len(calls) >= 3:
-                break
+        deadline = time.monotonic() + 10.0
+        while len(calls) < 3:
+            assert time.monotonic() < deadline, f"keepalive made only {len(calls)} calls"
             await real_sleep(0.01)
     finally:
         task.cancel()
@@ -1728,11 +1728,13 @@ def test_unexpected_mint_error_does_not_wedge_the_bootstrap_exchange(
 
     factory = _make_auth_token_factory()
     assert isinstance(factory, _InitialAuthTokenFactory)
+    from omnigent.runner._entry import _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S
+
     factory._exchange_due_at = 0.0
     before = time.monotonic()
     assert factory() == "host-bootstrap-token"
     assert factory._exchange_in_progress is False
-    assert factory._exchange_due_at >= before + 30.0
+    assert factory._exchange_due_at >= before + _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S
     # Backed off: not due yet, so no mint runs on this call.
     assert factory() == "host-bootstrap-token"
     assert mint_calls == [1]
@@ -1751,28 +1753,39 @@ def test_rejection_during_an_in_flight_exchange_keeps_the_minted_token(
     """
     import threading
 
+    from omnigent.inner.databricks_executor import DatabricksAuthError
+
     entered = threading.Event()
     release = threading.Event()
+    mint_bearers: list[str | None] = []
     resolve_calls: list[int] = []
 
-    def _slow_mint(*args: Any, **kwargs: Any) -> tuple[str, float]:
-        del args, kwargs
-        entered.set()
-        assert release.wait(timeout=10.0)
-        return "owner-jwt", time.time() + 1800
+    def _edge_mint(
+        mint_url: str, server_url: str, binding_token: str, *, proxy_bearer: str | None = None
+    ) -> tuple[str, float]:
+        del server_url, binding_token
+        mint_bearers.append(proxy_bearer)
+        if len(mint_bearers) == 1:
+            # The exchange's mint, sent while the bearer was still accepted.
+            entered.set()
+            assert release.wait(timeout=10.0)
+            return "owner-jwt", time.time() + 1800
+        # Rejection-time probes present the dead bearer (or none): the edge refuses.
+        request = httpx.Request("POST", mint_url)
+        raise httpx.HTTPStatusError(
+            "Invalid Token", request=request, response=httpx.Response(403, request=request)
+        )
 
-    def _unexpected_sdk(*args: Any, **kwargs: Any) -> tuple[Any, str]:
+    def _no_sdk(*args: Any, **kwargs: Any) -> tuple[Any, str]:
         del args, kwargs
         resolve_calls.append(1)
-        raise AssertionError("the minted token must be kept instead of resolving SDK auth")
+        raise DatabricksAuthError("no credential configured")
 
     _delegated_host_launched_runner_env(monkeypatch)
     monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url, **_kw: None)
     monkeypatch.setattr("omnigent.cli_auth.refresh_stored_token", lambda _url, **_kw: None)
-    monkeypatch.setattr(
-        "omnigent.inner.databricks_executor._resolve_databricks_auth", _unexpected_sdk
-    )
-    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", _slow_mint)
+    monkeypatch.setattr("omnigent.inner.databricks_executor._resolve_databricks_auth", _no_sdk)
+    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", _edge_mint)
 
     factory = _make_auth_token_factory()
     assert isinstance(factory, _InitialAuthTokenFactory)
@@ -1782,16 +1795,24 @@ def test_rejection_during_an_in_flight_exchange_keeps_the_minted_token(
     exchanger.start()
     try:
         assert entered.wait(timeout=10.0)
-        # The server rejects the host bearer while the mint is still in flight.
+        # The server rejects the host bearer while the mint is still in flight,
+        # and the callback's retry looks up a credential at once: the dead bearer
+        # cannot mint and there is no SDK/OIDC credential, so it finds nothing yet.
         assert factory.invalidate() is True
+        assert factory.call_with_declined() == (None, False)
+        assert resolve_calls == [1]
     finally:
         release.set()
         exchanger.join(timeout=10.0)
 
+    # The exchange completes afterwards and its token serves every later lookup,
+    # including inside the discovery backoff window.
     assert results == ["owner-jwt"]
     assert isinstance(factory._fallback_factory, _ManagedMintTokenFactory)
+    assert factory.call_with_declined() == ("owner-jwt", False)
     assert factory() == "owner-jwt"
-    assert resolve_calls == []
+    assert mint_bearers[0] == "host-bootstrap-token"
+    assert resolve_calls == [1]
 
 
 @pytest.mark.asyncio
@@ -1822,9 +1843,9 @@ async def test_credential_keepalive_remints_owner_jwt_before_it_lapses(
 
     task = asyncio.create_task(_run_credential_keepalive(factory, interval_s=0.001))
     try:
-        for _ in range(200):
-            if len(mint_bearers) >= 2:
-                break
+        deadline = time.monotonic() + 10.0
+        while len(mint_bearers) < 2:
+            assert time.monotonic() < deadline, f"keepalive re-mint never ran: {mint_bearers}"
             await asyncio.sleep(0.005)
     finally:
         task.cancel()

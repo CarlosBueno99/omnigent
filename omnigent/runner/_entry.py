@@ -539,14 +539,20 @@ class _InitialAuthTokenFactory:
         if mint is None:
             return token
         try:
-            minted = mint()
-        except Exception:  # noqa: BLE001 — treated as a transient mint failure
-            minted = None
-            _logger.debug(
-                "bootstrap bearer exchange failed unexpectedly",
-                exc_info=True,
-                extra={"session_id": runner_primary_session_id()},
-            )
+            try:
+                minted = mint()
+            except Exception:  # noqa: BLE001 — treated as a transient mint failure
+                minted = None
+                _logger.debug(
+                    "bootstrap bearer exchange failed unexpectedly",
+                    exc_info=True,
+                    extra={"session_id": runner_primary_session_id()},
+                )
+        except BaseException:
+            # Never leave the exchange latched in flight (e.g. SystemExit).
+            with self._lock:
+                self._exchange_in_progress = False
+            raise
         with self._lock:
             return self._finish_exchange_locked(mint, minted) or token
 
@@ -2142,6 +2148,10 @@ async def _run_tunnel_from_env() -> None:
             )
         for task in wait_tasks:
             task.cancel()
+        if keepalive_task is not None:
+            # Cancel before the awaits below: a tunnel error re-raised there
+            # would otherwise skip this and leave the keepalive running.
+            keepalive_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await stop_task
         with contextlib.suppress(asyncio.CancelledError):
@@ -2150,7 +2160,6 @@ async def _run_tunnel_from_env() -> None:
             with contextlib.suppress(asyncio.CancelledError):
                 await idle_task
         if keepalive_task is not None:
-            keepalive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await keepalive_task
         if direct_attach_listener is not None:
