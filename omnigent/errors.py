@@ -690,7 +690,7 @@ _PAYLOAD_REJECTED_RPC_STATUSES = frozenset({"INVALID_ARGUMENT", "OUT_OF_RANGE", 
 # "Frame size 2036419 exceeds maximum: 1048576" or grpc-core's
 # "Received message larger than max (5000000 vs. 4194304)".
 _OVERSIZED_MESSAGE_DETAILS = re.compile(
-    r"frame size|message (?:larger than|exceeds|too large)", re.IGNORECASE
+    r"frame size|message size|message (?:larger than max|exceeds max|too large)", re.IGNORECASE
 )
 
 

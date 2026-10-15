@@ -7444,6 +7444,9 @@ def test_list_items_degrades_undecodable_item_instead_of_failing(
     assert placeholder.data.title
     assert placeholder.id == big.id
     assert placeholder.response_id == "resp_big"
+    assert placeholder.status == big.status
+    assert placeholder.created_at == big.created_at
+    assert placeholder.created_by == big.created_by
     assert page.data[0].data.content[0]["text"] == "before"
     assert page.data[2].data.content[0]["text"] == "after"
 
@@ -7547,11 +7550,19 @@ def test_list_items_propagates_when_every_row_is_refused(db_uri: str) -> None:
     assert store.decode_calls == 3
 
 
-def test_single_row_quota_refusal_propagates_for_list_and_point_lookup(db_uri: str) -> None:
-    """A quota-style RESOURCE_EXHAUSTED carries no size rejection, so a one-row
-    page and a point lookup both propagate it after a single call instead of
-    presenting the backend's refusal as an unreadable item."""
-    error = _rpc_error("RESOURCE_EXHAUSTED", "Quota exceeded for decrypt requests")
+@pytest.mark.parametrize(
+    "detail",
+    ["Quota exceeded for decrypt requests", "Message exceeds tenant quota"],
+    ids=["quota_exceeded", "message_exceeds_quota"],
+)
+def test_single_row_quota_refusal_propagates_for_list_and_point_lookup(
+    db_uri: str, detail: str
+) -> None:
+    """A quota-style RESOURCE_EXHAUSTED carries no size rejection — even when it
+    mentions the message — so a one-row page and a point lookup both propagate
+    it after a single call instead of presenting the refusal as an unreadable
+    item."""
+    error = _rpc_error("RESOURCE_EXHAUSTED", detail)
     store = _FailingDecodeStore(db_uri, error)
     conv = store.create_conversation()
     [only] = store.append(conv.id, [_user_message("only", "resp_only")])

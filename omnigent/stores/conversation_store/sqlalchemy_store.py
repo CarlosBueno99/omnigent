@@ -2413,25 +2413,15 @@ class SqlAlchemyConversationStore(ConversationStore):
         return stored
 
     def _decode_item_data_batch_for_read(self, stored: list[str]) -> list[str | None]:
-        """Decode a page for a read, isolating rows that cannot be decoded.
+        """Decode a read page, isolating rows the backend refuses as unreadable.
 
-        Returns one decoded ``data`` JSON per row, or ``None`` for a row the
-        decode backend refuses. A failure the backend attributes to the payload
-        (an oversized decrypt frame, corrupt data; see
-        :func:`is_payload_rejected_rpc_error`) is narrowed by halving the page
-        until each unreadable row stands alone, so it degrades to a placeholder
-        instead of hiding the whole page. Any other exception — a denial,
-        cancellation or outage, a local decode error, a defect inside the seam —
-        propagates unchanged for the app's existing handling, and so does a
-        refusal of every row on a multi-row page, which points at a backend-wide
-        fault (a rotated key, a request-format bug) rather than bad payloads.
-        Placeholders are never persisted: the next read decodes the rows again,
-        so a page with an unreadable row costs the halving on every read.
-
-        Only the decode seam is covered; parsing the decoded JSON in
-        :func:`_to_item` is not. Writes, the append dedup probe and forks keep
-        the strict decode on purpose: they must not copy or rewrite content
-        they cannot read.
+        A batch failure the backend attributes to the payload
+        (:func:`is_payload_rejected_rpc_error`) is halved until each refused
+        row stands alone and becomes ``None``; other exceptions propagate, as
+        does a refusal of every row on a multi-row page, which points at a
+        backend-wide fault rather than bad payloads. Placeholders are never
+        persisted, so such a page pays the halving on every read. Parsing of
+        decoded JSON and the mutation paths that decode content remain strict.
 
         :param stored: Raw ``data`` column values of the page, in order.
         :returns: Decoded JSON per row, ``None`` where the row is unreadable.

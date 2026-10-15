@@ -608,6 +608,7 @@ def test_is_payload_rejected_rpc_error_ignores_backend_state_statuses() -> None:
     assert is_payload_rejected_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED")) is False
     for details in (
         "Quota exceeded for decrypt requests",
+        "Message exceeds tenant quota",
         "request rate exceeds maximum",
         "concurrent streams larger than max",
     ):
