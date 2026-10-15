@@ -6213,7 +6213,7 @@ def _wait_for_claude_prompt_ready(
     pane_exited = False
     dialog_headline: str | None = None
     sign_in_url: str | None = None
-    waited_on_sign_in = False
+    sign_in_elsewhere_prev = False
     # Poll at least once even at timeout_s=0: a single readiness check is
     # still meaningful, and it guarantees a capture to attach on failure.
     while True:
@@ -6264,8 +6264,8 @@ def _wait_for_claude_prompt_ready(
         sign_in_url = sign_in.url if sign_in is not None else None
         # Another launch's sign-in holds the launcher's lock. Reaping the pane at
         # the budget would kill this wait, so report the sign-in instead.
-        waiting_on_sign_in = sign_in is None and sign_in_running_elsewhere(pane)
-        if waiting_on_sign_in and waited_on_sign_in:
+        sign_in_elsewhere_now = sign_in is None and sign_in_running_elsewhere(pane)
+        if sign_in_elsewhere_now and sign_in_elsewhere_prev:
             raise ClaudeSignInPending(
                 "Claude Code is waiting for a sign-in that another session started, "
                 "so the message was not delivered.",
@@ -6276,7 +6276,7 @@ def _wait_for_claude_prompt_ready(
                     "completes; then send your message again."
                 ),
             )
-        waited_on_sign_in = waiting_on_sign_in
+        sign_in_elsewhere_prev = sign_in_elsewhere_now
         now = time.monotonic()
         if now >= next_liveness_probe:
             state = _claude_pane_state(socket_path, tmux_target)

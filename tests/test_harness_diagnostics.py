@@ -414,12 +414,18 @@ def test_sign_in_running_elsewhere_ignores_other_output(screen: str | None) -> N
     assert sign_in_running_elsewhere(screen) is False
 
 
-def test_sign_in_running_elsewhere_ignores_a_wait_line_the_launcher_moved_past() -> None:
+@pytest.mark.parametrize(
+    "boot_line",
+    [
+        "Generating claude-code MCP client config...\n",
+        "Claude Code — connecting to host...\n",
+        "Authenticating with API key...\n",
+        "Opening browser to sign in...\n",
+    ],
+)
+def test_sign_in_running_elsewhere_ignores_a_wait_line_the_launcher_moved_past(
+    boot_line: str,
+) -> None:
     """Boot output below the wait line means the launcher moved on; the line is stale."""
-    screen = (
-        "dbexec: launcher 1.2.3\n"
-        + _WAIT_ELSEWHERE_LINE
-        + "Generating claude-code MCP client config...\n"
-        "Claude Code — connecting to host...\n"
-    )
+    screen = "dbexec: launcher 1.2.3\n" + _WAIT_ELSEWHERE_LINE + boot_line
     assert sign_in_running_elsewhere(screen) is False
