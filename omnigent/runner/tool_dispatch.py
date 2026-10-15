@@ -7440,6 +7440,10 @@ async def _execute_rest_tool(
     if tool_name == SysCancelAsyncTool.name():
         # ``task_id`` fallback supports older clients; remove in 0.8.0.
         handle_id = args.get("handle_id") or args.get("task_id", "")
+        if not isinstance(handle_id, str) or not handle_id:
+            return 'Error: sys_cancel_async requires "handle_id"'
+        if not _is_session_route_id(handle_id):
+            return f"Error: no in-flight task with handle_id {handle_id}"
         try:
             resp = await server_client.post(
                 f"/v1/sessions/{handle_id}/events",

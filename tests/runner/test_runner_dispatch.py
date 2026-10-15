@@ -8619,6 +8619,12 @@ async def test_sys_session_get_info_maps_error_statuses(
 
 _ROUTE_SESSION_HEX = "0123456789abcdef0123456789abcdef"
 _ROUTE_CALLER_ID = "conv_route_caller"
+_ROUTE_ESCAPING_TARGETS = [
+    pytest.param("../hosts", id="dot-segment-escape"),
+    pytest.param(f"{_ROUTE_SESSION_HEX}/items", id="extra-path-segment"),
+    pytest.param(f"{_ROUTE_SESSION_HEX}%2Fitems", id="encoded-slash"),
+    pytest.param(f"{_ROUTE_SESSION_HEX}?include_items=true", id="query-injection"),
+]
 
 
 def _session_tool_request(
@@ -8659,6 +8665,21 @@ def _tool_error(output: str) -> str | None:
     return parsed.get("error") if isinstance(parsed, dict) else None
 
 
+def _expected_rejection(tool_name: str, target: str) -> str:
+    """The error each tool reports for an identifier that is not one route segment."""
+    rule = "a single session identifier (letters, digits, '-' or '_')"
+    if tool_name == "sys_session_send":
+        return f"Error: sys_session_send 'session_id' must be {rule}; got {target!r}"
+    if tool_name == "sys_cancel_task":
+        return f"Error: no in-flight task with task_id {target}"
+    arg = (
+        "conversation_id"
+        if tool_name in ("sys_session_get_history", "sys_session_close")
+        else "session_id"
+    )
+    return f"{tool_name} requires '{arg}' to be {rule}"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "tool_name",
@@ -8673,15 +8694,7 @@ def _tool_error(output: str) -> str | None:
         "sys_cancel_task",
     ],
 )
-@pytest.mark.parametrize(
-    "target",
-    [
-        pytest.param("../hosts", id="dot-segment-escape"),
-        pytest.param(f"{_ROUTE_SESSION_HEX}/items", id="extra-path-segment"),
-        pytest.param(f"{_ROUTE_SESSION_HEX}%2Fitems", id="encoded-slash"),
-        pytest.param(f"{_ROUTE_SESSION_HEX}?include_items=true", id="query-injection"),
-    ],
-)
+@pytest.mark.parametrize("target", _ROUTE_ESCAPING_TARGETS)
 async def test_session_tools_reject_route_escaping_identifiers_before_any_request(
     tool_name: str,
     target: str,
@@ -8716,7 +8729,29 @@ async def test_session_tools_reject_route_escaping_identifiers_before_any_reques
         subagent_work._session_inboxes_ref.pop(_ROUTE_CALLER_ID, None)
 
     assert requests == [], f"{tool_name} forwarded identifier {target!r} to the server: {requests}"
-    assert _tool_error(output), output
+    assert _tool_error(output) == _expected_rejection(tool_name, target), output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", _ROUTE_ESCAPING_TARGETS)
+async def test_rest_cancel_async_fallback_rejects_route_escaping_handle(target: str) -> None:
+    """The REST ``sys_cancel_async`` fallback checks ``handle_id`` like the dispatched tools."""
+    from omnigent.runner.tool_dispatch import _execute_rest_tool
+
+    requests: list[str] = []
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(f"{request.method} {request.url.raw_path.decode()}")
+        return httpx.Response(202)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        output = await _execute_rest_tool("sys_cancel_async", {"handle_id": target}, server_client)
+
+    assert requests == [], requests
+    assert output == f"Error: no in-flight task with handle_id {target}"
 
 
 @pytest.mark.asyncio
@@ -8758,10 +8793,7 @@ async def test_sys_session_get_info_accepts_supported_identifier_spellings(targe
             conversation_id="conv_caller",
         )
 
-    assert requested_paths in (
-        [f"/v1/sessions/{target}"],
-        [f"/v1/sessions/{_ROUTE_SESSION_HEX}"],
-    ), requested_paths
+    assert requested_paths == [f"/v1/sessions/{target}"]
     assert json.loads(output)["session_id"] == _ROUTE_SESSION_HEX
 
 
