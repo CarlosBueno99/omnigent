@@ -255,7 +255,7 @@ Playwright test drives the session page with the terminal view shown, and the
 pane's contents land in the browser video. Save `tmux capture-pane -e` text dumps
 alongside as machine-checkable evidence.
 
-**For a native-harness pane** (claude/codex/cursor/goose/hermes/kiro/… — the bug
+**For a native-harness pane** (claude/codex/cursor/goose/hermes/kiro/pi/… — the bug
 is in a real harness CLI's output), don't hand-roll the launch: the existing
 render-parity tests already drive the *real* CLI against the mock LLM with the
 terminal view shown, so **reuse or adapt the closest one**
@@ -275,11 +275,12 @@ are scripted. It drives a web-composer turn, types a second turn in Terminal,
 waits for the reply on the terminal stream, and checks both replies in Chat and
 the canonical transcript. This covers native delivery/rendering; adapt the
 journey for queueing, steering, or timing bugs instead of claiming this smoke
-journey reproduces those behaviors.
+journey reproduces those behaviors. Script responses with `configure_mock_llm`
+using `match=<prompt marker>` and `required_tools=["bash"]` so title requests
+cannot consume the Pi reply; use empty fallbacks for unrelated requests.
 
-Build the SPA and clear inherited runner variables as above. This test uses the
-**synchronous pytest `page` fixture**, so enable its recorder with `--video on`
-(the current `OMNIGENT_E2E_RECORD_DIR` hook only instruments async browsers):
+Build the SPA and clear inherited runner variables as above. Enable recording
+with `OMNIGENT_E2E_RECORD_DIR` or `--video on`:
 
 ```bash
 pytest tests/e2e_ui/messages/test_native_pi_render_parity.py \
@@ -293,7 +294,7 @@ restoring the original config on exit. No Pi login or live model is required.
 A missing/unrunnable `pi` or missing `tmux` produces an explicit skip; launch,
 delivery, and recorder failures are not successful Pi coverage. Move the emitted
 `video.webm` to a stable name after inspecting it. Declare `capture_mode:
-playwright`, surface `terminal` or `web` as appropriate, and disclose the scripted
+playwright_ui`, surface `terminal` or `web` as appropriate, and disclose the scripted
 model in the caption. Never present this as a live-model capture or a simulated
 Pi implementation.
 

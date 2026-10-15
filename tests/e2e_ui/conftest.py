@@ -3523,45 +3523,15 @@ def native_cursor_approval_session(
 
 def _create_native_pi_session(base_url: str, runner_id: str) -> str:
     """Launch the same terminal-first Pi wrapper as `omnigent pi`."""
-    import tempfile
-
-    from omnigent._wrapper_labels import (
-        PI_NATIVE_WRAPPER_VALUE,
-        UI_MODE_LABEL_KEY,
-        UI_MODE_TERMINAL_VALUE,
-        WRAPPER_LABEL_KEY,
+    created = create_native_session(
+        httpx, base_url, harness="pi", metadata={"workspace": str(_REPO_ROOT)}
     )
-    from omnigent.harnesses.pi_native.main import _materialize_pi_agent_spec
-
-    with tempfile.TemporaryDirectory() as directory:
-        data = _materialize_pi_agent_spec(Path(directory)).read_bytes()
-    bundle = io.BytesIO()
-    with tarfile.open(fileobj=bundle, mode="w:gz") as archive:
-        info = tarfile.TarInfo("pi-native-ui.yaml")
-        info.size = len(data)
-        archive.addfile(info, io.BytesIO(data))
-    response = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={
-            "metadata": json.dumps(
-                {
-                    "labels": {
-                        UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
-                        WRAPPER_LABEL_KEY: PI_NATIVE_WRAPPER_VALUE,
-                    },
-                    "workspace": str(_REPO_ROOT),
-                }
-            )
-        },
-        files={"bundle": ("pi-native-ui.tar.gz", bundle.getvalue(), "application/gzip")},
-        timeout=30,
-    )
-    response.raise_for_status()
-    session_id = str(response.json()["session_id"])
+    session_id = str(created["session_id"])
     try:
         _bind_session_runner(base_url, session_id, runner_id)
     except BaseException:
-        httpx.delete(f"{base_url}/v1/sessions/{session_id}", timeout=10)
+        with contextlib.suppress(httpx.HTTPError):
+            httpx.delete(f"{base_url}/v1/sessions/{session_id}", timeout=10)
         raise
     return session_id
 
@@ -3577,6 +3547,13 @@ def native_pi_mock_session(
     The prepared environment already supplies an Anthropic mock provider.
     Standalone runs use the same provider config as the Claude mock fixture.
     """
+    from tests.e2e._harness_probes import cli_unavailable_reason
+
+    if reason := cli_unavailable_reason("pi"):
+        pytest.skip(reason)
+    if shutil.which("tmux") is None:
+        pytest.skip("Pi recording needs tmux on PATH")
+
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     try:
         with _temp_omnigent_mock_config(
