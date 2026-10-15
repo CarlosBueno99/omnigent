@@ -1891,6 +1891,10 @@ class OpenAIAgentsSDKExecutor(Executor):
             # is what makes :meth:`interrupt_session`'s ``task.cancel()``
             # land at the SDK boundary instead of in our queue plumbing.
             event_queue: asyncio.Queue[object] = asyncio.Queue()
+            # A new attempt's terminal events must not settle an earlier attempt's
+            # charges; those keep whatever header cost they carried.
+            for charge in gateway_charges:
+                charge.settled = True
             try:
                 # Reuse the count already fetched above; avoids a second
                 # ``get_items()`` round-trip.
@@ -2184,10 +2188,13 @@ class OpenAIAgentsSDKExecutor(Executor):
                 }
                 if cached_tok:
                     turn_usage["cache_read_input_tokens"] = cached_tok
-                # What the gateway billed; the server prefers it over a catalog estimate.
-                billed = [charge.billed for charge in gateway_charges]
-                if any(cost is not None for cost in billed):
-                    turn_usage["cost_usd"] = sum(cost for cost in billed if cost is not None)
+                # What the gateway billed; the server prefers it over a catalog estimate,
+                # so a turn with an unpriced model call stays catalog-priced as a whole.
+                model_calls = [charge for charge in gateway_charges if charge.streams_response]
+                if model_calls and all(charge.billed is not None for charge in model_calls):
+                    turn_usage["cost_usd"] = sum(
+                        charge.billed for charge in gateway_charges if charge.billed is not None
+                    )
         _notify_usage_from_dict(model=model, usage=turn_usage)
 
         # Emit CompactionComplete if the SDK compacted this turn.

@@ -3770,9 +3770,16 @@ class _GatewayBilledResult(_FakeResult):
     :param calls: One ``(header, usage_cost)`` pair per model call, in call order.
     """
 
-    def __init__(self, *args, calls: Sequence[_GatewayCall] = (), **kwargs):
+    def __init__(
+        self,
+        *args,
+        calls: Sequence[_GatewayCall] = (),
+        terminal_events: bool = True,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._calls = list(calls)
+        self._terminal_events = terminal_events
         self._hook_tasks: list[asyncio.Task[None]] = []
 
     def on_run_streamed(self) -> None:
@@ -3788,8 +3795,9 @@ class _GatewayBilledResult(_FakeResult):
     async def stream_events(self):
         if self._hook_tasks:
             await asyncio.gather(*self._hook_tasks)
-        for _header, usage_cost in self._calls:
-            yield _completed_event(usage_cost)
+        if self._terminal_events:
+            for _header, usage_cost in self._calls:
+                yield _completed_event(usage_cost)
         async for event in super().stream_events():
             yield event
 
@@ -3916,6 +3924,14 @@ def test_turn_usage_keeps_a_zero_usage_cost_over_that_calls_header() -> None:
     assert usage["cost_usd"] == pytest.approx(0.01)
 
 
+def test_turn_usage_stays_catalog_priced_when_a_model_call_is_unpriced() -> None:
+    """A turn with one unpriced model call reports no ``cost_usd``: a partial sum would
+    stop the server from pricing the unpriced call from the catalog."""
+    usage = _billed_turn_usage([("0.01", None), (None, None)])
+    assert usage is not None
+    assert "cost_usd" not in usage
+
+
 def test_turn_usage_reports_zero_gateway_cost_as_priced() -> None:
     """A gateway that billed nothing prices the turn at ``0`` instead of leaving it unpriced."""
     usage = _billed_turn_usage([("0", None)])
@@ -3992,6 +4008,44 @@ def test_turn_usage_includes_cost_of_a_retried_empty_attempt() -> None:
     assert usage["cost_usd"] == pytest.approx(0.03)
     assert usage["input_tokens"] == 10
     assert usage["output_tokens"] == 5
+
+
+def test_retry_attempt_cannot_settle_an_earlier_attempts_orphaned_charge() -> None:
+    """A first attempt whose stream ended without a terminal event keeps its header
+    cost; the retry's annotation settles the retry's own call."""
+
+    async def _t():
+        _FakeRunner.last_calls = []
+        _FakeRunner.next_result = None
+        _FakeRunner.next_results = [
+            _GatewayBilledResult(
+                events=[],
+                final_output="",
+                new_items=[],
+                raw_responses=[_empty_raw_response()],
+                calls=[("0.01", None)],
+                terminal_events=False,
+            ),
+            _GatewayBilledResult(
+                events=[_FakeRawEvent(_FakeRawTextDelta("recovered"))],
+                final_output="recovered",
+                raw_responses=[
+                    _FakeRawResponse(_FakeUsage(input_tokens=10, output_tokens=5, total_tokens=15))
+                ],
+                calls=[(None, 0.02)],
+            ),
+        ]
+        executor = OpenAIAgentsSDKExecutor(client=object())
+        with patch(
+            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+            return_value=_fake_agents_sdk(),
+        ):
+            return await _turn_usage(executor, "s1")
+
+    usage = _run(_t())
+    assert usage is not None
+    assert len(_FakeRunner.last_calls) == 2
+    assert usage["cost_usd"] == pytest.approx(0.03)
 
 
 @pytest.mark.parametrize(
@@ -4166,3 +4220,93 @@ def test_run_turn_credits_gateway_costs_through_the_real_sdk() -> None:
     assert usage["cost_usd"] == pytest.approx(0.0123)
     assert usage["input_tokens"] == 10
     assert usage["output_tokens"] == 5
+
+
+def test_run_turn_bills_a_header_only_chat_completions_turn_through_the_real_sdk() -> None:
+    """On the chat-completions path only the header carries a cost.
+
+    The hook records it from inside the SDK's run task and the synthesized
+    terminal event settles the call without an annotation, so the header bills.
+    """
+    import json as _json
+
+    from openai import AsyncOpenAI
+
+    def _chunk(**fields: object) -> str:
+        base = {
+            "id": "chatcmpl-gateway",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "bedrock.claude-sonnet-5",
+            "choices": [],
+        }
+        return "data: " + _json.dumps({**base, **fields}) + "\n\n"
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions", request.url
+        body = (
+            _chunk(
+                choices=[
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "Gateway turn answered."},
+                        "finish_reason": None,
+                    }
+                ]
+            )
+            + _chunk(choices=[{"index": 0, "delta": {}, "finish_reason": "stop"}])
+            + _chunk(usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+            + "data: [DONE]\n\n"
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream", _GATEWAY_COST_HEADER: "0.0007"},
+            content=body.encode(),
+        )
+
+    async def _t():
+        client = AsyncOpenAI(
+            api_key="mock-key",
+            base_url="http://gateway.test/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(_handler)),
+        )
+        executor = OpenAIAgentsSDKExecutor(
+            client=client, model="bedrock.claude-sonnet-5", use_responses=False
+        )
+        try:
+            return await _turn_usage(executor, "real-sdk-chat")
+        finally:
+            await executor.close()
+            await client.close()
+
+    usage = _run(_t())
+    assert usage is not None
+    assert usage["cost_usd"] == pytest.approx(0.0007)
+    assert usage["input_tokens"] == 10
+    assert usage["output_tokens"] == 5
+
+
+def test_concurrent_turns_keep_their_own_gateway_charges() -> None:
+    """Two turns running at once each bill only the calls their own run made."""
+
+    async def _t():
+        _FakeRunner.last_calls = []
+        _FakeRunner.next_result = None
+        _FakeRunner.next_results = [
+            _gateway_billed_result([("0.01", None)]),
+            _gateway_billed_result([(None, 0.02)]),
+        ]
+        with patch(
+            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+            return_value=_fake_agents_sdk(),
+        ):
+            first, second = await asyncio.gather(
+                _turn_usage(OpenAIAgentsSDKExecutor(client=object()), "a"),
+                _turn_usage(OpenAIAgentsSDKExecutor(client=object()), "b"),
+            )
+        return first, second, _turn_gateway_charges.get()
+
+    first, second, leaked = _run(_t())
+    assert first is not None and second is not None
+    assert sorted([first["cost_usd"], second["cost_usd"]]) == pytest.approx([0.01, 0.02])
+    assert leaked is None
