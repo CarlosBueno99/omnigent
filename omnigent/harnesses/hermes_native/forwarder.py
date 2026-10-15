@@ -121,8 +121,13 @@ _CHILD_SCAN_LIMIT = 32
 
 #: Polls to keep looking for a compression continuation after compacted rows
 #: appear (~10 s at the default interval): the parent's end stamp and the child
-#: row can land a few polls later, or be unreadable mid-checkpoint.
+#: row can land a few polls later. A parent seen ended by compression is known
+#: dead, so the search for its continuation then continues past this window.
 _REPIN_RETRY_POLLS = 25
+
+#: Polls to wait for a saved binding's row to become readable before the binding
+#: is dropped in favour of discovery (a wiped or rotated store never yields it).
+_BINDING_CHECK_POLLS = 25
 
 # Sqlite read errors are swallowed in the helpers below (a live DB is briefly
 # unreadable mid-checkpoint, so returning empty and retrying is correct). But a
@@ -1231,6 +1236,7 @@ async def forward_hermes_store_to_session(
     # the store before anything is mirrored; ``None`` (store unreadable, row not yet
     # written) keeps the check pending for the next poll.
     binding_verdict: bool | None = False if hermes_session_id is None else None
+    binding_check_polls = 0
     last_id = persisted.last_id if hermes_session_id is not None else 0
     # A row whose mirroring failed partway, and how many of its items already
     # posted; both ``0`` when ``last_id`` is a clean fully-mirrored high-water mark.
@@ -1263,15 +1269,20 @@ async def forward_hermes_store_to_session(
                         _is_side_session_id, db, hermes_session_id
                     )
                     if binding_verdict is None:
-                        await asyncio.sleep(poll_interval_s)
-                        continue
+                        binding_check_polls += 1
+                        if binding_check_polls < _BINDING_CHECK_POLLS:
+                            await asyncio.sleep(poll_interval_s)
+                            continue
+                        # The row never became readable: drop the binding so
+                        # discovery can rebind the live session instead.
+                        binding_verdict = True
                     if binding_verdict:
                         # A helper or fork must never back the main transcript: drop
                         # the binding and its idle poster count (rebased onto the
                         # helper) so discovery and completion reporting start clean.
                         _logger.warning(
-                            "hermes forwarder persisted binding %s is a side session; "
-                            "rediscovering; session=%s",
+                            "hermes forwarder persisted binding %s is a side session or "
+                            "not in the store; rediscovering; session=%s",
                             hermes_session_id,
                             session_id,
                         )
@@ -1468,9 +1479,11 @@ async def forward_hermes_store_to_session(
                                     exc_info=True,
                                 )
                             repin_polls_left = _REPIN_RETRY_POLLS
-                        if not compression_end_seen and await asyncio.to_thread(
-                            _ended_by_compression, db, hermes_session_id
-                        ):
+                        if compression_end_seen:
+                            # The parent is known dead by compression: keep looking
+                            # for its continuation instead of letting the window expire.
+                            repin_polls_left = max(repin_polls_left, 1)
+                        elif await asyncio.to_thread(_ended_by_compression, db, hermes_session_id):
                             # A fork compaction ends the pinned session even when no
                             # compacted rows (or no such column) mark it.
                             compression_end_seen = True

@@ -129,8 +129,9 @@ def test_discover_child_session_returns_newest_child(tmp_path: Path) -> None:
     # No children -> None (forwarder stays pinned to the parent).
     assert f._discover_child_session(db, "child_new") is None
     # A parent that is still live (or ended for another reason) has no continuation.
-    with sqlite3.connect(db) as con:
-        con.execute("UPDATE sessions SET end_reason = NULL WHERE id = 'parent'")
+    con = sqlite3.connect(db)
+    con.execute("UPDATE sessions SET end_reason = NULL WHERE id = 'parent'")
+    con.commit()
     con.close()
     assert f._discover_child_session(db, "parent") is None
 
@@ -1186,6 +1187,136 @@ async def test_forward_loop_defers_binding_check_until_the_store_is_readable(
     ]
     # The unverified helper binding was never advertised as the external session.
     assert _patched_external_ids(patched) == ["main"]
+
+
+async def test_forward_loop_drops_a_saved_binding_whose_row_never_appears(
+    tmp_path, monkeypatch
+) -> None:
+    """A binding to a row the store no longer has is dropped after a bounded wait."""
+    workspace = str(tmp_path)
+    db = tmp_path / "state.db"
+    _seed_main_with_finished_helper(db, workspace, compacted=False)
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    f._write_state(
+        bridge_dir,
+        f._ForwardState(hermes_session_id="rotated-away", last_id=7, launch_epoch_s=1000.0),
+    )
+    monkeypatch.setattr(f, "_BINDING_CHECK_POLLS", 2)
+
+    posted: list[f._MirrorItem] = []
+
+    async def _fake_post(_client, *, session_id, item):
+        posted.append(item)
+
+    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
+    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
+    patched = _capture_server_client(monkeypatch)
+
+    iteration = {"n": 0}
+
+    async def _sleep(_s):
+        iteration["n"] += 1
+        if iteration["n"] >= 4:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await f.forward_hermes_store_to_session(
+            base_url="http://x",
+            headers={},
+            session_id="conv_rotated",
+            bridge_dir=bridge_dir,
+            agent_name="hermes-native-ui",
+            workspace=workspace,
+            launch_epoch_s=1000.0,
+            db_path=db,
+        )
+
+    assert f._read_state(bridge_dir).hermes_session_id == "main"
+    assert _mirrored_texts(posted) == [
+        "please delegate a tiny task",
+        "dispatching a helper",
+        "the helper finished",
+    ]
+    assert _patched_external_ids(patched) == ["main"]
+
+
+async def test_forward_loop_keeps_looking_for_the_continuation_of_an_ended_parent(
+    tmp_path, monkeypatch
+) -> None:
+    """Once the parent is known ended by compression, the re-pin outlives the retry window."""
+    workspace = str(tmp_path)
+    db = tmp_path / "state.db"
+    con = sqlite3.connect(db)
+    con.executescript(_SCHEMA)
+    con.execute(
+        "INSERT INTO sessions(id, source, cwd, started_at, end_reason) VALUES (?,?,?,?,?)",
+        ("parent_1", "cli", workspace, 1000.0, "compression"),
+    )
+    con.execute(
+        "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
+        ("parent_1", "assistant", "last parent reply", 1, 0),
+    )
+    con.commit()
+    con.close()
+
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    f._write_state(bridge_dir, f._ForwardState(hermes_session_id="parent_1", last_id=1))
+    monkeypatch.setattr(f, "_REPIN_RETRY_POLLS", 1)
+
+    posted: list[f._MirrorItem] = []
+
+    async def _fake_post(_client, *, session_id, item):
+        posted.append(item)
+
+    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
+    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
+    _capture_server_client(monkeypatch)
+
+    iteration = {"n": 0}
+
+    async def _sleep(_s):
+        iteration["n"] += 1
+        if iteration["n"] == 3:
+            # The continuation row lands well after the one-poll retry window.
+            con = sqlite3.connect(db)
+            con.execute(
+                "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id)"
+                " VALUES (?,?,?,?,?)",
+                ("child_1", "cli", workspace, 1005.0, "parent_1"),
+            )
+            con.executemany(
+                "INSERT INTO messages(session_id, role, content, active, compacted)"
+                " VALUES (?,?,?,?,?)",
+                [
+                    ("child_1", "user", "child hi", 1, 0),
+                    ("child_1", "assistant", "child reply", 1, 0),
+                ],
+            )
+            con.commit()
+            con.close()
+        if iteration["n"] >= 5:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await f.forward_hermes_store_to_session(
+            base_url="http://x",
+            headers={},
+            session_id="conv_late_child",
+            bridge_dir=bridge_dir,
+            agent_name="hermes-native-ui",
+            workspace=workspace,
+            launch_epoch_s=1000.0,
+            db_path=db,
+        )
+
+    assert f._read_state(bridge_dir).hermes_session_id == "child_1"
+    assert _mirrored_texts(posted) == ["child hi", "child reply"]
 
 
 # --- Usage tracker tests ---------------------------------------------------
