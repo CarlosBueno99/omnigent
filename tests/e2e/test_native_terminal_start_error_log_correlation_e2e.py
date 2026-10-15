@@ -50,6 +50,9 @@ from tests._helpers.server_runner import server_runner
 from tests._helpers.session import bundle_files, post_session_bundle
 from tests._helpers.zerobus import ZeroBusCapture
 
+# Compatibility alias for test modules that import the capture from here.
+_ZeroBusCapture = ZeroBusCapture
+
 # CI shells can carry an egress proxy in the environment; every HTTP call in
 # this test targets 127.0.0.1, so bypass proxy autodetection entirely.
 _http = httpx.Client(trust_env=False)
