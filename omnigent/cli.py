@@ -84,6 +84,7 @@ from omnigent.host.local_server import (
     _DEFAULT_LOCAL_PORT,
     LocalServerStartupError,
     _pid_alive,
+    _read_local_server_base_path,
     consume_failed_server_log_tail,
     ensure_local_omnigent_server,
     local_server_status,
@@ -4803,10 +4804,15 @@ def server(
 
 @dataclass(frozen=True)
 class _StoppedLocalProcesses:
-    """Which local processes a stop actually took down."""
+    """Which local processes a stop actually took down.
+
+    ``base_path`` is the subpath the stopped server served under (``""`` for
+    the root); the stop clears its sidecar, so a relaunch needs it carried.
+    """
 
     server: bool
     daemon: bool
+    base_path: str = ""
 
 
 def _stop_local_server_and_daemon(*, force: bool) -> _StoppedLocalProcesses:
@@ -4836,12 +4842,15 @@ def _stop_local_server_and_daemon(*, force: bool) -> _StoppedLocalProcesses:
                 f"{exc.message} It keeps running the code it loaded until it is restarted.",
                 err=True,
             )
+    base_path = _read_local_server_base_path()
     server = stop_local_omnigent_server()
     # Also catch an orphan on the canonical port whose pidfile was lost, so
     # `server stop` isn't blind to it (it reported "No background server is
     # running" while one was still listening on the default port).
     orphan_pid = stop_untracked_local_server()
-    return _StoppedLocalProcesses(server=server or orphan_pid is not None, daemon=daemon)
+    return _StoppedLocalProcesses(
+        server=server or orphan_pid is not None, daemon=daemon, base_path=base_path
+    )
 
 
 def _run_background_server() -> None:
@@ -5519,10 +5528,14 @@ def _restart_local_processes_after_upgrade(stopped: _StoppedLocalProcesses) -> N
         click.echo(f"Could not restart {what}. {hint}", err=True)
         return
     click.echo(f"Restarting {what}…")
+    env = {**os.environ, "OMNIGENT_NO_UPDATE_CHECK": "1"}
+    if stopped.base_path:
+        # The stop cleared the base-path sidecar; an explicit shell setting still wins.
+        env.setdefault("OMNIGENT_WEB_BASE_PATH", stopped.base_path)
     try:
         code = subprocess.run(
             [sys.executable, "-P", "-m", "omnigent.cli", *args],
-            env={**os.environ, "OMNIGENT_NO_UPDATE_CHECK": "1"},
+            env=env,
             stdin=subprocess.DEVNULL,
             check=False,
         ).returncode
@@ -5563,10 +5576,18 @@ def _local_server_stopped_for_upgrade(*, force: bool, restart: bool) -> Iterator
                     err=True,
                 )
         elif restart:
-            _restart_local_processes_after_upgrade(stopped)
+            try:
+                _restart_local_processes_after_upgrade(stopped)
+            except KeyboardInterrupt:
+                click.echo(
+                    "Restart interrupted. "
+                    f"Run `{_manual_restart_command(stopped)}` to bring it back.",
+                    err=True,
+                )
+                raise
         elif stopped.server or stopped.daemon:
             click.echo(
-                "Left the background server stopped (--no-restart). "
+                f"Left {_restarted_processes_label(stopped)} stopped (--no-restart). "
                 f"Run `{_manual_restart_command(stopped)}` to bring it back."
             )
 

@@ -447,7 +447,7 @@ _STOP_POLL_INTERVAL_S = 0.1
 """Polling interval while waiting for the server process to exit."""
 
 
-def _terminate_pid(pid: int) -> None:
+def _terminate_pid(pid: int) -> bool:
     """SIGTERM a pid, wait up to the grace period, then SIGKILL if needed.
 
     Shared by :func:`stop_local_omnigent_server` (the pidfile-tracked server) and
@@ -456,18 +456,19 @@ def _terminate_pid(pid: int) -> None:
     port becomes immediately re-bindable. Best-effort: a dead pid is a no-op.
 
     :param pid: Process id to terminate, e.g. ``93359``.
-    :returns: None.
+    :returns: ``True`` once the process is confirmed gone (or was already
+        dead), ``False`` if it is still alive after the SIGKILL wait.
     """
     import signal
 
     if not _pid_alive(pid):
-        return
+        return True
     with contextlib.suppress(ProcessLookupError, OSError):
         os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + _STOP_GRACE_S
     while time.monotonic() < deadline:
         if not _pid_alive(pid):
-            return
+            return True
         time.sleep(_STOP_POLL_INTERVAL_S)
     # Grace period expired — force-kill so the port is freed. Windows has no
     # SIGKILL; os.kill with SIGTERM there maps to TerminateProcess (forceful).
@@ -477,8 +478,9 @@ def _terminate_pid(pid: int) -> None:
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         if not _pid_alive(pid):
-            return
+            return True
         time.sleep(_STOP_POLL_INTERVAL_S)
+    return False
 
 
 def _pid_is_local_server(pid: int) -> bool:
@@ -486,18 +488,23 @@ def _pid_is_local_server(pid: int) -> bool:
 
     The pidfile carries no start-time identity like the daemon registry, so a
     pid recycled after a reboot would otherwise be signalled as if it were the
-    server. Every launch path spells ``omni`` somewhere in argv (``-m
-    omnigent.cli``, the ``omni``/``omnigent`` console script, the tool venv),
-    so a readable command line without it marks a recycled pid; an unreadable
-    one falls back to alive-only.
+    server. Every launch path names the package in argv — ``-m omnigent.cli``,
+    or the ``omni``/``omnigent`` console script as its own argv element — so a
+    readable command line without either marks a recycled pid (an empty one
+    too: the server is never argv-less). An unreadable command line falls
+    back to alive-only.
     """
     if not _pid_alive(pid):
         return False
     try:
         cmdline = psutil.Process(pid).cmdline()
-    except Exception:  # noqa: BLE001 — gone or unreadable command line: alive-only
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:  # unreadable command line: alive-only
         return True
-    return not cmdline or any("omni" in part for part in cmdline)
+    return bool(cmdline) and any(
+        "omnigent" in part or os.path.basename(part) in ("omni", "omnigent") for part in cmdline
+    )
 
 
 def stop_local_omnigent_server() -> bool:
@@ -515,17 +522,16 @@ def stop_local_omnigent_server() -> bool:
     NOT visible here — :func:`stop_untracked_local_server` covers that, and
     the off-switch (``omnigent stop`` / ``server stop``) calls both.
 
-    :returns: ``True`` when a live recorded server process was terminated;
-        ``False`` when the record was missing, dead, or named a recycled pid
-        (which is left alone and only has its record cleared).
+    :returns: ``True`` when a live recorded server process was terminated and
+        is confirmed gone; ``False`` when the record was missing, dead, named a
+        recycled pid (left alone, record cleared), or the process outlived
+        the SIGKILL wait.
     """
     existing = _read_local_server_pid_file()
     stopped = False
     if existing is not None:
         pid, _port = existing
-        if _pid_is_local_server(pid):
-            _terminate_pid(pid)
-            stopped = True
+        stopped = _pid_is_local_server(pid) and _terminate_pid(pid)
     with contextlib.suppress(OSError):
         _LOCAL_SERVER_PID_PATH.unlink()
     with contextlib.suppress(OSError):
@@ -987,7 +993,8 @@ def stop_untracked_local_server(port: int = _DEFAULT_LOCAL_PORT) -> int | None:
     ``lsof`` is unavailable.
 
     :param port: Canonical loopback port to sweep, e.g. ``6767``.
-    :returns: The PID stopped, or ``None`` if there was nothing to stop.
+    :returns: The PID stopped, or ``None`` if there was nothing to stop or the
+        process did not exit.
     """
     base_url = f"http://127.0.0.1:{port}"
     if not _local_server_health_ok(base_url):
@@ -995,8 +1002,7 @@ def stop_untracked_local_server(port: int = _DEFAULT_LOCAL_PORT) -> int | None:
     pid = _pid_listening_on_port(port)
     if pid is None or not _pid_alive(pid):
         return None
-    _terminate_pid(pid)
-    return pid
+    return pid if _terminate_pid(pid) else None
 
 
 def register_local_server(port: int) -> None:
