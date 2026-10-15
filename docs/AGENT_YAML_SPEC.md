@@ -83,7 +83,9 @@ completed response, or an `x-litellm-response-cost` header — before falling ba
 to the provider's `pricing:` block or the model catalog, so gateway model aliases
 the catalog does not know still show a Session cost. A LiteLLM gateway reports an
 exact cost for streamed replies only when its
-`litellm_settings.include_cost_in_streaming_usage` is enabled.
+`litellm_settings.include_cost_in_streaming_usage` is enabled; Omnigent reads
+that annotation on the Responses API path, while chat-completions turns use the
+header when available.
 
 The `cursor` harness (Cursor's `cursor-agent`) is the exception: it talks
 only to Cursor's own backend and has no custom API base-URL, so the Databricks

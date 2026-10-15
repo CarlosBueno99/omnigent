@@ -811,8 +811,6 @@ class QueuedResponse:
         subprocess booting/evaluating) real time to land before the
         next scripted tool call fires, without depending on the CI
         runner being fast enough for a back-to-back agent loop.
-    :param response_headers: Extra HTTP response headers for the
-        OpenAI-compatible endpoints, e.g. ``{"x-litellm-response-cost": "0.0123"}``.
     :param truncate_after: If set, open the SSE stream normally but emit only
         this many events and then end the connection — dropping the terminal
         completion event so the client sees a stream that starts and dies
@@ -854,9 +852,6 @@ class QueuedResponse:
     # value paces the stream so live surfaces (the web SPA, a native TUI)
     # visibly render intermediate deltas.
     chunk_delay: float = 0.0
-    # Extra HTTP response headers on the OpenAI-compatible endpoints, e.g. a
-    # gateway's per-request cost (LiteLLM's ``x-litellm-response-cost``).
-    response_headers: dict[str, str] | None = None
     _gate: asyncio.Event = field(default_factory=asyncio.Event)
     _pending: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -1164,8 +1159,7 @@ async def create_response(
             parsed.get("model", "mock-model") if isinstance(parsed, dict) else "mock-model"
         )
         return JSONResponse(
-            content=json_text_response(qr.text or "", model=model_name, usage=qr.usage),
-            headers=qr.response_headers,
+            content=json_text_response(qr.text or "", model=model_name, usage=qr.usage)
         )
 
     # Build SSE body
@@ -1185,7 +1179,6 @@ async def create_response(
     return StreamingResponse(
         paced_sse(sse_body, qr.chunk_delay),
         media_type="text/event-stream",
-        headers=qr.response_headers,
     )
 
 
@@ -1421,10 +1414,8 @@ async def create_chat_completion(
         async def _stream() -> AsyncIterator[str]:
             yield stream_body
 
-        return StreamingResponse(
-            _stream(), media_type="text/event-stream", headers=qr.response_headers
-        )
-    return JSONResponse(content=body_json, headers=qr.response_headers)
+        return StreamingResponse(_stream(), media_type="text/event-stream")
+    return JSONResponse(content=body_json)
 
 
 @app.get("/v1/models")
@@ -1530,7 +1521,6 @@ async def configure(request: Request) -> dict[str, object]:
                     refusal_category=entry.get("refusal_category"),
                     thinking=entry.get("thinking"),
                     chunk_delay=entry.get("chunk_delay", 0.0),
-                    response_headers=entry.get("response_headers"),
                 )
             )
         count = len(queue.responses)

@@ -1,24 +1,8 @@
-"""UI journey: a gateway-served model id is priced from the gateway's reported cost.
+"""Verify a gateway-reported cost prices an unknown model in the session UI and API.
 
-The server prices a turn from the provider's static ``pricing:`` block or the
-MLflow catalog. A LiteLLM-style gateway alias such as ``bedrock.claude-sonnet-5``
-matches neither, so the session must take the per-request cost the gateway
-reports or it accrues tokens with no USD cost. The gateway reply here annotates
-``usage.cost`` on the completed response (LiteLLM's
-``include_cost_in_streaming_usage``, the only cost signal it puts on a streamed
-reply to the Agents SDK); the ``x-litellm-response-cost`` header shape is
-covered through the real SDK and HTTP client in
-``tests/inner/test_openai_agents_sdk_executor.py``.
-
-Journey (real web SPA, live server + runner, openai-agents SDK harness pointed at
-the mock OpenAI-compatible gateway):
-
-1. register an agent pinned to ``bedrock.claude-sonnet-5`` and bind it to the runner
-2. script the gateway reply with token usage and the reported cost
-3. send one message and wait for the reply
-4. open the agent-info popover: the Token usage breakdown lists the model's
-   tokens and the Session cost row shows the gateway-reported amount, which the
-   sessions API also returns as ``total_cost_usd``
+The scripted reply annotates ``usage.cost`` like a LiteLLM gateway with
+``include_cost_in_streaming_usage``; the cost-header shape is covered through
+the real SDK in ``tests/inner/test_openai_agents_sdk_executor.py``.
 """
 
 from __future__ import annotations

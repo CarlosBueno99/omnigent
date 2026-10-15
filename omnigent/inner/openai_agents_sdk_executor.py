@@ -1108,11 +1108,14 @@ class _GatewayCharge:
         or ``None`` when absent or unusable.
     :param streams_response: Whether this is a model call, which ends in a
         terminal response event carrying the usage annotation.
+    :param settled: Whether a terminal response event has been attributed to
+        this call.
     """
 
     header_cost: float | None = None
     usage_cost: float | None = None
     streams_response: bool = True
+    settled: bool = False
 
     @property
     def billed(self) -> float | None:
@@ -1176,29 +1179,29 @@ async def _record_gateway_cost(response: httpx.Response) -> None:
         return
     try:
         path = response.request.url.path
-    except RuntimeError:  # a response built without a request
+    except RuntimeError:  # a response built without a request: bill its header alone
         path = ""
     charges.append(
         _GatewayCharge(
             header_cost=_parse_gateway_cost(response.headers.get(_GATEWAY_COST_HEADER)),
-            streams_response=not path or path.endswith(_MODEL_CALL_PATHS),
+            streams_response=bool(path) and path.endswith(_MODEL_CALL_PATHS),
         )
     )
 
 
-def _settle_gateway_charge(
-    charges: list[_GatewayCharge], index: int, usage_cost: float | None
-) -> None:
-    """Attach the *index*-th model call's usage annotation to its recorded charge.
+def _settle_gateway_charge(charges: list[_GatewayCharge], usage_cost: float | None) -> None:
+    """Attribute a terminal response event's usage annotation to the model call it ends.
 
-    Without the response hook (a client with no httpx client) no charge was
-    recorded, so the annotation is kept on its own.
+    Model calls run one at a time, so the event ends the oldest model call still
+    awaiting one. Without the response hook (a client with no httpx client) no
+    charge was recorded, so the annotation is kept on its own.
     """
-    model_calls = [charge for charge in charges if charge.streams_response]
-    if index < len(model_calls):
-        model_calls[index].usage_cost = usage_cost
-    else:
-        charges.append(_GatewayCharge(usage_cost=usage_cost))
+    for charge in charges:
+        if charge.streams_response and not charge.settled:
+            charge.usage_cost = usage_cost
+            charge.settled = True
+            return
+    charges.append(_GatewayCharge(usage_cost=usage_cost, settled=True))
 
 
 def _install_gateway_cost_hook(client: AsyncOpenAIClient) -> None:
@@ -1767,7 +1770,6 @@ class OpenAIAgentsSDKExecutor(Executor):
         # the gateway still billed. The list lives only in ``run_context``, which the
         # SDK's run task copies, so the response hook sees it and the caller never does.
         gateway_charges: list[_GatewayCharge] = []
-        terminal_events = 0
         run_context = contextvars.copy_context()
         run_context.run(_turn_gateway_charges.set, gateway_charges)
         # cfg.model (per-request /model override; agent name no longer
@@ -1938,14 +1940,10 @@ class OpenAIAgentsSDKExecutor(Executor):
                                     delta=reasoning_delta, event_type="reasoning_text"
                                 )
                         elif data.type in _TERMINAL_RESPONSE_EVENTS:
-                            # Model calls run in order, so the i-th terminal event ends the
-                            # i-th model call the response hook recorded.
                             _settle_gateway_charge(
                                 gateway_charges,
-                                terminal_events,
                                 _gateway_usage_cost(getattr(data, "response", None)),
                             )
-                            terminal_events += 1
 
                     elif event.type == "run_item_stream_event":
                         item_event = cast(_RunItemEvent, event)

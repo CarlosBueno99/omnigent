@@ -491,35 +491,3 @@ async def test_chunk_delay_paces_messages_sse_event_by_event(clean_mock_state: N
     assert len(chunks) > 1
     for chunk in chunks:
         assert _count_events(chunk) == 1
-
-
-@pytest.mark.parametrize("stream", [True, False], ids=["stream", "json"])
-@pytest.mark.parametrize("endpoint", ["/v1/responses", "/v1/chat/completions"])
-def test_scripted_response_headers_ride_on_openai_endpoints(
-    monkeypatch: pytest.MonkeyPatch, endpoint: str, stream: bool
-) -> None:
-    """A scripted reply's extra headers reach the client; unscripted ones carry none."""
-    monkeypatch.setattr(mock_llm_server, "_state", MockState())
-    with TestClient(mock_llm_server.app) as client:
-        configured = client.post(
-            "/mock/configure",
-            json={
-                "key": "mock-model",
-                "responses": [
-                    {"text": "priced", "response_headers": {"x-litellm-response-cost": "0.0123"}},
-                    {"text": "unpriced"},
-                ],
-            },
-        )
-        assert configured.status_code == 200
-        body: dict[str, Any] = {"model": "mock-model", "stream": stream}
-        if endpoint == "/v1/chat/completions":
-            body["messages"] = [{"role": "user", "content": "hi"}]
-        else:
-            body["input"] = "hi"
-        priced = client.post(endpoint, json=body)
-        unpriced = client.post(endpoint, json=body)
-    assert priced.status_code == 200
-    assert priced.headers["x-litellm-response-cost"] == "0.0123"
-    assert unpriced.status_code == 200
-    assert "x-litellm-response-cost" not in unpriced.headers

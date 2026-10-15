@@ -44,6 +44,7 @@ from omnigent.inner.openai_agents_sdk_executor import (
     _ReasoningBlockFilterStream,
     _record_gateway_cost,
     _sanitize_replay_item,
+    _settle_gateway_charge,
     _skip_history_transform,
     _turn_gateway_charges,
     _wrap_client_for_reasoning_models,
@@ -3777,7 +3778,11 @@ class _GatewayBilledResult(_FakeResult):
     def on_run_streamed(self) -> None:
         for header, _usage_cost in self._calls:
             headers = {} if header is None else {_GATEWAY_COST_HEADER: header}
-            response = httpx.Response(200, headers=headers)
+            response = httpx.Response(
+                200,
+                headers=headers,
+                request=httpx.Request("POST", "http://gateway.test/v1/responses"),
+            )
             self._hook_tasks.append(asyncio.create_task(_record_gateway_cost(response)))
 
     async def stream_events(self):
@@ -4023,6 +4028,38 @@ def test_gateway_cost_hook_records_zero_as_priced() -> None:
         return charges
 
     assert [charge.header_cost for charge in _run(_t())] == [0.0]
+
+
+def test_gateway_cost_hook_bills_unknown_paths_without_pairing() -> None:
+    """A response whose request path is unknown is billed by its header alone."""
+
+    async def _t():
+        charges: list[_GatewayCharge] = []
+        _turn_gateway_charges.set(charges)
+        await _record_gateway_cost(httpx.Response(200, headers={_GATEWAY_COST_HEADER: "0.01"}))
+        return charges
+
+    charges = _run(_t())
+    assert [(charge.header_cost, charge.streams_response) for charge in charges] == [(0.01, False)]
+
+
+def test_settle_gateway_charge_targets_the_oldest_unsettled_model_call() -> None:
+    """Annotations settle model calls in order, skip non-model calls, and never overwrite."""
+    charges = [
+        _GatewayCharge(header_cost=0.1),
+        _GatewayCharge(header_cost=0.2, streams_response=False),
+        _GatewayCharge(header_cost=0.3),
+    ]
+    _settle_gateway_charge(charges, 0.01)
+    _settle_gateway_charge(charges, None)
+    _settle_gateway_charge(charges, 0.03)
+    assert [(charge.usage_cost, charge.settled) for charge in charges] == [
+        (0.01, True),
+        (None, False),
+        (None, True),
+        (0.03, True),
+    ]
+    assert [charge.billed for charge in charges] == [0.01, 0.2, 0.3, 0.03]
 
 
 def test_gateway_cost_hook_is_inert_outside_a_turn() -> None:
