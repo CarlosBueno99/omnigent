@@ -44,6 +44,8 @@ _ERROR_JSON_KEYS = ("error_code", "error", "error_description", "message", "deta
 _OPAQUE_WORD = re.compile(
     r"(?<![\w./:@%-])(?=[A-Za-z0-9_+=-]*\d)[A-Za-z0-9_+=-]{20,}(?![\w./:@%-])"
 )
+# Even without a digit, a 32-character run of token characters is not a word.
+_LONG_OPAQUE_WORD = re.compile(r"(?<![\w./:@%-])[A-Za-z0-9_+=-]{32,}(?![\w./:@%-])")
 _CODEX_MESSAGE_LIMIT_BYTES = 512
 # The card's cause stays a sentence or two: it quotes only the first line of
 # the helper's report, this long; the record and message keep the rest.
@@ -162,7 +164,7 @@ class ProviderAuthFailure:
                 databricks_host=_optional_str(record.get("databricks_host")),
             ),
             outcome=outcome,
-            exit_status=exit_status if isinstance(exit_status, int) else None,
+            exit_status=exit_status if _is_int(exit_status) else None,
             stdout=_optional_str(record.get("stdout")) or "",
             stderr=_optional_str(record.get("stderr")) or "",
         )
@@ -198,12 +200,15 @@ class ProviderAuthDiagnosis:
     :param remediation: The provider-appropriate next step.
     :param login_required: Whether the evidence shows the credential needs a
         new sign-in rather than some other repair.
+    :param used_record: Whether a recorded helper run informed the diagnosis,
+        rather than Codex's message alone.
     """
 
     title: str
     cause: str
     remediation: str
     login_required: bool
+    used_record: bool = False
 
     def message(self, codex_message: str) -> str:
         """:returns: The full text for clients that render only code/message."""
@@ -233,6 +238,10 @@ def codex_message_outcome(message: str) -> str | None:
         :data:`OUTCOME_TIMED_OUT`, or ``None`` when the wording is unfamiliar.
     """
     lowered = message.lower()
+    # The wrapper ends a hung helper itself, before Codex's own timeout, and
+    # exits 124; Codex then words the timeout as an exit status.
+    if f"exit status: {_EXIT_TIMED_OUT}" in lowered:
+        return OUTCOME_TIMED_OUT
     for fragment, outcome in _CODEX_OUTCOME_FRAGMENTS:
         if fragment in lowered:
             return outcome
@@ -426,7 +435,11 @@ def diagnose_provider_auth_failure(
             else "Codex could not get a provider token"
         )
     return ProviderAuthDiagnosis(
-        title=title, cause=cause, remediation=remediation, login_required=login_required
+        title=title,
+        cause=cause,
+        remediation=remediation,
+        login_required=login_required,
+        used_record=True,
     )
 
 
@@ -517,6 +530,10 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _sanitized(text: str) -> str:
     from omnigent.harnesses.diagnostics import sanitize_diagnostic_text
 
@@ -541,7 +558,9 @@ def _captured_stdout(stream: bytes) -> str:
     parsed = _json_object(text)
     if parsed is not None:
         kept = {
-            key: parsed[key] for key in _ERROR_JSON_KEYS if isinstance(parsed.get(key), (str, int))
+            key: parsed[key]
+            for key in _ERROR_JSON_KEYS
+            if isinstance(parsed.get(key), str) or _is_int(parsed.get(key))
         }
         if kept:
             return _bounded(
@@ -557,7 +576,8 @@ def _captured_stderr(stream: bytes) -> str:
 
 
 def _redacted(text: str) -> str:
-    return _OPAQUE_WORD.sub("[REDACTED]", _sanitized(text))
+    text = _OPAQUE_WORD.sub("[REDACTED]", _sanitized(text))
+    return _LONG_OPAQUE_WORD.sub("[REDACTED]", text)
 
 
 def _bridge_dir_from_env(env: Mapping[str, str]) -> Path | None:

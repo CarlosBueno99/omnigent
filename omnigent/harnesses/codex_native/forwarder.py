@@ -1174,11 +1174,13 @@ def _describe_provider_auth_error(
         return error
     failure = read_provider_auth_failure(bridge_dir) if bridge_dir is not None else None
     diagnosis = diagnose_provider_auth_failure(error.message, failure)
+    used = failure if diagnosis.used_record else None
     _logger.info(
         "Codex forwarder diagnosed provider auth failure: "
-        "provider=%s outcome=%s login_required=%s",
-        failure.helper.provider if failure is not None else None,
-        failure.outcome if failure is not None else None,
+        "record_used=%s provider=%s outcome=%s login_required=%s",
+        diagnosis.used_record,
+        used.helper.provider if used is not None else None,
+        used.outcome if used is not None else None,
         diagnosis.login_required,
     )
     return replace(

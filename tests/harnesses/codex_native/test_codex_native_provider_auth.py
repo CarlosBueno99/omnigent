@@ -125,6 +125,23 @@ def test_wrapped_helper_records_structured_stdout_and_stderr(tmp_path: Path) -> 
     assert failure.stderr == "Error: not logged in"
 
 
+def test_wrapped_helper_redacts_credentials_inside_a_json_error_message(tmp_path: Path) -> None:
+    """A retained JSON diagnostic keeps its words but not an opaque value, digits or not."""
+    secret = "abcdefghijklmnopqrstuvwxyzabcdefghij"
+    payload = json.dumps(
+        {"error_code": "UNAUTHENTICATED", "message": f"token {secret} was rejected"}
+    )
+
+    result = _run_wrapped(tmp_path, f"printf '%s' {shlex.quote(payload)}; exit 1", _OSS_HELPER)
+
+    assert result.returncode == 1
+    failure = read_provider_auth_failure(tmp_path)
+    assert failure is not None
+    assert secret not in failure.stdout
+    assert failure.reported_error() == ("UNAUTHENTICATED", "token [REDACTED] was rejected")
+    assert secret not in diagnose_provider_auth_failure(_CODEX_EXIT_1, failure).cause
+
+
 def test_wrapped_helper_records_an_empty_token(tmp_path: Path) -> None:
     """Exit 0 with no token (the generated Databricks helper's failure shape) is recorded too."""
     result = _run_wrapped(
@@ -199,25 +216,28 @@ def test_wrapped_helper_ignores_a_workspace_package_named_omnigent(tmp_path: Pat
     assert read_provider_auth_failure(bridge_dir) is None
 
 
-def test_wrapped_helper_times_out_before_codex_and_records_it(tmp_path: Path) -> None:
-    """A hung helper is ended, with its whole process group, inside Codex's budget."""
-    result = _run_wrapped(tmp_path, "sleep 30", _OSS_HELPER, timeout_ms=2_000)
+@pytest.mark.parametrize("timeout_ms", [2_000, 600], ids=["normal-budget", "tiny-budget"])
+def test_wrapped_helper_times_out_before_codex_and_records_it(
+    tmp_path: Path, timeout_ms: int
+) -> None:
+    """A hung helper is ended, with its whole process group, inside Codex's budget (even one
+    smaller than the usual margin), and the record still yields the timeout card once Codex
+    words the wrapper's exit 124 as an exit status."""
+    result = _run_wrapped(tmp_path, "sleep 30", _OSS_HELPER, timeout_ms=timeout_ms)
 
     assert result.returncode == 124
     failure = read_provider_auth_failure(tmp_path)
     assert failure is not None
     assert failure.outcome == OUTCOME_TIMED_OUT
     assert failure.exit_status is None
-
-
-def test_wrapped_helper_times_out_inside_a_tiny_budget(tmp_path: Path) -> None:
-    """A budget smaller than the usual margin still leaves the wrapper time to record."""
-    result = _run_wrapped(tmp_path, "sleep 5", _OSS_HELPER, timeout_ms=600)
-
-    assert result.returncode == 124
-    failure = read_provider_auth_failure(tmp_path)
-    assert failure is not None
-    assert failure.outcome == OUTCOME_TIMED_OUT
+    codex_message = (
+        f"provider auth command `sh` exited with status exit status: {result.returncode}"
+    )
+    diagnosis = diagnose_provider_auth_failure(codex_message, failure)
+    assert diagnosis.used_record is True
+    assert "provider 'DatabricksOSS' (Databricks profile 'oss')" in diagnosis.cause
+    assert "did not finish in time" in diagnosis.cause
+    assert "`databricks auth login --profile oss`" in diagnosis.remediation
 
 
 def test_helper_is_left_alone_without_an_interpreter_path(
@@ -452,6 +472,8 @@ def test_diagnosis_for_a_non_databricks_helper_points_at_the_provider_setup() ->
         (_CODEX_EXIT_1, OUTCOME_EXITED),
         ("provider auth command `sh` produced an empty token", OUTCOME_EMPTY_TOKEN),
         ("provider auth command `sh` timed out after 15000 ms", OUTCOME_TIMED_OUT),
+        # The wrapper ends a hung helper itself and exits 124 before Codex's timeout.
+        ("provider auth command `sh` exited with status exit status: 124", OUTCOME_TIMED_OUT),
         ("provider auth command `sh` could not be spawned", None),
     ],
 )
@@ -465,6 +487,7 @@ def test_diagnosis_ignores_a_record_from_a_different_failure() -> None:
 
     diagnosis = diagnose_provider_auth_failure(_CODEX_EXIT_1, stale)
 
+    assert diagnosis.used_record is False
     assert diagnosis.title == "Codex could not get a provider token"
     assert "did not finish in time" not in diagnosis.cause
     assert _CODEX_EXIT_1 in diagnosis.cause
@@ -495,6 +518,13 @@ def test_record_round_trips_and_rejects_malformed_records(tmp_path: Path) -> Non
 
     (tmp_path / "provider_auth_failure.json").write_text('{"outcome": "weird"}', encoding="utf-8")
     assert read_provider_auth_failure(tmp_path) is None
+    # A boolean is not an exit status.
+    (tmp_path / "provider_auth_failure.json").write_text(
+        '{"provider": "p", "outcome": "exited", "exit_status": true}', encoding="utf-8"
+    )
+    malformed = read_provider_auth_failure(tmp_path)
+    assert malformed is not None
+    assert malformed.exit_status is None
     (tmp_path / "provider_auth_failure.json").write_text("not json", encoding="utf-8")
     assert read_provider_auth_failure(tmp_path) is None
 
