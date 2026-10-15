@@ -445,6 +445,81 @@ async def test_session_snapshot_unresolvable_sub_agent_warns_and_reports_parent(
 
 
 @pytest.mark.asyncio
+async def test_session_snapshot_native_sub_agent_reports_parent_without_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A native sub-agent's CLI-chosen name never resolves in the parent spec.
+
+    Claude Code names its Task sub-agents (``general-purpose``, ``Explore``) and
+    Codex its spawned agents; the parent spec doesn't list them, so the parent's
+    identity is the expected answer and is not worth a warning on every snapshot.
+    """
+    parent_spec = AgentSpec(
+        spec_version=1,
+        name="claude-native-ui",
+        executor=ExecutorSpec(config={"harness": "claude-native"}, model="claude-sonnet"),
+    )
+    conversations = {
+        "conv_parent": Conversation(
+            id="conv_parent",
+            created_at=1,
+            updated_at=1,
+            root_conversation_id="conv_parent",
+            agent_id="ag_claude",
+        ),
+        "conv_child": Conversation(
+            id="conv_child",
+            created_at=1,
+            updated_at=1,
+            root_conversation_id="conv_parent",
+            parent_conversation_id="conv_parent",
+            agent_id="ag_claude",
+            kind="sub_agent",
+            sub_agent_name="general-purpose",
+            labels={"omnigent.wrapper": "claude-code-native-ui-subagent"},
+        ),
+    }
+    conv_store = _ConversationStore([], conversations=conversations)
+
+    class _AgentStore:
+        @staticmethod
+        def get(agent_id: str) -> Any:
+            return type(
+                "StoredAgent",
+                (),
+                {
+                    "id": agent_id,
+                    "name": "claude-native-ui",
+                    "bundle_location": "bundle",
+                    "session_id": None,
+                    "operator_authored": False,
+                },
+            )()
+
+    class _AgentCache:
+        @staticmethod
+        def load(agent_id: str, bundle_location: str, *, expand_env: bool = True) -> Any:
+            return type("LoadedAgent", (), {"spec": parent_spec})()
+
+    monkeypatch.setattr("omnigent.runtime.get_runner_client", lambda: None)
+    monkeypatch.setattr("omnigent.runtime.get_runner_router", lambda: None)
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.server.routes._sessions.orchestration"):
+        child = await _get_session_snapshot(
+            conv_store,  # type: ignore[arg-type]
+            "conv_child",
+            agent_store=_AgentStore(),  # type: ignore[arg-type]
+            agent_cache=_AgentCache(),  # type: ignore[arg-type]
+        )
+
+    assert "did not resolve" not in caplog.text
+    assert child.agent_name == "claude-native-ui"
+    assert child.llm_model == "claude-sonnet"
+
+
+@pytest.mark.asyncio
 async def test_session_snapshot_populates_runner_online_from_session_lookup() -> None:
     """GET /sessions/{id} carries session-scoped runner + host liveness."""
     conv_store = _ConversationStore([_message_item("item_1", "hi")])
@@ -518,6 +593,105 @@ async def test_session_snapshot_surfaces_runner_exit_report_as_failed() -> None:
     assert snapshot.last_task_error["code"] == "runner_failed_to_start"
     # The daemon's full cause (incl. log tail) rides through verbatim.
     assert snapshot.last_task_error["message"] == daemon_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [False, True], ids=["persisted", "cached"])
+@pytest.mark.parametrize("live_status", ["failed", "running"])
+async def test_session_snapshot_existing_failure_survives_runner_exit(
+    monkeypatch: pytest.MonkeyPatch, cached: bool, live_status: str
+) -> None:
+    """A saved failure cause outlives the exit report; an interrupted turn still takes it."""
+    from omnigent.server.host_registry import RunnerExitReports
+    from omnigent.server.routes import sessions as sessions_module
+
+    session_id = "30cc5cfcaab3427698d56838f8b636cd"
+    original = {"code": "native_turn_error", "message": "Synthetic provider rejection"}
+    conv = Conversation(
+        id=session_id,
+        created_at=1,
+        updated_at=1,
+        root_conversation_id=session_id,
+        runner_id="runner_exit_after_failure",
+        agent_id="synthetic-agent",
+        live_status=None if cached else live_status,
+        labels={
+            "omnigent.last_task_error_code": original["code"],
+            "omnigent.last_task_error_message": original["message"],
+        },
+    )
+    store = _ConversationStore([], conversations={session_id: conv})
+    _use_runner_client(monkeypatch, None)
+    if cached:
+        monkeypatch.setitem(sessions_module._session_status_cache, session_id, live_status)
+    else:
+        monkeypatch.delitem(sessions_module._session_status_cache, session_id, raising=False)
+    reports = RunnerExitReports()
+    reports.record(conv.runner_id, "Synthetic runner exit", owner=None)
+
+    snapshot = await _get_session_snapshot(
+        store,
+        session_id,
+        runner_exit_reports=reports,  # type: ignore[arg-type]
+    )
+
+    assert snapshot.status == "failed"
+    assert snapshot.last_task_error == (
+        original
+        if live_status == "failed"
+        else {"code": "runner_failed_to_start", "message": "Synthetic runner exit"}
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_matches", [True, False], ids=["same_runner", "replacement_runner"])
+async def test_session_snapshot_scopes_existing_failure_to_owning_runner(
+    monkeypatch: pytest.MonkeyPatch, owner_matches: bool
+) -> None:
+    """A failed cause owned by a prior runner yields to the current runner's exit.
+
+    When a session is rebound to a new runner that then dies before connecting,
+    the snapshot surfaces that runner's startup failure instead of the previous
+    runner's stale cause; a cause owned by the current runner still survives.
+    """
+    from omnigent.server.host_registry import RunnerExitReports
+    from omnigent.server.routes import sessions as sessions_module
+
+    session_id = "4d9f2c1b7a0e4d5e8c1f2a3b4c5d6e7f"
+    original = {"code": "native_turn_error", "message": "Synthetic provider rejection"}
+    owner_runner = "runner_current" if owner_matches else "runner_previous"
+    conv = Conversation(
+        id=session_id,
+        created_at=1,
+        updated_at=1,
+        root_conversation_id=session_id,
+        runner_id="runner_current",
+        agent_id="synthetic-agent",
+        live_status="failed",
+        labels={
+            "omnigent.last_task_error_code": original["code"],
+            "omnigent.last_task_error_message": original["message"],
+            "omnigent.last_task_error_runner_id": owner_runner,
+        },
+    )
+    store = _ConversationStore([], conversations={session_id: conv})
+    _use_runner_client(monkeypatch, None)
+    monkeypatch.delitem(sessions_module._session_status_cache, session_id, raising=False)
+    reports = RunnerExitReports()
+    reports.record("runner_current", "Synthetic runner exit", owner=None)
+
+    snapshot = await _get_session_snapshot(
+        store,
+        session_id,
+        runner_exit_reports=reports,  # type: ignore[arg-type]
+    )
+
+    assert snapshot.status == "failed"
+    assert snapshot.last_task_error == (
+        original
+        if owner_matches
+        else {"code": "runner_failed_to_start", "message": "Synthetic runner exit"}
+    )
 
 
 @pytest.mark.asyncio
