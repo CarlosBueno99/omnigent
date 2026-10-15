@@ -1,0 +1,205 @@
+// Desktop-shell lane: a URL typed into the embedded browser's address bar must
+// get the same main-process URL policy as agent navigation (loopback / private /
+// file: destinations rejected), independent of the renderer-supplied intent flag.
+//
+// Journey: boot the shell on a local server → open a session → Workspace "+" →
+// Browser → type a loopback URL into the Address bar → Enter. The expected
+// outcome is a "navigation blocked" alert under the toolbar and no load; the
+// pane rendering the loopback page is the failure. A bridge-level control then
+// requests the same URL with agent intent, which the policy denies.
+//
+// Run from web/electron after building the SPA:
+//   OMNIGENT_PW_NO_SANDBOX=1 xvfb-run -a node --test e2e/desktop_url_bar_policy.e2e.js
+// OMNIGENT_DESKTOP_RECORD_DIR overrides where clips and observations.json land.
+
+"use strict";
+
+const { describe, it, before, after } = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const http = require("node:http");
+const os = require("node:os");
+const path = require("node:path");
+
+const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
+// The harness reads OMNIGENT_PYTHON at load time; default to the repo venv.
+if (!process.env.OMNIGENT_PYTHON) {
+  const venvPython = path.join(REPO_ROOT, ".venv", "bin", "python");
+  if (fs.existsSync(venvPython)) process.env.OMNIGENT_PYTHON = venvPython;
+}
+
+const { desktopDepsAvailable, launchDesktop, saveRecording } = require("./desktopHarness");
+const { startDesignBackend } = require("./desktopDesignPromptHarness");
+
+const deps = desktopDepsAvailable();
+const RECORD_DIR =
+  process.env.OMNIGENT_DESKTOP_RECORD_DIR ||
+  path.join(__dirname, "recordings", "desktop-url-bar-policy");
+const headlessLinux =
+  process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+const skip = !deps.ok
+  ? `missing deps: ${deps.missing.join(", ")}`
+  : headlessLinux
+    ? "no display (run under xvfb-run)"
+    : false;
+
+const LOOPBACK_PAGE = `<!doctype html><title>Internal service</title>
+<body style="margin:0;background:#d9480f;color:#fff;font:28px sans-serif">
+<div style="padding:40px"><h1>INTERNAL SERVICE</h1>
+<p>Served on loopback (127.0.0.1); the agent URL policy rejects this host.</p></div></body>`;
+
+/** A test-owned loopback site standing in for an internal service. */
+function serveLoopback() {
+  return new Promise((resolve) => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(LOOPBACK_PAGE);
+    });
+    server.listen(0, "127.0.0.1", () => {
+      resolve({
+        url: `http://127.0.0.1:${server.address().port}/`,
+        close: () =>
+          new Promise((done) => {
+            server.close(done);
+          }),
+      });
+    });
+  });
+}
+
+/** Poll the view's committed URL and the pane's alert until the URL reaches
+ *  `target` or an alert appears (or the window elapses). */
+async function observeNavigation(window, pane, viewId, target, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  const alerts = pane.getByRole("alert");
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- Poll the bridge sequentially.
+    const view = await window.evaluate((id) => window.omnigentDesktop.browserHasView(id), viewId);
+    // oxlint-disable-next-line no-await-in-loop -- Read the alert after the bridge probe.
+    const alert = (await alerts.count()) > 0 ? await alerts.first().innerText() : null;
+    const loaded = !!(view.exists && view.url && view.url.startsWith(target));
+    if (loaded || alert || Date.now() > deadline) {
+      return { viewUrl: view.url ?? null, alert, loaded };
+    }
+    // oxlint-disable-next-line no-await-in-loop -- Wait before the next probe.
+    await window.waitForTimeout(250);
+  }
+}
+
+/** Start time of the composited display capture, parsed from its raw filename. */
+function displayCaptureStartMs(recordDir) {
+  const raw = fs.readdirSync(recordDir).find((f) => /^display@\d+\.webm$/.test(f));
+  return raw ? Number(raw.slice("display@".length, -".webm".length)) : null;
+}
+
+describe("desktop shell — embedded browser address bar applies the URL policy", { skip }, () => {
+  let tmpDir;
+  let backend;
+  let loopback;
+
+  before(
+    async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omni-desktop-url-policy-"));
+      loopback = await serveLoopback();
+      backend = await startDesignBackend(tmpDir);
+    },
+    { timeout: 120_000 },
+  );
+
+  after(async () => {
+    if (backend) await backend.close();
+    if (loopback) await loopback.close();
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("rejects a loopback URL typed into the address bar", { timeout: 240_000 }, async () => {
+    const { electronApp, window, userDataDir, stopDisplayCapture } = await launchDesktop({
+      recordDir: RECORD_DIR,
+      serverUrl: backend.serverUrl,
+      env: {
+        OMNIGENT_CONFIG_HOME: path.join(tmpDir, "config"),
+        OMNIGENT_DATA_DIR: path.join(tmpDir, "config", "data"),
+      },
+    });
+    const observations = {
+      sessionId: backend.sessionId,
+      loopbackUrl: loopback.url,
+      captureStartedAtMs: displayCaptureStartMs(RECORD_DIR),
+      timeline: [],
+    };
+    const mark = (event) => observations.timeline.push({ event, atMs: Date.now() });
+    try {
+      const nativeWindow = await electronApp.browserWindow(window);
+      await nativeWindow.evaluate((win) => {
+        win.setPosition(0, 0);
+        win.setSize(1260, 960);
+        win.show();
+        win.focus();
+      });
+      await window.goto(`${backend.serverUrl}/c/${backend.sessionId}`);
+      await window
+        .getByRole("button", { name: /^(Expand|Collapse) right panel$/ })
+        .waitFor({ timeout: 30_000 });
+      mark("session page open");
+      const expand = window.getByRole("button", { name: "Expand right panel", exact: true });
+      if (await expand.isVisible()) await expand.click();
+      await window.waitForTimeout(1_500);
+      await window.getByRole("button", { name: "Open new", exact: true }).click();
+      mark("workspace + menu open");
+      await window.waitForTimeout(1_500);
+      await window.getByRole("menuitem", { name: "Browser", exact: true }).click();
+      const pane = window.locator("[data-browser-pane-conversation]");
+      await pane.waitFor({ timeout: 15_000 });
+      mark("browser tab open");
+      const viewId = await pane.getAttribute("data-browser-pane-conversation");
+      observations.viewId = viewId;
+      const address = window.getByRole("textbox", { name: "Address bar", exact: true });
+      await window.waitForTimeout(1_500);
+
+      await address.click();
+      await address.pressSequentially(loopback.url, { delay: 40 });
+      mark("loopback url typed");
+      await window.waitForTimeout(1_000);
+      await address.press("Enter");
+      mark("enter pressed");
+      observations.loopback = await observeNavigation(window, pane, viewId, loopback.url);
+      mark(observations.loopback.loaded ? "loopback page loaded in pane" : "loopback not loaded");
+      await window.waitForTimeout(5_000);
+
+      observations.agentControl = await window.evaluate(
+        ([id, url]) =>
+          window.omnigentDesktop.browserOpenOrNavigate(id, url, undefined, {
+            force: true,
+            agent: true,
+          }),
+        [viewId, loopback.url],
+      );
+      mark("agent-intent control requested");
+      await window.waitForTimeout(3_000);
+    } finally {
+      fs.mkdirSync(RECORD_DIR, { recursive: true });
+      fs.writeFileSync(
+        path.join(RECORD_DIR, "observations.json"),
+        JSON.stringify(observations, null, 2),
+      );
+      // Stop filming while the pane still shows the outcome, then close.
+      await stopDisplayCapture();
+      await electronApp.close();
+      saveRecording(RECORD_DIR, "url-bar-policy");
+      fs.rmSync(userDataDir, { recursive: true, force: true });
+    }
+
+    assert.equal(observations.agentControl.ok, false, "agent-intent control was not denied");
+    assert.match(observations.agentControl.error ?? "", /navigation blocked/);
+    assert.equal(
+      observations.loopback.loaded,
+      false,
+      `loopback URL typed into the address bar loaded in the pane (${observations.loopback.viewUrl})`,
+    );
+    assert.match(
+      observations.loopback.alert ?? "",
+      /navigation blocked/,
+      'no "navigation blocked" alert under the toolbar',
+    );
+  });
+});

@@ -367,9 +367,10 @@ describe("browserViewRegistry — agent-navigation allowlist", () => {
     assert.deepEqual(loaded, ["https://example.com/"]);
   });
 
-  it("does NOT gate the user-typed URL-bar path (agent flag absent) — file:// still loads", () => {
-    // The URL bar is user-initiated; the strict allowlist is scoped to the
-    // agent path only. A user who types a local address keeps that ability.
+  it("does NOT gate a main-owned navigation (agent flag absent) — file:// still loads", () => {
+    // browserIpc sets `agent` on every renderer request (URL bar included), so
+    // this ungated path is reachable only from main-process callers such as the
+    // desktop E2E fixture driver.
     const { registry, loaded } = makeLoadTrackingRegistry();
     const r = registry.openOrNavigate("conv_1", "file:///tmp/report.html", undefined, {
       force: true,
@@ -545,26 +546,26 @@ describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every h
     assert.equal(sent.filter((s) => s.channel === "browser-nav-blocked").length, 0);
   });
 
-  it("does NOT block redirects on a user-typed (non-agent) navigation", () => {
+  it("does NOT block redirects on a main-owned (non-agent) navigation", () => {
     const { registry, fire } = makeEventCapturingRegistry();
-    // User types a URL (no agent flag) → the view is NOT agent-locked, so its
-    // redirects — even to an internal host (auth-redirect chains) — are allowed.
+    // A main-owned nav (no agent flag) leaves the view unlocked, so its
+    // redirects — even to an internal host — are allowed.
     registry.openOrNavigate("conv_1", "https://intranet.example.com/", undefined, {
       force: true,
     });
     const ev = fire("will-redirect", "http://10.0.0.5/sso/callback");
-    assert.equal(ev.prevented, false, "user-driven nav stays permissive");
+    assert.equal(ev.prevented, false, "main-owned nav stays permissive");
   });
 
-  it("re-locks correctly: a user nav after an agent nav flips enforcement off", () => {
+  it("re-locks correctly: a main-owned nav after a gated nav flips enforcement off", () => {
     const { registry, fire } = makeEventCapturingRegistry();
     registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
-    // Then the user types a new address on the same view.
+    // Then a main-owned nav reuses the same view.
     registry.openOrNavigate("conv_1", "https://intranet.example.com/", undefined, {
       force: true,
     });
     const ev = fire("will-redirect", "http://192.168.1.10/");
-    assert.equal(ev.prevented, false, "the later user nav unlocked the view");
+    assert.equal(ev.prevented, false, "the later main-owned nav unlocked the view");
   });
 });
 

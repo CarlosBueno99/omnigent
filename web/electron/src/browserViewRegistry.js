@@ -130,13 +130,13 @@ function createBrowserViewRegistry({
       // Last URL we EXPLICITLY requested (not getURL(), which drifts as the page
       // navigates) — lets openOrNavigate skip reissuing loadURL on a re-mount.
       lastRequestedUrl: "",
-      // Whether the CURRENT navigation was agent-initiated. Set on every
-      // openOrNavigate from opts.agent; read by the will-navigate/will-redirect
-      // guard so the allowlist is enforced on the agent's whole nav chain
-      // (initial load + every redirect / meta-refresh / location.href) but NOT
-      // on user-typed URL-bar browsing, which stays permissive. SECURITY: without
-      // this, the allowlist only guards the first hop and a redirect to an
-      // internal host slips through (SSRF via screenshot).
+      // Whether the CURRENT navigation is policy-gated. Set on every
+      // openOrNavigate from opts.agent (browserIpc sets it for every renderer
+      // request, URL bar included; only main-owned callers omit it) and read by
+      // the will-navigate/will-redirect guard so the allowlist covers the whole
+      // nav chain (initial load + every redirect / meta-refresh / location.href).
+      // SECURITY: without this, the allowlist only guards the first hop and a
+      // redirect to an internal host slips through (SSRF via screenshot).
       agentNavLocked: false,
       agentContext: null,
       // Design-mode listeners + webContents, set by browserIpc's enable handler
@@ -258,15 +258,15 @@ function createBrowserViewRegistry({
   // redirect the view to an internal host (metadata / loopback / RFC-1918) with
   // no re-check, and browser_screenshot could read it back. `will-navigate` and
   // `will-redirect` (plus subframes via `will-frame-navigate`) are the blocking
-  // hooks — did-navigate is report-only and fires too late. Enforced ONLY while
-  // `entry.agentNavLocked` (set per-navigation from opts.agent), so user-typed
-  // URL-bar browsing — including legitimate auth-redirect chains to internal
-  // hosts — stays permissive.
+  // hooks — did-navigate is report-only and fires too late. Enforced while
+  // `entry.agentNavLocked` (set per-navigation from opts.agent), which every
+  // renderer-originated navigation carries; only a main-owned navigation (the
+  // desktop E2E fixture driver) leaves the view unguarded.
   function attachAgentNavGuard(conversationId, entry) {
     const wc = entry.view && entry.view.webContents;
     if (!wc || typeof wc.on !== "function") return;
     const guard = (event, targetUrl) => {
-      if (!entry.agentNavLocked) return; // user-driven nav: permissive
+      if (!entry.agentNavLocked) return; // main-owned nav: ungated
       const verdict = isAgentNavigationAllowed(targetUrl, {
         allowLocalhost: isArcaAgentContext(entry.agentContext),
       });
@@ -370,11 +370,11 @@ function createBrowserViewRegistry({
 
   function openOrNavigate(conversationId, url, bounds, opts) {
     const force = !!(opts && opts.force);
-    // Agent-driven nav (opts.agent) is gated by an allowlist (see
-    // browserUrlPolicy) so the model can't point the view at file:// /
-    // metadata / loopback / private hosts and exfiltrate via screenshot. URL-bar
-    // (user-typed) nav stays permissive. Checked before getOrCreate so a
-    // rejected nav creates no blank view.
+    // A gated nav (opts.agent — every renderer request, URL bar included) runs
+    // the allowlist (see browserUrlPolicy) so neither the model nor the renderer
+    // can point the view at file:// / metadata / loopback / private hosts and
+    // exfiltrate via screenshot. Only main-owned callers omit the flag. Checked
+    // before getOrCreate so a rejected nav creates no blank view.
     if (opts && opts.agent && url) {
       const verdict = isAgentNavigationAllowed(url, {
         allowLocalhost: isArcaAgentContext(opts.agentContext),
@@ -386,9 +386,9 @@ function createBrowserViewRegistry({
     const result = getOrCreate(conversationId);
     if (!result.ok) return result;
     const { entry, created } = result;
-    // Latch who drives THIS navigation so the will-navigate/will-redirect guard
-    // enforces the allowlist on an agent nav's whole redirect chain, and leaves
-    // user-typed URL-bar nav permissive. Set only when a url is actually issued.
+    // Latch whether THIS navigation is gated so the will-navigate/will-redirect
+    // guard enforces the allowlist on its whole redirect chain. Set only when a
+    // url is actually issued.
     if (url) {
       entry.agentNavLocked = !!(opts && opts.agent);
       entry.agentContext = entry.agentNavLocked ? (opts.agentContext ?? null) : null;

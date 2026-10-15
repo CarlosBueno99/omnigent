@@ -486,13 +486,20 @@ port collisions.
 1. Ask the agent to start the app on the remote host and report its URL.
 2. Use Companion to forward the app's port to your Mac. Check the actual
    forwarded address: the local port may differ from the remote port.
-3. In the Omnigent desktop app, open the session's Workspace **+** menu and
-   choose **Browser**. Type the forwarded URL, for example
-   `http://localhost:5273/`, in the address bar and press Enter. Here
-   `localhost` is the desktop machine, not the agent's remote host.
-4. Hide and reopen the Workspace, or switch tabs or sessions and return.
-   The existing page is retained without navigating or reloading it. Closing
-   the Browser tab destroys that view; opening a new tab does not restore it.
+3. Open the forwarded URL, for example `http://localhost:5273/`, in your Mac's
+   regular browser. Here `localhost` is the desktop machine, not the agent's
+   remote host. The embedded Browser tab (Workspace **+** > **Browser**) cannot
+   open it: every address typed into its bar goes through the same URL policy
+   as agent navigation, which refuses loopback, private-network, and metadata
+   hosts and non-web schemes with a "navigation blocked" message under the
+   toolbar. The renderer cannot exempt a request by claiming user intent.
+4. On an eligible Arca session (next section), you can instead ask the agent to
+   open the forwarded URL. It loads in the session's agent browser view, which
+   you can also interact with.
+
+A page open in a Browser tab is retained when you hide and reopen the Workspace
+or switch tabs or sessions and return; closing the Browser tab destroys that
+view, and opening a new tab does not restore it.
 
 If the page is unreachable, check that the app is still running and that the
 forwarded URL reaches the intended app in your Mac's regular browser. Check
@@ -500,10 +507,8 @@ Companion's forwarding and local port selection separately. Normal TLS, CORS,
 authentication, and local-network permission rules still apply. This pane is
 desktop-only; it is not available in the plain web UI.
 
-For local or unrecognized hosts, `browser_navigate` keeps its restrictions on
-localhost and private addresses, even after you open a page manually.
-A manually opened page in the session's
-agent browser view remains available to existing agent inspection and
+A page opened in the session's agent browser view, by the agent or through that
+view's own URL bar, remains available to existing agent inspection and
 interaction, including navigation caused by interacting with the page. Manual
 opening is therefore not a read-only boundary for that view. The user-created
 Browser tab opened through **+** > **Browser** is separate from the agent relay
@@ -662,7 +667,10 @@ the toolbar is a fixed-height row _above_ the measured container, because the
 native `WebContentsView` paints over that container's rect — a toolbar inside it
 would be hidden by the overlay. The URL bar reuses the existing
 `browserOpenOrNavigate(..., {force:true})` path (the same one the relay uses), so
-no separate navigation IPC exists for manual entry.
+no separate navigation IPC exists for manual entry. Main applies the URL policy
+to that request exactly as to the relay's (see **URL policy for every renderer
+navigation** below), so a typed internal address is refused and the pane shows
+the "navigation blocked" error under the toolbar.
 
 **Design mode (point-and-prompt).** A toolbar toggle (next to DevTools) injects
 an in-page element picker into the `WebContentsView` via `executeJavaScript`:
@@ -685,11 +693,16 @@ console listener is stored on the registry entry
 `close()` detaches it on teardown. Electron-only (needs `executeJavaScript` +
 the native view); no server flag.
 
-All renderer IPC navigation uses the same URL policy, including the URL bar.
-A renderer's `agent: false` flag does not exempt a tab from address checks.
-Main-owned Arca preview eligibility still applies. Other internal sites must be
-opened in a separate browser; this also keeps later redirects in these tabs
-under the same policy.
+**URL policy for every renderer navigation.** `omnigent:browser-open-or-navigate`
+runs the `browserUrlPolicy` allowlist for every request, URL bar included: a
+renderer's `agent: false` (or absent) flag never exempts a tab, and the view is
+locked so later redirects, frames, and window-open hops in that tab stay under
+the same policy. Main-owned Arca preview eligibility still applies to relay
+requests, which carry the session's host context; the URL bar supplies none, so
+it cannot open loopback addresses even on an eligible Arca session. Other
+internal sites must be opened in a separate browser. The registry's ungated
+path (no `agent` flag) is reachable only from main-process callers such as the
+desktop E2E fixture driver.
 
 **JS trust boundary (important):** `omnigent:browser-execute` runs
 arbitrary JS in the child view via `executeJavaScript(js, true)`. It is exposed

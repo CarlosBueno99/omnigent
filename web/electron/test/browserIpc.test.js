@@ -781,34 +781,81 @@ describe("browserIpc — navigation API helpers", () => {
   });
 });
 
-it("applies navigation policy even when renderer options claim user intent", async () => {
-  for (const opts of [undefined, {}, { agent: false }, { agent: true }]) {
+// browserIpc must apply the URL policy to every renderer request: the address
+// bar sends `{ force: true }` with no agent flag (BrowserPane's submitUrl), and
+// main cannot verify a renderer's claim of user intent.
+describe("browser IPC — URL policy independent of renderer intent", () => {
+  const { createBrowserViewRegistry } = require("../src/browserViewRegistry");
+  const { createBrowserViewBoundsController } = require("../src/browserViewBounds");
+
+  function makeRealRegistryIpc({ isArcaAgentContext, getAgentContextForEvent } = {}) {
+    const loaded = [];
+    const registry = createBrowserViewRegistry({
+      WebContentsViewCtor: () => ({
+        setBounds() {},
+        setVisible() {},
+        webContents: {
+          loadURL(url) {
+            loaded.push(url);
+          },
+          getURL: () => loaded[loaded.length - 1] ?? "",
+          close() {},
+          on() {},
+          removeListener() {},
+          setWindowOpenHandler() {},
+        },
+      }),
+      createBoundsController: createBrowserViewBoundsController,
+      attachToHost() {},
+      detachFromHost() {},
+      sendToRenderer() {},
+      ...(isArcaAgentContext ? { isArcaAgentContext } : {}),
+    });
     const ipcMain = makeIpcMain();
-    const calls = [];
-    const context = { serverTarget: "trusted-main-context" };
     registerBrowserIpc({
       ipcMain,
       isPinnedOriginSender: () => true,
-      getRegistryForEvent: () => ({
-        openOrNavigate: (...args) => {
-          calls.push(args);
-          return { ok: false, error: "blocked" };
-        },
-      }),
+      getRegistryForEvent: () => registry,
+      ...(getAgentContextForEvent ? { getAgentContextForEvent } : {}),
+    });
+    const navigate = (url, opts) =>
+      ipcMain.invoke(
+        "omnigent:browser-open-or-navigate",
+        { sender: { send() {} } },
+        { conversationId: "browser-tab:conv_1:tab", url, opts },
+      );
+    return { navigate, loaded };
+  }
+
+  it("rejects blocked destinations whatever intent the renderer claims, without loading them", async () => {
+    const { navigate, loaded } = makeRealRegistryIpc();
+    const accepted = [];
+    for (const opts of [undefined, {}, { agent: false }, { force: true }, { agent: true }]) {
+      for (const url of ["http://127.0.0.1:8080/", "file:///etc/passwd"]) {
+        // oxlint-disable-next-line no-await-in-loop -- Sequential requests against one view.
+        const r = await navigate(url, opts);
+        if (r.ok) accepted.push(`${JSON.stringify(opts)} ${url}`);
+        else assert.match(r.error ?? "", /navigation blocked/, url);
+      }
+    }
+    assert.deepEqual(accepted, [], `accepted: ${accepted.join(", ")}`);
+    assert.deepEqual(loaded, []);
+  });
+
+  it("still loads a public https URL typed into the address bar", async () => {
+    const { navigate, loaded } = makeRealRegistryIpc();
+    assert.equal((await navigate("https://example.com/", { force: true })).ok, true);
+    assert.deepEqual(loaded, ["https://example.com/"]);
+  });
+
+  it("evaluates main-owned Arca eligibility for every request, not only flagged ones", async () => {
+    const context = { serverTarget: "selected-server", sourceHostId: "arca-host" };
+    const { navigate, loaded } = makeRealRegistryIpc({
+      isArcaAgentContext: (ctx) => ctx === context,
       getAgentContextForEvent: () => context,
     });
-    // oxlint-disable-next-line no-await-in-loop -- Each request checks a distinct renderer option.
-    const result = await ipcMain.invoke(
-      "omnigent:browser-open-or-navigate",
-      {},
-      {
-        conversationId: "conv_1",
-        url: "https://example.com",
-        opts,
-      },
-    );
-    assert.equal(result.ok, false);
-    assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0][3], { force: false, agent: true, agentContext: context });
-  }
+    assert.equal((await navigate("http://localhost:5173/", { force: true })).ok, true);
+    assert.deepEqual(loaded, ["http://localhost:5173/"]);
+    assert.equal((await navigate("http://10.0.0.1/", { force: true })).ok, false);
+  });
 });

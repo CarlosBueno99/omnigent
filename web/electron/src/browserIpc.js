@@ -301,7 +301,8 @@ function registerBrowserIpc({
     const navigate = (registry) =>
       registry.openOrNavigate(conversationId, url, bounds, {
         force: !!opts?.force,
-        // Renderer flags do not establish user intent.
+        // Every renderer request is policy-gated: main cannot verify a claim of
+        // user intent, so the URL bar gets the same allowlist as the relay.
         agent: true,
         // The first-party renderer supplies the source-session host; main owns
         // the target and eligibility. Caller exception flags never establish identity.
@@ -309,6 +310,8 @@ function registerBrowserIpc({
       });
     let r = navigate(g.registry);
     let recovered = false;
+    // Arca recovery and its hint apply only to relay requests, which carry the
+    // session-host context the exception needs; the URL bar supplies none.
     if (!r.ok && opts?.agent) {
       try {
         recovered = await recoverAgentNavigationForEvent(

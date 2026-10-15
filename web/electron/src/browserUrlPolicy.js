@@ -1,7 +1,8 @@
-// Allowlist for AGENT-driven browser navigation (the URL-bar path
-// stays permissive — it's a user gesture). An unguarded model-issued loadURL
-// could point the view at file:// / cloud-metadata / loopback / private hosts
-// and read the bytes back via screenshot (SSRF + local-file read + exfil).
+// Allowlist for browser navigation requested through the renderer — the agent
+// relay and the URL bar alike, since main cannot verify a renderer's claim of
+// user intent. An unguarded loadURL could point the view at file:// /
+// cloud-metadata / loopback / private hosts and read the bytes back via
+// screenshot (SSRF + local-file read + exfil).
 // Runs in the main process (gate holds regardless of caller); pure + dep-free
 // so `node --test` can exercise it without Electron.
 
@@ -68,7 +69,7 @@ function isBlockedHostname(hostname) {
 }
 
 /**
- * Decide whether an AGENT-issued navigation to `url` is allowed: `{ ok: true }`
+ * Decide whether a policy-gated navigation to `url` is allowed: `{ ok: true }`
  * for an http(s) URL to a non-internal host (or eligible Arca loopback), else
  * `{ ok: false, error }`. Never throws — an unparseable URL is a rejection.
  *
