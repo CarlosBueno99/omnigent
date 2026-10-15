@@ -8661,7 +8661,10 @@ def _tool_error(output: str) -> str | None:
     """The error a tool reported, as ``Error: ...`` text or a JSON ``error`` field."""
     if output.startswith("Error:"):
         return output
-    parsed = json.loads(output)
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        return output
     return parsed.get("error") if isinstance(parsed, dict) else None
 
 
