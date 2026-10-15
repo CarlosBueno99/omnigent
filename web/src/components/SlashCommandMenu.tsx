@@ -332,7 +332,7 @@ export function SlashCommandMenu({
             {skillsUnavailableMessage}
           </div>
         )}
-        {/* An incomplete catalog explains itself; an empty one is only claimed when complete. */}
+        {/* An incomplete catalog explains itself; "No skills available" is only claimed when complete. */}
         {skillsStatus === "ready" && skillsWarnings.length > 0 && (
           <div role="status" className="px-1.5 py-1 text-ui text-muted-foreground">
             {skillsWarnings.map((warning) => (
@@ -343,11 +343,13 @@ export function SlashCommandMenu({
             {onRetrySkills && <RetrySkillsButton onClick={onRetrySkills} />}
           </div>
         )}
-        {skillsStatus === "ready" && skillRows.length === 0 && skillsWarnings.length === 0 && (
-          <div role="status" className="px-1.5 py-1 text-ui text-muted-foreground">
-            {query ? "No matching skills" : "No skills available"}
-          </div>
-        )}
+        {skillsStatus === "ready" &&
+          skillRows.length === 0 &&
+          (query !== "" || skillsWarnings.length === 0) && (
+            <div role="status" className="px-1.5 py-1 text-ui text-muted-foreground">
+              {query ? "No matching skills" : "No skills available"}
+            </div>
+          )}
         {skillRows.map((row) => (
           <MenuRowButton
             key={row.name}

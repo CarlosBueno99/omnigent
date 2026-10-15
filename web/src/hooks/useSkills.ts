@@ -39,8 +39,11 @@ export async function fetchSkills(
   const body = (await response.json()) as { skills?: SkillSummary[]; warnings?: unknown };
   if (!Array.isArray(body.skills)) throw new Error("Invalid host skills response");
   // Older servers omit warnings; their catalogs were always presented as complete.
+  // Deduplicated so each warning is a unique row (and React key) in the menu.
   const warnings = Array.isArray(body.warnings)
-    ? body.warnings.filter((warning): warning is string => typeof warning === "string")
+    ? Array.from(
+        new Set(body.warnings.filter((warning): warning is string => typeof warning === "string")),
+      )
     : [];
   return { skills: body.skills, warnings };
 }

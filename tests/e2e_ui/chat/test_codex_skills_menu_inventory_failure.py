@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 from pathlib import Path
 
@@ -33,14 +34,14 @@ _INVENTORY = {
 # every other invocation reaches the real CLI when one is installed.
 _SHIM = """#!/bin/sh
 if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
-  if [ "$(cat '{mode}' 2>/dev/null)" = "fail" ]; then
+  if [ "$(cat {mode} 2>/dev/null)" = "fail" ]; then
     echo "Error: {error}" >&2
     exit 1
   fi
-  cat '{inventory}'
+  cat {inventory}
   exit 0
 fi
-if [ -n "{real}" ]; then exec "{real}" "$@"; fi
+if [ -n {real} ]; then exec {real} "$@"; fi
 if [ "$1" = "--version" ]; then echo "codex-cli 0.0.0-test"; exit 0; fi
 echo "codex CLI is not installed in this environment" >&2
 exit 127
@@ -69,10 +70,10 @@ def _write_codex_shim(root: Path) -> tuple[Path, Path]:
     shim = root / "codex"
     shim.write_text(
         _SHIM.format(
-            mode=mode,
-            inventory=inventory,
+            mode=shlex.quote(str(mode)),
+            inventory=shlex.quote(str(inventory)),
             error=_INVENTORY_ERROR,
-            real=shutil.which("codex") or "",
+            real=shlex.quote(shutil.which("codex") or ""),
         )
     )
     shim.chmod(0o755)
@@ -140,13 +141,15 @@ def test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog(
             empty_catalog_rows = skills_rows.filter(has_text=_EMPTY_CATALOG_ROW).count()
             warning_rows = skills_rows.filter(has_text=_WARNING_ROW)
             warning_visible = warning_rows.count() == 1 and warning_rows.first.is_visible()
-            retry_visible = warning_rows.get_by_role("button", name="Retry").is_visible()
+            retry_visible = warning_rows.first.get_by_role("button", name="Retry").is_visible()
             plugin_rows = page.get_by_test_id(f"slash-menu-item-{_PLUGIN_SKILL}").count()
             api = client.get("/v1/skills", params={"session_id": session_id})
         finally:
-            if page is not None and not page.is_closed():
-                page.context.close()
-            client.delete(f"/v1/sessions/{session_id}", timeout=10.0)
+            try:
+                if page is not None and not page.is_closed():
+                    page.context.close()
+            finally:
+                client.delete(f"/v1/sessions/{session_id}", timeout=10.0)
 
     observed = (
         f"session {session_id}: picker rows {observed_rows!r}, plugin rows {plugin_rows}, "

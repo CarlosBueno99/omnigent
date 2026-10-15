@@ -76,9 +76,9 @@ describe("useSkills", () => {
     },
   );
 
-  it("surfaces why a ready catalog is incomplete", async () => {
+  it("surfaces why a ready catalog is incomplete, once per distinct warning", async () => {
     const warning = "Codex plugin skills unavailable: `codex plugin list` exited 1";
-    fetchMock.mockResolvedValue(response([], 200, [warning]));
+    fetchMock.mockResolvedValue(response([], 200, [warning, warning]));
     const { result } = renderHook(() => useSkills({ target }), { wrapper });
     await waitFor(() => expect(result.current.skillsStatus).toBe("ready"));
     expect(result.current.skills).toEqual([]);

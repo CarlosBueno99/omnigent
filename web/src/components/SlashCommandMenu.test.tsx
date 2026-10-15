@@ -132,18 +132,34 @@ describe("skill discovery state", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(onRetrySkills).toHaveBeenCalledOnce();
 
-    // Skills that were read still list alongside the explanation.
+    // Skills that were read still list alongside the explanation and its Retry.
     rerender(
       <SlashCommandMenu
         {...props}
         commands={{ ...props.commands, "/review": "Review code" }}
         skillsStatus="ready"
         skillsWarnings={[warning]}
+        onRetrySkills={onRetrySkills}
       />,
     );
     expect(screen.getByTestId("slash-menu-item-review")).toBeVisible();
     expect(screen.getByRole("status")).toHaveTextContent(warning);
-    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeVisible();
+
+    // A filter that matches nothing still says so, next to the explanation.
+    rerender(
+      <SlashCommandMenu
+        {...props}
+        query="zzz"
+        commands={{ ...props.commands, "/review": "Review code" }}
+        skillsStatus="ready"
+        skillsWarnings={[warning]}
+        onRetrySkills={onRetrySkills}
+      />,
+    );
+    const rows = screen.getAllByRole("status").map((row) => row.textContent ?? "");
+    expect(rows.some((text) => text.includes(warning))).toBe(true);
+    expect(rows.some((text) => text.includes("No matching skills"))).toBe(true);
   });
 
   it("preserves the existing empty-menu behavior when discovery state is absent", () => {

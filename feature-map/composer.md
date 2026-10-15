@@ -37,7 +37,10 @@ and steers messages while the agent is busy.
 - `managed-mcp-sign-in`: selecting an unconnected service opens inline sign-in;
   selection and launch wait for success. States: connected, pending, cancelled,
   failed, popup blocked, Databricks workspace prompt, bearer token needed.
-- `slash-menu`: typing `/` opens commands and skills with keyboard navigation.
+- `slash-menu`: typing `/` (`$` for Codex) opens commands and skills with keyboard
+  navigation. States: loading, error/retry, unavailable while disconnected, and an
+  incomplete catalog — a failed `codex plugin list` is named with Retry while the
+  skills that were read stay listed, instead of "No skills available".
 - `new-command`: `/new` opens a blank new-session composer in the same project;
   working-directory selection follows the project's defaults, not the old session.
 - `attachments`: attach button, paste, and drop onto the transcript; chips can
@@ -244,7 +247,9 @@ Other connection providers alone do not enable the managed MCP picker.
   covers deleted projects with dangling session membership.
   No running agent is needed.
 - **`slash-menu`:**
-  `tests/browser_ui/chat/test_slash_menu.py::test_slash_menu_tracks_real_focus_and_wrapping_keyboard_navigation`
+  `tests/browser_ui/chat/test_slash_menu.py::test_slash_menu_tracks_real_focus_and_wrapping_keyboard_navigation`;
+  incomplete catalog:
+  `tests/e2e_ui/chat/test_codex_skills_menu_inventory_failure.py::test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog`
 - **`attachments`:**
   `tests/browser_ui/chat/test_composer_attachments.py::test_attach_supported_files_and_remove`,
   `tests/browser_ui/chat/test_composer_attachments.py::test_file_dropped_on_the_transcript_attaches`,
