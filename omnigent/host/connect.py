@@ -2557,7 +2557,8 @@ class HostProcess:
             # A stop may arrive while the marker check runs off-loop.
             return
         # The runner prints its refusal only when giving up for good, so the log
-        # names the cause even while the process is still shutting down.
+        # names the cause even while the process is still shutting down. This row
+        # is best-effort; the exit watcher's runner_died row is the authoritative one.
         tail = await asyncio.to_thread(_read_log_tail, handle.log_path)
         refusal = runner_tunnel_refusal(tail)
         if refusal is not None:

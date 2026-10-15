@@ -256,9 +256,7 @@ class RunnerExitReports:
         :param runner_id: Runner whose lifetime evidence is needed.
         :returns: ``True`` only for a report with affirmative connection evidence.
         """
-        with self._lock:
-            report = self._reports.get(runner_id)
-        return report is not None and report.had_connected is True
+        return self.had_connected(runner_id) is True
 
     def had_connected(self, runner_id: str) -> bool | None:
         """Return the host's connection evidence from this runner's exit report.

@@ -1791,12 +1791,18 @@ def _runner_exited_app(db_uri: str, tmp_path: Path) -> tuple[FastAPI, SqlAlchemy
 
 
 async def _report_runner_exited(
-    app: FastAPI, runner_id: str, *, had_connected: bool | None = None
+    app: FastAPI,
+    runner_id: str,
+    *,
+    had_connected: bool | None = None,
+    error: str = "exited with code 1",
 ) -> ApplicationCommunicator:
     """Connect a host to ``app`` and send a ``host.runner_exited`` frame.
 
     :param app: The full server app.
     :param runner_id: Runner the host reports dead.
+    :param had_connected: Connect-marker evidence to put on the frame, if any.
+    :param error: The host-composed exit error carried by the frame.
     :returns: The live tunnel communicator; keep it referenced while asserting.
     """
     from omnigent.host.frames import HostRunnerExitedFrame
@@ -1806,9 +1812,7 @@ async def _report_runner_exited(
     accepted = await comm.receive_output(timeout=5.0)
     assert accepted["type"] == "websocket.accept", f"tunnel refused: {accepted!r}"
     await comm.send_input({"type": "websocket.receive", "text": _make_hello()})
-    report = json.loads(
-        encode_host_frame(HostRunnerExitedFrame(runner_id=runner_id, error="exited with code 1"))
-    )
+    report = json.loads(encode_host_frame(HostRunnerExitedFrame(runner_id=runner_id, error=error)))
     if had_connected is not None:
         report["had_connected"] = had_connected
     await comm.send_input({"type": "websocket.receive", "text": json.dumps(report)})
@@ -2002,6 +2006,53 @@ async def test_runner_exited_after_connect_keeps_idle_session_idle(
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "idle"
     assert response.json()["last_task_error"] is None
+
+
+_REFUSAL_REPORT = (
+    "runner tunnel rejected by server (HTTP 401 persisted across 3 attempts); "
+    "run `omnigent login https://ws.example.com` to re-authenticate\n"
+    "runner process exited with code 1 (log on host: ~/.omnigent/logs/runner/r.log)"
+)
+
+
+@pytest.mark.parametrize(
+    ("had_connected", "expected_phase"),
+    [(False, "runner_launch"), (None, "runner_launch"), (True, "unknown")],
+)
+async def test_runner_exited_refusal_row_follows_host_connect_evidence(
+    db_uri: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    had_connected: bool | None,
+    expected_phase: str,
+) -> None:
+    """The server's ``runner_exited`` row takes its phase from the host's evidence.
+
+    A refused runner is a configuration failure on every path; only a runner
+    the host saw connect keeps the phase unknown, as on the host's own row.
+    """
+    app, conv_store = _runner_exited_app(db_uri, tmp_path)
+    conv = conv_store.create_conversation(agent_id=None, runner_id="runner_refused")
+    caplog.set_level("WARNING", logger="omnigent")
+
+    _comm = await _report_runner_exited(
+        app, "runner_refused", had_connected=had_connected, error=_REFUSAL_REPORT
+    )
+
+    def _rows() -> list[logging.LogRecord]:
+        return [
+            r
+            for r in caplog.records
+            if getattr(r, "event_name", None) == "runner_exited"
+            and getattr(r, "session_id", None) == conv.id
+        ]
+
+    async with asyncio.timeout(5.0):
+        while not _rows():
+            await asyncio.sleep(0.01)
+    row = _rows()[0]
+    assert row.attributes["error_category"] == "config"
+    assert row.attributes["error_phase"] == expected_phase
 
 
 @pytest.mark.parametrize("had_connected", [None, False])

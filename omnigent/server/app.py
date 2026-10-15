@@ -3688,14 +3688,12 @@ def create_app(
         _cancel_disconnect_grace(runner_id)
         # Host connection evidence survives tunnel moves between replicas. Older
         # hosts fall back to this replica's observed liveness.
+        # Attribution uses only the host's own evidence: a liveness stamp can be
+        # left behind by an earlier runner with the same token-bound id.
         had_connected = runner_exit_reports.had_connected(runner_id)
         runner_ran = (
             had_connected is True or session_live_state.last_liveness_stamp(runner_id) is not None
         )
-        # Liveness only fills in missing evidence: a stale stamp from an earlier
-        # runner with the same id must not override a definite never-connected.
-        if had_connected is None and runner_ran:
-            had_connected = True
         try:
             affected = await asyncio.to_thread(
                 conversation_store.list_conversations_by_runner_id, runner_id

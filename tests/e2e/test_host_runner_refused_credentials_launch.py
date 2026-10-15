@@ -270,15 +270,6 @@ def _register_agent(client: httpx.Client) -> str:
     return str(response.json()["agent_id"])
 
 
-def _host_is_online(client: httpx.Client, host_id: str) -> bool:
-    response = client.get("/v1/hosts", timeout=10.0)
-    response.raise_for_status()
-    return any(
-        row.get("host_id") == host_id and row.get("status") == "online"
-        for row in response.json().get("hosts", [])
-    )
-
-
 def _wait_for_session_failure(
     client: httpx.Client, session_id: str, *, timeout: float
 ) -> dict[str, Any]:
@@ -368,7 +359,8 @@ def refused_launch(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[st
         ) as (front_door, host, _),
     ):
         front_door.revoke(_STALE_BEARER)
-        assert _host_is_online(client, host.host_id), "host tunnel should survive revocation"
+        # The established tunnel must survive the revocation; poll briefly for CI jitter.
+        host.wait_online(client, timeout=10, poll_interval=0.25)
 
         agent_id = _register_agent(client)
         workspace = tmp_path / "project"
