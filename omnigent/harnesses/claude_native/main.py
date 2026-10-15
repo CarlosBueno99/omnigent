@@ -1610,6 +1610,9 @@ def run_claude_native(
         the pass-through args: a trailing variadic value flag (e.g.
         ``--mcp-config <configs...>``) would consume a trailing
         positional as another value. ``None`` starts the TUI empty.
+        Refused together with a resume on the remote path, where the
+        prompt could only travel as a persisted launch arg that every
+        later relaunch of the pane would replay.
     :param command: Executable to run in the terminal resource,
         e.g. ``"claude"``. Kept off the public CLI surface so v0
         always exposes Claude Code, while tests can supply a fake
@@ -1627,6 +1630,16 @@ def run_claude_native(
     claude_args = _normalize_extra_args(
         extra_args=extra_args, legacy_args=claude_args, legacy_param="claude_args"
     )
+    if (
+        server is not None
+        and prompt
+        and prompt.strip()
+        and (session_id is not None or resume_picker)
+    ):
+        raise click.UsageError(
+            "-p/--prompt gives a new session its first message, so it cannot be combined "
+            "with --resume or --continue. Resume without -p and type the message in Claude."
+        )
     startup_profiler = startup_profiler or StartupProfiler.from_env(
         name="omnigent claude",
         env_var=_CLAUDE_STARTUP_PROFILE_ENV_VAR,

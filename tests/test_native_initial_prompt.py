@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import click
 import pytest
 
 from omnigent.harnesses.claude_native import main as claude_native
@@ -118,6 +119,42 @@ def test_local_launch_path_also_receives_the_prompt(monkeypatch: pytest.MonkeyPa
     captured = _capture_local(monkeypatch)
 
     claude_native.run_claude_native(server=None, session_id=None, prompt="hello")
+
+    assert captured["claude_args"] == ("hello",)
+
+
+@pytest.mark.parametrize(
+    ("session_id", "resume_picker"),
+    [("conv_abc123", False), (None, True)],
+    ids=["resume-id", "resume-picker"],
+)
+def test_prompt_is_refused_with_a_remote_resume(
+    monkeypatch: pytest.MonkeyPatch, session_id: str | None, resume_picker: bool
+) -> None:
+    """A resume on the remote path refuses a prompt instead of persisting it.
+
+    The daemon-launched runner can only read the prompt from the session's
+    stored launch args, and every later relaunch of the pane would replay it
+    into the resumed conversation.
+    """
+    captured = _capture_remote(monkeypatch)
+
+    with pytest.raises(click.UsageError, match="cannot be combined with --resume"):
+        claude_native.run_claude_native(
+            server="https://example.com/",
+            session_id=session_id,
+            resume_picker=resume_picker,
+            prompt="hello",
+        )
+
+    assert captured == {}
+
+
+def test_local_resume_still_forwards_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The local path hands the prompt to one launch through argv, so a resume keeps it."""
+    captured = _capture_local(monkeypatch)
+
+    claude_native.run_claude_native(server=None, session_id="conv_abc123", prompt="hello")
 
     assert captured["claude_args"] == ("hello",)
 

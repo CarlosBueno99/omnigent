@@ -1172,6 +1172,92 @@ async def test_auto_create_claude_terminal_passes_session_effort(
 
 
 @pytest.mark.asyncio
+async def test_auto_create_claude_terminal_cold_resume_drops_persisted_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A pane relaunch that cold-resumes Claude does not replay the stored ``-p`` prompt.
+
+    ``omni claude -p`` persists the prompt as the leading ``terminal_launch_args``
+    entry so the first launch submits it. When the idle reaper or a lost pane
+    forces a relaunch, the runner resumes the captured Claude session: passing
+    the prompt again would submit that first turn a second time, while the
+    other stored flags must still apply.
+
+    :param tmp_path: Pytest-provided temporary directory.
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(workspace))
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config-home"))
+    monkeypatch.delenv("OMNIGENT_CLAUDE_PATH", raising=False)
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.forwarder.supervise_forwarder",
+        _no_op_forwarder,
+    )
+    claude_session_id = "02857840-6362-408f-b41f-309e396ed7c6"
+    transcript = tmp_path / f"{claude_session_id}.jsonl"
+    transcript.write_text('{"type": "user"}\n', encoding="utf-8")
+    synthesized: dict[str, Any] = {}
+
+    async def fake_resume_transcript(client: Any, **kwargs: Any) -> Path:
+        del client
+        synthesized.update(kwargs)
+        return transcript
+
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.main._ensure_local_claude_resume_transcript",
+        fake_resume_transcript,
+    )
+
+    def _handle_request(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("envelope terminal startup made a legacy HTTP callback")
+
+    fake_client = httpx.AsyncClient(
+        base_url="http://test-server",
+        transport=httpx.MockTransport(_handle_request),
+    )
+    captured: dict[str, Any] = {}
+    session_id = "4c1f0d2e9b8a7c6d5e4f3a2b1c0d9e8f"
+    session_init = RunnerSessionInitEnvelope.model_validate(
+        {
+            "protocol_version": 2,
+            "server_version": "0.6.0.dev0",
+            "session_id": session_id,
+            "agent_id": "agent",
+            "snapshot": {
+                "created_at": 10,
+                "updated_at": 11,
+                "workspace": str(workspace),
+                "terminal_launch_args": ["review the last commit", "--verbose"],
+                "external_session_id": claude_session_id,
+                "labels": {},
+            },
+        }
+    )
+
+    await _auto_create_claude_terminal(
+        session_id,
+        _RecordingClaudeRegistry(captured),
+        lambda _sid, _evt: None,
+        server_client=fake_client,
+        session_init=session_init,
+    )
+    await fake_client.aclose()
+
+    args = list(captured["spec"].args)
+    assert synthesized["external_session_id"] == claude_session_id
+    assert args[args.index("--resume") + 1] == claude_session_id
+    assert "--verbose" in args
+    assert "review the last commit" not in args
+
+
+@pytest.mark.asyncio
 async def test_auto_create_claude_terminal_rejects_missing_recorded_workspace_before_setup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
