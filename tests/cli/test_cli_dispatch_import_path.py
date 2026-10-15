@@ -68,16 +68,14 @@ def _isolated_state(root: Path) -> dict[str, str]:
     return {key: str(path) for key, path in state.items()}
 
 
-def _isolated_env(root: Path) -> dict[str, str]:
-    """Isolate CLI state and credentials; use this checkout as the runtime."""
+def _isolated_env(root: Path, *extra_pythonpath: Path) -> dict[str, str]:
+    """Isolate CLI state and credentials; PYTHONPATH is this checkout plus *extra_pythonpath*."""
     env = dict(os.environ)
     for key in _ENV_TO_CLEAR:
         env.pop(key, None)
-    # Skip empty entries: an empty PYTHONPATH entry puts the cwd on sys.path at startup.
-    pythonpath = (str(_REPO_ROOT), env.get("PYTHONPATH", ""))
     env.update(
         _isolated_state(root),
-        PYTHONPATH=os.pathsep.join(entry for entry in pythonpath if entry),
+        PYTHONPATH=os.pathsep.join(str(path) for path in (_REPO_ROOT, *extra_pythonpath)),
     )
     return env
 
@@ -134,7 +132,15 @@ def _read_marker(marker: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in lines if line.strip()]
 
 
-@pytest.mark.parametrize("entry", ["console_script", "module", "module_without_safe_path"])
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "console_script",
+        "module",
+        "module_without_safe_path",
+        "module_with_workspace_on_pythonpath",
+    ],
+)
 def test_cli_dispatch_ignores_workspace_shadow_of_runtime_dependency(
     tmp_path: Path, entry: str
 ) -> None:
@@ -158,6 +164,9 @@ def test_cli_dispatch_ignores_workspace_shadow_of_runtime_dependency(
         f"`diagnose` no longer imports {_SHADOWED_DEPENDENCY!r} after dispatch; "
         "pick another dependency it imports lazily so this test stays meaningful."
     )
+    if entry == "module_with_workspace_on_pythonpath":
+        # PYTHONPATH names the launch directory too, so it starts on sys.path twice.
+        env = _isolated_env(tmp_path, workspace)
     shadowed = _run_diagnose(launcher, cwd=workspace, env=env)
     workspace_imports = _read_marker(marker)
     assert (
@@ -194,11 +203,11 @@ def test_importing_the_cli_does_not_preload_the_shadowed_dependency(tmp_path: Pa
     )
 
 
-@pytest.mark.parametrize("workspace_first", [False, True])
+@pytest.mark.parametrize("already_present", [False, True])
 def test_console_entry_puts_workspace_last(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workspace_first: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, already_present: bool
 ) -> None:
-    """``main()`` leaves the launch directory behind every other entry, adding or moving it."""
+    """``main()`` leaves a single launch-directory entry behind every other entry."""
     from omnigent.cli import main
 
     for key in _ENV_TO_CLEAR:
@@ -207,7 +216,8 @@ def test_console_entry_puts_workspace_last(
         monkeypatch.setenv(key, value)
     monkeypatch.chdir(tmp_path)
     others = [entry for entry in sys.path if entry != str(tmp_path)]
-    monkeypatch.setattr(sys, "path", [str(tmp_path), *others] if workspace_first else list(others))
+    startup = [str(tmp_path), *others, str(tmp_path)] if already_present else list(others)
+    monkeypatch.setattr(sys, "path", startup)
     monkeypatch.setattr(sys, "argv", ["omnigent", "--version"])
 
     with pytest.raises(SystemExit) as exc_info:

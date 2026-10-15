@@ -2129,8 +2129,7 @@ def main() -> None:
     # spec-declared local tools living in the workspace still import without
     # shadowing the installed runtime or its dependencies.
     cwd = os.getcwd()
-    if cwd in sys.path:
-        sys.path.remove(cwd)
+    sys.path[:] = [entry for entry in sys.path if entry != cwd]
     sys.path.append(cwd)
 
     configure_process_logging("runner", force=True)

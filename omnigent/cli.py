@@ -2271,8 +2271,7 @@ def main() -> None:
     _enforce_wrapper_guard()
 
     cwd = os.getcwd()
-    if cwd in sys.path:
-        sys.path.remove(cwd)
+    sys.path[:] = [entry for entry in sys.path if entry != cwd]
     sys.path.append(cwd)
 
     # Legacy-codepage stdio (Windows ANSI, C locale, PYTHONIOENCODING)
@@ -14032,7 +14031,7 @@ _register_native_commands(cli)
 if __name__ == "__main__":
     # Omnigent is already loaded from the selected installation. Put the
     # workspace path last for local tools, matching the console entry point.
-    if (_cwd := os.getcwd()) in sys.path:
-        sys.path.remove(_cwd)
+    _cwd = os.getcwd()
+    sys.path[:] = [_path for _path in sys.path if _path != _cwd]
     sys.path.append(_cwd)
     cli()

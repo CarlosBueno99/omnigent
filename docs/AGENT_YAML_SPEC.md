@@ -689,7 +689,11 @@ first: a project package whose top-level name collides with an installed package
 (for example a project `agents/` next to the installed `agents` distribution) is
 not imported in its place, and its callables fail to resolve until the project
 package is renamed. Other `PYTHONPATH` entries keep their usual position ahead of
-installed packages.
+installed packages. Dependencies that omnigent imports while starting, before it
+reorders the path (for example `click`), still follow the interpreter's original
+order: a plain `python -m omnigent.cli` run from a project that shadows one of
+them is not protected, while the `omnigent` console script and the `-P` launches
+omnigent uses for its own processes are.
 
 ### Linux desktop keyrings
 

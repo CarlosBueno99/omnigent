@@ -2881,11 +2881,11 @@ def test_main_configures_runner_process_logging(
     assert captured == {"destination": "runner", "force": True}
 
 
-@pytest.mark.parametrize("workspace_first", [False, True])
+@pytest.mark.parametrize("already_present", [False, True])
 def test_main_makes_the_workspace_importable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    workspace_first: bool,
+    already_present: bool,
 ) -> None:
     """``main`` puts the workspace last on ``sys.path`` for local tools.
 
@@ -2911,7 +2911,8 @@ def test_main_makes_the_workspace_importable(
     )
     monkeypatch.chdir(tmp_path)
     others = [p for p in sys.path if p != str(tmp_path)]
-    monkeypatch.setattr(sys, "path", [str(tmp_path), *others] if workspace_first else list(others))
+    startup = [str(tmp_path), *others, str(tmp_path)] if already_present else list(others)
+    monkeypatch.setattr(sys, "path", startup)
 
     main()
 
