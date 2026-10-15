@@ -630,14 +630,20 @@ def databricks_pairing_trusted(server_url: str, workspace_host: str) -> bool:
         ``"https://example.databricks.com"``.
     :returns: ``True`` when no consent question is needed before pairing.
     """
+    default_ports = {"https": 443, "http": 80}
     server = urllib.parse.urlsplit(server_url)
     workspace = urllib.parse.urlsplit(workspace_host)
-    same_origin = (server.scheme, server.hostname, server.port) == (
+    same_origin = (
+        server.scheme,
+        server.hostname,
+        server.port or default_ports.get(server.scheme),
+    ) == (
         workspace.scheme,
         workspace.hostname,
-        workspace.port,
+        workspace.port or default_ports.get(workspace.scheme),
     )
-    return same_origin or load_databricks_workspace_host(server_url) == workspace_host
+    # The record is stored without a trailing slash; compare like for like.
+    return same_origin or load_databricks_workspace_host(server_url) == workspace_host.rstrip("/")
 
 
 def databricks_pairing_question(server_url: str, workspace_host: str) -> str:

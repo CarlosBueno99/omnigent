@@ -567,9 +567,18 @@ def _sandbox_login_supports_yes(launcher: SandboxLauncher, sandbox_id: str) -> b
 
     ``omnigent sandbox auth`` reuses whatever CLI the sandbox already has, so
     a sandbox provisioned before the flag existed must keep the legacy command.
+    A probe that fails outright is reported, not guessed at: a current CLI
+    mistaken for a legacy one would block on its own question in the PTY.
     """
     result = launcher.run(sandbox_id, "omnigent login --help", check=False)
-    return result.returncode == 0 and "--yes" in result.stdout
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise click.ClickException(
+            f"Could not probe the sandbox CLI on '{sandbox_id}' "
+            f"(`omnigent login --help` exited {result.returncode}): {detail}"
+        )
+    help_text = result.stdout + result.stderr
+    return re.search(r"^\s+--yes\b", help_text, re.MULTILINE) is not None
 
 
 def _confirm_sandbox_workspace_pairing(server_url: str, workspace_host: str, display: str) -> None:

@@ -127,6 +127,7 @@ class _FakeLauncher(SandboxLauncher):
         login_returncode: int = 0,
         exec_foreground_returncode: int = 0,
         login_help: str = _LOGIN_HELP_WITH_YES,
+        login_help_returncode: int = 0,
     ) -> None:
         """
         :param login_lines: Lines the fake login process streams.
@@ -134,11 +135,13 @@ class _FakeLauncher(SandboxLauncher):
         :param exec_foreground_returncode: Exit code of
             ``exec_foreground``.
         :param login_help: What the sandbox's ``omnigent login --help`` prints.
+        :param login_help_returncode: Exit code of that probe.
         """
         self._login_lines = list(login_lines or [])
         self._login_returncode = login_returncode
         self._exec_foreground_returncode = exec_foreground_returncode
         self._login_help = login_help
+        self._login_help_returncode = login_help_returncode
         self.log: list[str] = []
         self.run_commands: list[str] = []
         self.puts: list[_PutCall] = []
@@ -168,8 +171,11 @@ class _FakeLauncher(SandboxLauncher):
         """Record the remote command and report success."""
         self.log.append(f"run:{command}")
         self.run_commands.append(command)
-        stdout = self._login_help if command == _LOGIN_HELP_COMMAND else ""
-        return RemoteCommandResult(returncode=0, stdout=stdout, stderr="")
+        if command == _LOGIN_HELP_COMMAND:
+            return RemoteCommandResult(
+                returncode=self._login_help_returncode, stdout=self._login_help, stderr=""
+            )
+        return RemoteCommandResult(returncode=0, stdout="", stderr="")
 
     def put(self, sandbox_id: str, local_path: Path, remote_path: str) -> None:
         """Record the file upload."""
@@ -576,6 +582,30 @@ def test_login_keeps_legacy_command_for_older_sandbox_cli(
     assert launcher.stream_calls == [
         _StreamCall(command="omnigent login https://app.example.com", pty=True)
     ]
+
+
+def test_login_fails_fast_when_sandbox_cli_probe_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken ``--yes`` probe is reported; guessing "legacy" could hang the login."""
+    launcher = _FakeLauncher(
+        login_lines=["Logged in.\r\n"],
+        login_help="omnigent: command not found",
+        login_help_returncode=127,
+    )
+    _patch_saved_local_pairing(monkeypatch)
+
+    with pytest.raises(click.ClickException) as exc:
+        login_app_oauth_in_sandbox(
+            launcher,
+            "sb-1",
+            server_url="https://app.example.com",
+            workspace=DerivedWorkspace(host="https://ws.example.com", workspace_id="123456"),
+        )
+
+    assert "omnigent login --help" in str(exc.value) and "127" in str(exc.value)
+    # No login was spawned against an unknown CLI.
+    assert launcher.stream_calls == []
 
 
 def test_login_requires_prior_local_login_when_unattended(
