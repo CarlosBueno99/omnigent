@@ -21,10 +21,11 @@ import sys
 import time
 import urllib.parse
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, MutableMapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
+from omnigent.util.http_retry import jittered_retry_delay
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
     from omnigent.harnesses.opencode_native.app_server import OpenCodeNativeServer
     from omnigent.harnesses.opencode_native.client import OpenCodeClient, OpenCodeSession
     from omnigent.harnesses.opencode_native.forwarder import OpenCodeNativeForwarder
-    from omnigent.inner.datamodel import OSEnvSpec
+    from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
     from omnigent.inner.terminal import TerminalInstance
     from omnigent.runner.subagent_routing import SubagentRouter
     from omnigent.runner.turn_routing import TurnRouter
@@ -64,6 +65,8 @@ from omnigent.errors import (
     OmnigentError,
 )
 from omnigent.harness_plugins import native_provider_for_key
+from omnigent.host.harness_startup import env_wrapper_chdir, env_wrapper_environment
+from omnigent.inner.terminal import build_terminal_os_env_spec, terminal_pane_environment
 from omnigent.models.model_override import validate_model_override
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
@@ -979,6 +982,7 @@ _LAUNCH_CONFIG_FETCH_TIMEOUT_S = 20.0
 _LAUNCH_CONFIG_FETCH_ATTEMPTS = 3
 _LAUNCH_CONFIG_FETCH_BACKOFF_BASE_S = 0.5
 _LAUNCH_CONFIG_FETCH_BACKOFF_CAP_S = 4.0
+_LAUNCH_CONFIG_RETRY_MAX_DELAY_S = 10.0
 _LAUNCH_CONFIG_RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
 
 
@@ -1030,7 +1034,8 @@ async def _fetch_native_launch_snapshot(
     Reads ``GET /v1/sessions/<id>`` and returns the parsed snapshot object.
     A transient runner->server condition (a read/connect timeout, or a
     ``429``/``502``/``503``/``504``) is retried with bounded exponential
-    backoff so one blip under load does not tear through native terminal
+    backoff and jitter, honoring bounded ``Retry-After`` hints, so one blip
+    under load does not tear through native terminal
     launch, ensure, and the next turn. A persistent transient failure, a 5xx,
     or a malformed body raises a server-attributed ``OmnigentError`` so
     startup-reliability signals count it as a platform fault.
@@ -1054,6 +1059,7 @@ async def _fetch_native_launch_snapshot(
     resp: httpx.Response | None = None
     for attempt in range(1, _LAUNCH_CONFIG_FETCH_ATTEMPTS + 1):
         last_attempt = attempt == _LAUNCH_CONFIG_FETCH_ATTEMPTS
+        resp = None
         try:
             resp = await server_client.get(
                 path, params=_SESSION_METADATA_PARAMS, timeout=_LAUNCH_CONFIG_FETCH_TIMEOUT_S
@@ -1071,16 +1077,7 @@ async def _fetch_native_launch_snapshot(
                         phase=ErrorPhase.HARNESS_SETUP,
                     ) from exc
                 raise RuntimeError(message) from exc
-            _logger.warning(
-                "Transient %s launch-config fetch error (attempt %d/%d) for "
-                "session=%s; retrying: %s",
-                runtime_label,
-                attempt,
-                _LAUNCH_CONFIG_FETCH_ATTEMPTS,
-                session_id,
-                type(exc).__name__,
-                extra={"session_id": session_id},
-            )
+            retry_reason = type(exc).__name__
         else:
             if resp.status_code == 200:
                 break
@@ -1097,21 +1094,35 @@ async def _fetch_native_launch_snapshot(
                         phase=ErrorPhase.HARNESS_SETUP,
                     )
                 raise RuntimeError(message)
-            _logger.warning(
-                "Transient %s launch-config fetch status %d (attempt %d/%d) for "
-                "session=%s; retrying",
-                runtime_label,
-                resp.status_code,
-                attempt,
-                _LAUNCH_CONFIG_FETCH_ATTEMPTS,
-                session_id,
-                extra={"session_id": session_id},
-            )
+            retry_reason = f"HTTP {resp.status_code}"
         backoff = min(
             _LAUNCH_CONFIG_FETCH_BACKOFF_BASE_S * (2 ** (attempt - 1)),
             _LAUNCH_CONFIG_FETCH_BACKOFF_CAP_S,
         )
-        await _launch_config_retry_sleep(backoff)
+        delay = jittered_retry_delay(
+            resp, backoff=backoff, max_delay=_LAUNCH_CONFIG_RETRY_MAX_DELAY_S
+        )
+        if delay is None:
+            assert resp is not None
+            raise OmnigentError(
+                f"Could not fetch {runtime_label} launch config for {session_id!r}: "
+                f"GET /v1/sessions returned {resp.status_code}.",
+                category=ErrorCategory.SERVER,
+                impact=ErrorImpact.BLOCKING,
+                phase=ErrorPhase.HARNESS_SETUP,
+            )
+        _logger.warning(
+            "Transient %s launch-config fetch failure: %s (attempt %d/%d) for "
+            "session=%s; retrying in %.2fs",
+            runtime_label,
+            retry_reason,
+            attempt,
+            _LAUNCH_CONFIG_FETCH_ATTEMPTS,
+            session_id,
+            delay,
+            extra={"session_id": session_id},
+        )
+        await _launch_config_retry_sleep(delay)
     assert resp is not None  # loop either broke on 200 or raised
     try:
         snapshot = resp.json()
@@ -7506,6 +7517,86 @@ def _claude_terminal_env_unset(
     return env_unset
 
 
+def _claude_terminal_launch_cwd(spec: TerminalEnvSpec, parent_os_env: OSEnvSpec | None) -> Path:
+    """
+    Return the directory the native Claude terminal pane starts in.
+
+    Resolves the spec's os_env the same way terminal creation does for this
+    launch, which passes no cwd or sandbox override and does not fork, then
+    applies an ``env -C``/``--chdir`` wrapper the way ``chdir(2)`` does.
+
+    :param spec: The Claude terminal launch spec.
+    :param parent_os_env: The agent's os_env the terminal inherits from, or
+        ``None``.
+    :returns: The resolved Claude cwd, e.g. ``Path("/home/user/repo")``.
+    :raises OmnigentError: If an ``env --chdir`` target is not an existing
+        directory the runner can enter; the real ``env`` would refuse to
+        launch, and seeding must not create it.
+    """
+    effective = build_terminal_os_env_spec(spec, parent_os_env_spec=parent_os_env)
+    cwd = Path(effective.cwd or os.getcwd()).resolve()
+    chdir = env_wrapper_chdir(
+        spec.command or "", list(spec.args), _claude_terminal_pre_wrapper_env(spec)
+    )
+    if chdir is None:
+        return cwd
+    target = (cwd / chdir).resolve()
+    # ``env`` refuses an empty, missing, or unsearchable target, so the launch would fail.
+    if not chdir or not target.is_dir() or not os.access(target, os.X_OK):
+        raise OmnigentError(
+            "The Claude terminal's env --chdir directory does not exist or cannot be entered.",
+            code=ErrorCode.WORKSPACE_MISSING,
+        )
+    return target
+
+
+def _claude_terminal_pre_wrapper_env(spec: TerminalEnvSpec) -> dict[str, str]:
+    """
+    Return the environment a Claude launch command starts with.
+
+    The pane environment the terminal builds (runner environment when
+    inherited, the spec's overrides and removals, runner-auth secrets removed,
+    and a UTF-8 locale default) before an ``env`` wrapper applies its own
+    changes; ``env -S`` expands ``${NAME}`` from it.
+
+    :param spec: The Claude terminal launch spec.
+    :returns: The pre-wrapper environment, e.g. ``{"HOME": "/home/user"}``.
+    """
+    return terminal_pane_environment(
+        inherit_env=spec.inherit_env, env=spec.env, env_unset=spec.env_unset
+    )
+
+
+def _claude_terminal_launch_env(spec: TerminalEnvSpec) -> dict[str, str]:
+    """
+    Return the environment the native Claude terminal process starts with.
+
+    Mirrors the pane launch: the runner environment (when inherited), the
+    spec's overrides and removals, then the options and assignments of an
+    ``env`` wrapper command. Trust seeding uses it so the runner writes the
+    global config file this Claude process will read.
+
+    :param spec: The Claude terminal launch spec, e.g. one with
+        ``command="env"`` and ``args=["CLAUDE_CONFIG_DIR=/srv/claude", "claude"]``.
+    :returns: The effective environment, e.g.
+        ``{"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}``.
+    """
+    env = _claude_terminal_pre_wrapper_env(spec)
+    wrapper = env_wrapper_environment(spec.command or "", list(spec.args), env)
+    if wrapper is None and Path(spec.command or "").name == "env":
+        _logger.info(
+            "Claude terminal env wrapper form is not modeled; trust seeding uses the "
+            "pre-wrapper environment"
+        )
+    if wrapper is not None:
+        if not wrapper.inherit:
+            env = {}
+        for key in wrapper.unset:
+            env.pop(key, None)
+        env.update(wrapper.variables)
+    return env
+
+
 def _publish_terminal_pending(
     publish_event: Callable[[str, _JsonObject], None],
     session_id: str,
@@ -7640,6 +7731,7 @@ def _native_terminal_start_error_payload(
         if isinstance(exc, OmnigentError) and exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES
         else None
     )
+    os_error = _os_error_with_errno(exc)
     extra = debug_event(
         "native_terminal_start_failed",
         session_id=session_id,
@@ -7649,6 +7741,14 @@ def _native_terminal_start_error_payload(
         exception_type=type(exc).__name__,
         exception_cause_type=type(exc.__cause__).__name__ if exc.__cause__ is not None else None,
         cause_code=exc.code if isinstance(exc, OmnigentError) else None,
+        native_launch_os_errno=os_error.errno if os_error is not None else None,
+        native_launch_os_errno_name=errno.errorcode.get(os_error.errno)
+        if os_error is not None and os_error.errno is not None
+        else None,
+        native_launch_winerror=getattr(os_error, "winerror", None),
+        exception_context_type=type(exc.__context__).__name__
+        if exc.__context__ is not None
+        else None,
         # The warning below carries no exc_info for a missing agent, so the
         # sink cannot derive its category.
         error_category=exc.category.value
@@ -7729,6 +7829,9 @@ def _native_terminal_start_error_payload(
         # The raise site composes a client-safe message (versions + upgrade
         # command), so it can be shown verbatim.
         message = str(exc)
+    elif isinstance(exc, OmnigentError) and exc.code == ErrorCode.HARNESS_NOT_CONFIGURED:
+        # Only the person can fix the host's setup, and the message says how.
+        message = exc.message
     elif IS_WINDOWS:
         # Native terminals are tmux/PTY-based and disabled on Windows by design.
         # Give the client an actionable message instead of a log pointer.
@@ -8328,13 +8431,6 @@ async def _auto_create_claude_terminal(
         session_id,
         extra={"session_id": session_id},
     )
-    # Pre-accept Claude's first-run trust + onboarding TUI prompts for this
-    # workspace. They have no PermissionRequest hook, so on a host-spawned
-    # (web-UI-driven) session they would hang Claude in its terminal with
-    # nothing shown in the UI. Acute with per-session worktrees,
-    # which launch Claude in a brand-new, untrusted directory.
-    ensure_claude_workspace_trusted(Path(workspace))
-
     from omnigent.runner._entry import _make_auth_token_factory, _RunnerDatabricksAuth
 
     # The Omnigent server URL + auth are needed in two places below: the
@@ -8437,7 +8533,7 @@ async def _auto_create_claude_terminal(
         # copied prefix (no double-render), and placing it in the clone's
         # own project dir means cwd-scoped ``--resume`` finds it in any
         # dir/worktree. Only viable when the source transcript exists on
-        # THIS host (same-host fork — CUJ 1 same-user); else launch fresh.
+        # THIS host; otherwise the stored-item fallback below rebuilds it.
         # See designs/FORK_SESSION_UX.md.
         from omnigent.harnesses.claude_native.main import _clone_claude_transcript
 
@@ -8449,10 +8545,11 @@ async def _auto_create_claude_terminal(
                 target_external_session_id=our_uuid,
                 clone_workspace=_clone_workspace,
             )
-        except Exception:  # noqa: BLE001 — best-effort; launch fresh on failure
+        except Exception:  # noqa: BLE001 — best-effort; fall back to stored items
             _cloned = None
             _logger.warning(
-                "Could not clone source transcript for forked clone %s; launching fresh",
+                "Could not clone source transcript for forked clone %s; "
+                "trying item-history fallback",
                 session_id,
                 exc_info=True,
             )
@@ -8489,21 +8586,15 @@ async def _auto_create_claude_terminal(
                         session_id,
                         exc_info=True,
                     )
-    elif (
+    if (
         server_client is not None
         and fork_carry_history
         and session_external_id is None
-        and fork_source_external_id is None
+        and resume_external_session_id is None
     ):
-        # Forked clone bound to a native target with NO source native
-        # transcript to clone (an SDK or cross-family source): build the clone's
-        # native transcript from its OWN copied Omnigent items under a uuid we
-        # assign, then launch plain ``--resume <our_uuid>``. This reuses the
-        # same server-items→transcript converter the cross-machine cold
-        # resume path uses (``_ensure_local_claude_resume_transcript``), so
-        # the clone opens with the prior conversation (messages + tool
-        # history) as real Claude context. Best-effort: launch fresh on
-        # failure. See designs/FORK_SESSION_UX.md.
+        # A missing local transcript or cross-family source needs the fork's
+        # copied Omnigent items rebuilt into a resumable Claude transcript.
+        # The chosen workspace supplies its project directory and cwd fields.
         from omnigent.harnesses.claude_native.main import _ensure_local_claude_resume_transcript
 
         our_uuid = str(uuid.uuid4())
@@ -8961,6 +9052,37 @@ async def _auto_create_claude_terminal(
         # the watcher reports the exit deterministically via `#{pane_dead}`.
         keep_alive_after_exit=True,
     )
+    # Seed trust and onboarding in the config selected by the terminal's launch environment.
+    try:
+        ensure_claude_workspace_trusted(
+            _claude_terminal_launch_cwd(env_spec, agent_os_env),
+            env=_claude_terminal_launch_env(env_spec),
+        )
+    except BaseException as seed_error:
+        # No forwarder owns the routers yet, so release the ones this launch started.
+        # A ``None`` handle would shut down whichever router is registered now.
+        cleanups: list[Coroutine[Any, Any, None]] = []
+        if _subagent_router is not None:
+            cleanups.append(_shutdown_session_router_async(session_id, _subagent_router))
+        if _claude_turn_router is not None:
+            cleanups.append(_shutdown_session_turn_router_async(session_id, _claude_turn_router))
+        cancelled: asyncio.CancelledError | None = None
+        for cleanup in cleanups:
+            try:
+                await cleanup
+            except asyncio.CancelledError as exc:
+                # Release the other router before honoring the cancellation.
+                cancelled = exc
+            except Exception:  # noqa: BLE001 - keep the seeding failure as the error.
+                _logger.warning(
+                    "Router cleanup failed after Claude trust seeding failed: session=%s",
+                    session_id,
+                    exc_info=True,
+                    extra={"session_id": session_id},
+                )
+        if cancelled is not None:
+            raise cancelled from seed_error
+        raise
     _logger.info(
         "Claude terminal tmux launch requested: session=%s command=%s args_count=%d "
         "env_keys=%s cwd=%s scrollback=%d",
