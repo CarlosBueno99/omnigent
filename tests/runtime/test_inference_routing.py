@@ -339,6 +339,26 @@ def test_pi_picker_rows_resolve_to_their_allowlisted_models(
             assert launch.args[3].removeprefix(f"{launch.args[1]}/") == row["displayName"]
 
 
+def test_pi_bound_selection_prefers_an_exact_allowlisted_literal() -> None:
+    profile = _profile()
+    profile["inference"] = {
+        "harnesses": {
+            "pi-native": {
+                "provider": "bifrost",
+                "default_model": "claude-example",
+                "model_allowlist": ["claude-example", "omnigent/claude-example"],
+            }
+        }
+    }
+    with inference_config_scope(profile):
+        exact = resolve_pi_native_provider(model="omnigent/claude-example")
+        assert exact is not None
+        assert exact.model == "omnigent/claude-example"
+        bare = resolve_pi_native_provider(model="claude-example")
+        assert bare is not None
+        assert bare.model == "claude-example"
+
+
 def test_pi_picker_rows_resolve_without_an_allowlist() -> None:
     from omnigent.harnesses.pi_native.credentials import pi_native_model_options
 
