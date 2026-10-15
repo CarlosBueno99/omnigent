@@ -208,6 +208,7 @@ def test_console_entry_puts_workspace_last(
     monkeypatch.chdir(tmp_path)
     others = [entry for entry in sys.path if entry != str(tmp_path)]
     monkeypatch.setattr(sys, "path", [str(tmp_path), *others] if workspace_first else list(others))
+    monkeypatch.setattr(sys, "argv", ["omnigent", "--version"])
 
     with pytest.raises(SystemExit) as exc_info:
         main()
