@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     from omnigent.spec.types import AgentSpec
 
 from omnigent.cli_invocation import cli_invocation
+from omnigent.debug_logging import debug_event
+from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harnesses.codex_egress import CertificateFailure, detect_certificate_failure
 from omnigent.harnesses.codex_native.bridge import (
     clear_certificate_failure,
@@ -46,6 +48,7 @@ from omnigent.harnesses.codex_native.bridge import (
     record_certificate_failure,
     write_policy_hook_config,
 )
+from omnigent.harnesses.codex_native.diagnostics import collect_codex_startup_diagnostics
 from omnigent.harnesses.codex_native.launch_args import (
     _merge_tables,
     _write_private_config,
@@ -998,6 +1001,14 @@ _CODEX_THREAD_STORE_ERROR = "thread-store internal error"
 #: Substring in codex's ``-32600`` message when a thread's paginated-history
 #: lineage points at a source rollout in the older, non-paginated format.
 _CODEX_PAGINATED_LINEAGE_ERROR = "source rollout is not paginated"
+
+
+def is_server_draining_error(error: CodexAppServerResponseError) -> bool:
+    """Whether Codex explicitly refused this RPC before submitting its input."""
+    return (
+        error.code == _CODEX_INVALID_REQUEST_CODE
+        and error.message == "Server is draining; retry after reconnecting"
+    )
 
 
 def is_unreadable_thread_error(exc: BaseException) -> bool:
@@ -2006,7 +2017,14 @@ class CodexNativeAppServer:
         Start the Codex app-server and wait for the socket.
 
         :returns: None.
+        :raises OmnigentError: ``WORKSPACE_MISSING`` when the session's working
+            directory was removed, e.g. a deleted git worktree.
         """
+        if not self.cwd.is_dir():
+            # Spawning in it would only fail with a bare ENOENT; name the cause.
+            raise OmnigentError(
+                "The session workspace is no longer available.", code=ErrorCode.WORKSPACE_MISSING
+            )
         config_source = _codex_home_config_source_from_env()
         if self.codex_home.resolve() == config_source.resolve():
             raise ValueError(
@@ -2277,9 +2295,28 @@ class CodexNativeAppServer:
                     await startup_client.close()
                 except Exception:  # noqa: BLE001 - a dead control socket cannot undo trust
                     _logger.warning("Could not close Codex startup client", exc_info=True)
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                self._log_startup_failure_snapshot(exc)
             await self.close()
             raise
+
+    def _log_startup_failure_snapshot(self, exc: Exception) -> None:
+        """Record the owned child's state before ``close()`` discards it."""
+        diagnostics: dict[str, object]
+        try:
+            diagnostics = collect_codex_startup_diagnostics(self)
+        except Exception as diagnostics_error:  # noqa: BLE001 - never replace the startup error
+            diagnostics = {"diagnostics_error_type": type(diagnostics_error).__name__}
+        failure_event = debug_event("codex_app_server_start_failed", session_id=self.session_id)
+        failure_event["attributes"] = {
+            "harness": "codex-native",
+            "phase": "app_server_startup",
+            "exception_type": type(exc).__name__,
+            **diagnostics,
+        }
+        with contextlib.suppress(Exception):
+            _logger.warning("Codex app-server startup failed before cleanup", extra=failure_event)
 
     async def _trust_policy_hooks(self, *, client: CodexAppServerClient | None = None) -> None:
         """
@@ -4381,6 +4418,7 @@ async def preload_codex_thread_for_resume(
     terminal_launch_args: Sequence[str] | None = None,
     retain_client: bool = False,
     cwd: Path | None = None,
+    model_provider: str | None = None,
 ) -> CodexAppServerClient | None:
     """
     Load an existing Codex thread into a freshly started app-server.
@@ -4399,6 +4437,8 @@ async def preload_codex_thread_for_resume(
     :param retain_client: Keep the thread subscribed through terminal attachment.
         The caller must pass the returned client to the forwarder and close it.
     :param cwd: Session working directory for resolving additional writable roots.
+    :param model_provider: Launch-selected provider to apply over persisted thread settings.
+        None preserves Codex's default resume behavior.
     :returns: The subscribed client when retained, otherwise None.
     :raises RuntimeError: If the app-server rejects the resume.
     """
@@ -4410,6 +4450,10 @@ async def preload_codex_thread_for_resume(
     try:
         await client.connect()
         params = _codex_resume_permission_params(terminal_launch_args)
+        # Resume otherwise restores the persisted provider even when startup
+        # config and the refreshed rollout name a different one.
+        if model_provider is not None:
+            params["modelProvider"] = model_provider
         args = canonical_codex_launch_args(terminal_launch_args or ())
         additional_roots: list[str] = []
         effective_cwd = cwd or Path.cwd()
