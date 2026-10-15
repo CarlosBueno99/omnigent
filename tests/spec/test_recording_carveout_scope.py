@@ -68,9 +68,11 @@ def test_lane_rules_stop_every_recorded_context_with_the_test_body() -> None:
 
     assert "closes the pytest-playwright context as soon as the test body finishes" in lanes
     assert (
-        "every page or context the test or its fixtures open through `browser.new_page()` / "
-        "`browser.new_context()` (sync or async API) is closed at the same point" in lanes
+        "every page or context opened through `browser.new_page()` / `browser.new_context()` "
+        "(sync or async API) while the test runs" in lanes
     )
+    assert "is closed at the same point" in lanes
+    assert "`record_video_dir=None` is not recording and is left to its owner" in lanes
     assert "Cleanup inside the test body still films" in lanes
     assert (
         "a brightness or colour statistic cannot tell a live pane from the greyed-out overlay"

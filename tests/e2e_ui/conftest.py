@@ -2263,9 +2263,10 @@ def _install_record_video_patches(
     opened: list[tuple[Any, asyncio.AbstractEventLoop | None]],
 ) -> None:
     """Inject ``record_video_dir`` into every page/context a ``Browser`` opens,
-    on both the async and sync Playwright APIs, and register each context in
-    ``opened`` so its recording can be stopped with the test body. A caller
-    that already passes ``record_video_dir`` is left alone."""
+    on both the async and sync Playwright APIs, and register each recording
+    context in ``opened`` so its video can be stopped with the test body. A
+    caller that already passes ``record_video_dir`` is left alone; ``None``
+    opts the context out of recording and of the early close."""
     from playwright.async_api import Browser as _AsyncBrowser
     from playwright.sync_api import Browser as _SyncBrowser
 
@@ -2277,25 +2278,29 @@ def _install_record_video_patches(
     async def _new_page(self: Any, *args: Any, **kwargs: Any) -> Any:
         kwargs.setdefault("record_video_dir", record_dir)
         page = await _orig_new_page(self, *args, **kwargs)
-        opened.append((page.context, asyncio.get_running_loop()))
+        if kwargs["record_video_dir"]:
+            opened.append((page.context, asyncio.get_running_loop()))
         return page
 
     async def _new_context(self: Any, *args: Any, **kwargs: Any) -> Any:
         kwargs.setdefault("record_video_dir", record_dir)
         context = await _orig_new_context(self, *args, **kwargs)
-        opened.append((context, asyncio.get_running_loop()))
+        if kwargs["record_video_dir"]:
+            opened.append((context, asyncio.get_running_loop()))
         return context
 
     def _sync_new_page(self: Any, *args: Any, **kwargs: Any) -> Any:
         kwargs.setdefault("record_video_dir", record_dir)
         page = _orig_sync_new_page(self, *args, **kwargs)
-        opened.append((page.context, None))
+        if kwargs["record_video_dir"]:
+            opened.append((page.context, None))
         return page
 
     def _sync_new_context(self: Any, *args: Any, **kwargs: Any) -> Any:
         kwargs.setdefault("record_video_dir", record_dir)
         context = _orig_sync_new_context(self, *args, **kwargs)
-        opened.append((context, None))
+        if kwargs["record_video_dir"]:
+            opened.append((context, None))
         return context
 
     monkeypatch.setattr(_AsyncBrowser, "new_page", _new_page)
@@ -2366,7 +2371,7 @@ def _close_recorded_context(
             context.close()
         else:
             loop.run_until_complete(context.close())
-    except Error as exc:
+    except (Error, RuntimeError) as exc:
         _warn_recording_not_finalized(item, exc)
 
 

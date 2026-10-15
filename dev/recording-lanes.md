@@ -162,10 +162,14 @@ recording is requested (`OMNIGENT_E2E_RECORD_DIR`, `--video`, or a
 `record_video_dir` in `browser_context_args`), the e2e_ui conftest therefore
 closes the pytest-playwright context as soon as the test body finishes, before
 any fixture teardown runs. With `OMNIGENT_E2E_RECORD_DIR` set, every page or
-context the test or its fixtures open through `browser.new_page()` /
-`browser.new_context()` (sync or async API) is closed at the same point, so a
-driver that forgets to close its own page cannot film teardown either; close it
-yourself when the clip should end earlier. An async-API context is closed on
+context opened through `browser.new_page()` / `browser.new_context()` (sync or
+async API) while the test runs — by its body or its function-scoped fixtures —
+is closed at the same point, so a driver that forgets to close its own page
+cannot film teardown either; close it yourself when the clip should end
+earlier. A context that a session- or module-scoped fixture opened before the
+test is not registered and stays open, and a page opened with
+`record_video_dir=None` is not recording and is left to its owner. An async-API
+context is closed on
 the event loop that opened it, which must still be open and not running when
 the test body ends (a pytest-asyncio test loop is); a context whose loop has
 already closed or is still running is left to its owner, with a pytest
