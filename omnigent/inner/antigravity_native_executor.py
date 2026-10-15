@@ -364,10 +364,9 @@ class AntigravityNativeExecutor(Executor):
         state = await asyncio.to_thread(read_bridge_state, self._bridge_dir)
         if state is None or not _session_is_active(state.session_id, self._request_session_id):
             return False
-        # Release the completion gate now that there is an ACTIVE session to
-        # stop, whether or not agy accepts the cancel below. Setting it before
-        # this guard would poison the next turn's gate when there is nothing to
-        # stop (an interrupt that lands with no live session).
+        # Release the gate only once a session is confirmed active; setting it
+        # before this guard would poison the next turn's gate when there is
+        # nothing to stop (an interrupt that lands with no live session).
         self._interrupted.set()
         cascade_id = state.conversation_id
         # No live cascade exists before agy mints its real id, so never RPC the
@@ -446,11 +445,9 @@ class AntigravityNativeExecutor(Executor):
             self._interrupted.clear()
             yield TurnCancelled()
             return
-        # Reject a watchdog so small the gate could never verify a turn BEFORE
-        # typing anything. The gate must return a safety margin ahead of the
-        # harness idle watchdog, which would otherwise replay run_turn and
-        # re-type the turn; a watchdog at or under that margin leaves no polling
-        # room, so delivering would type work this executor could not confirm.
+        # A watchdog at/under the gate's safety margin leaves no room to confirm
+        # the turn before the harness idle watchdog would replay run_turn and
+        # re-type it, so reject it here, before anything is typed.
         watchdog_s = _harness_idle_watchdog_s()
         if watchdog_s is not None and watchdog_s <= _WATCHDOG_SAFETY_MARGIN_S:
             yield ExecutorError(
@@ -663,9 +660,8 @@ class AntigravityNativeExecutor(Executor):
                     start_index = find_turn_start_index(steps, baseline_step_count=baseline)
                 elif not _still_opens_a_turn(steps, start_index):
                     # The list changed shape under us (see the positional note
-                    # above). Everything after ``start_index`` now describes some
-                    # other turn, so classifying it could report a stale close as
-                    # this turn's completion. Fail loudly instead.
+                    # above): everything after ``start_index`` is another turn now,
+                    # so classifying it could report a stale close. Fail loudly.
                     return _GateResult(
                         completed=False,
                         text=latest_text,
@@ -738,11 +734,9 @@ class AntigravityNativeExecutor(Executor):
                 )
             watchdog_s = _harness_idle_watchdog_s()
             if watchdog_s is not None:
-                # Return a safety margin before the watchdog fires: it would
-                # replay run_turn and re-type the delivered turn (see
-                # _TURN_COMPLETION_TIMEOUT_S). A watchdog at/under the margin is
-                # rejected before delivery (see run_turn), so the floor here only
-                # guards a watchdog lowered after this turn was already typed.
+                # Return before the watchdog replays and re-types the turn (see
+                # _TURN_COMPLETION_TIMEOUT_S). A sub-margin watchdog is rejected
+                # pre-delivery, so this floor only guards one lowered mid-turn.
                 gate_deadline = max(watchdog_s - _WATCHDOG_SAFETY_MARGIN_S, 0.0)
                 if time.monotonic() - turn_started_at >= gate_deadline:
                     return _GateResult(
