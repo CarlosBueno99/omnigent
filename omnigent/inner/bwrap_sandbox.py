@@ -955,7 +955,8 @@ def _ensure_executable_visible(
         roots); descendants need no literal bind.
     :param writable_roots: The subset of *bound_roots* the sandboxed
         process may write to. The agent could retarget a directory-symlink
-        under one of them, so such a link is never followed.
+        stored in one of them, so such a link is never followed, even when
+        it is reached through an alias from a read-only path.
     :returns: Extra bwrap args (possibly empty) to insert before the
         wholesale binds. Never includes a destination already covered by
         :data:`_DEFAULT_RO_DIRS` or by *bound_roots*.
@@ -987,7 +988,8 @@ def _interpreter_chain_binds(
     :param covered_prefixes: Paths whose descendants need no explicit
         bind (already visible inside the sandbox).
     :param writable_prefixes: Covered paths the sandboxed process may
-        write to; directory-symlinks under them are never followed.
+        write to; a directory-symlink stored in one of them is never
+        followed, however it is reached.
     :returns: Extra bwrap args (possibly empty), as ``--ro-bind-try
         <src> <dst>`` triples.
     """
@@ -999,6 +1001,28 @@ def _interpreter_chain_binds(
 
     def _under(path: Path, roots: Sequence[Path]) -> bool:
         return any(_is_within(path, root, resolve=False) for root in roots)
+
+    def _retargetable(path: Path, depth: int = 0) -> bool:
+        """Whether a symlink on the way to *path* is stored in a directory the
+        sandboxed process may write to, letting the agent point it elsewhere.
+        Resolution is replayed component by component so an alias into a
+        write root is caught; unreadable or cyclic chains count as unsafe."""
+        if depth > 40:
+            return True
+        resolved = Path("/")
+        try:
+            for part in path.parts[1:]:
+                entry = resolved / part
+                if entry.is_symlink():
+                    if _under(resolved, writable_prefixes):
+                        return True
+                    link = os.path.join(str(resolved), os.readlink(str(entry)))
+                    if _retargetable(Path(os.path.normpath(link)), depth + 1):
+                        return True
+                resolved = Path(os.path.realpath(str(entry)))
+        except OSError:
+            return True
+        return False
 
     def _emit(src: Path, dst: Path) -> None:
         if dst in seen_dest or dst == dst.parent or src == src.parent:
@@ -1031,7 +1055,7 @@ def _interpreter_chain_binds(
             if (
                 real_dir != literal_dir
                 and _is_venv_dir(real_dir)
-                and not _under(literal_dir, writable_prefixes)
+                and not _retargetable(literal_dir)
             ):
                 _emit(real_dir, real_dir)
                 return

@@ -879,6 +879,12 @@ def _symlinked_venv_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     return checkout, real_venv, checkout / ".venv" / "bin" / "python"
 
 
+def _bind_paths(argv: list[str]) -> list[str]:
+    """Every bind source and destination in a bwrap argv."""
+    flags = {"--bind", "--bind-try", "--ro-bind", "--ro-bind-try"}
+    return [path for i, token in enumerate(argv) if token in flags for path in argv[i + 1 : i + 3]]
+
+
 def _covering_policy(
     tmp_path: Path, checkout: Path, covering_bind: str
 ) -> tuple[Path, SandboxPolicy]:
@@ -959,12 +965,45 @@ def test_wrap_launcher_argv_does_not_mount_unsafe_symlink_targets(
 
     argv = _make_backend().wrap_launcher_argv([str(interp), "-c", "pass"], policy, checkout)
 
-    exposed = [
-        argv[i + 2]
-        for i in range(len(argv) - 2)
-        if argv[i] == "--ro-bind-try" and Path(argv[i + 2]).is_relative_to(target)
-    ]
+    exposed = [path for path in _bind_paths(argv) if Path(path).is_relative_to(target)]
     assert exposed == [], f"symlink target {str(target)!r} must not be mounted: {exposed}"
+
+
+def test_wrap_launcher_argv_does_not_follow_venv_through_writable_alias(tmp_path: Path) -> None:
+    """
+    The writability check must look at the directory that stores the link:
+    a read-only cwd may alias into a write root (``ws/out -> data/out``),
+    where the agent can retarget ``data/out/.venv`` between helper launches.
+    Neither the venv it points at first nor the one it is retargeted to may
+    be mounted.
+    """
+    tmp_path = tmp_path.resolve()
+    real_python = Path(os.path.realpath(sys.executable))
+    venvs: dict[str, Path] = {}
+    for name in ("legit", "secret"):
+        venv = tmp_path / "venvs" / name
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").symlink_to(real_python)
+        (venv / "pyvenv.cfg").write_text(f"home = {real_python.parent}\n")
+        venvs[name] = venv
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    out = tmp_path / "data" / "out"
+    out.mkdir(parents=True)
+    (ws / "out").symlink_to(out, target_is_directory=True)
+    link = out / ".venv"
+    link.symlink_to(venvs["legit"], target_is_directory=True)
+    interp = ws / "out" / ".venv" / "bin" / "python"
+    policy = _make_policy(ws, allow_hidden=[".venv"], write_roots=[out])
+    backend = _make_backend()
+
+    first = _bind_paths(backend.wrap_launcher_argv([str(interp), "-c", "pass"], policy, ws))
+    link.unlink()
+    link.symlink_to(venvs["secret"], target_is_directory=True)
+    second = _bind_paths(backend.wrap_launcher_argv([str(interp), "-c", "pass"], policy, ws))
+
+    leaked = [path for path in first + second if Path(path).is_relative_to(tmp_path / "venvs")]
+    assert leaked == [], f"a venv behind a writable alias must not be mounted: {leaked}"
 
 
 def test_wrap_launcher_argv_target_binds_non_default_path(
