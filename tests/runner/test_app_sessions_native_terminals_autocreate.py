@@ -1115,6 +1115,17 @@ async def test_auto_create_claude_terminal_passes_session_effort(
         _no_op_forwarder,
     )
 
+    import omnigent.config as _config_module
+
+    real_load_effective_config = _config_module.load_effective_config
+    loader_workspaces: list[Any] = []
+
+    def _recording_load_effective_config(*, workspace: Any = None) -> Any:
+        loader_workspaces.append(workspace)
+        return real_load_effective_config(workspace=workspace)
+
+    monkeypatch.setattr(_config_module, "load_effective_config", _recording_load_effective_config)
+
     captured: dict[str, Any] = {}
 
     # Fake Omnigent server client that returns a session with reasoning_effort.
@@ -1164,6 +1175,9 @@ async def test_auto_create_claude_terminal_passes_session_effort(
     args = captured["spec"].args
     assert captured["spec"].os_env.cwd == str(workspace)
     assert captured["spec"].command == "user-claude"
+    # The user command would win even if project config were never read, so
+    # prove the merge saw the session workspace, not the removed process cwd.
+    assert any(w is not None and Path(w) == workspace for w in loader_workspaces)
     assert "--effort" in args
     effort_idx = args.index("--effort")
     assert args[effort_idx + 1] == "high"
@@ -4334,6 +4348,17 @@ async def test_codex_tui_launch_prefers_user_command_over_project_from_session_w
 
     monkeypatch.setattr(Path, "cwd", missing_cwd)
 
+    import omnigent.config as _config_module
+
+    real_load_effective_config = _config_module.load_effective_config
+    loader_workspaces: list[Any] = []
+
+    def _recording_load_effective_config(*, workspace: Any = None) -> Any:
+        loader_workspaces.append(workspace)
+        return real_load_effective_config(workspace=workspace)
+
+    monkeypatch.setattr(_config_module, "load_effective_config", _recording_load_effective_config)
+
     captured: dict[str, Any] = {}
     app_server = SimpleNamespace(
         listen_url="ws://127.0.0.1:9876",
@@ -4369,6 +4394,9 @@ async def test_codex_tui_launch_prefers_user_command_over_project_from_session_w
     assert spec.args[0] == "--user-arg"
     assert "--project-arg" not in spec.args
     assert spec.os_env.cwd == str(workspace)
+    # The user command would win even if project config were never read, so
+    # prove the merge saw the session workspace, not the removed process cwd.
+    assert any(w is not None and Path(w) == workspace for w in loader_workspaces)
 
 
 @pytest.mark.asyncio

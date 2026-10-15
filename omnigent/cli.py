@@ -56,6 +56,8 @@ from omnigent.cli_sandbox import lakebox as _lakebox_alias_group
 from omnigent.cli_sandbox import sandbox as _sandbox_group
 from omnigent.config import (
     _merge_effective_config,
+    _project_harness_default,
+    _project_harness_override_keys,
     global_config_path,
     load_global_config,
     load_local_config,
@@ -11117,29 +11119,24 @@ def _print_config_defaults() -> None:
         [] if local_is_global else sorted(raw_local_cfg.keys() & _USER_LEVEL_ONLY_CONFIG_KEYS)
     )
     raw_local_harness = raw_local_cfg.get("harness")
+    # Reuse the merge's own notion of accepted default and ignored overrides so
+    # these notices cannot drift from what the resolver actually applies.
     ignored_harness_overrides = (
-        []
-        if local_is_global or not isinstance(raw_local_harness, dict)
-        else sorted(key for key in raw_local_harness if isinstance(key, str) and key != "default")
+        [] if local_is_global else _project_harness_override_keys(raw_local_harness)
     )
-    # Mirror the merge's scalar normalization so an invalid default is detected
-    # whatever form the project wrote it in (scalar, mapping, or neither).
-    norm_local_harness = (
-        {"default": raw_local_harness} if isinstance(raw_local_harness, str) else raw_local_harness
-    )
-    if isinstance(norm_local_harness, dict):
-        project_default = norm_local_harness.get("default")
-        project_sets_default = "default" in norm_local_harness
-    else:
-        project_default = norm_local_harness
-        project_sets_default = norm_local_harness is not None
     # A project may select the default harness, but only as a non-empty string.
     # Surface an invalid value so the author sees why it was dropped; the merge
-    # strips it before the resolver, so nothing else would report it.
+    # strips it before the resolver, so nothing else would report it. A project
+    # attempts a default via a scalar ``harness`` or a mapping ``default`` key.
+    project_attempts_default = (
+        "default" in raw_local_harness
+        if isinstance(raw_local_harness, dict)
+        else raw_local_harness is not None
+    )
     project_default_ignored = (
         not local_is_global
-        and project_sets_default
-        and not (isinstance(project_default, str) and project_default)
+        and project_attempts_default
+        and _project_harness_default(raw_local_harness) is None
     )
     local_cfg = {
         k: v
@@ -11167,29 +11164,36 @@ def _print_config_defaults() -> None:
     # user-level path (``~/.omnigent/config.yaml``). Dedup on the resolved
     # absolute path so the one file is shown once, not twice under two
     # spellings. ``resolve()`` collapses ``~`` and symlinks for the compare.
+    local_header_printed = False
+
+    def _local_header_once() -> None:
+        # The project path header precedes the first project-level line (values
+        # or an ignored-setting notice) and prints at most once.
+        nonlocal local_header_printed
+        if not local_header_printed:
+            click.echo(f"  # {local_path}")
+            local_header_printed = True
+
     if global_cfg:
         click.echo(f"  # {_display_config_path(global_path)}")
         _print_config_default_rows(global_cfg)
     if local_cfg and not local_is_global:
-        click.echo(f"  # {local_path}")
+        _local_header_once()
         _print_config_default_rows(local_cfg)
     if ignored_local_keys:
-        if not local_cfg:
-            click.echo(f"  # {local_path}")
+        _local_header_once()
         click.echo(
             "  # ignored user-level-only setting(s): "
             f"{', '.join(ignored_local_keys)} (set with --global)"
         )
     if ignored_harness_overrides:
-        if not local_cfg and not ignored_local_keys:
-            click.echo(f"  # {local_path}")
+        _local_header_once()
         click.echo(
             "  # ignored project harness launch override(s): "
             f"{', '.join(ignored_harness_overrides)} (command/args are user-owned)"
         )
     if project_default_ignored:
-        if not local_cfg and not ignored_local_keys and not ignored_harness_overrides:
-            click.echo(f"  # {local_path}")
+        _local_header_once()
         click.echo("  # ignored invalid project harness default (expected a non-empty harness id)")
 
 
@@ -11444,7 +11448,10 @@ def config_grp() -> None:
     Defaults (auto_open_conversation, default_agent, harness, model,
     server) are used by ``omnigent run``. Project-level config
     (``.omnigent/config.yaml`` in the cwd, like ``.git/config``) overrides
-    user-level config (``~/.omnigent/config.yaml``, like ``~/.gitconfig``).
+    user-level config (``~/.omnigent/config.yaml``, like ``~/.gitconfig``),
+    except native-harness executables and launch arguments
+    (``harness.<id>.command``/``args``), which stay user-owned; a project may
+    only select ``harness.default``.
 
     \b
     Subcommands:

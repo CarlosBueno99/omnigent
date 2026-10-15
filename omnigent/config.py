@@ -12,6 +12,7 @@ import yaml
 
 _log = logging.getLogger(__name__)
 _cwd_missing_warned = False
+_harness_override_warned = False
 
 _Config: TypeAlias = dict[str, object]
 
@@ -58,6 +59,32 @@ def load_local_config(path: Path | None = None) -> _Config:
         return raw
 
 
+def _project_harness_default(harness: object) -> str | None:
+    """Return the project-selected default harness when it is an accepted value.
+
+    A project may select the default harness only as a non-empty string, written
+    either as a scalar ``harness: <id>`` or as ``harness.default: <id>``. Any
+    other value is rejected so untrusted project config cannot steer the launch
+    away from the user's harness selection.
+    """
+    normalized = {"default": harness} if isinstance(harness, str) else harness
+    if not isinstance(normalized, dict):
+        return None
+    default = normalized.get("default")
+    return default if isinstance(default, str) and default else None
+
+
+def _project_harness_override_keys(harness: object) -> list[str]:
+    """Return the project harness mapping keys other than ``default``, sorted.
+
+    These are per-harness launch overrides (``command``/``args``) that the merge
+    discards because executables and arguments are user-owned.
+    """
+    if not isinstance(harness, dict):
+        return []
+    return sorted(key for key in harness if isinstance(key, str) and key != "default")
+
+
 def _merge_effective_config(
     global_cfg: _Config,
     local_cfg: _Config,
@@ -71,16 +98,25 @@ def _merge_effective_config(
     :param local_cfg: Project-level config (``.omnigent/config.yaml``).
     :returns: The merged effective config dict.
     """
+    global _harness_override_warned
     merged: _Config = {**global_cfg, **{k: v for k, v in local_cfg.items() if k != "harness"}}
     g_harness = global_cfg.get("harness")
     l_harness = local_cfg.get("harness")
-    if isinstance(l_harness, str):
-        l_harness = {"default": l_harness}
+    # The resolver (and ``config list``) see only the merged result, so warn once
+    # per process when project launch overrides are dropped; otherwise a project
+    # that relied on them would stop taking effect with no explanation.
+    override_keys = _project_harness_override_keys(l_harness)
+    if override_keys and not _harness_override_warned:
+        _harness_override_warned = True
+        _log.warning(
+            "ignoring project harness launch override(s): %s (command/args are user-owned)",
+            ", ".join(override_keys),
+        )
     # A project may only select the default harness, and only as a non-empty
     # string; a malformed or empty default is ignored so untrusted project
     # config fails safe and keeps the user's harness selection.
-    l_default = l_harness.get("default") if isinstance(l_harness, dict) else None
-    if isinstance(l_default, str) and l_default:
+    l_default = _project_harness_default(l_harness)
+    if l_default:
         trusted = g_harness if isinstance(g_harness, dict) else {}
         merged["harness"] = {**trusted, "default": l_default}
     return merged

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,39 @@ def test_merge_effective_config_no_harness_key_unchanged() -> None:
         "model": "x",
         "server": "y",
     }
+
+
+def test_merge_effective_config_warns_once_on_dropped_project_overrides(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Dropped project launch overrides are invisible to the resolver, so the
+    # merge logs them once per process to explain why they stopped applying.
+    monkeypatch.setattr(_config_module, "_harness_override_warned", False)
+    g = {"harness": {"default": "claude-sdk"}}
+    loc = {
+        "harness": {
+            "default": "codex",
+            "codex": {"command": "/evil"},
+            "claude": {"args": ["x"]},
+        }
+    }
+    with caplog.at_level(logging.WARNING, logger="omnigent.config"):
+        _merge_effective_config(g, loc)
+        _merge_effective_config(g, loc)
+    warnings = [r.getMessage() for r in caplog.records if "launch override" in r.getMessage()]
+    assert warnings == [
+        "ignoring project harness launch override(s): claude, codex (command/args are user-owned)"
+    ]
+
+
+def test_merge_effective_config_no_warning_without_project_overrides(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A project selecting only the default harness drops nothing; stay quiet.
+    monkeypatch.setattr(_config_module, "_harness_override_warned", False)
+    with caplog.at_level(logging.WARNING, logger="omnigent.config"):
+        _merge_effective_config({"harness": {"default": "claude-sdk"}}, {"harness": "codex"})
+    assert not [r for r in caplog.records if "launch override" in r.getMessage()]
 
 
 def test_global_config_path_respects_config_home(
