@@ -4621,12 +4621,7 @@ _SUBAGENT_DELIVERY_NOT_CONFIRMED_ERROR = "subagent_delivery_not_confirmed"
 
 
 def _subagent_forward_lost(runner_result: _RunnerForwardResult | None) -> bool:
-    """
-    Return whether a sub-agent terminal forward missed the parent's inbox.
-
-    :param runner_result: Direct forward result; ``None`` when no runner resolved.
-    :returns: ``True`` for ``None`` or a 503 ``subagent_delivery_not_confirmed``.
-    """
+    """Whether a child's status forward missed the parent inbox: no runner or 503 not-confirmed."""
     if runner_result is None:
         return True
     if runner_result.status_code != 503:
@@ -7040,13 +7035,7 @@ async def _post_session_change_to_runner_client(
     *,
     timeout_s: float = 5.0,
 ) -> _RunnerForwardResult | None:
-    """
-    POST a control ``event`` for ``session_id`` to a runner client the caller chose.
-
-    :param runner_client: Runner client, e.g. the parent's live runner.
-    :param timeout_s: Request budget in seconds.
-    :returns: The runner's status/body, or ``None`` on a transport failure.
-    """
+    """POST ``event`` for ``session_id`` to ``runner_client``; ``None`` on a transport failure."""
     try:
         resp = await runner_client.post(
             f"/v1/sessions/{session_id}/events",
