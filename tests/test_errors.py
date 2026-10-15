@@ -23,6 +23,7 @@ from omnigent.errors import (
     impact_for_code,
     is_before_harness_start,
     is_cancelled_rpc_error,
+    is_oversized_payload_rpc_error,
     is_payload_rejected_rpc_error,
     is_permission_denied_rpc_error,
     phase_for_code,
@@ -579,21 +580,22 @@ def test_is_payload_rejected_rpc_error_matches_refused_payload_statuses() -> Non
     a message-size limit, in the wording of the common gRPC servers."""
     for status in ("INVALID_ARGUMENT", "OUT_OF_RANGE", "DATA_LOSS"):
         assert is_payload_rejected_rpc_error(_make_rpc_error(status)) is True, status
+        assert is_oversized_payload_rpc_error(_make_rpc_error(status)) is False, status
     for details in (
         "Frame size 2036419 exceeds maximum: 1048576",
         "Received message larger than max (5000000 vs. 4194304)",
         "gRPC message exceeds maximum size 4194304: 5000000",
         "grpc: received message larger than max (5000000 vs. 4194304)",
     ):
-        assert is_payload_rejected_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED", details)), (
-            details
-        )
+        oversized = _make_rpc_error("RESOURCE_EXHAUSTED", details)
+        assert is_oversized_payload_rpc_error(oversized) is True, details
+        assert is_payload_rejected_rpc_error(oversized) is True, details
 
 
 def test_is_payload_rejected_rpc_error_ignores_backend_state_statuses() -> None:
     """A denial, cancellation or outage is the backend's own state, not a
     refused payload — and so is a RESOURCE_EXHAUSTED that reports quota or
-    overload, or carries no readable details. The three detectors never overlap."""
+    overload, or carries no readable details. The detectors never overlap."""
     for status in (
         "PERMISSION_DENIED",
         "CANCELLED",
@@ -605,6 +607,7 @@ def test_is_payload_rejected_rpc_error_ignores_backend_state_statuses() -> None:
         assert is_payload_rejected_rpc_error(_make_rpc_error(status)) is False, status
     assert is_payload_rejected_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED")) is False
     quota = _make_rpc_error("RESOURCE_EXHAUSTED", "Quota exceeded for decrypt requests")
+    assert is_oversized_payload_rpc_error(quota) is False
     assert is_payload_rejected_rpc_error(quota) is False
 
     class RpcError(Exception):

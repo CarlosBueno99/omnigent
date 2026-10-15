@@ -715,28 +715,40 @@ def _rpc_error_details(exc: BaseException) -> str:
     return text if isinstance(text, str) else ""
 
 
+def is_oversized_payload_rpc_error(exc: BaseException) -> bool:
+    """Whether *exc* is a gRPC call refused because the message exceeded a size limit.
+
+    A ``RESOURCE_EXHAUSTED`` whose details name the limit, e.g. a decrypt
+    sidecar rejecting one oversized request frame (``Frame size 2036419 exceeds
+    maximum: 1048576``). A ``RESOURCE_EXHAUSTED`` without such details reports
+    quota or overload — the peer's own state — and does not match.
+
+    :param exc: The exception to inspect.
+    :returns: ``True`` only for a message-size rejection (matched structurally,
+        see :func:`_rpc_error_status_name`).
+    """
+    return (
+        _rpc_error_status_name(exc) == "RESOURCE_EXHAUSTED"
+        and _OVERSIZED_MESSAGE_DETAILS.search(_rpc_error_details(exc)) is not None
+    )
+
+
 def is_payload_rejected_rpc_error(exc: BaseException) -> bool:
     """Whether *exc* is a gRPC call the peer refused because of what was sent.
 
     A malformed or corrupt payload (``INVALID_ARGUMENT``, ``OUT_OF_RANGE``,
-    ``DATA_LOSS``), or a ``RESOURCE_EXHAUSTED`` whose details name a
-    message-size limit, e.g. a decrypt sidecar rejecting one oversized request
-    frame (``Frame size 2036419 exceeds maximum: 1048576``). A
-    ``RESOURCE_EXHAUSTED`` without such details reports quota or overload, the
-    peer's own state, and does not match; neither does a denial, cancellation or
-    outage. The failure is specific to the payload, so a caller can retry with
-    less or degrade just that payload.
+    ``DATA_LOSS``) or an oversized one (:func:`is_oversized_payload_rpc_error`).
+    The failure is specific to the payload, so a caller can retry with less or
+    degrade just that payload; a denial, cancellation, quota refusal or outage
+    is the peer's own state and does not match.
 
     :param exc: The exception to inspect.
     :returns: ``True`` only for a payload-rejected RPC error (matched
         structurally, see :func:`_rpc_error_status_name`).
     """
-    status = _rpc_error_status_name(exc)
-    if status in _PAYLOAD_REJECTED_RPC_STATUSES:
-        return True
-    if status != "RESOURCE_EXHAUSTED":
-        return False
-    return _OVERSIZED_MESSAGE_DETAILS.search(_rpc_error_details(exc)) is not None
+    return _rpc_error_status_name(
+        exc
+    ) in _PAYLOAD_REJECTED_RPC_STATUSES or is_oversized_payload_rpc_error(exc)
 
 
 # EDQUOT is POSIX-only; Windows reports a full disk as ENOSPC.

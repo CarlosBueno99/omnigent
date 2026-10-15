@@ -2966,7 +2966,20 @@ def _load_initial_history(
                 if item.type not in NON_CONTENT_ITEM_TYPES
             ]
         )
-    assert isinstance(compaction_item.data, CompactionData)
+    if not isinstance(compaction_item.data, CompactionData):
+        # The store serves a row it cannot decode as an error placeholder.
+        _logger.warning(
+            "Ignoring unreadable compaction item %s for %s; loading full history",
+            compaction_item.id,
+            conversation_id,
+        )
+        return _LoadedHistory(
+            items=[
+                item
+                for item in fetch_all_items(conv_store, conversation_id)
+                if item.type not in NON_CONTENT_ITEM_TYPES
+            ]
+        )
     # Validate the compaction item before trusting it as a cursor.
     # A broken item (empty summary, missing/bogus last_item_id) would
     # make the after= query return nothing, leaving history as just

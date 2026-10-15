@@ -7420,17 +7420,22 @@ def test_list_items_survives_batch_decode_overflow(db_uri: str) -> None:
     assert store.decode_calls < len(texts)
 
 
-def test_list_items_degrades_undecodable_item_instead_of_failing(db_uri: str) -> None:
+@pytest.mark.parametrize("type_filter", [None, "message"], ids=["all_types", "type_filter"])
+def test_list_items_degrades_undecodable_item_instead_of_failing(
+    db_uri: str, type_filter: str | None
+) -> None:
     """A row too large to decode even alone becomes an ``error`` placeholder
     while the rest of the conversation stays readable — one oversized inline
-    attachment must not make the whole session unopenable."""
+    attachment must not make the whole session unopenable. A ``type`` filter
+    selects rows by their stored type, so the placeholder is returned under it
+    too rather than failing the page or silently disappearing."""
     store = _FrameLimitedDecodeStore(db_uri)
     conv = store.create_conversation()
     store.append(conv.id, [_user_message("before", "resp_a")])
     [big] = store.append(conv.id, [_user_message("y" * (store.frame_limit + 1), "resp_big")])
     store.append(conv.id, [_user_message("after", "resp_b")])
 
-    page = store.list_items(conv.id)
+    page = store.list_items(conv.id, type=type_filter)
 
     assert [item.type for item in page.data] == ["message", "error", "message"]
     placeholder = page.data[1]
@@ -7441,22 +7446,6 @@ def test_list_items_degrades_undecodable_item_instead_of_failing(db_uri: str) ->
     assert placeholder.response_id == "resp_big"
     assert page.data[0].data.content[0]["text"] == "before"
     assert page.data[2].data.content[0]["text"] == "after"
-
-
-def test_list_items_type_filter_returns_unreadable_row_as_placeholder(db_uri: str) -> None:
-    """A ``type`` filter selects rows by their stored type; a selected row that
-    cannot be decoded still comes back as an ``error`` placeholder rather than
-    failing the page or silently disappearing."""
-    store = _FrameLimitedDecodeStore(db_uri)
-    conv = store.create_conversation()
-    store.append(conv.id, [_user_message("before", "resp_a")])
-    store.append(conv.id, [_user_message("y" * (store.frame_limit + 1), "resp_big")])
-    store.append(conv.id, [_user_message("after", "resp_b")])
-
-    page = store.list_items(conv.id, type="message")
-
-    assert [item.type for item in page.data] == ["message", "error", "message"]
-    assert page.data[1].response_id == "resp_big"
 
 
 def test_list_items_degrades_sole_oversized_row(db_uri: str) -> None:
@@ -7472,21 +7461,27 @@ def test_list_items_degrades_sole_oversized_row(db_uri: str) -> None:
     assert page.data[0].response_id == "resp_only"
 
 
-def test_list_items_degrades_row_with_corrupt_data(db_uri: str) -> None:
-    """A row whose stored data fails local decoding (corrupt compression, bad
-    encoding) degrades to a placeholder just like a refused payload."""
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("zstd: data corruption detected"), _rpc_error("DATA_LOSS", "ciphertext corrupt")],
+    ids=["value_error", "data_loss"],
+)
+def test_list_items_degrades_row_with_corrupt_data(db_uri: str, error: Exception) -> None:
+    """A row the seam cannot decode because its stored data is corrupt — a local
+    ``ValueError`` or a ``DATA_LOSS`` status — degrades to a placeholder even
+    when it is the smallest row on the page; its readable neighbours stay intact."""
 
     class _CorruptRowStore(SqlAlchemyConversationStore):
         def _decode_item_data_batch(self, stored: list[str]) -> list[str]:
             if any("corrupt-me" in s for s in stored):
-                raise ValueError("zstd: data corruption detected")
+                raise error
             return super()._decode_item_data_batch(stored)
 
     store = _CorruptRowStore(db_uri)
     conv = store.create_conversation()
-    store.append(conv.id, [_user_message("before", "resp_a")])
+    store.append(conv.id, [_user_message("before " + "r" * 200, "resp_a")])
     store.append(conv.id, [_user_message("corrupt-me", "resp_bad")])
-    store.append(conv.id, [_user_message("after", "resp_b")])
+    store.append(conv.id, [_user_message("after " + "r" * 200, "resp_b")])
 
     page = store.list_items(conv.id)
 
@@ -7533,21 +7528,23 @@ def test_list_items_propagates_backend_failures_unchanged(db_uri: str, error: Ex
     assert store.decode_calls == 1
 
 
-def test_list_items_propagates_when_even_the_smallest_row_is_refused(db_uri: str) -> None:
-    """A size rejection for every row means the backend's limit sits below the
-    whole page. When the smallest row is refused on its own, the original error
-    propagates after that one probe instead of a page of placeholders built
-    from one decode call per halving."""
-    error = _rpc_error("RESOURCE_EXHAUSTED", "Frame size 512 exceeds maximum: 256")
+def test_single_row_quota_refusal_propagates_for_list_and_point_lookup(db_uri: str) -> None:
+    """A quota-style RESOURCE_EXHAUSTED carries no size rejection, so a one-row
+    page and a point lookup both propagate it after a single call instead of
+    presenting the backend's refusal as an unreadable item."""
+    error = _rpc_error("RESOURCE_EXHAUSTED", "Quota exceeded for decrypt requests")
     store = _FailingDecodeStore(db_uri, error)
     conv = store.create_conversation()
-    store.append(conv.id, [_user_message("a", "resp_a"), _user_message("b", "resp_b")])
+    [only] = store.append(conv.id, [_user_message("only", "resp_only")])
     store.decode_calls = 0
 
-    with pytest.raises(type(error)) as excinfo:
+    with pytest.raises(type(error)) as listing:
         store.list_items(conv.id)
+    with pytest.raises(type(error)) as lookup:
+        store.get_item(conv.id, only.id)
 
-    assert excinfo.value is error
+    assert listing.value is error
+    assert lookup.value is error
     assert store.decode_calls == 2
 
 

@@ -2453,11 +2453,6 @@ class SqlAlchemyConversationStore(ConversationStore):
         except Exception as exc:
             if not _is_payload_decode_failure(exc):
                 raise
-            # When even the smallest row is refused alone, the backend refuses
-            # the call itself (a limit below every row, quota wording we did
-            # not recognise): propagate instead of a page of placeholders.
-            if len(stored) > 1 and not self._decodes_alone(min(stored, key=len)):
-                raise
             _logger.warning(
                 "decoding a page of %d items failed (%s: %s); isolating unreadable rows",
                 len(stored),
@@ -2474,20 +2469,6 @@ class SqlAlchemyConversationStore(ConversationStore):
                 len(stored),
             )
         return decoded
-
-    def _decodes_alone(self, stored: str) -> bool:
-        """Whether one row decodes by itself; a non-payload failure propagates.
-
-        :param stored: One raw ``data`` column value.
-        :returns: ``False`` when the decode seam refuses the row's payload.
-        """
-        try:
-            self._decode_item_data_batch([stored])
-        except Exception as exc:
-            if not _is_payload_decode_failure(exc):
-                raise
-            return False
-        return True
 
     def _isolate_unreadable_rows(self, failed: list[str]) -> list[str | None]:
         """Halve a slice whose batch decode failed until each unreadable row stands alone.
