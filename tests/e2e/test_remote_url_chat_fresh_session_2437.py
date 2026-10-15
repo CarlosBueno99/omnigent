@@ -532,17 +532,19 @@ def _session_count(base_url: str) -> int:
         return len(resp.json()["data"])
 
 
-def test_run_one_shot_on_fresh_server_does_not_demand_an_existing_session(
+def test_run_one_shot_on_fresh_server_asks_for_agent_then_answers_with_it(
     registered_agent_server: _RegisteredAgentServer,
     tmp_path: Path,
 ) -> None:
-    """``omnigent run --server <url> -p`` must not fail for lack of sessions.
+    """``omnigent run --server <url> -p`` on a fresh server: the --agent advice, then the answer.
 
     Built-ins make every server multi-agent, so a headless run that names no
     agent cannot pick one. It must fail by listing the registered agents and
     the ``--agent`` selector; it must not tell the user that nothing can be
     found, drop into an interactive picker it cannot answer, or append the
-    stale-host hint that ``omnigent stop`` cannot act on.
+    stale-host hint that ``omnigent stop`` cannot act on. Passing ``--agent``
+    then starts a session for that registered agent, adopts the server's online
+    runner and prints the reply.
     """
     server = registered_agent_server
     assert _session_count(server.base_url) == 0
@@ -557,18 +559,6 @@ def test_run_one_shot_on_fresh_server_does_not_demand_an_existing_session(
     assert proc.returncode != 0, output
     assert "--agent <name>" in output, output
     assert server.agent_name in output, output
-
-
-def test_run_one_shot_with_agent_on_fresh_server_answers(
-    registered_agent_server: _RegisteredAgentServer,
-    tmp_path: Path,
-) -> None:
-    """``omnigent run --server <url> --agent <name> -p`` answers on a fresh server.
-
-    The selector the discovery error points at starts a session for the named
-    registered agent, adopts the server's online runner, and prints the reply.
-    """
-    server = registered_agent_server
     assert _session_count(server.base_url) == 0
 
     proc = _run_cli(

@@ -1845,6 +1845,29 @@ def test_pick_agent_headless_error_summarizes_a_long_registry(
     assert "(and 5 more)" in message
 
 
+@pytest.mark.parametrize("data", [None, {"name": "scribe"}])
+def test_pick_agent_rejects_a_listing_without_a_data_list(
+    monkeypatch: pytest.MonkeyPatch, data: object
+) -> None:
+    """A listing whose ``data`` is not a list is a discovery error, not a traceback."""
+    _serve_listings(
+        monkeypatch, sessions=[], agent_pages=[{"data": data, "has_more": False, "last_id": None}]
+    )
+
+    with pytest.raises(click.ClickException, match="unexpected body shape"):
+        _pick_agent("http://127.0.0.1:6767")
+
+
+def test_pick_agent_skips_malformed_listing_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rows that are not objects or lack a string name are ignored, as the SDK resolver does."""
+    rows = [None, {"id": "ag_x"}, {"name": 7}, {"name": "scribe"}]
+    _serve_listings(
+        monkeypatch, sessions=[], agent_pages=[{"data": rows, "has_more": False, "last_id": None}]
+    )
+
+    assert _pick_agent("http://127.0.0.1:6767", quiet=True) == "scribe"
+
+
 def test_pick_agent_prefers_agents_with_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
     """Existing sessions still drive discovery; the registry is only the fallback."""
     requests = _serve_listings(monkeypatch, sessions=[{"agent_name": "used"}], agent_pages=[])
@@ -1902,16 +1925,15 @@ def test_require_registered_agent_rejects_an_unknown_name(
 
 
 @pytest.mark.parametrize(
-    ("initial_message", "resume_id", "expected_interactive"),
+    ("initial_message", "expected_interactive"),
     [
-        (None, None, True),  # REPL: a menu is fine
-        ("hi", None, False),  # headless one-shot on a new session: never prompt
+        (None, True),  # REPL: a menu is fine
+        ("hi", False),  # headless one-shot on a new session: never prompt
     ],
 )
 def test_chat_with_server_only_prompts_for_an_agent_when_it_can(
     monkeypatch: pytest.MonkeyPatch,
     initial_message: str | None,
-    resume_id: str | None,
     expected_interactive: bool,
 ) -> None:
     """A headless one-shot that starts a new session never blocks on the agent menu."""
@@ -1930,7 +1952,7 @@ def test_chat_with_server_only_prompts_for_an_agent_when_it_can(
         "http://127.0.0.1:6767",
         None,
         initial_message=initial_message,
-        resume_conversation_id=resume_id,
+        resume_conversation_id=None,
     )
 
     assert picked["interactive"] is expected_interactive
@@ -1940,7 +1962,9 @@ def _resume_lookup(body: dict[str, object]) -> Callable[..., dict[str, object]]:
     """Fake ``_discovery_get`` that records the requested path and answers *body*."""
     seen: list[str] = []
 
-    def _get(base_url: str, path: str, params: dict[str, object]) -> dict[str, object]:
+    def _get(
+        base_url: str, path: str, params: dict[str, object], **_kw: object
+    ) -> dict[str, object]:
         seen.append(path)
         return body
 
@@ -1970,6 +1994,22 @@ def test_chat_with_server_resume_uses_the_sessions_own_agent(
     assert lookup.seen == ["/v1/sessions/conv_1"]  # type: ignore[attr-defined]
     assert captured["agent_name"] == "nessie"
     assert captured["resume_conversation_id"] == "conv_1"
+
+
+def test_chat_with_server_resume_quotes_the_session_id_in_the_lookup_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session id with URL-significant characters still addresses the sessions route."""
+    monkeypatch.setattr(chat_module, "_redirect_native_resume_if_needed", lambda **_kw: False)
+    lookup = _resume_lookup({"id": "conv/odd?x", "agent_name": "nessie"})
+    monkeypatch.setattr(chat_module, "_discovery_get", lookup)
+    monkeypatch.setattr(chat_module, "_run_one_shot", lambda **_kw: None)
+
+    chat_module._chat_with_server(
+        "http://127.0.0.1:6767", None, initial_message="hi", resume_conversation_id="conv/odd?x"
+    )
+
+    assert lookup.seen == ["/v1/sessions/conv%2Fodd%3Fx"]  # type: ignore[attr-defined]
 
 
 def test_chat_with_server_headless_resume_without_session_agent_is_a_clear_error(
@@ -2023,6 +2063,7 @@ def test_chat_with_server_headless_resume_reports_a_failed_session_lookup(
         )
 
     message = str(excinfo.value)
+    assert "Session conv_1 lookup failed" in message
     assert "/v1/sessions/conv_1" in message and "404" in message
     assert "does not report its agent" not in message
 

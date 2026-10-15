@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from collections.abc import Awaitable, Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
@@ -1098,7 +1099,12 @@ def _chat_with_server(
         # A resumed session already has its agent; asking would risk picking
         # another one and adopting a runner for the wrong harness. A failed
         # lookup surfaces as a discovery error naming the session.
-        snapshot = _discovery_get(base_url, f"/v1/sessions/{resume_conversation_id}", {})
+        snapshot = _discovery_get(
+            base_url,
+            f"/v1/sessions/{urllib.parse.quote(resume_conversation_id, safe='')}",
+            {},
+            what=f"Session {resume_conversation_id} lookup",
+        )
         session_agent = snapshot.get("agent_name")
         agent_name = session_agent if isinstance(session_agent, str) and session_agent else None
         if agent_name is None and initial_message is not None:
@@ -1438,22 +1444,27 @@ def _require_url_target_for_agent(target: str, agent_name: str | None) -> None:
         )
 
 
-def _discovery_error(base_url: str, path: str, detail: str) -> click.ClickException:
-    """Build the CLI error for an agent-discovery listing the client cannot use."""
+def _discovery_error(
+    base_url: str, path: str, detail: str, *, what: str = "Agent discovery"
+) -> click.ClickException:
+    """Build the CLI error for a server listing or lookup the client cannot use."""
     from omnigent.util.server_url import display_server_url
 
     return _server_setup_error(
-        f"Agent discovery failed: GET {path} on {display_server_url(base_url)} {detail}."
+        f"{what} failed: GET {path} on {display_server_url(base_url)} {detail}."
     )
 
 
-def _discovery_get(base_url: str, path: str, params: dict[str, Any]) -> dict[str, Any]:
+def _discovery_get(
+    base_url: str, path: str, params: dict[str, Any], *, what: str = "Agent discovery"
+) -> dict[str, Any]:
     """
-    Fetch one agent-discovery listing from the server as JSON.
+    Fetch one agent-discovery listing or lookup from the server as JSON.
 
     :param base_url: Server base URL.
-    :param path: Listing route, e.g. ``"/v1/agents"``.
-    :param params: Query parameters for the listing.
+    :param path: Route, e.g. ``"/v1/agents"``.
+    :param params: Query parameters for the request.
+    :param what: Short name of the lookup for error messages.
     :returns: The decoded JSON object.
     :raises click.ClickException: If the server is unreachable, answers with an
         HTTP error, or returns something other than a JSON object.
@@ -1472,23 +1483,33 @@ def _discovery_get(base_url: str, path: str, params: dict[str, Any]) -> dict[str
         # (_prepare_chat_session_via_daemon).
         raise click.ClickException(_unreachable_server_message(base_url)) from exc
     except httpx.TransportError as exc:
-        # The connection was made but the listing never fully arrived.
+        # The connection was made but the response never fully arrived.
         raise _discovery_error(
-            base_url, path, f"failed before a response arrived ({type(exc).__name__})"
+            base_url, path, f"failed before a response arrived ({type(exc).__name__})", what=what
         ) from exc
     try:
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
         raise _discovery_error(
-            base_url, path, f"returned HTTP {exc.response.status_code}"
+            base_url, path, f"returned HTTP {exc.response.status_code}", what=what
         ) from exc
     try:
         body = resp.json()
     except ValueError as exc:
-        raise _discovery_error(base_url, path, "returned a non-JSON body") from exc
+        raise _discovery_error(base_url, path, "returned a non-JSON body", what=what) from exc
     if not isinstance(body, dict):
-        raise _discovery_error(base_url, path, "returned an unexpected body shape")
+        raise _discovery_error(base_url, path, "returned an unexpected body shape", what=what)
     return body
+
+
+def _listing_items(
+    body: dict[str, Any], base_url: str, path: str, *, what: str = "Agent discovery"
+) -> list[dict[str, Any]]:
+    """Return the object rows of a listing body, rejecting a ``data`` that is not a list."""
+    data = body.get("data")
+    if not isinstance(data, list):
+        raise _discovery_error(base_url, path, "returned an unexpected body shape", what=what)
+    return [item for item in data if isinstance(item, dict)]
 
 
 def _session_agent_names(base_url: str) -> list[str]:
@@ -1496,9 +1517,9 @@ def _session_agent_names(base_url: str) -> list[str]:
     names: list[str] = []
     # custom-lint: disable-next=session-list-visibility -- params below carry visibility=all
     listing = _discovery_get(base_url, "/v1/sessions", {"limit": 100, "visibility": "all"})
-    for session in listing.get("data", []):
+    for session in _listing_items(listing, base_url, "/v1/sessions"):
         name = session.get("agent_name")
-        if name and name not in names:
+        if isinstance(name, str) and name and name not in names:
             names.append(name)
     return names
 
@@ -1535,9 +1556,9 @@ def _server_agent_names(base_url: str, *, stop_at: str | None = None) -> list[st
         if after is not None:
             params["after"] = after
         page = _discovery_get(base_url, "/v1/agents", params)
-        for item in page.get("data", []):
+        for item in _listing_items(page, base_url, "/v1/agents"):
             name = item.get("name")
-            if name and name not in names:
+            if isinstance(name, str) and name and name not in names:
                 names.append(name)
         if (stop_at is not None and stop_at in names) or not page.get("has_more"):
             return names
