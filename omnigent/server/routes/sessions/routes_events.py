@@ -2077,10 +2077,9 @@ def register_events_routes(
                 # devin sub-agent is a reconstructed chain of the parent
                 # session, never an omnigent-dispatched runner sub-agent.
                 if _subagent_forward_lost(runner_result):
-                    # The result missed the parent's inbox: no runner answered
-                    # (stale child binding), or the child's own runner has no
-                    # inbox for the parent and answered 503. Re-deliver through
-                    # the parent's live runner; rebind only a child whose runner is gone.
+                    # No runner answered (stale child binding) or the child's own
+                    # runner has no inbox for the parent (503): re-deliver through
+                    # the parent's live runner, rebinding only a runner-less child.
                     from omnigent.server.routes import sessions as _sf
 
                     recovered = await _sf._recover_subagent_status_forward_via_parent(

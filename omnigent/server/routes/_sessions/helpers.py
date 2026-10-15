@@ -4622,16 +4622,10 @@ _SUBAGENT_DELIVERY_NOT_CONFIRMED_ERROR = "subagent_delivery_not_confirmed"
 
 def _subagent_forward_lost(runner_result: _RunnerForwardResult | None) -> bool:
     """
-    Return whether a sub-agent terminal-status forward missed the parent's inbox.
+    Return whether a sub-agent terminal forward missed the parent's inbox.
 
-    That is the case when no runner could be reached (``None``) or when the
-    child's own runner answered 503 ``subagent_delivery_not_confirmed`` because
-    the parent's inbox is not on that runner. Other rejections (a pane not
-    advertised yet, a malformed event) are unrelated to where the parent lives.
-
-    :param runner_result: The direct forward's HTTP result, or ``None`` when
-        no runner client resolved.
-    :returns: ``True`` when the result must be re-delivered via the parent.
+    :param runner_result: Direct forward result; ``None`` when no runner resolved.
+    :returns: ``True`` for ``None`` or a 503 ``subagent_delivery_not_confirmed``.
     """
     if runner_result is None:
         return True
@@ -7047,18 +7041,13 @@ async def _post_session_change_to_runner_client(
     timeout_s: float = 5.0,
 ) -> _RunnerForwardResult | None:
     """
-    POST a control event for ``session_id`` to an already-resolved runner client.
+    POST a control event for ``session_id`` to a runner client the caller chose.
 
-    The transport half of :func:`_forward_session_change_to_runner_impl`, for a
-    caller that picked the runner itself (a sub-agent result re-delivered through
-    the parent's runner while the child stays bound to its own).
-
-    :param runner_client: Client for the runner that should handle the event.
+    :param runner_client: Runner client, e.g. the parent's live runner.
     :param session_id: Session the event is about, e.g. ``"conv_child456"``.
     :param event: The ``/events`` POST body.
     :param timeout_s: Request budget, e.g. ``5.0``.
-    :returns: The runner's HTTP status/body, or ``None`` when the POST failed
-        at the transport layer.
+    :returns: The runner's status/body, or ``None`` on a transport failure.
     """
     try:
         resp = await runner_client.post(

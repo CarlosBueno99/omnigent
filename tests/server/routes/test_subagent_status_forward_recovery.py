@@ -404,15 +404,7 @@ def test_subagent_forward_lost_only_when_parent_inbox_missed(
 async def test_recover_posts_through_parent_runner_without_rebinding_live_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    A child live on a runner of its own keeps that binding; its result goes to the parent's runner.
-
-    The reported loop: the child was relaunched alone while the parent's runner was
-    down, so at turn end its own runner answers 503 ``missing_parent_inbox``. The
-    child's ``runner_id`` is correct and must not be repointed, and the by-id
-    forward would only reach the same runner again. The status is posted straight
-    to the parent's live client instead.
-    """
+    """A live child keeps its binding; its status is posted straight to the parent's runner."""
     child = _conv("conv_child", runner_id="runner_child_own", parent_id="conv_parent")
     store = _FakeStore(_conv("conv_parent", runner_id="runner_parent"))
     posted: list[tuple[str, dict[str, Any]]] = []
@@ -518,10 +510,7 @@ async def test_boot_failure_forward_heals_through_parent_when_child_runner_is_go
 async def test_boot_failure_forward_reroutes_without_rebind_when_parent_inbox_is_elsewhere(
     _patch_boot_failure_forward: dict[str, Any],
 ) -> None:
-    """The child's own runner answered 503 ``missing_parent_inbox``.
-
-    Deliver through the parent's runner and keep the child's own binding.
-    """
+    """Own runner answered 503 ``missing_parent_inbox``: go via the parent, keep the binding."""
     _patch_boot_failure_forward["forward_result"] = _not_confirmed("missing_parent_inbox")
 
     await _forward_native_subagent_terminal_failure(
@@ -539,14 +528,7 @@ async def test_boot_failure_forward_logs_instead_of_failing_the_consumed_message
     _patch_boot_failure_forward: dict[str, Any],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """
-    No live runner holds the parent's inbox: warn, do not raise.
-
-    The caller has already consumed the user's message into a persisted failed
-    turn; raising turned that into a 503 the user read as a refused send. The
-    failed status is durable and the parent's runner rebuilds the result from it
-    when the parent next initializes.
-    """
+    """No live runner holds the parent's inbox: warn instead of failing the consumed message."""
     _patch_boot_failure_forward["recovery_result"] = None
     caplog.set_level(logging.WARNING)
 
