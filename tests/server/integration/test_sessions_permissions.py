@@ -782,15 +782,23 @@ async def test_collaborator_cannot_persist_native_approval_settings_via_events(
     if runner_token is not None:
         headers[RUNNER_TUNNEL_TOKEN_HEADER] = runner_token
 
-    resp = await auth_client.post(f"/v1/sessions/{session_id}/events", json=event, headers=headers)
+    collector = await start_session_stream_collector(session_id)
+    try:
+        resp = await auth_client.post(
+            f"/v1/sessions/{session_id}/events", json=event, headers=headers
+        )
 
-    assert resp.status_code == 403, (
-        f"user-b (level {grant_level}, runner token {runner_token!r}) should be blocked from "
-        f"{event['type']}, got {resp.status_code}: {resp.text}"
-    )
-    after = await _snapshot_as(auth_client, session_id, "user-a")
-    assert after["terminal_launch_args"] == before["terminal_launch_args"]
-    assert label_key not in after["labels"]
+        assert resp.status_code == 403, (
+            f"user-b (level {grant_level}, runner token {runner_token!r}) should be blocked "
+            f"from {event['type']}, got {resp.status_code}: {resp.text}"
+        )
+        after = await _snapshot_as(auth_client, session_id, "user-a")
+        assert after["terminal_launch_args"] == before["terminal_launch_args"]
+        assert label_key not in after["labels"]
+        # A rejected event must not move the owner's live picker either.
+        await collector.assert_no_event(within=0.2)
+    finally:
+        await collector.stop()
 
 
 async def test_owner_and_bound_runner_persist_native_approval_settings_via_events(
