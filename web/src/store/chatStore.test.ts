@@ -60,6 +60,7 @@ import type {
   SessionStatusEvent,
   SessionTerminalPendingEvent,
   StreamEvent,
+  TerminalCommandEvent,
 } from "@/lib/events";
 import type { TerminalInfo } from "@/hooks/useTerminals";
 import { terminalsQueryKey } from "@/hooks/useTerminals";
@@ -512,6 +513,7 @@ beforeEach(() => {
     conversationId: null,
     blocks: [],
     pendingUserMessages: [],
+    settledShellInputs: [],
     queuedMessages: [],
     activeResponse: null,
     status: "idle",
@@ -2859,6 +2861,51 @@ describe("chatStore — send (first-send ordering)", () => {
     // The optimistic bubble is pushed synchronously, before any network
     // call resolves, so the user sees their message immediately.
     expect(useChatStore.getState().pendingUserMessages).toHaveLength(1);
+    await sendPromise;
+  });
+
+  it.each([
+    { native: true, status: "running" as const, expected: true },
+    { native: true, status: "idle" as const, expected: undefined },
+    { native: true, status: "waiting" as const, expected: undefined },
+    { native: false, status: "running" as const, expected: undefined },
+  ])(
+    "marks the bubble sentMidTurn=$expected for native=$native, status=$status",
+    async ({ native, status, expected }) => {
+      // Only a native session holds a mid-turn message until its agent reads
+      // it; `waiting` means the turn already ended.
+      useChatStore.setState({
+        conversationId: "conv_existing",
+        abortController: new AbortController(),
+        isNativeTerminalSession: native,
+        sessionStatus: status,
+        pendingUserMessages: [],
+      });
+
+      const sendPromise = useChatStore.getState().send("steer", "agent_xyz");
+      expect(useChatStore.getState().pendingUserMessages[0]?.sentMidTurn).toBe(expected);
+      await sendPromise;
+    },
+  );
+
+  it("marks a pinned send from the target conversation's turn, not the visible one", async () => {
+    // A queued Send now is pinned to its own conversation, which may not be on screen.
+    seedSession("conv_target");
+    seedSession("conv_visible");
+    await useChatStore.getState().switchTo("conv_target");
+    await useChatStore.getState().switchTo("conv_visible");
+    useChatStore.setState({ isNativeTerminalSession: true, sessionStatus: "idle" });
+    conversationRegistry.peek("conv_target")!.setState({
+      isNativeTerminalSession: true,
+      sessionStatus: "running",
+    });
+
+    const sendPromise = useChatStore.getState().send("steer", "agent_xyz", undefined, {
+      pinnedConversationId: "conv_target",
+    });
+    const target = conversationRegistry.peek("conv_target")!.getState();
+    expect(target.pendingUserMessages.at(-1)?.sentMidTurn).toBe(true);
+    expect(useChatStore.getState().pendingUserMessages).toEqual([]);
     await sendPromise;
   });
 
@@ -8161,6 +8208,341 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
     });
   });
 
+  describe("terminal_command (claude-native !cmd)", () => {
+    const shellEvent = (kind: "input" | "output", command = "ls"): TerminalCommandEvent => ({
+      type: "terminal_command",
+      kind,
+      input: kind === "input" ? command : null,
+      stdout: kind === "output" ? "a.txt" : null,
+      stderr: null,
+      itemId: `item_shell_${kind}`,
+      responseId: "resp_shell_1",
+    });
+    const bubble = (tempId: string, text: string) => ({
+      tempId,
+      content: [{ type: "input_text" as const, text }],
+    });
+    const receipt = (itemId: string, text: string, clearedPendingId: string): StreamEvent => ({
+      type: "session_input_consumed",
+      itemId,
+      itemType: "message",
+      clearedPendingId,
+      data: { role: "user", content: [{ type: "input_text", text }], user_authored: true },
+    });
+    // A sent bubble keeps its client key; the server's pending id rides along.
+    const sent = (n: number, text: string) => ({
+      ...bubble(`pend_${n}`, text),
+      posted: true,
+      pendingId: `pending_${n}`,
+    });
+
+    it("pops the queued bubble whose command was mirrored", () => {
+      // A `!cmd` runs as a shell command, so no `session.input.consumed`
+      // follows. The server settles the entry whose text is that command; the
+      // matching bubble must clear with it, or the next message's receipt would
+      // pop this one and strand its own.
+      useChatStore.setState({
+        blocks: [],
+        pendingUserMessages: [bubble("pend_1", "!ls"), bubble("pend_2", "next")],
+      });
+
+      handleSessionEvent(shellEvent("input"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([bubble("pend_2", "next")]);
+    });
+
+    it("pops only the `!ls` bubble when it is queued behind a plain message", () => {
+      useChatStore.setState({
+        blocks: [],
+        pendingUserMessages: [bubble("pend_1", "fix the bug"), bubble("pend_2", "!ls")],
+      });
+
+      handleSessionEvent(shellEvent("input"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([
+        bubble("pend_1", "fix the bug"),
+      ]);
+    });
+
+    it("pops nothing for a command typed in the terminal", () => {
+      // No web bubble is that command, so the queued messages are still queued.
+      const pending = [
+        bubble("pend_1", "fix the bug"),
+        bubble("pend_2", "!ls"),
+        bubble("pend_3", "next"),
+      ];
+      useChatStore.setState({ blocks: [], pendingUserMessages: pending });
+
+      handleSessionEvent(shellEvent("input", "pwd"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual(pending);
+    });
+
+    it.each([
+      ["!  ls   -la", "ls -la"],
+      ["!ls -la", "ls   -la"],
+      ["! ls -la", "ls -la"],
+    ])("matches %j against the mirrored command %j across spacing", (queued, command) => {
+      useChatStore.setState({ blocks: [], pendingUserMessages: [bubble("pend_1", queued)] });
+
+      handleSessionEvent(shellEvent("input", command));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+    });
+
+    it("pops the oldest of two identical commands", () => {
+      useChatStore.setState({
+        blocks: [],
+        pendingUserMessages: [bubble("pend_1", "!ls"), bubble("pend_2", "! ls")],
+      });
+
+      handleSessionEvent(shellEvent("input"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([bubble("pend_2", "! ls")]);
+    });
+
+    it("does not take a plain message that repeats the command for the shell command", () => {
+      const pending = [bubble("pend_1", "ls")];
+      useChatStore.setState({ blocks: [], pendingUserMessages: pending });
+
+      handleSessionEvent(shellEvent("input"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual(pending);
+    });
+
+    it("never pops an unsent draft", () => {
+      const draft = {
+        ...bubble("pend_draft", "!ls"),
+        initialDraft: { text: "!ls", files: [] },
+      };
+      useChatStore.setState({ blocks: [], pendingUserMessages: [draft] });
+
+      handleSessionEvent(shellEvent("input"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([draft]);
+    });
+
+    it("matches nothing for an empty command", () => {
+      const pending = [bubble("pend_1", "!")];
+      useChatStore.setState({ blocks: [], pendingUserMessages: pending });
+
+      handleSessionEvent(shellEvent("input", "  "));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual(pending);
+    });
+
+    it("leaves pendingUserMessages alone on the output half", () => {
+      const pending = [bubble("pend_1", "!ls")];
+      useChatStore.setState({ blocks: [], pendingUserMessages: pending });
+
+      handleSessionEvent(shellEvent("output"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual(pending);
+    });
+
+    it("is a no-op when pendingUserMessages is empty (observing client)", () => {
+      useChatStore.setState({ blocks: [], pendingUserMessages: [] });
+
+      handleSessionEvent(shellEvent("input"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+    });
+
+    it("keeps the next message's bubble through an older server's skip receipt", () => {
+      // An older server never drains the `!cmd` entry: the next message's mirror
+      // persists it as skipped, with a receipt naming the bubble popped above.
+      useChatStore.setState({
+        blocks: [],
+        pendingUserMessages: [sent(1, "!echo hi"), sent(2, "thanks")],
+      });
+
+      handleSessionEvent(shellEvent("input", "echo hi"));
+      handleSessionEvent(receipt("item_skipped_user", "!echo hi", "pending_1"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([sent(2, "thanks")]);
+
+      handleSessionEvent(receipt("item_thanks", "thanks", "pending_2"));
+
+      const state = useChatStore.getState();
+      expect(state.pendingUserMessages).toEqual([]);
+      expect(state.blocks).toMatchObject([
+        {
+          type: "user_message",
+          ctx: { itemId: "item_skipped_user" },
+          content: [{ text: "!echo hi" }],
+        },
+        { type: "user_message", ctx: { itemId: "item_thanks" }, stableKey: "pend_2" },
+      ]);
+    });
+
+    it("keeps every later bubble queued through the skip receipt", () => {
+      useChatStore.setState({
+        blocks: [],
+        pendingUserMessages: [sent(1, "!echo hi"), sent(2, "thanks"), sent(3, "more")],
+      });
+
+      handleSessionEvent(shellEvent("input", "echo hi"));
+      handleSessionEvent(receipt("item_skipped_user", "!echo hi", "pending_1"));
+      handleSessionEvent(receipt("item_thanks", "thanks", "pending_2"));
+
+      // "thanks" took its own bubble, so "more" stays visible until its mirror lands.
+      expect(useChatStore.getState().pendingUserMessages).toEqual([sent(3, "more")]);
+
+      handleSessionEvent(receipt("item_more", "more", "pending_3"));
+
+      const state = useChatStore.getState();
+      expect(state.pendingUserMessages).toEqual([]);
+      expect(state.blocks).toMatchObject([
+        { ctx: { itemId: "item_skipped_user" } },
+        { ctx: { itemId: "item_thanks" }, stableKey: "pend_2" },
+        { ctx: { itemId: "item_more" }, stableKey: "pend_3" },
+      ]);
+    });
+
+    it("keeps the next bubble when the skipped command's item already rendered", () => {
+      // The forwarder-mirrored item beat its receipt into `blocks`.
+      const rendered = {
+        type: "user_message",
+        ctx: {
+          agent: null,
+          depth: 0,
+          turn: 0,
+          timestamp: 0,
+          responseId: "",
+          itemId: "item_skipped",
+        },
+        content: [{ type: "input_text", text: "!echo hi" }],
+      } as unknown as AnyBlock;
+      useChatStore.setState({
+        blocks: [rendered],
+        pendingUserMessages: [sent(1, "!echo hi"), sent(2, "thanks")],
+      });
+
+      handleSessionEvent(shellEvent("input", "echo hi"));
+      handleSessionEvent(receipt("item_skipped", "!echo hi", "pending_1"));
+
+      const state = useChatStore.getState();
+      expect(state.pendingUserMessages).toEqual([sent(2, "thanks")]);
+      expect(state.blocks).toEqual([rendered]);
+    });
+
+    it("settles the head for a receipt naming an id no shell input cleared", () => {
+      useChatStore.setState({
+        blocks: [],
+        pendingUserMessages: [sent(1, "!echo hi"), sent(2, "thanks")],
+      });
+
+      handleSessionEvent(shellEvent("input", "echo hi"));
+      handleSessionEvent(receipt("item_thanks", "thanks", "pending_unknown"));
+
+      const state = useChatStore.getState();
+      expect(state.pendingUserMessages).toEqual([]);
+      expect(state.blocks).toMatchObject([{ ctx: { itemId: "item_thanks" }, stableKey: "pend_2" }]);
+    });
+
+    it("does not consume an identical later command on a replayed shell mirror", () => {
+      useChatStore.setState({ pendingUserMessages: [sent(1, "!ls"), sent(2, "!ls")] });
+
+      handleSessionEvent(shellEvent("input"));
+      handleSessionEvent(shellEvent("input"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([sent(2, "!ls")]);
+      handleSessionEvent({ ...shellEvent("input"), itemId: "item_shell_second" });
+      expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+    });
+
+    it("does not consume a new send on a replay of an observed terminal command", () => {
+      handleSessionEvent(shellEvent("input"));
+      useChatStore.setState({ pendingUserMessages: [sent(1, "!ls")] });
+
+      handleSessionEvent(shellEvent("input"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([sent(1, "!ls")]);
+    });
+
+    it("keeps the next bubble through repeated legacy skip receipts", () => {
+      useChatStore.setState({ pendingUserMessages: [sent(1, "!ls"), sent(2, "next")] });
+      handleSessionEvent(shellEvent("input"));
+
+      handleSessionEvent(receipt("item_skipped", "!ls", "pending_1"));
+      handleSessionEvent(receipt("item_skipped", "!ls", "pending_1"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([sent(2, "next")]);
+      expect(useChatStore.getState().blocks).toHaveLength(1);
+    });
+
+    it("recognizes a legacy receipt that beats the shell POST acknowledgement", () => {
+      useChatStore.setState({
+        pendingUserMessages: [bubble("pend_unacked", "!ls"), sent(2, "next")],
+      });
+      handleSessionEvent(shellEvent("input"));
+
+      handleSessionEvent(receipt("item_skipped", "!ls", "pending_unacked"));
+
+      expect(useChatStore.getState().pendingUserMessages).toEqual([sent(2, "next")]);
+    });
+
+    it("adopts the server id when the POST acknowledgement follows the shell mirror", async () => {
+      useChatStore.setState({
+        conversationId: "conv_existing",
+        abortController: new AbortController(),
+      });
+      let resolvePost: (() => void) | null = null;
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        if (
+          String(input).endsWith("/v1/sessions/conv_existing/events") &&
+          init?.method === "POST"
+        ) {
+          return new Promise<Response>((resolve) => {
+            resolvePost = () =>
+              resolve(mockResponse({ queued: true, pending_id: "pending_shell" }));
+          });
+        }
+        return defaultFetchHandler(input, init);
+      });
+      const sending = useChatStore.getState().send("!ls", "agent_xyz");
+      await vi.waitFor(() => expect(resolvePost).not.toBeNull());
+      handleSessionEvent(shellEvent("input"));
+      expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+
+      resolvePost!();
+      await sending;
+      expect(useChatStore.getState().settledShellInputs).toMatchObject([
+        { pendingId: "pending_shell" },
+      ]);
+      useChatStore.setState({ pendingUserMessages: [sent(2, "next")] });
+      handleSessionEvent(receipt("item_skipped", "!ls", "pending_shell"));
+      expect(useChatStore.getState().pendingUserMessages).toEqual([sent(2, "next")]);
+    });
+
+    it("records a sent `!cmd`'s server id so its skip receipt is recognised", async () => {
+      useChatStore.setState({
+        conversationId: "conv_existing",
+        abortController: new AbortController(),
+      });
+      let posts = 0;
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        if (
+          String(input).endsWith("/v1/sessions/conv_existing/events") &&
+          init?.method === "POST"
+        ) {
+          posts += 1;
+          return mockResponse({ queued: true, pending_id: `pending_${posts}` });
+        }
+        return defaultFetchHandler(input, init);
+      });
+      await useChatStore.getState().send("!echo hi", "agent_xyz");
+      await useChatStore.getState().send("thanks", "agent_xyz");
+
+      handleSessionEvent(shellEvent("input", "echo hi"));
+      handleSessionEvent(receipt("item_skipped_user", "!echo hi", "pending_1"));
+
+      expect(useChatStore.getState().pendingUserMessages).toMatchObject([
+        { content: [{ text: "thanks" }], pendingId: "pending_2" },
+      ]);
+    });
+  });
+
   describe("session.interrupted", () => {
     it("sets activeResponse.state to 'cancelled'", () => {
       useChatStore.setState({
@@ -12910,6 +13292,147 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
+  /**
+   * Pump a conversation whose "Compacting…" spinner is owned by `owner`, and
+   * whose status snapshot is `snapshot` (the idle seed when omitted).
+   */
+  async function startSpinnerSnapshotPump(
+    id: string,
+    owner: string,
+    state: Partial<ConversationState>,
+    snapshot?: Record<string, unknown>,
+  ) {
+    seedSession(id, []);
+    const sink = pushableStream();
+    let snapshotFetches = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === `/v1/sessions/${id}/stream`) {
+        init?.signal?.addEventListener("abort", () =>
+          sink.error(new DOMException("aborted", "AbortError")),
+        );
+        return mockResponse(null, { bodyStream: sink.stream });
+      }
+      if (url.startsWith(`/v1/sessions/${id}?`) && (init?.method ?? "GET") === "GET") {
+        snapshotFetches += 1;
+        if (snapshot) return mockResponse(snapshot);
+      }
+      return defaultFetchHandler(input, init);
+    });
+    const controller = new AbortController();
+    const bound = bindConversationForTest(id, {
+      abortController: controller,
+      ...state,
+      blocks: [
+        {
+          type: "compaction_loading",
+          ctx: { agent: null, depth: 0, turn: 0, timestamp: 0, responseId: owner, itemId: null },
+        },
+      ],
+    });
+    const loop = startStreamPump(id, controller, bound.set, bound.get);
+    await drainAsync();
+    return {
+      sink,
+      bound,
+      snapshotFetches: () => snapshotFetches,
+      spinnerIds: () =>
+        bound
+          .get()
+          .blocks.filter((b) => b.type === "compaction_loading")
+          .map((b) => b.ctx.responseId),
+      stop: async () => {
+        controller.abort();
+        await drainAsync(2);
+        await loop;
+      },
+    };
+  }
+
+  it("clears the open turn's compaction spinner when a status snapshot settles the turn", async () => {
+    const pump = await startSpinnerSnapshotPump("conv_spinner_gap", "resp_live", {
+      sessionStatus: "running",
+      status: "streaming",
+      activeResponse: { responseId: "resp_live", state: "streaming", error: null },
+    });
+
+    // Heartbeats keep the stream open while both the compaction terminal
+    // and the turn's idle edge are missing.
+    await advanceWithHeartbeats(pump.sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+
+    expect(pump.bound.get().activeResponse?.state).toBe("completed");
+    expect(pump.spinnerIds()).toEqual([]);
+
+    await pump.stop();
+  });
+
+  it("keeps a spinner shown after a stopped turn when a status snapshot arrives", async () => {
+    const pump = await startSpinnerSnapshotPump("conv_spinner_stopped", "resp_stopped", {
+      sessionStatus: "idle",
+      status: "idle",
+      activeResponse: {
+        responseId: "resp_stopped",
+        state: "cancelled",
+        error: null,
+        completedAt: Date.now(),
+      },
+    });
+
+    await advanceWithHeartbeats(pump.sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+
+    expect(pump.snapshotFetches()).toBeGreaterThan(0);
+    expect(pump.spinnerIds()).toEqual(["resp_stopped"]);
+
+    await pump.stop();
+  });
+
+  it("hands spinners to a running turn a status snapshot reveals", async () => {
+    // The live `running` edge naming the new turn was missed; the snapshot
+    // reopens it, and the turn's own terminal edge must then take the spinner.
+    const pump = await startSpinnerSnapshotPump(
+      "conv_spinner_reopen",
+      "resp_prev",
+      {
+        sessionStatus: "idle",
+        status: "idle",
+        activeResponse: {
+          responseId: "resp_prev",
+          state: "completed",
+          error: null,
+          completedAt: Date.now(),
+        },
+      },
+      {
+        id: "conv_spinner_reopen",
+        agent_id: "agent_xyz",
+        status: "running",
+        active_response_id: "resp_new",
+        created_at: 0,
+        items: [],
+        labels: {},
+      },
+    );
+
+    await advanceWithHeartbeats(pump.sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+    expect(pump.bound.get().activeResponse?.responseId).toBe("resp_new");
+    expect(pump.spinnerIds()).toEqual(["resp_new"]);
+
+    pump.sink.push(
+      sse("session.status", {
+        conversation_id: "conv_spinner_reopen",
+        status: "idle",
+        response_id: "resp_new",
+      }),
+    );
+    await drainAsync();
+    expect(pump.spinnerIds()).toEqual([]);
+
+    await pump.stop();
+  });
+
   it("keeps a live status event that arrives during snapshot reconciliation", async () => {
     seedSession("conv_status_race", []);
     const sink = pushableStream();
@@ -13340,6 +13863,88 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await drainAsync(2);
     await loop;
   });
+
+  it.each([
+    { path: "ordinary backfill", gapLength: 5, refreshesWindow: false },
+    { path: "the fresh-window fallback", gapLength: 100, refreshesWindow: true },
+  ])(
+    "clears the open turn's compaction spinner when reconnect recovers through $path",
+    async ({ gapLength, refreshesWindow }) => {
+      const id = `conv_spinner_gap_${gapLength}`;
+      const preGap = Array.from({ length: 30 }, (_, i) => gapUser("pre", i));
+      const windowItems = preGap.slice(-SESSION_HISTORY_PAGE_SIZE);
+      seedSession(id, preGap);
+      const sinks: StreamSink[] = [];
+      const heldItems: (() => void)[] = [];
+      let holdItems = false;
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === `/v1/sessions/${id}/stream`) {
+          const sink = pushableStream();
+          sinks.push(sink);
+          return mockResponse(null, { bodyStream: sink.stream });
+        }
+        if (holdItems && url.startsWith(`/v1/sessions/${id}/items`)) {
+          return new Promise<Response>((resolve) => {
+            heldItems.push(() => resolve(defaultFetchHandler(input, init)));
+          });
+        }
+        return defaultFetchHandler(input, init);
+      });
+      const controller = new AbortController();
+      useChatStore.setState({
+        conversationId: id,
+        abortController: controller,
+        blocks: itemsToBlocks(windowItems),
+        hasMoreHistory: true,
+        oldestItemId: windowItems[0]!.id,
+        sessionStatus: "running",
+        status: "streaming",
+        activeResponse: { responseId: "resp_live", state: "streaming", error: null },
+      });
+
+      const loop = startStreamPump(id, controller, setState, getState);
+      await drainAsync();
+
+      // The turn ends during the gap. Before reconcile's fetches land, the new
+      // stream replays the turn header and the compaction progress it announced.
+      const gap = Array.from({ length: gapLength }, (_, i) => gapUser("gap", i));
+      seedSessionItems(id, [...preGap, ...gap]);
+      holdItems = true;
+      sinks[0]!.error();
+      await drainAsync();
+      expect(sinks).toHaveLength(2);
+      sinks[1]!.push(
+        sse("response.created", { id: "resp_live", status: "in_progress", output: [] }),
+      );
+      sinks[1]!.push(sse("response.compaction.in_progress", {}));
+      await drainAsync();
+      expect(useChatStore.getState().blocks.some((b) => b.type === "compaction_loading")).toBe(
+        true,
+      );
+
+      holdItems = false;
+      /* oxlint-disable no-await-in-loop */
+      while (heldItems.length > 0) {
+        heldItems.shift()!();
+        await drainAsync();
+      }
+      /* oxlint-enable no-await-in-loop */
+
+      const state = useChatStore.getState();
+      // The intended recovery path ran: only the fallback replaces the window.
+      expect(state.oldestItemId).toBe(
+        refreshesWindow ? gap.at(-INITIAL_WINDOW_ITEMS)!.id : windowItems[0]!.id,
+      );
+      expect(state.activeResponse?.state).toBe("completed");
+      expect(state.blocks.some((b) => b.type === "compaction_loading")).toBe(false);
+
+      sinks[1]!.push("data: [DONE]\n\n");
+      sinks[1]!.close();
+      await drainAsync(2);
+      await loop;
+    },
+  );
 
   it("tombstones native previews found only by capped re-hydration", async () => {
     const preGap = Array.from({ length: 30 }, (_, i) => gapUser("npre", i));
@@ -17369,6 +17974,308 @@ describe("chatStore — attributing pre-turn blocks to the turn", () => {
 
     const rids = useChatStore.getState().blocks.map((b) => b.ctx.responseId);
     expect(rids).toEqual(["", "codex_prev", "codex_now"]);
+  });
+});
+
+describe("chatStore — compaction spinner follows its turn", () => {
+  // Only a terminal compaction event otherwise clears the "Compacting…"
+  // spinner, and the stream never replays one. The spinner belongs to the
+  // turn it ran in, or to the turn that starts after it, and goes when that
+  // turn settles.
+  const setState = useChatStore.setState as unknown as Parameters<typeof pumpStreamEvents>[3];
+  const getState = useChatStore.getState as unknown as Parameters<typeof pumpStreamEvents>[4];
+
+  const spinner = (responseId: string): AnyBlock => ({
+    type: "compaction_loading",
+    ctx: { agent: null, depth: 0, turn: 0, timestamp: 0, responseId, itemId: null },
+  });
+
+  const spinnerIds = () =>
+    useChatStore
+      .getState()
+      .blocks.filter((b) => b.type === "compaction_loading")
+      .map((b) => b.ctx.responseId);
+
+  function startPump(conversationId: string) {
+    useChatStore.setState({ conversationId, blocks: [], activeResponse: null, status: "idle" });
+    const sink = pushableStream();
+    const controller = new AbortController();
+    void pumpStreamEvents(conversationId, sink.stream, controller, setState, getState, {
+      schedule: (flush) => flush(),
+      cancel: () => {},
+    });
+    return { sink, controller };
+  }
+
+  const turnEvent = (type: string, id: string) =>
+    sse(type, {
+      id,
+      status: type === "response.completed" ? "completed" : "in_progress",
+      output: [],
+    });
+
+  it("keeps a /compact spinner published before its turn until compaction completes", async () => {
+    // The runner announces an idle `/compact` before it dispatches the turn
+    // that compacts, so the spinner carries the previous turn's id when the
+    // compact turn starts under a new one.
+    const { sink, controller } = startPump("conv_compact_preturn");
+    sink.push(turnEvent("response.created", "resp_prev"));
+    sink.push(turnEvent("response.completed", "resp_prev"));
+    sink.push(sse("response.compaction.in_progress", {}));
+    sink.push(turnEvent("response.in_progress", "resp_compact"));
+    await tick();
+
+    expect(spinnerIds()).toEqual(["resp_compact"]);
+
+    sink.push(sse("response.compaction.completed", {}));
+    await tick();
+    expect(useChatStore.getState().blocks.some((b) => b.type === "compaction")).toBe(true);
+
+    sink.push(turnEvent("response.completed", "resp_compact"));
+    await tick();
+    expect(spinnerIds()).toEqual([]);
+
+    controller.abort();
+  });
+
+  it("clears a pre-turn spinner when its compact turn settles without a terminal event", async () => {
+    const { sink, controller } = startPump("conv_compact_dropped");
+    sink.push(turnEvent("response.created", "resp_prev"));
+    sink.push(turnEvent("response.completed", "resp_prev"));
+    sink.push(sse("response.compaction.in_progress", {}));
+    sink.push(turnEvent("response.in_progress", "resp_compact"));
+    sink.push(turnEvent("response.completed", "resp_compact"));
+    await tick();
+
+    expect(spinnerIds()).toEqual([]);
+
+    controller.abort();
+  });
+
+  it("clears a spinner when the turn it ran in settles without a terminal event", async () => {
+    const { sink, controller } = startPump("conv_turn_dropped");
+    sink.push(turnEvent("response.created", "resp_turn"));
+    sink.push(sse("response.compaction.in_progress", {}));
+    await tick();
+    expect(spinnerIds()).toEqual(["resp_turn"]);
+
+    sink.push(turnEvent("response.completed", "resp_turn"));
+    await tick();
+    expect(spinnerIds()).toEqual([]);
+    expect(useChatStore.getState().activeResponse?.state).toBe("completed");
+
+    controller.abort();
+  });
+
+  it("keeps a spinner published after its turn settled when that terminal repeats", async () => {
+    const { sink, controller } = startPump("conv_turn_repeat");
+    sink.push(turnEvent("response.created", "resp_done"));
+    sink.push(turnEvent("response.completed", "resp_done"));
+    sink.push(sse("response.compaction.in_progress", {}));
+    sink.push(turnEvent("response.completed", "resp_done"));
+    await tick();
+
+    expect(spinnerIds()).toEqual(["resp_done"]);
+
+    controller.abort();
+  });
+
+  it.each([
+    { edge: "a named idle", status: "idle", named: true },
+    { edge: "a bare idle", status: "idle", named: false },
+    { edge: "a named waiting", status: "waiting", named: true },
+  ] as const)(
+    "clears a native turn's spinner on $edge that settles the turn",
+    ({ status, named }) => {
+      useChatStore.setState({
+        conversationId: "conv_native",
+        activeResponse: { responseId: "codex_turn_1", state: "streaming", error: null },
+        blocks: [spinner("codex_turn_1")],
+      });
+
+      handleSessionEvent({
+        type: "session_status",
+        conversationId: "conv_native",
+        status,
+        ...(named ? { responseId: "codex_turn_1" } : {}),
+      });
+
+      expect(spinnerIds()).toEqual([]);
+      expect(useChatStore.getState().activeResponse?.state).toBe("completed");
+    },
+  );
+
+  const nativeStatus = (status: string, responseId: string) =>
+    sse("session.status", {
+      conversation_id: "conv_native_frame",
+      status,
+      response_id: responseId,
+    });
+
+  it.each([
+    {
+      edge: "the turn's idle edge",
+      before: [],
+      after: [nativeStatus("idle", "codex_turn_1")],
+      settled: "completed",
+    },
+    {
+      edge: "the turn's stop",
+      before: [],
+      after: [
+        sse("session.interrupted", {
+          type: "session.interrupted",
+          data: { requested_at: 1704067200, response_id: "codex_turn_1" },
+        }),
+      ],
+      settled: "cancelled",
+    },
+    {
+      // Progress announced after the turn settled, ahead of the next turn.
+      edge: "the next turn's start",
+      before: [nativeStatus("idle", "codex_turn_1")],
+      after: [nativeStatus("running", "codex_turn_2"), nativeStatus("idle", "codex_turn_2")],
+      settled: "completed",
+    },
+  ])(
+    "clears a spinner still awaiting its frame flush when $edge lands first",
+    async ({ before, after, settled }) => {
+      useChatStore.setState({
+        conversationId: "conv_native_frame",
+        blocks: [],
+        activeResponse: null,
+      });
+      const sink = pushableStream();
+      const controller = new AbortController();
+      let pendingFlush: (() => void) | null = null;
+      void pumpStreamEvents("conv_native_frame", sink.stream, controller, setState, getState, {
+        schedule: (flush) => {
+          pendingFlush = flush;
+        },
+        cancel: () => {
+          pendingFlush = null;
+        },
+      });
+
+      sink.push(nativeStatus("running", "codex_turn_1"));
+      // The turn's first content paints at once; the spinner after it waits
+      // for the next frame, and the turn edge arrives before that frame.
+      sink.push(
+        sse("response.output_item.done", {
+          item: {
+            type: "message",
+            role: "assistant",
+            id: "msg_frame",
+            response_id: "codex_turn_1",
+            content: [{ type: "output_text", text: "Working on it" }],
+          },
+        }),
+      );
+      before.forEach((frame) => sink.push(frame));
+      sink.push(sse("response.compaction.in_progress", {}));
+      after.forEach((frame) => sink.push(frame));
+      await tick();
+      (pendingFlush as (() => void) | null)?.();
+
+      expect(useChatStore.getState().activeResponse?.state).toBe(settled);
+      expect(spinnerIds()).toEqual([]);
+
+      controller.abort();
+    },
+  );
+
+  it("clears a turn's spinner when the turn is stopped", () => {
+    useChatStore.setState({
+      conversationId: "conv_native",
+      activeResponse: { responseId: "claude_turn_1", state: "streaming", error: null },
+      blocks: [spinner("claude_turn_1")],
+    });
+
+    handleSessionEvent({
+      type: "session_interrupted",
+      requestedAt: 0,
+      responseId: "claude_turn_1",
+    });
+
+    expect(spinnerIds()).toEqual([]);
+    expect(useChatStore.getState().activeResponse?.state).toBe("cancelled");
+  });
+
+  it("keeps a spinner shown after a stop through the stopped turn's terminal edges", () => {
+    useChatStore.setState({
+      conversationId: "conv_native",
+      activeResponse: {
+        responseId: "claude_turn_1",
+        state: "cancelled",
+        error: null,
+        completedAt: Date.now(),
+      },
+      blocks: [spinner("claude_turn_1")],
+    });
+
+    handleSessionEvent({ type: "session_status", conversationId: "conv_native", status: "idle" });
+    handleSessionEvent({
+      type: "session_status",
+      conversationId: "conv_native",
+      status: "idle",
+      responseId: "claude_turn_1",
+    });
+
+    expect(spinnerIds()).toEqual(["claude_turn_1"]);
+  });
+
+  it("keeps a spinner that started after the turn settled", () => {
+    // A claude-native `/compact` compacts without a turn of its own, so the
+    // spinner carries the finished turn's id and later edges must spare it.
+    useChatStore.setState({
+      conversationId: "conv_native",
+      activeResponse: {
+        responseId: "claude_turn_1",
+        state: "completed",
+        error: null,
+        completedAt: Date.now(),
+      },
+      blocks: [spinner("claude_turn_1")],
+    });
+
+    handleSessionEvent({
+      type: "session_status",
+      conversationId: "conv_native",
+      status: "waiting",
+      responseId: "claude_turn_1",
+    });
+    handleSessionEvent({ type: "session_status", conversationId: "conv_native", status: "idle" });
+
+    expect(spinnerIds()).toEqual(["claude_turn_1"]);
+  });
+
+  it("hands a leftover spinner to the next turn, which clears it when it settles", () => {
+    useChatStore.setState({
+      conversationId: "conv_native",
+      activeResponse: {
+        responseId: "claude_turn_1",
+        state: "completed",
+        error: null,
+        completedAt: Date.now(),
+      },
+      blocks: [spinner("claude_turn_1")],
+    });
+
+    handleSessionEvent({
+      type: "session_status",
+      conversationId: "conv_native",
+      status: "running",
+      responseId: "claude_turn_2",
+    });
+    expect(spinnerIds()).toEqual(["claude_turn_2"]);
+
+    handleSessionEvent({
+      type: "session_status",
+      conversationId: "conv_native",
+      status: "idle",
+      responseId: "claude_turn_2",
+    });
+    expect(spinnerIds()).toEqual([]);
   });
 });
 
