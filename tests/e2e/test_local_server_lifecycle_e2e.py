@@ -35,6 +35,7 @@ import os
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -182,11 +183,24 @@ def _find_free_port() -> int:
 
     :returns: An available port number on ``127.0.0.1``.
     """
-    import socket
-
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return int(s.getsockname()[1])
+
+
+@pytest.fixture
+def lan_stand_in_host() -> str:
+    """The LAN stand-in address, skipping on hosts without a second loopback address.
+
+    Linux answers for all of 127/8; stock macOS aliases only 127.0.0.1 on lo0,
+    so nothing could connect to 127.0.0.2 there whatever the server binds.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((_LAN_STAND_IN_HOST, 0))
+        except OSError as exc:
+            pytest.skip(f"{_LAN_STAND_IN_HOST} is not configured on this host ({exc})")
+    return _LAN_STAND_IN_HOST
 
 
 def _lan_stand_in_health_status(port: int) -> int | None:
@@ -195,13 +209,13 @@ def _lan_stand_in_health_status(port: int) -> int | None:
     ``trust_env=False`` so a CI egress proxy can never answer for the server.
 
     :param port: The server's TCP port.
-    :returns: The HTTP status, or ``None`` when the connection is refused.
+    :returns: The HTTP status, or ``None`` when no connection could be made.
     """
     try:
         resp = httpx.get(
             f"http://{_LAN_STAND_IN_HOST}:{port}/health", timeout=2.0, trust_env=False
         )
-    except httpx.ConnectError:
+    except httpx.TransportError:
         return None
     return resp.status_code
 
@@ -615,12 +629,13 @@ def test_explicit_port_servers_run_side_by_side(
 def test_readme_lan_tip_matches_default_server_bind(
     procs: _Procs,
     tmp_path: Path,
+    lan_stand_in_host: str,
 ) -> None:
-    """The README tip's LAN address must be served by a bare ``server``, or the tip must say how.
+    """A bare ``server`` behaves as the README tip says: loopback-only, ``--host`` documented.
 
-    The tip tells readers to open ``http://<LAN-IP>:6767`` on a phone. A default
-    ``omnigent server`` binds 127.0.0.1, so that phone is refused; that is only
-    acceptable when the same tip documents an ``omnigent server --host …`` command.
+    The tip tells readers the default ``omnigent server`` binds 127.0.0.1, so a
+    phone on the LAN is refused, and shows the ``omnigent server --host …``
+    command to use instead. Both halves must hold or the tip has drifted.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -632,18 +647,23 @@ def test_readme_lan_tip_matches_default_server_bind(
     assert _health_ok(port)
 
     lan_status = _lan_stand_in_health_status(port)
+    assert lan_status is None, (
+        f"default `omnigent server` served the LAN client {lan_stand_in_host}:{port} "
+        f"(status={lan_status}), but the README tip documents a loopback-only default:\n"
+        f"{_readme_lan_tip()}"
+    )
     documented = _readme_lan_tip_server_command()
-    tip_documents_bind = documented is not None and "--host" in documented
-    assert lan_status == 200 or tip_documents_bind, (
-        f"default `omnigent server` refused the LAN client {_LAN_STAND_IN_HOST}:{port} "
-        f"(status={lan_status}), yet the README tip sends phone users to the LAN address "
-        f"without documenting an `omnigent server --host …` command:\n{_readme_lan_tip()}"
+    assert documented is not None and "--host" in documented, (
+        f"default `omnigent server` refuses the LAN client {lan_stand_in_host}:{port}, yet "
+        f"the README tip sends phone users to the LAN address without documenting an "
+        f"`omnigent server --host …` command:\n{_readme_lan_tip()}"
     )
 
 
 def test_readme_documented_bind_serves_lan_stand_in_client(
     procs: _Procs,
     tmp_path: Path,
+    lan_stand_in_host: str,
 ) -> None:
     """The ``omnigent server --host …`` command the README tip documents serves the LAN client."""
     command = _readme_lan_tip_server_command()
@@ -660,6 +680,6 @@ def test_readme_documented_bind_serves_lan_stand_in_client(
     _wait_for_health(port, server, tmp_path / "server.log")
 
     assert _lan_stand_in_health_status(port) == 200, (
-        f"`omnigent {' '.join(command)}` refused the LAN client {_LAN_STAND_IN_HOST}:{port}.\n"
+        f"`omnigent {' '.join(command)}` refused the LAN client {lan_stand_in_host}:{port}.\n"
         f"--- log ---\n{_tail(tmp_path / 'server.log')}"
     )
