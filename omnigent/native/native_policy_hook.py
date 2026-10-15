@@ -30,13 +30,20 @@ import types
 from collections.abc import Callable, Mapping
 from typing import NotRequired, TypedDict
 
-# httpx's package import also loads its optional command-line client and its
-# click/pygments/rich dependencies, which hook processes never use and the
-# harness waits on. An empty stand-in makes httpx fall back to its stub ``main``.
+# httpx's package import also loads its optional command-line client (plus
+# click, pygments and rich), which hook processes never use yet wait on. The
+# stand-in leaves httpx's stub ``main`` in this process; omnigent never runs it.
 _skip_httpx_cli = "httpx" not in sys.modules
 if _skip_httpx_cli:
     sys.modules["httpx._main"] = types.ModuleType("httpx._main")
 try:
+    import httpx
+except Exception:  # the stand-in must never break a hook's import
+    if not _skip_httpx_cli:
+        raise
+    # An httpx that cannot load beside the stand-in gets a plain import instead.
+    del sys.modules["httpx._main"]
+    _skip_httpx_cli = False
     import httpx
 finally:
     if _skip_httpx_cli:

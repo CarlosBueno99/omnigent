@@ -1387,8 +1387,12 @@ def _exit_without_teardown(code: int) -> NoReturn:
     """
     sys.stdout.flush()
     sys.stderr.flush()
-    threading._shutdown()  # type: ignore[attr-defined]  # private, as in multiprocessing
-    atexit._run_exitfuncs()
+    try:
+        threading._shutdown()  # type: ignore[attr-defined]  # private, as in multiprocessing
+        atexit._run_exitfuncs()
+    except AttributeError:
+        # The private helpers moved: a normal exit still delivers the verdict.
+        raise SystemExit(code) from None
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(code)

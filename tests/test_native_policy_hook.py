@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -28,11 +29,11 @@ def _modules_loaded_by(statements: str, watched: tuple[str, ...]) -> list[str]:
     )
     completed = subprocess.run(
         [sys.executable, "-I", "-c", code],
-        check=True,
         capture_output=True,
         text=True,
         timeout=120,
     )
+    assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
 
 
@@ -69,6 +70,49 @@ def test_import_after_httpx_leaves_the_loaded_httpx_alone() -> None:
         ("httpx", "httpx._main"),
     )
     assert loaded == ["httpx", "httpx._main"]
+
+
+def test_import_retries_without_the_stand_in_when_httpx_rejects_it(tmp_path: Path) -> None:
+    """
+    An httpx that cannot load beside the stand-in is imported again without it.
+
+    Protects every hook's import against an httpx release that stops tolerating
+    a missing command-line module; the hook then just pays for that import.
+    """
+    fake = tmp_path / "httpx"
+    fake.mkdir()
+    (fake / "__init__.py").write_text(
+        "\n".join(
+            (
+                "import pathlib, sys",
+                "with pathlib.Path(__file__).with_name('attempts').open('a') as log:",
+                "    log.write('x')",
+                "stand_in = sys.modules.get('httpx._main')",
+                "if stand_in is not None and not hasattr(stand_in, 'main'):",
+                "    raise ImportError('this httpx needs its real command-line module')",
+                "class RemoteProtocolError(Exception): ...",
+                "class ReadError(Exception): ...",
+            )
+        )
+    )
+    code = "\n".join(
+        (
+            "import json, sys",
+            f"sys.path.insert(0, {str(tmp_path)!r})",
+            "import omnigent.native.native_policy_hook as seam",
+            "print(json.dumps({'httpx_file': seam.httpx.__file__,"
+            " 'stand_in_left': 'httpx._main' in sys.modules}))",
+        )
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "httpx_file": str(fake / "__init__.py"),
+        "stand_in_left": False,
+    }
+    assert (fake / "attempts").read_text() == "xx"
 
 
 def test_pre_tool_use_maps_to_phase_tool_call() -> None:

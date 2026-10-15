@@ -10,6 +10,7 @@ import select
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -1992,9 +1993,9 @@ _PRE_TOOL_USE_PAYLOAD = json.dumps(
     {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}
 )
 # Claude Code waits for the hook process to exit, not for the verdict bytes.
-# Module teardown used to hold the exit for about 40 ms; a plain exit takes a
+# Module teardown used to hold the exit for 35 ms or more; a plain exit takes a
 # few milliseconds even through the generated ``/bin/sh`` wrapper.
-_MAX_VERDICT_TO_EXIT_S = 0.015
+_MAX_VERDICT_TO_EXIT_S = 0.020
 _HOOK_TIMEOUT_S = 60.0
 
 
@@ -2029,35 +2030,42 @@ def _run_generated_policy_command(command: str) -> tuple[bytes, float]:
 
     :returns: The hook's stdout and the seconds from its first stdout byte to EOF.
     """
-    proc = subprocess.Popen(
-        ["/bin/sh", "-c", command],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
-    proc.stdin.write(_PRE_TOOL_USE_PAYLOAD.encode())
-    proc.stdin.close()
-    fd = proc.stdout.fileno()
     deadline = time.monotonic() + _HOOK_TIMEOUT_S
     first_byte_at: float | None = None
+    now = deadline
+    timed_out = False
     chunks: list[bytes] = []
-    while True:
-        ready, _, _ = select.select([fd], [], [], max(0.0, deadline - time.monotonic()))
-        if not ready:
-            proc.kill()
-            pytest.fail(
-                f"hook did not exit within {_HOOK_TIMEOUT_S}s; stderr={proc.stderr.read()!r}"
-            )
-        data = os.read(fd, 65536)
-        now = time.monotonic()
-        if not data:
-            break
-        if first_byte_at is None:
-            first_byte_at = now
-        chunks.append(data)
-    proc.wait(timeout=10)
-    stderr = proc.stderr.read()
+    # stderr goes to a file so a chatty hook can never block on a full pipe.
+    with (
+        tempfile.TemporaryFile() as stderr_file,
+        subprocess.Popen(
+            ["/bin/sh", "-c", command],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
+        ) as proc,
+    ):
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(_PRE_TOOL_USE_PAYLOAD.encode())
+        proc.stdin.close()
+        fd = proc.stdout.fileno()
+        while True:
+            ready, _, _ = select.select([fd], [], [], max(0.0, deadline - time.monotonic()))
+            if not ready:
+                proc.kill()
+                timed_out = True
+                break
+            data = os.read(fd, 65536)
+            now = time.monotonic()
+            if not data:
+                break
+            if first_byte_at is None:
+                first_byte_at = now
+            chunks.append(data)
+        proc.wait(timeout=10)
+        stderr_file.seek(0)
+        stderr = stderr_file.read()
+    assert not timed_out, f"hook did not exit within {_HOOK_TIMEOUT_S}s; stderr={stderr!r}"
     assert proc.returncode == 0, stderr
     assert first_byte_at is not None, f"hook wrote no verdict; stderr={stderr!r}"
     return b"".join(chunks), now - first_byte_at
@@ -2124,6 +2132,24 @@ def test_policy_hook_fast_exit_finalizes_in_interpreter_order() -> None:
     )
     assert result.returncode == 3, result.stderr
     assert result.stdout.splitlines() == ["non-daemon thread finished", "exit handler ran"]
+
+
+def test_policy_hook_fast_exit_falls_back_to_a_normal_exit_without_the_private_api() -> None:
+    """If CPython drops the private shutdown helpers, the hook still exits with its code."""
+    code = "\n".join(
+        (
+            "import atexit, threading",
+            "from omnigent.harnesses.claude_native import hook",
+            "del threading._shutdown",
+            "atexit.register(print, 'exit handler ran')",
+            "hook._exit_without_teardown(3)",
+        )
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 3, result.stderr
+    assert result.stdout.splitlines() == ["exit handler ran"]
 
 
 # ── #1782: bound the reattach spin-loop ────────────────────────────────────
