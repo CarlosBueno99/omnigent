@@ -1861,6 +1861,21 @@ def create_runner_app(
             _release_required_terminal_session(event.session_id)
             return
 
+        if _shutting_down.is_set():
+            # tmux died with this runner's process group on a stop signal, not
+            # a crash; the server settles the turn from the dropped tunnel. This
+            # precedes the idle check so stopping a runner with idle sessions
+            # stays benign instead of logging a cause diagnostic per session.
+            _logger.info(
+                "required terminal %s exited for %s while the runner is shutting down; "
+                "not failing the turn",
+                event.terminal_name,
+                event.session_id,
+                extra={"session_id": event.session_id},
+            )
+            _release_required_terminal_session(event.session_id)
+            return
+
         if event.session_was_idle:
             # No turn fails, so this is the only record of why the terminal died;
             # without it a startup exit stays unattributed. The idle session is
@@ -1875,19 +1890,6 @@ def create_runner_app(
                 event.session_id,
                 sanitize_diagnostic_text(error.get("message", "")),
                 extra=idle_log,
-            )
-            _release_required_terminal_session(event.session_id)
-            return
-
-        if _shutting_down.is_set():
-            # tmux died with this runner's process group on a stop signal, not
-            # a crash; the server settles the turn from the dropped tunnel.
-            _logger.info(
-                "required terminal %s exited for %s while the runner is shutting down; "
-                "not failing the turn",
-                event.terminal_name,
-                event.session_id,
-                extra={"session_id": event.session_id},
             )
             _release_required_terminal_session(event.session_id)
             return

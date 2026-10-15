@@ -473,28 +473,11 @@ async def test_idle_required_terminal_exit_records_the_launcher_output(
     statuses = _drain_session_event_queue(_session_event_queues_ref.get(_SESSION))
     assert not any(event.get("status") == "failed" for event in statuses), statuses
 
-    rows = [row for row in _rows_after_exit(caplog) if _SESSION in json.dumps(row)]
-    assert any(launcher_output in json.dumps(row) for row in rows), (
-        "no runner-log row carries the dead terminal's output; rows after the exit: "
-        + json.dumps(
-            [
-                {
-                    "event": row.get("event_name") or row.get("message"),
-                    "terminal_exit_status": row.get("attributes", {}).get("terminal_exit_status"),
-                    "terminal_last_output": row.get("attributes", {}).get("terminal_last_output"),
-                }
-                for row in rows
-            ]
-        )
+    # The idle exit fails no turn, so this WARNING is the only record of the
+    # cause; selecting it by name keeps an unrelated diagnostic from satisfying
+    # the assertion.
+    [idle_row] = _rows(caplog, "required_terminal_exited_idle")
+    assert launcher_output in json.dumps(idle_row), (
+        "the idle-exit diagnostic does not carry the dead terminal's output: "
+        + json.dumps(idle_row)
     )
-
-
-def _rows_after_exit(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
-    """Every runner record emitted from the exit observation onward, serialized as sink rows."""
-    records = caplog.records
-    start = next(
-        index
-        for index, record in enumerate(records)
-        if getattr(record, "event_name", None) == "terminal_exit_observed"
-    )
-    return [record_to_row(record, source="runner") for record in records[start:]]

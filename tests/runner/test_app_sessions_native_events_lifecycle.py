@@ -4320,7 +4320,10 @@ async def test_required_terminal_exit_publishes_deleted_and_failed(
     instance.command = "worker-cli"
     instance.args = ["--profile", "test"]
     instance.launch_cwd = str(tmp_path)
-    instance._remember_pane_snapshot("startup failed\ncomplete setup first")
+    instance._remember_pane_snapshot(
+        "startup failed\ncomplete setup first\n"
+        "Cookie: s3cr3t-active-cookie-7b2c\npassword hunter2-active-secret-pw"
+    )
     terminal_registry._by_conversation.setdefault(conv_id, {})[("worker", "main")] = instance
     callbacks: dict[str, Any] = {}
 
@@ -4421,6 +4424,12 @@ async def test_required_terminal_exit_publishes_deleted_and_failed(
     assert exit_record.attributes["error_category"] == "runner"
     assert exit_record.attributes["error_impact"] == "blocking"
     assert exit_record.attributes["error_code"] == "required_terminal_exited"
+    # Captured pane text can carry credentials the default log redactor misses,
+    # so the failing-turn ERROR message must redact them before it is logged.
+    exit_message = exit_record.getMessage()
+    assert "s3cr3t-active-cookie-7b2c" not in exit_message
+    assert "hunter2-active-secret-pw" not in exit_message
+    assert "[REDACTED]" in exit_message
     assert parent_events == [
         {
             "type": "session.child_session.updated",
@@ -4922,9 +4931,11 @@ async def test_required_terminal_voluntary_exit_publishes_idle_not_failed() -> N
     assert pm.released == [conv_id]
 
 
+@pytest.mark.parametrize("session_was_idle", [False, True])
 @pytest.mark.asyncio
 async def test_required_terminal_exit_during_shutdown_does_not_fail_session(
     caplog: pytest.LogCaptureFixture,
+    session_was_idle: bool,
 ) -> None:
     """A required terminal exit while the runner is shutting down is not a crash.
 
@@ -4934,6 +4945,10 @@ async def test_required_terminal_exit_during_shutdown_does_not_fail_session(
     the runner must still remove the terminal resource and release the
     harness, but must not log an ERROR or publish ``session.status: failed``
     — the server already handles a runner going away via the dropped tunnel.
+
+    Shutdown is handled ahead of the idle check, so stopping a runner with an
+    idle session takes the benign shutdown path rather than emitting a
+    ``required_terminal_exited_idle`` cause diagnostic for ordinary teardown.
     """
     import logging
 
@@ -4965,7 +4980,7 @@ async def test_required_terminal_exit_during_shutdown_does_not_fail_session(
                     session_key="main",
                     lifecycle=TerminalLifecycle.REQUIRED,
                     exit_status=None,
-                    session_was_idle=False,
+                    session_was_idle=session_was_idle,
                 )
             )
             queued_events: list[dict[str, Any]] = []
@@ -4997,6 +5012,13 @@ async def test_required_terminal_exit_during_shutdown_does_not_fail_session(
         "shutting down" in record.getMessage() and record.levelno == logging.INFO
         for record in caplog.records
     )
+    # Shutdown is handled before the idle check, so an idle session at teardown
+    # takes the benign path and emits no idle cause diagnostic.
+    assert [
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "required_terminal_exited_idle"
+    ] == []
     # The harness subprocess is still released — the terminal is gone.
     assert pm.released == [conv_id]
 
