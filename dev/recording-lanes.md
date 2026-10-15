@@ -165,7 +165,11 @@ any fixture teardown runs. With `OMNIGENT_E2E_RECORD_DIR` set, every page or
 context the test or its fixtures open through `browser.new_page()` /
 `browser.new_context()` (sync or async API) is closed at the same point, so a
 driver that forgets to close its own page cannot film teardown either; close it
-yourself when the clip should end earlier. A fixture that touches a page after
+yourself when the clip should end earlier. An async-API context is closed on
+the event loop that opened it, which must still be open and not running when
+the test body ends (a pytest-asyncio test loop is); a context whose loop has
+already closed or is still running is left to its owner, with a pytest
+warning. A fixture that touches a page after
 `yield` must skip that work when `page.is_closed()`. Cleanup inside the test
 body still films: a driver that deletes its session or stops its runner in its
 own `finally:` while the recorded page is open ends on "Bridge closed" — close

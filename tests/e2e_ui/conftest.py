@@ -2377,6 +2377,9 @@ def _stop_recorded_contexts(item: pytest.Item) -> None:
         # pytest-playwright's close wrapper still takes its screenshots and traces.
         _close_recorded_context(item, context)
     for opened, loop in item.stash.get(_OPENED_RECORDING_CONTEXTS, []):
+        # The ``context`` fixture is also opened through the patched method.
+        if opened is context:
+            continue
         _close_recorded_context(item, opened, loop)
 
 
