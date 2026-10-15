@@ -546,31 +546,31 @@ def test_upgrade_git_confirmed_behind_but_repull_noop_fails(
 def test_upgrade_git_install_dry_run_prints_without_running(
     monkeypatch: pytest.MonkeyPatch, _wheel_install: None
 ) -> None:
-    """``--dry-run`` on a git install prints the re-pull command instead of running it."""
+    """``--dry-run`` on a git install prints the re-pull plan and exits before any side effects."""
     monkeypatch.setattr("omnigent.update_check._read_installed_wheel_info", _git_install_info)
     monkeypatch.setattr("omnigent.update_check._remote_git_head", lambda _url: "b" * 40)
 
-    events: list[str] = []
+    def _must_not_run(*_a: object, **_k: object) -> int:
+        raise AssertionError("--dry-run must not run the upgrade")
+
+    monkeypatch.setattr("omnigent.update_check._run_upgrade_command", _must_not_run)
+    stopped: list[bool] = []
     monkeypatch.setattr(
-        "omnigent.cli._drain_and_stop_local_server", lambda *, force: events.append("stopped")
-    )
-    monkeypatch.setattr(
-        "omnigent.update_check._run_upgrade_command",
-        lambda command, _console: events.append(f"ran: {command}") or 0,
-    )
-    monkeypatch.setattr(
-        "omnigent.update_check._probe_installed_distribution", lambda: ("0.1.0", "b" * 40)
+        "omnigent.cli._stop_local_server_and_daemon",
+        lambda *, force: stopped.append(force) or False,
     )
 
-    result = CliRunner().invoke(cli, ["update", "--dry-run"])
+    result = CliRunner().invoke(cli, ["upgrade", "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    assert events == [], events
+    assert "Detected installer: uv" in result.output
+    assert "Detected extras: (none)" in result.output
     assert (
         f"Would run: uv tool install --reinstall{_UV_PY} "
-        "git+https://github.com/omnigent-ai/omnigent.git" in result.output
-    )
-    assert "Updated to git" not in result.output
+        "git+https://github.com/omnigent-ai/omnigent.git"
+    ) in result.output
+    assert "Running:" not in result.output
+    assert stopped == []
 
 
 def _nightly_ls_remote(*names: str) -> str:
