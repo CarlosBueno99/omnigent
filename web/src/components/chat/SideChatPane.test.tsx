@@ -716,6 +716,18 @@ describe("inherited history boundary", () => {
     renderPane(<SideChatPane childId={childId} />);
     expect(screen.queryByText("main: list the important caveats")).toBeNull();
   });
+
+  it("never overwrites a boundary already persisted by an off-screen capture", async () => {
+    const key = `omnigent.sideChatInherited:${childId}`;
+    const { settleLoad } = mountLoadingChild();
+    // The off-screen continuation persisted the correct parent-only boundary
+    // after this mount's first pre-settle render.
+    localStorage.setItem(key, JSON.stringify(["parent_1", "parent_2"]));
+    // The load then settles with the child's own turn already in blocks; the
+    // render-time capture must not re-persist a wider, poisoning boundary.
+    await settleLoad([...parentTurns, sideTurn]);
+    expect(localStorage.getItem(key)).toBe(JSON.stringify(["parent_1", "parent_2"]));
+  });
 });
 
 describe("side-chat composer auto-grow", () => {

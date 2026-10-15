@@ -75,9 +75,8 @@ function writeInheritedBoundary(childId: string, ids: Set<string>): void {
   }
 }
 
-// The forked-in item ids to hide, or null until the fork load has genuinely
-// settled: a null harness means a not-yet-bound or abandoned entry, and a native
-// Codex fork holds only its own turns. Pure: callers persist the result.
+// Null until the load settles: a null harness is an unbound/abandoned entry and
+// a native Codex fork already holds only its own turns. Pure; callers persist.
 function forkedInBoundary(state: ConversationState): Set<string> | null {
   if (
     state.loadingConversation ||
@@ -219,7 +218,8 @@ export function SideChatPane({
   useEffect(() => {
     const ref = boundaryRef.current;
     if (ref === null || ref.persisted || inherited === null) return;
-    writeInheritedBoundary(childId, inherited);
+    // Write-once: never clobber a boundary an off-screen capture already stored.
+    if (readInheritedBoundary(childId) === null) writeInheritedBoundary(childId, inherited);
     ref.persisted = true;
   }, [childId, inherited]);
   const visibleBlocks = useMemo(

@@ -84,7 +84,9 @@ def test_side_chat_left_while_loading_hides_parent_transcript(
         while not held and time.monotonic() < deadline:
             page.wait_for_timeout(100)
         assert held, "the side chat never requested its first transcript page"
-        child_id = child_ids[0]
+        held_match = _ITEMS_URL.search(held[0].request.url)
+        assert held_match is not None
+        child_id = held_match.group(1)
         # Leave the pane while that page is in flight, then let it land off screen.
         rail.get_by_role("button", name="Open new", exact=True).click()
         page.get_by_role("menuitem", name="Side chat", exact=True).click()
@@ -127,4 +129,5 @@ def test_side_chat_left_while_loading_hides_parent_transcript(
             with contextlib.suppress(Exception):
                 route.continue_()
         for child_id in child_ids:
-            httpx.delete(f"{base_url}/v1/sessions/{child_id}", timeout=10.0)
+            with contextlib.suppress(Exception):
+                httpx.delete(f"{base_url}/v1/sessions/{child_id}", timeout=10.0)
