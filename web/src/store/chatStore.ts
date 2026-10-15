@@ -5713,13 +5713,9 @@ export interface FrameScheduler {
   cancel: () => void;
 }
 
-/**
- * Stream commits are held while the reader scrolls the transcript: each one
- * re-renders and reflows it, which on a slow device steals the gesture's frame
- * budget, and a scrolling reader is not following the live text. A scroll this
- * recent still counts as scrolling; the first settled frame paints everything
- * buffered. Turn edges and a response's first content block are never held.
- */
+// A scroll this recent still counts as the reader scrolling the transcript, which
+// holds stream commits (each reflows it and, on a slow device, steals the gesture's
+// frame budget); turn edges and a response's first content are never held.
 export const TRANSCRIPT_SCROLL_SETTLE_MS = 150;
 
 /** Longest hold during one continuous scroll, so the stream never looks dead. */

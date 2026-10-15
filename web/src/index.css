@@ -1855,10 +1855,9 @@ html[data-electron-mac] .breadcrumb-folder {
   }
 }
 
-/* While the reader scrolls the transcript (VirtualBubbleList sets this, never
- * while pinned to the bottom), the animations that repaint every frame pause so
- * the gesture keeps its frame budget. Scoped to these classes: a universal
- * descendant rule would restyle the whole transcript on every toggle. */
+/* Set by VirtualBubbleList while the reader scrolls away from the bottom: the
+ * animations that repaint every frame pause so the gesture keeps its frame budget.
+ * Class-scoped because a universal rule restyles the whole transcript per toggle. */
 [data-transcript-scrolling] .text-shimmer,
 [data-transcript-scrolling] .otto-working,
 [data-transcript-scrolling] .otto-working .otto-eye {

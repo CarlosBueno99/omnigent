@@ -1,27 +1,6 @@
-"""Scrolling a long transcript while a reply streams must stay as smooth as idle scrolling.
-
-On a phone, scrolling up through a long history while output was still
-streaming made the chat view stutter. The iOS app is a thin shell over this
-same server-served SPA, so the journey runs on the web lane in a phone touch
-context, with CDP CPU throttling standing in for a phone's headroom.
-
-The mock + openai-agents path delivers the reply to the SPA as one consolidated
-``response.output_text.delta`` (no progressive tokens), so a page-side ``fetch``
-wrapper re-paces that single text delta into many paced delta frames, driving the
-real stream/render path (``sse.ts`` -> chat store frame scheduler -> virtualized
-transcript) with a genuine streaming window. Every other backend event and the
-real turn lifecycle are untouched.
-
-Frame intervals are sampled while the finger is down, across the same drags in
-three phases: nothing streaming (idle control), while the reply streams, and
-after it finishes (second no-stream control). Each phase starts with warm-up
-drags that are not measured, so first-mount costs of freshly windowed rows don't
-inflate a control, and drags are separated by a rest long enough for the
-transcript to settle, as between real flicks. Scrolling while streaming must
-drop no more frames than the no-stream controls. The per-commit cost grows with
-transcript length, so a long seeded history is what makes the stutter reliably
-observable.
-"""
+"""Dragging through a long transcript while a reply streams must not drop more frames
+than the same drags with nothing streaming. Phone stand-in: the web SPA at an iPhone
+touch viewport under CDP CPU throttling."""
 
 from __future__ import annotations
 
@@ -42,12 +21,15 @@ _REPACE_MS = 4
 _STREAM_DRAG_START = 150
 _STREAM_END = "STREAMENDMARKER"
 _PROMPT = f"Scroll test stream {uuid.uuid4().hex[:8]}: tell me a long story."
+# Frames are sampled only while the finger is down, after unmeasured warm-up drags,
+# with a rest between drags so the transcript settles as between real flicks.
 _WARMUP_DRAGS = 2
 _DRAGS = 12
 _DRAG_PAUSE_MS = 400
 
-# Re-pace the one consolidated text delta the SPA receives into many paced delta
-# frames, so the real stream/render path sees a progressive-streaming window.
+# The mock reply arrives as one consolidated text delta; re-pace it into token-sized
+# deltas so the real stream/render path sees a streaming window. Everything else
+# about the stream and turn lifecycle is the real path.
 _REPACE_JS = """
 (pace) => {
   const orig = window.fetch.bind(window);
@@ -100,8 +82,7 @@ _REPACE_JS = """
       status: resp.status, statusText: resp.statusText, headers: resp.headers,
     });
   };
-}
-"""
+}"""
 
 _SAMPLER_JS = """
 () => {
@@ -131,8 +112,7 @@ _SAMPLER_JS = """
     });
     return best || log;
   })();
-}
-"""
+}"""
 
 # True once the re-paced stream has stopped delivering deltas for a few polls.
 _STREAM_FINISHED_JS = """
@@ -145,8 +125,24 @@ _STREAM_FINISHED_JS = """
   window.__rpLast = n;
   window.__rpStable = 0;
   return false;
-}
-"""
+}"""
+
+# A mid-session user already has warm virtualized-row measurements; sweep the full
+# history once so the idle control is not charged first-measurement cost.
+_WARM_VIRTUALIZER_JS = """
+() => new Promise((resolve) => {
+  const s = window.__scroller;
+  if (!s) return resolve();
+  const step = Math.max(200, Math.floor(s.clientHeight * 0.8));
+  let y = s.scrollHeight;
+  const up = () => {
+    y -= step;
+    s.scrollTop = Math.max(0, y);
+    if (y > 0) requestAnimationFrame(() => setTimeout(up, 16));
+    else { s.scrollTop = s.scrollHeight; resolve(); }
+  };
+  up();
+})"""
 
 
 def _seed_history(session_id: str) -> None:
@@ -193,23 +189,7 @@ def _scroll_to_bottom(page: Page) -> None:
 
 
 def _warm_virtualizer(page: Page) -> None:
-    # A mid-session user already has warm virtualized-row measurements; sweep the
-    # full history once so the idle control is not charged first-measurement cost.
-    page.evaluate(
-        """() => new Promise((resolve) => {
-            const s = window.__scroller;
-            if (!s) return resolve();
-            const step = Math.max(200, Math.floor(s.clientHeight * 0.8));
-            let y = s.scrollHeight;
-            const up = () => {
-              y -= step;
-              s.scrollTop = Math.max(0, y);
-              if (y > 0) requestAnimationFrame(() => setTimeout(up, 16));
-              else { s.scrollTop = s.scrollHeight; resolve(); }
-            };
-            up();
-        })"""
-    )
+    page.evaluate(_WARM_VIRTUALIZER_JS)
     page.wait_for_timeout(500)
 
 
