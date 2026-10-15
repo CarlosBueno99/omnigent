@@ -1096,19 +1096,20 @@ def _chat_with_server(
 
     if agent_name is None and resume_conversation_id is not None:
         # A resumed session already has its agent; asking would risk picking
-        # another one and adopting a runner for the wrong harness.
-        agent_name = _attach_session_info(
-            base_url=base_url, conversation_id=resume_conversation_id
-        ).agent_name
+        # another one and adopting a runner for the wrong harness. A failed
+        # lookup surfaces as a discovery error naming the session.
+        snapshot = _discovery_get(base_url, f"/v1/sessions/{resume_conversation_id}", {})
+        session_agent = snapshot.get("agent_name")
+        agent_name = session_agent if isinstance(session_agent, str) and session_agent else None
         if agent_name is None and initial_message is not None:
             from omnigent.util.server_url import display_server_url
 
             # --agent is rejected with --resume, so the generic "pass --agent"
             # advice would be a dead end here.
             raise _server_setup_error(
-                f"Could not read the agent of session {resume_conversation_id} from "
-                f"{display_server_url(base_url)}, so this headless resume cannot choose one. "
-                f"Resume it interactively (`{cli_invocation()} run --server <url> --resume "
+                f"Session {resume_conversation_id} on {display_server_url(base_url)} does not "
+                "report its agent (an older server?), so this headless resume cannot choose "
+                f"one. Resume it interactively (`{cli_invocation()} run --server <url> --resume "
                 f"{resume_conversation_id}`) or start a new session with --agent <name>."
             )
     # A headless one-shot cannot answer the agent menu, so it fails with the
@@ -1470,6 +1471,11 @@ def _discovery_get(base_url: str, path: str, params: dict[str, Any]) -> dict[str
         # not a crash. Same guard as the daemon path
         # (_prepare_chat_session_via_daemon).
         raise click.ClickException(_unreachable_server_message(base_url)) from exc
+    except httpx.TransportError as exc:
+        # The connection was made but the listing never fully arrived.
+        raise _discovery_error(
+            base_url, path, f"failed before a response arrived ({type(exc).__name__})"
+        ) from exc
     try:
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:

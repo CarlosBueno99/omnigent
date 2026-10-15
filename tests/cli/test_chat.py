@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -1935,18 +1936,25 @@ def test_chat_with_server_only_prompts_for_an_agent_when_it_can(
     assert picked["interactive"] is expected_interactive
 
 
+def _resume_lookup(body: dict[str, object]) -> Callable[..., dict[str, object]]:
+    """Fake ``_discovery_get`` that records the requested path and answers *body*."""
+    seen: list[str] = []
+
+    def _get(base_url: str, path: str, params: dict[str, object]) -> dict[str, object]:
+        seen.append(path)
+        return body
+
+    _get.seen = seen  # type: ignore[attr-defined]
+    return _get
+
+
 def test_chat_with_server_resume_uses_the_sessions_own_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Resuming never asks for an agent: the session already has one."""
     monkeypatch.setattr(chat_module, "_redirect_native_resume_if_needed", lambda **_kw: False)
-    monkeypatch.setattr(
-        chat_module,
-        "_attach_session_info",
-        lambda **_kw: chat_module._AttachSessionInfo(
-            runner_online=True, agent_name="nessie", harness="codex"
-        ),
-    )
+    lookup = _resume_lookup({"id": "conv_1", "agent_name": "nessie"})
+    monkeypatch.setattr(chat_module, "_discovery_get", lookup)
 
     def _must_not_pick(*_args: object, **_kwargs: object) -> str:
         raise AssertionError("agent discovery ran on resume")
@@ -1959,25 +1967,21 @@ def test_chat_with_server_resume_uses_the_sessions_own_agent(
         "http://127.0.0.1:6767", None, initial_message="hi", resume_conversation_id="conv_1"
     )
 
+    assert lookup.seen == ["/v1/sessions/conv_1"]  # type: ignore[attr-defined]
     assert captured["agent_name"] == "nessie"
     assert captured["resume_conversation_id"] == "conv_1"
-
-
-def _snapshot_without_agent(**_kw: object) -> chat_module._AttachSessionInfo:
-    """A session snapshot from an older server that omits ``agent_name``."""
-    return chat_module._AttachSessionInfo(runner_online=True, agent_name=None, harness=None)
 
 
 def test_chat_with_server_headless_resume_without_session_agent_is_a_clear_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A headless resume that cannot read the session's agent must not point at --agent.
+    """A headless resume whose session reports no agent must not point at --agent.
 
     ``--agent`` is rejected together with ``--resume``, so the generic discovery
     error would send the user to a flag combination the CLI forbids.
     """
     monkeypatch.setattr(chat_module, "_redirect_native_resume_if_needed", lambda **_kw: False)
-    monkeypatch.setattr(chat_module, "_attach_session_info", _snapshot_without_agent)
+    monkeypatch.setattr(chat_module, "_discovery_get", _resume_lookup({"id": "conv_1"}))
 
     def _must_not_pick(*_args: object, **_kwargs: object) -> str:
         raise AssertionError("agent discovery ran on a headless resume")
@@ -1990,18 +1994,45 @@ def test_chat_with_server_headless_resume_without_session_agent_is_a_clear_error
         )
 
     message = str(excinfo.value)
-    assert "session conv_1" in message
+    assert "Session conv_1" in message and "does not report its agent" in message
     assert "--resume conv_1" in message
     assert "pass --agent" not in message
     assert suppresses_recovery_hint(excinfo.value)
 
 
+def test_chat_with_server_headless_resume_reports_a_failed_session_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that cannot be read (here: 404) names that failure, not legacy advice."""
+    monkeypatch.setattr(chat_module, "_redirect_native_resume_if_needed", lambda **_kw: False)
+
+    def _get(url: str, **_kwargs: object) -> SimpleNamespace:
+        request = httpx.Request("GET", url)
+        response = httpx.Response(404, request=request)
+
+        def _raise() -> None:
+            raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+        return SimpleNamespace(raise_for_status=_raise, json=dict)
+
+    monkeypatch.setattr(chat_module.httpx, "get", _get)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        chat_module._chat_with_server(
+            "http://127.0.0.1:6767", None, initial_message="hi", resume_conversation_id="conv_1"
+        )
+
+    message = str(excinfo.value)
+    assert "/v1/sessions/conv_1" in message and "404" in message
+    assert "does not report its agent" not in message
+
+
 def test_chat_with_server_interactive_resume_without_session_agent_offers_the_menu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In the REPL the same older-server snapshot still falls back to the agent menu."""
+    """In the REPL a session that reports no agent still falls back to the agent menu."""
     monkeypatch.setattr(chat_module, "_redirect_native_resume_if_needed", lambda **_kw: False)
-    monkeypatch.setattr(chat_module, "_attach_session_info", _snapshot_without_agent)
+    monkeypatch.setattr(chat_module, "_discovery_get", _resume_lookup({"id": "conv_1"}))
     picked: dict[str, bool] = {}
 
     def _fake_pick(base_url: str, *, quiet: bool = False, interactive: bool = True) -> str:
@@ -2018,31 +2049,17 @@ def test_chat_with_server_interactive_resume_without_session_agent_offers_the_me
     assert picked["interactive"] is True
 
 
-@pytest.mark.parametrize("failing_route", ["/v1/sessions", "/v1/agents"])
-def test_pick_agent_reports_a_failed_listing_as_a_cli_error(
-    monkeypatch: pytest.MonkeyPatch, failing_route: str
+def test_pick_agent_menu_accepts_a_typed_name(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An HTTP error from either discovery listing is a clean CLI error, hint withheld."""
+    """The interactive menu over the registered agents accepts an agent typed by name."""
+    _serve_listings(monkeypatch, sessions=[], agent_pages=[_agents_page(["coder", "scribe"])])
+    monkeypatch.setattr("sys.stdin", io.StringIO("scribe\n"))
 
-    def _get(url: str, **_kwargs: object) -> SimpleNamespace:
-        if not url.endswith(failing_route):
-            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"data": []})
-        request = httpx.Request("GET", url)
-        response = httpx.Response(404, request=request)
+    assert _pick_agent("http://127.0.0.1:6767") == "scribe"
 
-        def _raise() -> None:
-            raise httpx.HTTPStatusError("not found", request=request, response=response)
-
-        return SimpleNamespace(raise_for_status=_raise, json=dict)
-
-    monkeypatch.setattr(chat_module.httpx, "get", _get)
-
-    with pytest.raises(click.ClickException) as excinfo:
-        _pick_agent("http://127.0.0.1:6767")
-
-    message = str(excinfo.value)
-    assert failing_route in message and "404" in message
-    assert suppresses_recovery_hint(excinfo.value)
+    out = capsys.readouterr().out
+    assert "Available agents" in out and "2. scribe" in out
 
 
 @pytest.mark.parametrize(

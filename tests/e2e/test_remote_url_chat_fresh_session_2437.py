@@ -27,7 +27,6 @@ Run locally (mock LLM, no real API key needed)::
 from __future__ import annotations
 
 import asyncio
-import io
 import os
 import subprocess
 import sys
@@ -531,26 +530,6 @@ def _session_count(base_url: str) -> int:
         resp = client.get("/v1/sessions", params={"visibility": "all", "limit": 100})
         resp.raise_for_status()
         return len(resp.json()["data"])
-
-
-def test_pick_agent_offers_registered_agents_before_any_session(
-    registered_agent_server: _RegisteredAgentServer,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Agent discovery works on a server that has agents but no sessions yet.
-
-    This is the normal state of a new server (built-ins are always seeded), so
-    ``_pick_agent`` must offer the registered agents rather than refusing until
-    some session exists.
-    """
-    from omnigent.chat import _pick_agent
-
-    server = registered_agent_server
-    assert _session_count(server.base_url) == 0
-
-    # Built-ins are registered alongside the test agent, so answer the picker.
-    monkeypatch.setattr("sys.stdin", io.StringIO(f"{server.agent_name}\n"))
-    assert _pick_agent(server.base_url) == server.agent_name
 
 
 def test_run_one_shot_on_fresh_server_does_not_demand_an_existing_session(

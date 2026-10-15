@@ -8750,7 +8750,8 @@ def run(
         and acp_agent is None
     )
     if agent is not None:
-        if not agent.strip():
+        agent = agent.strip()
+        if not agent:
             raise click.ClickException("--agent requires a non-empty agent name.")
         if not direct_server_cli:
             raise click.ClickException(

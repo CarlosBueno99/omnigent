@@ -5124,6 +5124,20 @@ def test_run_agent_rejects_resume_flags(flags: list[str], monkeypatch: pytest.Mo
     run_chat.assert_not_called()
 
 
+def test_run_agent_name_is_trimmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Surrounding whitespace in ``--agent`` is dropped before the name is checked."""
+    monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
+    run_chat = Mock()
+    monkeypatch.setattr("omnigent.chat.run_chat", run_chat)
+
+    result = CliRunner().invoke(
+        cli, ["run", "--server", "http://localhost:8000", "--agent", "  scribe ", "-p", "hi"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert run_chat.call_args.kwargs["agent_name"] == "scribe"
+
+
 def test_run_agent_rejects_a_blank_name(monkeypatch: pytest.MonkeyPatch) -> None:
     """``--agent ""`` must not silently fall back to agent discovery."""
     monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
