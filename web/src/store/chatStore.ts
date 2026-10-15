@@ -5714,12 +5714,42 @@ export interface FrameScheduler {
 }
 
 /**
- * Default `FrameScheduler` backed by `requestAnimationFrame`, so block
- * appends paint at most once per browser frame. Falls back to a 0 ms
- * timer where rAF is absent (SSR / non-DOM); each pump owns its own
- * instance so cancelling one stream's frame can't drop another's.
+ * Stream commits are held while the reader scrolls the transcript: each one
+ * re-renders and reflows it, which on a slow device steals the gesture's frame
+ * budget, and a scrolling reader is not following the live text. A scroll this
+ * recent still counts as scrolling; the first settled frame paints everything
+ * buffered. Turn edges and a response's first content block are never held.
  */
-function createRafScheduler(): FrameScheduler {
+export const TRANSCRIPT_SCROLL_SETTLE_MS = 150;
+
+/** Longest hold during one continuous scroll, so the stream never looks dead. */
+export const SCROLLING_COMMIT_HOLD_MS = 2_000;
+
+let transcriptScrolledAt = Number.NEGATIVE_INFINITY;
+
+/** The transcript calls this on each scroll event while the reader is away from the bottom. */
+export function noteTranscriptScroll(at: number = performance.now()): void {
+  transcriptScrolledAt = at;
+}
+
+export function isTranscriptScrolling(at: number = performance.now()): boolean {
+  return at - transcriptScrolledAt < TRANSCRIPT_SCROLL_SETTLE_MS;
+}
+
+export function resetTranscriptScrollForTest(): void {
+  transcriptScrolledAt = Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * Default `FrameScheduler` backed by `requestAnimationFrame`, so block
+ * appends paint at most once per browser frame — and not at all while the
+ * reader scrolls the transcript, up to `SCROLLING_COMMIT_HOLD_MS`. Falls back
+ * to a 0 ms timer where rAF is absent (SSR / non-DOM); each pump owns its own
+ * instance so cancelling one stream's frame can't drop another's.
+ *
+ * :param now: clock for the hold decision; tests inject a fake one.
+ */
+export function createRafScheduler(now: () => number = () => performance.now()): FrameScheduler {
   const raf: (cb: () => void) => number =
     typeof requestAnimationFrame === "function"
       ? (cb) => requestAnimationFrame(() => cb())
@@ -5729,13 +5759,21 @@ function createRafScheduler(): FrameScheduler {
       ? (handle) => cancelAnimationFrame(handle)
       : (handle) => clearTimeout(handle);
   let handle: number | null = null;
+  let lastFlushAt = Number.NEGATIVE_INFINITY;
+  const frame = (cb: () => void) => (): void => {
+    const at = now();
+    if (isTranscriptScrolling(at) && at - lastFlushAt < SCROLLING_COMMIT_HOLD_MS) {
+      handle = raf(frame(cb));
+      return;
+    }
+    handle = null;
+    lastFlushAt = at;
+    cb();
+  };
   return {
     schedule(cb) {
       if (handle !== null) return;
-      handle = raf(() => {
-        handle = null;
-        cb();
-      });
+      handle = raf(frame(cb));
     },
     cancel() {
       if (handle !== null) {

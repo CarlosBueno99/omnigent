@@ -22,7 +22,7 @@ import {
   createBubbleCache,
   liveCandidateAssistantIndex,
 } from "@/lib/renderItems";
-import { useChatStore } from "@/store/chatStore";
+import { noteTranscriptScroll, TRANSCRIPT_SCROLL_SETTLE_MS, useChatStore } from "@/store/chatStore";
 import { TranscriptScrollbar } from "@/pages/TranscriptScrollbar";
 import { TurnRail, type Turn } from "@/pages/TurnRail";
 import { StreamBudgetBanner } from "@/components/StreamBudgetBanner";
@@ -784,6 +784,31 @@ export function VirtualBubbleList({
   const virtualizerRef = useRef(virtualizer);
   virtualizerRef.current = virtualizer;
 
+  // A scroll away from the bottom holds stream commits (createRafScheduler) and
+  // pauses the transcript's per-frame animations (index.css) until the pane
+  // settles. At the bottom, scroll events are the lock following the reply.
+  useEffect(() => {
+    if (!scrollEl) return;
+    let settleTimer = 0;
+    const settled = () => {
+      settleTimer = 0;
+      scrollEl.removeAttribute("data-transcript-scrolling");
+    };
+    const noteScroll = () => {
+      if (ctxRef.current.state.isAtBottom) return;
+      noteTranscriptScroll();
+      if (settleTimer === 0) scrollEl.setAttribute("data-transcript-scrolling", "");
+      else window.clearTimeout(settleTimer);
+      settleTimer = window.setTimeout(settled, TRANSCRIPT_SCROLL_SETTLE_MS);
+    };
+    scrollEl.addEventListener("scroll", noteScroll, { passive: true });
+    return () => {
+      scrollEl.removeEventListener("scroll", noteScroll);
+      window.clearTimeout(settleTimer);
+      scrollEl.removeAttribute("data-transcript-scrolling");
+    };
+  }, [scrollEl]);
+
   // Persist the item crossing the viewport top, not only a raw scrollTop.
   // Virtual row estimates can change while a conversation is hidden; the key
   // lets restoration follow the same bubble as those estimates settle.
@@ -913,7 +938,9 @@ export function VirtualBubbleList({
   const activeTurnId = useMemo(() => {
     const scrollOffset = virtualizer.scrollOffset;
     if (scrollOffset === null || bubbles.length === 0) return null;
-    const viewport = scrollEl?.clientHeight ?? 0;
+    // The virtualizer's observed rect rather than clientHeight: this runs on
+    // every render, and a layout read here forces a reflow per streaming commit.
+    const viewport = virtualizer.scrollRect?.height ?? scrollEl?.clientHeight ?? 0;
     const midItem = virtualizer.getVirtualItemForOffset(scrollOffset + viewport / 2);
     return activeTurnIdAtBubbleIndex(bubbles, midItem?.index ?? bubbles.length - 1);
     // `range` and `totalSize` are deps so the active turn recomputes as the

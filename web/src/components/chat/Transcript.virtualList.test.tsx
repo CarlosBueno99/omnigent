@@ -2,9 +2,17 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Bubble } from "@/lib/renderItems";
 import { Conversation, ConversationContent } from "@/components/ai-elements/conversation";
+import {
+  isTranscriptScrolling,
+  resetTranscriptScrollForTest,
+  TRANSCRIPT_SCROLL_SETTLE_MS,
+} from "@/store/chatStore";
+import { ConversationScrollRefBridge, type ConversationScroller } from "./chatBubbleParts";
 import { isNativeFindShortcut, type TranscriptGeometry, VirtualBubbleList } from "./Transcript";
 
 afterEach(cleanup);
+afterEach(resetTranscriptScrollForTest);
+afterEach(() => vi.useRealTimers());
 
 const bubble: Extract<Bubble, { kind: "user" }> = {
   kind: "user",
@@ -88,6 +96,54 @@ it("remeasures scrollMargin when task padding changes without changing bubbles",
   view.rerender(list(true, scrollEl));
 
   await waitFor(() => expect(row.style.transform).toBe("translateY(-64px)"));
+});
+
+it("holds stream commits and pauses animations only while the reader scrolls away from the bottom", () => {
+  vi.useFakeTimers();
+  const scrollEl = document.createElement("div");
+  const lifted: { scroller: ConversationScroller | null } = { scroller: null };
+  render(
+    <Conversation>
+      <ConversationContent>
+        <ConversationScrollRefBridge
+          onScroller={(s) => {
+            lifted.scroller = s;
+          }}
+        />
+        <VirtualBubbleList
+          bubbles={[bubble]}
+          scrollEl={scrollEl}
+          lastAssistantIndex={-1}
+          showsWorking={false}
+          sessionIdle
+          conversationId={undefined}
+          hasTasks={false}
+          disableVirtualization={false}
+          onGeometryChange={vi.fn()}
+        />
+      </ConversationContent>
+    </Conversation>,
+  );
+  const state = lifted.scroller!.state;
+
+  // Pinned to the bottom, scroll events are the lock following the reply.
+  state.isAtBottom = true;
+  scrollEl.dispatchEvent(new Event("scroll"));
+  expect(isTranscriptScrolling()).toBe(false);
+  expect(scrollEl).not.toHaveAttribute("data-transcript-scrolling");
+
+  state.isAtBottom = false;
+  scrollEl.dispatchEvent(new Event("scroll"));
+  expect(isTranscriptScrolling()).toBe(true);
+  expect(scrollEl).toHaveAttribute("data-transcript-scrolling");
+
+  // Each further scroll event extends the pause; it lifts once the pane settles.
+  vi.advanceTimersByTime(TRANSCRIPT_SCROLL_SETTLE_MS - 1);
+  scrollEl.dispatchEvent(new Event("scroll"));
+  vi.advanceTimersByTime(TRANSCRIPT_SCROLL_SETTLE_MS - 1);
+  expect(scrollEl).toHaveAttribute("data-transcript-scrolling");
+  vi.advanceTimersByTime(1);
+  expect(scrollEl).not.toHaveAttribute("data-transcript-scrolling");
 });
 
 it("publishes navigation that distinguishes loaded and missing turns", async () => {

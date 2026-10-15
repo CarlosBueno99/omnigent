@@ -82,6 +82,11 @@ import {
   setPendingInitialPrompt,
   startStreamPump,
   useChatStore,
+  createRafScheduler,
+  noteTranscriptScroll,
+  resetTranscriptScrollForTest,
+  SCROLLING_COMMIT_HOLD_MS,
+  TRANSCRIPT_SCROLL_SETTLE_MS,
   type ConversationState,
   type FrameScheduler,
   type PendingUserMessage,
@@ -11049,6 +11054,126 @@ describe("chatStore — session configuration scope", () => {
 
     expect(patchCallsFor("conv_sticky_gpt").some((p) => "model_override" in p)).toBe(false);
     expect(useChatStore.getState().sessionModelOverride).toBeNull();
+  });
+});
+
+describe("chatStore — createRafScheduler scroll hold", () => {
+  /** rAF stand-in the test advances by hand, one frame at a time. */
+  function fakeFrames(): { frame: () => void; pending: () => number } {
+    const queue = new Map<number, () => void>();
+    let nextId = 1;
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      const id = nextId++;
+      queue.set(id, () => cb(0));
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      queue.delete(id);
+    });
+    return {
+      frame: () => {
+        const callbacks = [...queue.values()];
+        queue.clear();
+        for (const cb of callbacks) cb();
+      },
+      pending: () => queue.size,
+    };
+  }
+
+  let now = 0;
+  const clock = () => now;
+
+  beforeEach(() => {
+    now = 0;
+    resetTranscriptScrollForTest();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetTranscriptScrollForTest();
+  });
+
+  it("flushes on the next frame while the transcript is not being scrolled", () => {
+    const frames = fakeFrames();
+    const scheduler = createRafScheduler(clock);
+    const flush = vi.fn();
+    scheduler.schedule(flush);
+    now = 16;
+    frames.frame();
+    scheduler.schedule(flush);
+    now = 32;
+    frames.frame();
+    expect(flush).toHaveBeenCalledTimes(2);
+  });
+
+  it("holds commits while scroll events keep arriving, painting at most once per hold bound", () => {
+    const frames = fakeFrames();
+    const scheduler = createRafScheduler(clock);
+    const flushedAt: number[] = [];
+    const flush = vi.fn(() => {
+      flushedAt.push(now);
+    });
+    // The reader starts dragging while the stream paints every frame.
+    now = 16;
+    noteTranscriptScroll(now);
+    scheduler.schedule(flush);
+    frames.frame();
+    expect(flushedAt).toEqual([16]);
+    // Finger still moving and tokens still arriving on every 16 ms frame.
+    for (let t = 32; t <= 4_400; t += 16) {
+      now = t;
+      noteTranscriptScroll(now);
+      scheduler.schedule(flush);
+      frames.frame();
+    }
+    expect(SCROLLING_COMMIT_HOLD_MS).toBe(2_000);
+    expect(flushedAt).toEqual([16, 2_016, 4_016]);
+    // The held commit stays armed for the next frame rather than being dropped.
+    expect(frames.pending()).toBe(1);
+  });
+
+  it("releases a held commit on the first frame after the scroll settles", () => {
+    const frames = fakeFrames();
+    const scheduler = createRafScheduler(clock);
+    const flush = vi.fn();
+    noteTranscriptScroll(0);
+    now = 100;
+    scheduler.schedule(flush);
+    frames.frame();
+    expect(flush).toHaveBeenCalledTimes(1);
+    now = 110;
+    scheduler.schedule(flush);
+    now = 120;
+    frames.frame();
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(frames.pending()).toBe(1);
+    // 160 ms since the last scroll event: settled, so it paints even though the
+    // last commit was only 60 ms ago.
+    expect(TRANSCRIPT_SCROLL_SETTLE_MS).toBe(150);
+    now = 160;
+    frames.frame();
+    expect(flush).toHaveBeenCalledTimes(2);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it("cancel drops a held commit", () => {
+    const frames = fakeFrames();
+    const scheduler = createRafScheduler(clock);
+    const flush = vi.fn();
+    now = 16;
+    noteTranscriptScroll(now);
+    scheduler.schedule(flush);
+    frames.frame();
+    now = 32;
+    noteTranscriptScroll(now);
+    scheduler.schedule(flush);
+    frames.frame();
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(frames.pending()).toBe(1);
+    scheduler.cancel();
+    expect(frames.pending()).toBe(0);
+    now = 400;
+    frames.frame();
+    expect(flush).toHaveBeenCalledTimes(1);
   });
 });
 
