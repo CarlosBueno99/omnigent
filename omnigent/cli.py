@@ -11120,7 +11120,7 @@ def _print_config_defaults() -> None:
     ignored_harness_overrides = (
         []
         if local_is_global or not isinstance(raw_local_harness, dict)
-        else sorted(key for key in raw_local_harness if key != "default")
+        else sorted(key for key in raw_local_harness if isinstance(key, str) and key != "default")
     )
     local_cfg = {
         k: v
@@ -11462,7 +11462,9 @@ def config_set(is_global: bool, settings: tuple[str, ...]) -> None:
     Without ``--global``, pairs are written to ``.omnigent/config.yaml``
     in the current directory (project-level, like ``.git/config``); with
     ``--global`` to ``~/.omnigent/config.yaml`` (user-level, like
-    ``~/.gitconfig``). Project values take precedence.
+    ``~/.gitconfig``). Project values take precedence, except native-harness
+    executables and launch arguments (``harness.<id>.command``/``args``), which
+    are user-owned; a project may only select ``harness.default``.
 
     Supported keys: auto_open_conversation, default_agent, harness,
     model, server, session_title_instructions. Session title instructions
