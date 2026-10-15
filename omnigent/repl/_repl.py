@@ -2257,9 +2257,12 @@ class _SessionsChatReplAdapter:
         self._replay_from_start = False
         self._streamed_text_parts = []
         self._pending_dup_texts = []
-        seeded = False
         reconnecting = False
         assert self._session_id is not None
+        # Baseline the replay cursor before the first subscription, so a
+        # reconnect reconciles every item after it even if the gap opened
+        # before this pump ever delivered one.
+        await self._seed_stream_cursor()
         while True:
             try:
                 if _dbg:
@@ -2271,15 +2274,11 @@ class _SessionsChatReplAdapter:
                 reconcile_pending = reconnecting
                 reconnecting = True
                 async for event in self._client.sessions.stream(self._session_id):
-                    if not seeded:
-                        # Read the baseline only once this tail is registered,
-                        # so nothing can complete between the two.
-                        seeded = True
-                        await self._seed_stream_cursor()
                     if reconcile_pending:
-                        # The server registers the live-tail slot before it
-                        # sends anything, so REST state read now is never
-                        # ahead of the tail; anything seen twice is deduped.
+                        # Reconcile once the new tail is registered: the server
+                        # registers its live-tail slot before it sends anything,
+                        # so a REST read now is never ahead of the tail and any
+                        # item seen twice is deduped.
                         reconcile_pending = False
                         await self._reconcile_stream_gap()
                     if isinstance(event, _StatusEv):
@@ -2374,8 +2373,7 @@ class _SessionsChatReplAdapter:
         Otherwise a gap before this pump delivered any item could reconcile
         only the status and silently drop output completed meanwhile. An
         empty session replays from the start instead. Best-effort: on failure
-        the first live item still sets the cursor. Callers run it once the
-        live tail is registered, so no item can land between the two.
+        the first live item still sets the cursor.
         """
         assert self._session_id is not None
         try:

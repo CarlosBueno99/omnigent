@@ -3537,10 +3537,11 @@ async def test_stream_pump_reconciles_output_and_status_missed_during_reconnect(
         ("status", "running"),
     ], "missed output renders once, user echo and live duplicates are skipped"
     assert adapter._turn_done.is_set()  # type: ignore[attr-defined]
-    # The baseline is read once the first tail is registered, never before.
+    # The baseline is read once, before the first subscription, so a
+    # reconnect reconciles everything after it.
     assert calls == [
-        {"subscribed": 1},
         _GAP_SEED_CALL,
+        {"subscribed": 1},
         {"subscribed": 2},
         {"limit": 100, "after": "m1", "order": "asc"},
     ]
