@@ -20,11 +20,19 @@ const RECORD_DIR =
   path.join(__dirname, "recordings", "desktop-url-bar-policy");
 const headlessLinux =
   process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
-const skip = !deps.ok
-  ? `missing deps: ${deps.missing.join(", ")}`
-  : headlessLinux
-    ? "no display (run under xvfb-run)"
-    : false;
+function skipReason() {
+  if (!deps.ok) return `missing deps: ${deps.missing.join(", ")}`;
+  if (headlessLinux) return "no display (run under xvfb-run)";
+  return false;
+}
+const skip = skipReason();
+
+/** Timeline label for what the poll observed. */
+function outcomeLabel(loopback) {
+  if (loopback.alert) return "navigation blocked alert shown";
+  if (loopback.loaded) return "loopback page loaded in pane";
+  return "no load or alert within the window";
+}
 
 const LOOPBACK_PAGE = `<!doctype html><title>Internal service</title>
 <body style="margin:0;background:#d9480f;color:#fff;font:28px sans-serif">
@@ -165,13 +173,7 @@ describe("desktop shell — embedded browser address bar applies the URL policy"
       await address.press("Enter");
       mark("enter pressed");
       observations.loopback = await observeNavigation(window, pane, viewId, loopback.url);
-      mark(
-        observations.loopback.alert
-          ? "navigation blocked alert shown"
-          : observations.loopback.loaded
-            ? "loopback page loaded in pane"
-            : "no load or alert within the window",
-      );
+      mark(outcomeLabel(observations.loopback));
       // Hold the outcome on film before closing.
       await window.waitForTimeout(5_000);
     } finally {
@@ -183,9 +185,12 @@ describe("desktop shell — embedded browser address bar applies the URL policy"
       // Stop filming while the pane still shows the outcome, then close; a
       // capture failure must not leak the shell.
       await stopDisplayCapture().catch(() => {});
-      await electronApp.close();
-      saveRecording(RECORD_DIR, "url-bar-policy");
-      fs.rmSync(userDataDir, { recursive: true, force: true });
+      await electronApp.close().catch(() => {});
+      try {
+        saveRecording(RECORD_DIR, "url-bar-policy");
+      } finally {
+        fs.rmSync(userDataDir, { recursive: true, force: true });
+      }
     }
 
     assert.equal(observations.loopback.timedOut, false, "neither a load nor an alert within 15 s");

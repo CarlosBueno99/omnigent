@@ -700,9 +700,9 @@ locked so later redirects, frames, and window-open hops in that tab stay under
 the same policy. Main-owned Arca preview eligibility still applies to relay
 requests, which carry the session's host context; the URL bar supplies none, so
 it cannot open loopback addresses even on an eligible Arca session. Other
-internal sites must be opened in a separate browser. The registry's ungated
-path (no `agent` flag) is reachable only from main-process callers such as the
-desktop E2E fixture driver.
+internal sites must be opened in a separate browser. The registry gates every
+navigation unless a main-process caller opts out with `mainOwned: true`; only
+the desktop E2E fixture driver does.
 
 **JS trust boundary (important):** `omnigent:browser-execute` runs
 arbitrary JS in the child view via `executeJavaScript(js, true)`. It is exposed

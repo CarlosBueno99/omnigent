@@ -327,9 +327,7 @@ function makeLoadTrackingRegistry() {
 describe("browserViewRegistry — agent-navigation allowlist", () => {
   it("rejects agent navigation to file:// and never calls loadURL", () => {
     const { registry, loaded } = makeLoadTrackingRegistry();
-    const r = registry.openOrNavigate("conv_1", "file:///home/user/.ssh/id_rsa", undefined, {
-      agent: true,
-    });
+    const r = registry.openOrNavigate("conv_1", "file:///home/user/.ssh/id_rsa");
     assert.equal(r.ok, false);
     assert.match(r.error, /navigation blocked/);
     assert.equal(loaded.length, 0, "loadURL must not run on a rejected agent nav");
@@ -337,43 +335,32 @@ describe("browserViewRegistry — agent-navigation allowlist", () => {
 
   it("rejects agent navigation to the cloud-metadata IP (169.254.169.254)", () => {
     const { registry, loaded } = makeLoadTrackingRegistry();
-    const r = registry.openOrNavigate(
-      "conv_1",
-      "http://169.254.169.254/latest/meta-data/",
-      undefined,
-      {
-        agent: true,
-      },
-    );
+    const r = registry.openOrNavigate("conv_1", "http://169.254.169.254/latest/meta-data/");
     assert.equal(r.ok, false);
     assert.equal(loaded.length, 0);
   });
 
   it("rejects agent navigation to localhost", () => {
     const { registry, loaded } = makeLoadTrackingRegistry();
-    const r = registry.openOrNavigate("conv_1", "http://localhost:6767/health", undefined, {
-      agent: true,
-    });
+    const r = registry.openOrNavigate("conv_1", "http://localhost:6767/health");
     assert.equal(r.ok, false);
     assert.equal(loaded.length, 0);
   });
 
   it("allows agent navigation to a normal public https URL (loadURL runs)", () => {
     const { registry, loaded } = makeLoadTrackingRegistry();
-    const r = registry.openOrNavigate("conv_1", "https://example.com/", undefined, {
-      agent: true,
-    });
+    const r = registry.openOrNavigate("conv_1", "https://example.com/");
     assert.equal(r.ok, true);
     assert.deepEqual(loaded, ["https://example.com/"]);
   });
 
-  it("does NOT gate a main-owned navigation (agent flag absent) — file:// still loads", () => {
-    // browserIpc sets `agent` on every renderer request (URL bar included), so
-    // this ungated path is reachable only from main-process callers such as the
-    // desktop E2E fixture driver.
+  it("does NOT gate a main-owned navigation (`mainOwned` opt-out) — file:// still loads", () => {
+    // Only main-process callers (the desktop E2E fixture driver) can opt out;
+    // renderer requests are always gated.
     const { registry, loaded } = makeLoadTrackingRegistry();
     const r = registry.openOrNavigate("conv_1", "file:///tmp/report.html", undefined, {
       force: true,
+      mainOwned: true,
     });
     assert.equal(r.ok, true);
     assert.deepEqual(loaded, ["file:///tmp/report.html"]);
@@ -458,7 +445,6 @@ describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every h
     });
     assert.equal(
       registry.openOrNavigate("arca", "http://localhost:5173", undefined, {
-        agent: true,
         agentContext: context,
       }).ok,
       true,
@@ -480,7 +466,6 @@ describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every h
     assert.equal(loaded.length, before + 1);
     assert.equal(
       registry.openOrNavigate("unknown", "http://localhost:5173", undefined, {
-        agent: true,
         agentContext: context,
       }).ok,
       false,
@@ -495,27 +480,28 @@ describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every h
     const second = makeEventCapturingRegistry();
     assert.equal(
       first.registry.openOrNavigate("same-id", "http://localhost", undefined, {
-        agent: true,
         agentContext: context,
       }).ok,
       true,
     );
     assert.equal(
       second.registry.openOrNavigate("same-id", "http://localhost", undefined, {
-        agent: true,
         agentContext: context,
       }).ok,
       false,
     );
-    first.registry.openOrNavigate("same-id", "https://example.com", undefined, { agent: true });
+    first.registry.openOrNavigate("same-id", "https://example.com");
     assert.equal(first.fire("will-redirect", "http://localhost").prevented, true);
-    first.registry.openOrNavigate("same-id", "http://localhost", undefined, { force: true });
+    first.registry.openOrNavigate("same-id", "http://localhost", undefined, {
+      force: true,
+      mainOwned: true,
+    });
     assert.equal(first.fire("will-redirect", "http://10.0.0.1").prevented, false);
   });
   it("blocks an agent-locked will-redirect to the cloud-metadata IP", () => {
     const { registry, sent, fire } = makeEventCapturingRegistry();
     // Agent navigates to an allowed host (locks the view to agent policy).
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     // The server 302s to the metadata endpoint — the guard must cancel it.
     const ev = fire("will-redirect", "http://169.254.169.254/latest/meta-data/");
     assert.equal(ev.prevented, true, "will-redirect to metadata must be preventDefault'd");
@@ -526,32 +512,33 @@ describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every h
 
   it("blocks an agent-locked will-navigate to a loopback host", () => {
     const { registry, fire } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     const ev = fire("will-navigate", "http://127.0.0.1:8080/");
     assert.equal(ev.prevented, true);
   });
 
   it("blocks an agent-locked will-navigate to an RFC-1918 private host", () => {
     const { registry, fire } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     const ev = fire("will-navigate", "http://10.1.2.3/admin");
     assert.equal(ev.prevented, true);
   });
 
   it("allows an agent-locked redirect between normal public https hosts", () => {
     const { registry, sent, fire } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     const ev = fire("will-redirect", "https://cdn.example.net/asset");
     assert.equal(ev.prevented, false, "a normal https→https redirect must not be blocked");
     assert.equal(sent.filter((s) => s.channel === "browser-nav-blocked").length, 0);
   });
 
-  it("does NOT block redirects on a main-owned (non-agent) navigation", () => {
+  it("does NOT block redirects on a main-owned navigation", () => {
     const { registry, fire } = makeEventCapturingRegistry();
-    // A main-owned nav (no agent flag) leaves the view unlocked, so its
-    // redirects — even to an internal host — are allowed.
+    // A main-owned nav leaves the view unlocked, so its redirects — even to an
+    // internal host — are allowed.
     registry.openOrNavigate("conv_1", "https://intranet.example.com/", undefined, {
       force: true,
+      mainOwned: true,
     });
     const ev = fire("will-redirect", "http://10.0.0.5/sso/callback");
     assert.equal(ev.prevented, false, "main-owned nav stays permissive");
@@ -559,10 +546,11 @@ describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every h
 
   it("re-locks correctly: a main-owned nav after a gated nav flips enforcement off", () => {
     const { registry, fire } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     // Then a main-owned nav reuses the same view.
     registry.openOrNavigate("conv_1", "https://intranet.example.com/", undefined, {
       force: true,
+      mainOwned: true,
     });
     const ev = fire("will-redirect", "http://192.168.1.10/");
     assert.equal(ev.prevented, false, "the later main-owned nav unlocked the view");
@@ -572,14 +560,14 @@ describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every h
 describe("browserViewRegistry — child window.open is denied (S3)", () => {
   it("never opens a window: every window.open target is answered with deny", () => {
     const { registry, windowOpen } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     assert.deepEqual(windowOpen("https://evil.example.com/popup"), { action: "deny" });
     assert.deepEqual(windowOpen("https://example.com/ok"), { action: "deny" });
   });
 
   it("navigates the SAME view in place for an http(s) link target", () => {
     const { registry, windowOpen, loaded } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     loaded.length = 0; // ignore the initial openOrNavigate load
     assert.deepEqual(windowOpen("https://example.com/linked-page"), { action: "deny" });
     assert.deepEqual(loaded, ["https://example.com/linked-page"]);
@@ -587,7 +575,7 @@ describe("browserViewRegistry — child window.open is denied (S3)", () => {
 
   it("blocks an agent-locked window.open to an internal host (no in-place nav)", () => {
     const { registry, windowOpen, loaded, sent } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     loaded.length = 0;
     assert.deepEqual(windowOpen("http://169.254.169.254/latest/meta-data/"), {
       action: "deny",
@@ -599,7 +587,7 @@ describe("browserViewRegistry — child window.open is denied (S3)", () => {
 
   it("still denies non-web schemes with no in-place nav", () => {
     const { registry, windowOpen, loaded } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     loaded.length = 0;
     assert.deepEqual(windowOpen("file:///etc/passwd"), { action: "deny" });
     assert.deepEqual(windowOpen("javascript:alert(1)"), { action: "deny" });
@@ -611,7 +599,7 @@ describe("browserViewRegistry — pane context menu", () => {
   it("offers Open Link in Browser + Copy Link Address over a link", () => {
     const { registry, fireContextMenu, menus, externalOpens, clipboardWrites } =
       makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     fireContextMenu({ linkURL: "https://example.com/page", selectionText: "" });
     assert.equal(menus.length, 1);
     assert.deepEqual(
@@ -626,7 +614,7 @@ describe("browserViewRegistry — pane context menu", () => {
 
   it("omits Open Link in Browser for a non-web link but still offers Copy Link Address", () => {
     const { registry, fireContextMenu, menus } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     fireContextMenu({ linkURL: "javascript:alert(1)", selectionText: "" });
     assert.deepEqual(
       menus[0].map((item) => item.label),
@@ -636,7 +624,7 @@ describe("browserViewRegistry — pane context menu", () => {
 
   it("offers Copy over selected text and routes it to webContents.copy()", () => {
     const { registry, fireContextMenu, menus, copyCalls } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     fireContextMenu({ linkURL: "", selectionText: "hello" });
     assert.deepEqual(
       menus[0].map((item) => item.label),
@@ -648,7 +636,7 @@ describe("browserViewRegistry — pane context menu", () => {
 
   it("shows nothing over dead space", () => {
     const { registry, fireContextMenu, menus } = makeEventCapturingRegistry();
-    registry.openOrNavigate("conv_1", "https://example.com/", undefined, { agent: true });
+    registry.openOrNavigate("conv_1", "https://example.com/");
     fireContextMenu({ linkURL: "", selectionText: "   " });
     assert.equal(menus.length, 0);
   });

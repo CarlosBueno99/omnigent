@@ -257,16 +257,16 @@ async function launchDesignDesktop(tmpDir, recordDir, serverUrl) {
     update_mode: "none",
     update_auto_install: false,
   });
-  const executablePath = process.env.OMNIGENT_DESKTOP_EXECUTABLE;
-  // The dev app preloads the profile bootstrap, which also lets openBrowserFixture
-  // host the loopback fixtures that the renderer URL policy refuses.
+  // Dev app only: it preloads the profile bootstrap that lets openBrowserFixture
+  // host the loopback fixtures the renderer URL policy refuses.
   const args = [
-    ...(executablePath ? [] : ["-r", writeProfileBootstrap(userDataDir), APP_ROOT]),
+    "-r",
+    writeProfileBootstrap(userDataDir),
+    APP_ROOT,
     `--user-data-dir=${userDataDir}`,
   ];
   if (process.env.OMNIGENT_PW_NO_SANDBOX) args.push("--no-sandbox", "--disable-dev-shm-usage");
   const electronApp = await _electron.launch({
-    ...(executablePath ? { executablePath } : {}),
     args,
     cwd: APP_ROOT,
     env: {

@@ -298,20 +298,20 @@ function registerBrowserIpc({
     if (typeof conversationId !== "string" || !conversationId) {
       return { ok: false, error: "conversationId is required" };
     }
+    // The registry gates every request; the renderer's `agent` flag only marks a
+    // relay request, which carries the session-host context Arca recovery needs
+    // (the URL bar supplies none), so it never reaches the registry.
+    const relayRequest = !!opts?.agent;
     const navigate = (registry) =>
       registry.openOrNavigate(conversationId, url, bounds, {
         force: !!opts?.force,
-        // Every renderer request is policy-gated: main cannot verify a claim of
-        // user intent, so the URL bar gets the same allowlist as the relay.
-        agent: true,
         // The first-party renderer supplies the source-session host; main owns
         // the target and eligibility. Caller exception flags never establish identity.
         agentContext: getAgentContextForEvent(event, opts?.sourceHostId),
       });
     let r = navigate(g.registry);
     let recovered = false;
-    // Only relay requests carry the session-host context Arca recovery needs; the URL bar supplies none.
-    if (!r.ok && opts?.agent) {
+    if (!r.ok && relayRequest) {
       try {
         recovered = await recoverAgentNavigationForEvent(
           event,
@@ -341,7 +341,7 @@ function registerBrowserIpc({
     }
     // Strip the non-serializable `entry` before it crosses the IPC boundary.
     const hint =
-      !r.ok && opts?.agent
+      !r.ok && relayRequest
         ? getAgentNavigationHintForEvent(
             event,
             url,

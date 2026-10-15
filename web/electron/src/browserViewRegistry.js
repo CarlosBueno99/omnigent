@@ -130,9 +130,9 @@ function createBrowserViewRegistry({
       // Last URL we EXPLICITLY requested (not getURL(), which drifts as the page
       // navigates) — lets openOrNavigate skip reissuing loadURL on a re-mount.
       lastRequestedUrl: "",
-      // Whether the CURRENT navigation is policy-gated (opts.agent; only main-owned
-      // callers omit it). Read by the will-navigate/will-redirect guard so the
-      // allowlist covers the whole nav chain, not just the first hop (SSRF).
+      // Whether the CURRENT navigation is policy-gated (all but a `mainOwned`
+      // opt-out). Read by the will-navigate/will-redirect guard so the allowlist
+      // covers the whole nav chain, not just the first hop (SSRF).
       agentNavLocked: false,
       agentContext: null,
       // Design-mode listeners + webContents, set by browserIpc's enable handler
@@ -359,12 +359,13 @@ function createBrowserViewRegistry({
 
   function openOrNavigate(conversationId, url, bounds, opts) {
     const force = !!(opts && opts.force);
-    // Gated navs (opts.agent — every renderer request; only main-owned callers
-    // omit it) run the allowlist (see browserUrlPolicy) before getOrCreate so a
-    // rejected nav creates no blank view.
-    if (opts && opts.agent && url) {
+    // Gated unless a main-process caller opts out with `mainOwned` (only the E2E
+    // fixture driver does; renderer requests never can). Checked before
+    // getOrCreate so a rejected nav creates no blank view.
+    const gated = !(opts && opts.mainOwned);
+    if (gated && url) {
       const verdict = isAgentNavigationAllowed(url, {
-        allowLocalhost: isArcaAgentContext(opts.agentContext),
+        allowLocalhost: isArcaAgentContext(opts?.agentContext),
       });
       if (!verdict.ok) {
         return { ok: false, error: verdict.error };
@@ -377,8 +378,8 @@ function createBrowserViewRegistry({
     // guard enforces the allowlist on its whole redirect chain. Set only when a
     // url is actually issued.
     if (url) {
-      entry.agentNavLocked = !!(opts && opts.agent);
-      entry.agentContext = entry.agentNavLocked ? (opts.agentContext ?? null) : null;
+      entry.agentNavLocked = gated;
+      entry.agentContext = gated ? (opts?.agentContext ?? null) : null;
     }
     if (bounds) entry.boundsController.setRendererBounds(bounds);
     // Only attach immediately when this is the active conversation; otherwise

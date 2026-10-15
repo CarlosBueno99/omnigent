@@ -109,15 +109,19 @@ async function editPeriod(page) {
   assert.equal(await period.inputValue(), "W41");
 }
 
+function skipReason() {
+  if (!deps.ok) return `missing deps: ${deps.missing.join(", ")}`;
+  if (process.env.OMNIGENT_DESKTOP_EXECUTABLE) {
+    return "a packaged executable cannot preload the fixture driver that opens the loopback fixtures; run the dev app";
+  }
+  return false;
+}
+
 describe(
   "desktop in-page floating design editor",
   {
     concurrency: 1,
-    skip: !deps.ok
-      ? `missing deps: ${deps.missing.join(", ")}`
-      : process.env.OMNIGENT_DESKTOP_EXECUTABLE
-        ? "a packaged executable cannot preload the fixture driver that opens the loopback fixtures; run the dev app"
-        : false,
+    skip: skipReason(),
   },
   () => {
     let backend;

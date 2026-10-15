@@ -43,31 +43,42 @@ function makeIpcMain() {
 }
 
 describe("browser IPC Arca context", () => {
-  it("adds a main-owned recovery hint only to a denied agent navigation", async () => {
+  it("recovers and hints only for a denied relay navigation, never for the address bar", async () => {
     const ipcMain = makeIpcMain();
     let allowed = false;
     let hints = 0;
+    let recoveries = 0;
     registerBrowserIpc({
       ipcMain,
       isPinnedOriginSender: () => true,
       getRegistryForEvent: () => ({
         openOrNavigate: () => ({ ok: allowed, error: allowed ? undefined : "blocked" }),
       }),
+      recoverAgentNavigationForEvent: async () => {
+        recoveries++;
+        return false;
+      },
       getAgentNavigationHintForEvent: () => {
         hints++;
         return "Run on Arca";
       },
     });
-    const invoke = (agent) =>
+    const invoke = (opts) =>
       ipcMain.invoke(
         "omnigent:browser-open-or-navigate",
         {},
-        { conversationId: "source", url: "http://localhost", opts: { agent } },
+        { conversationId: "source", url: "http://localhost", opts },
       );
-    assert.equal((await invoke(true)).error, "blocked Run on Arca");
-    assert.equal((await invoke(false)).error, "blocked");
+    assert.equal((await invoke({ agent: true })).error, "blocked Run on Arca");
+    assert.equal(recoveries, 1);
+    // Address-bar shapes are denied without a recovery attempt or a hint.
+    for (const opts of [{ agent: false }, { force: true }]) {
+      // oxlint-disable-next-line no-await-in-loop -- Sequential requests.
+      assert.equal((await invoke(opts)).error, "blocked");
+    }
+    assert.equal(recoveries, 1);
     allowed = true;
-    assert.equal((await invoke(true)).ok, true);
+    assert.equal((await invoke({ agent: true })).ok, true);
     assert.equal(hints, 1);
   });
 
@@ -241,7 +252,7 @@ describe("browser IPC Arca context", () => {
         },
       },
     );
-    assert.deepEqual(calls[0][3], { force: true, agent: true, agentContext: context });
+    assert.deepEqual(calls[0][3], { force: true, agentContext: context });
   });
 });
 

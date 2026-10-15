@@ -513,7 +513,14 @@ function writeProfileBootstrap(userDataDir) {
       `const mod = require(${JSON.stringify(path.join(APP_ROOT, "src/browserViewRegistry.js"))});\n` +
       `const create = mod.createBrowserViewRegistry;\n` +
       `global.omnigentTestBrowserRegistries = [];\n` +
-      `mod.createBrowserViewRegistry = (...args) => { const registry = create(...args); const ids = BrowserWindow.getAllWindows().map((win) => win.id); const windowId = ids.length > 0 ? Math.max(...ids) : null; global.omnigentTestBrowserRegistries.push({ registry, windowId }); return registry; };\n`,
+      `mod.createBrowserViewRegistry = (...args) => {
+  const registry = create(...args);
+  const ids = BrowserWindow.getAllWindows().map((win) => win.id);
+  const windowId = ids.length > 0 ? Math.max(...ids) : null;
+  global.omnigentTestBrowserRegistries.push({ registry, windowId });
+  return registry;
+};
+`,
   );
   return bootstrap;
 }
@@ -545,12 +552,12 @@ async function openBrowserFixture(electronApp, conversationId, url) {
       }
       // One registry per shell window; the newest live one belongs to the window under test.
       const { registry } = live[live.length - 1];
-      const { ok, error } = registry.openOrNavigate(viewId, target, {
-        x: 40,
-        y: 80,
-        width: 900,
-        height: 520,
-      });
+      const { ok, error } = registry.openOrNavigate(
+        viewId,
+        target,
+        { x: 40, y: 80, width: 900, height: 520 },
+        { mainOwned: true },
+      );
       return { ok, error };
     },
     { conversationId, url },
