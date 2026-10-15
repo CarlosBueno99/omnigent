@@ -1,8 +1,6 @@
-// Allowlist for renderer-requested navigation (relay and URL bar alike — main
-// can't verify user intent): blocks file:// / cloud-metadata / loopback /
-// private hosts, which could otherwise be read back via screenshot (SSRF/exfil).
-// Runs in the main process (gate holds regardless of caller); pure + dep-free
-// so `node --test` can exercise it without Electron.
+// Allowlist for renderer-requested navigation (relay and URL bar — main can't
+// verify user intent): blocks file:// / metadata / loopback / private hosts
+// (SSRF/exfil via screenshot). Main-process, pure, dep-free for `node --test`.
 
 "use strict";
 

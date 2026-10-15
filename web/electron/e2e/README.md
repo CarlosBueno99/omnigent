@@ -112,7 +112,10 @@ OMNIGENT_PYTHON="$PWD/.venv/bin/python" \
 ```
 
 Run on an interactive desktop and keep the test app foregrounded for its native
-focus assertions. `OMNIGENT_DESKTOP_EXECUTABLE` may point to a packaged binary.
+focus assertions. The suite skips when `OMNIGENT_DESKTOP_EXECUTABLE` points to a
+packaged binary: its fixtures are served on loopback, which the renderer URL
+policy refuses, so they are opened through `openBrowserFixture` in
+`desktopHarness.js`, a main-process hook only the dev app can preload.
 `OMNIGENT_DESKTOP_COMPOSITED_VIDEO=1` records the native window on macOS (requires
 Screen Recording permission). Set `OMNIGENT_DESKTOP_RECORD_DIR` outside the
 checkout; each fixture's subdirectory receives `design-prompt-native.mov`.
@@ -123,6 +126,23 @@ Human check: select a modal field containing `W41` in Design mode, type `asdf`
 into the nearby floating editor, and confirm the field remains `W41`. Escape
 should close only the editor. Reopen it and use Send or Enter to submit an
 instruction to chat. No instruction bar should appear below the browser URL.
+
+## Address-bar URL policy
+
+`desktop_url_bar_policy.e2e.js` types a loopback URL into the embedded browser's
+Address bar and expects the main-process URL policy to refuse it: a "navigation
+blocked" alert under the toolbar and no view. The other journeys open their
+loopback fixtures through `openBrowserFixture`, which drives main's registry
+directly instead of the renderer bridge.
+
+```bash
+cd web/electron
+OMNIGENT_PYTHON="$PWD/../../.venv/bin/python" OMNIGENT_PW_NO_SANDBOX=1 \
+  xvfb-run -a node --test e2e/desktop_url_bar_policy.e2e.js
+```
+
+`OMNIGENT_DESKTOP_RECORD_DIR` overrides where the clips and `observations.json`
+land.
 
 ## Authoring a desktop reproduction
 

@@ -162,14 +162,6 @@ describe(
           assert.match(String(signIn.result), /agent_identity=alice/);
           await window.waitForTimeout(2_500); // hold A's state on film
 
-          const blocked = await window.evaluate(
-            (url) =>
-              window.omnigentDesktop.browserOpenOrNavigate("restricted-fixture", url, undefined, {
-                agent: false,
-              }),
-            server.serverUrl,
-          );
-          assert.equal(blocked.ok, false, "renderer navigation must enforce the URL policy");
           const firstTab = "browser-tab:conv_A:first";
           const secondTab = "browser-tab:conv_A:second";
           for (const tab of [firstTab, secondTab]) {

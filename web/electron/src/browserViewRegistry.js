@@ -248,14 +248,9 @@ function createBrowserViewRegistry({
     });
   }
 
-  // SECURITY (SSRF): enforce the agent-navigation allowlist on the child view's
-  // OWN navigation events, not just the first loadURL. A server 302 / meta-
-  // refresh / location.href during an agent-initiated navigation would otherwise
-  // redirect the view to an internal host (metadata / loopback / RFC-1918) with
-  // no re-check, and browser_screenshot could read it back. `will-navigate` and
-  // `will-redirect` (plus subframes via `will-frame-navigate`) are the blocking
-  // hooks — did-navigate is report-only and fires too late. Enforced only while
-  // `entry.agentNavLocked`; main-owned navs (desktop E2E fixture driver) are ungated.
+  // SECURITY (SSRF): re-check the allowlist on every hop (will-navigate /
+  // will-redirect / will-frame-navigate — did-navigate fires too late), else a
+  // 302 reaches an internal host. Only while agentNavLocked; main-owned navs ungated.
   function attachAgentNavGuard(conversationId, entry) {
     const wc = entry.view && entry.view.webContents;
     if (!wc || typeof wc.on !== "function") return;

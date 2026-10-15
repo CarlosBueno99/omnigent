@@ -376,16 +376,7 @@ async function launchDesktop(opts) {
   const { _electron: electron } = require("playwright");
   const userDataDir = opts.userDataDir || fs.mkdtempSync(path.join(os.tmpdir(), "omni-desktop-"));
   fs.mkdirSync(userDataDir, { recursive: true });
-  if (opts.serverUrl) {
-    // Seed both profile locations, matching main.js's development userData path.
-    for (const profile of [userDataDir, path.join(userDataDir, "Omnigent Dev")]) {
-      fs.mkdirSync(profile, { recursive: true });
-      fs.writeFileSync(
-        path.join(profile, "settings.json"),
-        JSON.stringify({ server_url: opts.serverUrl }, null, 2),
-      );
-    }
-  }
+  if (opts.serverUrl) seedProfileSettings(userDataDir, { server_url: opts.serverUrl });
   fs.mkdirSync(opts.recordDir, { recursive: true });
 
   const profileBootstrap = writeProfileBootstrap(userDataDir);
@@ -513,28 +504,45 @@ function saveRecording(recordDir, name) {
  *  every browser registry for openBrowserFixture. Packaged apps can't preload it. */
 function writeProfileBootstrap(userDataDir) {
   const bootstrap = path.join(userDataDir, "isolate-profile.cjs");
+  // main.js creates each registry right after its shell window, so the newest
+  // window id at that moment identifies the registry's host.
   fs.writeFileSync(
     bootstrap,
-    `require("electron").app.setPath("appData", ${JSON.stringify(userDataDir)});\n` +
+    `const { app, BrowserWindow } = require("electron");\n` +
+      `app.setPath("appData", ${JSON.stringify(userDataDir)});\n` +
       `const mod = require(${JSON.stringify(path.join(APP_ROOT, "src/browserViewRegistry.js"))});\n` +
       `const create = mod.createBrowserViewRegistry;\n` +
       `global.omnigentTestBrowserRegistries = [];\n` +
-      `mod.createBrowserViewRegistry = (...args) => { const registry = create(...args); global.omnigentTestBrowserRegistries.push(registry); return registry; };\n`,
+      `mod.createBrowserViewRegistry = (...args) => { const registry = create(...args); const windowId = Math.max(0, ...BrowserWindow.getAllWindows().map((win) => win.id)); global.omnigentTestBrowserRegistries.push({ registry, windowId }); return registry; };\n`,
   );
   return bootstrap;
+}
+
+/** Seed settings.json in both locations main.js's development userData path
+ *  may resolve to. */
+function seedProfileSettings(userDataDir, settings) {
+  for (const profile of [userDataDir, path.join(userDataDir, "Omnigent Dev")]) {
+    fs.mkdirSync(profile, { recursive: true });
+    fs.writeFileSync(path.join(profile, "settings.json"), JSON.stringify(settings, null, 2));
+  }
 }
 
 /** Open a fixture view through main's registry, bypassing the renderer URL
  *  policy; only for test sites served on loopback. */
 async function openBrowserFixture(electronApp, conversationId, url) {
   return electronApp.evaluate(
-    (_electron, { conversationId: viewId, url: target }) => {
-      const registries = global.omnigentTestBrowserRegistries;
-      if (!registries || registries.length === 0) {
-        throw new Error("No browser registry captured; the bootstrap hook did not fire");
+    ({ BrowserWindow }, { conversationId: viewId, url: target }) => {
+      const live = (global.omnigentTestBrowserRegistries ?? []).filter(({ windowId }) => {
+        const win = BrowserWindow.fromId(windowId);
+        return win !== null && !win.isDestroyed();
+      });
+      if (live.length === 0) {
+        throw new Error(
+          "No live browser registry captured; the bootstrap hook did not fire or every shell window closed",
+        );
       }
-      // One registry per shell window; the newest belongs to the window under test.
-      const registry = registries[registries.length - 1];
+      // One registry per shell window; the newest live one belongs to the window under test.
+      const { registry } = live[live.length - 1];
       const { ok, error } = registry.openOrNavigate(viewId, target, {
         x: 40,
         y: 80,
@@ -549,6 +557,7 @@ async function openBrowserFixture(electronApp, conversationId, url) {
 
 module.exports = {
   openBrowserFixture,
+  seedProfileSettings,
   writeProfileBootstrap,
   APP_ROOT,
   REPO_ROOT,

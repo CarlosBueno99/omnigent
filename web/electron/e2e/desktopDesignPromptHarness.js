@@ -11,6 +11,7 @@ const {
   REPO_ROOT,
   WEB_UI_DIST,
   findFreePort,
+  seedProfileSettings,
   writeProfileBootstrap,
 } = require("./desktopHarness");
 
@@ -251,18 +252,11 @@ async function startFormFixture() {
 async function launchDesignDesktop(tmpDir, recordDir, serverUrl) {
   const { _electron } = require("playwright");
   const userDataDir = path.join(tmpDir, "user-data");
-  // Seed both profile locations, matching main.js's development userData path.
-  for (const profile of [userDataDir, path.join(userDataDir, "Omnigent Dev")]) {
-    fs.mkdirSync(profile, { recursive: true });
-    fs.writeFileSync(
-      path.join(profile, "settings.json"),
-      JSON.stringify({
-        server_url: serverUrl,
-        update_mode: "none",
-        update_auto_install: false,
-      }),
-    );
-  }
+  seedProfileSettings(userDataDir, {
+    server_url: serverUrl,
+    update_mode: "none",
+    update_auto_install: false,
+  });
   const executablePath = process.env.OMNIGENT_DESKTOP_EXECUTABLE;
   // The dev app preloads the profile bootstrap, which also lets openBrowserFixture
   // host the loopback fixtures that the renderer URL policy refuses.

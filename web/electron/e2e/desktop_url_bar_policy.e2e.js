@@ -1,15 +1,6 @@
-// Desktop-shell lane: a URL typed into the embedded browser's address bar must
-// get the same main-process URL policy as agent navigation (loopback / private /
-// file: destinations rejected), independent of the renderer-supplied intent flag.
-//
-// Journey: boot the shell on a local server → open a session → Workspace "+" →
-// Browser → type a loopback URL into the Address bar → Enter. The expected
-// outcome is a "navigation blocked" alert under the toolbar and no load; the
-// pane rendering the loopback page is the failure.
-//
-// Run from web/electron after building the SPA:
-//   OMNIGENT_PW_NO_SANDBOX=1 xvfb-run -a node --test e2e/desktop_url_bar_policy.e2e.js
-// OMNIGENT_DESKTOP_RECORD_DIR overrides where clips and observations.json land.
+// Desktop-shell lane: a loopback URL typed into the embedded browser's Address
+// bar must be refused by the main-process URL policy (alert, no view), whatever
+// intent the renderer claims. Run instructions: e2e/README.md.
 
 "use strict";
 
@@ -71,11 +62,19 @@ function serveLoopback() {
 async function observeNavigation(window, pane, viewId, target, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   const alerts = pane.getByRole("alert");
+  // An alert that re-renders between the count and the read counts as "no alert yet".
+  const readAlert = async () =>
+    (await alerts.count()) > 0
+      ? await alerts
+          .first()
+          .innerText()
+          .catch(() => null)
+      : null;
   for (;;) {
     // oxlint-disable-next-line no-await-in-loop -- Poll the bridge sequentially.
     const view = await window.evaluate((id) => window.omnigentDesktop.browserHasView(id), viewId);
     // oxlint-disable-next-line no-await-in-loop -- Read the alert after the bridge probe.
-    const alert = (await alerts.count()) > 0 ? await alerts.first().innerText() : null;
+    const alert = await readAlert();
     const loaded = !!(view.exists && view.url && view.url.startsWith(target));
     if (loaded || alert || Date.now() > deadline) {
       return { viewUrl: view.url ?? null, alert, loaded, timedOut: !loaded && !alert };
@@ -85,10 +84,14 @@ async function observeNavigation(window, pane, viewId, target, timeoutMs = 15_00
   }
 }
 
-/** Start time of the composited display capture, parsed from its raw filename. */
+/** Start time of the newest composited display capture, parsed from its raw filename. */
 function displayCaptureStartMs(recordDir) {
-  const raw = fs.readdirSync(recordDir).find((f) => /^display@\d+\.webm$/.test(f));
-  return raw ? Number(raw.slice("display@".length, -".webm".length)) : null;
+  const starts = fs
+    .readdirSync(recordDir)
+    .filter((f) => /^display@\d+\.webm$/.test(f))
+    .map((f) => Number(f.slice("display@".length, -".webm".length)))
+    .sort((a, b) => b - a);
+  return starts.length > 0 ? starts[0] : null;
 }
 
 describe("desktop shell — embedded browser address bar applies the URL policy", { skip }, () => {

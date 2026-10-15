@@ -113,7 +113,11 @@ describe(
   "desktop in-page floating design editor",
   {
     concurrency: 1,
-    skip: deps.ok ? false : `missing deps: ${deps.missing.join(", ")}`,
+    skip: !deps.ok
+      ? `missing deps: ${deps.missing.join(", ")}`
+      : process.env.OMNIGENT_DESKTOP_EXECUTABLE
+        ? "a packaged executable cannot preload the fixture driver that opens the loopback fixtures; run the dev app"
+        : false,
   },
   () => {
     let backend;
