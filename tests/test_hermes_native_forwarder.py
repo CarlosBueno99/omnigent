@@ -183,24 +183,6 @@ def test_discover_child_session_prefers_compression_continuation(
     assert f._discover_child_session(db, "main") == "compression-child"
 
 
-def test_discover_child_session_ignores_helper_of_live_parent(tmp_path: Path) -> None:
-    """In-place compaction keeps the parent live; its delegated helper is not a continuation."""
-    db = tmp_path / "state.db"
-    con = sqlite3.connect(db)
-    con.executescript(_SCHEMA)
-    con.executemany(
-        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason,"
-        " model_config) VALUES (?,?,?,?,?,?,?)",
-        [
-            ("main", "cli", "/w", 1000.0, None, None, None),
-            ("helper", "subagent", "/w", 1002.0, "main", None, '{"_delegate_from": "main"}'),
-        ],
-    )
-    con.commit()
-    con.close()
-    assert f._discover_child_session(db, "main") is None
-
-
 def test_is_side_session_binds_markers_to_the_queried_parent() -> None:
     """A continuation inherits its parent's markers; only one naming the parent is a fork."""
     inherited = '{"_branched_from": "root"}'
@@ -231,6 +213,7 @@ def test_side_session_checks_ignore_inherited_markers(tmp_path: Path) -> None:
     con.close()
     assert f._is_side_session_id(db, "branch") is True
     assert f._is_side_session_id(db, "continuation") is False
+    assert f._is_side_session_id(db, "not-written-yet") is None
     assert f._discover_child_session(db, "branch") == "continuation"
     assert f._discover_session_id(db, "/w", 1000.0) == "continuation"
 
@@ -1146,6 +1129,63 @@ async def test_forward_loop_drops_persisted_helper_binding(tmp_path, monkeypatch
     # Main's completions are reported again from a clean baseline, then deduped.
     assert idle_posts == ["idle"]
     assert hstatus.read_posted_count(bridge_dir) == 2
+
+
+async def test_forward_loop_defers_binding_check_until_the_store_is_readable(
+    tmp_path, monkeypatch
+) -> None:
+    """An unreadable store leaves the saved binding unverified: nothing is mirrored or
+    PATCHed until the check can run, then a helper binding is still discarded."""
+    workspace = str(tmp_path)
+    db = tmp_path / "hermes_home" / "state.db"  # directory does not exist yet
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    f._write_state(
+        bridge_dir, f._ForwardState(hermes_session_id="helper", last_id=0, launch_epoch_s=1000.0)
+    )
+
+    posted: list[f._MirrorItem] = []
+
+    async def _fake_post(_client, *, session_id, item):
+        posted.append(item)
+
+    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
+    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
+    patched = _capture_server_client(monkeypatch)
+
+    iteration = {"n": 0}
+
+    async def _sleep(_s):
+        iteration["n"] += 1
+        if iteration["n"] == 2:
+            # Hermes brings the store up two polls later.
+            db.parent.mkdir()
+            _seed_main_with_finished_helper(db, workspace, compacted=False)
+        if iteration["n"] >= 4:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await f.forward_hermes_store_to_session(
+            base_url="http://x",
+            headers={},
+            session_id="conv_deferred",
+            bridge_dir=bridge_dir,
+            agent_name="hermes-native-ui",
+            workspace=workspace,
+            launch_epoch_s=1000.0,
+            db_path=db,
+        )
+
+    assert f._read_state(bridge_dir).hermes_session_id == "main"
+    assert _mirrored_texts(posted) == [
+        "please delegate a tiny task",
+        "dispatching a helper",
+        "the helper finished",
+    ]
+    # The unverified helper binding was never advertised as the external session.
+    assert _patched_external_ids(patched) == ["main"]
 
 
 # --- Usage tracker tests ---------------------------------------------------

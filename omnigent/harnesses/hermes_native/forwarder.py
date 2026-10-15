@@ -476,15 +476,15 @@ def _is_side_session(
     return parent_id in markers
 
 
-def _is_side_session_id(db_path: Path, hermes_session_id: str) -> bool:
+def _is_side_session_id(db_path: Path, hermes_session_id: str) -> bool | None:
     """Whether the ``sessions`` row *hermes_session_id* is a side session.
 
-    ``False`` when the row is missing or unreadable, so an uncheckable binding
-    (a fork pre-seeds one before Hermes writes the row) is kept.
+    ``None`` when the verdict is not available yet: the store is unreadable or the
+    row is not written (a fork pre-seeds a binding before Hermes writes its row).
     """
     con = _connect_ro(db_path)
     if con is None:
-        return False
+        return None
     try:
         cols = _table_columns(con, "sessions")
         row = con.execute(
@@ -495,11 +495,11 @@ def _is_side_session_id(db_path: Path, hermes_session_id: str) -> bool:
         ).fetchone()
     except sqlite3.Error as exc:
         _warn_sqlite_once("binding check", exc)
-        return False
+        return None
     finally:
         con.close()
     if row is None:
-        return False
+        return None
     return _is_side_session(row[0], row[1], parent_id=_optional_id(row[2]))
 
 
@@ -616,8 +616,9 @@ def _discover_child_session(db_path: Path, parent_session_id: str) -> str | None
             ).fetchone()
             if parent is None or parent[0] != "compression":
                 return None
-        # Hermes indexes sessions(parent_session_id); the LIMIT caps the scan when a
-        # parent accumulated many helpers, and the loop stops at the first match.
+        # The continuation is created as the parent ends, and only helpers spawned
+        # before that can still add rows under it, so it is among the newest children;
+        # LIMIT caps the returned candidates (the parent_session_id index serves the filter).
         rows = con.execute(
             f"SELECT id, {_column_or_null(cols, 'source')}, "
             f"{_column_or_null(cols, 'model_config')} "
@@ -1225,22 +1226,11 @@ async def forward_hermes_store_to_session(
     """
     db = db_path or default_state_db()
     persisted = _read_state(bridge_dir)
-    if persisted.hermes_session_id is not None and await asyncio.to_thread(
-        _is_side_session_id, db, persisted.hermes_session_id
-    ):
-        # A saved binding outlives the rule that produced it; a helper or fork
-        # must never back the main transcript, so start over with discovery.
-        _logger.warning(
-            "hermes forwarder persisted binding %s is a side session; rediscovering; session=%s",
-            persisted.hermes_session_id,
-            session_id,
-        )
-        persisted = _ForwardState(launch_epoch_s=launch_epoch_s)
-        _write_state(bridge_dir, persisted)
-        # The idle poster count was rebased onto the helper; start it clean so the
-        # rediscovered session's next completion still wakes a parent orchestrator.
-        await asyncio.to_thread(hermes_native_status.clear_hermes_status_state, bridge_dir)
     hermes_session_id: str | None = persisted.hermes_session_id
+    # A saved binding outlives the rule that produced it, so it is checked against
+    # the store before anything is mirrored; ``None`` (store unreadable, row not yet
+    # written) keeps the check pending for the next poll.
+    binding_verdict: bool | None = False if hermes_session_id is None else None
     last_id = persisted.last_id if hermes_session_id is not None else 0
     # A row whose mirroring failed partway, and how many of its items already
     # posted; both ``0`` when ``last_id`` is a clean fully-mirrored high-water mark.
@@ -1268,6 +1258,32 @@ async def forward_hermes_store_to_session(
         compression_end_seen = False
         while True:
             try:
+                if hermes_session_id is not None and binding_verdict is None:
+                    binding_verdict = await asyncio.to_thread(
+                        _is_side_session_id, db, hermes_session_id
+                    )
+                    if binding_verdict is None:
+                        await asyncio.sleep(poll_interval_s)
+                        continue
+                    if binding_verdict:
+                        # A helper or fork must never back the main transcript: drop
+                        # the binding and its idle poster count (rebased onto the
+                        # helper) so discovery and completion reporting start clean.
+                        _logger.warning(
+                            "hermes forwarder persisted binding %s is a side session; "
+                            "rediscovering; session=%s",
+                            hermes_session_id,
+                            session_id,
+                        )
+                        hermes_session_id = None
+                        last_id = 0
+                        partial_row_id = 0
+                        partial_row_items = 0
+                        active_turn_id = None
+                        _write_state(bridge_dir, _ForwardState(launch_epoch_s=launch_epoch_s))
+                        await asyncio.to_thread(
+                            hermes_native_status.clear_hermes_status_state, bridge_dir
+                        )
                 if hermes_session_id is None:
                     resolved = await asyncio.to_thread(
                         _discover_session_id, db, workspace, launch_epoch_s
@@ -1276,6 +1292,7 @@ async def forward_hermes_store_to_session(
                         _session_claimed_by_other, bridge_dir, resolved, launch_epoch_s
                     ):
                         hermes_session_id = resolved
+                        binding_verdict = False
                         resuming = persisted.hermes_session_id == resolved
                         last_id = persisted.last_id if resuming else 0
                         partial_row_id = persisted.partial_row_id if resuming else 0
@@ -1471,6 +1488,7 @@ async def forward_hermes_store_to_session(
                                     _session_claimed_by_other, bridge_dir, child, launch_epoch_s
                                 ):
                                     hermes_session_id = child
+                                    binding_verdict = False
                                     last_id = 0
                                     partial_row_id = 0
                                     partial_row_items = 0
