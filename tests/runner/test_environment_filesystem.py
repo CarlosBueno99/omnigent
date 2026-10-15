@@ -2634,66 +2634,38 @@ async def test_default_read_still_follows_a_symlink_into_a_read_grant(tmp_path: 
         os_env.close()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("query_template", "expected_path"),
-    [
-        ("{root}/src/main.py", "src/main.py"),
-        ("{root}/src", "src"),
-        ("./src/main.py", "src/main.py"),
-        ("src//main.py", "src/main.py"),
-        ("src/", "src"),
-        ("{folder}/src/main.py", "src/main.py"),
-    ],
-    ids=[
-        "absolute_file",
-        "absolute_dir",
-        "dot_prefixed",
-        "doubled_separator",
-        "trailing_slash",
-        "workspace_folder_prefixed",
-    ],
-)
-async def test_search_matches_path_shaped_queries(
-    client: httpx.AsyncClient,
-    workspace: Path,
-    query_template: str,
-    expected_path: str,
-) -> None:
-    """A query spelled as a path to an existing entry still finds that entry."""
-    query = query_template.format(root=workspace, folder=workspace.name)
-    resp = await client.get(
-        f"/v1/sessions/conv_test/resources/environments/{DEFAULT_ENVIRONMENT_ID}/search"
-        f"?q={urllib.parse.quote(query, safe='')}"
-    )
-    assert resp.status_code == 200, resp.text
-    paths = {e["path"] for e in resp.json()["data"]}
-    assert expected_path in paths, f"q={query!r} returned {paths}"
+# Query shapes the sandboxed walk and the git-index matcher must agree on. The
+# walk's predicate lives in a script string, so one table drives both layers.
+_PATH_SHAPED_QUERY_CASES = [
+    pytest.param("{root}/src/main.py", ["src/main.py"], id="absolute_file"),
+    pytest.param("{root}/src", ["src", "src/main.py"], id="absolute_dir"),
+    pytest.param("{root}/src/", ["src", "src/main.py"], id="absolute_dir_trailing_slash"),
+    pytest.param(
+        "/{root}/src/main.py",
+        ["src/main.py"],
+        id="doubled_leading_separator",
+        marks=pytest.mark.skipif(os.sep != "/", reason="a leading // is a UNC prefix on Windows"),
+    ),
+    pytest.param("./src/main.py", ["src/main.py"], id="dot_prefixed"),
+    pytest.param("./hello.txt", ["hello.txt"], id="dot_prefixed_name"),
+    pytest.param("src//main.py", ["src/main.py"], id="doubled_separator"),
+    pytest.param("{folder}/src/main.py", ["src/main.py"], id="workspace_folder_prefixed"),
+    pytest.param("src/", ["src", "src/main.py"], id="trailing_slash"),
+    pytest.param("{folder}", [], id="plain_root_name"),
+    pytest.param("./{folder}", [], id="dot_prefixed_root_name"),
+    pytest.param("{folder}/", [], id="root_name_slash"),
+    pytest.param("/", ["src/main.py"], id="bare_separator"),
+]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("query_template", "expected_paths"),
-    [
-        ("{folder}", []),
-        ("./{folder}", []),
-        ("{folder}/", []),
-        ("./hello.txt", ["hello.txt"]),
-        ("/", ["src/main.py"]),
-    ],
-    ids=[
-        "plain_root_name",
-        "dot_prefixed_root_name",
-        "root_name_slash",
-        "dot_prefixed_name",
-        "bare_separator",
-    ],
-)
-async def test_search_bare_word_queries_match_relative_paths_only(
+@pytest.mark.parametrize(("query_template", "expected_paths"), _PATH_SHAPED_QUERY_CASES)
+async def test_search_route_matches_path_shaped_queries(
     client: httpx.AsyncClient, workspace: Path, query_template: str, expected_paths: list[str]
 ) -> None:
-    """A query that is or normalizes to a bare word never matches the root's own path."""
-    query = query_template.format(folder=workspace.name)
+    """A query spelled as a path finds its entry; one that is or normalizes to a
+    bare word (or only separators) never matches the root's own path."""
+    query = query_template.format(root=workspace, folder=workspace.name)
     resp = await client.get(
         f"/v1/sessions/conv_test/resources/environments/{DEFAULT_ENVIRONMENT_ID}/search"
         f"?q={urllib.parse.quote(query, safe='')}"
@@ -2702,43 +2674,14 @@ async def test_search_bare_word_queries_match_relative_paths_only(
     assert [e["path"] for e in resp.json()["data"]] == expected_paths, f"q={query!r}"
 
 
-@pytest.mark.parametrize(
-    ("query_template", "expected_paths"),
-    [
-        ("{root}/src/main.py", ["src/main.py"]),
-        ("{root}/src", ["src", "src/main.py"]),
-        ("{root}/src/", ["src", "src/main.py"]),
-        ("./src/main.py", ["src/main.py"]),
-        ("src//main.py", ["src/main.py"]),
-        ("{folder}/src/main.py", ["src/main.py"]),
-        ("src/", ["src", "src/main.py"]),
-        ("{folder}", []),
-        ("./{folder}", []),
-        ("/", ["src/main.py"]),
-    ],
-    ids=[
-        "absolute_file",
-        "absolute_dir",
-        "absolute_dir_trailing_slash",
-        "dot_prefixed",
-        "doubled_separator",
-        "workspace_folder_prefixed",
-        "trailing_slash",
-        "plain_root_name",
-        "dot_prefixed_root_name",
-        "bare_separator",
-    ],
-)
+@pytest.mark.parametrize(("query_template", "expected_paths"), _PATH_SHAPED_QUERY_CASES)
 def test_search_indexed_paths_matches_path_shaped_queries(
     workspace: Path, query_template: str, expected_paths: list[str]
 ) -> None:
-    """The git-index matcher applies the same path-shaped rule as the walk.
-
-    A bare separator keeps its old meaning, entries inside a folder, rather than
-    matching the absolute root of every entry.
-    """
+    """The git-index matcher returns what the walk returns for every case above."""
     query = query_template.format(root=workspace, folder=workspace.name)
-    entries = search_indexed_paths(workspace, ["src/main.py", "hello.txt"], query)
+    tracked = ["hello.txt", "logo.png", "src/main.py"]
+    entries = search_indexed_paths(workspace, tracked, query)
     assert [e.path for e in entries] == expected_paths, f"q={query!r}"
 
 

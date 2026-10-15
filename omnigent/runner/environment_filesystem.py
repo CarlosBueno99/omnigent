@@ -162,6 +162,9 @@ def _path_query(q: str) -> str | None:
     normalized = os.path.normpath(q)
     if os.sep != "/":
         normalized = normalized.replace(os.sep, "/")
+    elif normalized.startswith("//"):
+        # POSIX normpath keeps exactly two leading slashes; Linux reads them as one.
+        normalized = normalized[1:]
     return None if normalized.strip("/") in ("", ".") else normalized
 
 
