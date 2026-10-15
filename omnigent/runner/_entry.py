@@ -70,9 +70,9 @@ _GRACEFUL_SHUTDOWN_TUNNEL_TIMEOUT_S = 15.0
 # expires, so a live session's HTTP callbacks never present an expired
 # token. Well under the server-side token TTL.
 _MANAGED_MINT_REFRESH_SKEW_S = 300.0
-# Swap the bootstrap bearer for the runner's own token on the first ordinary
-# call at least this long after construction (boot-time calls stay on the
-# bearer); transient mint failures retry with doubling delays up to the cap.
+# Delay the proactive exchange so normal startup pays no mint latency: the
+# first plain call at least this long after construction performs it, and a
+# transient mint failure retries with doubling delays up to the cap below.
 _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S = 30.0
 _BOOTSTRAP_BEARER_EXCHANGE_MAX_DELAY_S = 300.0
 # Cadence of the runner's credential keepalive. Stays under
@@ -522,13 +522,25 @@ class _InitialAuthTokenFactory:
         self._exchange_due_at = time.monotonic() + _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S
         self._exchange_retry_s = _BOOTSTRAP_BEARER_EXCHANGE_DELAY_S
         self._exchange_unavailable = False
+        self._exchange_in_progress = False
         self._no_credential_logged = False
         self._lock = threading.Lock()
 
     def __call__(self) -> str | None:
-        """Return the host bearer or a token from the lazy local fallback."""
+        """Return the host bearer or a token from the lazy local fallback.
+
+        A due bootstrap exchange mints outside the lock so concurrent lookups
+        keep getting the bearer meanwhile; the keepalive is its usual caller.
+        :meth:`call_with_declined` (HTTP callbacks) never exchanges.
+        """
         with self._lock:
-            return self._call_locked()
+            token = self._call_locked()
+            mint = self._start_exchange_locked()
+        if mint is None:
+            return token
+        minted = mint()
+        with self._lock:
+            return self._finish_exchange_locked(mint, minted) or token
 
     def _call_locked(self) -> str | None:
         """Body of :meth:`__call__`, run under :attr:`_lock`.
@@ -536,11 +548,7 @@ class _InitialAuthTokenFactory:
         :returns: See :meth:`__call__`.
         """
         if self._initial_token is not None:
-            now = time.monotonic()
-            if not self._exchange_unavailable and now >= self._exchange_due_at:
-                self._exchange_locked(now)
-            if self._initial_token is not None:
-                return self._initial_token
+            return self._initial_token
         if self._fallback_factory is None:
             if time.monotonic() < self._retry_discovery_at:
                 return None
@@ -574,16 +582,39 @@ class _InitialAuthTokenFactory:
             self._no_credential_logged = False
         return token
 
-    def _exchange_locked(self, now: float) -> None:
-        """Swap the host bearer for a runner-owned token while it is still accepted.
+    def _start_exchange_locked(self) -> _ManagedMintTokenFactory | None:
+        """Hand out the mint factory for a due bootstrap exchange, else ``None``.
 
-        :param now: Current monotonic time, used to schedule a retry.
+        :returns: The factory to call outside the lock, or ``None`` when no
+            exchange is due, possible, or already in flight.
         """
+        if (
+            self._initial_token is None
+            or self._exchange_unavailable
+            or self._exchange_in_progress
+            or time.monotonic() < self._exchange_due_at
+        ):
+            return None
         mint = _delegated_mint_factory_from_env(self._server_url, proxy_bearer=self._initial_token)
         if mint is None:
             self._exchange_unavailable = True
-            return
-        token = mint()
+            return None
+        self._exchange_in_progress = True
+        return mint
+
+    def _finish_exchange_locked(
+        self, mint: _ManagedMintTokenFactory, token: str | None
+    ) -> str | None:
+        """Install a minted token or schedule the next exchange attempt.
+
+        :param mint: The factory :meth:`_start_exchange_locked` handed out.
+        :param token: Its mint result; ``None`` when the mint failed.
+        :returns: The installed token, or ``None`` while the bearer stays in use.
+        """
+        self._exchange_in_progress = False
+        if self._initial_token is None:
+            # Rejected meanwhile: the rejection path already owns the fallback.
+            return None
         if token:
             self._fallback_factory = mint
             self._initial_token = None
@@ -591,17 +622,18 @@ class _InitialAuthTokenFactory:
                 "exchanged the host bootstrap bearer for a runner-owned token",
                 extra={"session_id": runner_primary_session_id()},
             )
-            return
+            return token
         if (mint.declined and not mint.declined_by_server_error) or mint.proxy_auth_failed:
             # The server never mints for this runner, or the bearer is already
             # rejected: keep the bearer until the server rejects it.
             self._exchange_unavailable = True
-            return
-        # Transient failure: the mint blocks callers on the lock, so back off.
-        self._exchange_due_at = now + self._exchange_retry_s
+            return None
+        # Transient failure: back off so a flapping server is not probed every call.
+        self._exchange_due_at = time.monotonic() + self._exchange_retry_s
         self._exchange_retry_s = min(
             self._exchange_retry_s * 2, _BOOTSTRAP_BEARER_EXCHANGE_MAX_DELAY_S
         )
+        return None
 
     @property
     def declined(self) -> bool:
@@ -1119,28 +1151,45 @@ def _delegated_mint_factory_from_env(
 
 
 async def _run_credential_keepalive(
-    factory: Callable[[], str | None], *, interval_s: float
+    factory: Callable[[], str | None],
+    *,
+    interval_s: float,
+    initial_delay_s: float | None = None,
 ) -> None:
     """Call *factory* periodically so an idle runner's credential never lapses.
 
     Callbacks renew a credential only on demand; a session idle past the token
     lifetime would present an expired bearer, which the edge also rejects on
-    the re-mint. Calling inside the re-mint window renews it while accepted.
+    the re-mint. Calling inside the re-mint window renews it while accepted,
+    and the first call past the exchange delay swaps a host bootstrap bearer
+    for a runner-owned token.
 
     :param factory: The runner's auth token factory.
     :param interval_s: Seconds between calls, e.g. ``120.0``.
+    :param initial_delay_s: Seconds before the first call, e.g. the bootstrap
+        exchange delay so a short-lived host bearer is exchanged in time.
+        ``None`` waits one interval.
     :returns: Never; cancelled at runner shutdown.
     """
+    consecutive_failures = 0
+    delay_s = interval_s if initial_delay_s is None else initial_delay_s
     while True:
-        await asyncio.sleep(interval_s)
+        await asyncio.sleep(delay_s)
+        delay_s = interval_s
         try:
             await asyncio.to_thread(factory)
         except Exception:  # noqa: BLE001 — best-effort; the next tick retries
-            _logger.debug(
+            consecutive_failures += 1
+            # Factories report "no token" by returning None, so an exception
+            # that keeps recurring is worth surfacing at the default log level.
+            log = _logger.warning if consecutive_failures >= 3 else _logger.debug
+            log(
                 "runner credential keepalive failed",
                 exc_info=True,
                 extra={"session_id": runner_primary_session_id()},
             )
+        else:
+            consecutive_failures = 0
 
 
 def _mint_managed_owner_token(
@@ -2019,7 +2068,9 @@ async def _run_tunnel_from_env() -> None:
     if auth_token_factory is not None:
         keepalive_task = asyncio.create_task(
             _run_credential_keepalive(
-                auth_token_factory, interval_s=_CREDENTIAL_KEEPALIVE_INTERVAL_S
+                auth_token_factory,
+                interval_s=_CREDENTIAL_KEEPALIVE_INTERVAL_S,
+                initial_delay_s=_BOOTSTRAP_BEARER_EXCHANGE_DELAY_S,
             ),
             name=f"runner-credential-keepalive:{runner_id}",
         )

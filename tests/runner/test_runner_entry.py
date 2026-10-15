@@ -662,11 +662,16 @@ async def test_tunnel_boot_owns_the_credential_keepalive(
     )
     factory = (lambda: "tok") if has_factory else None
     events: list[tuple[object, ...]] = []
+    started = asyncio.Event()
 
     async def _keepalive(
-        keepalive_factory: Callable[[], str | None], *, interval_s: float
+        keepalive_factory: Callable[[], str | None],
+        *,
+        interval_s: float,
+        initial_delay_s: float | None = None,
     ) -> None:
-        events.append(("started", keepalive_factory, interval_s))
+        events.append(("started", keepalive_factory, interval_s, initial_delay_s))
+        started.set()
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
@@ -675,8 +680,12 @@ async def test_tunnel_boot_owns_the_credential_keepalive(
 
     async def _tunnel(*args: object, **kwargs: object) -> None:
         del args, kwargs
-        await asyncio.sleep(0.02)
+        # Return once the keepalive is up (or at once without a factory), so
+        # the runner's shutdown path has something to cancel.
+        if has_factory:
+            await asyncio.wait_for(started.wait(), timeout=5.0)
 
+    monkeypatch.setattr(entry_mod.gc, "freeze", lambda: None)
     monkeypatch.setattr(entry_mod, "_runner_auth_factory", None)
     monkeypatch.setattr(entry_mod, "_server_url_from_env", lambda: "http://runner.test")
     monkeypatch.setattr(entry_mod, "_make_auth_token_factory", lambda: factory)
@@ -692,7 +701,15 @@ async def test_tunnel_boot_owns_the_credential_keepalive(
     await asyncio.wait_for(entry_mod._run_tunnel_from_env(), timeout=10.0)
 
     expected = (
-        [("started", factory, entry_mod._CREDENTIAL_KEEPALIVE_INTERVAL_S), ("cancelled",)]
+        [
+            (
+                "started",
+                factory,
+                entry_mod._CREDENTIAL_KEEPALIVE_INTERVAL_S,
+                entry_mod._BOOTSTRAP_BEARER_EXCHANGE_DELAY_S,
+            ),
+            ("cancelled",),
+        ]
         if has_factory
         else []
     )
@@ -1534,6 +1551,138 @@ def test_host_launched_runner_exchanges_bootstrap_bearer_before_it_lapses(
     request = httpx.Request("GET", "https://app.databricksapps.com/api/version")
     captured = _drive_auth_flow(_RunnerDatabricksAuth(factory), request, httpx.Response(200))
     assert captured == [f"Bearer {presented}"]
+
+
+def test_bootstrap_exchange_waits_for_the_configured_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exchange becomes due exactly ``_BOOTSTRAP_BEARER_EXCHANGE_DELAY_S`` after boot.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :returns: None.
+    """
+    import types
+
+    import omnigent.runner._entry as entry_mod
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(
+        entry_mod,
+        "time",
+        types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time, sleep=time.sleep),
+    )
+    _accepted, mint_bearers, _resolve_calls = _host_launched_runner_behind_validating_edge(
+        monkeypatch
+    )
+    factory = _make_auth_token_factory()
+    assert isinstance(factory, _InitialAuthTokenFactory)
+
+    clock["now"] += entry_mod._BOOTSTRAP_BEARER_EXCHANGE_DELAY_S - 1.0
+    assert factory() == "host-bootstrap-token"
+    assert mint_bearers == []
+    clock["now"] += 1.0
+    assert factory() == "owner-jwt-1"
+    assert mint_bearers == ["host-bootstrap-token"]
+
+
+@pytest.mark.asyncio
+async def test_credential_keepalive_first_call_waits_only_the_initial_delay() -> None:
+    """The first keepalive call lands after ``initial_delay_s``, not a full interval.
+
+    :returns: None.
+    """
+    from omnigent.runner._entry import _run_credential_keepalive
+
+    calls: list[float] = []
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    task = asyncio.create_task(
+        _run_credential_keepalive(
+            lambda: calls.append(loop.time() - started) or "tok",
+            interval_s=60.0,
+            initial_delay_s=0.01,
+        )
+    )
+    try:
+        for _ in range(200):
+            if calls:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert len(calls) == 1
+    assert calls[0] < 60.0
+
+
+def test_http_callback_lookups_never_pay_for_the_bootstrap_exchange(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``call_with_declined`` (the HTTP auth flow) returns the bearer without minting.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :returns: None.
+    """
+    _accepted, mint_bearers, _resolve_calls = _host_launched_runner_behind_validating_edge(
+        monkeypatch
+    )
+    factory = _make_auth_token_factory()
+    assert isinstance(factory, _InitialAuthTokenFactory)
+    factory._exchange_due_at = 0.0
+
+    assert factory.call_with_declined() == ("host-bootstrap-token", False)
+    assert mint_bearers == []
+    # A plain call (the keepalive's) performs the exchange.
+    assert factory() == "owner-jwt-1"
+    assert mint_bearers == ["host-bootstrap-token"]
+    assert factory.call_with_declined() == ("owner-jwt-1", False)
+
+
+def test_concurrent_lookups_get_the_bearer_while_the_exchange_is_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow mint stalls only the caller that started it, never other lookups.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :returns: None.
+    """
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    mint_calls: list[int] = []
+
+    def _slow_mint(*args: Any, **kwargs: Any) -> tuple[str, float]:
+        del args, kwargs
+        mint_calls.append(1)
+        entered.set()
+        assert release.wait(timeout=10.0)
+        return "owner-jwt", time.time() + 1800
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "https://app.databricksapps.com")
+    monkeypatch.setenv(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, "host-bootstrap-token")
+    monkeypatch.setenv(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR, "bind-tok")
+    monkeypatch.setenv(RUNNER_DELEGATED_AUTH_ENV_VAR, "1")
+    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", _slow_mint)
+
+    factory = _make_auth_token_factory()
+    assert isinstance(factory, _InitialAuthTokenFactory)
+    factory._exchange_due_at = 0.0
+    results: list[str | None] = []
+    exchanger = threading.Thread(target=lambda: results.append(factory()))
+    exchanger.start()
+    try:
+        assert entered.wait(timeout=10.0)
+        # The mint is in flight: these must return the bearer at once, not block.
+        assert factory() == "host-bootstrap-token"
+        assert factory.call_with_declined() == ("host-bootstrap-token", False)
+        assert mint_calls == [1]
+    finally:
+        release.set()
+        exchanger.join(timeout=10.0)
+    assert results == ["owner-jwt"]
+    assert factory() == "owner-jwt"
 
 
 @pytest.mark.asyncio
