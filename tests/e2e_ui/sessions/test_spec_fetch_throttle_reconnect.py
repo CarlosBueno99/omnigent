@@ -1,17 +1,11 @@
-"""A throttled agent-spec fetch must not fail runner session init after a restart.
+"""A throttled agent-spec fetch must not fail a new session after a server restart.
 
-Journey: the server restarts (dropping the host and runner tunnels), the runners
-reconnect, and while the API front end is rate-limiting that reconnect burst it
-answers the ``GET /v1/sessions/{id}/agent/contents`` spec fetch with HTTP 429 for
-a moment. A user starts a new session during that window. Expected: the runner
-rides out the transient 429 and the first message is answered. Observed (bug):
-the runner treats the 429 as fatal, session init is rejected with
-``503 spec_resolver_failed``, and the user's turn fails with an error pill
-("Something went wrong setting up the turn on the host.") instead of a reply.
-
-The front end is stood in for by :mod:`_spec_fetch_throttle`, which answers every
-spec fetch with HTTP 429 for a bounded window after each arming and then passes
-through, so a runner that retried the transient 429 would recover.
+The server restarts, dropping the host and runner tunnels. While the runners
+reconnect, the API front end (stood in for by :mod:`_spec_fetch_throttle`) answers
+``GET /v1/sessions/{id}/agent/contents`` with HTTP 429 for a bounded window. A user
+who starts a new session during that window must still get the agent's reply: the
+runner rides out the transient 429 instead of failing the turn with
+``spec_resolver_failed``.
 """
 
 from __future__ import annotations

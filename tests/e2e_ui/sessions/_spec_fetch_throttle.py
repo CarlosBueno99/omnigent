@@ -1,13 +1,9 @@
 """A rate-limiting API front end stand-in for the runner's agent-spec fetch.
 
-Production puts the server behind an API front end that answers bursts with
-HTTP 429 (``RESOURCE_EXHAUSTED``). Locally nothing in front of the server does
-that, so ``install()`` wraps the product app in a pure-ASGI edge that throttles
-``GET /v1/sessions/{id}/agent/contents`` while armed, and passes everything else
-(including the runner tunnel) through untouched. The edge is armed by writing the
-flag file with the current epoch time; it then throttles every matching fetch for
-a bounded window and lifts automatically, so a runner that retried the transient
-429 would recover. Run it from the server process bootstrap::
+``install()`` wraps the product app in a pure-ASGI edge that answers
+``GET /v1/sessions/{id}/agent/contents`` with HTTP 429 for a bounded window after
+each arming (the flag file holds the arming time) and passes everything else,
+including the runner tunnel, through untouched. Run it from the server bootstrap::
 
     python -c "from tests.e2e_ui.sessions._spec_fetch_throttle import install; \\
                install(); from omnigent.cli import main; main()" server ...
