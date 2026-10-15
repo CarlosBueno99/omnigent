@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
+import time
 import urllib.parse
 import warnings
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 
 import click
 import httpx
@@ -19,6 +21,7 @@ DAEMON_TERMINAL_READY_TIMEOUT_S = 60.0
 _HTTP_429_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0)
 _HTTP_429_MAX_RETRY_AFTER_S = 10.0
 _sleep = asyncio.sleep
+_monotonic = time.monotonic
 
 
 async def request_with_429_retry(
@@ -26,6 +29,7 @@ async def request_with_429_retry(
     *,
     delays_s: tuple[float, ...] = _HTTP_429_RETRY_DELAYS_S,
     max_retry_after_s: float = _HTTP_429_MAX_RETRY_AFTER_S,
+    budget_s: float | None = None,
 ) -> httpx.Response:
     """Send an HTTP request, retrying only explicit 429 responses.
 
@@ -33,27 +37,37 @@ async def request_with_429_retry(
     session creation bodies replayable. ``Retry-After`` takes precedence over
     the bounded exponential fallback schedule.
 
-    Retries are bounded by attempt count, not a wall-clock deadline: with
-    every hint capped, the sleeps total at most
-    ``len(delays_s) * max_retry_after_s`` (40s with the defaults).
+    Without ``budget_s``, retries are bounded by attempt count: with every hint
+    capped, the sleeps total at most ``len(delays_s) * max_retry_after_s`` (40s
+    with the defaults). With ``budget_s``, the last fallback delay repeats and
+    retrying stops as soon as the next pause would end after the budget,
+    measured from the first attempt; the caller then gets the final 429.
 
     :param send: Callable that creates and sends one request attempt.
     :param delays_s: Fallback pause before each retry when the response has
         no usable ``Retry-After`` hint, e.g. ``(0.5, 1.0, 2.0)``.
     :param max_retry_after_s: Cap on any single pause, e.g. ``10.0``.
+    :param budget_s: Wall-clock retry budget in seconds, e.g. ``30.0``.
+        ``None`` keeps the attempt-count bound.
     :returns: The first non-429 response, or the final 429 response.
     """
-    for fallback_delay_s in delays_s:
+    started = _monotonic()
+    fallbacks: Iterable[float] = delays_s
+    if budget_s is not None:
+        last_delay_s = delays_s[-1] if delays_s else max_retry_after_s
+        fallbacks = itertools.chain(delays_s, itertools.repeat(last_delay_s))
+    for fallback_delay_s in fallbacks:
         response = await send()
         if response.status_code != 429:
             return response
-        await _sleep(
-            bounded_retry_after_seconds(
-                response,
-                fallback=fallback_delay_s,
-                max_delay=max_retry_after_s,
-            )
+        delay_s = bounded_retry_after_seconds(
+            response,
+            fallback=fallback_delay_s,
+            max_delay=max_retry_after_s,
         )
+        if budget_s is not None and _monotonic() - started + delay_s > budget_s:
+            return response
+        await _sleep(delay_s)
     return await send()
 
 

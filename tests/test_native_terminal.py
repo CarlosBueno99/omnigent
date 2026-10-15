@@ -109,6 +109,67 @@ async def test_bind_session_runner_surfaces_429_after_retries(
     assert sleeps == [10.0] * 4
 
 
+def _fake_retry_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace the 429 retry sleep and clock with a fake; returns the recorded pauses."""
+    sleeps: list[float] = []
+    now = 1_000.0
+
+    async def _fake_sleep(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    monkeypatch.setattr(native_terminal, "_sleep", _fake_sleep)
+    monkeypatch.setattr(native_terminal, "_monotonic", lambda: now)
+    return sleeps
+
+
+@pytest.mark.asyncio
+async def test_request_with_429_retry_budget_outlasts_repeated_hints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a budget, short ``Retry-After`` hints are followed past the fallback schedule."""
+    attempts = 0
+
+    async def _send() -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 6:
+            return httpx.Response(429, headers={"Retry-After": "1"})
+        return httpx.Response(200)
+
+    sleeps = _fake_retry_clock(monkeypatch)
+    response = await native_terminal.request_with_429_retry(
+        _send, delays_s=(0.5, 1.0), max_retry_after_s=5.0, budget_s=10.0
+    )
+
+    assert response.status_code == 200
+    assert attempts == 7
+    assert sleeps == [1.0] * 6
+
+
+@pytest.mark.asyncio
+async def test_request_with_429_retry_budget_repeats_last_fallback_until_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without hints the last fallback repeats, and no pause may end after the budget."""
+    attempts = 0
+
+    async def _send() -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(429)
+
+    sleeps = _fake_retry_clock(monkeypatch)
+    response = await native_terminal.request_with_429_retry(
+        _send, delays_s=(0.5, 1.0, 2.0), max_retry_after_s=5.0, budget_s=7.0
+    )
+
+    assert response.status_code == 429
+    assert attempts == 5
+    assert sleeps == [0.5, 1.0, 2.0, 2.0]
+
+
 @pytest.mark.asyncio
 async def test_bind_session_runner_raises_click_exception_on_http_error() -> None:
     """

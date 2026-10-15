@@ -2760,15 +2760,30 @@ async def test_resolve_agent_spec_from_server_caches_by_version_and_content(
     ]
 
 
+def _fake_retry_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace the 429 retry sleep and clock with a fake; returns the recorded pauses."""
+    sleeps: list[float] = []
+    now = 1_000.0
+
+    async def _fake_sleep(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    monkeypatch.setattr(native_terminal, "_sleep", _fake_sleep)
+    monkeypatch.setattr(native_terminal, "_monotonic", lambda: now)
+    return sleeps
+
+
 @pytest.mark.asyncio
 async def test_resolve_agent_spec_from_server_retries_a_throttled_fetch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rate-limited fetch is retried inside the server's init timeout, not failed.
+    """A rate-limited fetch is retried, honoring a capped ``Retry-After``, not failed.
 
     :param tmp_path: Temporary spec cache root.
-    :param monkeypatch: Pytest patch fixture for the retry sleep.
+    :param monkeypatch: Pytest patch fixture for the retry sleep and clock.
     :returns: None.
     """
     responses = [
@@ -2776,12 +2791,7 @@ async def test_resolve_agent_spec_from_server_retries_a_throttled_fetch(
         httpx.Response(429),
         httpx.Response(200, content=_spec_bundle("throttled-agent")),
     ]
-    sleeps: list[float] = []
-
-    async def _fake_sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    monkeypatch.setattr(native_terminal, "_sleep", _fake_sleep)
+    sleeps = _fake_retry_clock(monkeypatch)
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _request: responses.pop(0)),
         base_url="http://server.test",
@@ -2791,8 +2801,42 @@ async def test_resolve_agent_spec_from_server_retries_a_throttled_fetch(
         )
 
     assert spec is not None and spec.name == "throttled-agent"
-    # The 30s hint is capped so the retries fit the server's 10s init wait.
-    assert sleeps == [2.0, 1.0]
+    # The 30s hint is capped; a response without a hint falls back to the schedule.
+    assert sleeps == [5.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_resolve_agent_spec_from_server_rides_out_a_sustained_throttle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated short ``Retry-After`` hints keep the fetch retrying across a long burst.
+
+    :param tmp_path: Temporary spec cache root.
+    :param monkeypatch: Pytest patch fixture for the retry sleep and clock.
+    :returns: None.
+    """
+    attempts = 0
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 15:
+            return httpx.Response(429, headers={"Retry-After": "1"})
+        return httpx.Response(200, content=_spec_bundle("throttled-agent"))
+
+    sleeps = _fake_retry_clock(monkeypatch)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        base_url="http://server.test",
+    ) as client:
+        spec = await _resolve_agent_spec_from_server(
+            client, tmp_path, "ag_throttled", session_id="conv_test"
+        )
+
+    assert spec is not None and spec.name == "throttled-agent"
+    assert attempts == 16
+    assert sleeps == [1.0] * 15
 
 
 @pytest.mark.asyncio
@@ -2800,24 +2844,20 @@ async def test_resolve_agent_spec_from_server_raises_when_throttling_persists(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fetch still throttled after the retries fails as before, naming the 429.
+    """A fetch still throttled when the budget runs out fails as before, naming the 429.
 
     :param tmp_path: Temporary spec cache root.
-    :param monkeypatch: Pytest patch fixture for the retry sleep.
+    :param monkeypatch: Pytest patch fixture for the retry sleep and clock.
     :returns: None.
     """
     attempts = 0
-    sleeps: list[float] = []
 
     def _handler(_request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
         return httpx.Response(429)
 
-    async def _fake_sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    monkeypatch.setattr(native_terminal, "_sleep", _fake_sleep)
+    sleeps = _fake_retry_clock(monkeypatch)
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_handler),
         base_url="http://server.test",
@@ -2827,8 +2867,9 @@ async def test_resolve_agent_spec_from_server_raises_when_throttling_persists(
                 client, tmp_path, "ag_throttled", session_id="conv_test"
             )
 
-    assert attempts == 4
-    assert sleeps == [0.5, 1.0, 2.0]
+    # The last fallback repeats until another pause would end after the 30s budget.
+    assert attempts == 10
+    assert sleeps == [0.5, 1.0, 2.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]
 
 
 @pytest.mark.asyncio
