@@ -405,7 +405,7 @@ def _repl_env(tmp_home: Path) -> dict[str, str]:
 
 def _attach_command(session_id: str, server_url: str) -> str:
     # The console script (not ``python -m omnigent.cli``) runs ``main()``,
-    # which writes the always-on CLI diagnostics log the report quotes.
+    # which writes the diagnostics log asserted by ``_reconnect_logged``.
     return f"omnigent attach {session_id} --server {server_url}"
 
 

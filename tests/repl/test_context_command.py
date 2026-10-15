@@ -719,8 +719,9 @@ async def test_idle_ring_estimate_survives_a_failing_token_count(
 ) -> None:
     """A ``count_tokens`` failure leaves the ring untouched instead of raising.
 
-    The estimate runs as a background task at turn end, so an exception here
-    would surface as an unhandled-task traceback in the REPL.
+    The estimate runs as a fire-and-forget task at turn end, so an exception
+    here (e.g. an offline host that cannot fetch the tiktoken encoding) would
+    otherwise surface as an unhandled-task traceback that halts the REPL.
     """
 
     def _failing_count_tokens(messages: list[dict[str, object]], model: str) -> int:

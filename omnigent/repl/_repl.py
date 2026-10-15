@@ -1397,7 +1397,10 @@ class _SessionsChatReplAdapter:
         # Prose streamed since the renderer's last segment boundary, so a
         # message completed inside a gap is finished rather than repeated.
         self._streamed_text_parts: list[str] = []
-        self._drop_queued_deltas = False
+        # Full text of each message reconciliation just replayed, in order, so
+        # the tail's re-queued copy of that prose is dropped without swallowing
+        # a genuinely new message that starts streaming right after it.
+        self._pending_dup_texts: list[str] = []
         self._stream_task: asyncio.Task[None] | None = None
         self._recover_task: asyncio.Task[None] | None = None
         self._recover_lock = asyncio.Lock()
@@ -2253,10 +2256,10 @@ class _SessionsChatReplAdapter:
         self._replayed_status = None
         self._replay_from_start = False
         self._streamed_text_parts = []
-        self._drop_queued_deltas = False
+        self._pending_dup_texts = []
+        seeded = False
         reconnecting = False
         assert self._session_id is not None
-        await self._seed_stream_cursor()
         while True:
             try:
                 if _dbg:
@@ -2268,6 +2271,11 @@ class _SessionsChatReplAdapter:
                 reconcile_pending = reconnecting
                 reconnecting = True
                 async for event in self._client.sessions.stream(self._session_id):
+                    if not seeded:
+                        # Read the baseline only once this tail is registered,
+                        # so nothing can complete between the two.
+                        seeded = True
+                        await self._seed_stream_cursor()
                     if reconcile_pending:
                         # The server registers the live-tail slot before it
                         # sends anything, so REST state read now is never
@@ -2275,9 +2283,10 @@ class _SessionsChatReplAdapter:
                         reconcile_pending = False
                         await self._reconcile_stream_gap()
                     if isinstance(event, _StatusEv):
-                        self._drop_queued_deltas = False
                         if event.status == "running":
+                            # A new turn: no replayed prose is still pending.
                             self._streamed_text_parts.clear()
+                            self._pending_dup_texts.clear()
                         if event.status == self._replayed_status:
                             self._replayed_status = None
                             continue  # live copy of the reconciled status
@@ -2288,18 +2297,25 @@ class _SessionsChatReplAdapter:
                             if turn_done is not None:
                                 turn_done.set()
                     elif isinstance(event, _ItemDoneEv):
-                        self._drop_queued_deltas = False
                         if _commits_streamed_prose(event.item):
                             self._streamed_text_parts.clear()
                         item_id = event.item.get("id")
+                        if (
+                            isinstance(item_id, str)
+                            and item_id
+                            and item_id in self._replayed_item_ids
+                        ):
+                            # Live copy of a reconciled item; its queued prose
+                            # may still be arriving, so keep the dup guard.
+                            self._replayed_item_ids.discard(item_id)
+                            continue
+                        # A genuinely new live item ends the replayed-prose run.
+                        self._pending_dup_texts.clear()
                         if isinstance(item_id, str) and item_id:
-                            if item_id in self._replayed_item_ids:
-                                self._replayed_item_ids.discard(item_id)
-                                continue  # already rendered by reconciliation
                             self._last_streamed_item_id = item_id
                     elif isinstance(event, _TextDeltaEv):
-                        if self._drop_queued_deltas:
-                            continue  # the tail's copy of prose reconciliation rendered
+                        if self._consume_replayed_delta(event.delta):
+                            continue  # duplicate of prose reconciliation replayed
                         self._streamed_text_parts.append(event.delta)
                     if self._on_event is not None:
                         self._on_event(event)
@@ -2358,7 +2374,8 @@ class _SessionsChatReplAdapter:
         Otherwise a gap before this pump delivered any item could reconcile
         only the status and silently drop output completed meanwhile. An
         empty session replays from the start instead. Best-effort: on failure
-        the first live item still sets the cursor.
+        the first live item still sets the cursor. Callers run it once the
+        live tail is registered, so no item can land between the two.
         """
         assert self._session_id is not None
         try:
@@ -2390,7 +2407,7 @@ class _SessionsChatReplAdapter:
         session_id = self._session_id
         # Live copies of an earlier gap's items cannot arrive on this tail.
         self._replayed_item_ids.clear()
-        replayed_message = False
+        replayed_texts: list[str] = []
         try:
             cursor = self._last_streamed_item_id
             # No cursor and no seed means the boundary is unknown: replay
@@ -2424,7 +2441,8 @@ class _SessionsChatReplAdapter:
                                     delta=text[len(streamed) :],
                                 )
                             )
-                        replayed_message = True
+                        if text:
+                            replayed_texts.append(text)
                     if _commits_streamed_prose(item):
                         self._streamed_text_parts.clear()
                     self._on_event(_ItemDoneEv(type="response.output_item.done", item=item))
@@ -2439,9 +2457,9 @@ class _SessionsChatReplAdapter:
             await self._seed_stream_cursor()
         except Exception as exc:  # noqa: BLE001 — reconciliation is best-effort
             _log.info("stream gap item reconciliation failed: %s", exc)
-        # The tail may have queued the same prose for a message replayed above;
-        # those deltas end at the next item or status.
-        self._drop_queued_deltas = replayed_message
+        # The tail may re-queue the prose of each message replayed above; drop
+        # exactly that prose, in order, as :meth:`_consume_replayed_delta` sees it.
+        self._pending_dup_texts = replayed_texts
         try:
             snapshot = await self._client.sessions.get(session_id)
             status = getattr(snapshot, "status", None)
@@ -2459,6 +2477,29 @@ class _SessionsChatReplAdapter:
                 )
         except Exception as exc:  # noqa: BLE001 — reconciliation is best-effort
             _log.info("stream gap status reconciliation failed: %s", exc)
+
+    def _consume_replayed_delta(self, delta: str) -> bool:
+        """Whether *delta* is the tail re-sending prose reconciliation replayed.
+
+        The new tail re-queues the in-flight prefix of a message that
+        reconciliation already rendered from REST. Match each queued delta
+        against the next replayed message's text, consuming it as it arrives
+        (the prefix can be shorter than, or chunked within, the full text). A
+        delta that is not that message's prose is new live output: stop
+        suppressing so a fresh message streaming right after a replayed one
+        still renders.
+        """
+        if not delta or not self._pending_dup_texts:
+            return False
+        head = self._pending_dup_texts[0]
+        if head.startswith(delta):
+            if head == delta:
+                self._pending_dup_texts.pop(0)
+            else:
+                self._pending_dup_texts[0] = head[len(delta) :]
+            return True
+        self._pending_dup_texts.clear()
+        return False
 
     async def send(
         self,
@@ -6218,7 +6259,10 @@ async def _update_context_ring_estimate(
     llm = getattr(session, "llm_model", None) or session.model
     try:
         tokens = count_tokens([dict(i) for i in effective], llm)
-    except Exception:  # noqa: BLE001 — background estimate at the REPL UI boundary: a stale ring beats an unhandled-task traceback
+    except Exception:  # noqa: BLE001 — fire-and-forget estimate: a stale ring beats crashing the REPL
+        # count_tokens fetches a tiktoken encoding on first use; if that is
+        # unavailable (offline host), leave the ring stale rather than let this
+        # background task raise into the prompt and halt the REPL.
         _log.debug("context ring estimate failed", exc_info=True)
         return
     host.update_context_usage(tokens, context_window)

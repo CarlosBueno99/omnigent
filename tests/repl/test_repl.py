@@ -3442,7 +3442,7 @@ def _gap_adapter(
     adapter._replayed_status = None
     adapter._replay_from_start = False
     adapter._streamed_text_parts = ["prose from previous session"]
-    adapter._drop_queued_deltas = True
+    adapter._pending_dup_texts = ["prose from previous session"]
     return adapter
 
 
@@ -3472,6 +3472,8 @@ def _gap_message(item_id: str, text: str) -> dict[str, object]:
 _GAP_H0 = _gap_message("h0", "earlier")
 _GAP_M1 = _gap_message("m1", "hi")
 _GAP_FINAL = _gap_message("m2", "done")
+_GAP_TOOL = {"id": "t1", "type": "function_call_output", "call_id": "c1", "output": "ok"}
+_GAP_SECOND = _gap_message("m3", "more")
 _GAP_SEED_CALL = {"limit": 1, "order": "desc"}
 
 
@@ -3494,12 +3496,13 @@ async def test_stream_pump_reconciles_output_and_status_missed_during_reconnect(
 
     subscriptions = 0
     rendered: list[object] = []
-    list_calls: list[dict[str, object]] = []
+    calls: list[dict[str, object]] = []
     settled = asyncio.Event()
 
     async def _stream(session_id: str):
         nonlocal subscriptions
         subscriptions += 1
+        calls.append({"subscribed": subscriptions})
         if subscriptions == 1:
             async for event in _gap_first_subscription(session_id, _gap_item(_GAP_M1)):
                 yield event
@@ -3512,7 +3515,7 @@ async def test_stream_pump_reconciles_output_and_status_missed_during_reconnect(
         await asyncio.Event().wait()
 
     async def _list_items(session_id: str, **kwargs: object) -> PaginatedList:
-        list_calls.append(kwargs)
+        calls.append(kwargs)
         if (seed := _gap_seed_page(**kwargs)) is not None:
             return seed
         user = {"id": "u2", "type": "message", "role": "user", "content": "next"}
@@ -3534,7 +3537,13 @@ async def test_stream_pump_reconciles_output_and_status_missed_during_reconnect(
         ("status", "running"),
     ], "missed output renders once, user echo and live duplicates are skipped"
     assert adapter._turn_done.is_set()  # type: ignore[attr-defined]
-    assert list_calls == [_GAP_SEED_CALL, {"limit": 100, "after": "m1", "order": "asc"}]
+    # The baseline is read once the first tail is registered, never before.
+    assert calls == [
+        {"subscribed": 1},
+        _GAP_SEED_CALL,
+        {"subscribed": 2},
+        {"limit": 100, "after": "m1", "order": "asc"},
+    ]
     assert adapter._replayed_item_ids == set()  # type: ignore[attr-defined]
 
 
@@ -3547,6 +3556,11 @@ async def test_stream_pump_reconciles_a_turn_that_ends_while_resubscribing() -> 
     published to nobody. Reading REST before subscribing would still see the
     turn running and lose it for good. The tail also queued the same prose as
     deltas; printing them after the replayed item would show it twice.
+
+    The gap holds two prose segments split by a tool boundary. A single
+    "drop until the next item" flag would stop suppressing at the first
+    replayed item and re-print the second segment, so each segment's prose
+    is tracked and dropped on its own.
     """
     import asyncio
     import types
@@ -3563,11 +3577,15 @@ async def test_stream_pump_reconciles_a_turn_that_ends_while_resubscribing() -> 
             async for event in _gap_first_subscription(session_id, _gap_item(_GAP_M1)):
                 yield event
         server["status"] = "idle"
-        server["items"] = [_GAP_FINAL]
+        server["items"] = [_GAP_FINAL, _GAP_TOOL, _GAP_SECOND]
         yield _gap_heartbeat()
         yield _gap_delta("do")
         yield _gap_delta("ne")
         yield _gap_item(_GAP_FINAL)
+        yield _gap_item(_GAP_TOOL)
+        yield _gap_delta("mo")
+        yield _gap_delta("re")
+        yield _gap_item(_GAP_SECOND)
         yield _gap_status(session_id, "idle")
         yield _gap_status(session_id, "running")
         yield _gap_delta("next")
@@ -3590,11 +3608,71 @@ async def test_stream_pump_reconciles_a_turn_that_ends_while_resubscribing() -> 
         ("status", "running"),
         ("item", "m1"),
         ("item", "m2"),
+        ("item", "t1"),
+        ("item", "m3"),
         ("status", "idle"),
         ("heartbeat",),
         ("status", "running"),
         ("delta", "next"),
-    ], "queued copies of the replayed prose are dropped; the next turn streams"
+    ], "both replayed segments drop their queued prose once; the next turn streams"
+    assert adapter._turn_done.is_set()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_stream_pump_streams_a_fresh_message_after_a_replayed_one() -> None:
+    """A new message that starts streaming right after a replayed one still renders.
+
+    Reconciliation replays the message that committed inside the gap, then the
+    tail opens a brand-new message. Its deltas must render: the dup-prose guard
+    covers only the replayed message, not everything that follows it. A single
+    drop flag would swallow the new message's prose until its item arrived.
+    """
+    import asyncio
+    import types
+
+    subscriptions = 0
+    rendered: list[object] = []
+    settled = asyncio.Event()
+
+    async def _stream(session_id: str):
+        nonlocal subscriptions
+        subscriptions += 1
+        if subscriptions == 1:
+            async for event in _gap_first_subscription(session_id, _gap_item(_GAP_M1)):
+                yield event
+        yield _gap_heartbeat()
+        yield _gap_delta("mo")
+        yield _gap_delta("re")
+        yield _gap_item(_GAP_SECOND)
+        yield _gap_status(session_id, "idle")
+        settled.set()
+        await asyncio.Event().wait()
+
+    async def _list_items(session_id: str, **kwargs: object) -> PaginatedList:
+        if (seed := _gap_seed_page(**kwargs)) is not None:
+            return seed
+        # Only the message that committed inside the gap is in REST; the new
+        # message is still in flight on the tail.
+        return PaginatedList(data=[_GAP_FINAL])
+
+    async def _get(session_id: str):
+        # The turn is still running when reconciliation reads REST.
+        return types.SimpleNamespace(status="running")
+
+    adapter = _gap_adapter(stream=_stream, list_items=_list_items, get=_get, rendered=rendered)
+    await _run_gap_pump(adapter, settled)
+
+    assert [_describe_gap_event(e) for e in rendered] == [
+        ("heartbeat",),
+        ("status", "running"),
+        ("item", "m1"),
+        ("item", "m2"),
+        ("heartbeat",),
+        ("delta", "mo"),
+        ("delta", "re"),
+        ("item", "m3"),
+        ("status", "idle"),
+    ], "the replayed message renders once and the fresh message still streams"
     assert adapter._turn_done.is_set()  # type: ignore[attr-defined]
 
 
