@@ -1359,6 +1359,34 @@ def test_transcript_mirrors_prompt_blocked_by_hook_from_notice_text(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
+    "reason,prompt",
+    [("a\n\nOriginal prompt: b", "c"), ("No.", "line one\n\nOriginal prompt: quoted")],
+    ids=["separator-in-reason", "separator-in-prompt"],
+)
+def test_transcript_keeps_an_ambiguous_notice_only_block_for_the_server(
+    tmp_path: Path, reason: str, prompt: str
+) -> None:
+    """Without a structured reason, a repeated separator makes the split a guess: notice only."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        _transcript_line(_notice_only_blocked_prompt_entry(reason, prompt)), encoding="utf-8"
+    )
+
+    _cursor, current_response_id, items = read_transcript_items_since(
+        transcript, 0, agent_name="Claude", current_response_id="active"
+    )
+
+    assert current_response_id == "active"
+    assert [item.item_type for item in items] == ["error"]
+    assert items[0].data["code"] == "native_prompt_blocked_by_hook"
+    assert (
+        items[0]
+        .data["message"]
+        .endswith(f"hook blocked it.\n\n{reason}\n\nOriginal prompt: {prompt}")
+    )
+
+
+@pytest.mark.parametrize(
     "entry",
     [
         {"type": "system", "subtype": "informational", "content": "Conversation compacted"},

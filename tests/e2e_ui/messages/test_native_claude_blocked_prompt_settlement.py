@@ -40,6 +40,9 @@ from .test_native_claude_render_parity import (
     _open_terminal_view,
     _wait_terminal_connected,
 )
+from .test_native_claude_shell_input import (  # noqa: F401 — autouse skip guard
+    _requires_mockable_claude,
+)
 
 _MISSING_CODE = "native_prompt_not_recorded"
 _BLOCKED_CODE = "native_prompt_blocked_by_hook"

@@ -9738,3 +9738,88 @@ async def test_hook_blocked_prompt_is_not_reclassified_as_missing_by_later_mirro
         assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == []
     finally:
         pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_hook_block_notice_keeps_the_queued_original(tmp_path: Path) -> None:
+    """A notice-only block whose reason repeats the separator must not rewrite the message.
+
+    The parser cannot tell where the prompt starts, so it emits only the notice;
+    the queued web message keeps its own text and settles through the existing
+    skipped-input path once the next message is mirrored.
+    """
+    import json
+
+    from omnigent.harnesses.claude_native.bridge import read_transcript_items_since
+    from omnigent.harnesses.claude_native.forwarder import _external_conversation_item_event
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _persist_external_conversation_item
+
+    pending_inputs.reset_for_tests()
+    session_id = "64a784c3aa907d1774f44313546947c6"
+    store = _ConversationStore()
+    conversation = store.get_conversation(session_id)
+    assert conversation is not None
+    blocked_text = "c"
+    later_text = "continue"
+    reason = "a\n\nOriginal prompt: b"
+    records = [
+        {
+            "type": "system",
+            "subtype": "informational",
+            "uuid": "ambiguous-block",
+            "content": (
+                "UserPromptSubmit operation blocked by hook:\n"
+                f"{reason}\n\nOriginal prompt: {blocked_text}"
+            ),
+            "version": "2.1.283",
+        },
+        {
+            "type": "user",
+            "uuid": "later-record",
+            "message": {"role": "user", "content": later_text},
+        },
+    ]
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+    for text, stable_id in (
+        (blocked_text, "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"),
+        (later_text, "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"),
+    ):
+        pending_inputs.record(
+            session_id,
+            [{"type": "input_text", "text": text}],
+            created_by="alice@example.com",
+            stable_id=stable_id,
+        )
+    try:
+        _cursor, _response_id, items = read_transcript_items_since(
+            transcript, 0, agent_name=CLAUDE_NATIVE_AGENT_NAME
+        )
+        for item in items:
+            event = _external_conversation_item_event(item)
+            await _persist_external_conversation_item(
+                session_id,
+                conversation,
+                SessionEventInput(type=event["type"], data=event["data"]),
+                store,  # type: ignore[arg-type]
+            )
+
+        assert [
+            item.data.content[0]["text"] for item in store.appended_items if item.type == "message"
+        ] == [blocked_text, later_text]
+        errors = [
+            (item.data.code, item.data.message)
+            for item in store.appended_items
+            if item.type == "error"
+        ]
+        assert [code for code, _message in errors] == [
+            "native_prompt_blocked_by_hook",
+            "native_prompt_not_recorded",
+        ]
+        assert errors[0][1].endswith(f"{reason}\n\nOriginal prompt: {blocked_text}")
+        assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == []
+    finally:
+        pending_inputs.reset_for_tests()

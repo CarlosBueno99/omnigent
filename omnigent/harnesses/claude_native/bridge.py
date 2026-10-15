@@ -8205,51 +8205,58 @@ def _blocked_prompt_transcript_items(
     """
     Mirror a prompt a ``UserPromptSubmit`` hook blocked, with the hook's reason.
 
-    Claude Code drops a blocked prompt before the model sees it and records
-    only a ``system`` notice holding the reason and the original prompt, so
-    a web message that carried the prompt otherwise stays queued until a
-    later message is recorded and is then reported as never recorded,
-    without the reason. The prompt is mirrored as the user message it was,
-    which settles that web message, followed by an informational notice
-    carrying the reason Claude showed in its terminal.
+    Claude records blocked prompts as system notices. Mirror the original
+    prompt to settle its web entry, then emit the hook reason as an
+    informational notice.
 
     :param entry: Claude ``system`` record of the blocked prompt.
     :param outcome: Its outcome from :func:`_hook_block_outcome`.
     :param line_number: One-based transcript line number.
     :param record_offset: Byte offset where the transcript record
         starts, or ``None`` for legacy line-cursor reads.
-    :returns: The user message and the notice, or no items when the
-        original prompt cannot be recovered from the record.
+    :returns: The user message and the notice; only the notice when a
+        notice-only record cannot be split unambiguously; no items when
+        the record names no prompt.
     """
     content = entry.get("content")
     if not isinstance(content, str) or not content.startswith(_BLOCKED_PROMPT_HEADER):
         return []
     body = content.removeprefix(_BLOCKED_PROMPT_HEADER)
     reason = outcome.get("reason")
+    ambiguous = False
     if isinstance(reason, str) and body.startswith(reason + _BLOCKED_PROMPT_SEPARATOR):
         # The structured reason marks where the prompt starts even when either
         # one contains the separator text.
         prompt = body[len(reason + _BLOCKED_PROMPT_SEPARATOR) :]
-    else:
+    elif isinstance(reason, str) or body.count(_BLOCKED_PROMPT_SEPARATOR) <= 1:
         notice_reason, _separator, prompt = body.partition(_BLOCKED_PROMPT_SEPARATOR)
         if not isinstance(reason, str):
             reason = notice_reason
+    else:
+        # A notice-only record whose reason or prompt repeats the separator
+        # cannot be split without guessing: leave the queued message to the
+        # server's own settlement and show the hook's whole output instead.
+        ambiguous, reason, prompt = True, body, ""
     prompt = _unwrap_pasted_content_markers(prompt)
-    if not prompt.strip():
+    if not prompt.strip() and not ambiguous:
         return []
     source_key = _transcript_source_key(entry, line_number, record_offset)
     response_id = _response_id_from_source(source_key)
     notice = _BLOCKED_PROMPT_NOTICE
     if reason.strip():
         notice = f"{notice}\n\n{reason.strip()}"
-    return [
-        ClaudeTranscriptItem(
-            source_id=_source_id(source_key, 0, "message"),
-            item_type="message",
-            data={"role": "user", "content": [{"type": "input_text", "text": prompt}]},
-            response_id=response_id,
-            agent_message_candidate=_is_agent_notification_text(prompt),
-        ),
+    items: list[ClaudeTranscriptItem] = []
+    if prompt.strip():
+        items.append(
+            ClaudeTranscriptItem(
+                source_id=_source_id(source_key, 0, "message"),
+                item_type="message",
+                data={"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+                response_id=response_id,
+                agent_message_candidate=_is_agent_notification_text(prompt),
+            )
+        )
+    items.append(
         ClaudeTranscriptItem(
             source_id=_source_id(source_key, 1, "error"),
             item_type="error",
@@ -8260,8 +8267,9 @@ def _blocked_prompt_transcript_items(
                 "level": "info",
             },
             response_id=response_id,
-        ),
-    ]
+        )
+    )
+    return items
 
 
 # Slash-command marker handling. Claude Code's embedded TUI emits
