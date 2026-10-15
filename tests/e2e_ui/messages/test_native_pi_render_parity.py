@@ -74,8 +74,12 @@ def test_native_pi_message_render_parity(
             )
 
     def terminal_text() -> str:
-        # Pi can insert ANSI styling or line wraps inside a streamed reply.
-        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", "".join(terminal_frames))
+        # Ignore terminal styling, title updates, and wrapping within the reply.
+        text = re.sub(
+            r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]",
+            "",
+            "".join(terminal_frames),
+        )
         return text.replace("\r", "").replace("\n", "")
 
     page.on("websocket", observe_socket)
