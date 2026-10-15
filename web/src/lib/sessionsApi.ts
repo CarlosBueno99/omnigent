@@ -909,11 +909,14 @@ export async function createSideChat(sourceId: string): Promise<{ childSessionId
     source.hostId != null &&
     (source.hostOnline !== false || source.hostResumable)
   ) {
-    await retrySession(sourceId);
-    // The parent is relaunching, so its "stopped" band no longer applies; a
-    // generic side chat never passes through the composer that would clear it.
-    clearSessionStopped(sourceId);
+    const retryResult = await retrySession(sourceId);
     source = await getSession(sourceId);
+    // Only drop the "stopped" band once the relaunch actually took effect; a
+    // generic side chat never passes through the composer that would clear it,
+    // and a recovery that failed leaves the session genuinely stopped.
+    if (retryResult.recovered || source.runnerOnline !== false) {
+      clearSessionStopped(sourceId);
+    }
   }
   const { runnerId } = source;
   const canUseRunner =

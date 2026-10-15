@@ -1554,7 +1554,12 @@ export function useBulkStopSessions() {
         if (results[i].status === "fulfilled") succeeded.push(ids[i]);
         else failed.push(ids[i]);
       }
-      for (const id of succeeded) markSessionStopped(id);
+      for (const id of succeeded) {
+        markSessionStopped(id);
+        // Mirror useStopSession: a stale per-session snapshot would otherwise
+        // clobber the now-stopped state in the header merge.
+        void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      }
       if (failed.length > 0) {
         throw new BulkConversationMutationError("stop", {
           failed,

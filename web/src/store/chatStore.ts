@@ -1310,8 +1310,9 @@ export interface ChatActions {
   /** Drain the queued composer attachments (called by the composer). */
   clearPendingComposerAttachments: () => void;
   /** Stamp {@link ChatState.runnerLaunchedAt} now — call right after a
-   *  successful `launchRunner` for the open session. */
-  markRunnerLaunched: () => void;
+   *  successful `launchRunner`. Pass the launched session id when it may not be
+   *  the open conversation (a host switch can resolve after a navigation). */
+  markRunnerLaunched: (sessionId?: string) => void;
   /**
    * Compact the active session's context. Posts a ``compact`` event to the
    * server, which summarises the conversation history in-place. No-ops when
@@ -2343,13 +2344,12 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         : pinnedId === null
           ? get().status === "streaming"
           : setterForState(pinnedId)?.status === "streaming";
-    // Sending is the relaunch the stopped band promises (a `/side` fork
-    // relaunches the parent too), so a confirmed stop no longer describes this
-    // session. Re-marked below if the relaunch never lands.
+    // Cleared just before the relaunch POST below (not here): the guards in
+    // between can return without relaunching, and clearing inside the serialized
+    // send chain stops a late failure from re-stamping a session a later send
+    // already relaunched. `didClearStopMarker` gates the restore to our own clear.
     const relaunchTargetId = pinnedId ?? get().conversationId;
-    const clearedStopMarker =
-      relaunchTargetId !== null && relaunchTargetId in useStoppedSessions.getState().stoppedAt;
-    if (clearedStopMarker && relaunchTargetId !== null) clearSessionStopped(relaunchTargetId);
+    let didClearStopMarker = false;
     if (!alreadyStreaming && !opensSideChat) {
       // Latch on the SAME entry as `status`, in one patch, so they can't
       // diverge — a new chat buffers both on root and `adoptPreSessionState`
@@ -2498,6 +2498,16 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         }));
         initialDispatched = true;
       }
+      if (
+        relaunchTargetId !== null &&
+        relaunchTargetId in useStoppedSessions.getState().stoppedAt
+      ) {
+        // Sending is the relaunch the stopped band promises (a `/side` fork
+        // relaunches the parent too), so a confirmed stop no longer describes
+        // this session.
+        clearSessionStopped(relaunchTargetId);
+        didClearStopMarker = true;
+      }
       const postResult = await postEvent(sessionId, {
         type: "message",
         data: {
@@ -2513,7 +2523,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // depending on the live stream being connected.
       if (postResult.denied) {
         // The relaunch never ran, so restore the stopped band.
-        if (clearedStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
+        if (didClearStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
         // Target the session this send posted to: the user may have navigated
         // away while the POST was open, and settling the VISIBLE conversation
         // would clobber an unrelated chat's composer state.
@@ -2564,7 +2574,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       queryClient?.invalidateQueries({ queryKey: ["conversations"] });
     } catch (err) {
       // The relaunch POST failed, so the session is still stopped — restore its band.
-      if (clearedStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
+      if (didClearStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
       if (initialDraft && !initialDispatched && !initialSendPending()) return;
       const { message, code } = describeSendFailure(err);
       // A codex `/side` that armed the side-chat latch (line ~2103) but then
@@ -2705,9 +2715,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         ? get().status === "streaming"
         : setterForState(pinnedId)?.status === "streaming";
     const relaunchTargetId = pinnedId ?? get().conversationId;
-    const clearedStopMarker =
-      relaunchTargetId !== null && relaunchTargetId in useStoppedSessions.getState().stoppedAt;
-    if (clearedStopMarker && relaunchTargetId !== null) clearSessionStopped(relaunchTargetId);
+    // Cleared just before the relaunch POST (below), inside the send chain, so a
+    // late failure can't re-stamp a session a later send already relaunched.
+    let didClearStopMarker = false;
     if (!alreadyStreaming) {
       // See `send`: latch and status on one entry, in one patch.
       pinnedSetter({ status: "streaming", activeResponse: null, sendLatchedAt: Date.now() });
@@ -2750,6 +2760,15 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // See `send`: rekey inside the call, before the new id is visible.
       const sessionId = await ensureBoundSession(agentId, get, opts, submitConversationId, rekey);
       postedSessionId = sessionId;
+      if (
+        relaunchTargetId !== null &&
+        relaunchTargetId in useStoppedSessions.getState().stoppedAt
+      ) {
+        // Invoking a skill relaunches a stopped session just like an ordinary
+        // send, so a confirmed stop no longer describes it.
+        clearSessionStopped(relaunchTargetId);
+        didClearStopMarker = true;
+      }
       // Same wire shape the REPL sends (repl/_repl.py). The server resolves
       // the skill, persists a visible receipt + hidden `<skill>` meta
       // message, and forwards the meta to the runner.
@@ -2759,7 +2778,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       });
       if (postResult.denied) {
         // The relaunch never ran, so restore the stopped band.
-        if (clearedStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
+        if (didClearStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
         // Denied commands publish no receipt, so nothing will pop the
         // optimistic echo — roll it back here alongside the status settle.
         // Targets the session the command posted to: a backgrounded
@@ -2793,7 +2812,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       queryClient?.invalidateQueries({ queryKey: ["conversations"] });
     } catch (err) {
       // The relaunch POST failed, so the session is still stopped — restore its band.
-      if (clearedStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
+      if (didClearStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
       const message = err instanceof Error ? err.message : String(err);
       // Settle the conversation this command targeted, wherever the user is
       // now: its echo must roll back and its status must not stay "streaming"
@@ -3109,10 +3128,12 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     }
   },
 
-  markRunnerLaunched: () => {
+  markRunnerLaunched: (sessionId) => {
     // A host switch relaunches the runner, so a confirmed stop no longer applies.
-    const { conversationId } = get();
-    if (conversationId !== null) clearSessionStopped(conversationId);
+    // Clear the launched session explicitly: the switch's await can resolve after
+    // the user navigated away, so the open conversation may not be the relaunched one.
+    const id = sessionId ?? get().conversationId;
+    if (id !== null) clearSessionStopped(id);
     setActive({ runnerLaunchedAt: Date.now() });
   },
 

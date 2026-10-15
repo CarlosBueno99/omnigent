@@ -2403,6 +2403,10 @@ describe("useBulkStopSessions", () => {
       expect(JSON.parse(init.body as string)).toEqual({ type: "stop_session", data: {} });
     }
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversations"] });
+    // Each stopped session's own snapshot must be refreshed too, or a stale
+    // per-session read clobbers the now-stopped state in the header merge.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["session", "conv_a"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["session", "conv_b"] });
   });
 
   it("throws with failed ids when some stops fail", async () => {
@@ -2429,13 +2433,16 @@ describe("useBulkStopSessions", () => {
       .mockResolvedValueOnce(mockResponse({ queued: false }))
       .mockResolvedValueOnce(mockResponse({}, { ok: false, status: 503 }));
 
-    const { rendered } = renderBulkStopHook();
+    const { invalidateSpy, rendered } = renderBulkStopHook();
     rendered.result.current.mutate(["conv_a", "conv_b"]);
     await waitFor(() => expect(rendered.result.current.isError).toBe(true));
 
     const { stoppedAt } = useStoppedSessions.getState();
     expect(stoppedAt.conv_a).toEqual(expect.any(Number));
     expect(stoppedAt.conv_b).toBeUndefined();
+    // Only the session that actually stopped gets its snapshot invalidated.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["session", "conv_a"] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["session", "conv_b"] });
   });
 });
 

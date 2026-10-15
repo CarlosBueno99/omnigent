@@ -18858,6 +18858,41 @@ describe("confirmed-stop markers", () => {
     expect(stoppedAt.conv_other).toEqual(expect.any(Number));
   });
 
+  it("a host-switch launch clears the relaunched session's marker, not the open one", () => {
+    // The switch awaits `launchRunner` before marking, so it can resolve after
+    // the user has navigated away: the launched id must be cleared, not the
+    // conversation that happens to be visible now.
+    useChatStore.setState({ conversationId: "conv_other" });
+    markSessionStopped("conv_switched");
+    markSessionStopped("conv_other");
+
+    useChatStore.getState().markRunnerLaunched("conv_switched");
+
+    const { stoppedAt } = useStoppedSessions.getState();
+    expect(stoppedAt.conv_switched).toBeUndefined();
+    expect(stoppedAt.conv_other).toEqual(expect.any(Number));
+  });
+
+  it("a failed send never stamps a stop marker on a session that was not stopped", async () => {
+    // The restore only undoes our own clear; a POST failure must not invent a
+    // stop the user never performed.
+    useChatStore.setState({
+      conversationId: "conv_live",
+      abortController: new AbortController(),
+      status: "idle",
+    });
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/v1/sessions/conv_live/events")) {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    await useChatStore.getState().send("hello", "agent_xyz");
+
+    expect(useStoppedSessions.getState().stoppedAt.conv_live).toBeUndefined();
+  });
+
   it("a denied send restores the stop marker — the relaunch never ran", async () => {
     useChatStore.setState({
       conversationId: "conv_stopped",

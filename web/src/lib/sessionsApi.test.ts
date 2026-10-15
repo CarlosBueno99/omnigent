@@ -713,6 +713,23 @@ describe("createSideChat", () => {
     expect(useStoppedSessions.getState().stoppedAt[source.id]).toBeUndefined();
   });
 
+  it("keeps the parent's stop marker when the relaunch does not recover", async () => {
+    // Recovery failed and the runner is still offline, so the parent is
+    // genuinely stopped: the band must stay up rather than vanish on a
+    // relaunch that never took effect.
+    useStoppedSessions.setState({ stoppedAt: {} });
+    markSessionStopped(source.id);
+    fetchMock
+      .mockResolvedValueOnce(mockJsonResponse({ ...source, runner_online: false }))
+      .mockResolvedValueOnce(mockJsonResponse({ recovered: false }))
+      .mockResolvedValueOnce(mockJsonResponse({ ...source, runner_online: false }));
+
+    await expect(createSideChat(source.id)).rejects.toThrow("This session is disconnected.");
+
+    expect(useStoppedSessions.getState().stoppedAt[source.id]).toEqual(expect.any(Number));
+    useStoppedSessions.setState({ stoppedAt: {} });
+  });
+
   it("leaves an online parent's stop marker alone (no relaunch, cleared on send)", async () => {
     useStoppedSessions.setState({ stoppedAt: {} });
     markSessionStopped(source.id);
