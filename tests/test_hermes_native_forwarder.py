@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import json
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -544,6 +545,62 @@ def _patched_external_ids(calls: list[tuple[str, dict]]) -> list[object]:
     return [body["external_session_id"] for _url, body in calls if "external_session_id" in body]
 
 
+async def _run_hermes_loop(
+    monkeypatch,
+    *,
+    db: Path,
+    bridge_dir: Path,
+    workspace: str,
+    statuses: list[str],
+    stop_after_iterations: int,
+    posted: list[f._MirrorItem] | None = None,
+    on_sleep: Callable[[int], None] | None = None,
+    session_id: str = "conv_idle",
+) -> None:
+    """Drive the real hermes forward loop with HTTP stubbed; record idle statuses.
+
+    *posted* collects mirrored items when given (they are dropped otherwise), and
+    *on_sleep* runs with the 1-based poll count whenever the loop sleeps, so a test
+    can mutate the store between polls. Callers install any client capture first.
+    """
+
+    async def _record_item(_client, *, session_id, item):
+        if posted is not None:
+            posted.append(item)
+
+    async def _record_status(_client, *, session_id, status, response_id=None):
+        # Idle-only: these loop tests assert the parent-wake idle dedup; the
+        # running edge has dedicated coverage in the _annotate_turn_actions tests.
+        if status == "idle":
+            statuses.append(status)
+
+    monkeypatch.setattr(f, "_post_conversation_item", _record_item)
+    monkeypatch.setattr(f, "_post_external_session_status", _record_status)
+
+    iteration = {"n": 0}
+
+    async def _sleep(_s):
+        iteration["n"] += 1
+        if on_sleep is not None:
+            on_sleep(iteration["n"])
+        if iteration["n"] >= stop_after_iterations:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await f.forward_hermes_store_to_session(
+            base_url="http://x",
+            headers={},
+            session_id=session_id,
+            bridge_dir=bridge_dir,
+            agent_name="hermes-native-ui",
+            workspace=workspace,
+            launch_epoch_s=1000.0,
+            db_path=db,
+        )
+
+
 async def test_post_conversation_item_posts_event(tmp_path) -> None:
     client = _FakeClient()
     item = f._MirrorItem(
@@ -874,12 +931,59 @@ def _seed_main_with_finished_helper(db: Path, workspace: str, *, compacted: bool
     con.close()
 
 
-def _append_main_row(db: Path, text: str) -> None:
+def _append_main_row(db: Path, text: str, role: str = "user") -> None:
     con = sqlite3.connect(db)
     con.execute(
         "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
-        ("main", "user", text, 1, 0),
+        ("main", role, text, 1, 0),
     )
+    con.commit()
+    con.close()
+
+
+def _seed_rotating_compaction(
+    db: Path,
+    workspace: str,
+    *,
+    parent_end_reason: str | None,
+    compacted: bool,
+    with_child: bool = True,
+) -> None:
+    """``parent_1`` with one row (``compacted=1`` when *compacted*), plus ``child_1`` if asked."""
+    con = sqlite3.connect(db)
+    con.executescript(_SCHEMA)
+    con.execute(
+        "INSERT INTO sessions(id, source, cwd, started_at, end_reason) VALUES (?,?,?,?,?)",
+        ("parent_1", "cli", workspace, 1000.0, parent_end_reason),
+    )
+    con.execute(
+        "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
+        ("parent_1", "assistant", "compacted summary", 1, int(compacted)),
+    )
+    con.commit()
+    con.close()
+    if with_child:
+        _add_child_session(db, workspace)
+
+
+def _add_child_session(db: Path, workspace: str) -> None:
+    """``child_1`` of ``parent_1`` with a user/assistant turn."""
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id) VALUES (?,?,?,?,?)",
+        ("child_1", "cli", workspace, 1005.0, "parent_1"),
+    )
+    con.executemany(
+        "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
+        [("child_1", "user", "child hi", 1, 0), ("child_1", "assistant", "child reply", 1, 0)],
+    )
+    con.commit()
+    con.close()
+
+
+def _set_end_reason(db: Path, session_id: str, end_reason: str | None) -> None:
+    con = sqlite3.connect(db)
+    con.execute("UPDATE sessions SET end_reason = ? WHERE id = ?", (end_reason, session_id))
     con.commit()
     con.close()
 
@@ -903,37 +1007,20 @@ async def test_forward_loop_stays_on_main_after_in_place_compaction_with_helper(
     bridge_dir.mkdir()
     # Main's pre-compaction rows (1, 2, 5) were already mirrored.
     f._write_state(bridge_dir, f._ForwardState(hermes_session_id="main", last_id=5))
-
-    posted: list[f._MirrorItem] = []
-
-    async def _fake_post(_client, *, session_id, item):
-        posted.append(item)
-
-    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
     monkeypatch.setattr(f, "_persist_hermes_compaction_item", lambda *a, **k: _noop())
-    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
     patched = _capture_server_client(monkeypatch)
 
-    iteration = {"n": 0}
-
-    async def _sleep(_s):
-        iteration["n"] += 1
-        if iteration["n"] >= 3:
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await f.forward_hermes_store_to_session(
-            base_url="http://x",
-            headers={},
-            session_id="conv_main",
-            bridge_dir=bridge_dir,
-            agent_name="hermes-native-ui",
-            workspace=workspace,
-            launch_epoch_s=1000.0,
-            db_path=db,
-        )
+    posted: list[f._MirrorItem] = []
+    await _run_hermes_loop(
+        monkeypatch,
+        db=db,
+        bridge_dir=bridge_dir,
+        workspace=workspace,
+        statuses=[],
+        stop_after_iterations=3,
+        posted=posted,
+        session_id="conv_main",
+    )
 
     assert _mirrored_texts(posted) == ["summary of the compacted turns"]
     assert f._read_state(bridge_dir).hermes_session_id == "main"
@@ -946,67 +1033,30 @@ async def test_forward_loop_repin_waits_for_the_parent_compression_stamp(
     """Compacted rows can precede the parent's end stamp; the re-pin retries on later polls."""
     workspace = str(tmp_path)
     db = tmp_path / "state.db"
-    con = sqlite3.connect(db)
-    con.executescript(_SCHEMA)
-    con.executemany(
-        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason)"
-        " VALUES (?,?,?,?,?,?)",
-        [
-            ("parent_1", "cli", workspace, 1000.0, None, None),
-            ("child_1", "cli", workspace, 1005.0, "parent_1", None),
-        ],
-    )
-    con.executemany(
-        "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
-        [
-            ("parent_1", "assistant", "compacted summary", 1, 1),
-            ("child_1", "user", "child hi", 1, 0),
-            ("child_1", "assistant", "child reply", 1, 0),
-        ],
-    )
-    con.commit()
-    con.close()
-
+    _seed_rotating_compaction(db, workspace, parent_end_reason=None, compacted=True)
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
     f._write_state(bridge_dir, f._ForwardState(hermes_session_id="parent_1", last_id=1))
-
-    posted: list[f._MirrorItem] = []
-
-    async def _fake_post(_client, *, session_id, item):
-        posted.append(item)
-
-    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
     monkeypatch.setattr(f, "_persist_hermes_compaction_item", lambda *a, **k: _noop())
-    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
     _capture_server_client(monkeypatch)
 
-    iteration = {"n": 0}
+    def _stamp_parent_late(poll: int) -> None:
+        # Hermes stamps the parent one poll after its compacted rows became visible.
+        if poll == 1:
+            _set_end_reason(db, "parent_1", "compression")
 
-    async def _sleep(_s):
-        iteration["n"] += 1
-        if iteration["n"] == 1:
-            # Hermes stamps the parent one poll after its compacted rows became visible.
-            con = sqlite3.connect(db)
-            con.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = 'parent_1'")
-            con.commit()
-            con.close()
-        if iteration["n"] >= 3:
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await f.forward_hermes_store_to_session(
-            base_url="http://x",
-            headers={},
-            session_id="conv_retry",
-            bridge_dir=bridge_dir,
-            agent_name="hermes-native-ui",
-            workspace=workspace,
-            launch_epoch_s=1000.0,
-            db_path=db,
-        )
+    posted: list[f._MirrorItem] = []
+    await _run_hermes_loop(
+        monkeypatch,
+        db=db,
+        bridge_dir=bridge_dir,
+        workspace=workspace,
+        statuses=[],
+        stop_after_iterations=3,
+        posted=posted,
+        on_sleep=_stamp_parent_late,
+        session_id="conv_retry",
+    )
 
     assert f._read_state(bridge_dir).hermes_session_id == "child_1"
     assert _mirrored_texts(posted) == ["child hi", "child reply"]
@@ -1018,60 +1068,23 @@ async def test_forward_loop_repins_when_parent_ends_by_compression_without_compa
     """A fork compaction that marks no ``compacted`` rows still re-pins once the parent ended."""
     workspace = str(tmp_path)
     db = tmp_path / "state.db"
-    con = sqlite3.connect(db)
-    con.executescript(_SCHEMA)
-    con.executemany(
-        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason)"
-        " VALUES (?,?,?,?,?,?)",
-        [
-            ("parent_1", "cli", workspace, 1000.0, None, "compression"),
-            ("child_1", "cli", workspace, 1005.0, "parent_1", None),
-        ],
-    )
-    con.executemany(
-        "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
-        [
-            ("parent_1", "assistant", "last parent reply", 1, 0),
-            ("child_1", "user", "child hi", 1, 0),
-            ("child_1", "assistant", "child reply", 1, 0),
-        ],
-    )
-    con.commit()
-    con.close()
-
+    _seed_rotating_compaction(db, workspace, parent_end_reason="compression", compacted=False)
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
     f._write_state(bridge_dir, f._ForwardState(hermes_session_id="parent_1", last_id=1))
-
-    posted: list[f._MirrorItem] = []
-
-    async def _fake_post(_client, *, session_id, item):
-        posted.append(item)
-
-    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
-    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
     _capture_server_client(monkeypatch)
 
-    iteration = {"n": 0}
-
-    async def _sleep(_s):
-        iteration["n"] += 1
-        if iteration["n"] >= 2:
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await f.forward_hermes_store_to_session(
-            base_url="http://x",
-            headers={},
-            session_id="conv_fork",
-            bridge_dir=bridge_dir,
-            agent_name="hermes-native-ui",
-            workspace=workspace,
-            launch_epoch_s=1000.0,
-            db_path=db,
-        )
+    posted: list[f._MirrorItem] = []
+    await _run_hermes_loop(
+        monkeypatch,
+        db=db,
+        bridge_dir=bridge_dir,
+        workspace=workspace,
+        statuses=[],
+        stop_after_iterations=2,
+        posted=posted,
+        session_id="conv_fork",
+    )
 
     assert f._read_state(bridge_dir).hermes_session_id == "child_1"
     assert _mirrored_texts(posted) == ["child hi", "child reply"]
@@ -1081,65 +1094,49 @@ async def test_forward_loop_drops_persisted_helper_binding(tmp_path, monkeypatch
     """A saved binding naming a delegated helper is discarded and main is rediscovered.
 
     The state file is trusted across supervisor restarts, so a stale helper binding
-    would otherwise keep tailing the helper.
+    would otherwise keep tailing the helper. Main is mirrored from its start, so a turn
+    that reached the TUI while the helper was bound is not lost.
     """
     workspace = str(tmp_path)
     db = tmp_path / "state.db"
     _seed_main_with_finished_helper(db, workspace, compacted=False)
+    _append_main_row(db, "follow-up during the mix-up")
+    _append_main_row(db, "answered in the TUI", role="assistant")
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
     f._write_state(
         bridge_dir, f._ForwardState(hermes_session_id="helper", last_id=0, launch_epoch_s=1000.0)
     )
-    # The helper-era idle baseline equals main's two completed turns; kept, it would
-    # suppress main's parent-wake idle post.
-    hstatus.write_posted_count(bridge_dir, 2)
+    # The helper-era idle baseline equals main's three completed turns; kept, it
+    # would suppress main's parent-wake idle post.
+    hstatus.write_posted_count(bridge_dir, 3)
+    patched = _capture_server_client(monkeypatch)
 
     posted: list[f._MirrorItem] = []
     idle_posts: list[str] = []
+    await _run_hermes_loop(
+        monkeypatch,
+        db=db,
+        bridge_dir=bridge_dir,
+        workspace=workspace,
+        statuses=idle_posts,
+        stop_after_iterations=2,
+        posted=posted,
+        session_id="conv_resume",
+    )
 
-    async def _fake_post(_client, *, session_id, item):
-        posted.append(item)
-
-    async def _fake_status(_client, *, session_id, status, response_id=None):
-        if status == "idle":
-            idle_posts.append(status)
-
-    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
-    monkeypatch.setattr(f, "_post_external_session_status", _fake_status)
-    patched = _capture_server_client(monkeypatch)
-
-    iteration = {"n": 0}
-
-    async def _sleep(_s):
-        iteration["n"] += 1
-        if iteration["n"] == 1:
-            _append_main_row(db, "after recovery")
-        if iteration["n"] >= 3:
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await f.forward_hermes_store_to_session(
-            base_url="http://x",
-            headers={},
-            session_id="conv_resume",
-            bridge_dir=bridge_dir,
-            agent_name="hermes-native-ui",
-            workspace=workspace,
-            launch_epoch_s=1000.0,
-            db_path=db,
-        )
-
-    # Main's rows 1-5 were mirrored before the helper took over: resume past them
-    # (no replay) and only mirror what lands afterwards.
     assert f._read_state(bridge_dir).hermes_session_id == "main"
-    assert _mirrored_texts(posted) == ["after recovery"]
+    assert _mirrored_texts(posted) == [
+        "please delegate a tiny task",
+        "dispatching a helper",
+        "the helper finished",
+        "follow-up during the mix-up",
+        "answered in the TUI",
+    ]
     assert _patched_external_ids(patched) == ["main"]
-    # Main's completions are still reported once from the clean baseline, then deduped.
+    # Main's completions are reported once from the clean baseline, then deduped.
     assert idle_posts == ["idle"]
-    assert hstatus.read_posted_count(bridge_dir) == 2
+    assert hstatus.read_posted_count(bridge_dir) == 3
 
 
 async def test_forward_loop_defers_binding_check_until_the_store_is_readable(
@@ -1154,46 +1151,81 @@ async def test_forward_loop_defers_binding_check_until_the_store_is_readable(
     f._write_state(
         bridge_dir, f._ForwardState(hermes_session_id="helper", last_id=0, launch_epoch_s=1000.0)
     )
-
-    posted: list[f._MirrorItem] = []
-
-    async def _fake_post(_client, *, session_id, item):
-        posted.append(item)
-
-    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
-    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
     patched = _capture_server_client(monkeypatch)
 
-    iteration = {"n": 0}
-
-    async def _sleep(_s):
-        iteration["n"] += 1
-        if iteration["n"] == 2:
+    def _bring_store_up(poll: int) -> None:
+        if poll == 2:
             # Hermes brings the store up two polls later.
             db.parent.mkdir()
             _seed_main_with_finished_helper(db, workspace, compacted=False)
-        if iteration["n"] == 3:
+        if poll == 3:
             _append_main_row(db, "after recovery")
-        if iteration["n"] >= 5:
-            raise asyncio.CancelledError
 
-    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await f.forward_hermes_store_to_session(
-            base_url="http://x",
-            headers={},
-            session_id="conv_deferred",
-            bridge_dir=bridge_dir,
-            agent_name="hermes-native-ui",
-            workspace=workspace,
-            launch_epoch_s=1000.0,
-            db_path=db,
-        )
+    posted: list[f._MirrorItem] = []
+    await _run_hermes_loop(
+        monkeypatch,
+        db=db,
+        bridge_dir=bridge_dir,
+        workspace=workspace,
+        statuses=[],
+        stop_after_iterations=5,
+        posted=posted,
+        on_sleep=_bring_store_up,
+        session_id="conv_deferred",
+    )
 
     assert f._read_state(bridge_dir).hermes_session_id == "main"
-    assert _mirrored_texts(posted) == ["after recovery"]
+    assert _mirrored_texts(posted) == [
+        "please delegate a tiny task",
+        "dispatching a helper",
+        "the helper finished",
+        "after recovery",
+    ]
     # The unverified helper binding was never advertised as the external session.
+    assert _patched_external_ids(patched) == ["main"]
+
+
+async def test_forward_loop_keeps_a_valid_binding_through_an_unreadable_store_window(
+    tmp_path, monkeypatch
+) -> None:
+    """A store unreadable past the check window only unpins in memory: the same session
+    resumes its saved cursor and idle count instead of replaying or re-waking."""
+    workspace = str(tmp_path)
+    db = tmp_path / "hermes_home" / "state.db"  # directory does not exist yet
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    f._write_state(
+        bridge_dir, f._ForwardState(hermes_session_id="main", last_id=5, launch_epoch_s=1000.0)
+    )
+    hstatus.write_posted_count(bridge_dir, 2)
+    monkeypatch.setattr(f, "_BINDING_CHECK_POLLS", 2)
+    patched = _capture_server_client(monkeypatch)
+
+    def _bring_store_up(poll: int) -> None:
+        if poll == 2:
+            # The store comes back after the window expired, with one new row.
+            db.parent.mkdir()
+            _seed_main_with_finished_helper(db, workspace, compacted=False)
+            _append_main_row(db, "after the outage")
+
+    posted: list[f._MirrorItem] = []
+    idle_posts: list[str] = []
+    await _run_hermes_loop(
+        monkeypatch,
+        db=db,
+        bridge_dir=bridge_dir,
+        workspace=workspace,
+        statuses=idle_posts,
+        stop_after_iterations=4,
+        posted=posted,
+        on_sleep=_bring_store_up,
+        session_id="conv_outage",
+    )
+
+    assert f._read_state(bridge_dir).hermes_session_id == "main"
+    assert _mirrored_texts(posted) == ["after the outage"]
+    assert idle_posts == []
+    assert hstatus.read_posted_count(bridge_dir) == 2
     assert _patched_external_ids(patched) == ["main"]
 
 
@@ -1211,36 +1243,19 @@ async def test_forward_loop_drops_a_saved_binding_whose_row_never_appears(
         f._ForwardState(hermes_session_id="rotated-away", last_id=7, launch_epoch_s=1000.0),
     )
     monkeypatch.setattr(f, "_BINDING_CHECK_POLLS", 2)
-
-    posted: list[f._MirrorItem] = []
-
-    async def _fake_post(_client, *, session_id, item):
-        posted.append(item)
-
-    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
-    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
     patched = _capture_server_client(monkeypatch)
 
-    iteration = {"n": 0}
-
-    async def _sleep(_s):
-        iteration["n"] += 1
-        if iteration["n"] >= 4:
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await f.forward_hermes_store_to_session(
-            base_url="http://x",
-            headers={},
-            session_id="conv_rotated",
-            bridge_dir=bridge_dir,
-            agent_name="hermes-native-ui",
-            workspace=workspace,
-            launch_epoch_s=1000.0,
-            db_path=db,
-        )
+    posted: list[f._MirrorItem] = []
+    await _run_hermes_loop(
+        monkeypatch,
+        db=db,
+        bridge_dir=bridge_dir,
+        workspace=workspace,
+        statuses=[],
+        stop_after_iterations=4,
+        posted=posted,
+        session_id="conv_rotated",
+    )
 
     assert f._read_state(bridge_dir).hermes_session_id == "main"
     assert _mirrored_texts(posted) == [
@@ -1257,71 +1272,32 @@ async def test_forward_loop_keeps_looking_for_the_continuation_of_an_ended_paren
     """Once the parent is known ended by compression, the re-pin outlives the retry window."""
     workspace = str(tmp_path)
     db = tmp_path / "state.db"
-    con = sqlite3.connect(db)
-    con.executescript(_SCHEMA)
-    con.execute(
-        "INSERT INTO sessions(id, source, cwd, started_at, end_reason) VALUES (?,?,?,?,?)",
-        ("parent_1", "cli", workspace, 1000.0, "compression"),
+    _seed_rotating_compaction(
+        db, workspace, parent_end_reason="compression", compacted=False, with_child=False
     )
-    con.execute(
-        "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
-        ("parent_1", "assistant", "last parent reply", 1, 0),
-    )
-    con.commit()
-    con.close()
-
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
     f._write_state(bridge_dir, f._ForwardState(hermes_session_id="parent_1", last_id=1))
     monkeypatch.setattr(f, "_REPIN_RETRY_POLLS", 1)
-
-    posted: list[f._MirrorItem] = []
-
-    async def _fake_post(_client, *, session_id, item):
-        posted.append(item)
-
-    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
-    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
     _capture_server_client(monkeypatch)
 
-    iteration = {"n": 0}
+    def _land_child_late(poll: int) -> None:
+        # The continuation row lands well after the one-poll retry window.
+        if poll == 3:
+            _add_child_session(db, workspace)
 
-    async def _sleep(_s):
-        iteration["n"] += 1
-        if iteration["n"] == 3:
-            # The continuation row lands well after the one-poll retry window.
-            con = sqlite3.connect(db)
-            con.execute(
-                "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id)"
-                " VALUES (?,?,?,?,?)",
-                ("child_1", "cli", workspace, 1005.0, "parent_1"),
-            )
-            con.executemany(
-                "INSERT INTO messages(session_id, role, content, active, compacted)"
-                " VALUES (?,?,?,?,?)",
-                [
-                    ("child_1", "user", "child hi", 1, 0),
-                    ("child_1", "assistant", "child reply", 1, 0),
-                ],
-            )
-            con.commit()
-            con.close()
-        if iteration["n"] >= 5:
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await f.forward_hermes_store_to_session(
-            base_url="http://x",
-            headers={},
-            session_id="conv_late_child",
-            bridge_dir=bridge_dir,
-            agent_name="hermes-native-ui",
-            workspace=workspace,
-            launch_epoch_s=1000.0,
-            db_path=db,
-        )
+    posted: list[f._MirrorItem] = []
+    await _run_hermes_loop(
+        monkeypatch,
+        db=db,
+        bridge_dir=bridge_dir,
+        workspace=workspace,
+        statuses=[],
+        stop_after_iterations=5,
+        posted=posted,
+        on_sleep=_land_child_late,
+        session_id="conv_late_child",
+    )
 
     assert f._read_state(bridge_dir).hermes_session_id == "child_1"
     assert _mirrored_texts(posted) == ["child hi", "child reply"]
@@ -1619,51 +1595,6 @@ def test_hermes_status_posted_count_roundtrip_and_clear(tmp_path: Path) -> None:
     assert hstatus.read_posted_count(bridge) == 4
     hstatus.clear_hermes_status_state(bridge)
     assert hstatus.read_posted_count(bridge) == 0
-
-
-async def _run_hermes_loop(
-    monkeypatch,
-    *,
-    db: Path,
-    bridge_dir: Path,
-    workspace: str,
-    statuses: list[str],
-    stop_after_iterations: int,
-) -> None:
-    """Drive the real hermes forward loop with HTTP stubbed; record idle statuses."""
-
-    async def _noop_item(_client, *, session_id, item):
-        pass
-
-    async def _record_status(_client, *, session_id, status, response_id=None):
-        # Idle-only: these loop tests assert the parent-wake idle dedup; the
-        # running edge has dedicated coverage in the _annotate_turn_actions tests.
-        if status == "idle":
-            statuses.append(status)
-
-    monkeypatch.setattr(f, "_post_conversation_item", _noop_item)
-    monkeypatch.setattr(f, "_post_external_session_status", _record_status)
-
-    iteration = {"n": 0}
-
-    async def _sleep(_s):
-        iteration["n"] += 1
-        if iteration["n"] >= stop_after_iterations:
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await f.forward_hermes_store_to_session(
-            base_url="http://x",
-            headers={},
-            session_id="conv_idle",
-            bridge_dir=bridge_dir,
-            agent_name="hermes-native-ui",
-            workspace=workspace,
-            launch_epoch_s=1000.0,
-            db_path=db,
-        )
 
 
 async def test_forward_loop_posts_idle_once_per_turn(tmp_path, monkeypatch) -> None:

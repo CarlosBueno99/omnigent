@@ -121,8 +121,7 @@ _CHILD_SCAN_LIMIT = 32
 
 #: Polls to keep looking for a compression continuation after compacted rows
 #: appear (~10 s at the default interval): the parent's end stamp and the child
-#: row can land a few polls later. A parent seen ended by compression is known
-#: dead, so the search for its continuation then continues past this window.
+#: row can land a few polls later.
 _REPIN_RETRY_POLLS = 25
 
 #: Polls to wait for a saved binding's row to become readable before the binding
@@ -511,40 +510,21 @@ def _is_side_session_id(db_path: Path, hermes_session_id: str) -> bool | None:
 def _ended_by_compression(db_path: Path, hermes_session_id: str) -> bool:
     """Whether Hermes ended *hermes_session_id* with ``end_reason = 'compression'``.
 
-    ``False`` when the column is absent or the store is unreadable.
+    Polled every cycle, so this is one indexed SELECT: an older schema without the
+    column or a store mid-checkpoint simply reads as "not ended" this time.
     """
     con = _connect_ro(db_path)
     if con is None:
         return False
     try:
-        if "end_reason" not in _table_columns(con, "sessions"):
-            return False
         row = con.execute(
             "SELECT end_reason FROM sessions WHERE id = ?", (hermes_session_id,)
         ).fetchone()
-    except sqlite3.Error as exc:
-        _warn_sqlite_once("end-reason check", exc)
+    except sqlite3.Error:
         return False
     finally:
         con.close()
     return row is not None and row[0] == "compression"
-
-
-def _session_high_water(db_path: Path, hermes_session_id: str) -> int:
-    """``MAX(messages.id)`` of *hermes_session_id*, or ``0`` when unreadable or empty."""
-    con = _connect_ro(db_path)
-    if con is None:
-        return 0
-    try:
-        row = con.execute(
-            "SELECT MAX(id) FROM messages WHERE session_id = ?", (hermes_session_id,)
-        ).fetchone()
-    except sqlite3.Error as exc:
-        _warn_sqlite_once("high-water read", exc)
-        return 0
-    finally:
-        con.close()
-    return int(row[0]) if row and row[0] is not None else 0
 
 
 def _discover_session_id(
@@ -1254,7 +1234,6 @@ async def forward_hermes_store_to_session(
     # written) keeps the check pending for the next poll.
     binding_verdict: bool | None = False if hermes_session_id is None else None
     binding_check_polls = 0
-    skip_mirrored_history = False
     last_id = persisted.last_id if hermes_session_id is not None else 0
     # A row whose mirroring failed partway, and how many of its items already
     # posted; both ``0`` when ``last_id`` is a clean fully-mirrored high-water mark.
@@ -1286,26 +1265,43 @@ async def forward_hermes_store_to_session(
                     binding_verdict = await asyncio.to_thread(
                         _is_side_session_id, db, hermes_session_id
                     )
-                    if binding_verdict is None:
+                    if binding_verdict is None and binding_check_polls < _BINDING_CHECK_POLLS:
                         binding_check_polls += 1
-                        if binding_check_polls < _BINDING_CHECK_POLLS:
-                            await asyncio.sleep(poll_interval_s)
-                            continue
-                        # The row never became readable: drop the binding so
-                        # discovery can rebind the live session instead.
-                        binding_verdict = True
+                        # Keep the claim heartbeat fresh while the check is pending.
+                        _write_state(
+                            bridge_dir,
+                            _ForwardState(
+                                hermes_session_id=hermes_session_id,
+                                last_id=last_id,
+                                partial_row_id=partial_row_id,
+                                partial_row_items=partial_row_items,
+                                launch_epoch_s=launch_epoch_s,
+                                active_turn_id=active_turn_id,
+                            ),
+                        )
+                        await asyncio.sleep(poll_interval_s)
+                        continue
+                    if binding_verdict is None:
+                        # The row never became readable: unpin so discovery can rebind
+                        # (the same session resumes its saved cursor); the saved state
+                        # and idle count stay until a side session is confirmed.
+                        _logger.warning(
+                            "hermes forwarder persisted binding %s is not readable; "
+                            "rediscovering; session=%s",
+                            hermes_session_id,
+                            session_id,
+                        )
+                        hermes_session_id = None
+                        binding_verdict = False
                     elif binding_verdict:
-                        # Main's earlier rows were mirrored before the side session
-                        # replaced it; resume past its current rows instead of
-                        # replaying them (the item POST has no dedup key).
-                        skip_mirrored_history = True
-                    if binding_verdict:
                         # A helper or fork must never back the main transcript: drop
                         # the binding and its idle poster count (rebased onto the
                         # helper) so discovery and completion reporting start clean.
+                        # The rediscovered session mirrors from its start: nothing is
+                        # lost, and the item POST has no dedup key anyway.
                         _logger.warning(
-                            "hermes forwarder persisted binding %s is a side session or "
-                            "not in the store; rediscovering; session=%s",
+                            "hermes forwarder persisted binding %s is a side session; "
+                            "rediscovering; session=%s",
                             hermes_session_id,
                             session_id,
                         )
@@ -1329,9 +1325,6 @@ async def forward_hermes_store_to_session(
                         binding_verdict = False
                         resuming = persisted.hermes_session_id == resolved
                         last_id = persisted.last_id if resuming else 0
-                        if skip_mirrored_history:
-                            last_id = await asyncio.to_thread(_session_high_water, db, resolved)
-                            skip_mirrored_history = False
                         partial_row_id = persisted.partial_row_id if resuming else 0
                         partial_row_items = persisted.partial_row_items if resuming else 0
                         # Discovery only (re)binds on a cold start or a
