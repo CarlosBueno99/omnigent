@@ -18,7 +18,6 @@ import httpx
 import pytest
 
 from omnigent.native import _native_forwarder_health as native_forwarder_health
-from omnigent.native import native_terminal
 from omnigent.runner._entry import (
     _DEFAULT_RUNNER_IDLE_TIMEOUT_S,
     _DEFAULT_RUNNER_THREADPOOL_MAX_WORKERS,
