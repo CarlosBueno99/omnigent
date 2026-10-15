@@ -12005,6 +12005,10 @@ async def test_hook_evaluate_endpoint_allows(
         # The relay wrote the shell-sourceable env file the curl hooks use.
         env_text = (bridge_dir / claude_native_bridge.TOOL_RELAY_ENV_FILE).read_text("utf-8")
         assert "OMNIGENT_RELAY_URL=" in env_text and "OMNIGENT_RELAY_TOKEN=" in env_text
+        # ...and the owner-only curl config that carries the bearer for ``-K``.
+        curl_path = bridge_dir / claude_native_bridge.TOOL_RELAY_CURL_FILE
+        assert os.stat(curl_path).st_mode & 0o777 == 0o600
+        assert curl_path.read_text("utf-8").startswith('header = "Authorization: Bearer ')
     finally:
         relay.close()
 

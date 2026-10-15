@@ -14,33 +14,58 @@ from pathlib import Path
 # Shell-sourceable sibling of ``tool_relay.json`` (written by the relay on every
 # start, so hooks follow a restarted runner to its new port).
 TOOL_RELAY_ENV_FILE = "tool_relay.env"
+# curl config holding the relay's Authorization header. curl reads it with
+# ``-K``, so the bearer never appears in a process argument list.
+TOOL_RELAY_CURL_FILE = "tool_relay.curlrc"
 
 
-def relay_hook_command(bridge_dir: Path, route: str, fallback: str, *, max_time_s: int) -> str:
+def relay_curl_config(token: str) -> str:
+    """
+    Render the curl config that carries the relay bearer.
+
+    :param token: Relay bearer token (``token_urlsafe`` alphabet, so it needs
+        no escaping inside the quoted value).
+    :returns: File text for :data:`TOOL_RELAY_CURL_FILE`.
+    """
+    return f'header = "Authorization: Bearer {token}"\n'
+
+
+def relay_hook_command(
+    bridge_dir: Path,
+    route: str,
+    fallback: str,
+    *,
+    max_time_s: int,
+    max_bytes: int | None = None,
+) -> str:
     """
     Build a hook command that POSTs its stdin to the relay at *route*.
 
-    The relay's coordinates are re-read from ``tool_relay.env`` on every
-    event. When that file is absent (a hook can beat the relay's start) or
-    curl fails, the same stdin is replayed into *fallback*, the harness's
-    Python hook, which owns the direct-server path and any fail-closed
-    shaping. Wrapped in ``/bin/sh -c`` so it does not depend on the shell
-    the harness runs hook commands with.
+    The relay's coordinates are re-read from ``tool_relay.env`` and its bearer
+    from ``tool_relay.curlrc`` on every event. When either file is absent (a
+    hook can beat the relay's start) or curl fails, the same stdin is replayed
+    into *fallback*, the harness's Python hook, which owns the direct-server
+    path and any fail-closed shaping. Wrapped in ``/bin/sh -c`` so it does not
+    depend on the shell the harness runs hook commands with.
 
-    :param bridge_dir: Bridge directory holding ``tool_relay.env``.
+    :param bridge_dir: Bridge directory holding the relay files.
     :param route: Relay path, e.g. ``"/hook/observe-tool"``.
     :param fallback: Shell command for the Python hook, e.g.
         ``"/venv/bin/python -I -m omnigent.harnesses.codex_native.hook evaluate-policy
         --bridge-dir /b"``.
     :param max_time_s: curl's total budget in seconds.
+    :param max_bytes: When set, read at most this many bytes of stdin. An
+        oversized payload is truncated, so the relay and the fallback both
+        reject it as malformed JSON instead of buffering it whole.
     :returns: The shell command string.
     """
     env = shlex.quote(str(bridge_dir / TOOL_RELAY_ENV_FILE))
+    curlrc = shlex.quote(str(bridge_dir / TOOL_RELAY_CURL_FILE))
+    read_stdin = "cat" if max_bytes is None else f"head -c {int(max_bytes)}"
     script = (
-        "p=$(cat); "
-        f"if [ -r {env} ]; then . {env}; "
-        f"out=$(printf '%s' \"$p\" | curl -sf --max-time {max_time_s} "
-        '-H "Authorization: Bearer $OMNIGENT_RELAY_TOKEN" '
+        f"p=$({read_stdin}); "
+        f"if [ -r {env} ] && [ -r {curlrc} ]; then . {env}; "
+        f"out=$(printf '%s' \"$p\" | curl -sf --max-time {max_time_s} -K {curlrc} "
         "-H 'Content-Type: application/json' --data-binary @- "
         f'"$OMNIGENT_RELAY_URL{route}" 2>/dev/null) '
         "&& { printf '%s' \"$out\"; exit 0; }; fi; "

@@ -77,7 +77,12 @@ from omnigent.harnesses.kiro_native import bridge as kiro_bridge
 from omnigent.models.claude_model_vocabulary import MODEL_VOCABULARY_ENV_VARS
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.native.failure_telemetry import FailureContext
-from omnigent.native.relay_hook import TOOL_RELAY_ENV_FILE, relay_hook_command
+from omnigent.native.relay_hook import (
+    TOOL_RELAY_CURL_FILE,
+    TOOL_RELAY_ENV_FILE,
+    relay_curl_config,
+    relay_hook_command,
+)
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -6422,6 +6427,10 @@ def start_tool_relay(
         encoding="utf-8",
     )
     os.chmod(env_path, 0o600)
+    # The curl hooks read the bearer from this file (``-K``), never from argv.
+    curl_path = bridge_dir / TOOL_RELAY_CURL_FILE
+    curl_path.write_text(relay_curl_config(token), encoding="utf-8")
+    os.chmod(curl_path, 0o600)
     relay = ClaudeNativeToolRelay(
         bridge_dir=bridge_dir,
         httpd=httpd,
