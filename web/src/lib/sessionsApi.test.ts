@@ -561,6 +561,12 @@ describe("createSideChat", () => {
     labels: { "omnigent.side_chat": "1", "omnigent.side_chat.source_id": source.id },
   };
 
+  afterEach(() => {
+    // Reset here, not after each assertion, so a thrown assertion can't leak a
+    // stop marker into the next test.
+    useStoppedSessions.setState({ stoppedAt: {} });
+  });
+
   it.each(["worktree-from-another-machine", "main", null])(
     "relaunches a stopped parent and reuses its runner without requiring saved branch %s",
     async (gitBranch) => {
@@ -699,7 +705,6 @@ describe("createSideChat", () => {
     // A generic side chat never passes through the composer that would clear
     // the marker, so the parent would otherwise stay labeled "Session stopped"
     // while actually relaunching.
-    useStoppedSessions.setState({ stoppedAt: {} });
     markSessionStopped(source.id);
     fetchMock
       .mockResolvedValueOnce(mockJsonResponse({ ...source, runner_online: false }))
@@ -717,7 +722,6 @@ describe("createSideChat", () => {
     // Recovery failed and the runner is still offline, so the parent is
     // genuinely stopped: the band must stay up rather than vanish on a
     // relaunch that never took effect.
-    useStoppedSessions.setState({ stoppedAt: {} });
     markSessionStopped(source.id);
     fetchMock
       .mockResolvedValueOnce(mockJsonResponse({ ...source, runner_online: false }))
@@ -727,11 +731,9 @@ describe("createSideChat", () => {
     await expect(createSideChat(source.id)).rejects.toThrow("This session is disconnected.");
 
     expect(useStoppedSessions.getState().stoppedAt[source.id]).toEqual(expect.any(Number));
-    useStoppedSessions.setState({ stoppedAt: {} });
   });
 
   it("leaves an online parent's stop marker alone (no relaunch, cleared on send)", async () => {
-    useStoppedSessions.setState({ stoppedAt: {} });
     markSessionStopped(source.id);
     fetchMock
       .mockResolvedValueOnce(mockJsonResponse(source))
@@ -742,7 +744,6 @@ describe("createSideChat", () => {
 
     // No relaunch happened here, so this path must not touch the marker.
     expect(useStoppedSessions.getState().stoppedAt[source.id]).toEqual(expect.any(Number));
-    useStoppedSessions.setState({ stoppedAt: {} });
   });
 });
 

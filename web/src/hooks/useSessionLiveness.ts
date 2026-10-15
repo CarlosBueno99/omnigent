@@ -360,10 +360,9 @@ function useSessionLivenessRaw(
   if (hostId && hostOnline === false) {
     if (conv?.host_resumable) {
       if (opts?.turnActive) return { kind: "starting" };
-      // An explicit stop outranks the silent `host_asleep`: a resumable host is
-      // woken by the next message just as a downed runner is relaunched, so the
-      // same "stopped — send to restart" affordance applies. A non-resumable
-      // dead host (below) still wins: sending cannot restart it.
+      // An explicit stop outranks the silent `host_asleep`: a resumable host
+      // wakes on the next message like a relaunched runner, so the same
+      // "stopped — send to restart" affordance applies. A dead host wins below.
       if (typeof stoppedAtMs === "number") return { kind: "stopped" };
       return { kind: "host_asleep" };
     }
