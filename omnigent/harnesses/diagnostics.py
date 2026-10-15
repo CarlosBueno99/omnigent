@@ -210,11 +210,10 @@ _SIGN_IN_ELSEWHERE = re.compile(
     r"waiting for another process to finish (?:oauth|sign[ -]?in|log[ -]?in)", re.IGNORECASE
 )
 # Progress lines a parked launcher prints below its wait message ("still
-# waiting...", "press Ctrl-C to cancel"). Anything else below it, launcher or
-# agent output alike, means the launcher moved on.
-_SIGN_IN_ELSEWHERE_TRAILER = re.compile(
-    r"still waiting|wait(?:ing)? for (?:another|the) |press ctrl", re.IGNORECASE
-)
+# waiting...", "press Ctrl-C to cancel"); a repeated wait message matches
+# above. Anything else below it, launcher or agent output alike, means the
+# launcher moved on.
+_SIGN_IN_ELSEWHERE_TRAILER = re.compile(r"still waiting|press ctrl", re.IGNORECASE)
 
 
 def sign_in_running_elsewhere(screen: str | None) -> bool:

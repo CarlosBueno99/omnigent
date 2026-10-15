@@ -422,6 +422,7 @@ def test_sign_in_running_elsewhere_ignores_other_output(screen: str | None) -> N
         "Authenticating with API key...\n",
         "Opening browser to sign in...\n",
         "Waiting for server...\n",
+        "Waiting for the server to start...\n",
         "Press Enter to continue\n",
         "Token expired, refreshing credentials...\n",
     ],

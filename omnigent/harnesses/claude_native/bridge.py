@@ -6248,12 +6248,16 @@ def _wait_for_claude_prompt_ready(
         # to open, often with a device code. Real when the same address shows
         # on two consecutive polls. Fail now with the link rather than wait out
         # the budget and reap the pane the person needs to finish signing in.
-        # The joined capture keeps an address wider than the pane in one piece.
-        sign_in = (
-            detect_sign_in_prompt(_capture_pane(socket_path, tmux_target, join_wrapped=True))
-            if "http" in pane
-            else None
+        # The joined capture keeps an address wider than the pane, or a wait
+        # line a narrow pane wrapped, in one piece; one capture serves both.
+        has_address = "http" in pane
+        has_wait_line = "waiting for another process" in pane.casefold()
+        joined = (
+            _capture_pane(socket_path, tmux_target, join_wrapped=True)
+            if has_address or has_wait_line
+            else ""
         )
+        sign_in = detect_sign_in_prompt(joined) if has_address else None
         if sign_in is not None and sign_in.url == sign_in_url:
             raise ClaudeSignInPending(
                 "Claude Code is waiting for a sign-in in this session's terminal, "
@@ -6263,14 +6267,9 @@ def _wait_for_claude_prompt_ready(
             )
         sign_in_url = sign_in.url if sign_in is not None else None
         # Another launch's sign-in holds the launcher's lock. Reaping the pane at
-        # the budget would kill this wait, so report the sign-in instead. The
-        # joined capture keeps the wait line whole when a narrow pane wraps it.
+        # the budget would kill this wait, so report the sign-in instead.
         sign_in_elsewhere_now = (
-            sign_in is None
-            and "waiting" in pane.casefold()
-            and sign_in_running_elsewhere(
-                _capture_pane(socket_path, tmux_target, join_wrapped=True)
-            )
+            sign_in is None and has_wait_line and sign_in_running_elsewhere(joined)
         )
         if sign_in_elsewhere_now and sign_in_elsewhere_prev:
             raise ClaudeSignInPending(
