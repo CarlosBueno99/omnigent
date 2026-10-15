@@ -209,7 +209,13 @@ export function PermissionsModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent
+        className="sm:max-w-md"
+        // Radix opens a tooltip when its trigger gains non-pointer focus, and
+        // the file-access info button is the first tabbable control while
+        // grants load, so the dialog's auto-focus would show it on open.
+        onOpenAutoFocus={(e) => e.preventDefault()}
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">Share this session</DialogTitle>
           <DialogDescription asChild>

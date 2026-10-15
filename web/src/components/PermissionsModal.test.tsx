@@ -1107,5 +1107,29 @@ describe("PermissionsModal", () => {
         expect(updateSessionMock).toHaveBeenCalledWith("conv_abc", { shareWorkspaceFiles: false }),
       );
     });
+
+    it("keeps the file-access tooltip closed until the info icon is focused", async () => {
+      listMock.mockResolvedValue([]);
+      useSessionMock.mockReturnValue({
+        session: sessionWith({ workspace: "/repo", shareWorkspaceFiles: false }),
+        isLoading: false,
+        error: null,
+      });
+
+      render(<PermissionsModal sessionId="conv_abc" open={true} onOpenChange={() => {}} />, {
+        wrapper: createInfoWrapper({}),
+      });
+
+      await waitFor(() => expect(listMock).toHaveBeenCalled());
+      const info = screen.getByRole("button", {
+        name: "File access for Comment and Edit permissions",
+      });
+      expect(screen.queryByRole("tooltip")).toBeNull();
+
+      info.focus();
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(
+        "Comment always includes file access and commenting.",
+      );
+    });
   });
 });
