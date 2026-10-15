@@ -8764,10 +8764,11 @@ async def test_rest_cancel_async_fallback_rejects_route_escaping_handle(target: 
         pytest.param(_ROUTE_SESSION_HEX, id="bare-hex"),
         pytest.param("01234567-89ab-cdef-0123-456789abcdef", id="dashed"),
         pytest.param(f"conv_{_ROUTE_SESSION_HEX}", id="legacy-conv-prefix"),
+        pytest.param("opaque-ID_123", id="opaque-token"),
     ],
 )
 async def test_sys_session_get_info_accepts_supported_identifier_spellings(target: str) -> None:
-    """Canonical and legacy-prefixed ids keep addressing ``GET /v1/sessions/{id}``."""
+    """Supported spellings and other opaque route-safe tokens reach ``GET /v1/sessions/{id}``."""
     from omnigent.runner.tool_dispatch import execute_tool
 
     requested_paths: list[str] = []
