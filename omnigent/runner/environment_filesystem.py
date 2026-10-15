@@ -154,14 +154,15 @@ def _path_query(q: str) -> str | None:
     word from the root's own path would match every entry.
 
     :param q: Stripped, lowercased query.
-    :returns: The ``/``-separated normalized path, or ``None``.
+    :returns: The ``/``-separated normalized path, or ``None`` for a plain word
+        or a query that is only separators (``/``) or ``.``.
     """
     if "/" not in q and os.sep not in q:
         return None
     normalized = os.path.normpath(q)
     if os.sep != "/":
         normalized = normalized.replace(os.sep, "/")
-    return None if normalized == "." else normalized
+    return None if normalized.strip("/") in ("", ".") else normalized
 
 
 def _path_matcher(q: str, root: str) -> Callable[[str], bool]:
@@ -1038,10 +1039,8 @@ stop = False
 root = os.path.abspath(start)
 # A bare root ('/', 'C:\') already ends in the separator the slice skips.
 cut = len(root.rstrip(os.sep)) + 1
-# An entry's absolute path, '/'-separated like its relative one, for
-# path-shaped queries. A query that normalized to a bare word ('./name')
-# matches the relative path only, so a word from the root's own path
-# cannot match every entry.
+# Absolute-path prefix for path-shaped queries; bare-word queries ('./name')
+# match the relative path only (see _path_query).
 prefix = (root.rstrip(os.sep).replace(os.sep, '/') + '/').lower()
 qp_abs = qp is not None and '/' in qp
 

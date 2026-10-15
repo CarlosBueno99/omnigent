@@ -2641,9 +2641,18 @@ async def test_default_read_still_follows_a_symlink_into_a_read_grant(tmp_path: 
         ("{root}/src/main.py", "src/main.py"),
         ("{root}/src", "src"),
         ("./src/main.py", "src/main.py"),
+        ("src//main.py", "src/main.py"),
+        ("src/", "src"),
         ("{folder}/src/main.py", "src/main.py"),
     ],
-    ids=["absolute_file", "absolute_dir", "dot_prefixed", "workspace_folder_prefixed"],
+    ids=[
+        "absolute_file",
+        "absolute_dir",
+        "dot_prefixed",
+        "doubled_separator",
+        "trailing_slash",
+        "workspace_folder_prefixed",
+    ],
 )
 async def test_search_matches_path_shaped_queries(
     client: httpx.AsyncClient,
@@ -2670,8 +2679,15 @@ async def test_search_matches_path_shaped_queries(
         ("./{folder}", []),
         ("{folder}/", []),
         ("./hello.txt", ["hello.txt"]),
+        ("/", ["src/main.py"]),
     ],
-    ids=["plain_root_name", "dot_prefixed_root_name", "root_name_slash", "dot_prefixed_name"],
+    ids=[
+        "plain_root_name",
+        "dot_prefixed_root_name",
+        "root_name_slash",
+        "dot_prefixed_name",
+        "bare_separator",
+    ],
 )
 async def test_search_bare_word_queries_match_relative_paths_only(
     client: httpx.AsyncClient, workspace: Path, query_template: str, expected_paths: list[str]
@@ -2698,6 +2714,7 @@ async def test_search_bare_word_queries_match_relative_paths_only(
         ("src/", ["src", "src/main.py"]),
         ("{folder}", []),
         ("./{folder}", []),
+        ("/", ["src/main.py"]),
     ],
     ids=[
         "absolute_file",
@@ -2709,12 +2726,17 @@ async def test_search_bare_word_queries_match_relative_paths_only(
         "trailing_slash",
         "plain_root_name",
         "dot_prefixed_root_name",
+        "bare_separator",
     ],
 )
 def test_search_indexed_paths_matches_path_shaped_queries(
     workspace: Path, query_template: str, expected_paths: list[str]
 ) -> None:
-    """The git-index matcher applies the same path-shaped rule as the walk."""
+    """The git-index matcher applies the same path-shaped rule as the walk.
+
+    A bare separator keeps its old meaning, entries inside a folder, rather than
+    matching the absolute root of every entry.
+    """
     query = query_template.format(root=workspace, folder=workspace.name)
     entries = search_indexed_paths(workspace, ["src/main.py", "hello.txt"], query)
     assert [e.path for e in entries] == expected_paths, f"q={query!r}"
