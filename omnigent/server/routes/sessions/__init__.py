@@ -441,6 +441,7 @@ from omnigent.server.routes._sessions.helpers import (
     _owner_from_grants as _owner_from_grants,
     _parse_external_assistant_message as _parse_external_assistant_message,
     _parse_external_conversation_item as _parse_external_conversation_item,
+    _parse_external_output_text_delta as _parse_external_output_text_delta,
     _parse_session_create_metadata as _parse_session_create_metadata,
     _parse_skill_slash_command as _parse_skill_slash_command,
     _pending_elicitation_snapshot_for_session as _pending_elicitation_snapshot_for_session,

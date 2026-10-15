@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import itertools
 import secrets
 import time
@@ -188,6 +189,7 @@ from omnigent.server.routes._sessions.helpers import (
     _parse_background_tasks,
     _parse_external_assistant_message,
     _parse_external_conversation_item,
+    _parse_external_output_text_delta,
     _persist_external_acp_subagent_start,
     _persist_external_assistant_message,
     _persist_external_codex_approval_mode_change,
@@ -207,7 +209,6 @@ from omnigent.server.routes._sessions.helpers import (
     _publish_compaction_in_progress,
     _publish_elicitation_request_to_ancestors,
     _publish_external_output_reasoning_delta,
-    _publish_external_output_text_delta,
     _publish_external_tool_output_delta,
     _publish_input_deny_terminal,
     _publish_interrupted,
@@ -760,8 +761,11 @@ def register_events_routes(
         session_id: str,
         conv: Conversation,
         body: SessionEventInput,
+        *,
         actor: dict[str, str] | None,
+        needs_review: bool | None = None,
     ) -> SessionEventInput:
+        """Replace denied external assistant text with the RESPONSE-phase policy notice."""
         if body.type == _EXTERNAL_ASSISTANT_MESSAGE_TYPE:
             _agent_name, text, _response_id = _parse_external_assistant_message(body)
             message = SessionEventInput(
@@ -777,6 +781,10 @@ def register_events_routes(
                 return body
             message = SessionEventInput(type="message", data=item.data.model_dump(mode="json"))
         else:
+            return body
+        if needs_review is None:
+            needs_review = await _external_output_needs_review(conv)
+        if not needs_review:
             return body
         verdict = await _evaluate_output_policy(
             session_id,
@@ -854,18 +862,20 @@ def register_events_routes(
                             )
                         continue
                     batch_user, batch_conv = await _authorized_conversation(request, session_id)
-                    filtered = [
-                        await _filter_external_assistant(
+                    # One policy lookup per run; the persist helper reviews each body
+                    # in order so a rejected entry leaves the entries before it applied.
+                    review = None
+                    if await _external_output_needs_review(batch_conv):
+                        review = functools.partial(
+                            _filter_external_assistant,
                             session_id,
                             batch_conv,
-                            event,
-                            {"run_as": batch_user} if batch_user else None,
+                            actor=_build_actor(batch_user),
+                            needs_review=True,
                         )
-                        for event in run
-                    ]
                     add_audit_attrs(event_type=_EXTERNAL_CONVERSATION_ITEM_TYPE)
                     item_ids = await _persist_external_conversation_items(
-                        session_id, filtered, conversation_store
+                        session_id, list(run), conversation_store, review=review
                     )
                     acks.extend({"queued": False, "item_id": item_id} for item_id in item_ids)
                 return acks
@@ -1863,12 +1873,13 @@ def register_events_routes(
             )
             return {"queued": True}
         if body.type in (_EXTERNAL_ASSISTANT_MESSAGE_TYPE, _EXTERNAL_CONVERSATION_ITEM_TYPE):
-            body = await _filter_external_assistant(session_id, conv, body, _actor)
-        # Partial text cannot be reviewed as a complete response. The completed
-        # assistant item is evaluated above before it is persisted or streamed.
-        if body.type == _EXTERNAL_OUTPUT_TEXT_DELTA_TYPE and await _external_output_needs_review(
-            conv
-        ):
+            body = await _filter_external_assistant(session_id, conv, body, actor=_actor)
+        if body.type == _EXTERNAL_OUTPUT_TEXT_DELTA_TYPE:
+            delta_event = _parse_external_output_text_delta(body)
+            # Partial text cannot be reviewed as a complete response; the completed
+            # item is reviewed above before it is persisted or streamed.
+            if not await _external_output_needs_review(conv):
+                session_stream.publish(session_id, delta_event.model_dump(exclude_none=True))
             return {"queued": False}
         if body.type == _EXTERNAL_ASSISTANT_MESSAGE_TYPE:
             item_id = await _persist_external_assistant_message(
@@ -1888,9 +1899,6 @@ def register_events_routes(
                 enabled=background_session_titles_enabled(request.headers),
             )
             return {"queued": False, "item_id": item_id}
-        if body.type == _EXTERNAL_OUTPUT_TEXT_DELTA_TYPE:
-            _publish_external_output_text_delta(session_id, body)
-            return {"queued": False}
         if body.type == _EXTERNAL_TOOL_OUTPUT_DELTA_TYPE:
             _publish_external_tool_output_delta(session_id, body)
             return {"queued": False}

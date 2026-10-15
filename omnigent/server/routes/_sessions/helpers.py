@@ -3078,6 +3078,20 @@ def _publish_external_output_text_delta(session_id: str, body: SessionEventInput
     :param body: ``POST /events`` body whose type is
         :data:`_EXTERNAL_OUTPUT_TEXT_DELTA_TYPE`.
     :returns: None.
+    :raises OmnigentError: If :func:`_parse_external_output_text_delta`
+        rejects the payload.
+    """
+    event = _parse_external_output_text_delta(body)
+    session_stream.publish(session_id, event.model_dump(exclude_none=True))
+
+
+def _parse_external_output_text_delta(body: SessionEventInput) -> OutputTextDeltaEvent:
+    """
+    Validate a terminal-observed assistant text delta event.
+
+    :param body: ``POST /events`` body whose type is
+        :data:`_EXTERNAL_OUTPUT_TEXT_DELTA_TYPE`.
+    :returns: The ``response.output_text.delta`` event to publish.
     :raises OmnigentError: If ``data.delta`` is not a string, or any
         provided ``message_id`` / ``index`` / ``final`` has the wrong
         type.
@@ -3108,14 +3122,13 @@ def _publish_external_output_text_delta(session_id: str, body: SessionEventInput
             "external_output_text_delta data.final must be a boolean",
             code=ErrorCode.INVALID_INPUT,
         )
-    event = OutputTextDeltaEvent(
+    return OutputTextDeltaEvent(
         type="response.output_text.delta",
         delta=delta,
         message_id=message_id,
         index=index,
         final=final,
     )
-    session_stream.publish(session_id, event.model_dump(exclude_none=True))
 
 
 def _publish_external_tool_output_delta(session_id: str, body: SessionEventInput) -> None:
@@ -11924,6 +11937,7 @@ __all__ = [
     "_owner_from_grants",
     "_parse_external_assistant_message",
     "_parse_external_conversation_item",
+    "_parse_external_output_text_delta",
     "_parse_session_create_metadata",
     "_parse_skill_slash_command",
     "_pending_elicitation_snapshot_for_session",

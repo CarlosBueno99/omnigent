@@ -3181,24 +3181,32 @@ async def _persist_external_conversation_items(
     session_id: str,
     bodies: list[SessionEventInput],
     conversation_store: ConversationStore,
+    review: Callable[[SessionEventInput], Awaitable[SessionEventInput]] | None = None,
 ) -> list[str]:
     """
     Persist a run of external items with one store append.
 
     Matches :func:`_persist_external_conversation_item` per body for items
     that neither drain a pending input nor seed a title. As on the per-entry
-    path, a malformed body raises only after the bodies before it are applied.
+    path, a malformed body raises only after the bodies before it are applied;
+    a body that ``review`` rejects is reported the same way.
 
+    :param review: Optional rewrite of each body before it is parsed, used to
+        substitute the RESPONSE-phase policy notice for denied assistant text.
     :returns: Store-assigned item ids, in body order.
     """
     items: list[NewConversationItem] = []
+    reviewed: list[SessionEventInput] = []
     error: Exception | None = None
     for body in bodies:
         try:
+            if review is not None:
+                body = await review(body)
             items.append(_new_external_conversation_item(session_id, body))
         except Exception as exc:  # noqa: BLE001 — re-raised once the valid prefix is applied
             error = exc
             break
+        reviewed.append(body)
     markers = [marker for item in items for marker in claude_subagent_completion_markers(item)]
     persisted_items = (
         (await asyncio.to_thread(conversation_store.append, session_id, [*items, *markers]))[
@@ -3207,7 +3215,7 @@ async def _persist_external_conversation_items(
         if items
         else []
     )
-    for body, persisted in zip(bodies[: len(items)], persisted_items, strict=True):
+    for body, persisted in zip(reviewed, persisted_items, strict=True):
         if not persisted.deduplicated:
             _publish_persisted_external_item(session_id, body, persisted)
         await record_claude_subagent_return(session_id, persisted, conversation_store)

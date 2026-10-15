@@ -14,6 +14,7 @@ from itertools import count
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -27,6 +28,18 @@ from omnigent.runtime import pending_inputs
 from omnigent.server.routes.sessions import create_sessions_router
 
 _SESSION_ID = "conv_test"
+
+
+@pytest.fixture(autouse=True)
+def _allow_external_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These conversations have no agent, which the RESPONSE-phase gate rejects;
+    tests/server/integration/test_external_output_policy.py covers that gate."""
+
+    async def allow(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(routes_events_mod, "_evaluate_output_policy", allow)
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
