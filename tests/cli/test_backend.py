@@ -3415,6 +3415,80 @@ def test_databricks_preflight_non_interactive_overrides_tty(
     assert login_calls == []
 
 
+def test_databricks_preflight_non_interactive_requires_saved_pairing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No saved pairing: the scripted pre-flight hints at login, pairing nothing.
+
+    A grant cached for the workspace the edge names must not let an
+    unattended command pair the server and forward that workspace's token.
+    """
+    import httpx
+
+    responses = iter([_databricks_probe_response(302), _databricks_probe_response(200)])
+    requests: list[dict[str, object]] = []
+    stored: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "omnigent.chat._remote_headers", lambda server_url=None, *, host_id=None: {}
+    )
+
+    def _get(url: str, **kwargs: object) -> object:
+        requests.append(kwargs)
+        return next(responses)
+
+    monkeypatch.setattr(httpx, "get", _get)
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda server: None)
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_org_id", lambda server: None)
+    monkeypatch.setattr(cli, "_databricks_default_workspace_id", lambda workspace_host: None)
+    monkeypatch.setattr(
+        cli,
+        "_databricks_workspace_auth_info",
+        lambda workspace: cli._DatabricksWorkspaceAuthInfo(
+            token="cached-grant", profile_name=None
+        ),
+    )
+    monkeypatch.setattr(cli, "_databricks_login", lambda *args, **kwargs: pytest.fail("login"))
+    monkeypatch.setattr(
+        "omnigent.cli_auth.store_databricks_auth",
+        lambda server, workspace, user_id=None, org_id=None: stored.append((server, workspace)),
+    )
+
+    with pytest.raises(click.ClickException) as exc:
+        cli._ensure_databricks_server_auth(_HOST_DATABRICKS_SERVER, non_interactive=True)
+
+    assert f"omnigent login {_HOST_DATABRICKS_SERVER}" in str(exc.value)
+    assert stored == []
+    # Only the credential-less probe reached the server.
+    assert [req.get("headers") for req in requests] == [{}]
+
+
+def test_databricks_preflight_unpaired_cached_grant_runs_login_on_tty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a TTY, a cached grant for an unpaired server goes through the login flow.
+
+    The login flow owns the cross-origin confirmation; the pre-flight must not pair alone.
+    """
+    login_calls = _patch_auth_preflight(monkeypatch, probe_status=302, tty=True)
+    monkeypatch.setattr(
+        cli,
+        "_databricks_workspace_auth_info",
+        lambda workspace: cli._DatabricksWorkspaceAuthInfo(
+            token="cached-grant", profile_name=None
+        ),
+    )
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda server: None)
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_org_id", lambda server: None)
+    monkeypatch.setattr(
+        "omnigent.cli_auth.store_databricks_auth",
+        lambda *args, **kwargs: pytest.fail("paired without consent"),
+    )
+
+    cli._ensure_databricks_server_auth(_HOST_DATABRICKS_SERVER)
+
+    assert login_calls == [f"{_HOST_DATABRICKS_SERVER} https://example.databricks.com"]
+
+
 def _patch_rejected_credential_preflight(
     monkeypatch: pytest.MonkeyPatch,
     *,

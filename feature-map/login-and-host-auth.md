@@ -15,6 +15,11 @@ be able to write resources without a separate Omnigent account.
 - `login-auto-detect`: `omnigent login <url>` detects the server's sign-in mode.
   States: accounts, OIDC, header mode, Databricks-fronted, and a workspace URL
   with an org selector.
+- `cross-origin-pairing-consent`: the first `omnigent login` to a server on a
+  different origin from its Databricks workspace asks before any workspace
+  credential is resolved or sent; `--yes` pre-approves it, a saved pairing skips
+  the question, and unattended commands or sandbox provisioning without a
+  terminal need a prior login.
 - `databricks-credential-kind`: the host authenticates with a user OAuth login
   made by the Databricks CLI, a personal access token, or a machine-to-machine
   service principal. Each is its own state to reproduce.

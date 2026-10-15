@@ -209,25 +209,81 @@ def test_login_apps_redirect_stores_pointer_record(
 
 
 @pytest.mark.parametrize("answer", ["n\n", ""])
-def test_login_requires_confirmation_before_resolving_workspace_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-    token_dir: Path,
-    answer: str,
+def test_login_cross_origin_workspace_pairing_requires_confirmation(
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path, answer: str
 ) -> None:
+    """Declining (or not answering) a first cross-origin pairing sends and stores nothing.
+
+    The user must agree before the named workspace's credential is even resolved.
+    """
     from omnigent.cli_auth import load_databricks_workspace_host
 
-    fake = _FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})])
+    fake = _FakeHttpx(
+        responses=[
+            _response(302, headers={"location": _APPS_REDIRECT}),
+            _response(200, body={"user_id": "alice@example.com"}),
+        ]
+    )
     _patch_login_env(monkeypatch, fake_httpx=fake)
     monkeypatch.setattr(
         cli_mod,
         "_databricks_workspace_auth_info",
-        lambda _: pytest.fail("Credentials must not be resolved before approval"),
+        lambda workspace_host: pytest.fail("credentials resolved before approval"),
     )
+
     result = CliRunner().invoke(cli_group, ["login", _APPS_URL], input=answer)
-    assert result.exit_code != 0
+
+    assert result.exit_code != 0, result.output
+    # The question names both origins so the user can check them.
     assert _APPS_URL in result.output and _WORKSPACE in result.output
+    # Only the credential-less probe reached the app, and nothing was stored.
+    forwarded = [req["authorization"] for req in fake.requests if req["authorization"]]
+    assert forwarded == [], result.output
     assert len(fake.requests) == 1
     assert load_databricks_workspace_host(_APPS_URL) is None
+
+
+def test_login_yes_flag_pre_approves_cross_origin_pairing(
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path
+) -> None:
+    """``--yes`` answers the pairing question; an empty stdin would otherwise abort."""
+    from omnigent.cli_auth import load_databricks_workspace_host
+
+    fake = _FakeHttpx(
+        responses=[
+            _response(302, headers={"location": _APPS_REDIRECT}),
+            _response(200, body={"user_id": "alice@example.com"}),
+        ]
+    )
+    _patch_login_env(monkeypatch, fake_httpx=fake)
+
+    result = CliRunner().invoke(cli_group, ["login", "--yes", _APPS_URL])
+
+    assert result.exit_code == 0, result.output
+    assert load_databricks_workspace_host(_APPS_URL) == _WORKSPACE
+    assert fake.requests[-1]["authorization"] == "Bearer tok-cached"
+
+
+def test_login_reuses_saved_pairing_without_asking(
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path
+) -> None:
+    """A server already paired with this workspace logs in again with no question."""
+    from omnigent.cli_auth import store_databricks_auth
+
+    store_databricks_auth(_APPS_URL, _WORKSPACE)
+    fake = _FakeHttpx(
+        responses=[
+            _response(302, headers={"location": _APPS_REDIRECT}),
+            _response(200, body={"user_id": "alice@example.com"}),
+        ]
+    )
+    _patch_login_env(monkeypatch, fake_httpx=fake)
+
+    # No stdin answer is supplied: a question here would abort the login.
+    result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
+
+    assert result.exit_code == 0, result.output
+    assert fake.requests[-1]["authorization"] == "Bearer tok-cached"
 
 
 def test_login_workspace_hosted_401_uses_url_host(

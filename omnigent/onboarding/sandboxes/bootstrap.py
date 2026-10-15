@@ -32,6 +32,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import webbrowser
@@ -405,16 +406,13 @@ def derive_workspace(server_url: str) -> DerivedWorkspace | None:
     # Deferred import: cli.py transitively imports this module at
     # startup, so a top-level import would be a cycle. The classifier
     # is cli-private; promoting it to a shared module is follow-up.
-    from omnigent.cli import (
-        _databricks_workspace_binding_trusted,
-        _databricks_workspace_login_target,
-    )
+    from omnigent.cli import _databricks_workspace_login_target
 
     probe = _probe_server(server_url)
     if probe is None:
         return None
     host = _databricks_workspace_login_target(server_url, probe)
-    if host is None or not _databricks_workspace_binding_trusted(server_url, host):
+    if host is None:
         return None
     return DerivedWorkspace(host=host, workspace_id=_workspace_org_id(host))
 
@@ -458,6 +456,13 @@ def login_app_oauth_in_sandbox(
     URL (a cached workspace grant verified against the server), the
     browser steps are skipped and success is read from the exit code.
 
+    Sending a workspace's credentials to a server on another origin needs
+    the user's consent, which the in-sandbox login cannot collect (its
+    PTY only streams output). A saved local ``omnigent login`` for the
+    same pairing counts as consent; otherwise an interactive run asks
+    here and an unattended run fails with the login hint. The in-sandbox
+    login then runs with ``--yes``.
+
     The sandbox ends up the sole holder of its OAuth grant — nothing is
     shipped from the laptop — which sidesteps CLI-version cache-format
     skew, OS-keyring storage, and single-use refresh-token rotation.
@@ -493,6 +498,7 @@ def login_app_oauth_in_sandbox(
     :param skip: When ``True``, skip authentication entirely (the
         ``--no-auth`` escape hatch).
     :raises click.ClickException: If *server_url* is missing, the
+        pairing is declined or cannot be approved unattended, the
         forward fails to bind, or the in-sandbox login exits non-zero.
     """
     if skip:
@@ -511,7 +517,10 @@ def login_app_oauth_in_sandbox(
 
     from omnigent.util.server_url import display_server_url
 
-    click.echo(f"▸ Logging sandbox '{sandbox_id}' in to {display_server_url(server_url)}")
+    display = display_server_url(server_url)
+    if workspace is not None:
+        _confirm_sandbox_workspace_pairing(server_url, workspace.host, display)
+    click.echo(f"▸ Logging sandbox '{sandbox_id}' in to {display}")
     if workspace is not None:
         # Reset ~/.databrickscfg to exactly one [DEFAULT] entry shaped
         # like what `databricks auth login` itself writes (host +
@@ -532,15 +541,53 @@ def login_app_oauth_in_sandbox(
             sandbox_id,
             f"rm -f ~/.databrickscfg && printf '%s' {shlex.quote(cfg_body)} > ~/.databrickscfg",
         )
+    # Consent was settled above; the in-sandbox login must not ask again
+    # over a PTY nobody can answer.
+    login_flag = "--yes " if workspace is not None else ""
     login = launcher.stream_exec(
         sandbox_id,
-        f"omnigent login {shlex.quote(server_url)}",
+        f"omnigent login {login_flag}{shlex.quote(server_url)}",
         pty=True,
     )
     try:
         _complete_browser_login(launcher, sandbox_id, login)
     finally:
         login.close()
+
+
+def _confirm_sandbox_workspace_pairing(server_url: str, workspace_host: str, display: str) -> None:
+    """
+    Settle consent for sending *workspace_host* credentials to *server_url*.
+
+    A saved local ``omnigent login`` pairing (or a same-origin server)
+    needs no question. Otherwise an interactive run is asked here, and an
+    unattended run is told to log in first.
+
+    :param server_url: Omnigent server URL the sandbox logs in to.
+    :param workspace_host: The workspace fronting it, from
+        :func:`derive_workspace`.
+    :param display: User-facing form of *server_url* for messages.
+    :raises click.ClickException: When the pairing is declined or cannot
+        be approved because stdin is not a terminal.
+    """
+    # Deferred import: cli.py imports this module at startup.
+    from omnigent.cli import _databricks_workspace_binding_trusted
+
+    if _databricks_workspace_binding_trusted(server_url, workspace_host):
+        return
+    if not sys.stdin.isatty():
+        raise click.ClickException(
+            f"Not signed in to {display}. Its login would send {workspace_host} "
+            "credentials to a server on another origin, which needs your approval: "
+            f"run `{cli_invocation()} login {display}` first (or pass --no-auth) and retry."
+        )
+    if not click.confirm(
+        f"Allow {display} to receive credentials for workspace {workspace_host}?",
+        default=False,
+    ):
+        raise click.ClickException(
+            f"Sandbox login cancelled: no workspace credentials were sent to {display}."
+        )
 
 
 def _complete_browser_login(

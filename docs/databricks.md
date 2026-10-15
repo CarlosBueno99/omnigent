@@ -172,11 +172,16 @@ The rest of this guide walks each piece in depth.
 
 ## 1. Deploy on Databricks Apps
 
-When signing in with `omnigent login <server-url>`, the CLI asks before sending
-workspace credentials to a different server origin. Check both displayed URLs
-before approving. Later refreshes reuse that saved pairing. Custom domains use
-the same confirmation; unattended commands require a prior login. Log in locally
-before provisioning a sandbox that derives its workspace from the server.
+When you sign in with `omnigent login <server-url>` and the server is on a
+different origin from the workspace that fronts it (a Databricks App), the CLI
+asks before resolving or sending any workspace credential to that server. Check
+both URLs in the question before approving; custom domains get the same
+question. Later logins and token refreshes reuse the saved pairing, and
+unattended commands (`omnigent host --non-interactive`, or any run without a
+terminal) need a prior `omnigent login`. Pass `omnigent login --yes <server-url>`
+to pre-approve the pairing in a script. `omnigent sandbox create` and
+`omnigent sandbox auth` ask the same question locally, or reuse your saved local
+login, before logging the sandbox in.
 
 ### Context
 
