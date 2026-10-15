@@ -11,13 +11,6 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 
-const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
-// The harness reads OMNIGENT_PYTHON at load time; default to the repo venv.
-if (!process.env.OMNIGENT_PYTHON) {
-  const venvPython = path.join(REPO_ROOT, ".venv", "bin", "python");
-  if (fs.existsSync(venvPython)) process.env.OMNIGENT_PYTHON = venvPython;
-}
-
 const { desktopDepsAvailable, launchDesktop, saveRecording } = require("./desktopHarness");
 const { startDesignBackend } = require("./desktopDesignPromptHarness");
 
@@ -40,11 +33,12 @@ const LOOPBACK_PAGE = `<!doctype html><title>Internal service</title>
 
 /** A test-owned loopback site standing in for an internal service. */
 function serveLoopback() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = http.createServer((_req, res) => {
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end(LOOPBACK_PAGE);
     });
+    server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       resolve({
         url: `http://127.0.0.1:${server.address().port}/`,
@@ -77,7 +71,13 @@ async function observeNavigation(window, pane, viewId, target, timeoutMs = 15_00
     const alert = await readAlert();
     const loaded = !!(view.exists && view.url && view.url.startsWith(target));
     if (loaded || alert || Date.now() > deadline) {
-      return { viewUrl: view.url ?? null, alert, loaded, timedOut: !loaded && !alert };
+      return {
+        viewExists: !!view.exists,
+        viewUrl: view.url ?? null,
+        alert,
+        loaded,
+        timedOut: !loaded && !alert,
+      };
     }
     // oxlint-disable-next-line no-await-in-loop -- Wait before the next probe.
     await window.waitForTimeout(250);
@@ -180,14 +180,20 @@ describe("desktop shell — embedded browser address bar applies the URL policy"
         path.join(RECORD_DIR, "observations.json"),
         JSON.stringify(observations, null, 2),
       );
-      // Stop filming while the pane still shows the outcome, then close.
-      await stopDisplayCapture();
+      // Stop filming while the pane still shows the outcome, then close; a
+      // capture failure must not leak the shell.
+      await stopDisplayCapture().catch(() => {});
       await electronApp.close();
       saveRecording(RECORD_DIR, "url-bar-policy");
       fs.rmSync(userDataDir, { recursive: true, force: true });
     }
 
     assert.equal(observations.loopback.timedOut, false, "neither a load nor an alert within 15 s");
+    assert.equal(
+      observations.loopback.viewExists,
+      false,
+      "a view was created for the rejected URL",
+    );
     assert.equal(
       observations.loopback.loaded,
       false,

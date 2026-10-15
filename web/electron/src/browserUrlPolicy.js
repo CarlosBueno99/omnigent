@@ -85,7 +85,7 @@ function isAgentNavigationAllowed(url, { allowLocalhost = false } = {}) {
   if (!ALLOWED_SCHEMES.has(parsed.protocol)) {
     return {
       ok: false,
-      error: `navigation blocked: scheme "${parsed.protocol}" is not allowed for agent navigation (only http/https)`,
+      error: `navigation blocked: scheme "${parsed.protocol}" is not allowed in the embedded browser (only http/https)`,
     };
   }
   const hostname = parsed.hostname;

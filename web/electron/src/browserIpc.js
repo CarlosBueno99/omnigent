@@ -310,8 +310,7 @@ function registerBrowserIpc({
       });
     let r = navigate(g.registry);
     let recovered = false;
-    // Arca recovery and its hint apply only to relay requests, which carry the
-    // session-host context the exception needs; the URL bar supplies none.
+    // Only relay requests carry the session-host context Arca recovery needs; the URL bar supplies none.
     if (!r.ok && opts?.agent) {
       try {
         recovered = await recoverAgentNavigationForEvent(

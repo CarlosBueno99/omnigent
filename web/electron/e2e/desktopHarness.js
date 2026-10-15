@@ -513,7 +513,7 @@ function writeProfileBootstrap(userDataDir) {
       `const mod = require(${JSON.stringify(path.join(APP_ROOT, "src/browserViewRegistry.js"))});\n` +
       `const create = mod.createBrowserViewRegistry;\n` +
       `global.omnigentTestBrowserRegistries = [];\n` +
-      `mod.createBrowserViewRegistry = (...args) => { const registry = create(...args); const windowId = Math.max(0, ...BrowserWindow.getAllWindows().map((win) => win.id)); global.omnigentTestBrowserRegistries.push({ registry, windowId }); return registry; };\n`,
+      `mod.createBrowserViewRegistry = (...args) => { const registry = create(...args); const ids = BrowserWindow.getAllWindows().map((win) => win.id); const windowId = ids.length > 0 ? Math.max(...ids) : null; global.omnigentTestBrowserRegistries.push({ registry, windowId }); return registry; };\n`,
   );
   return bootstrap;
 }
@@ -532,7 +532,9 @@ function seedProfileSettings(userDataDir, settings) {
 async function openBrowserFixture(electronApp, conversationId, url) {
   return electronApp.evaluate(
     ({ BrowserWindow }, { conversationId: viewId, url: target }) => {
+      // A registry captured before any window exists has no id and stays eligible.
       const live = (global.omnigentTestBrowserRegistries ?? []).filter(({ windowId }) => {
+        if (windowId === null) return true;
         const win = BrowserWindow.fromId(windowId);
         return win !== null && !win.isDestroyed();
       });
