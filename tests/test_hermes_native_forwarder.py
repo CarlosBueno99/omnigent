@@ -134,14 +134,15 @@ def test_discover_child_session_returns_newest_child(tmp_path: Path) -> None:
     assert f._discover_child_session(db, "parent") is None
 
 
-# Hermes marks a compression continuation by its parent's ``end_reason`` and keeps
-# delegated helpers as ``source='subagent'`` rows (``/branch`` and ``delegate_task``
-# also stamp ``model_config`` markers). Ancestry or newest-row order alone cannot
-# tell a helper from the continuation.
+# Hermes marks a compression continuation via its parent's ``end_reason``; side
+# sessions are ``subagent``/``tool`` rows or carry a ``model_config`` fork marker.
+# Ancestry or newest-row order alone cannot tell a helper from the continuation.
 _HELPER_ROWS = [
     pytest.param("subagent", "{}", id="subagent-source"),
+    pytest.param("tool", "{}", id="tool-source"),
     pytest.param("cli", '{"_delegate_from": "main"}', id="delegate-marker"),
     pytest.param("cli", '{"_branched_from": "main"}', id="branch-marker"),
+    pytest.param("cli", '{"_reset_from": "main"}', id="reset-marker"),
 ]
 
 
@@ -168,7 +169,7 @@ def test_discover_session_id_skips_delegated_helper(
     """Initial discovery binds the main conversation or its continuation, never a helper."""
     db = tmp_path / "state.db"
     _seed_compressed_main_with_late_helper(db, source=source, model_config=model_config)
-    assert f._discover_session_id(db, "/w", 1000.0) in {"main", "compression-child"}
+    assert f._discover_session_id(db, "/w", 1000.0) == "compression-child"
 
 
 @pytest.mark.parametrize(("source", "model_config"), _HELPER_ROWS)
@@ -208,6 +209,28 @@ def test_is_side_session_binds_markers_to_the_queried_parent() -> None:
     assert f._is_side_session("subagent", None, parent_id="main") is True
     assert f._is_side_session("cli", "not json", parent_id="main") is False
     assert f._is_side_session("cli", '{"_delegate_from": null}') is False
+
+
+def test_side_session_checks_ignore_inherited_markers(tmp_path: Path) -> None:
+    """A continuation of a /branch inherits ``_branched_from``; only the branch is a fork."""
+    db = tmp_path / "state.db"
+    con = sqlite3.connect(db)
+    con.executescript(_SCHEMA)
+    con.executemany(
+        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason,"
+        " model_config) VALUES (?,?,?,?,?,?,?)",
+        [
+            ("root", "cli", "/w", 1000.0, None, "branched", None),
+            ("branch", "cli", "/w", 1001.0, "root", "compression", '{"_branched_from": "root"}'),
+            ("continuation", "cli", "/w", 1002.0, "branch", None, '{"_branched_from": "root"}'),
+        ],
+    )
+    con.commit()
+    con.close()
+    assert f._is_side_session_id(db, "branch") is True
+    assert f._is_side_session_id(db, "continuation") is False
+    assert f._discover_child_session(db, "branch") == "continuation"
+    assert f._discover_session_id(db, "/w", 1000.0) == "continuation"
 
 
 # Newer Hermes (schema_version >= 11) dropped ``sessions.cwd`` and
@@ -278,6 +301,20 @@ def test_discover_session_id_v11_no_cwd_skips_helper(tmp_path: Path) -> None:
     con.commit()
     con.close()
     assert f._discover_session_id(db, str(tmp_path), 1000.0) == "20260710_1"
+
+
+def test_discover_child_session_v11_without_lineage_columns(tmp_path: Path) -> None:
+    """Without end_reason/model_config columns the re-pin follows a plain child, never a helper."""
+    db = tmp_path / "state.db"
+    _seed_db_v11(db, started_at=1000.0)
+    con = sqlite3.connect(db)
+    con.executemany(
+        "INSERT INTO sessions(id, source, started_at, parent_session_id) VALUES (?,?,?,?)",
+        [("child", "cli", 1005.0, "20260710_1"), ("helper", "subagent", 1006.0, "20260710_1")],
+    )
+    con.commit()
+    con.close()
+    assert f._discover_child_session(db, "20260710_1") == "child"
 
 
 def test_read_new_items_v11_no_active_column(tmp_path: Path) -> None:
@@ -495,6 +532,32 @@ class _FakeClient:
         return _Resp()
 
 
+def _capture_server_client(monkeypatch) -> list[tuple[str, dict]]:
+    """Replace the loop's server client; return the ``(url, body)`` of every PATCH."""
+    patched: list[tuple[str, dict]] = []
+
+    class _Client:
+        async def post(self, url, json=None, **_kw):
+            return _Resp()
+
+        async def patch(self, url, json=None, **_kw):
+            patched.append((url, json or {}))
+            return _Resp()
+
+    @contextlib.asynccontextmanager
+    async def _make_client(*_a, **_kw):
+        yield _Client()
+
+    # The loop opens its client through the cli_auth factory, so patching
+    # ``f.httpx`` would leave a real client (and a real network call) in place.
+    monkeypatch.setattr("omnigent.cli_auth.open_server_client", _make_client)
+    return patched
+
+
+def _patched_external_ids(calls: list[tuple[str, dict]]) -> list[object]:
+    return [body["external_session_id"] for _url, body in calls if "external_session_id" in body]
+
+
 async def test_post_conversation_item_posts_event(tmp_path) -> None:
     client = _FakeClient()
     item = f._MirrorItem(
@@ -578,37 +641,13 @@ async def test_forward_loop_patches_external_session_id_once(tmp_path, monkeypat
     db = tmp_path / "state.db"
     _seed_db(db, cwd=workspace, started_at=1000.0)
 
-    patched_calls: list[tuple[str, dict]] = []
-
     async def _fake_post(_client, *, session_id, item):
         pass  # ignore mirrored items for this test
 
     monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
+    patched_calls = _capture_server_client(monkeypatch)
 
     iteration = {"n": 0}
-
-    # Build a self-contained fake client + constructor so the forward loop
-    # never touches real httpx internals.
-    class _Client:
-        async def post(self, url, json=None, **_kw):
-            return _Resp()
-
-        async def patch(self, url, json=None, **_kw):
-            patched_calls.append((url, json or {}))
-            return _Resp()
-
-    import contextlib
-
-    @contextlib.asynccontextmanager
-    async def _make_client(*_a, **_kw):
-        yield _Client()
-
-    # The forward loop opens its server client through the cli_auth factory
-    # (``open_server_client``, which folds the host_id slice-key + routing
-    # headers), so intercept that — the loop no longer constructs
-    # ``httpx.AsyncClient`` directly, so patching ``f.httpx`` would leave the
-    # real factory client (and a real network call) in place.
-    monkeypatch.setattr("omnigent.cli_auth.open_server_client", _make_client)
 
     async def _sleep(_s):
         iteration["n"] += 1
@@ -849,26 +888,6 @@ def _seed_main_with_finished_helper(db: Path, workspace: str, *, compacted: bool
     con.close()
 
 
-def _capture_external_session_patches(monkeypatch) -> list[str | None]:
-    """Replace the server client; return the ``external_session_id`` values PATCHed."""
-    patched: list[str | None] = []
-
-    class _Client:
-        async def post(self, url, json=None, **_kw):
-            return _Resp()
-
-        async def patch(self, url, json=None, **_kw):
-            patched.append((json or {}).get("external_session_id"))
-            return _Resp()
-
-    @contextlib.asynccontextmanager
-    async def _make_client(*_a, **_kw):
-        yield _Client()
-
-    monkeypatch.setattr("omnigent.cli_auth.open_server_client", _make_client)
-    return patched
-
-
 def _mirrored_texts(posted: list[f._MirrorItem]) -> list[str]:
     return [str(i.item_data["content"][0]["text"]) for i in posted if i.item_type == "message"]
 
@@ -897,7 +916,7 @@ async def test_forward_loop_stays_on_main_after_in_place_compaction_with_helper(
     monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
     monkeypatch.setattr(f, "_persist_hermes_compaction_item", lambda *a, **k: _noop())
     monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
-    patched = _capture_external_session_patches(monkeypatch)
+    patched = _capture_server_client(monkeypatch)
 
     iteration = {"n": 0}
 
@@ -922,7 +941,79 @@ async def test_forward_loop_stays_on_main_after_in_place_compaction_with_helper(
 
     assert _mirrored_texts(posted) == ["summary of the compacted turns"]
     assert f._read_state(bridge_dir).hermes_session_id == "main"
-    assert patched == ["main"]
+    assert _patched_external_ids(patched) == ["main"]
+
+
+async def test_forward_loop_repin_waits_for_the_parent_compression_stamp(
+    tmp_path, monkeypatch
+) -> None:
+    """Compacted rows can precede the parent's end stamp; the re-pin retries on later polls."""
+    workspace = str(tmp_path)
+    db = tmp_path / "state.db"
+    con = sqlite3.connect(db)
+    con.executescript(_SCHEMA)
+    con.executemany(
+        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason)"
+        " VALUES (?,?,?,?,?,?)",
+        [
+            ("parent_1", "cli", workspace, 1000.0, None, None),
+            ("child_1", "cli", workspace, 1005.0, "parent_1", None),
+        ],
+    )
+    con.executemany(
+        "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
+        [
+            ("parent_1", "assistant", "compacted summary", 1, 1),
+            ("child_1", "user", "child hi", 1, 0),
+            ("child_1", "assistant", "child reply", 1, 0),
+        ],
+    )
+    con.commit()
+    con.close()
+
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    f._write_state(bridge_dir, f._ForwardState(hermes_session_id="parent_1", last_id=1))
+
+    posted: list[f._MirrorItem] = []
+
+    async def _fake_post(_client, *, session_id, item):
+        posted.append(item)
+
+    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
+    monkeypatch.setattr(f, "_persist_hermes_compaction_item", lambda *a, **k: _noop())
+    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
+    _capture_server_client(monkeypatch)
+
+    iteration = {"n": 0}
+
+    async def _sleep(_s):
+        iteration["n"] += 1
+        if iteration["n"] == 1:
+            # Hermes stamps the parent one poll after its compacted rows became visible.
+            con = sqlite3.connect(db)
+            con.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = 'parent_1'")
+            con.commit()
+            con.close()
+        if iteration["n"] >= 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await f.forward_hermes_store_to_session(
+            base_url="http://x",
+            headers={},
+            session_id="conv_retry",
+            bridge_dir=bridge_dir,
+            agent_name="hermes-native-ui",
+            workspace=workspace,
+            launch_epoch_s=1000.0,
+            db_path=db,
+        )
+
+    assert f._read_state(bridge_dir).hermes_session_id == "child_1"
+    assert _mirrored_texts(posted) == ["child hi", "child reply"]
 
 
 async def test_forward_loop_drops_persisted_helper_binding(tmp_path, monkeypatch) -> None:
@@ -939,15 +1030,23 @@ async def test_forward_loop_drops_persisted_helper_binding(tmp_path, monkeypatch
     f._write_state(
         bridge_dir, f._ForwardState(hermes_session_id="helper", last_id=0, launch_epoch_s=1000.0)
     )
+    # The helper-era idle baseline equals main's two completed turns; kept, it would
+    # suppress main's parent-wake idle post.
+    hstatus.write_posted_count(bridge_dir, 2)
 
     posted: list[f._MirrorItem] = []
+    idle_posts: list[str] = []
 
     async def _fake_post(_client, *, session_id, item):
         posted.append(item)
 
+    async def _fake_status(_client, *, session_id, status, response_id=None):
+        if status == "idle":
+            idle_posts.append(status)
+
     monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
-    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
-    patched = _capture_external_session_patches(monkeypatch)
+    monkeypatch.setattr(f, "_post_external_session_status", _fake_status)
+    patched = _capture_server_client(monkeypatch)
 
     iteration = {"n": 0}
 
@@ -976,7 +1075,10 @@ async def test_forward_loop_drops_persisted_helper_binding(tmp_path, monkeypatch
         "dispatching a helper",
         "the helper finished",
     ]
-    assert patched == ["main"]
+    assert _patched_external_ids(patched) == ["main"]
+    # Main's completions are reported again from a clean baseline, then deduped.
+    assert idle_posts == ["idle"]
+    assert hstatus.read_posted_count(bridge_dir) == 2
 
 
 # --- Usage tracker tests ---------------------------------------------------
