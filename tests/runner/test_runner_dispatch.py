@@ -12995,6 +12995,10 @@ _SIGN_IN_PROMPT_SCREEN = (
     "dbcert: If the browser does not open automatically, please open the following URL:\n"
     "\n\thttps://databricks.okta.com/oauth2/v1/authorize?client_id=0oa1&state=T4IU\n\n"
 )
+# A launcher parked behind another session's sign-in: no address of its own.
+_SIGN_IN_ELSEWHERE_SCREEN = (
+    "dbexec: launcher 1.2.3\nWaiting for another process to finish OAuth on port 8020...\n"
+)
 _SIGNED_IN_SCREENS = {
     # Codex draws inline: dbcert's lines stay above its banner.
     "codex-native": (
@@ -13008,20 +13012,29 @@ _SIGNED_IN_SCREENS = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("harness", ["codex-native", "claude-native"])
+@pytest.mark.parametrize(
+    ("harness", "pending_screen"),
+    [
+        ("codex-native", _SIGN_IN_PROMPT_SCREEN),
+        ("claude-native", _SIGN_IN_PROMPT_SCREEN),
+        ("claude-native", _SIGN_IN_ELSEWHERE_SCREEN),
+    ],
+)
 async def test_sign_in_pending_failure_posts_a_notice_once_the_agent_is_ready(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     harness: str,
+    pending_screen: str,
 ) -> None:
     """
     A turn that failed on a pending Databricks sign-in is followed by one "signed in" notice.
 
     The runner watches the session's pane after the failure. While the sign-in
-    prompt is on screen nothing is posted. Once the prompt is gone and the
-    agent can take a message (Codex has published its bridge state, Claude Code
-    shows its composer), one neutral notice lands in the transcript so the
-    person knows the sign-in worked and can resend.
+    prompt (or the launcher's wait for a sign-in another session started) is on
+    screen nothing is posted. Once it is gone and the agent can take a message
+    (Codex has published its bridge state, Claude Code shows its composer), one
+    neutral notice lands in the transcript so the person knows the sign-in
+    worked and can resend.
     """
     from omnigent.harnesses.codex_native import bridge as codex_bridge
     from omnigent.terminals import TerminalRegistry
@@ -13046,7 +13059,7 @@ async def test_sign_in_pending_failure_posts_a_notice_once_the_agent_is_ready(
         del scrollback, join_wrapped
         reads += 1
         if reads < 3:
-            return {"screen": _SIGN_IN_PROMPT_SCREEN}
+            return {"screen": pending_screen}
         if harness == "codex-native":
             # Thread discovery publishes the bridge state as the TUI starts a thread.
             codex_bridge.write_bridge_state(
@@ -13124,7 +13137,7 @@ async def test_sign_in_pending_failure_posts_a_notice_once_the_agent_is_ready(
     assert item["level"] == "info"
     assert item["title"] == "Signed in to Databricks"
     assert item["message"] == f"{agent} is ready. Send your message again."
-    # The prompt screen was seen (and ignored) before the agent came up.
+    # The pending screen was seen (and ignored) before the agent came up.
     assert reads >= 3
 
 

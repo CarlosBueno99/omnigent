@@ -11,6 +11,7 @@ from omnigent.harnesses.diagnostics import (
     detect_sign_in_prompt,
     sanitize_diagnostic_text,
     sign_in_next_step,
+    sign_in_running_elsewhere,
 )
 
 
@@ -385,3 +386,44 @@ def test_sign_in_next_step_names_the_agent_and_carries_no_address() -> None:
         "sign-in completes; then send your message again."
     )
     assert "http" not in step
+
+
+_WAIT_ELSEWHERE_LINE = "Waiting for another process to finish OAuth on port 8020...\n"
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [
+        _WAIT_ELSEWHERE_LINE,
+        "dbexec: launcher 1.2.3\n" + _WAIT_ELSEWHERE_LINE,
+        # Keys echoed into the waiting pane are not launcher output.
+        _WAIT_ELSEWHERE_LINE + "^[^[\n^[[A\n",
+        _WAIT_ELSEWHERE_LINE + "Still waiting...\n",
+        "waiting for another process to finish sign-in\n",
+        "Waiting for another process to finish login...\n",
+    ],
+)
+def test_sign_in_running_elsewhere_recognizes_the_wait_line(screen: str) -> None:
+    """A launcher parked behind another process's sign-in prints only this line."""
+    assert sign_in_running_elsewhere(screen) is True
+
+
+@pytest.mark.parametrize("screen", [None, "", "Starting MCP servers: omnigent\n"])
+def test_sign_in_running_elsewhere_ignores_other_output(screen: str | None) -> None:
+    assert sign_in_running_elsewhere(screen) is False
+
+
+def test_sign_in_running_elsewhere_ignores_a_wait_line_the_launcher_moved_past() -> None:
+    """
+    Once the other sign-in completes, the launcher and the agent print below the line.
+
+    The agent boots for a while before its input box takes the screen; a message
+    sent in that window is a slow boot to wait out, not a sign-in to report.
+    """
+    screen = (
+        "dbexec: launcher 1.2.3\n"
+        + _WAIT_ELSEWHERE_LINE
+        + "Generating claude-code MCP client config...\n"
+        "Claude Code — connecting to host...\n"
+    )
+    assert sign_in_running_elsewhere(screen) is False

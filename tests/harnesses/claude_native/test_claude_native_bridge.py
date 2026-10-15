@@ -9707,6 +9707,37 @@ def test_wait_for_claude_prompt_ready_reports_a_sign_in_running_elsewhere(
     assert not isinstance(raised.value, claude_native_bridge.ClaudePromptTimeout)
 
 
+_STALE_WAIT_PANE = (
+    "Waiting for another process to finish OAuth on port 8020...\n"
+    "Generating claude-code MCP client config...\n"
+    "Claude Code — connecting to host...\n"
+)
+
+
+def test_wait_for_claude_prompt_ready_waits_out_a_boot_below_a_stale_wait_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The wait line stays in scrollback while Claude Code boots after the other
+    sign-in completes. A send in that window waits for the input box like any
+    slow boot; it must not fail as a sign-in that already finished.
+    """
+    frames = iter([_STALE_WAIT_PANE, _STALE_WAIT_PANE, _STALE_WAIT_PANE, _READY_PANE])
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._capture_pane",
+        lambda socket_path, tmux_target, *, join_wrapped=False: next(frames, _READY_PANE),
+    )
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.bridge._claude_pane_state",
+        lambda socket_path, tmux_target: claude_native_bridge._ClaudePaneState(True),
+    )
+    claude_native_bridge._wait_for_claude_prompt_ready(
+        "/tmp/example/tmux.sock",
+        "claude:0.0",
+        timeout_s=30.0,
+    )
+
+
 def test_wait_for_claude_prompt_ready_prefers_a_rendered_prompt_over_a_link(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

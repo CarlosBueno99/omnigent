@@ -134,6 +134,22 @@ def _is_reprint(line: str, url: str) -> bool:
     return text == url or (_SIGN_IN_URL.fullmatch(text) is not None and _is_endpoint(text))
 
 
+def _launcher_moved_on(
+    lines: list[str], index: int, *, trailer: re.Pattern[str], url: str | None = None
+) -> bool:
+    """Whether the launcher printed real output below ``lines[index]``.
+
+    Echoed keys, lines matching ``trailer`` (the prompt's own trailing output)
+    and a reprint of ``url`` do not count.
+    """
+    return any(
+        re.search(r"\w", _ECHOED_CONTROL.sub("", line))
+        and not trailer.search(line)
+        and (url is None or not _is_reprint(line, url))
+        for line in lines[index + 1 :]
+    )
+
+
 def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
     """Find a device-style sign-in prompt in terminal screen text.
 
@@ -175,12 +191,7 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
         return None
     url = endpoints[-1][1] if endpoints else cued[0][1]
     first = min(index for index, _ in endpoints + cued)
-    if any(
-        re.search(r"\w", _ECHOED_CONTROL.sub("", line))
-        and not _SIGN_IN_TRAILER.search(line)
-        and not _is_reprint(line, url)
-        for line in lines[first + 1 :]
-    ):
+    if _launcher_moved_on(lines, first, trailer=_SIGN_IN_TRAILER, url=url):
         return None
     code: str | None = None
     for line in lines:
@@ -199,18 +210,32 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
 _SIGN_IN_ELSEWHERE = re.compile(
     r"waiting for another process to finish (?:oauth|sign[ -]?in|log[ -]?in)", re.IGNORECASE
 )
+# Lines the waiting launcher may print below that message ("still waiting...").
+# Any other output means it moved on. Unlike a sign-in prompt's trailer this
+# must not accept "code": the agent's own boot output names Claude Code.
+_SIGN_IN_ELSEWHERE_TRAILER = re.compile(r"\bwait(?:ing)?\b", re.IGNORECASE)
 
 
 def sign_in_running_elsewhere(screen: str | None) -> bool:
     """Whether a launcher is waiting for a sign-in that another process started.
 
     The screen shows no address of its own: the sign-in to finish is in the
-    browser tab or terminal of whichever launch started it first.
+    browser tab or terminal of whichever launch started it first. The wait
+    message counts only while it is the launcher's latest output. Once the
+    other sign-in completes the launcher moves on and the agent boots below
+    the line, which stays on screen until the agent's own interface takes it;
+    a message sent in that window is a slow boot to wait out, not a sign-in.
 
     :param screen: ANSI-stripped terminal screen text, or ``None``.
-    :returns: ``True`` when the wait message is on screen.
+    :returns: ``True`` while the launcher is still waiting.
     """
-    return bool(screen) and _SIGN_IN_ELSEWHERE.search(screen) is not None
+    if not screen:
+        return False
+    lines = screen.splitlines()
+    waits = [index for index, line in enumerate(lines) if _SIGN_IN_ELSEWHERE.search(line)]
+    if not waits:
+        return False
+    return not _launcher_moved_on(lines, waits[-1], trailer=_SIGN_IN_ELSEWHERE_TRAILER)
 
 
 def sign_in_next_step(agent: str) -> str:
