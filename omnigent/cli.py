@@ -7687,6 +7687,9 @@ _RESUME_SKIP_PARAMS: frozenset[str] = frozenset(
         # ephemeral is session-scoped infrastructure flag, not
         # meaningful across invocations.
         "ephemeral",
+        # The resumed session already has its agent, and --agent is
+        # rejected alongside --resume.
+        "agent",
     }
 )
 
@@ -8747,6 +8750,8 @@ def run(
         and acp_agent is None
     )
     if agent is not None:
+        if not agent.strip():
+            raise click.ClickException("--agent requires a non-empty agent name.")
         if not direct_server_cli:
             raise click.ClickException(
                 "--agent names an agent registered on a server. Use it with "

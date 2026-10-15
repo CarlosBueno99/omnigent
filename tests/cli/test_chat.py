@@ -1792,6 +1792,58 @@ def test_pick_agent_follows_agent_listing_pages(monkeypatch: pytest.MonkeyPatch)
     assert requests == [("sessions", None), ("agents", None), ("agents", "ag_coder")]
 
 
+@pytest.mark.parametrize(
+    "second_page",
+    [
+        _agents_page(["coder"], has_more=True, last_id=None),  # cursor missing
+        _agents_page(["coder"], has_more=True, last_id="ag_first"),  # cursor unchanged
+    ],
+)
+def test_pick_agent_rejects_a_stalled_agent_listing(
+    monkeypatch: pytest.MonkeyPatch, second_page: dict[str, object]
+) -> None:
+    """Claiming more agents without a usable cursor is an error, not a partial list."""
+    _serve_listings(
+        monkeypatch,
+        sessions=[],
+        agent_pages=[_agents_page(["first"], has_more=True, last_id="ag_first"), second_page],
+    )
+
+    with pytest.raises(click.ClickException, match="no usable cursor"):
+        _pick_agent("http://127.0.0.1:6767")
+
+
+def test_require_registered_agent_stops_paging_once_the_name_is_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``--agent`` on the first page does not walk the rest of the registry."""
+    requests = _serve_listings(
+        monkeypatch,
+        sessions=[],
+        agent_pages=[_agents_page(["scribe"], has_more=True, last_id="ag_scribe")],
+    )
+
+    assert _require_registered_agent("http://127.0.0.1:6767", "scribe") == "scribe"
+
+    assert requests == [("agents", None)]
+
+
+def test_pick_agent_headless_error_summarizes_a_long_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The candidate list in the headless error is capped instead of printing every name."""
+    names = [f"agent-{i:02d}" for i in range(25)]
+    _serve_listings(monkeypatch, sessions=[], agent_pages=[_agents_page(names)])
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _pick_agent("http://127.0.0.1:6767", interactive=False)
+
+    message = str(excinfo.value)
+    assert "agent-19" in message
+    assert "agent-20" not in message
+    assert "(and 5 more)" in message
+
+
 def test_pick_agent_prefers_agents_with_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
     """Existing sessions still drive discovery; the registry is only the fallback."""
     requests = _serve_listings(monkeypatch, sessions=[{"agent_name": "used"}], agent_pages=[])
@@ -1862,7 +1914,6 @@ def test_require_registered_agent_rejects_an_unknown_name(
     [
         (None, None, True),  # REPL: a menu is fine
         ("hi", None, False),  # headless one-shot on a new session: never prompt
-        ("hi", "conv_1", True),  # resume keeps today's behavior; --agent does not apply
     ],
 )
 def test_chat_with_server_only_prompts_for_an_agent_when_it_can(
@@ -1891,6 +1942,110 @@ def test_chat_with_server_only_prompts_for_an_agent_when_it_can(
     )
 
     assert picked["interactive"] is expected_interactive
+
+
+def test_chat_with_server_resume_uses_the_sessions_own_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resuming never asks for an agent: the session already has one."""
+    monkeypatch.setattr(chat_module, "_redirect_native_resume_if_needed", lambda **_kw: False)
+    monkeypatch.setattr(
+        chat_module,
+        "_attach_session_info",
+        lambda **_kw: chat_module._AttachSessionInfo(
+            runner_online=True, agent_name="nessie", harness="codex"
+        ),
+    )
+
+    def _must_not_pick(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("agent discovery ran on resume")
+
+    monkeypatch.setattr(chat_module, "_pick_agent", _must_not_pick)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(chat_module, "_run_one_shot", lambda **kw: captured.update(kw))
+
+    chat_module._chat_with_server(
+        "http://127.0.0.1:6767", None, initial_message="hi", resume_conversation_id="conv_1"
+    )
+
+    assert captured["agent_name"] == "nessie"
+    assert captured["resume_conversation_id"] == "conv_1"
+
+
+def test_chat_with_server_resume_without_session_agent_falls_back_to_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older snapshot without agent_name still discovers, headless rules intact."""
+    monkeypatch.setattr(chat_module, "_redirect_native_resume_if_needed", lambda **_kw: False)
+    monkeypatch.setattr(
+        chat_module,
+        "_attach_session_info",
+        lambda **_kw: chat_module._AttachSessionInfo(
+            runner_online=True, agent_name=None, harness=None
+        ),
+    )
+    picked: dict[str, bool] = {}
+
+    def _fake_pick(base_url: str, *, quiet: bool = False, interactive: bool = True) -> str:
+        picked["interactive"] = interactive
+        return "scribe"
+
+    monkeypatch.setattr(chat_module, "_pick_agent", _fake_pick)
+    monkeypatch.setattr(chat_module, "_run_one_shot", lambda **_kw: None)
+
+    chat_module._chat_with_server(
+        "http://127.0.0.1:6767", None, initial_message="hi", resume_conversation_id="conv_1"
+    )
+
+    assert picked["interactive"] is False
+
+
+def test_pick_agent_reports_a_failed_agent_listing_as_a_cli_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An HTTP error from the agent listing (e.g. an older server) is a clean CLI error."""
+
+    def _get(url: str, **_kwargs: object) -> SimpleNamespace:
+        if url.endswith("/v1/sessions"):
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"data": []})
+        request = httpx.Request("GET", url)
+        response = httpx.Response(404, request=request)
+
+        def _raise() -> None:
+            raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+        return SimpleNamespace(raise_for_status=_raise, json=dict)
+
+    monkeypatch.setattr(chat_module.httpx, "get", _get)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _pick_agent("http://127.0.0.1:6767")
+
+    message = str(excinfo.value)
+    assert "/v1/agents" in message and "404" in message
+
+
+def test_run_prompt_url_target_runs_the_requested_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The headless entry point can name the agent instead of discovering one."""
+    monkeypatch.setattr(chat_module, "_require_registered_agent", lambda _base_url, name: name)
+    captured: dict[str, object] = {}
+
+    def _fake_headless(
+        base_url: str, agent_name: str, _tool_handler: object, **kwargs: object
+    ) -> None:
+        captured["base_url"] = base_url
+        captured["agent_name"] = agent_name
+        captured.update(kwargs)
+
+    monkeypatch.setattr(chat_module, "_run_headless_prompt", _fake_headless)
+
+    chat_module.run_prompt("http://127.0.0.1:6767/", None, prompt="hi", agent_name="scribe")
+
+    assert captured == {
+        "base_url": "http://127.0.0.1:6767",
+        "agent_name": "scribe",
+        "prompt": "hi",
+    }
 
 
 def test_run_chat_checks_agent_flag_against_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3259,6 +3414,14 @@ def test_build_resume_parts_strips_resume() -> None:
         parts = _build_resume_parts()
     assert "--resume" not in parts
     assert "conv_old" not in parts
+
+
+def test_build_resume_parts_strips_agent() -> None:
+    """``--agent`` is dropped from the resume hint; the resumed session has its agent."""
+    ctx = _make_run_context(server="https://example.com", agent="scribe")
+    with ctx:
+        parts = _build_resume_parts()
+    assert parts == ["omnigent", "run", "--server", "https://example.com"]
 
 
 def test_build_resume_parts_includes_harness_and_model() -> None:

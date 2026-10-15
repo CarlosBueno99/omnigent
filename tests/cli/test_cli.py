@@ -5124,6 +5124,21 @@ def test_run_agent_rejects_resume_flags(flags: list[str], monkeypatch: pytest.Mo
     run_chat.assert_not_called()
 
 
+def test_run_agent_rejects_a_blank_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--agent ""`` must not silently fall back to agent discovery."""
+    monkeypatch.setattr("omnigent.cli._load_effective_config", dict)
+    run_chat = Mock()
+    monkeypatch.setattr("omnigent.chat.run_chat", run_chat)
+
+    result = CliRunner().invoke(
+        cli, ["run", "--server", "http://localhost:8000", "--agent", "", "-p", "hi"]
+    )
+
+    assert result.exit_code != 0
+    assert "non-empty agent name" in result.output
+    run_chat.assert_not_called()
+
+
 def test_run_help_lists_agent_option() -> None:
     """The ``--agent`` selector the agent-discovery errors point at exists on ``run``."""
     result = CliRunner().invoke(cli, ["run", "--help"])

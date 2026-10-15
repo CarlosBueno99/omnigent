@@ -412,11 +412,7 @@ def run_chat(
             "--server is for binding a local agent YAML to a server. "
             "Pass a YAML path as the target (got a URL)."
         )
-    if agent_name is not None and not _is_url(target):
-        raise click.ClickException(
-            "--agent names an agent registered on a server; it only applies to "
-            "`run --server <url>` without an AGENT path."
-        )
+    _require_url_target_for_agent(target, agent_name)
 
     if _is_url(target):
         if any(
@@ -441,7 +437,9 @@ def run_chat(
         # An explicit --agent is checked against the server's registered agents
         # up front, so a typo is a clean error rather than a failed session.
         selected_agent = (
-            _require_registered_agent(target.rstrip("/"), agent_name) if agent_name else None
+            _require_registered_agent(target.rstrip("/"), agent_name)
+            if agent_name is not None
+            else None
         )
         # Discover host-scope skills from cwd so ``/skill-name`` slash
         # commands work even when connecting to a remote server with no
@@ -519,6 +517,7 @@ def run_prompt(
     prompt: str,
     system_prompt: str | None = None,
     ephemeral: bool = False,
+    agent_name: str | None = None,
 ) -> None:
     """Run one prompt headlessly and print only the assistant text.
 
@@ -536,6 +535,9 @@ def run_prompt(
     :param system_prompt: CLI ``--system-prompt`` override for local targets.
     :param ephemeral: When ``True``, use a fresh per-run local
         server database and artifact directory.
+    :param agent_name: Registered agent to run on a server URL target,
+        e.g. ``"scribe"``. ``None`` discovers one; with several registered
+        agents the headless run fails and asks for it.
     """
     tool_handler = _load_tool_handler(client_tools) if client_tools else None
     overrides = ChatOverrides(
@@ -543,6 +545,7 @@ def run_prompt(
         model=model,
         system_prompt=system_prompt,
     )
+    _require_url_target_for_agent(target, agent_name)
 
     if _is_url(target):
         if any(
@@ -553,10 +556,14 @@ def run_prompt(
                 "agent paths. The remote server controls its own agent registrations."
             )
         base_url = target.rstrip("/")
-        agent_name = _pick_agent(base_url, quiet=True)
+        selected_agent = (
+            _require_registered_agent(base_url, agent_name)
+            if agent_name is not None
+            else _pick_agent(base_url, quiet=True)
+        )
         _run_headless_prompt(
             base_url,
-            agent_name,
+            selected_agent,
             tool_handler,
             prompt=prompt,
         )
@@ -1087,11 +1094,15 @@ def _chat_with_server(
     ):
         return
 
-    # A headless one-shot that starts a new session cannot answer the agent
-    # menu, so it fails with the candidates instead; a resume keeps prompting
-    # because the session's agent is already fixed and --agent does not apply.
-    headless_new_session = initial_message is not None and resume_conversation_id is None
-    selected_agent = agent_name or _pick_agent(base_url, interactive=not headless_new_session)
+    if agent_name is None and resume_conversation_id is not None:
+        # A resumed session already has its agent; asking would risk picking
+        # another one and adopting a runner for the wrong harness.
+        agent_name = _attach_session_info(
+            base_url=base_url, conversation_id=resume_conversation_id
+        ).agent_name
+    # A headless one-shot cannot answer the agent menu, so it fails with the
+    # candidates instead.
+    selected_agent = agent_name or _pick_agent(base_url, interactive=initial_message is None)
 
     # Bring-up is done — clear the spinner the instant before we produce
     # terminal output (the one-shot reply or the REPL's first paint), so it
@@ -1406,6 +1417,15 @@ def _attach_session_info(
     )
 
 
+def _require_url_target_for_agent(target: str, agent_name: str | None) -> None:
+    """``--agent`` names a server-registered agent; a local AGENT path already is the agent."""
+    if agent_name is not None and not _is_url(target):
+        raise click.ClickException(
+            "--agent names an agent registered on a server; it only applies to "
+            "`run --server <url>` without an AGENT path."
+        )
+
+
 def _discovery_get(base_url: str, path: str, params: dict[str, Any]) -> dict[str, Any]:
     """
     Fetch one agent-discovery listing from the server as JSON.
@@ -1429,7 +1449,15 @@ def _discovery_get(base_url: str, path: str, params: dict[str, Any]) -> dict[str
         # not a crash. Same guard as the daemon path
         # (_prepare_chat_session_via_daemon).
         raise click.ClickException(_unreachable_server_message(base_url)) from exc
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        from omnigent.util.server_url import display_server_url
+
+        raise click.ClickException(
+            f"Agent discovery failed: GET {path} on {display_server_url(base_url)} "
+            f"returned HTTP {exc.response.status_code}."
+        ) from exc
     body = resp.json()
     return body if isinstance(body, dict) else {}
 
@@ -1446,7 +1474,18 @@ def _session_agent_names(base_url: str) -> list[str]:
     return names
 
 
-def _server_agent_names(base_url: str) -> list[str]:
+#: Most agent names an error message spells out before summarizing the rest.
+_MAX_LISTED_AGENTS = 20
+
+
+def _format_agent_names(names: list[str]) -> str:
+    """Comma-join agent names for an error message, summarizing a long registry."""
+    shown = ", ".join(names[:_MAX_LISTED_AGENTS])
+    hidden = len(names) - _MAX_LISTED_AGENTS
+    return f"{shown} (and {hidden} more)" if hidden > 0 else shown
+
+
+def _server_agent_names(base_url: str, *, stop_at: str | None = None) -> list[str]:
     """
     Return the names of the agents registered on the server.
 
@@ -1454,7 +1493,11 @@ def _server_agent_names(base_url: str) -> list[str]:
     session against, so every name returned here can start a session.
 
     :param base_url: Server base URL.
-    :returns: Registered agent names in listing order.
+    :param stop_at: Stop paging as soon as this name is seen, e.g. ``"scribe"``.
+    :returns: Registered agent names in listing order; only the pages read so
+        far when *stop_at* was found early.
+    :raises click.ClickException: If the server is unreachable or the listing
+        reports more agents without a usable cursor.
     """
     names: list[str] = []
     after: str | None = None
@@ -1467,9 +1510,16 @@ def _server_agent_names(base_url: str) -> list[str]:
             name = item.get("name")
             if name and name not in names:
                 names.append(name)
-        last_id = page.get("last_id")
-        if not page.get("has_more") or not last_id or last_id == after:
+        if (stop_at is not None and stop_at in names) or not page.get("has_more"):
             return names
+        last_id = page.get("last_id")
+        if not last_id or last_id == after:
+            from omnigent.util.server_url import display_server_url
+
+            raise click.ClickException(
+                f"Agent discovery failed: GET /v1/agents on {display_server_url(base_url)} "
+                "reported more agents but no usable cursor to fetch them."
+            )
         after = last_id
 
 
@@ -1502,7 +1552,7 @@ def _require_registered_agent(base_url: str, agent_name: str) -> str:
     :raises click.ClickException: If the server is unreachable or no
         registered agent has that name.
     """
-    names = _server_agent_names(base_url)
+    names = _server_agent_names(base_url, stop_at=agent_name)
     if agent_name in names:
         return agent_name
     if not names:
@@ -1511,7 +1561,7 @@ def _require_registered_agent(base_url: str, agent_name: str) -> str:
 
     raise _server_setup_error(
         f"Agent {agent_name!r} is not registered on {display_server_url(base_url)}. "
-        f"Registered agents: {', '.join(names)}."
+        f"Registered agents: {_format_agent_names(names)}."
     )
 
 
@@ -1546,7 +1596,7 @@ def _pick_agent(base_url: str, *, quiet: bool = False, interactive: bool = True)
 
         raise _server_setup_error(
             f"Several agents are available on {display_server_url(base_url)}; pass "
-            f"--agent <name> to choose one: {', '.join(names)}."
+            f"--agent <name> to choose one: {_format_agent_names(names)}."
         )
 
     click.echo("\n  Available agents:\n")
