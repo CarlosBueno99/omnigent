@@ -4155,8 +4155,11 @@ async def test_codex_discover_thread_and_forward_waits_while_terminal_alive(
     ]
     if expected_code == "databricks_sign_in_pending":
         assert "terminal_last_output" not in pending_record.attributes
+        assert "HQ7M-2KPD" not in pending_record.getMessage()
     else:
         assert pending_record.attributes["terminal_last_output"] == screen.strip()
+        # The local runner log renders only the message, so the tail rides on it too.
+        assert screen.strip() in pending_record.getMessage()
     # The backend outlived the deadline and closed only after forwarding ended.
     assert timeline == ["thread_started", "app_server_closed"]
     # The thread start cleared the pending record and published bridge state.

@@ -931,3 +931,87 @@ def test_launch_projection_without_socket_still_arms(tmp_path: Path) -> None:
     )
     assert armed is instance
     assert reason is None
+
+
+_STALLED_LAUNCHER_SCREEN = (
+    "Launcher: checking for updates before starting Codex... (marker OMNI-STALL-unit)\n"
+)
+_SIGN_IN_SCREEN = (
+    "dbexec: launcher 1.2.3\nSign in to continue:\n"
+    "  https://signin.example.com/device\n  code: HQ7M-2KPD\nwaiting for sign-in...\n"
+)
+
+
+def _stalled_terminal(screen: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        diagnostic_id="terminal-instance-stalled",
+        read=AsyncMock(return_value={"screen": screen}),
+    )
+
+
+def _attribute_text(records: list[logging.LogRecord], session_id: str) -> str:
+    return "\n".join(
+        str(value)
+        for record in records
+        if getattr(record, "session_id", None) == session_id
+        for value in getattr(record, "attributes", {}).values()
+    )
+
+
+async def test_startup_pending_records_live_pane_tail_under_capture_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """At the thread-start budget the pending record must carry what the live pane shows."""
+    monkeypatch.setenv(_STDERR_ENV, "1")
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.runner.app"):
+        await orchestration._record_agent_startup_pending(
+            session_id="conv_codex_stalled",
+            bridge_dir=tmp_path,
+            terminal_instance=_stalled_terminal(_STALLED_LAUNCHER_SCREEN),  # type: ignore[arg-type]
+            routing_summary="provider 'test' (model=gpt-test)",
+            waited_seconds=120.0,
+        )
+
+    pending = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "agent_startup_pending"
+    )
+    assert pending.attributes["sign_in_prompt_detected"] is False
+    assert pending.attributes["code"] == "agent_startup_pending"
+    assert "OMNI-STALL-unit" in _attribute_text(caplog.records, "conv_codex_stalled"), (
+        "agent_startup_pending carries only the flags, not what the live pane showed"
+    )
+
+
+async def test_startup_pending_sign_in_prompt_stays_a_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """A sign-in prompt is recorded as a flag; its one-time code never reaches the log."""
+    monkeypatch.setenv(_STDERR_ENV, "1")
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.runner.app"):
+        await orchestration._record_agent_startup_pending(
+            session_id="conv_codex_sign_in",
+            bridge_dir=tmp_path,
+            terminal_instance=_stalled_terminal(_SIGN_IN_SCREEN),  # type: ignore[arg-type]
+            routing_summary="Databricks ucode profile 'oss'",
+            waited_seconds=4.0,
+        )
+
+    pending = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "agent_startup_pending"
+    )
+    assert pending.attributes["sign_in_prompt_detected"] is True
+    logged = "\n".join(
+        record.getMessage() + _attribute_text([record], "conv_codex_sign_in")
+        for record in caplog.records
+    )
+    assert "HQ7M-2KPD" not in logged

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import deque
 
@@ -86,6 +87,97 @@ async def test_observer_records_unobserved_without_raising(
     assert record.attributes["reason"] == "RuntimeError"
 
 
+_STALLED_LAUNCHER_SCREEN = (
+    "Launcher: checking for updates before starting Claude Code... (marker OMNI-STALL-unit)"
+)
+
+
+def _pane_tail_records(
+    records: list[logging.LogRecord], session_id: str
+) -> list[logging.LogRecord]:
+    """Records for *session_id* whose structured attributes carry the stalled pane's text."""
+    return [
+        record
+        for record in records
+        if getattr(record, "session_id", None) == session_id
+        and any("OMNI-STALL-unit" in str(value) for value in record.attributes.values())
+    ]
+
+
+@pytest.mark.parametrize("capture", ["1", "0"])
+@pytest.mark.asyncio
+async def test_unobserved_deadline_records_live_pane_tail_under_capture_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capture: str,
+) -> None:
+    """A pane alive past the deadline leaves what it showed, only with capture enabled."""
+    monkeypatch.setenv("OMNIGENT_HARNESS_STDERR_ENABLED", capture)
+    terminal = _FakeTerminal([_STALLED_LAUNCHER_SCREEN])
+
+    with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
+        await _observe_terminal_interactive(
+            session_id="conv_stalled",
+            terminal_id="terminal_claude_main",
+            harness="claude-native",
+            readiness_signal="claude_composer",
+            instance=terminal,  # type: ignore[arg-type]
+            is_interactive=lambda _pane: False,
+            timeout_s=0.2,
+            poll_interval_s=0.01,
+        )
+
+    unobserved = next(
+        record
+        for record in caplog.records
+        if record.event_name == "terminal_interactive_unobserved"
+    )
+    assert unobserved.attributes["reason"] == "TimeoutError"
+    tails = _pane_tail_records(caplog.records, "conv_stalled")
+    if capture == "1":
+        assert tails, "no record carries the live pane's text although capture is enabled"
+    else:
+        assert tails == []
+
+
+@pytest.mark.asyncio
+async def test_observer_cancelled_before_deadline_already_recorded_pane_tail(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A runner lost mid-wait (host restart) must already have left the pane tail."""
+    monkeypatch.setenv("OMNIGENT_HARNESS_STDERR_ENABLED", "1")
+    terminal = _FakeTerminal([_STALLED_LAUNCHER_SCREEN])
+
+    with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
+        task = asyncio.create_task(
+            _observe_terminal_interactive(
+                session_id="conv_lost",
+                terminal_id="terminal_claude_main",
+                harness="claude-native",
+                readiness_signal="claude_composer",
+                instance=terminal,  # type: ignore[arg-type]
+                is_interactive=lambda _pane: False,
+                timeout_s=3.0,
+                poll_interval_s=0.01,
+            )
+        )
+        # Most of the deadline elapses with the pane stalled, then the runner goes away.
+        await asyncio.sleep(2.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert not any(
+        record.event_name in {"terminal_interactive", "terminal_interactive_unobserved"}
+        for record in caplog.records
+        if getattr(record, "event_name", None)
+    )
+    assert _pane_tail_records(caplog.records, "conv_lost"), (
+        "nothing recorded what the pane showed before the runner was lost"
+    )
+
+
 # A launcher wrapper still running its own startup step, with a token on screen.
 _SCREEN_TOKEN = "dapi" + "Test1234567890abcd"
 _STALLED_SCREEN = f"launcher: refreshing workspace login\nusing token {_SCREEN_TOKEN}\n"
@@ -127,6 +219,8 @@ async def test_observer_records_the_redacted_pane_of_a_stalled_terminal(
         tail = record.attributes["terminal_last_output"]
         assert "refreshing workspace login" in tail
         assert _SCREEN_TOKEN not in tail
+        # The local runner log renders only the message, so the tail rides on it too.
+        assert "refreshing workspace login" in record.getMessage()
         assert _SCREEN_TOKEN not in record.getMessage()
 
 
