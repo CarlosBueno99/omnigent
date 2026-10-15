@@ -7364,6 +7364,9 @@ def _rpc_error(status_name: str, detail: str) -> Exception:
         def code(self) -> object:
             return _Status()
 
+        def details(self) -> str:
+            return detail
+
     return RpcError(detail)
 
 
@@ -7497,6 +7500,7 @@ def test_list_items_degrades_row_with_corrupt_data(db_uri: str) -> None:
         _rpc_error("PERMISSION_DENIED", "Received http2 header with status: 403"),
         _rpc_error("UNAVAILABLE", "failed to connect to all addresses"),
         _rpc_error("CANCELLED", "Cancelled"),
+        _rpc_error("RESOURCE_EXHAUSTED", "Quota exceeded for decrypt requests"),
         ConnectionError("decrypt sidecar unreachable"),
         httpx.ConnectError("decrypt service unreachable"),
         TypeError("decode seam defect"),
@@ -7505,6 +7509,7 @@ def test_list_items_degrades_row_with_corrupt_data(db_uri: str) -> None:
         "permission_denied",
         "unavailable",
         "cancelled",
+        "quota_exhausted",
         "connection_error",
         "httpx_connect_error",
         "seam_defect",
@@ -7512,9 +7517,10 @@ def test_list_items_degrades_row_with_corrupt_data(db_uri: str) -> None:
 )
 def test_list_items_propagates_backend_failures_unchanged(db_uri: str, error: Exception) -> None:
     """A decode failure that is not about a row's payload — a denial, an outage,
-    a cancelled or refused connection, a defect inside the seam — propagates as
-    raised, after a single call, so the app's existing 403/499/500 handling
-    still applies instead of a page of placeholders."""
+    a cancelled or refused connection, a quota-style RESOURCE_EXHAUSTED, a defect
+    inside the seam — propagates as raised, after a single call, so the app's
+    existing 403/499/500 handling still applies instead of a page of
+    placeholders."""
     store = _FailingDecodeStore(db_uri, error)
     conv = store.create_conversation()
     store.append(conv.id, [_user_message("a", "resp_a"), _user_message("b", "resp_b")])
@@ -7528,11 +7534,11 @@ def test_list_items_propagates_backend_failures_unchanged(db_uri: str, error: Ex
 
 
 def test_list_items_propagates_when_even_the_smallest_row_is_refused(db_uri: str) -> None:
-    """RESOURCE_EXHAUSTED also means quota or overload. When the smallest row on
-    the page is refused on its own, the backend is refusing the call: the
-    original error propagates after that one probe instead of a page of
-    placeholders built from one decode call per halving."""
-    error = _rpc_error("RESOURCE_EXHAUSTED", "decrypt quota exceeded")
+    """A size rejection for every row means the backend's limit sits below the
+    whole page. When the smallest row is refused on its own, the original error
+    propagates after that one probe instead of a page of placeholders built
+    from one decode call per halving."""
+    error = _rpc_error("RESOURCE_EXHAUSTED", "Frame size 512 exceeds maximum: 256")
     store = _FailingDecodeStore(db_uri, error)
     conv = store.create_conversation()
     store.append(conv.id, [_user_message("a", "resp_a"), _user_message("b", "resp_b")])

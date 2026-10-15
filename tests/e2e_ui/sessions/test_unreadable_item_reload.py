@@ -114,7 +114,6 @@ def test_session_with_unreadable_item_reopens_with_placeholder(
                 (item["type"], item.get("code") or item.get("role"))
                 for item in json.loads(body)["data"]
             ]
-            print(f"items_after_reload kinds={kinds}")
             assert kinds.count(("error", "item_data_unreadable")) == 1, kinds
             assert ("message", "assistant") in kinds, kinds
 

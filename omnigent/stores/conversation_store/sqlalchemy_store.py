@@ -2453,10 +2453,9 @@ class SqlAlchemyConversationStore(ConversationStore):
         except Exception as exc:
             if not _is_payload_decode_failure(exc):
                 raise
-            # RESOURCE_EXHAUSTED also covers quota or overload. When even the
-            # smallest row is refused on its own, the backend is refusing the
-            # call rather than this page's content: propagate instead of
-            # answering a page of placeholders after one call per halving.
+            # When even the smallest row is refused alone, the backend refuses
+            # the call itself (a limit below every row, quota wording we did
+            # not recognise): propagate instead of a page of placeholders.
             if len(stored) > 1 and not self._decodes_alone(min(stored, key=len)):
                 raise
             _logger.warning(

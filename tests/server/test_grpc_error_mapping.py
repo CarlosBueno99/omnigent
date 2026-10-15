@@ -38,7 +38,9 @@ async def catchall_client(
         yield c
 
 
-def _rpc_error(status_name: str, implementation: str = "vendored") -> Exception:
+def _rpc_error(
+    status_name: str, implementation: str = "vendored", detail: str = _DENIAL_DETAILS
+) -> Exception:
     if implementation == "grpcio":
         grpc = pytest.importorskip("grpc")
         base = grpc.RpcError
@@ -53,9 +55,9 @@ def _rpc_error(status_name: str, implementation: str = "vendored") -> Exception:
             return status
 
         def details(self) -> str:
-            return _DENIAL_DETAILS
+            return detail
 
-    return BackendRpcError(_DENIAL_DETAILS)
+    return BackendRpcError(detail)
 
 
 @pytest.mark.parametrize("implementation", ["vendored", "grpcio"])
@@ -166,7 +168,7 @@ async def test_payload_rejected_decrypt_degrades_only_that_item(
 
     def frame_limited(self: SqlAlchemyConversationStore, stored: list[str]) -> list[str]:
         if sum(len(s) for s in stored) > 2048:
-            raise _rpc_error("RESOURCE_EXHAUSTED")
+            raise _rpc_error("RESOURCE_EXHAUSTED", detail="Frame size 4300 exceeds maximum: 2048")
         return original(self, stored)
 
     monkeypatch.setattr(SqlAlchemyConversationStore, "_decode_item_data_batch", frame_limited)

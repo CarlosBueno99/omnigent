@@ -288,15 +288,17 @@ def test_classify_exception_disk_full_is_blocking_host(code: int) -> None:
     assert classify_exception(exc) == (ErrorCategory.HOST, ErrorImpact.BLOCKING)
 
 
-def _make_rpc_error(status_name: str | None) -> Exception:
+def _make_rpc_error(status_name: str | None, details: str | None = None) -> Exception:
     """Build a structural stand-in for a grpc ``RpcError``.
 
     The class is literally named ``RpcError`` (as in both pypi grpcio and a
     vendored copy — a different class identity) and exposes the ``code()``
     accessor returning a status object with a ``name``, the shape
-    :func:`is_cancelled_rpc_error` matches on.
+    :func:`is_cancelled_rpc_error` matches on, plus ``details()`` when given.
 
     :param status_name: The status name ``code()`` reports, e.g. ``CANCELLED``.
+    :param details: The status details ``details()`` reports, or ``None`` for
+        an error without a details accessor.
     :returns: The exception instance.
     """
 
@@ -306,6 +308,13 @@ def _make_rpc_error(status_name: str | None) -> Exception:
     class RpcError(Exception):
         def code(self) -> object:
             return _Status()
+
+    if details is not None:
+
+        def _details(self: Exception) -> str:
+            return details
+
+        RpcError.details = _details  # type: ignore[attr-defined]
 
     return RpcError("RPC terminated")
 
@@ -565,15 +574,26 @@ async def test_restart_on_stale_cursor_reraises_from_an_async_walk() -> None:
 
 
 def test_is_payload_rejected_rpc_error_matches_refused_payload_statuses() -> None:
-    """Statuses that blame the request content — an oversized decrypt frame,
-    corrupt data — match regardless of which module defines ``RpcError``."""
-    for status in ("RESOURCE_EXHAUSTED", "INVALID_ARGUMENT", "OUT_OF_RANGE", "DATA_LOSS"):
+    """Statuses that blame the request content match regardless of which module
+    defines ``RpcError``; RESOURCE_EXHAUSTED matches only when its details name
+    a message-size limit, in the wording of the common gRPC servers."""
+    for status in ("INVALID_ARGUMENT", "OUT_OF_RANGE", "DATA_LOSS"):
         assert is_payload_rejected_rpc_error(_make_rpc_error(status)) is True, status
+    for details in (
+        "Frame size 2036419 exceeds maximum: 1048576",
+        "Received message larger than max (5000000 vs. 4194304)",
+        "gRPC message exceeds maximum size 4194304: 5000000",
+        "grpc: received message larger than max (5000000 vs. 4194304)",
+    ):
+        assert is_payload_rejected_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED", details)), (
+            details
+        )
 
 
 def test_is_payload_rejected_rpc_error_ignores_backend_state_statuses() -> None:
     """A denial, cancellation or outage is the backend's own state, not a
-    refused payload, and the three detectors never overlap."""
+    refused payload — and so is a RESOURCE_EXHAUSTED that reports quota or
+    overload, or carries no readable details. The three detectors never overlap."""
     for status in (
         "PERMISSION_DENIED",
         "CANCELLED",
@@ -583,8 +603,26 @@ def test_is_payload_rejected_rpc_error_ignores_backend_state_statuses() -> None:
         None,
     ):
         assert is_payload_rejected_rpc_error(_make_rpc_error(status)) is False, status
-    assert is_cancelled_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED")) is False
-    assert is_permission_denied_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED")) is False
+    assert is_payload_rejected_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED")) is False
+    quota = _make_rpc_error("RESOURCE_EXHAUSTED", "Quota exceeded for decrypt requests")
+    assert is_payload_rejected_rpc_error(quota) is False
+
+    class RpcError(Exception):
+        def code(self) -> object:
+            class _Status:
+                name = "RESOURCE_EXHAUSTED"
+
+            return _Status()
+
+        def details(self) -> str:
+            raise RuntimeError("details unavailable")
+
+    assert is_payload_rejected_rpc_error(RpcError("broken details")) is False
+    oversized = _make_rpc_error(
+        "RESOURCE_EXHAUSTED", "Frame size 2036419 exceeds maximum: 1048576"
+    )
+    assert is_cancelled_rpc_error(oversized) is False
+    assert is_permission_denied_rpc_error(oversized) is False
 
 
 def test_is_payload_rejected_rpc_error_requires_rpc_error_ancestry() -> None:

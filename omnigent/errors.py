@@ -14,6 +14,7 @@ from __future__ import annotations
 import errno
 import functools
 import inspect
+import re
 from collections.abc import Callable
 from enum import Enum
 from typing import Any, ParamSpec, TypeVar, cast
@@ -681,27 +682,61 @@ def is_permission_denied_rpc_error(exc: BaseException) -> bool:
     return _rpc_error_status_name(exc) == "PERMISSION_DENIED"
 
 
-# Statuses a peer returns when it refuses the request content itself — an
-# oversized frame, a malformed or corrupt payload — rather than reporting its
-# own state (a denial, a cancelled call, an outage).
-_PAYLOAD_REJECTED_RPC_STATUSES = frozenset(
-    {"RESOURCE_EXHAUSTED", "INVALID_ARGUMENT", "OUT_OF_RANGE", "DATA_LOSS"}
+# Statuses a peer returns when it refuses the request content itself — a
+# malformed or corrupt payload — rather than reporting its own state (a denial,
+# a cancelled call, an outage). RESOURCE_EXHAUSTED is handled separately below:
+# it covers an oversized frame as well as quota or overload.
+_PAYLOAD_REJECTED_RPC_STATUSES = frozenset({"INVALID_ARGUMENT", "OUT_OF_RANGE", "DATA_LOSS"})
+# How gRPC servers word a message-size rejection, e.g. Armeria's
+# "Frame size 2036419 exceeds maximum: 1048576" or grpc-core's
+# "Received message larger than max (5000000 vs. 4194304)".
+_OVERSIZED_MESSAGE_DETAILS = re.compile(
+    r"frame size|message (?:larger than|exceeds|too large)|exceeds maximum|larger than max",
+    re.IGNORECASE,
 )
+
+
+def _rpc_error_details(exc: BaseException) -> str:
+    """Return the status details a failed call carries, or ``""``.
+
+    Read structurally like :func:`_rpc_error_status_name`: a callable
+    ``details()`` returning a string.
+
+    :param exc: The exception to inspect.
+    :returns: The details text, or ``""`` when absent or unreadable.
+    """
+    details = getattr(exc, "details", None)
+    if not callable(details):
+        return ""
+    try:
+        text = details()
+    except Exception:  # noqa: BLE001 — a details reader that itself fails carries none
+        return ""
+    return text if isinstance(text, str) else ""
 
 
 def is_payload_rejected_rpc_error(exc: BaseException) -> bool:
     """Whether *exc* is a gRPC call the peer refused because of what was sent.
 
-    E.g. a decrypt sidecar rejecting one oversized request frame
-    (``RESOURCE_EXHAUSTED``, ``Frame size 2036419 exceeds maximum: 1048576``).
-    The failure is specific to the payload, so a caller can retry with less or
-    degrade just that payload; a denial, cancellation or outage is not.
+    A malformed or corrupt payload (``INVALID_ARGUMENT``, ``OUT_OF_RANGE``,
+    ``DATA_LOSS``), or a ``RESOURCE_EXHAUSTED`` whose details name a
+    message-size limit, e.g. a decrypt sidecar rejecting one oversized request
+    frame (``Frame size 2036419 exceeds maximum: 1048576``). A
+    ``RESOURCE_EXHAUSTED`` without such details reports quota or overload, the
+    peer's own state, and does not match; neither does a denial, cancellation or
+    outage. The failure is specific to the payload, so a caller can retry with
+    less or degrade just that payload.
 
     :param exc: The exception to inspect.
     :returns: ``True`` only for a payload-rejected RPC error (matched
         structurally, see :func:`_rpc_error_status_name`).
     """
-    return _rpc_error_status_name(exc) in _PAYLOAD_REJECTED_RPC_STATUSES
+    status = _rpc_error_status_name(exc)
+    if status in _PAYLOAD_REJECTED_RPC_STATUSES:
+        return True
+    if status != "RESOURCE_EXHAUSTED":
+        return False
+    return _OVERSIZED_MESSAGE_DETAILS.search(_rpc_error_details(exc)) is not None
 
 
 # EDQUOT is POSIX-only; Windows reports a full disk as ENOSPC.
