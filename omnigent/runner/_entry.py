@@ -538,7 +538,15 @@ class _InitialAuthTokenFactory:
             mint = self._start_exchange_locked()
         if mint is None:
             return token
-        minted = mint()
+        try:
+            minted = mint()
+        except Exception:  # noqa: BLE001 — treated as a transient mint failure
+            minted = None
+            _logger.debug(
+                "bootstrap bearer exchange failed unexpectedly",
+                exc_info=True,
+                extra={"session_id": runner_primary_session_id()},
+            )
         with self._lock:
             return self._finish_exchange_locked(mint, minted) or token
 
@@ -613,7 +621,11 @@ class _InitialAuthTokenFactory:
         """
         self._exchange_in_progress = False
         if self._initial_token is None:
-            # Rejected meanwhile: the rejection path already owns the fallback.
+            # Rejected meanwhile: keep a successful mint unless the rejection
+            # path already installed its own fallback.
+            if token and self._fallback_factory is None:
+                self._fallback_factory = mint
+                return token
             return None
         if token:
             self._fallback_factory = mint
@@ -1158,11 +1170,8 @@ async def _run_credential_keepalive(
 ) -> None:
     """Call *factory* periodically so an idle runner's credential never lapses.
 
-    Callbacks renew a credential only on demand; a session idle past the token
-    lifetime would present an expired bearer, which the edge also rejects on
-    the re-mint. Calling inside the re-mint window renews it while accepted,
-    and the first call past the exchange delay swaps a host bootstrap bearer
-    for a runner-owned token.
+    Callbacks renew a credential only on demand, so a session idle past the
+    token lifetime would present an expired token on its next request.
 
     :param factory: The runner's auth token factory.
     :param interval_s: Seconds between calls, e.g. ``120.0``.
