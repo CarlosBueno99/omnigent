@@ -3753,7 +3753,6 @@ async def _maybe_handle_turn_event(
             if error is None:
                 _logger.warning("Codex forwarder ignored malformed error notification")
                 return True
-            error = _describe_provider_auth_error(error, bridge_dir)
             turn_id = _turn_id_from_payload(params)
             if forwarder_state is not None:
                 if turn_id in forwarder_state.surfaced_terminal_error_turns:
@@ -3791,7 +3790,7 @@ async def _maybe_handle_turn_event(
                     status="failed",
                     turn_id=turn_id,
                     source="error",
-                    error=error,
+                    error=_describe_provider_auth_error(error, bridge_dir),
                 ),
             )
             await usage_coalescer.flush()

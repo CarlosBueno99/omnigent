@@ -23,6 +23,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 _MODULE = "omnigent.harnesses.codex_native.provider_auth"
 
@@ -50,15 +51,18 @@ _CODEX_MESSAGE_LIMIT_BYTES = 512
 # The card's cause stays a sentence or two: it quotes only the first line of
 # the helper's report, this long; the record and message keep the rest.
 _CAUSE_REPORT_LIMIT = 120
+# Provider, profile and host names are displayed and persisted as well.
+_METADATA_LIMIT = 120
 # Finish (and record) before Codex's own timeout kills this process.
 _TIMEOUT_MARGIN_MS = 1000
 _EXIT_TIMED_OUT = 124
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 # How Codex words each helper outcome, so a stale record cannot describe a new failure.
+# Codex's own wording comes first; the helper's stderr is appended after it.
 _CODEX_OUTCOME_FRAGMENTS = (
+    ("exited with status", OUTCOME_EXITED),
     ("produced an empty token", OUTCOME_EMPTY_TOKEN),
     ("timed out", OUTCOME_TIMED_OUT),
-    ("exited with status", OUTCOME_EXITED),
 )
 _LOGIN_REQUIRED_FRAGMENTS = (
     "unauthenticated",
@@ -91,6 +95,15 @@ class ProviderAuthHelper:
     provider: str
     databricks_profile: str | None = None
     databricks_host: str | None = None
+
+    def __post_init__(self) -> None:
+        # This metadata is displayed and persisted: keep it short and credential-free.
+        # The helper command itself is executed unchanged.
+        object.__setattr__(self, "provider", _display_text(self.provider))
+        if self.databricks_profile is not None:
+            object.__setattr__(self, "databricks_profile", _display_text(self.databricks_profile))
+        if self.databricks_host is not None:
+            object.__setattr__(self, "databricks_host", _safe_host(self.databricks_host))
 
     @property
     def uses_databricks_cli(self) -> bool:
@@ -212,7 +225,7 @@ class ProviderAuthDiagnosis:
 
     def message(self, codex_message: str) -> str:
         """:returns: The full text for clients that render only code/message."""
-        reported = _bounded(_sanitized(codex_message), _CODEX_MESSAGE_LIMIT_BYTES, keep="head")
+        reported = _bounded(_redacted(codex_message), _CODEX_MESSAGE_LIMIT_BYTES, keep="head")
         return f"{self.cause}\n\nTry this: {self.remediation}\n\nCodex reported: {reported}"
 
 
@@ -386,8 +399,7 @@ def diagnose_provider_auth_failure(
     :param failure: The recorded failed run, or ``None``.
     :returns: Title, cause and the provider-appropriate next step.
     """
-    expected_outcome = codex_message_outcome(codex_message)
-    if failure is not None and expected_outcome not in (None, failure.outcome):
+    if failure is not None and not _outcomes_agree(failure, codex_message_outcome(codex_message)):
         # A record left by an earlier, different failure must not describe this one.
         failure = None
     if failure is None:
@@ -443,8 +455,15 @@ def diagnose_provider_auth_failure(
     )
 
 
+def _outcomes_agree(failure: ProviderAuthFailure, expected: str | None) -> bool:
+    if expected in (None, failure.outcome):
+        return True
+    # A helper that itself exits 124 (timeout(1)'s convention) reads as a timeout to Codex.
+    return expected == OUTCOME_TIMED_OUT and failure.exit_status == _EXIT_TIMED_OUT
+
+
 def _diagnose_from_codex_message(codex_message: str) -> ProviderAuthDiagnosis:
-    reported = _bounded(_sanitized(codex_message), _CODEX_MESSAGE_LIMIT_BYTES, keep="head")
+    reported = _bounded(_redacted(codex_message), _CODEX_MESSAGE_LIMIT_BYTES, keep="head")
     login_required = any(fragment in reported.lower() for fragment in _LOGIN_REQUIRED_FRAGMENTS)
     return ProviderAuthDiagnosis(
         title="Codex could not get a provider token",
@@ -528,6 +547,23 @@ def _report_excerpt(text: str) -> str:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _display_text(value: str) -> str:
+    return _bounded(_redacted(value), _METADATA_LIMIT, keep="head")
+
+
+def _safe_host(host: str) -> str | None:
+    """Keep only the scheme and host of a workspace URL: no userinfo, path, query or fragment."""
+    parts = urlsplit(host if "://" in host else f"https://{host}")
+    try:
+        hostname, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not hostname:
+        return None
+    netloc = hostname if port is None else f"{hostname}:{port}"
+    return _bounded(f"{parts.scheme}://{netloc}", _METADATA_LIMIT, keep="head")
 
 
 def _is_int(value: object) -> bool:

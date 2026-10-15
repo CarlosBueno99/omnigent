@@ -142,6 +142,30 @@ def test_wrapped_helper_redacts_credentials_inside_a_json_error_message(tmp_path
     assert secret not in diagnose_provider_auth_failure(_CODEX_EXIT_1, failure).cause
 
 
+def test_helper_metadata_is_credential_free_and_bounded(tmp_path: Path) -> None:
+    """A --host URL with userinfo or a query never reaches the record, card or message."""
+    helper = ProviderAuthHelper(
+        provider="p" * 300,
+        databricks_host="https://alice:s3cretpass@ws.example.com:8443/api?token=querysecret#f",
+    )
+    assert helper.databricks_host == "https://ws.example.com:8443"
+    assert len(helper.provider) <= 121
+
+    result = _run_wrapped(tmp_path, "echo 'Error: not logged in' >&2; exit 1", helper)
+
+    assert result.returncode == 1
+    record = (tmp_path / "provider_auth_failure.json").read_text(encoding="utf-8")
+    failure = read_provider_auth_failure(tmp_path)
+    assert failure is not None
+    diagnosis = diagnose_provider_auth_failure(_CODEX_EXIT_1, failure)
+    for secret in ("s3cretpass", "querysecret", "alice"):
+        assert secret not in record
+        assert secret not in diagnosis.cause
+        assert secret not in diagnosis.remediation
+        assert secret not in diagnosis.message(_CODEX_EXIT_1)
+    assert "`databricks auth login --host https://ws.example.com:8443`" in diagnosis.remediation
+
+
 def test_wrapped_helper_records_an_empty_token(tmp_path: Path) -> None:
     """Exit 0 with no token (the generated Databricks helper's failure shape) is recorded too."""
     result = _run_wrapped(
@@ -301,6 +325,11 @@ def test_wrapped_command_names_the_interpreter_and_keeps_the_helper_verbatim() -
         (
             "env -u DATABRICKS_CONFIG_PROFILE databricks auth token --host https://x.databricks.com",
             (None, "https://x.databricks.com"),
+        ),
+        # The parsed host is raw here; ProviderAuthHelper strips credentials from it.
+        (
+            "databricks auth token --host https://u:p@x.databricks.com/?t=1 | jq -r .access_token",
+            (None, "https://u:p@x.databricks.com/?t=1"),
         ),
         ("databricks auth token | jq -r .access_token --profile stray", (None, None)),
         # A flag or separator where the value should be is not a profile.
@@ -474,11 +503,45 @@ def test_diagnosis_for_a_non_databricks_helper_points_at_the_provider_setup() ->
         ("provider auth command `sh` timed out after 15000 ms", OUTCOME_TIMED_OUT),
         # The wrapper ends a hung helper itself and exits 124 before Codex's timeout.
         ("provider auth command `sh` exited with status exit status: 124", OUTCOME_TIMED_OUT),
+        # Codex's own wording wins over a helper stderr that mentions a timeout.
+        (
+            _CODEX_EXIT_1 + ": Error: refresh timed out",
+            OUTCOME_EXITED,
+        ),
         ("provider auth command `sh` could not be spawned", None),
     ],
 )
 def test_codex_message_outcome(message: str, expected: str | None) -> None:
     assert codex_message_outcome(message) == expected
+
+
+def test_diagnosis_keeps_a_helper_that_itself_exited_124() -> None:
+    """A helper exiting 124 on its own is recorded as an exit yet reads as a timeout to Codex."""
+    failure = ProviderAuthFailure(_OSS_HELPER, OUTCOME_EXITED, 124, "", "timeout: databricks")
+
+    diagnosis = diagnose_provider_auth_failure(
+        "provider auth command `sh` exited with status exit status: 124: timeout: databricks",
+        failure,
+    )
+
+    assert diagnosis.used_record is True
+    assert "exited with status 124; it reported: timeout: databricks" in diagnosis.cause
+
+
+def test_diagnosis_redacts_a_token_codex_appended_from_the_helper_stderr() -> None:
+    """Codex appends the helper's raw stderr to its message; the card must not echo a token."""
+    token = "9f8e7d6c5b4a39281706f5e4d3c2b1a0f1e2d3c4"
+    codex_message = f"{_CODEX_EXIT_1}: refreshing {token} failed"
+
+    without_record = diagnose_provider_auth_failure(codex_message, None)
+    with_record = diagnose_provider_auth_failure(
+        codex_message, ProviderAuthFailure(_OSS_HELPER, OUTCOME_EXITED, 1, "null", "")
+    )
+
+    assert token not in without_record.cause
+    assert token not in without_record.message(codex_message)
+    assert token not in with_record.message(codex_message)
+    assert "[REDACTED]" in with_record.message(codex_message)
 
 
 def test_diagnosis_ignores_a_record_from_a_different_failure() -> None:

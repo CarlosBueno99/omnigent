@@ -323,6 +323,10 @@ def diagnose_codex_model_rejection(message: str) -> FailureDiagnosis | None:
     )
 
 
+# The code a Codex-native forwarder sends when the provider's bearer helper failed.
+CODEX_PROVIDER_AUTH_FAILED_CODE = "codex_provider_auth_failed"
+
+
 # --- failure-code English fallbacks -------------------------------------------
 # Every server-emitted failure code, mapped to a one-line human sentence, so
 # even an unclassified failure reads as English instead of a raw enum. Terminal
@@ -333,9 +337,6 @@ def diagnose_codex_model_rejection(message: str) -> FailureDiagnosis | None:
 # (``FAILURE_CODE_DESCRIPTIONS`` in ``web/src/components/blocks/StatusBlocks.tsx``)
 # because the failure card renders client-side. Keep the two in sync when adding
 # or editing a code.
-# The code a Codex-native forwarder sends when the provider's bearer helper failed.
-CODEX_PROVIDER_AUTH_FAILED_CODE = "codex_provider_auth_failed"
-
 _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
     "required_terminal_exited": (
         "The agent's terminal exited unexpectedly, so the session can't continue."
