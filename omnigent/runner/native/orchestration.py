@@ -50,7 +50,6 @@ from fastapi.responses import JSONResponse, Response
 
 from omnigent._platform import IS_WINDOWS, resolve_cli_binary
 from omnigent.cli_invocation import cli_invocation
-from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
 from omnigent.debug_logging import debug_event, runner_primary_session_id
 from omnigent.entities.session_resources import (
     SessionResourceView,
@@ -7805,11 +7804,19 @@ def _native_terminal_start_error_payload(
     # state those imports can raise the same stale-host ImportError and lose
     # the guidance, so this path must not depend on them.
     if _is_stale_host_import_error(exc):
+        # Load the shared label-length limit lazily: it lives in the ORM module,
+        # and importing it at module scope would pull SQLAlchemy into the
+        # runner's import graph for one constant used only on this error path.
+        from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
+
         cli = cli_invocation()
+        # The web card shows `cause`/`remediation` and hides `message` once a
+        # cause is set, so carry the log-correlation ID in the cause field.
         cause = (
             f"Native {runtime_name} terminal failed to start: this host is "
             "likely running an older Omnigent build than the one now on disk, "
-            "which an in-place upgrade can leave behind (mixed-version)."
+            "which an in-place upgrade can leave behind (mixed-version). "
+            f"Error ID: {error_id}."
         )
         remediation = (
             "Restart the host so it loads the upgraded code. For a foreground "
@@ -7830,7 +7837,7 @@ def _native_terminal_start_error_payload(
         return {
             "code": _NATIVE_TERMINAL_START_FAILED_CODE,
             "error_id": error_id,
-            "message": f"{cause} {remediation} Error ID: {error_id}.",
+            "message": f"{cause} {remediation}",
             "title": f"{runtime_name} can't start until you restart the host",
             "cause": cause,
             "remediation": remediation,

@@ -126,20 +126,9 @@ def test_mixed_version_import_failure_guides_host_restart(
     else:
         monkeypatch.setenv("OMNIGENT_WRAPPER_COMMAND", wrapper_command)
 
-    frames_path = (
-        "/opt/pipx/venvs/omnigent/lib/python3.12/site-packages/"
-        "omnigent/runner/transports/ws_tunnel/frames.py"
-    )
-    exc = ImportError(
-        "cannot import name 'EventAckFrame' from "
-        "'omnigent.runner.transports.ws_tunnel.frames' "
-        f"({frames_path})",
-        name="omnigent.runner.transports.ws_tunnel.frames",
-        path=frames_path,
-    )
-    # CPython sets ``name_from`` via the C constructor; typeshed omits it, so
-    # assign the attribute to stay type-clean while modelling the real failure.
-    exc.name_from = "EventAckFrame"
+    exc = _stale_host_import_error()
+    frames_path = exc.path
+    assert frames_path is not None
 
     payload = _native_terminal_start_error_payload(exc, "Claude", session_id="conv_1")
 
@@ -159,6 +148,9 @@ def test_mixed_version_import_failure_guides_host_restart(
     assert "re-enable it" in remediation
     assert "keeping `--server`" in remediation
     assert "disable &&" not in remediation
+    # The web card hides `message` once a cause is set, so the log-correlation
+    # ID must ride in a displayed field to stay quotable for support.
+    assert payload["error_id"] in cause
     # The reload card is rebuilt from per-field labels, so each field must fit
     # the label column or the guidance truncates away on refresh.
     assert len(cause) <= LABEL_VALUE_MAX_LEN
@@ -167,7 +159,8 @@ def test_mixed_version_import_failure_guides_host_restart(
     for text in (payload["title"], cause, remediation, payload["message"]):
         assert frames_path not in text
         assert "see the runner log" not in text
-    assert _ERROR_ID_RE.search(payload["message"]) is not None
+    # The ID is well-formed and sits at the end of the displayed cause field.
+    assert _ERROR_ID_RE.search(cause) is not None
 
 
 def _stale_host_import_error() -> ImportError:
@@ -226,6 +219,8 @@ def test_long_wrapper_command_keeps_restart_guidance_across_reload(
     assert "isaac-omnigent" not in reloaded["remediation"]
     assert reloaded["title"] == payload["title"]
     assert reloaded["cause"] == payload["cause"]
+    # The ID is carried in the cause, so it must survive the reload too.
+    assert payload["error_id"] in reloaded["cause"]
 
 
 def test_stale_host_classified_before_fragile_lazy_imports(
