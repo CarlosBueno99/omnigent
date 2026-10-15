@@ -24,6 +24,7 @@ _PLUGIN_SKILL = "toolkit:review"
 _EMPTY_CATALOG_ROW = "No skills available"
 _INVENTORY_ERROR = "failed to load plugin inventory (injected by test)"
 _WARNING_ROW = "Codex plugin skills unavailable"
+_EXIT_SUMMARY = "`codex plugin list` exited 1"
 _INVENTORY = {
     "installed": [
         {"marketplaceName": "market", "name": "toolkit", "version": "1.0.0", "enabled": True}
@@ -35,7 +36,7 @@ _INVENTORY = {
 _SHIM = """#!/bin/sh
 if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
   if [ "$(cat {mode} 2>/dev/null)" = "fail" ]; then
-    echo "Error: {error}" >&2
+    echo "Error:" {error} >&2
     exit 1
   fi
   cat {inventory}
@@ -72,7 +73,7 @@ def _write_codex_shim(root: Path) -> tuple[Path, Path]:
         _SHIM.format(
             mode=shlex.quote(str(mode)),
             inventory=shlex.quote(str(inventory)),
-            error=_INVENTORY_ERROR,
+            error=shlex.quote(_INVENTORY_ERROR),
             real=shlex.quote(shutil.which("codex") or ""),
         )
     )
@@ -140,8 +141,10 @@ def test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog(
             expect(warning_rows).to_have_count(1)
             expect(warning_rows.first.get_by_role("button", name="Retry")).to_be_visible()
             observed_rows = skills_rows.all_inner_texts()
+            # Skills the inventory could not read are absent, not served stale beside the warning.
             plugin_rows = page.get_by_test_id(f"slash-menu-item-{_PLUGIN_SKILL}").count()
             api = client.get("/v1/skills", params={"session_id": session_id})
+            host_log = host.log_path.read_text(errors="replace")
         finally:
             client.delete(f"/v1/sessions/{session_id}", timeout=10.0)
 
@@ -149,10 +152,18 @@ def test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog(
         f"session {session_id}: picker rows {observed_rows!r}, plugin rows {plugin_rows}, "
         f"GET /v1/skills -> {api.status_code} {api.text}"
     )
-    assert any(_INVENTORY_ERROR in row for row in observed_rows), (
-        f"{observed}: the picker's explanation omits the `codex plugin list` error"
+    assert any(_EXIT_SUMMARY in row for row in observed_rows), (
+        f"{observed}: the picker's explanation does not name the failed command"
     )
-    assert api.status_code == 200 and api.json()["skills"] == [], observed
-    assert [w for w in api.json()["warnings"] if _WARNING_ROW in w and _INVENTORY_ERROR in w], (
+    # Host paths and CLI output stay out of the menu; the host log keeps them for investigation.
+    assert _INVENTORY_ERROR not in " ".join(observed_rows), observed
+    assert _INVENTORY_ERROR in host_log, (
+        f"{observed}: host.log lacks the `codex plugin list` output"
+    )
+    assert plugin_rows == 0, f"{observed}: a plugin skill was listed despite the failed inventory"
+    assert api.status_code == 200, observed
+    body = api.json()
+    assert body["skills"] == [], observed
+    assert [w for w in body["warnings"] if _WARNING_ROW in w and _EXIT_SUMMARY in w], (
         f"{observed}: a failed plugin inventory was answered as a successful empty catalog"
     )

@@ -266,7 +266,10 @@ def test_incomplete_codex_catalog_reports_warnings_and_is_cached_only_briefly(
         return [skill["name"] for skill in discovery.discover(frame, tmp_path, warnings=warnings)]
 
     # Standalone skills survive a failed inventory, and the catalog says why it is incomplete.
-    warning = "Codex plugin skills unavailable: `codex plugin list` exited 1: Error: broken"
+    warning = (
+        "Codex plugin skills unavailable: `codex plugin list` exited 1; "
+        "see the host log for details."
+    )
     assert names(warnings := []) == ["later", "local"]
     assert warnings == [warning]
 

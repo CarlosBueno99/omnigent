@@ -40,27 +40,30 @@ def _skill_roots(root: Path, paths: object) -> list[Path]:
     return sorted(roots)
 
 
-def _inventory_failure(exc: Exception) -> str:
-    """Describe why ``codex plugin list`` produced no inventory."""
+def _inventory_failure(exc: Exception) -> tuple[str, str]:
+    """Summarize a failed ``codex plugin list`` for the menu and keep its output for the log.
+
+    Catalog warnings reach session editors, so the summary names only the
+    command and how it failed; stderr and exception text can carry host paths
+    and stay in the host log.
+    """
     if isinstance(exc, subprocess.CalledProcessError):
-        stderr = " ".join(str(exc.stderr or "").split())
-        if len(stderr) > 200:
-            stderr = stderr[:200] + "..."
-        detail = f"`codex plugin list` exited {exc.returncode}"
-        return f"{detail}: {stderr}" if stderr else detail
+        return f"`codex plugin list` exited {exc.returncode}", " ".join(
+            str(exc.stderr or "").split()
+        )
     if isinstance(exc, subprocess.TimeoutExpired):
-        return f"`codex plugin list` timed out after {exc.timeout:g}s"
+        return f"`codex plugin list` timed out after {exc.timeout:g}s", ""
     if isinstance(exc, ValueError):
-        return "`codex plugin list` returned unreadable JSON"
-    return f"could not run `codex plugin list`: {exc}"
+        return "`codex plugin list` returned unreadable output", str(exc)
+    return "`codex plugin list` could not be run", str(exc)
 
 
-def _without_inventory(detail: str, warnings: list[str] | None) -> list[SkillSpec]:
-    """Omit plugin skills, telling the log and the caller's menu why."""
-    message = f"Codex plugin skills unavailable: {detail}"
-    _log.warning(message)
+def _without_inventory(summary: str, detail: str, warnings: list[str] | None) -> list[SkillSpec]:
+    """Omit plugin skills, telling the host log and the caller's menu why."""
+    message = f"Codex plugin skills unavailable: {summary}"
+    _log.warning("%s%s", message, f": {detail}" if detail else "")
     if warnings is not None:
-        warnings.append(message)
+        warnings.append(f"{message}; see the host log for details.")
     return []
 
 
@@ -96,10 +99,12 @@ def discover_codex_plugin_skills(
         )
         inventory = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        return _without_inventory(_inventory_failure(exc), warnings)
+        return _without_inventory(*_inventory_failure(exc), warnings)
     plugins = inventory.get("installed") if isinstance(inventory, dict) else None
     if not isinstance(plugins, list):
-        return _without_inventory("`codex plugin list` returned an unexpected inventory", warnings)
+        return _without_inventory(
+            "`codex plugin list` returned an unexpected inventory", "", warnings
+        )
     filter_names = set(skills_filter) if isinstance(skills_filter, list) else None
     out: list[SkillSpec] = []
     for plugin in plugins:

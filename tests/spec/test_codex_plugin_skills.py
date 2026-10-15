@@ -203,21 +203,21 @@ def test_plugin_inventory_uses_session_home_and_workspace(tmp_path: Path, codex_
 
 
 @pytest.mark.parametrize(
-    "failure,detail",
+    "failure,summary,logged",
     [
         (
-            FileNotFoundError(2, "No such file"),
-            "could not run `codex plugin list`: [Errno 2] No such file",
+            FileNotFoundError(2, "No such file or directory", "/private/bin/codex"),
+            "`codex plugin list` could not be run",
+            "[Errno 2] No such file or directory: '/private/bin/codex'",
         ),
-        (subprocess.TimeoutExpired("codex", 5), "`codex plugin list` timed out after 5s"),
-        (subprocess.CalledProcessError(2, "codex"), "`codex plugin list` exited 2"),
+        (subprocess.TimeoutExpired("codex", 5), "`codex plugin list` timed out after 5s", ""),
+        (subprocess.CalledProcessError(2, "codex"), "`codex plugin list` exited 2", ""),
         (
-            subprocess.CalledProcessError(1, "codex", stderr="Error: bad config.toml\n  line 3\n"),
-            "`codex plugin list` exited 1: Error: bad config.toml line 3",
-        ),
-        (
-            subprocess.CalledProcessError(1, "codex", stderr="x" * 260),
-            "`codex plugin list` exited 1: " + "x" * 200 + "...",
+            subprocess.CalledProcessError(
+                1, "codex", stderr="Error: bad /Users/alice/.codex/config.toml\n  line 3\n"
+            ),
+            "`codex plugin list` exited 1",
+            "Error: bad /Users/alice/.codex/config.toml line 3",
         ),
     ],
 )
@@ -226,7 +226,8 @@ def test_unavailable_plugin_inventory_keeps_standalone_skills(
     codex_cli: Mock,
     caplog: pytest.LogCaptureFixture,
     failure: Exception,
-    detail: str,
+    summary: str,
+    logged: str,
 ) -> None:
     codex_home = tmp_path / ".codex"
     standalone = _skill(codex_home / "skills")
@@ -237,9 +238,13 @@ def test_unavailable_plugin_inventory_keeps_standalone_skills(
     with caplog.at_level(logging.WARNING, logger="omnigent.spec.codex_plugin_skills"):
         assert _discover(tmp_path, warnings=warnings) == {"review": standalone}
 
-    # The failure is reported to the menu and the host log, not swallowed as an empty catalog.
-    assert warnings == [f"Codex plugin skills unavailable: {detail}"]
-    assert warnings == [record.getMessage() for record in caplog.records]
+    # The menu learns what failed without host paths; the host log keeps the output.
+    message = f"Codex plugin skills unavailable: {summary}"
+    assert warnings == [f"{message}; see the host log for details."]
+    assert "/" not in warnings[0]
+    assert [record.getMessage() for record in caplog.records] == [
+        f"{message}: {logged}" if logged else message
+    ]
 
 
 def test_unavailable_plugin_inventory_without_a_collector_only_logs(
