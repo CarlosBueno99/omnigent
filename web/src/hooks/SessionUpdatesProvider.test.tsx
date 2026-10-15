@@ -525,7 +525,12 @@ const PROJECTS = [
   { id: "id-Beta", name: "Beta" },
 ];
 
-function renderSidebarLists(client: QueryClient, search?: string) {
+function renderSidebarLists(
+  client: QueryClient,
+  search?: string,
+  options: { serverLists?: boolean } = {},
+) {
+  const serverLists = options.serverLists === true;
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={["/"]}>
@@ -539,6 +544,10 @@ function renderSidebarLists(client: QueryClient, search?: string) {
       alpha: useProjectSessions("Alpha", true),
       beta: useProjectSessions("Beta", betaExpanded),
       search: useConversations(search ?? "", false, { enabled: search !== undefined }),
+      // Lists whose membership only the server decides (Settings' archived
+      // view and its project-filtered picker).
+      archived: useConversations("", true, { enabled: serverLists }, undefined, "archived"),
+      filtered: useConversations("", true, { enabled: serverLists }, "Alpha"),
     }),
     { wrapper, initialProps: { betaExpanded: true } },
   );
@@ -791,6 +800,38 @@ describe("SessionUpdatesProvider list reconciliation", () => {
     expect(folderRows(client, "Alpha").map((row) => row.id)).not.toContain("Alpha-0-3");
   });
 
+  it("keeps a remote deletion applied after an overlapping page fetch lands", async () => {
+    let holdPages = false;
+    const backend = listBackend({ hold: (params) => holdPages && params.has("after") });
+    vi.stubGlobal("fetch", backend.fetch);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["projects"], PROJECTS);
+    const { result } = renderSidebarLists(client);
+    await waitFor(() => {
+      expect(result.current.mine.isFetching).toBe(false);
+      expect(result.current.alpha.isFetching).toBe(false);
+      expect(result.current.beta.isFetching).toBe(false);
+    });
+
+    holdPages = true;
+    let nextPage!: Promise<unknown>;
+    act(() => {
+      nextPage = result.current.alpha.fetchNextPage();
+    });
+    await waitFor(() => expect(backend.calls.some((params) => params.has("after"))).toBe(true));
+    // Deleted elsewhere while page 2 is in flight; not the page's cursor row.
+    act(() => frameHandler()({ type: "removed", ids: ["Alpha-0-3"] }));
+    expect(folderRows(client, "Alpha").map((row) => row.id)).not.toContain("Alpha-0-3");
+    backend.release();
+    await act(async () => {
+      await nextPage;
+    });
+
+    // The landed page is built from the pre-removal pages; the removal is replayed.
+    await waitFor(() => expect(result.current.alpha.data?.pages).toHaveLength(2));
+    expect(folderRows(client, "Alpha").map((row) => row.id)).not.toContain("Alpha-0-3");
+  });
+
   it("refetches a folder whose cursor row was deleted elsewhere", async () => {
     const backend = listBackend({ endless: true });
     vi.stubGlobal("fetch", backend.fetch);
@@ -813,7 +854,7 @@ describe("SessionUpdatesProvider list reconciliation", () => {
     expect(result.current.beta.hasNextPage).toBe(true);
   });
 
-  it("cancels a collapsed folder's in-flight page before trimming it", async () => {
+  it("drops a collapsed folder's late page response after trimming it", async () => {
     let holdPages = false;
     const backend = listBackend({
       endless: true,
@@ -886,6 +927,41 @@ describe("SessionUpdatesProvider list reconciliation", () => {
 
     expect(backend.calls.slice(baseline)).toEqual([]);
     expect(folderRows(client, "Alpha").map((row) => row.id)).not.toContain("Alpha-1-3");
+  });
+
+  it("reconciles a rename in the archived and project-filtered lists only", async () => {
+    const backend = listBackend();
+    vi.stubGlobal("fetch", backend.fetch);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["projects"], PROJECTS);
+    const { result } = renderSidebarLists(client, undefined, { serverLists: true });
+    await loadSecondFolderPages(result);
+    await waitFor(() => {
+      expect(result.current.archived.isSuccess).toBe(true);
+      expect(result.current.filtered.isSuccess).toBe(true);
+    });
+    await settle();
+    const baseline = backend.calls.length;
+
+    act(() =>
+      frameHandler()({
+        type: "changed",
+        items: [{ ...conv("mine-0-5"), title: "renamed elsewhere", updated_at: 990 }],
+      }),
+    );
+    await settle();
+    await waitFor(() => {
+      expect(result.current.archived.isFetching).toBe(false);
+      expect(result.current.filtered.isFetching).toBe(false);
+    });
+
+    // The Mine scope and the resolved folders keep the row they patched in
+    // place; only the server-decided lists reconcile.
+    const refetched = backend.calls.slice(baseline);
+    expect(refetched).toHaveLength(2);
+    expect(refetched.every((params) => params.get("include_archived") === "true")).toBe(true);
+    expect(refetched.some((params) => params.get("visibility") === "archived")).toBe(true);
+    expect(refetched.some((params) => params.get("project") === "Alpha")).toBe(true);
   });
 });
 

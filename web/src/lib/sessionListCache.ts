@@ -333,11 +333,15 @@ export function mergeItemsIntoPages(
     }
     if (!rowChanged) return page;
     anyPageChanged = true;
-    if (!reordered) return { ...page, data: nextData };
+    if (!reordered) {
+      if (nextData.length === page.data.length) return { ...page, data: nextData };
+      // An evicted row may have anchored the legacy row-id cursor.
+      return { ...page, data: nextData, last_id: repairedLastId(page, nextData) };
+    }
     // Keep the page in server order and move a legacy row-id cursor off a
     // bumped anchor, which the server would otherwise resolve at its new time.
     nextData.sort((a, b) => compareSessionRows(a, b, sortBy));
-    return { ...page, data: nextData, last_id: lastIdAfterFiltering(page, nextData) };
+    return { ...page, data: nextData, last_id: repairedLastId(page, nextData) };
   });
   if (!anyPageChanged) return { data, found, needsRefetch };
   return { data: { ...data, pages }, found, needsRefetch };
@@ -425,7 +429,7 @@ export function insertNewRowsIntoPages(
     };
     if (conv.parent_session_id != null || violatesKnownMembership(conv, filters)) continue;
     // Sorts after every loaded row: it belongs on a page that isn't loaded yet.
-    if (!complete && (!oldest || compareSessionRows(conv, oldest, sortBy) > 0)) continue;
+    if (!complete && oldest && compareSessionRows(conv, oldest, sortBy) > 0) continue;
     // Ownership-aware insertion for scoped caches. `conv.owner` is null/absent
     // when the row is owned by the viewer (single-user / legacy shape) or
     // explicitly set to another user's id when the session was shared.
@@ -449,6 +453,15 @@ export function lastIdAfterFiltering(
 ): string | null {
   if (!original.data.some((row) => row.id === original.last_id)) return original.last_id;
   return rows.at(-1)?.id ?? emptyCursor;
+}
+
+/**
+ * Cursor for a page whose rows were re-sorted or evicted. Only a legacy row-id
+ * cursor anchored at the page tail follows the tail; a rewind cursor placed
+ * before retained history (see `refreshScopeWindow`) must stay where it is.
+ */
+function repairedLastId(page: ConversationsPage, rows: Conversation[]): string | null {
+  return page.last_id === page.data.at(-1)?.id ? lastIdAfterFiltering(page, rows) : page.last_id;
 }
 
 /** Drop matching rows while preserving opaque continuation metadata. */

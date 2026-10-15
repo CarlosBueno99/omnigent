@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
 import type { Conversation, ConversationsPage } from "@/hooks/useConversations";
 import { sortConversations } from "@/shell/sidebarNav";
-import { mergeScopeRows } from "./sidebarData";
+import { mergeScopeRows, refreshScopeWindow, sessionRowsPage } from "./sidebarData";
 import {
   type ConversationsInfiniteData,
   type SessionListWireItem,
@@ -691,5 +691,87 @@ describe("firstPageOnly", () => {
     expect(after!.pageParams).toEqual([undefined]);
     const single = data([conv("a")]);
     expect(firstPageOnly(single)).toBe(single);
+  });
+});
+
+describe("cursor repair after a local eviction", () => {
+  it("moves a legacy cursor off an evicted anchor even when no row reordered", () => {
+    const before = data([conv("a", { updated_at: 30 }), conv("b", { updated_at: 20 })]);
+    before.pages[0].has_more = true;
+
+    const { data: after } = mergeItemsIntoPages(
+      before,
+      new Map([["b", { id: "b", archived: true }]]),
+      DEFAULT_FILTERS,
+    );
+
+    expect(after!.pages[0].data.map((row) => row.id)).toEqual(["a"]);
+    // The next page continues after the oldest remaining row, not the evicted one.
+    expect(after!.pages[0].last_id).toBe("a");
+  });
+
+  it("places a new row into an emptied window that still has more pages", () => {
+    const before = data([]);
+    before.pages[0] = { ...before.pages[0], has_more: true, last_id: "opaque-token" };
+
+    const { inserted } = insertNewRowsIntoPages(
+      before,
+      new Map<string, SessionListWireItem>([["fresh", { id: "fresh", updated_at: 10 }]]),
+      DEFAULT_FILTERS,
+    );
+
+    expect(inserted.map((c) => c.id)).toEqual(["fresh"]);
+  });
+
+  it("keeps a rewind cursor set before retained history when its row is bumped", () => {
+    // A non-overlapping refresh keeps older history behind a cursor at the
+    // refreshed tail; sessions between the two are not loaded yet.
+    const retained = refreshScopeWindow(
+      { ...data([conv("old", { updated_at: 10 })]), windowSize: 2 },
+      sessionRowsPage([conv("new", { updated_at: 50 })], true),
+      1,
+    );
+    expect(retained.pages[0].data.map((row) => row.id)).toEqual(["new", "old"]);
+    expect(retained.pages[0].last_id).toBe("new");
+
+    const { data: after } = mergeItemsIntoPages(
+      retained,
+      new Map([["new", { id: "new", updated_at: 60 }]]),
+      { ...DEFAULT_FILTERS, visibility: "mine" },
+    );
+
+    expect(after!.pages[0].data.map((row) => row.id)).toEqual(["new", "old"]);
+    // "after=old" would skip the unloaded sessions between the two rows.
+    expect(after!.pages[0].last_id).toBe("new");
+  });
+});
+
+describe("insertNewRowsIntoPages ownership scopes", () => {
+  it("splits new rows between the Mine and Shared scopes by ownership", () => {
+    const rows = new Map<string, SessionListWireItem>([
+      ["own", { id: "own", owner: "viewer", updated_at: 9 }],
+      ["legacy", { id: "legacy", updated_at: 8 }],
+      ["theirs", { id: "theirs", owner: "someone-else", updated_at: 7 }],
+    ]);
+    const seed = () => data([conv("seed", { updated_at: 1 })]);
+
+    const mine = insertNewRowsIntoPages(
+      seed(),
+      rows,
+      { ...DEFAULT_FILTERS, visibility: "mine" },
+      undefined,
+      "viewer",
+    );
+    const shared = insertNewRowsIntoPages(
+      seed(),
+      rows,
+      { ...DEFAULT_FILTERS, visibility: "shared" },
+      undefined,
+      "viewer",
+    );
+
+    // A null owner is the single-user / legacy shape and counts as the viewer's.
+    expect(mine.inserted.map((c) => c.id)).toEqual(["own", "legacy"]);
+    expect(shared.inserted.map((c) => c.id)).toEqual(["theirs"]);
   });
 });

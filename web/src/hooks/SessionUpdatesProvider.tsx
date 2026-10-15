@@ -124,14 +124,9 @@ function applyItemsToCache(
     if (query.queryKey[4] === "archived") continue;
     applyToList(query, filtersFromConversationQueryKey(query.queryKey), true);
   }
-  // Each project folder fetches its own ["project-sessions", <name>] list, so
-  // streamed field updates (pending_elicitations_count → "Needs response",
-  // status, runner_online, …) must overlay those caches too — otherwise a
-  // filed session's row stays frozen at fetch time. With every project the
-  // frame mentions cached, membership is decided locally like the sidebar's
-  // grouping; a project created or promoted elsewhere leaves it to the server.
-  // Folders hold only the viewer's own sessions, so another owner's private
-  // project id can't make them ambiguous.
+  // Folder caches get the same field overlay. Membership is decided locally
+  // when every project the frame mentions is cached (folders hold only the
+  // viewer's own sessions); otherwise the server reconciles the folder.
   const projects = queryClient.getQueryData<ProjectSummary[]>(["projects"]) ?? [];
   const knownProjectIds = new Set(projects.map((p) => p.id));
   const projectsKnown = [...itemsById.values()].every(
@@ -405,12 +400,25 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
     // with, so a frame applied mid-fetch is lost when the fetch lands. Replay
     // such frames once those lists settle; re-applying a frame is idempotent.
     const replayItems = new Map<string, SessionListWireItem>();
+    const replayRemoved = new Set<string>();
     const replayLists = new Set<string>();
+    const fetchingListHashes = () =>
+      [["conversations"], ["project-sessions"]].flatMap((queryKey) =>
+        queryClient
+          .getQueryCache()
+          .findAll({ queryKey })
+          .filter((query) => query.state.fetchStatus === "fetching")
+          .map((query) => query.queryHash),
+      );
     const replayAfterFetch = (query: Query) => {
       if (query.state.fetchStatus !== "idle") return;
       replayLists.delete(query.queryHash);
       applyItemsToCache(queryClient, [...replayItems.values()], getCurrentUserId());
-      if (replayLists.size === 0) replayItems.clear();
+      if (replayRemoved.size > 0) removeIdsFromCache(queryClient, [...replayRemoved]);
+      if (replayLists.size === 0) {
+        replayItems.clear();
+        replayRemoved.clear();
+      }
     };
 
     // See commentsFingerprintsRef: invalidate `["comments", id]` (prefix —
@@ -469,6 +477,14 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
                 : previous,
           );
           {
+            const fetching = fetchingListHashes();
+            if (fetching.length > 0) {
+              for (const id of frame.ids) {
+                replayItems.delete(id);
+                replayRemoved.add(id);
+              }
+              for (const hash of fetching) replayLists.add(hash);
+            }
             const { removedAny, stranded } = removeIdsFromCache(queryClient, frame.ids);
             if (removedAny) scheduleInvalidate({ membership: true, lists: stranded });
           }
@@ -506,13 +522,9 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
             for (const item of frame.items) replayItems.set(item.id, item);
             for (const hash of fetchingLists) replayLists.add(hash);
           }
-          // A session new to every list, or a change to a membership-deciding
-          // field, can alter lists only the server can evaluate.
-          //
-          // Skip the active session: its updated_at bumps on open before the
-          // initial list fetch returns, so it lands in missingIds even though
-          // it isn't a genuinely new session. Its data is covered by
-          // useSession and it's pinned in the sidebar via ActiveChatOverride.
+          // A session new to every list, or a membership-deciding field change,
+          // needs the server-evaluated lists to reconcile. Skip the active
+          // session: it bumps updated_at on open, before the first list fetch lands.
           const sidebarMissingIds = activeIdRef.current
             ? missingIds.filter((id) => id !== activeIdRef.current)
             : missingIds;
@@ -553,7 +565,11 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
       // folder members join the stream's watch-set.
       if (Array.isArray(key) && (key[0] === "conversations" || key[0] === "project-sessions")) {
         scheduleWatch();
-        if (event.type === "updated" && replayLists.has(event.query.queryHash)) {
+        if (event.type === "removed") {
+          // A list dropped mid-fetch never settles; forget its pending replay.
+          replayLists.delete(event.query.queryHash);
+          if (replayLists.size === 0) replayItems.clear();
+        } else if (event.type === "updated" && replayLists.has(event.query.queryHash)) {
           replayAfterFetch(event.query);
         }
       }
