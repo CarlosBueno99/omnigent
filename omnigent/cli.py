@@ -4820,12 +4820,11 @@ def _stop_local_server_and_daemon(*, force: bool) -> _StoppedLocalProcesses:
 
     :param force: SIGKILL the daemon after the grace period if it does not
         exit on SIGTERM.
-    :returns: ``server`` when a healthy background server (or an untracked
-        one on the canonical port) was running; ``daemon`` when a local daemon
-        this user owns was terminated. A stale or foreign record is dropped
+    :returns: ``server`` when the recorded server process (or an untracked one
+        on the canonical port) was terminated; ``daemon`` when a local daemon
+        this user owns was terminated. Stale or recycled records are dropped
         without counting, and a daemon that will not exit is reported.
     """
-    was_running = local_server_url_if_healthy() is not None
     local_record = _find_daemon_record(_LOCAL_DAEMON_MARKER)
     daemon = False
     if local_record is not None:
@@ -4833,13 +4832,16 @@ def _stop_local_server_and_daemon(*, force: bool) -> _StoppedLocalProcesses:
             daemon = _terminate_daemon(local_record, force=force) == _STOP_TERMINATED
         except click.ClickException as exc:
             # A stubborn daemon shouldn't block stopping the server.
-            click.echo(exc.message, err=True)
-    stop_local_omnigent_server()
+            click.echo(
+                f"{exc.message} It keeps running the code it loaded until it is restarted.",
+                err=True,
+            )
+    server = stop_local_omnigent_server()
     # Also catch an orphan on the canonical port whose pidfile was lost, so
     # `server stop` isn't blind to it (it reported "No background server is
     # running" while one was still listening on the default port).
     orphan_pid = stop_untracked_local_server()
-    return _StoppedLocalProcesses(server=was_running or orphan_pid is not None, daemon=daemon)
+    return _StoppedLocalProcesses(server=server or orphan_pid is not None, daemon=daemon)
 
 
 def _run_background_server() -> None:

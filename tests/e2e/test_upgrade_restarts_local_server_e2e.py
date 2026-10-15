@@ -15,6 +15,7 @@ import contextlib
 import http.server
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -79,11 +80,11 @@ if [ "$1 $2 $3" != "tool upgrade omnigent" ]; then
   echo "fake uv: unexpected arguments: $*" >&2
   exit 1
 fi
-"{python}" - <<'PY'
+{python} - <<'PY'
 import pathlib, re
-path = pathlib.Path("{metadata}")
+path = pathlib.Path({metadata})
 path.write_text(re.sub(r"(?m)^Version: .*", "Version: {new}", path.read_text()))
-version = pathlib.Path("{version_py}")
+version = pathlib.Path({version_py})
 version.write_text(re.sub(r"(?m)^VERSION = .*", 'VERSION = "{new}"', version.read_text()))
 PY
 echo "Updated omnigent v{old} -> v{new}" >&2
@@ -113,9 +114,9 @@ def _fabricate_uv_tool_install(root: Path) -> dict[str, str]:
     fake_uv = bin_dir / "uv"
     fake_uv.write_text(
         _FAKE_UV.format(
-            python=sys.executable,
-            metadata=metadata,
-            version_py=runtime / "omnigent" / "version.py",
+            python=shlex.quote(sys.executable),
+            metadata=json.dumps(str(metadata)),
+            version_py=json.dumps(str(runtime / "omnigent" / "version.py")),
             old=_INSTALLED_VERSION,
             new=_AVAILABLE_VERSION,
         )
@@ -211,18 +212,25 @@ def _recorded_pids(home: Path) -> list[int]:
     return pids
 
 
-def _terminate(pid: int) -> None:
-    with contextlib.suppress(OSError):
-        os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + 10.0
+def _wait_for_exit(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
-            return
+            return True
         time.sleep(POLL_INTERVAL_S)
+    return False
+
+
+def _terminate(pid: int) -> None:
+    with contextlib.suppress(OSError):
+        os.kill(pid, signal.SIGTERM)
+    if _wait_for_exit(pid, 10.0):
+        return
     with contextlib.suppress(OSError):
         os.kill(pid, signal.SIGKILL)
+    _wait_for_exit(pid, 5.0)
 
 
 def _stop_everything(home: Path, env: dict[str, str]) -> None:

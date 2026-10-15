@@ -481,28 +481,51 @@ def _terminate_pid(pid: int) -> None:
         time.sleep(_STOP_POLL_INTERVAL_S)
 
 
-def stop_local_omnigent_server() -> None:
+def _pid_is_local_server(pid: int) -> bool:
+    """Whether *pid* is alive and still looks like the recorded Omnigent server.
+
+    The pidfile carries no start-time identity like the daemon registry, so a
+    pid recycled after a reboot would otherwise be signalled as if it were the
+    server. Every launch path spells ``omni`` somewhere in argv (``-m
+    omnigent.cli``, the ``omni``/``omnigent`` console script, the tool venv),
+    so a readable command line without it marks a recycled pid; an unreadable
+    one falls back to alive-only.
+    """
+    if not _pid_alive(pid):
+        return False
+    try:
+        cmdline = psutil.Process(pid).cmdline()
+    except Exception:  # noqa: BLE001 — gone or unreadable command line: alive-only
+        return True
+    return not cmdline or any("omni" in part for part in cmdline)
+
+
+def stop_local_omnigent_server() -> bool:
     """Stop the daemon-owned background local server and clear its files.
 
-    Sends ``SIGTERM`` to the recorded server PID (if alive), waits up to
-    :data:`_STOP_GRACE_S` for it to exit (so the listening socket is
-    released and the port becomes immediately re-bindable), then escalates
-    to ``SIGKILL`` if necessary. Removes the pidfile, config-signature
-    sidecar, and log-path sidecar so a subsequent
-    :func:`ensure_local_omnigent_server` spawns a fresh
-    server rather than reusing the stopped one. Best-effort: a missing or
-    dead server is a no-op.
+    Sends ``SIGTERM`` to the recorded server PID (if alive and still the
+    server), waits up to :data:`_STOP_GRACE_S` for it to exit (so the
+    listening socket is released and the port becomes immediately
+    re-bindable), then escalates to ``SIGKILL`` if necessary. Removes the
+    pidfile, config-signature sidecar, and log-path sidecar so a subsequent
+    :func:`ensure_local_omnigent_server` spawns a fresh server rather than
+    reusing the stopped one. Best-effort: a missing or dead server is a no-op.
 
     This is pidfile-scoped by design. An orphan whose pidfile was lost is
     NOT visible here — :func:`stop_untracked_local_server` covers that, and
     the off-switch (``omnigent stop`` / ``server stop``) calls both.
 
-    :returns: None.
+    :returns: ``True`` when a live recorded server process was terminated;
+        ``False`` when the record was missing, dead, or named a recycled pid
+        (which is left alone and only has its record cleared).
     """
     existing = _read_local_server_pid_file()
+    stopped = False
     if existing is not None:
         pid, _port = existing
-        _terminate_pid(pid)
+        if _pid_is_local_server(pid):
+            _terminate_pid(pid)
+            stopped = True
     with contextlib.suppress(OSError):
         _LOCAL_SERVER_PID_PATH.unlink()
     with contextlib.suppress(OSError):
@@ -511,6 +534,7 @@ def stop_local_omnigent_server() -> None:
         _LOCAL_SERVER_BASE_PATH_PATH.unlink()
     with contextlib.suppress(OSError):
         _LOCAL_SERVER_LOG_REF_PATH.unlink()
+    return stopped
 
 
 @dataclass(frozen=True)

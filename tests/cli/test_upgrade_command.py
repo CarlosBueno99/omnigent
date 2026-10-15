@@ -161,21 +161,18 @@ def test_upgrade_runs_installer_and_drains_first(
     monkeypatch.setattr(
         "omnigent.update_check._probe_installed_distribution", lambda: ("0.2.0", None)
     )
+    restarted: list[_StoppedLocalProcesses] = []
     monkeypatch.setattr(
         "omnigent.cli._restart_local_processes_after_upgrade",
-        lambda stopped: events.append(f"restart({stopped})"),
+        lambda stopped: (events.append("restart"), restarted.append(stopped)),
     )
 
     result = CliRunner().invoke(cli, ["upgrade"])
 
     assert result.exit_code == 0, result.output
     # Drain happened before the stop, before the install ran; the restart came last.
-    assert events == [
-        "drained",
-        "stop(force=False)",
-        "install",
-        f"restart({_StoppedLocalProcesses(server=True, daemon=True)})",
-    ]
+    assert events == ["drained", "stop(force=False)", "install", "restart"]
+    assert restarted == [_STOPPED_SERVER_AND_DAEMON]
     assert ran == ["uv tool upgrade omnigent"]
     assert "Upgraded to v0.2.0" in result.output
     assert "Re-run your command" not in result.output
@@ -275,7 +272,7 @@ def test_upgrade_ignores_a_recycled_daemon_pid(
     monkeypatch.setattr(
         "omnigent.cli._stop_local_server_and_daemon", _stop_local_server_and_daemon
     )
-    monkeypatch.setattr("omnigent.cli.local_server_url_if_healthy", lambda: None)
+    monkeypatch.setattr("omnigent.cli.local_server_url_if_healthy", _no_health_probe)
     monkeypatch.setattr(
         "omnigent.cli._find_daemon_record",
         lambda _target: SimpleNamespace(pid=os.getpid(), target="local"),
@@ -283,7 +280,7 @@ def test_upgrade_ignores_a_recycled_daemon_pid(
     monkeypatch.setattr("omnigent.cli._pid_is_recorded_daemon", lambda _record: False)
     dropped: list[object] = []
     monkeypatch.setattr("omnigent.cli._delete_daemon_record", dropped.append)
-    monkeypatch.setattr("omnigent.cli.stop_local_omnigent_server", lambda: None)
+    monkeypatch.setattr("omnigent.cli.stop_local_omnigent_server", lambda: False)
     monkeypatch.setattr("omnigent.cli.stop_untracked_local_server", lambda: None)
     monkeypatch.setattr("omnigent.update_check._run_upgrade_command", lambda *_a, **_k: 0)
     monkeypatch.setattr(
@@ -298,6 +295,31 @@ def test_upgrade_ignores_a_recycled_daemon_pid(
     assert "pid recycled" in result.output
     assert len(dropped) == 1
     assert restarted == [_STOPPED_NOTHING]
+
+
+def test_upgrade_restarts_a_server_the_stop_terminated_even_when_unhealthy(
+    monkeypatch: pytest.MonkeyPatch, _wheel_install: None
+) -> None:
+    """A live server that fails /health is still terminated by the stop, so it comes back."""
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda *_a, **_k: "0.2.0")
+    monkeypatch.setattr(
+        "omnigent.cli._stop_local_server_and_daemon", _stop_local_server_and_daemon
+    )
+    monkeypatch.setattr("omnigent.cli.local_server_url_if_healthy", _no_health_probe)
+    monkeypatch.setattr("omnigent.cli._find_daemon_record", lambda _target: None)
+    monkeypatch.setattr("omnigent.cli.stop_local_omnigent_server", lambda: True)
+    monkeypatch.setattr("omnigent.cli.stop_untracked_local_server", lambda: None)
+    monkeypatch.setattr("omnigent.update_check._run_upgrade_command", lambda *_a, **_k: 0)
+    monkeypatch.setattr(
+        "omnigent.update_check._probe_installed_distribution", lambda: ("0.2.0", None)
+    )
+    restarted: list[_StoppedLocalProcesses] = []
+    monkeypatch.setattr("omnigent.cli._restart_local_processes_after_upgrade", restarted.append)
+
+    result = CliRunner().invoke(cli, ["upgrade"])
+
+    assert result.exit_code == 0, result.output
+    assert restarted == [_STOPPED_SERVER_ONLY]
 
 
 def _completed(returncode: int) -> subprocess.CompletedProcess[bytes]:
@@ -407,11 +429,13 @@ def test_restart_after_upgrade_reports_an_unlaunchable_command(
     assert "exit status" not in err
 
 
+def _no_health_probe() -> str | None:
+    pytest.fail("the stop must decide from termination outcomes, not the health probe")
+
+
 def _stop_path(monkeypatch: pytest.MonkeyPatch, *, outcome: object) -> None:
-    """Drive the real stop: healthy server, local daemon whose termination yields *outcome*."""
-    monkeypatch.setattr(
-        "omnigent.cli.local_server_url_if_healthy", lambda: "http://127.0.0.1:6767"
-    )
+    """Drive the real stop: a server it terminates, a daemon whose termination yields *outcome*."""
+    monkeypatch.setattr("omnigent.cli.local_server_url_if_healthy", _no_health_probe)
     monkeypatch.setattr(
         "omnigent.cli._find_daemon_record",
         lambda _target: SimpleNamespace(pid=4242, target="local"),
@@ -423,7 +447,7 @@ def _stop_path(monkeypatch: pytest.MonkeyPatch, *, outcome: object) -> None:
         return str(outcome)
 
     monkeypatch.setattr("omnigent.cli._terminate_daemon", _terminate)
-    monkeypatch.setattr("omnigent.cli.stop_local_omnigent_server", lambda: None)
+    monkeypatch.setattr("omnigent.cli.stop_local_omnigent_server", lambda: True)
     monkeypatch.setattr("omnigent.cli.stop_untracked_local_server", lambda: None)
 
 
@@ -452,7 +476,9 @@ def test_stop_reports_a_daemon_that_will_not_exit(
     )
 
     assert _stop_local_server_and_daemon(force=False) == _STOPPED_SERVER_ONLY
-    assert "did not exit; retry with --force" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "did not exit; retry with --force" in err
+    assert "keeps running the code it loaded" in err
 
 
 def test_interrupted_install_prints_the_manual_command_instead_of_restarting(
@@ -1200,5 +1226,5 @@ def test_upgrade_nightly_failure_surfaces_recovery_when_install_is_gone(
     assert "your previous install is intact" not in result.output
     assert "no longer installed" in result.output
     assert "install.sh" in result.output
-    # The restart is still attempted; with the install gone it can only print the manual hint.
+    # Restart is still attempted after the installer removes the package.
     assert restarted == [_STOPPED_SERVER_ONLY]

@@ -74,8 +74,9 @@ no registered distribution contributes an empty version and is unaffected.)
 5. Run the installer-appropriate command (`_build_upgrade_suggestion` +
    `_run_upgrade_command`): `uv tool upgrade omnigent`, `pip install -U
    omnigent`, `pipx upgrade omnigent`, `--reinstall <vcs_url>`, etc.
-6. **Restart what was stopped**: relaunch the server / local host daemon that
-   step 4 found running, through a fresh `sys.executable -m omnigent.cli start`
+6. **Restart what was stopped**: relaunch what step 4 actually terminated (the
+   recorded server process and/or a daemon this user owns — stale or recycled
+   records never count), through a fresh `sys.executable -m omnigent.cli start`
    (or `server --background` when no daemon was hosting) so the new code is
    imported — this process still holds the old package. The restart also runs
    after a failed or no-op install, so the machine keeps hosting on whatever

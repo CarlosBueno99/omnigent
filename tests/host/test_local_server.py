@@ -12,6 +12,7 @@ import json
 import subprocess
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -566,6 +567,76 @@ def test_spawn_local_server_preserves_runtime_and_workspace(
     assert Path(observed["cwd"]) == workspace.resolve()
     assert Path(observed["config"]) == local_server.global_config_path()
     assert Path(observed["data"]) == local_server._local_data_dir()
+
+
+def test_stop_local_omnigent_server_reports_a_terminated_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stop reports ``True`` only when it terminated a live recorded server."""
+    pid_file = tmp_path / "local_server.pid"
+    pid_file.write_text("4242\n6767\n")
+    monkeypatch.setattr(local_server, "_LOCAL_SERVER_PID_PATH", pid_file)
+    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid: pid == 4242)
+    terminated: list[int] = []
+    monkeypatch.setattr(local_server, "_terminate_pid", terminated.append)
+
+    assert local_server.stop_local_omnigent_server() is True
+    assert terminated == [4242]
+    assert not pid_file.exists()
+
+
+def test_stop_local_omnigent_server_leaves_a_recycled_pid_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recorded pid that no longer names the server is not signalled; only its record goes."""
+    pid_file = tmp_path / "local_server.pid"
+    pid_file.write_text("4242\n6767\n")
+    monkeypatch.setattr(local_server, "_LOCAL_SERVER_PID_PATH", pid_file)
+    monkeypatch.setattr(local_server, "_pid_is_local_server", lambda pid: False)
+    monkeypatch.setattr(
+        local_server, "_terminate_pid", lambda pid: pytest.fail(f"signalled recycled pid {pid}")
+    )
+
+    assert local_server.stop_local_omnigent_server() is False
+    assert not pid_file.exists()
+
+
+def test_stop_local_omnigent_server_false_without_a_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(local_server, "_LOCAL_SERVER_PID_PATH", tmp_path / "absent.pid")
+
+    assert local_server.stop_local_omnigent_server() is False
+
+
+@pytest.mark.parametrize(
+    ("alive", "cmdline", "expected"),
+    [
+        (False, ["python", "-m", "omnigent.cli", "server"], False),
+        (True, ["python", "-m", "omnigent.cli", "server"], True),
+        (True, ["/home/u/.local/bin/omni", "server", "--background"], True),
+        (True, ["sshd: user@pts/0"], False),
+        (True, RuntimeError("unreadable"), True),
+        (True, [], True),
+    ],
+)
+def test_pid_is_local_server_rejects_only_a_readable_foreign_cmdline(
+    monkeypatch: pytest.MonkeyPatch, alive: bool, cmdline: object, expected: bool
+) -> None:
+    monkeypatch.setattr(local_server, "_pid_alive", lambda pid: alive)
+
+    class _Proc:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def cmdline(self) -> list[str]:
+            if isinstance(cmdline, Exception):
+                raise cmdline
+            return list(cmdline)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(local_server, "psutil", SimpleNamespace(Process=_Proc))
+
+    assert local_server._pid_is_local_server(4242) is expected
 
 
 def test_stop_local_omnigent_server_waits_for_process_exit(
