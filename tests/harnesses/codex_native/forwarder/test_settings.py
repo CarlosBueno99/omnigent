@@ -417,57 +417,40 @@ async def test_subscribe_mirrors_resumed_thread_model_over_divergent_launch_pin(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("launch_config", "pick"),
+    [
+        pytest.param('model = "gpt-5.6-sol"\n', "gpt-5.6-sol", id="pinned-return-to-pin"),
+        pytest.param('model_reasoning_effort = "medium"\n', "gpt-5.5", id="unpinned-first-pick"),
+    ],
+)
 async def test_refresh_after_resume_keeps_thread_model_until_config_is_rewritten(
-    tmp_path: Path,
+    tmp_path: Path, launch_config: str, pick: str
 ) -> None:
     """After a resume, only a rewritten config.toml replaces the thread's model.
 
-    The next ``turn/started`` re-read of the unchanged file keeps the resumed
-    thread's model; an in-TUI ``/model`` that rewrites the file wins — even
-    when the pick is the model the relaunch had pinned — and stays won on
-    the following unchanged re-read.
+    The subscription writes the resumed thread's model into the launch config,
+    whether that config pinned another model or had no ``model`` line. The next
+    ``turn/started`` re-read of the unchanged file keeps it; an in-TUI
+    ``/model`` that rewrites the file wins, even when the pick is the model the
+    relaunch had pinned, and stays won on the following unchanged re-read.
     """
-    _write_codex_config(tmp_path, 'model = "gpt-5.6-sol"\n')
-    state = await _subscribe_resumed_thread(
-        tmp_path, _RecordingClient(), thread_model="databricks-kimi-k3"
-    )
-    assert state.model == "databricks-kimi-k3"
-
-    fwd._refresh_model_from_config(tmp_path, state)
-    assert state.model == "databricks-kimi-k3"
-
-    # The user picks the formerly pinned model in the TUI: /model rewrites config.toml.
-    _write_codex_config(tmp_path, 'model = "gpt-5.6-sol"\n')
-    fwd._refresh_model_from_config(tmp_path, state)
-    assert state.model == "gpt-5.6-sol"
-
-    fwd._refresh_model_from_config(tmp_path, state)
-    assert state.model == "gpt-5.6-sol"
-
-
-@pytest.mark.asyncio
-async def test_refresh_after_resume_without_pinned_model_adopts_first_tui_pick(
-    tmp_path: Path,
-) -> None:
-    """A config.toml with no model line still mirrors the first in-TUI ``/model``.
-
-    An unpinned launch copies a config without a top-level ``model``; the
-    subscription writes the resumed thread's model into it, so the user's
-    first ``/model`` is a change against that value and replaces the thread
-    model.
-    """
-    _write_codex_config(tmp_path, 'model_reasoning_effort = "medium"\n')
+    _write_codex_config(tmp_path, launch_config)
     client = _RecordingClient()
-    state = await _subscribe_resumed_thread(tmp_path, client, thread_model="gpt-5.4-mini")
-    assert _model_posts(client) == ["gpt-5.4-mini"]
-    assert read_codex_config_model(tmp_path) == "gpt-5.4-mini"
-
-    _write_codex_config(tmp_path, 'model = "gpt-5.5"\nmodel_reasoning_effort = "medium"\n')
-    fwd._refresh_model_from_config(tmp_path, state)
-    assert state.model == "gpt-5.5"
+    state = await _subscribe_resumed_thread(tmp_path, client, thread_model="databricks-kimi-k3")
+    assert _model_posts(client) == ["databricks-kimi-k3"]
+    assert read_codex_config_model(tmp_path) == "databricks-kimi-k3"
 
     fwd._refresh_model_from_config(tmp_path, state)
-    assert state.model == "gpt-5.5"
+    assert state.model == "databricks-kimi-k3"
+
+    # The user picks a model in the TUI: /model rewrites config.toml.
+    _write_codex_config(tmp_path, f'model = "{pick}"\n')
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == pick
+
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == pick
 
 
 @pytest.mark.asyncio
@@ -528,6 +511,37 @@ async def test_subscribe_keeps_a_model_the_tui_picked_during_resume_mirroring(
     assert read_unmirrored_codex_settings(tmp_path) == {}
     assert state.model == "gpt-5.5"
     assert _model_posts(client) == ["gpt-5.5"]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_clears_a_stale_unmirrored_record_for_the_resumed_model(
+    tmp_path: Path,
+) -> None:
+    """A leftover failed-write record must not shadow a config that already matches.
+
+    The refresh prefers an unmirrored record over the file, so a record from
+    an earlier failed mirror that is still bound to the current revision would
+    otherwise mirror the wrong model. The subscription rewrites the file and
+    clears the record even though the file already names the thread's model.
+    """
+    from omnigent.harnesses.codex_native.bridge import (
+        codex_config_revision,
+        write_unmirrored_codex_settings,
+    )
+
+    _write_codex_config(tmp_path, 'model = "databricks-kimi-k3"\n')
+    write_unmirrored_codex_settings(
+        tmp_path, {"model": "gpt-5.6-sol"}, revision=codex_config_revision(tmp_path)
+    )
+    assert read_unmirrored_codex_settings(tmp_path) == {"model": "gpt-5.6-sol"}
+    client = _RecordingClient()
+
+    state = await _subscribe_resumed_thread(tmp_path, client, thread_model="databricks-kimi-k3")
+
+    assert read_unmirrored_codex_settings(tmp_path) == {}
+    assert read_codex_config_model(tmp_path) == "databricks-kimi-k3"
+    assert state.model == "databricks-kimi-k3"
+    assert _model_posts(client) == ["databricks-kimi-k3"]
 
 
 def test_thread_settings_updated_records_effort_and_collaboration_mode() -> None:

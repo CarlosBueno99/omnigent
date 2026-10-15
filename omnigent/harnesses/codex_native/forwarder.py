@@ -3309,7 +3309,7 @@ async def _mirror_resumed_model(bridge_dir: Path, response: CodexMessage) -> Non
     executor), so write the reported model when the file disagrees, as the
     executor does for a routed switch. The write is bound to the revision
     read, so a terminal ``/model`` landing meanwhile keeps its newer pick. A
-    failed write is recorded for those readers like any other applied setting.
+    failed write is recorded for the readers that honor unmirrored settings.
 
     :param bridge_dir: The session's native-Codex bridge directory.
     :param response: Codex ``thread/resume`` response envelope.
@@ -3322,7 +3322,10 @@ async def _mirror_resumed_model(bridge_dir: Path, response: CodexMessage) -> Non
 
     def adopt() -> dict[str, str]:
         revision = codex_config_revision(bridge_dir)
-        if read_codex_config_model(bridge_dir) == model:
+        # A stale failed-write record would otherwise shadow the file's value.
+        if read_codex_config_model(bridge_dir) == model and read_unmirrored_codex_settings(
+            bridge_dir
+        ).get("model") in (None, model):
             return {}
         return mirror_applied_codex_settings(
             bridge_dir, {"model": model}, expected_revision=revision
