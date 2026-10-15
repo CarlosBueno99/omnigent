@@ -3740,8 +3740,8 @@ def test_shell_command_bearer_auth_reports_failed_command(caplog):
 # ---------------------------------------------------------------------------
 
 
-def _completed_event(cost: object) -> _FakeRawEvent:
-    """A ``response.completed`` raw event whose typed usage carries a gateway cost."""
+def _completed_event(cost: object, event_type: str = "response.completed") -> _FakeRawEvent:
+    """A terminal response raw event whose typed usage carries a gateway cost."""
     usage = ResponseUsage.model_validate(
         {
             "input_tokens": 10,
@@ -3753,9 +3753,7 @@ def _completed_event(cost: object) -> _FakeRawEvent:
         }
     )
     return _FakeRawEvent(
-        data=types.SimpleNamespace(
-            type="response.completed", response=types.SimpleNamespace(usage=usage)
-        )
+        data=types.SimpleNamespace(type=event_type, response=types.SimpleNamespace(usage=usage))
     )
 
 
@@ -3775,11 +3773,13 @@ class _GatewayBilledResult(_FakeResult):
         *args,
         calls: Sequence[_GatewayCall] = (),
         terminal_events: bool = True,
+        terminal_type: str = "response.completed",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self._calls = list(calls)
         self._terminal_events = terminal_events
+        self._terminal_type = terminal_type
         self._hook_tasks: list[asyncio.Task[None]] = []
 
     def on_run_streamed(self) -> None:
@@ -3797,7 +3797,7 @@ class _GatewayBilledResult(_FakeResult):
             await asyncio.gather(*self._hook_tasks)
         if self._terminal_events:
             for _header, usage_cost in self._calls:
-                yield _completed_event(usage_cost)
+                yield _completed_event(usage_cost, self._terminal_type)
         async for event in super().stream_events():
             yield event
 
@@ -3806,6 +3806,7 @@ def _gateway_billed_result(
     calls: Sequence[_GatewayCall] = (),
     *,
     tokens: tuple[int, int, int] = (10, 5, 15),
+    terminal_type: str = "response.completed",
 ) -> _GatewayBilledResult:
     input_tokens, output_tokens, total_tokens = tokens
     return _GatewayBilledResult(
@@ -3821,6 +3822,7 @@ def _gateway_billed_result(
             )
         ],
         calls=calls,
+        terminal_type=terminal_type,
     )
 
 
@@ -3835,13 +3837,18 @@ async def _turn_usage(executor: OpenAIAgentsSDKExecutor, session_id: str) -> dic
 
 
 def _billed_turn_usage(
-    calls: Sequence[_GatewayCall], *, tokens: tuple[int, int, int] = (10, 5, 15)
+    calls: Sequence[_GatewayCall],
+    *,
+    tokens: tuple[int, int, int] = (10, 5, 15),
+    terminal_type: str = "response.completed",
 ) -> dict | None:
     """Run one gateway-billed turn on a stand-in client and return its usage."""
 
     async def _t():
         _FakeRunner.last_calls = []
-        _FakeRunner.next_result = _gateway_billed_result(calls, tokens=tokens)
+        _FakeRunner.next_result = _gateway_billed_result(
+            calls, tokens=tokens, terminal_type=terminal_type
+        )
         executor = OpenAIAgentsSDKExecutor(client=object())
         with patch(
             "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
@@ -3852,20 +3859,43 @@ def _billed_turn_usage(
     return _run(_t())
 
 
-def test_turn_usage_carries_gateway_reported_cost() -> None:
-    """A gateway-billed turn reports the summed header costs beside its token counts."""
-    usage = _billed_turn_usage([("0.0123", None), ("0.0007", None)])
+@pytest.mark.parametrize(
+    ("calls", "expected_cost"),
+    [
+        pytest.param([("0.0123", None), ("0.0007", None)], 0.013, id="headers-summed"),
+        pytest.param([(None, 0.0123), (None, 0.0007)], 0.013, id="annotations-summed"),
+        pytest.param([("0.0007", 0.0123)], 0.0123, id="annotation-over-own-header"),
+        pytest.param([("0.02", 0.0), ("0.01", None)], 0.01, id="zero-annotation-over-own-header"),
+        pytest.param([(None, 0.01), ("0.02", None)], 0.03, id="annotation-then-header"),
+        pytest.param([("0.02", None), (None, 0.01)], 0.03, id="header-then-annotation"),
+        pytest.param([("0", None)], 0.0, id="zero-header-is-priced"),
+        pytest.param([(None, None)], None, id="no-signal-stays-unpriced"),
+        pytest.param([("0.01", None), (None, None)], None, id="one-unpriced-call-stays-unpriced"),
+        pytest.param([("free", None), ("0.01", None)], None, id="malformed-header-stays-unpriced"),
+    ],
+)
+def test_turn_usage_bills_gateway_calls(calls: list, expected_cost: float | None) -> None:
+    """Each model call bills its annotation over its own header and the turn sums the
+    calls; a turn with an unpriced model call reports no ``cost_usd`` so the server
+    keeps catalog pricing for it. Token counts are unaffected."""
+    usage = _billed_turn_usage(calls)
     assert usage is not None
-    assert usage["cost_usd"] == pytest.approx(0.013)
+    if expected_cost is None:
+        assert "cost_usd" not in usage
+    else:
+        assert usage["cost_usd"] == pytest.approx(expected_cost)
     assert usage["input_tokens"] == 10
     assert usage["output_tokens"] == 5
 
 
-def test_turn_usage_omits_cost_without_gateway_signal() -> None:
-    """Without a reported cost the usage carries no ``cost_usd`` and stays catalog-priced."""
-    usage = _billed_turn_usage([(None, None)])
+@pytest.mark.parametrize(
+    "terminal_type", ["response.completed", "response.incomplete", "response.failed"]
+)
+def test_every_terminal_event_settles_its_model_call(terminal_type: str) -> None:
+    """Completed, incomplete and failed responses all settle the call they end."""
+    usage = _billed_turn_usage([("0.0007", 0.0123), ("0.02", None)], terminal_type=terminal_type)
     assert usage is not None
-    assert "cost_usd" not in usage
+    assert usage["cost_usd"] == pytest.approx(0.0323)
 
 
 def test_gateway_cost_does_not_carry_over_to_the_next_turn() -> None:
@@ -3887,56 +3917,6 @@ def test_gateway_cost_does_not_carry_over_to_the_next_turn() -> None:
     first, second = _run(_t())
     assert first is not None and first["cost_usd"] == pytest.approx(0.02)
     assert second is not None and "cost_usd" not in second
-
-
-def test_turn_usage_prefers_gateway_usage_cost_over_header() -> None:
-    """A call's exact ``usage.cost`` annotation wins over its own header estimate."""
-    usage = _billed_turn_usage([("0.0007", 0.0123)])
-    assert usage is not None
-    assert usage["cost_usd"] == pytest.approx(0.0123)
-
-
-def test_turn_usage_sums_gateway_usage_costs_across_model_calls() -> None:
-    """Every completed response's ``usage.cost`` is credited to the turn."""
-    usage = _billed_turn_usage([(None, 0.0123), (None, 0.0007)])
-    assert usage is not None
-    assert usage["cost_usd"] == pytest.approx(0.013)
-    assert usage["input_tokens"] == 10
-    assert usage["output_tokens"] == 5
-
-
-@pytest.mark.parametrize(
-    "calls",
-    [[(None, 0.01), ("0.02", None)], [("0.02", None), (None, 0.01)]],
-    ids=["annotation-then-header", "header-then-annotation"],
-)
-def test_turn_usage_credits_each_model_call_from_its_own_signal(calls: list) -> None:
-    """A header-only call and an annotated call in one turn are each billed once."""
-    usage = _billed_turn_usage(calls)
-    assert usage is not None
-    assert usage["cost_usd"] == pytest.approx(0.03)
-
-
-def test_turn_usage_keeps_a_zero_usage_cost_over_that_calls_header() -> None:
-    """An explicit ``usage.cost`` of 0 beats its call's header; other calls are unaffected."""
-    usage = _billed_turn_usage([("0.02", 0.0), ("0.01", None)])
-    assert usage is not None
-    assert usage["cost_usd"] == pytest.approx(0.01)
-
-
-def test_turn_usage_stays_catalog_priced_when_a_model_call_is_unpriced() -> None:
-    """A turn with one unpriced model call reports no ``cost_usd``: a partial sum would
-    stop the server from pricing the unpriced call from the catalog."""
-    usage = _billed_turn_usage([("0.01", None), (None, None)])
-    assert usage is not None
-    assert "cost_usd" not in usage
-
-
-def test_turn_usage_reports_zero_gateway_cost_as_priced() -> None:
-    """A gateway that billed nothing prices the turn at ``0`` instead of leaving it unpriced."""
-    usage = _billed_turn_usage([("0", None)])
-    assert usage is not None
-    assert usage["cost_usd"] == 0.0
 
 
 def test_token_less_turn_stays_unpriced_despite_gateway_cost() -> None:
@@ -4060,16 +4040,24 @@ def test_retry_attempt_cannot_settle_an_earlier_attempts_orphaned_charge() -> No
     ],
 )
 def test_gateway_cost_hook_ignores_unusable_headers(status: int, value: str) -> None:
-    """A malformed or negative header records no cost; a failed response records nothing."""
+    """A malformed or negative header leaves the model call recorded but unpriced; a
+    failed response records nothing."""
 
     async def _t():
         charges: list[_GatewayCharge] = []
         _turn_gateway_charges.set(charges)
-        await _record_gateway_cost(httpx.Response(status, headers={_GATEWAY_COST_HEADER: value}))
+        await _record_gateway_cost(
+            httpx.Response(
+                status,
+                headers={_GATEWAY_COST_HEADER: value},
+                request=httpx.Request("POST", "http://gateway.test/v1/responses"),
+            )
+        )
         return charges
 
     charges = _run(_t())
-    assert [charge.header_cost for charge in charges] == ([] if status == 500 else [None])
+    expected = [] if status == 500 else [(None, True)]
+    assert [(charge.header_cost, charge.streams_response) for charge in charges] == expected
 
 
 def test_gateway_cost_hook_records_zero_as_priced() -> None:

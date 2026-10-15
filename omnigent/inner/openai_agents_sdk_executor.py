@@ -1215,7 +1215,10 @@ def _install_gateway_cost_hook(client: AsyncOpenAIClient) -> None:
     """
     http_client = getattr(client, "_client", None)
     if not isinstance(http_client, httpx.AsyncClient):
-        logger.debug(
+        # A real openai client without one means the SDK moved the attribute.
+        level = logging.WARNING if type(client).__module__.startswith("openai") else logging.DEBUG
+        logger.log(
+            level,
             "Gateway cost header hook not installed: %s has no httpx.AsyncClient",
             type(client).__name__,
         )
