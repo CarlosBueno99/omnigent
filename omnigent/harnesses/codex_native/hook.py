@@ -17,9 +17,8 @@ import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-# Codex blocks every tool call on this process, so the module import stays
-# stdlib-only: the bridge and the httpx-backed policy client are imported
-# inside the subcommands that need them, never on the observe-tool path.
+# Codex blocks each tool call on this process, so the module import stays
+# stdlib-only; the bridge and the policy client load inside the subcommands.
 if TYPE_CHECKING:
     from omnigent.harnesses.codex_native.app_server import CodexAppServerClient
 

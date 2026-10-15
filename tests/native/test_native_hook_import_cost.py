@@ -60,12 +60,14 @@ def test_hook_module_import_loads_no_heavy_third_party_graph(module: str) -> Non
 
 @pytest.mark.parametrize("module", _HOOK_MODULES)
 def test_observe_tool_path_skips_the_harness_bridge(module: str, tmp_path: Path) -> None:
-    # A non-PostToolUse payload exits before any network call, so only imports are measured.
+    # With no relay advertised in the bridge dir, the observer runs up to its
+    # failed relay lookup and exits 0, so only its imports are measured.
     statements = "\n".join(
         (
             f"from {module} import main",
             f"assert main(['observe-tool', '--bridge-dir', {str(tmp_path)!r}]) == 0",
         )
     )
-    loaded = _loaded_after(statements, stdin=json.dumps({"hook_event_name": "SessionStart"}))
+    payload = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {}}
+    loaded = _loaded_after(statements, stdin=json.dumps(payload))
     assert loaded == [], f"observe-tool via {module} loads {loaded} before dispatching"

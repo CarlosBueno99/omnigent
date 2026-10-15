@@ -2495,10 +2495,9 @@ def build_hook_settings(
         }
         hooks["PermissionRequest"] = [{"hooks": [permission_hook]}]
 
-        # Policy-gate native Claude Code tools, not just relay/MCP tools.
-        # The relay's evaluate-policy endpoint owns all transformation and
-        # verdict logic, so Claude's blocking tool-call path pays no
-        # interpreter spawn; the Python hook is only the relay-less fallback.
+        # Policy-gate native Claude Code tools, not just relay/MCP tools. The
+        # relay's evaluate-policy endpoint owns the verdict logic, so this path
+        # pays no interpreter spawn; the Python hook is the relay-less fallback.
         evaluate_policy_hook: _JsonObject = {
             "type": "command",
             "command": relay_hook_command(
@@ -6701,6 +6700,8 @@ _HOOK_EVALUATE_ROUTES = {
 def _write_owner_only(path: Path, text: str) -> None:
     """Create or replace *path* with mode 0600 from the start, never world-readable."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # The open mode only applies on creation; an older, wider file keeps its bits.
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
 

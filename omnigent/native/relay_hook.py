@@ -71,13 +71,11 @@ def relay_hook_command(
             f"p=$(head -c {limit + 1}); "
             f'[ "$(printf \'%s\' "$p" | wc -c)" -gt {limit} ] && exit 0; '
         )
-    # The env file is sourced inside the command substitution: a special
-    # builtin failing in the main shell (the file pruned between the test and
-    # the dot) would abort the script before the fallback could run.
-    # ``-q`` first: an ambient ~/.curlrc (an extra ``url``, say) must not see
-    # the payload or the bearer; only the relay's own config applies.
+    # Source the env file inside the command substitution so a failure there
+    # cannot abort the main shell before the fallback runs.
     script = (
         read_stdin + f"if [ -r {env} ] && [ -r {curlrc} ]; then "
+        # ``-q`` first: ignore any ambient ~/.curlrc; only the relay's config applies.
         f"out=$(. {env} && printf '%s' \"$p\" | curl -q -sf --max-time {max_time_s} -K {curlrc} "
         "-H 'Content-Type: application/json' --data-binary @- "
         f'"$OMNIGENT_RELAY_URL{route}" 2>/dev/null) '
