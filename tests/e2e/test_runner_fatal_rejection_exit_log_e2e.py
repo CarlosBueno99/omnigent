@@ -104,15 +104,17 @@ def test_fatal_401_rejection_exits_with_reason_and_no_traceback(
     )
     apply_runner_env(env)
 
-    with log_path.open("a") as log_handle:
-        proc = subprocess.Popen(
+    with (
+        log_path.open("a") as log_handle,
+        subprocess.Popen(
             [runner_executable(), "-P", "-m", "omnigent.runner._entry"],
             env=env,
             cwd=compat_runner_cwd() or str(workspace),
             stdin=subprocess.DEVNULL,
             stdout=log_handle,
             stderr=log_handle,
-        )
+        ) as proc,
+    ):
         try:
             exit_code = proc.wait(timeout=_RUNNER_EXIT_TIMEOUT_S)
         except subprocess.TimeoutExpired:
