@@ -16,7 +16,11 @@ import pytest
 import yaml
 
 from omnigent.host.frames import HostSkillsFrame
-from omnigent.host.skills import HostSkillDiscovery
+from omnigent.host.skills import (
+    INCOMPLETE_CATALOG_TTL_SECONDS,
+    SKILLS_CACHE_TTL_SECONDS,
+    HostSkillDiscovery,
+)
 from omnigent.spec import load
 from omnigent.spec.skill_sources import resolve_session_skills
 
@@ -238,9 +242,11 @@ def test_directory_catalog_never_downloads_a_session_bundle(tmp_path: Path) -> N
     fetch.assert_not_called()
 
 
-def test_incomplete_codex_catalog_reports_warnings_and_is_not_cached(
+def test_incomplete_codex_catalog_reports_warnings_and_is_cached_only_briefly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    now = [0.0]
+    monkeypatch.setattr("omnigent.host.skills.time", SimpleNamespace(monotonic=lambda: now[0]))
     codex_home = tmp_path / "home" / ".codex"
     for directory in (codex_home / "skills" / "local", codex_home / "skills" / "later"):
         directory.mkdir(parents=True)
@@ -260,13 +266,11 @@ def test_incomplete_codex_catalog_reports_warnings_and_is_not_cached(
         return [skill["name"] for skill in discovery.discover(frame, tmp_path, warnings=warnings)]
 
     # Standalone skills survive a failed inventory, and the catalog says why it is incomplete.
-    warnings: list[str] = []
-    assert names(warnings) == ["later", "local"]
-    assert warnings == [
-        "Codex plugin skills unavailable: `codex plugin list` exited 1: Error: broken"
-    ]
+    warning = "Codex plugin skills unavailable: `codex plugin list` exited 1: Error: broken"
+    assert names(warnings := []) == ["later", "local"]
+    assert warnings == [warning]
 
-    # A retry rescans instead of serving the incomplete catalog from the cache.
+    # Within its short TTL the incomplete catalog is served from the cache, warning included.
     cli.side_effect = None
     cli.return_value = subprocess.CompletedProcess(
         [],
@@ -284,11 +288,16 @@ def test_incomplete_codex_catalog_reports_warnings_and_is_not_cached(
             }
         ),
     )
+    assert names(warnings := []) == ["later", "local"]
+    assert warnings == [warning]
+    assert cli.call_count == 1
+
+    # Once that expires a retry rescans, and the complete catalog is cached for the full TTL.
+    now[0] = INCOMPLETE_CATALOG_TTL_SECONDS + 1
     assert names(warnings := []) == ["later", "local", "toolkit:review"]
     assert warnings == []
-
-    # The complete catalog is cached, so a later inventory failure is not consulted.
     cli.side_effect = OSError("gone")
+    now[0] += SKILLS_CACHE_TTL_SECONDS - 1
     assert names(warnings := []) == ["later", "local", "toolkit:review"]
     assert warnings == []
     assert cli.call_count == 2

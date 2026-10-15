@@ -43,7 +43,9 @@ def _skill_roots(root: Path, paths: object) -> list[Path]:
 def _inventory_failure(exc: Exception) -> str:
     """Describe why ``codex plugin list`` produced no inventory."""
     if isinstance(exc, subprocess.CalledProcessError):
-        stderr = " ".join(str(exc.stderr or "").split())[:200]
+        stderr = " ".join(str(exc.stderr or "").split())
+        if len(stderr) > 200:
+            stderr = stderr[:200] + "..."
         detail = f"`codex plugin list` exited {exc.returncode}"
         return f"{detail}: {stderr}" if stderr else detail
     if isinstance(exc, subprocess.TimeoutExpired):

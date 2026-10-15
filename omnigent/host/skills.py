@@ -21,6 +21,9 @@ from omnigent.spec.skill_sources import (
 from omnigent.spec.types import AgentSpec
 
 SKILLS_CACHE_TTL_SECONDS = 60.0
+# Incomplete catalogs stay cached just long enough to absorb bursts of requests
+# while a source keeps failing, and short enough that Retry rescans soon.
+INCOMPLETE_CATALOG_TTL_SECONDS = 5.0
 _MAX_CACHED_CATALOGS = 128
 
 
@@ -40,13 +43,15 @@ def _subagent_bundle(spec: AgentSpec, directory: Path, name: str) -> tuple[Agent
 
 
 class HostSkillDiscovery:
-    """Cache successful catalogs and serialize scans off the host's event loop."""
+    """Cache catalogs and serialize scans off the host's event loop."""
 
     def __init__(self, fetch_bundle: Callable[[HostSkillsFrame], httpx.Response]) -> None:
         self._fetch_bundle = fetch_bundle
         self._lock = threading.Lock()
+        # Each entry: expiry, catalog, and the warnings that make the catalog incomplete.
         self._cache: OrderedDict[
-            tuple[str | tuple[str, ...] | None, ...], tuple[float, list[dict[str, str]]]
+            tuple[str | tuple[str, ...] | None, ...],
+            tuple[float, list[dict[str, str]], list[str]],
         ] = OrderedDict()
 
     def discover(
@@ -55,7 +60,7 @@ class HostSkillDiscovery:
         """Return metadata for the exact launch target or effective session bundle.
 
         Sources a provider could not read are reported through ``warnings``.
-        Such incomplete catalogs are not cached, so a retry rescans them.
+        Such incomplete catalogs are cached only briefly, so a retry rescans soon.
         """
         key = (
             str(root),
@@ -72,6 +77,8 @@ class HostSkillDiscovery:
             cached = self._cache.get(key)
             if cached is not None and cached[0] > time.monotonic():
                 self._cache.move_to_end(key)
+                if warnings is not None:
+                    warnings.extend(cached[2])
                 return list(cached[1])
             problems: list[str] = []
             if frame.session_id is None:
@@ -111,9 +118,9 @@ class HostSkillDiscovery:
             ]
             if warnings is not None:
                 warnings.extend(problems)
-            if not problems:
-                self._cache[key] = (time.monotonic() + SKILLS_CACHE_TTL_SECONDS, result)
-                self._cache.move_to_end(key)
-                while len(self._cache) > _MAX_CACHED_CATALOGS:
-                    self._cache.popitem(last=False)
+            ttl = INCOMPLETE_CATALOG_TTL_SECONDS if problems else SKILLS_CACHE_TTL_SECONDS
+            self._cache[key] = (time.monotonic() + ttl, result, problems)
+            self._cache.move_to_end(key)
+            while len(self._cache) > _MAX_CACHED_CATALOGS:
+                self._cache.popitem(last=False)
             return list(result)

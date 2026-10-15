@@ -135,13 +135,12 @@ def test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog(
             skill_items = page.locator('[data-testid^="slash-menu-item-"]')
             expect(skills_rows.or_(skill_items).first).to_be_visible(timeout=20_000)
             expect(skills_rows.filter(has_text="Loading skills")).to_have_count(0, timeout=20_000)
-            # Hold the settled picker on screen so a recording ends on it.
-            page.wait_for_timeout(1_500)
-            observed_rows = skills_rows.all_inner_texts()
-            empty_catalog_rows = skills_rows.filter(has_text=_EMPTY_CATALOG_ROW).count()
+            # A failed inventory must read as an incomplete catalog, never as an empty one.
+            expect(skills_rows.filter(has_text=_EMPTY_CATALOG_ROW)).to_have_count(0)
             warning_rows = skills_rows.filter(has_text=_WARNING_ROW)
-            warning_visible = warning_rows.count() == 1 and warning_rows.first.is_visible()
-            retry_visible = warning_rows.first.get_by_role("button", name="Retry").is_visible()
+            expect(warning_rows).to_have_count(1)
+            expect(warning_rows.first.get_by_role("button", name="Retry")).to_be_visible()
+            observed_rows = skills_rows.all_inner_texts()
             plugin_rows = page.get_by_test_id(f"slash-menu-item-{_PLUGIN_SKILL}").count()
             api = client.get("/v1/skills", params={"session_id": session_id})
         finally:
@@ -155,10 +154,6 @@ def test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog(
         f"session {session_id}: picker rows {observed_rows!r}, plugin rows {plugin_rows}, "
         f"GET /v1/skills -> {api.status_code} {api.text}"
     )
-    assert empty_catalog_rows == 0, (
-        f"{observed}: a failed `codex plugin list` was presented as an empty skill catalog"
-    )
-    assert warning_visible and retry_visible, f"{observed}: the picker did not explain the failure"
     assert any(_INVENTORY_ERROR in row for row in observed_rows), (
         f"{observed}: the picker's explanation omits the `codex plugin list` error"
     )

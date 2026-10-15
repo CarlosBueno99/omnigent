@@ -215,6 +215,10 @@ def test_plugin_inventory_uses_session_home_and_workspace(tmp_path: Path, codex_
             subprocess.CalledProcessError(1, "codex", stderr="Error: bad config.toml\n  line 3\n"),
             "`codex plugin list` exited 1: Error: bad config.toml line 3",
         ),
+        (
+            subprocess.CalledProcessError(1, "codex", stderr="x" * 260),
+            "`codex plugin list` exited 1: " + "x" * 200 + "...",
+        ),
     ],
 )
 def test_unavailable_plugin_inventory_keeps_standalone_skills(
@@ -239,11 +243,15 @@ def test_unavailable_plugin_inventory_keeps_standalone_skills(
 
 
 def test_unavailable_plugin_inventory_without_a_collector_only_logs(
-    tmp_path: Path, codex_cli: Mock
+    tmp_path: Path, codex_cli: Mock, caplog: pytest.LogCaptureFixture
 ) -> None:
     _skill(_plugin(tmp_path / ".codex") / "skills")
     codex_cli.side_effect = subprocess.CalledProcessError(1, "codex")
-    assert _discover(tmp_path) == {}
+    with caplog.at_level(logging.WARNING, logger="omnigent.spec.codex_plugin_skills"):
+        assert _discover(tmp_path) == {}
+    assert [record.getMessage() for record in caplog.records] == [
+        "Codex plugin skills unavailable: `codex plugin list` exited 1"
+    ]
 
 
 @pytest.mark.parametrize("output", ["{", "[]", '{"installed": {}}', '{"installed": [null, {}]}'])
