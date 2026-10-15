@@ -91,8 +91,9 @@ def test_side_chat_left_while_loading_hides_parent_transcript(
         expect(rail.get_by_role("tab", name="Side chat 2", exact=True)).to_be_visible()
         with page.expect_response(lambda r: f"/v1/sessions/{child_id}/items" in r.url):
             held[0].continue_()
-        # Return only once the OFF-SCREEN load persisted its boundary: Side chat 1
-        # is still unmounted, so this proves the fix, not the on-screen path.
+        # Wait for the OFF-SCREEN load to persist its boundary while Side chat 1
+        # stays unmounted, so the later assertions exercise that path rather than
+        # the on-screen capture.
         boundary_key = f"omnigent.sideChatInherited:{child_id}"
         deadline = time.monotonic() + 30
         while not page.evaluate("(k) => localStorage.getItem(k)", boundary_key):

@@ -75,13 +75,14 @@ function writeInheritedBoundary(childId: string, ids: Set<string>): void {
   }
 }
 
-// The forked-in item ids to hide once the child's first load has settled, or
-// null while it is still loading or failed, and for a native Codex fork (which
-// holds only its own turns). Pure: callers decide when to persist the result.
+// The forked-in item ids to hide, or null until the fork load has genuinely
+// settled: a null harness means a not-yet-bound or abandoned entry, and a native
+// Codex fork holds only its own turns. Pure: callers persist the result.
 function forkedInBoundary(state: ConversationState): Set<string> | null {
   if (
     state.loadingConversation ||
     state.conversationLoadError !== null ||
+    state.sessionHarness === null ||
     usesNativeSideChatFork(state.sessionHarness)
   ) {
     return null;

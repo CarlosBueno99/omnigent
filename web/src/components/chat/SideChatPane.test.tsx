@@ -679,6 +679,43 @@ describe("inherited history boundary", () => {
     await reloaded.settleLoad([sideTurn], "codex-native");
     expect(screen.getByText("side: answer this side question")).toBeInTheDocument();
   });
+
+  it("ignores an abandoned bind that resolves before the load settles", async () => {
+    // A dispose mid-bind can re-acquire a fresh entry (no harness, no blocks)
+    // while `ensureConversationStreamed` still resolves true. Capturing then
+    // would persist an empty boundary and permanently reveal inherited history.
+    let finishAbandoned!: (loaded: boolean) => void;
+    vi.mocked(ensureConversationStreamed).mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishAbandoned = resolve;
+        }),
+    );
+    conversationRegistry.acquire(childId).setState({
+      sessionHarness: null,
+      sessionStatus: "idle",
+      loadingConversation: true,
+    });
+    const abandoned = renderPane(<SideChatPane childId={childId} />);
+    abandoned.unmount();
+    conversationRegistry.clear();
+    conversationRegistry.acquire(childId).setState({
+      sessionHarness: null,
+      conversationLoadError: null,
+      blocks: [],
+      loadingConversation: false,
+    });
+    await act(async () => finishAbandoned(true));
+
+    // The genuine load then settles off screen with the parent transcript.
+    conversationRegistry.clear();
+    const reloaded = mountLoadingChild();
+    reloaded.view.unmount();
+    await reloaded.settleLoad(parentTurns);
+
+    renderPane(<SideChatPane childId={childId} />);
+    expect(screen.queryByText("main: list the important caveats")).toBeNull();
+  });
 });
 
 describe("side-chat composer auto-grow", () => {
