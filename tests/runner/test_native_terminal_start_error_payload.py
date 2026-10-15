@@ -19,6 +19,7 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
+from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
 from omnigent.debug_logging import record_to_row
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.inner.terminal import TerminalInstance, TmuxUnavailableError
@@ -99,13 +100,15 @@ def test_other_causes_keep_generic_startup_failure_code(cause: Exception) -> Non
 def test_mixed_version_import_failure_guides_host_restart(
     monkeypatch: pytest.MonkeyPatch, wrapper_command: str | None, cli: str
 ) -> None:
-    """A stale in-tree import failure guides a host restart, not the log.
+    """A stale in-tree import failure is classified as a host-restart card.
 
     After an in-place upgrade the running host imports an upgraded module whose
-    new symbol its in-memory copy lacks. The remedy must name both the
-    foreground host and the host user-service restart so it fits either
-    deployment, honour a configured CLI wrapper, and never echo the on-disk
-    install path the exception carries.
+    new symbol its in-memory copy lacks. The card must read as a recognized
+    failure (title + cause + remediation), name both the foreground host and
+    the host user-service restart in the configured CLI spelling, and never
+    echo the on-disk install path. Each field must fit the per-field
+    conversation-label budget, or a reloaded card silently truncates the
+    guidance away.
     """
     if wrapper_command is None:
         monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND", raising=False)
@@ -128,16 +131,26 @@ def test_mixed_version_import_failure_guides_host_restart(
     payload = _native_terminal_start_error_payload(exc, "Claude", session_id="conv_1")
 
     assert payload["code"] == _NATIVE_TERMINAL_START_FAILED_CODE
-    message = payload["message"]
-    assert "Restart the host" in message
+    # Classified: a real headline instead of "Something went wrong", with the
+    # diagnosis and the fix split into their own fields.
+    assert payload["title"] == "Claude can't start until you restart the host"
+    cause = payload["cause"]
+    remediation = payload["remediation"]
+    assert "an in-place upgrade left it mixed-version" in cause
+    assert "Restart the host" in remediation
     # A foreground host and a host user service each need their own restart;
     # both must appear in the configured CLI spelling, not just "restart".
-    assert f"re-run `{cli} host` for a foreground host" in message
-    assert f"`{cli} host disable && {cli} host enable` for a host user service" in message
-    assert "see the runner log" not in message
-    # Never leak the on-disk install path through the client-facing message.
-    assert frames_path not in message
-    assert _ERROR_ID_RE.search(message) is not None
+    assert f"re-run `{cli} host` for a foreground host" in remediation
+    assert f"`{cli} host disable && {cli} host enable` for a host user service" in remediation
+    # The reload card is rebuilt from per-field labels, so each field must fit
+    # the label column or the guidance truncates away on refresh.
+    assert len(cause) <= LABEL_VALUE_MAX_LEN
+    assert len(remediation) <= LABEL_VALUE_MAX_LEN
+    # Never leak the on-disk install path, nor fall back to the log pointer.
+    for text in (payload["title"], cause, remediation, payload["message"]):
+        assert frames_path not in text
+        assert "see the runner log" not in text
+    assert _ERROR_ID_RE.search(payload["message"]) is not None
 
 
 def _third_party_cannot_import_name() -> ImportError:
@@ -169,6 +182,10 @@ def test_unrelated_import_failure_keeps_generic_startup_code(exc: ImportError) -
     payload = _native_terminal_start_error_payload(exc, "Claude", session_id="conv_1")
 
     assert payload["code"] == _NATIVE_TERMINAL_START_FAILED_CODE
+    # The generic path stays a bare log pointer: no classified card fields.
+    assert "title" not in payload
+    assert "cause" not in payload
+    assert "remediation" not in payload
     message = payload["message"].lower()
     assert "see the runner log" in message
     assert "restart the host" not in message

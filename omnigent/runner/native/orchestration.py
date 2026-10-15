@@ -7726,9 +7726,12 @@ def _native_terminal_start_error_payload(
         e.g. ``ImportError("Native Codex requires the 'codex' CLI on PATH.")``.
     :param runtime_name: Human-readable runtime name, e.g. ``"Codex"``.
     :param session_id: Session whose terminal failed, which may be a runner's child.
-    :returns: ``{"code": ..., "message": ...}`` payload for SSE and
-        JSON error responses. Known actionable configuration errors surface
-        their safe message directly; other causes point to the runner log.
+    :returns: ``{"code": ..., "message": ...}`` payload for SSE and JSON
+        error responses. Known actionable configuration errors surface their
+        safe message directly; other causes point to the runner log. A
+        recognized failure also sets ``title``/``cause``/``remediation`` so
+        the card reads as classified and each part survives the reload-visible
+        label budget.
     """
     error_id = f"err_{uuid.uuid4().hex}"
     lifecycle_code = (
@@ -7801,6 +7804,12 @@ def _native_terminal_start_error_payload(
     from omnigent.harnesses.pi_native.main import PiNativeCliOutdatedError
     from omnigent.terminals.registry import TerminalExitedDuringLaunch
 
+    # Classified branches may set a headline/cause/remediation so the card reads
+    # as a recognized failure instead of a raw code; left ``None`` otherwise.
+    error_title: str | None = None
+    error_cause: str | None = None
+    error_remediation: str | None = None
+
     if isinstance(exc, TerminalExitedDuringLaunch):
         # The exit status and captured output ride on the exception for every
         # runtime. A failed diagnostic read must not hide the known
@@ -7838,16 +7847,22 @@ def _native_terminal_start_error_payload(
         # Only the person can fix the host's setup, and the message says how.
         message = exc.message
     elif _is_stale_host_import_error(exc):
-        # Guide the user to a host restart, and never echo the exception text
-        # in the client message: it carries the on-disk install path.
+        # Classify the mixed-version failure: split cause/remediation so each
+        # fits the reload-visible label budget, and never echo the exception
+        # text, which carries the on-disk install path.
         cli = cli_invocation()
-        message = (
+        error_title = f"{runtime_name} can't start until you restart the host"
+        error_cause = (
             f"Native {runtime_name} terminal failed to start because this host "
             "is still running an older Omnigent build than the one now on disk "
-            "(an in-place upgrade left it mixed-version). Restart the host so it "
-            f"loads the upgraded code: re-run `{cli} host` for a foreground host, "
-            f"or `{cli} host disable && {cli} host enable` for a host user service."
+            "(an in-place upgrade left it mixed-version)."
         )
+        error_remediation = (
+            "Restart the host so it loads the upgraded code: re-run "
+            f"`{cli} host` for a foreground host, or "
+            f"`{cli} host disable && {cli} host enable` for a host user service."
+        )
+        message = f"{error_cause} {error_remediation}"
     elif IS_WINDOWS:
         # Native terminals are tmux/PTY-based and disabled on Windows by design.
         # Give the client an actionable message instead of a log pointer.
@@ -7863,11 +7878,18 @@ def _native_terminal_start_error_payload(
             f"Native {runtime_name} terminal failed to start ({cause}); "
             f"see the runner log for details: {log_reference}"
         )
-    return {
+    payload: dict[str, str] = {
         "code": _NATIVE_TERMINAL_START_FAILED_CODE,
         "error_id": error_id,
         "message": f"{message} Error ID: {error_id}.",
     }
+    if error_title is not None:
+        payload["title"] = error_title
+    if error_cause is not None:
+        payload["cause"] = error_cause
+    if error_remediation is not None:
+        payload["remediation"] = error_remediation
+    return payload
 
 
 def _publish_native_terminal_start_error(
