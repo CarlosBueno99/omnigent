@@ -81,7 +81,14 @@ class ThrottledStack:
         paths = set(self.stack.root.glob("*.log"))
         for home in (self.stack.runner_home, self.stack.server_home):
             paths.update((home / ".omnigent" / "logs").rglob("*.log"))
-        return "\n".join(path.read_text(errors="replace") for path in sorted(paths))
+        texts = []
+        for path in sorted(paths):
+            try:
+                texts.append(path.read_text(errors="replace"))
+            except OSError:
+                # The processes are still writing and rotating these files.
+                continue
+        return "\n".join(texts)
 
     def spec_resolver_log_lines(self) -> list[str]:
         return [line for line in self.logs().splitlines() if _SPEC_RESOLVER_LINE.match(line)]
