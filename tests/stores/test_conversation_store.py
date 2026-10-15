@@ -7463,13 +7463,13 @@ def test_list_items_degrades_sole_oversized_row(db_uri: str) -> None:
 
 @pytest.mark.parametrize(
     "error",
-    [ValueError("zstd: data corruption detected"), _rpc_error("DATA_LOSS", "ciphertext corrupt")],
-    ids=["value_error", "data_loss"],
+    [_rpc_error("DATA_LOSS", "ciphertext corrupt"), _rpc_error("INVALID_ARGUMENT", "bad payload")],
+    ids=["data_loss", "invalid_argument"],
 )
 def test_list_items_degrades_row_with_corrupt_data(db_uri: str, error: Exception) -> None:
-    """A row the seam cannot decode because its stored data is corrupt — a local
-    ``ValueError`` or a ``DATA_LOSS`` status — degrades to a placeholder even
-    when it is the smallest row on the page; its readable neighbours stay intact."""
+    """A row the backend refuses as corrupt (``DATA_LOSS``, ``INVALID_ARGUMENT``)
+    degrades to a placeholder even when it is the smallest row on the page; its
+    readable neighbours stay intact."""
 
     class _CorruptRowStore(SqlAlchemyConversationStore):
         def _decode_item_data_batch(self, stored: list[str]) -> list[str]:
@@ -7498,6 +7498,7 @@ def test_list_items_degrades_row_with_corrupt_data(db_uri: str, error: Exception
         _rpc_error("RESOURCE_EXHAUSTED", "Quota exceeded for decrypt requests"),
         ConnectionError("decrypt sidecar unreachable"),
         httpx.ConnectError("decrypt service unreachable"),
+        ValueError("zstd: data corruption detected"),
         TypeError("decode seam defect"),
     ],
     ids=[
@@ -7507,15 +7508,16 @@ def test_list_items_degrades_row_with_corrupt_data(db_uri: str, error: Exception
         "quota_exhausted",
         "connection_error",
         "httpx_connect_error",
+        "local_decode_error",
         "seam_defect",
     ],
 )
 def test_list_items_propagates_backend_failures_unchanged(db_uri: str, error: Exception) -> None:
-    """A decode failure that is not about a row's payload — a denial, an outage,
-    a cancelled or refused connection, a quota-style RESOURCE_EXHAUSTED, a defect
-    inside the seam — propagates as raised, after a single call, so the app's
-    existing 403/499/500 handling still applies instead of a page of
-    placeholders."""
+    """A decode failure the backend does not attribute to a row's payload — a
+    denial, an outage, a cancelled or refused connection, a quota-style
+    RESOURCE_EXHAUSTED, a local decode error, a defect inside the seam —
+    propagates as raised, after a single call, so the app's existing
+    403/499/500 handling still applies instead of a page of placeholders."""
     store = _FailingDecodeStore(db_uri, error)
     conv = store.create_conversation()
     store.append(conv.id, [_user_message("a", "resp_a"), _user_message("b", "resp_b")])

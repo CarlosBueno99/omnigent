@@ -606,9 +606,14 @@ def test_is_payload_rejected_rpc_error_ignores_backend_state_statuses() -> None:
     ):
         assert is_payload_rejected_rpc_error(_make_rpc_error(status)) is False, status
     assert is_payload_rejected_rpc_error(_make_rpc_error("RESOURCE_EXHAUSTED")) is False
-    quota = _make_rpc_error("RESOURCE_EXHAUSTED", "Quota exceeded for decrypt requests")
-    assert is_oversized_payload_rpc_error(quota) is False
-    assert is_payload_rejected_rpc_error(quota) is False
+    for details in (
+        "Quota exceeded for decrypt requests",
+        "request rate exceeds maximum",
+        "concurrent streams larger than max",
+    ):
+        quota = _make_rpc_error("RESOURCE_EXHAUSTED", details)
+        assert is_oversized_payload_rpc_error(quota) is False, details
+        assert is_payload_rejected_rpc_error(quota) is False, details
 
     class RpcError(Exception):
         def code(self) -> object:

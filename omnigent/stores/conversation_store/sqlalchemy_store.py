@@ -771,21 +771,6 @@ def _to_unreadable_item(row: SqlConversationItem) -> ConversationItem:
     )
 
 
-def _is_payload_decode_failure(exc: BaseException) -> bool:
-    """Whether a decode-seam failure is about the rows being decoded, not the backend.
-
-    An RPC error counts only when its status says the peer refused the payload
-    (:func:`is_payload_rejected_rpc_error`); a denial, cancellation or outage is
-    the backend's own state. A local ``ValueError`` (corrupt or truncated
-    compression, bad encoding) is about the row; any other exception — a
-    connection error, a defect inside the seam — propagates unchanged.
-
-    :param exc: The exception the decode seam raised.
-    :returns: ``True`` when only the affected rows should degrade.
-    """
-    return is_payload_rejected_rpc_error(exc) or isinstance(exc, ValueError)
-
-
 def _remap_item_file_references(
     item_data: dict[str, Any],
     file_id_map: Mapping[str, str],
@@ -2431,14 +2416,15 @@ class SqlAlchemyConversationStore(ConversationStore):
         """Decode a page for a read, isolating rows that cannot be decoded.
 
         Returns one decoded ``data`` JSON per row, or ``None`` for a row the
-        decode seam refuses. A failure attributable to the payload (an
-        oversized decrypt frame, corrupt data; see
-        :func:`_is_payload_decode_failure`) is narrowed by halving the page
+        decode backend refuses. A failure the backend attributes to the payload
+        (an oversized decrypt frame, corrupt data; see
+        :func:`is_payload_rejected_rpc_error`) is narrowed by halving the page
         until each unreadable row stands alone, so it degrades to a placeholder
-        instead of hiding the whole page. A failure of the backend itself —
-        denial, cancellation, outage — propagates unchanged for the app's
-        existing handling. Placeholders are never persisted: the next read
-        decodes the rows again.
+        instead of hiding the whole page. Any other exception — a denial,
+        cancellation or outage, a local decode error, a defect inside the seam —
+        propagates unchanged for the app's existing handling. Placeholders are
+        never persisted: the next read decodes the rows again, so a page with an
+        unreadable row costs the halving on every read.
 
         Only the decode seam is covered; parsing the decoded JSON in
         :func:`_to_item` is not. Writes, the append dedup probe and forks keep
@@ -2451,22 +2437,19 @@ class SqlAlchemyConversationStore(ConversationStore):
         try:
             return list(self._decode_item_data_batch(stored))
         except Exception as exc:
-            if not _is_payload_decode_failure(exc):
+            if not is_payload_rejected_rpc_error(exc):
                 raise
-            _logger.warning(
-                "decoding a page of %d items failed (%s: %s); isolating unreadable rows",
-                len(stored),
-                type(exc).__name__,
-                exc,
-                exc_info=True,
-            )
+            refused = exc
+            _logger.debug("decoding a page of %d items was refused", len(stored), exc_info=True)
         decoded = self._isolate_unreadable_rows(stored)
         unreadable = sum(1 for d in decoded if d is None)
         if unreadable:
             _logger.warning(
-                "%d of %d items could not be decoded; serving placeholders",
+                "%d of %d items could not be decoded (%s: %s); serving placeholders",
                 unreadable,
                 len(stored),
+                type(refused).__name__,
+                refused,
             )
         return decoded
 
@@ -2486,7 +2469,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             try:
                 decoded.extend(self._decode_item_data_batch(half))
             except Exception as exc:
-                if not _is_payload_decode_failure(exc):
+                if not is_payload_rejected_rpc_error(exc):
                     raise
                 decoded.extend(self._isolate_unreadable_rows(half))
         return decoded

@@ -682,17 +682,15 @@ def is_permission_denied_rpc_error(exc: BaseException) -> bool:
     return _rpc_error_status_name(exc) == "PERMISSION_DENIED"
 
 
-# Statuses a peer returns when it refuses the request content itself — a
-# malformed or corrupt payload — rather than reporting its own state (a denial,
-# a cancelled call, an outage). RESOURCE_EXHAUSTED is handled separately below:
-# it covers an oversized frame as well as quota or overload.
+# Statuses a peer returns when it refuses the request content itself, not its
+# own state. RESOURCE_EXHAUSTED is handled separately: it covers an oversized
+# frame as well as quota or overload.
 _PAYLOAD_REJECTED_RPC_STATUSES = frozenset({"INVALID_ARGUMENT", "OUT_OF_RANGE", "DATA_LOSS"})
 # How gRPC servers word a message-size rejection, e.g. Armeria's
 # "Frame size 2036419 exceeds maximum: 1048576" or grpc-core's
 # "Received message larger than max (5000000 vs. 4194304)".
 _OVERSIZED_MESSAGE_DETAILS = re.compile(
-    r"frame size|message (?:larger than|exceeds|too large)|exceeds maximum|larger than max",
-    re.IGNORECASE,
+    r"frame size|message (?:larger than|exceeds|too large)", re.IGNORECASE
 )
 
 
