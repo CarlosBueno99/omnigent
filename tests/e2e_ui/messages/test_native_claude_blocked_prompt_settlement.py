@@ -73,7 +73,13 @@ def hook_blocked_claude_session(
     The workspace lives under the worktree: the runner may run in a sandbox
     whose ``/tmp`` is private, so a pytest temp dir would be invisible to it.
     """
-    workspace = _REPO_ROOT / ".omnigent" / "e2e-hook-workspaces" / uuid.uuid4().hex[:8]
+    workspaces_root = _REPO_ROOT / ".omnigent" / "e2e-hook-workspaces"
+    workspaces_root.mkdir(parents=True, exist_ok=True)
+    # A killed run leaves its workspace behind; anything an hour old is not in use.
+    for stale in workspaces_root.iterdir():
+        if stale.is_dir() and time.time() - stale.stat().st_mtime > 3600:
+            shutil.rmtree(stale, ignore_errors=True)
+    workspace = workspaces_root / uuid.uuid4().hex[:8]
     hooks_dir = workspace / ".claude" / "hooks"
     hooks_dir.mkdir(parents=True)
     script = hooks_dir / "block_marker.sh"
@@ -171,6 +177,16 @@ def _wait_for_block_settlement(
         time.sleep(1.0)
 
 
+def _wait_until_idle(base_url: str, session_id: str) -> Any:
+    """Poll the session status until it is idle, so the next paste meets a free composer."""
+    deadline = time.monotonic() + _SETTLE_TIMEOUT_S
+    status = _snapshot(base_url, session_id).get("status")
+    while status != "idle" and time.monotonic() < deadline:
+        time.sleep(1.0)
+        status = _snapshot(base_url, session_id).get("status")
+    return status
+
+
 def _wait_until_settled(base_url: str, session_id: str) -> dict[str, Any]:
     deadline = time.monotonic() + _SETTLE_TIMEOUT_S
     snapshot = _snapshot(base_url, session_id)
@@ -231,8 +247,8 @@ def test_hook_blocked_web_message_settles_with_the_hook_reason(
     page.screenshot(path=str(shots / "terminal-after-hook-block.png"))
     _mark(t0, "terminal view: Claude's own refusal")
     _ensure_chat_view(page)
-    # Claude must be idle before the bridge pastes the next prompt.
-    page.wait_for_timeout(5_000)
+    status = _wait_until_idle(base_url, session_id)
+    print(f"[probe] session status before the follow-up: {status}", flush=True)
 
     followup = f"Reply with exactly this token and nothing else: {token}"
     _compose(page, followup)
