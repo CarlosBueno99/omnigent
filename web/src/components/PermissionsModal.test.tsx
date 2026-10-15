@@ -1059,6 +1059,8 @@ describe("PermissionsModal", () => {
 
       await waitFor(() => expect(listMock).toHaveBeenCalled());
       expect(screen.queryByTestId("share-workspace-files")).toBeNull();
+      // Without the info icon, opening focus still lands on the first enabled control.
+      expect(screen.getByPlaceholderText("alice@example.com")).toHaveFocus();
     });
 
     it("turns sharing on for a workspace session that isn't sharing yet", async () => {
@@ -1108,33 +1110,36 @@ describe("PermissionsModal", () => {
       );
     });
 
-    it("keeps the file-access tooltip closed until the info icon is focused", async () => {
-      listMock.mockResolvedValue([]);
-      useSessionMock.mockReturnValue({
-        session: sessionWith({ workspace: "/repo", shareWorkspaceFiles: false }),
-        isLoading: false,
-        error: null,
-      });
+    it.each([true, false])(
+      "keeps the file-access tooltip closed until the info icon is focused (public sharing %s)",
+      async (publicSharingEnabled) => {
+        listMock.mockResolvedValue([]);
+        useSessionMock.mockReturnValue({
+          session: sessionWith({ workspace: "/repo", shareWorkspaceFiles: false }),
+          isLoading: false,
+          error: null,
+        });
 
-      render(<PermissionsModal sessionId="conv_abc" open={true} onOpenChange={() => {}} />, {
-        wrapper: createInfoWrapper({}),
-      });
+        render(<PermissionsModal sessionId="conv_abc" open={true} onOpenChange={() => {}} />, {
+          wrapper: createInfoWrapper({ public_sharing_enabled: publicSharingEnabled }),
+        });
 
-      await waitFor(() => expect(listMock).toHaveBeenCalled());
-      const info = screen.getByRole("button", {
-        name: "File access for Comment and Edit permissions",
-      });
-      // Opening focus skips the info icon and lands on the next control.
-      expect(info).not.toHaveFocus();
-      expect(
-        screen.getByRole("switch", { name: "Workspace files for Read permission" }),
-      ).toHaveFocus();
-      expect(screen.queryByRole("tooltip")).toBeNull();
+        await waitFor(() => expect(listMock).toHaveBeenCalled());
+        const info = screen.getByRole("button", {
+          name: "File access for Comment and Edit permissions",
+        });
+        // Opening focus skips the info icon and lands on the next control.
+        expect(info).not.toHaveFocus();
+        expect(
+          screen.getByRole("switch", { name: "Workspace files for Read permission" }),
+        ).toHaveFocus();
+        expect(screen.queryByRole("tooltip")).toBeNull();
 
-      info.focus();
-      expect(await screen.findByRole("tooltip")).toHaveTextContent(
-        "Comment always includes file access and commenting.",
-      );
-    });
+        info.focus();
+        expect(await screen.findByRole("tooltip")).toHaveTextContent(
+          "Comment always includes file access and commenting.",
+        );
+      },
+    );
   });
 });
