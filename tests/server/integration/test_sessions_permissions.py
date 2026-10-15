@@ -805,7 +805,7 @@ async def test_collaborator_cannot_persist_native_approval_settings_via_events(
 ) -> None:
     """Native approval-settings events need the owner or the session's bound runner.
 
-    They rewrite ``terminal_launch_args``; an Edit/Manage grant or an unbound runner token is not enough.
+    Rewrites ``terminal_launch_args``: an Edit/Manage grant or unbound runner token is not enough.
     """
     from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER
 
