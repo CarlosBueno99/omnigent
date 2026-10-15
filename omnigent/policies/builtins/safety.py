@@ -355,20 +355,46 @@ def ask_on_add_policy(event: PolicyEvent) -> PolicyResponse:
     }
 
 
+# Agent tools that persist or change unattended work. The builder injects
+# ``ask_on_scheduled_task_change`` into every engine and exempts these names
+# from its no-policy fast path; both read this set so they cannot drift.
+SCHEDULED_TASK_APPROVAL_TOOLS: frozenset[str] = frozenset(
+    {"sys_scheduled_task_create", "sys_scheduled_task_update"}
+)
+
+
 def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
-    """Require approval before an agent persists or changes unattended work."""
+    """ASK for user approval before an agent creates or updates a scheduled task.
+
+    Matches ``event["target"]`` (the dispatched tool identity) rather than
+    ``data["name"]``, which an earlier policy may have transformed. Reads
+    and ``sys_scheduled_task_delete`` are not gated here.
+
+    :param event: Policy event dict.
+    :returns: ASK if a scheduled task is being created or updated, ALLOW
+        otherwise.
+    """
     if event.get("type") != "tool_call":
         return _ALLOW
-    if event.get("target") not in {"sys_scheduled_task_create", "sys_scheduled_task_update"}:
+    tool = event.get("target")
+    if tool not in SCHEDULED_TASK_APPROVAL_TOOLS:
         return _ALLOW
+    data = event.get("data")
+    args = data.get("arguments") if isinstance(data, dict) else None
+    if not isinstance(args, dict):
+        args = {}
+    if tool == "sys_scheduled_task_create":
+        preview = f"create scheduled task {args.get('name', '')!r} ({args.get('rrule', '')})"
+    else:
+        fields = ", ".join(sorted(key for key in args if key != "scheduled_task_id"))
+        preview = f"update scheduled task {args.get('scheduled_task_id', '')} ({fields})"
     return {
         "result": "ASK",
-        "reason": "Approve these scheduled task settings for future unattended runs?",
+        "reason": f"Agent wants to {preview}. Approve?",
     }
 
 
 # ── Skill blocking ──────────────────────────────────────────────────────────
-
 
 # Omnigent runner tools that load skills in non-native (SDK) harnesses.
 _SKILL_TOOLS = frozenset({"load_skill", "read_skill_file"})

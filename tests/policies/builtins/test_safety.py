@@ -588,6 +588,85 @@ def test_ask_on_add_policy_handles_missing_arguments() -> None:
     assert result["result"] == "ASK"
 
 
+# ── ask_on_scheduled_task_change ───────────────────────────────
+
+
+def test_ask_on_scheduled_task_change_asks_for_create_with_preview() -> None:
+    """A create call ASKs and names the task and its schedule."""
+    from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
+
+    result = ask_on_scheduled_task_change(
+        {
+            "type": "tool_call",
+            "target": "sys_scheduled_task_create",
+            "data": {
+                "name": "sys_scheduled_task_create",
+                "arguments": {"name": "nightly triage", "rrule": "FREQ=DAILY;BYHOUR=9"},
+            },
+        }
+    )
+    assert result["result"] == "ASK"
+    assert "nightly triage" in result["reason"]
+    assert "FREQ=DAILY;BYHOUR=9" in result["reason"]
+
+
+def test_ask_on_scheduled_task_change_asks_for_update_naming_fields() -> None:
+    """An update call ASKs and names the task id and the fields it changes."""
+    from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
+
+    result = ask_on_scheduled_task_change(
+        {
+            "type": "tool_call",
+            "target": "sys_scheduled_task_update",
+            "data": {
+                "name": "sys_scheduled_task_update",
+                "arguments": {
+                    "scheduled_task_id": "0123456789abcdef0123456789abcdef",
+                    "state": "paused",
+                },
+            },
+        }
+    )
+    assert result["result"] == "ASK"
+    assert "0123456789abcdef0123456789abcdef" in result["reason"]
+    assert "state" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    "tool", ["sys_scheduled_task_list", "sys_scheduled_task_delete", "web_search"]
+)
+def test_ask_on_scheduled_task_change_allows_other_tools(tool: str) -> None:
+    """Reads, deletes and unrelated tools pass through."""
+    from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
+
+    result = ask_on_scheduled_task_change(
+        {"type": "tool_call", "target": tool, "data": {"name": tool, "arguments": {}}}
+    )
+    assert result["result"] == "ALLOW"
+
+
+def test_ask_on_scheduled_task_change_allows_non_tool_events() -> None:
+    """Non-tool_call events pass through."""
+    from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
+
+    result = ask_on_scheduled_task_change({"type": "request", "data": "hello"})
+    assert result["result"] == "ALLOW"
+
+
+def test_ask_on_scheduled_task_change_handles_missing_arguments() -> None:
+    """Missing or non-dict arguments still ASK without crashing."""
+    from omnigent.policies.builtins.safety import ask_on_scheduled_task_change
+
+    result = ask_on_scheduled_task_change(
+        {
+            "type": "tool_call",
+            "target": "sys_scheduled_task_update",
+            "data": {"name": "sys_scheduled_task_update", "arguments": "not-a-dict"},
+        }
+    )
+    assert result["result"] == "ASK"
+
+
 # ── block_skills: native Skill tool (PreToolUse hook path) ─────────────────
 
 

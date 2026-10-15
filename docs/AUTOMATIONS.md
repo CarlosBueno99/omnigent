@@ -30,15 +30,9 @@ To provision a fresh sandbox per firing, set `execution_target: "managed_sandbox
 
 `max_cost_usd` is a positive per-firing budget. Each fired session gets its own cost-budget policy, which blocks subsequent requests and tool calls once recorded spend reaches the cap. It does not interrupt an in-progress model turn: spend can overshoot before the next check, and denying a native tool call does not terminate the turn. Omit the field to attach no automation-specific cap; other applicable policies still apply.
 
-**Agent tools.** An agent can manage automations itself with `sys_scheduled_task_create`, `sys_scheduled_task_list`, `sys_scheduled_task_update`, and `sys_scheduled_task_delete` -- so an agent can schedule its own follow-up work. The create and update tools expose the same `permission_mode`, `max_cost_usd`, and `execution_target` controls.
+**Agent tools.** An agent can manage automations itself with `sys_scheduled_task_create`, `sys_scheduled_task_list`, `sys_scheduled_task_update`, and `sys_scheduled_task_delete` -- so an agent can schedule its own follow-up work. The create and update tools expose the same `permission_mode`, `max_cost_usd`, and `execution_target` controls. Because they persist or change unattended work, every agent call to `sys_scheduled_task_create` or `sys_scheduled_task_update` parks on an approval prompt in the session, even when no other guardrails apply; review the agent, prompt, schedule, host and permission settings it shows before approving. `sys_scheduled_task_list` and `sys_scheduled_task_delete` are not gated this way, and changes you make directly in the UI or REST API keep their existing authorization rules.
 
 ## Schedules are RRULEs, not cron
-
-Agent calls to `sys_scheduled_task_create` and `sys_scheduled_task_update`
-require interactive approval before persisting future work. Review the agent,
-prompt, host and permission settings in that request. This also applies when
-the call inherits defaults. Direct changes you make in the UI or REST API keep
-their existing authorization rules.
 
 A schedule is an [RFC 5545](https://datatracker.ietf.org/doc/html/rfc5545) recurrence rule evaluated in the task's IANA timezone.
 
