@@ -323,6 +323,70 @@ def diagnose_codex_model_rejection(message: str) -> FailureDiagnosis | None:
     )
 
 
+# The codex-native forwarder appends this explanation to a budget refusal that
+# Codex hit while compacting on its previous model; the server reads the two
+# model ids back out of it for the failure card.
+_CODEX_PREVIOUS_MODEL_BUDGET = re.compile(
+    r"Codex compacted this conversation on `(?P<previous>[^`]+)`, the model of its last "
+    r"completed turn, before switching to `(?P<selected>[^`]+)`"
+)
+
+
+# Both halves stay short enough to survive the persisted-label width with the
+# longest gateway model ids, so the card reads the same after a reload.
+def _codex_previous_model_budget_cause(previous_model: str, selected_model: str) -> str:
+    return (
+        f"Codex compacted this conversation on `{previous_model}`, the model of its last "
+        f"completed turn, before switching to `{selected_model}`, and that model's budget "
+        "is exhausted."
+    )
+
+
+def _codex_previous_model_budget_remediation(previous_model: str, selected_model: str) -> str:
+    return (
+        "Switching models again will not help; fork this session to continue on "
+        f"`{selected_model}`. The fork starts from the conversation history without the "
+        f"`{previous_model}` turn."
+    )
+
+
+def codex_previous_model_budget_hint(previous_model: str, selected_model: str) -> str:
+    """Explain a budget refusal Codex hit while compacting on its previous model.
+
+    Codex compacts a thread on the model of its last completed turn before the
+    first turn on a newly selected model, and retries that model on every later
+    turn, so switching models does not unblock the session on its own.
+
+    :param previous_model: Model of the last completed Codex turn, e.g. ``"gpt-5.5"``.
+    :param selected_model: Model the user switched to, e.g. ``"gpt-5.6-sol"``.
+    :returns: Explanation and recovery step appended to the turn error text.
+    """
+    return (
+        f"{_codex_previous_model_budget_cause(previous_model, selected_model)} "
+        f"{_codex_previous_model_budget_remediation(previous_model, selected_model)}"
+    )
+
+
+def diagnose_codex_previous_model_budget(message: str) -> FailureDiagnosis | None:
+    """Build the failure card for a budget refusal from Codex's previous model.
+
+    :param message: Turn error text, optionally carrying
+        :func:`codex_previous_model_budget_hint`.
+    :returns: A card naming the blocked model and the fork recovery, or ``None``
+        for an ordinary budget refusal.
+    """
+    match = _CODEX_PREVIOUS_MODEL_BUDGET.search(message)
+    if match is None:
+        return None
+    previous_model = match.group("previous")
+    selected_model = match.group("selected")
+    return FailureDiagnosis(
+        title="Codex is blocked on the previous model's budget",
+        cause=_codex_previous_model_budget_cause(previous_model, selected_model),
+        remediation=_codex_previous_model_budget_remediation(previous_model, selected_model),
+    )
+
+
 # --- failure-code English fallbacks -------------------------------------------
 # Every server-emitted failure code, mapped to a one-line human sentence, so
 # even an unclassified failure reads as English instead of a raw enum. Terminal

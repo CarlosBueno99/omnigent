@@ -964,6 +964,17 @@ async def test_auto_create_codex_terminal_fork_clones_rollout_and_resumes(
             }
         )
         + "\n"
+        + json.dumps(
+            {
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "turn_1",
+                    "cwd": "/old/source/dir",
+                    "model": "gpt-5-default",
+                },
+            }
+        )
+        + "\n"
     )
 
     patched_external_ids: list[str] = []
@@ -1197,33 +1208,49 @@ async def test_auto_create_codex_terminal_fork_clones_rollout_and_resumes(
     clone_home = codex_home_for_bridge_dir(bridge_dir_for_bridge_id(session_id))
     cloned = list(clone_home.glob(f"sessions/**/rollout-*-{minted}.jsonl"))
     assert len(cloned) == 1, f"expected one cloned rollout under {clone_home}, found {cloned}"
-    meta = json.loads(cloned[0].read_text().splitlines()[0])["payload"]
+    records = [json.loads(line) for line in cloned[0].read_text().splitlines()]
+    meta = records[0]["payload"]
     assert meta["id"] == minted
     assert meta["cwd"] == str(workspace.resolve())
+    # The source's last turn ran on the clone's own model, so the clone keeps
+    # the full rollout, that turn included.
+    assert records[1]["payload"]["model"] == "gpt-5-default"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("source_thread", "forked"),
-    [(None, True), ("019e96aa-0be2-7343-8d3b-6f914d60936b", True), (None, False)],
-    ids=["sdk-source", "missing-codex-rollout", "cli-import"],
+    ("source_thread", "forked", "source_turn_model"),
+    [
+        (None, True, None),
+        ("019e96aa-0be2-7343-8d3b-6f914d60936b", True, None),
+        (None, False, None),
+        ("019e96aa-0be2-7343-8d3b-6f914d60936b", True, "gpt-5-frontier"),
+    ],
+    ids=["sdk-source", "missing-codex-rollout", "cli-import", "source-pinned-to-another-model"],
 )
 async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_resumes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     source_thread: str | None,
     forked: bool,
+    source_turn_model: str | None,
 ) -> None:
-    """A carry-history codex session builds from items when no source rollout exists.
+    """A carry-history codex session builds from items when the source rollout can't be cloned.
 
     This covers a non-Codex source with no source thread id, an imported Codex
-    source whose rollout lives outside Omnigent's private ``CODEX_HOME``, and a
-    ``session import`` copy that has import labels but no fork source.
+    source whose rollout lives outside Omnigent's private ``CODEX_HOME``, a
+    ``session import`` copy that has import labels but no fork source, and a
+    local source rollout whose last recorded turn ran on a different model than
+    the clone launches with. Cloning that rollout would make Codex compact on
+    the source's model before the clone's first turn, so a source stuck on an
+    over-budget model would hand the clone the same failure.
 
     :param tmp_path: Temporary directory for isolated bridge state.
     :param monkeypatch: Pytest monkeypatch fixture.
-    :param source_thread: Optional unavailable source Codex thread id.
+    :param source_thread: Optional source Codex thread id.
     :param forked: Whether the session is a fork clone or a CLI import copy.
+    :param source_turn_model: When set, a local source rollout exists and its
+        newest ``turn_context`` names this model.
     :returns: None.
     """
     import omnigent.harnesses.codex_native.app_server as codex_app_mod
@@ -1243,6 +1270,7 @@ async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_res
     session_id = "70a19efac3ec27549a70acbb4d0c635a"
     source_id = "4bd4c10aa9a3237eb5213cbeda70b70f"
     codeword = "swordfish-7281"
+    source_rollout_codeword = "marlin-4410"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -1251,6 +1279,34 @@ async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_res
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
     monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
     monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
+
+    if source_turn_model is not None:
+        assert source_thread is not None
+        source_home = codex_home_for_bridge_dir(bridge_dir_for_bridge_id(source_id))
+        source_rollout_dir = source_home / "sessions" / "2026" / "06" / "05"
+        source_rollout_dir.mkdir(parents=True)
+        source_records = (
+            {"type": "session_meta", "payload": {"id": source_thread, "cwd": "/old/source/dir"}},
+            {
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "turn_1",
+                    "cwd": "/old/source/dir",
+                    "model": source_turn_model,
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": source_rollout_codeword}],
+                },
+            },
+        )
+        (source_rollout_dir / f"rollout-2026-06-05T15-23-07-{source_thread}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in source_records)
+        )
 
     patched_external_ids: list[str] = []
 
@@ -1487,6 +1543,9 @@ async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_res
     assert codeword in body, (
         "Built rollout must carry the source conversation's text from the "
         "copied Omnigent items; missing it means history was not seeded."
+    )
+    assert source_rollout_codeword not in body, (
+        "A source rollout pinned to another model must not be cloned into the fork."
     )
 
 

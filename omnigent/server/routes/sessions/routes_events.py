@@ -56,6 +56,7 @@ from omnigent.runner.launch_failure import (
     classify_native_turn_error,
     diagnose_client_update_required,
     diagnose_codex_model_rejection,
+    diagnose_codex_previous_model_budget,
 )
 from omnigent.runner.routing import RunnerRouter, routing_host_id
 from omnigent.runner.transports.ws_tunnel.frames import (
@@ -1981,6 +1982,8 @@ def register_events_routes(
                     "native_turn_error",
                 }:
                     diagnosis = diagnose_codex_model_rejection(output)
+                elif harness == "codex-native" and classified_code == "budget_exhausted":
+                    diagnosis = diagnose_codex_previous_model_budget(output)
                 status_error = ErrorDetail(
                     code=classified_code,
                     message=output.strip(),

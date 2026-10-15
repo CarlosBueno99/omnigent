@@ -5069,27 +5069,52 @@ async def _auto_create_codex_terminal(
     ):
         from omnigent.harnesses.codex_native.main import (
             _clone_codex_rollout,
+            _codex_source_rollout_last_turn_model,
             _mint_codex_thread_id,
         )
+        from omnigent.models.codex_model_vocabulary import comparable_model_id
 
         target_thread_id = _mint_codex_thread_id()
         clone_workspace = Path(workspace).resolve()
-        try:
-            cloned_rollout = _clone_codex_rollout(
-                source_session_id=launch_config.fork_source_id,
-                source_thread_id=launch_config.fork_source_external_id,
-                target_thread_id=target_thread_id,
-                clone_codex_home=codex_home,
-                clone_workspace=clone_workspace,
-            )
-        except Exception:  # noqa: BLE001 — best-effort; fall back to stored items
+        # Codex compacts a resumed thread on its last recorded turn's model before
+        # the first turn on another model; a clone pinned to an unusable (over
+        # budget) model would stay blocked, so it rebuilds from items instead.
+        source_turn_model = _codex_source_rollout_last_turn_model(
+            source_session_id=launch_config.fork_source_id,
+            source_thread_id=launch_config.fork_source_external_id,
+        )
+        clone_model = _codex_launch.model
+        if (
+            source_turn_model is not None
+            and clone_model is not None
+            and comparable_model_id(source_turn_model) != comparable_model_id(clone_model)
+        ):
             cloned_rollout = None
-            _logger.warning(
-                "Could not clone source rollout for forked codex clone %s; "
-                "trying item-history fallback",
+            _logger.info(
+                "Codex terminal fork skips the rollout clone: session=%s source last turn "
+                "model=%s clone model=%s; rebuilding from items",
                 session_id,
-                exc_info=True,
+                source_turn_model,
+                clone_model,
+                extra={"session_id": session_id},
             )
+        else:
+            try:
+                cloned_rollout = _clone_codex_rollout(
+                    source_session_id=launch_config.fork_source_id,
+                    source_thread_id=launch_config.fork_source_external_id,
+                    target_thread_id=target_thread_id,
+                    clone_codex_home=codex_home,
+                    clone_workspace=clone_workspace,
+                )
+            except Exception:  # noqa: BLE001 — best-effort; fall back to stored items
+                cloned_rollout = None
+                _logger.warning(
+                    "Could not clone source rollout for forked codex clone %s; "
+                    "trying item-history fallback",
+                    session_id,
+                    exc_info=True,
+                )
         _logger.info(
             "Codex terminal fork-resume decision: session=%s source_id=%s source_ext=%s "
             "our_thread=%s clone_workspace=%s cloned_rollout=%s",

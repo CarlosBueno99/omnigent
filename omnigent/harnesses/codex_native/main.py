@@ -73,6 +73,7 @@ from omnigent.harnesses.codex_native.forwarder import (
     _replay_dead_letters_before_resume,
     supervise_forwarder,
 )
+from omnigent.harnesses.codex_native.rollout import find_thread_rollout, last_turn_context_model
 from omnigent.harnesses.codex_native.state import read_launch_state, write_launch_state
 from omnigent.host.daemon_launch import (
     error_text,
@@ -1785,14 +1786,7 @@ def _find_codex_rollout(codex_home: Path, thread_id: str) -> Path | None:
     """
     if not _CODEX_THREAD_ID_RE.fullmatch(thread_id):
         return None
-    sessions = codex_home / "sessions"
-    if not sessions.is_dir():
-        return None
-    matches = [p for p in sessions.glob(f"**/rollout-*-{thread_id}.jsonl") if p.is_file()]
-    if not matches:
-        return None
-    matches.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    return matches[0]
+    return find_thread_rollout(codex_home, thread_id)
 
 
 def _copy_rollout_with_cwd(
@@ -1927,6 +1921,29 @@ def _clone_codex_rollout(
         with contextlib.suppress(FileNotFoundError):
             tmp.unlink()
     return target
+
+
+def _codex_source_rollout_last_turn_model(
+    *, source_session_id: str, source_thread_id: str
+) -> str | None:
+    """
+    Return the model of a fork source's last recorded Codex turn, if its rollout is local.
+
+    :param source_session_id: The SOURCE conversation id, used to locate the
+        source's ``CODEX_HOME``, e.g. ``"conv_abc123"``.
+    :param source_thread_id: The SOURCE Codex thread id / rollout stem, e.g.
+        ``"019e96aa-0be2-7343-8d3b-6f914d60936b"``.
+    :returns: The newest ``turn_context.payload.model`` of that rollout, or
+        ``None`` when the rollout is missing, unreadable, or names no model.
+    """
+    source_home = codex_home_for_bridge_dir(bridge_dir_for_bridge_id(source_session_id))
+    source = _find_codex_rollout(source_home, source_thread_id)
+    if source is None:
+        return None
+    try:
+        return last_turn_context_model(source)
+    except OSError:
+        return None
 
 
 async def _ensure_local_codex_resume_rollout(

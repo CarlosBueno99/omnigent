@@ -38,6 +38,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import HostHelloFrame
 from omnigent.llms.context_window import ModelPricing
 from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
+from omnigent.runner.launch_failure import codex_previous_model_budget_hint
 from omnigent.runner.transports.ws_tunnel.frames import EventAckFrame, EventBatchFrame
 from omnigent.runtime import inflight_text
 from omnigent.runtime.tool_output import MAX_TOOL_OUTPUT_BYTES
@@ -45,6 +46,7 @@ from omnigent.server.background_session_titles import BackgroundTitleRequest
 from omnigent.server.routes._sessions.helpers import (
     _NativeTerminalEnsureOutcome,
     _RunnerForwardResult,
+    _truncate_label,
 )
 from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
 from omnigent.spec.types import SkillSpec
@@ -5681,6 +5683,29 @@ _CODEX_MODEL_CARD = {
 }
 
 
+_BUDGET_REFUSAL_DETAIL = (
+    'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED","message":"Budget '
+    '\\"frontier-budget\\" (00000000-0000-0000-0000-000000000001) has reached its limit of '
+    '$2000. To continue, contact an admin to increase the budget or use a different budget."}'
+)
+# The codex-native forwarder appends this when the refusal came from Codex
+# compacting on the model of its last turn after the user switched models.
+_CODEX_PREVIOUS_MODEL_BUDGET_DETAIL = (
+    f"{_BUDGET_REFUSAL_DETAIL}\n\n{codex_previous_model_budget_hint('gpt-5.5', 'gpt-5.6-sol')}"
+)
+_CODEX_PREVIOUS_MODEL_BUDGET_CARD = {
+    "title": "Codex is blocked on the previous model's budget",
+    "cause": (
+        "Codex compacted this conversation on `gpt-5.5`, the model of its last completed turn, "
+        "before switching to `gpt-5.6-sol`, and that model's budget is exhausted."
+    ),
+    "remediation": (
+        "Switching models again will not help; fork this session to continue on `gpt-5.6-sol`. "
+        "The fork starts from the conversation history without the `gpt-5.5` turn."
+    ),
+}
+
+
 @pytest.mark.parametrize("wire_output", [False, True])
 @pytest.mark.parametrize(
     ("detail", "expected_code", "card", "wrapper", "reauth_required"),
@@ -5696,6 +5721,21 @@ _CODEX_MODEL_CARD = {
         (_CODEX_MODEL_DETAIL, None, _CODEX_MODEL_CARD, "codex-native-ui", False),
         (_CODEX_MODEL_DETAIL, "native_turn_error", {}, "claude-code-native-ui", False),
         (_CODEX_MODEL_DETAIL, "codex_reauth_required", {}, "codex-native-ui", True),
+        (_BUDGET_REFUSAL_DETAIL, "budget_exhausted", {}, "codex-native-ui", False),
+        (
+            _CODEX_PREVIOUS_MODEL_BUDGET_DETAIL,
+            "budget_exhausted",
+            _CODEX_PREVIOUS_MODEL_BUDGET_CARD,
+            "codex-native-ui",
+            False,
+        ),
+        (
+            _CODEX_PREVIOUS_MODEL_BUDGET_DETAIL,
+            "budget_exhausted",
+            {},
+            "claude-code-native-ui",
+            False,
+        ),
     ],
 )
 async def test_native_failures_are_coded_live_and_after_reload(
@@ -5762,9 +5802,10 @@ async def test_native_failures_are_coded_live_and_after_reload(
 
     snapshot_resp = await client.get(f"/v1/sessions/{session_id}")
     assert snapshot_resp.status_code == 200, snapshot_resp.text
+    # The persisted copy keeps the card whole; only a long raw detail is clipped.
     assert snapshot_resp.json()["last_task_error"] == {
         "code": expected_code,
-        "message": detail,
+        "message": _truncate_label(detail),
         "agent_name": wrapper,
         **card,
     }

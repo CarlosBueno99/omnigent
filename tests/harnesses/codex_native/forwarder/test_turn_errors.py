@@ -6,6 +6,7 @@ Resume uses the same verdict. Empty turns warn and stay idle, as do clean turns.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from omnigent.harnesses.codex_native.bridge import (
     record_certificate_failure,
     write_bridge_state,
 )
+from omnigent.runner.launch_failure import codex_previous_model_budget_hint
 from tests.harnesses.codex_native.forwarder._support import (
     _RecordingClient,
 )
@@ -748,6 +750,225 @@ def test_resume_terminal_status_edge_attaches_error(tmp_path: Path) -> None:
     state = read_bridge_state(tmp_path)
     assert state is not None
     assert state.active_turn_id is None
+
+
+_BUDGET_REFUSAL = (
+    'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED","message":"Budget '
+    '\\"frontier-budget\\" (00000000-0000-0000-0000-000000000001) has reached its limit of '
+    '$2000. To continue, contact an admin to increase the budget or use a different budget."}, '
+    "url: http://gateway.invalid/v1/responses"
+)
+
+
+def _seed_thread_rollout(bridge_dir: Path, turn_models: list[str]) -> None:
+    """
+    Seed bridge state and a rollout whose ``turn_context`` records name *turn_models*.
+
+    Mirrors what Codex leaves on disk once a turn reached sampling on each model
+    in order, so the forwarder can read back the model of the last recorded turn.
+
+    :param bridge_dir: Native Codex bridge directory (the test ``tmp_path``).
+    :param turn_models: Models of the recorded turns, oldest first.
+    :returns: None.
+    """
+    codex_home = bridge_dir / "codex-home"
+    write_bridge_state(
+        bridge_dir,
+        CodexNativeBridgeState(
+            session_id="conv_x",
+            socket_path=str(bridge_dir / "app-server.sock"),
+            thread_id="thread_123",
+            codex_home=str(codex_home),
+            active_turn_id="turn_123",
+        ),
+    )
+    records: list[dict[str, object]] = [
+        {"type": "session_meta", "payload": {"id": "thread_123", "cwd": "/workspace"}}
+    ]
+    for index, model in enumerate(turn_models):
+        records.append(
+            {
+                "type": "turn_context",
+                "payload": {"turn_id": f"turn_{index}", "cwd": "/workspace", "model": model},
+            }
+        )
+        records.append(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": f"turn {index}"}],
+                },
+            }
+        )
+    rollout_dir = codex_home / "sessions" / "2026" / "10" / "15"
+    rollout_dir.mkdir(parents=True)
+    (rollout_dir / "rollout-2026-10-15T12-00-00-thread_123.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records)
+    )
+
+
+def _budget_refusal_events(via: str) -> list[dict[str, object]]:
+    """
+    Return the notifications Codex emits when previous-model compaction is refused.
+
+    Recorded from codex-cli 0.158.0: the compaction item opens, the gateway's
+    403 is retried as ``willRetry`` reconnects, then a terminal ``error`` and the
+    failed ``turn/completed`` carry the refusal. ``via`` drops the standalone
+    error so the boundary alone reports the failure, as older app-servers do.
+
+    :param via: ``"standalone-error"`` or ``"turn-boundary"``.
+    :returns: Ordered ``_handle_event`` payloads.
+    """
+    events: list[dict[str, object]] = [
+        {
+            "method": "item/started",
+            "params": {
+                "threadId": "thread_123",
+                "turnId": "turn_123",
+                "item": {"id": "item_compact", "type": "contextCompaction"},
+            },
+        },
+        {
+            "method": "error",
+            "params": {
+                "threadId": "thread_123",
+                "turnId": "turn_123",
+                "willRetry": True,
+                "error": {
+                    "message": "Reconnecting... 1/7",
+                    "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 403}},
+                    "additionalDetails": _BUDGET_REFUSAL,
+                },
+            },
+        },
+    ]
+    if via == "standalone-error":
+        events.append(
+            {
+                "method": "error",
+                "params": {
+                    "threadId": "thread_123",
+                    "turnId": "turn_123",
+                    "willRetry": False,
+                    "error": {
+                        "message": _BUDGET_REFUSAL,
+                        "codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": 403}},
+                    },
+                },
+            }
+        )
+    events.append(
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread_123",
+                "turn": {
+                    "id": "turn_123",
+                    "status": "failed",
+                    "error": {
+                        "message": _BUDGET_REFUSAL,
+                        "codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": 403}},
+                    },
+                },
+            },
+        }
+    )
+    return events
+
+
+async def _drive_events(
+    bridge_dir: Path,
+    events: list[dict[str, object]],
+    *,
+    selected_model: str,
+) -> list[dict[str, object]]:
+    """
+    Feed *events* through the forwarder and return the ``failed`` status posts.
+
+    :param bridge_dir: Native Codex bridge directory.
+    :param events: Ordered Codex notifications.
+    :param selected_model: Model the forwarder knows the session runs on.
+    :returns: ``data`` of every ``external_session_status`` post with ``failed``.
+    """
+    client = _RecordingClient()
+    forwarder_state = fwd._CodexForwarderState()
+    forwarder_state.model = selected_model
+    usage_coalescer = fwd._SessionUsageCoalescer(client, "conv_x")  # type: ignore[arg-type]
+    elicitation_tracker = fwd._CodexElicitationTaskTracker()
+    for event in events:
+        await fwd._handle_event(
+            client,  # type: ignore[arg-type]
+            session_id="conv_x",
+            bridge_dir=bridge_dir,
+            event=event,  # type: ignore[arg-type]
+            usage_coalescer=usage_coalescer,
+            elicitation_tracker=elicitation_tracker,
+            expected_thread_id="thread_123",
+            forwarder_state=forwarder_state,
+        )
+    return [
+        body["data"]
+        for _url, body in client.posts
+        if body["type"] == "external_session_status" and body["data"]["status"] == "failed"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via", ["standalone-error", "turn-boundary"])
+async def test_budget_refusal_after_model_switch_names_the_previous_model(
+    tmp_path: Path, via: str
+) -> None:
+    """A budget 403 on a thread whose last turn ran on another model explains itself.
+
+    Codex compacts on the model of its last recorded turn before the first turn
+    on a newly selected model, and records the new turn's context only after that
+    compaction succeeds, so the rollout still names the previous model when the
+    refusal arrives. Surfaced bare, the 403 reads as the selected model being
+    over budget and the user keeps switching models to no effect.
+    """
+    _seed_thread_rollout(tmp_path, ["gpt-5.6-sol", "gpt-5.5"])
+
+    failed = await _drive_events(
+        tmp_path, _budget_refusal_events(via), selected_model="gpt-5.6-sol"
+    )
+
+    assert len(failed) == 1
+    output = failed[0]["output"]
+    assert output.startswith(_BUDGET_REFUSAL)
+    assert output.endswith(codex_previous_model_budget_hint("gpt-5.5", "gpt-5.6-sol"))
+    # A budget refusal is not an auth failure, with or without the explanation.
+    assert "reauth_required" not in failed[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("turn_models", "selected_model", "message"),
+    [
+        (["gpt-5.6-sol", "gpt-5.5"], "gpt-5.5", _BUDGET_REFUSAL),
+        (["gpt-5.6-sol", "gpt-5.5"], "gpt-5.6-sol", "unexpected status 503 Service Unavailable"),
+        ([], "gpt-5.6-sol", _BUDGET_REFUSAL),
+    ],
+    ids=["selected-model-over-budget", "not-a-budget-refusal", "no-recorded-turn"],
+)
+async def test_turn_error_without_a_stale_previous_model_stays_bare(
+    tmp_path: Path, turn_models: list[str], selected_model: str, message: str
+) -> None:
+    """Only a budget refusal on a thread pinned to another model gets the explanation."""
+    _seed_thread_rollout(tmp_path, turn_models)
+    event: dict[str, object] = {
+        "method": "turn/completed",
+        "params": {
+            "threadId": "thread_123",
+            "turn": {"id": "turn_123", "status": "failed", "error": {"message": message}},
+        },
+    }
+
+    failed = await _drive_events(tmp_path, [event], selected_model=selected_model)
+
+    assert len(failed) == 1
+    assert failed[0]["output"] == message
 
 
 @pytest.mark.asyncio

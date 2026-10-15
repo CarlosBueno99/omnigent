@@ -9,9 +9,11 @@ from omnigent.runner.launch_failure import (
     FailureDiagnosis,
     classify_native_turn_error,
     classify_terminal_failure,
+    codex_previous_model_budget_hint,
     describe_failure_code,
     diagnose_client_update_required,
     diagnose_codex_model_rejection,
+    diagnose_codex_previous_model_budget,
 )
 
 # The tail Claude Code prints when refusing --dangerously-skip-permissions as
@@ -448,6 +450,55 @@ def test_codex_model_rejection_explains_how_to_fix_configuration(model: str) -> 
 )
 def test_codex_model_rejection_ignores_unrelated_errors(message: str) -> None:
     assert diagnose_codex_model_rejection(message) is None
+
+
+_BUDGET_REFUSAL = (
+    'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED","message":"Budget '
+    '\\"frontier-budget\\" (00000000-0000-0000-0000-000000000001) has reached its limit of '
+    '$2000. To continue, contact an admin to increase the budget or use a different budget."}'
+)
+
+
+@pytest.mark.parametrize(
+    ("previous_model", "selected_model"),
+    [("gpt-5.5", "gpt-5.6-sol"), ("system.ai.gpt-6-astra", "system.ai.gpt-6-1-sol")],
+)
+def test_codex_previous_model_budget_card_names_both_models(
+    previous_model: str, selected_model: str
+) -> None:
+    """The forwarder's hint round-trips into a card that names the stuck model and the fix."""
+    message = (
+        f"{_BUDGET_REFUSAL}\n\n{codex_previous_model_budget_hint(previous_model, selected_model)}"
+    )
+
+    diagnosis = diagnose_codex_previous_model_budget(message)
+
+    assert diagnosis is not None
+    assert diagnosis.title == "Codex is blocked on the previous model's budget"
+    assert f"`{previous_model}`, the model of its last completed turn" in diagnosis.cause
+    assert f"switching to `{selected_model}`" in diagnosis.cause
+    assert diagnosis.cause.endswith("that model's budget is exhausted.")
+    assert diagnosis.remediation is not None
+    assert "fork this session to continue on" in diagnosis.remediation
+    assert f"continue on `{selected_model}`" in diagnosis.remediation
+    assert f"without the `{previous_model}` turn" in diagnosis.remediation
+    # Each half must fit the persisted-label width (255 chars) with long gateway ids.
+    assert max(len(diagnosis.cause), len(diagnosis.remediation)) < 255
+    # The hint keeps the refusal classified as budget exhaustion.
+    assert classify_native_turn_error("codex_turn_error", message) == "budget_exhausted"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "",
+        _BUDGET_REFUSAL,
+        "Your ChatGPT account has hit its usage limit.",
+        _CLIENT_UPDATE_OUTPUT,
+    ],
+)
+def test_codex_previous_model_budget_ignores_ordinary_refusals(message: str) -> None:
+    assert diagnose_codex_previous_model_budget(message) is None
 
 
 @pytest.mark.parametrize(

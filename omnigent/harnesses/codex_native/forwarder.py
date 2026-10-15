@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import json
 import logging
@@ -62,6 +63,8 @@ from omnigent.harnesses.codex_native.elicitation import (
 from omnigent.harnesses.codex_native.elicitation import (
     is_codex_request_id as _is_codex_request_id,
 )
+from omnigent.harnesses.codex_native.rollout import find_thread_rollout, last_turn_context_model
+from omnigent.models.codex_model_vocabulary import comparable_model_id
 from omnigent.native._native_forwarder_health import (
     note_post_success as note_native_post_success,
 )
@@ -74,6 +77,7 @@ from omnigent.native._native_post_delivery import (
     post_may_have_been_delivered,
     replay_dead_letters,
 )
+from omnigent.runner.launch_failure import codex_previous_model_budget_hint
 from omnigent.runtime.tool_output import cap_tool_output
 from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -991,9 +995,9 @@ def _classify_codex_error(error: _JsonObject, message: str) -> str:
     :returns: :data:`_CODEX_ERROR_KIND_AUTH` or
         :data:`_CODEX_ERROR_KIND_GENERIC`.
     """
-    lowered = message.lower()
-    if any(fragment in lowered for fragment in _CODEX_BUDGET_EXHAUSTED_FRAGMENTS):
+    if _is_budget_exhausted_message(message):
         return _CODEX_ERROR_KIND_GENERIC
+    lowered = message.lower()
     info = error.get("codexErrorInfo")
     variant: str | None = None
     http_status: object = None
@@ -1026,6 +1030,75 @@ def _error_payload_message(payload: _JsonObject) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return "Codex turn ended with an unspecified error."
+
+
+def _is_budget_exhausted_message(message: str) -> bool:
+    """Report whether *message* is the AI gateway's budget/usage-limit refusal."""
+    lowered = message.lower()
+    return any(fragment in lowered for fragment in _CODEX_BUDGET_EXHAUSTED_FRAGMENTS)
+
+
+def _last_turn_context_model(bridge_dir: Path) -> str | None:
+    """
+    Return the model of the bridge thread's last recorded Codex turn, if known.
+
+    :param bridge_dir: Native Codex bridge directory.
+    :returns: The newest ``turn_context`` model in the thread's rollout, or
+        ``None`` when the bridge state or rollout is unavailable.
+    :raises OSError: If the rollout cannot be read.
+    """
+    state = read_bridge_state(bridge_dir)
+    if state is None:
+        return None
+    rollout = find_thread_rollout(Path(state.codex_home), state.thread_id)
+    if rollout is None:
+        return None
+    return last_turn_context_model(rollout)
+
+
+def _explain_previous_model_budget_failure(
+    error: _CodexTerminalError,
+    *,
+    bridge_dir: Path | None,
+    forwarder_state: _CodexForwarderState | None,
+) -> _CodexTerminalError:
+    """
+    Attach the stuck-compaction explanation to a budget refusal, when it applies.
+
+    Codex compacts a thread on the model of its last recorded turn before the
+    first turn on a newly selected model, and records the new turn's context
+    only once that compaction succeeds. A budget refusal while the rollout's
+    newest ``turn_context`` still names a different model than the selected
+    one therefore came from that previous model, and every later turn repeats
+    it; the bare 403 would read as the selected model being over budget.
+
+    :param error: The classified turn error.
+    :param bridge_dir: Native Codex bridge directory, or ``None`` for a child
+        thread, which has no rollout of its own to consult.
+    :param forwarder_state: Forwarder state carrying the selected model.
+    :returns: *error* with the explanation appended, or unchanged.
+    """
+    selected_model = forwarder_state.model if forwarder_state is not None else None
+    if bridge_dir is None or not selected_model or not _is_budget_exhausted_message(error.message):
+        return error
+    try:
+        previous_model = _last_turn_context_model(bridge_dir)
+    except OSError:
+        _logger.debug(
+            "Could not read the Codex rollout for the previous turn model", exc_info=True
+        )
+        return error
+    if previous_model is None or comparable_model_id(previous_model) == comparable_model_id(
+        selected_model
+    ):
+        return error
+    _logger.info(
+        "Codex budget refusal came from compacting on the previous model: previous=%s selected=%s",
+        previous_model,
+        selected_model,
+    )
+    hint = codex_previous_model_budget_hint(previous_model, selected_model)
+    return dataclasses.replace(error, message=f"{error.message}\n\n{hint}")
 
 
 def _codex_terminal_launch_args_from_settings(payload: _JsonObject) -> list[str] | None:
@@ -3717,7 +3790,9 @@ async def _maybe_handle_turn_event(
                     status="failed",
                     turn_id=turn_id,
                     source="error",
-                    error=error,
+                    error=_explain_previous_model_budget_failure(
+                        error, bridge_dir=bridge_dir, forwarder_state=forwarder_state
+                    ),
                 ),
             )
             await usage_coalescer.flush()
@@ -4021,8 +4096,16 @@ async def _handle_terminal_turn_boundary_inner(
         forwarder_state=forwarder_state,
     )
     handled = terminal.handled
-    if terminal.edge is not None:
-        await _post_turn_status_edge(client, session_id, terminal.edge)
+    edge = terminal.edge
+    if edge is not None and edge.error is not None:
+        edge = dataclasses.replace(
+            edge,
+            error=_explain_previous_model_budget_failure(
+                edge.error, bridge_dir=bridge_dir, forwarder_state=forwarder_state
+            ),
+        )
+    if edge is not None:
+        await _post_turn_status_edge(client, session_id, edge)
     if handled:
         await elicitation_tracker.resolve_by_terminal_turn_event(
             client,
