@@ -1458,10 +1458,7 @@ describe("buildSlashCommandMap", () => {
 
 describe("btw Quick Answer panel", () => {
   it("bounds the answer container so long answers scroll instead of overflowing the viewport", () => {
-    // The panel renders in the composer's unbounded beforeInput slot; without
-    // its own scroll bound a long answer grew past the viewport with no way to
-    // reach it. jsdom can't catch visual overflow, so guard at source level —
-    // same pattern as the CSS guard in BlockRenderer.test.tsx.
+    // jsdom cannot measure overflow; guard the answer container's scroll classes in source.
     const chatPagePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "ChatPage.tsx");
     const source = readFileSync(chatPagePath, "utf8");
     const panelStart = source.indexOf("{btwSidechat && (");
@@ -1469,7 +1466,7 @@ describe("btw Quick Answer panel", () => {
     // First <div className> after the "Answer:" label is the answer container.
     const answerDiv = source.slice(panelStart).match(/Answer:[\s\S]*?<div className="([^"]+)"/);
     expect(answerDiv?.[1]).toContain("overflow-y-auto");
-    expect(answerDiv?.[1]).toMatch(/\bmax-h-/);
+    expect(answerDiv?.[1]).toContain("max-h-[50vh]");
     expect(answerDiv?.[1]).toContain("overscroll-contain");
   });
 });
