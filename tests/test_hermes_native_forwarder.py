@@ -818,9 +818,8 @@ async def test_forward_loop_rebases_idle_count_on_compaction_repin(tmp_path, mon
 def _seed_main_with_finished_helper(db: Path, workspace: str, *, compacted: bool) -> None:
     """Main (``cli``) plus a finished ``delegate_task`` helper; optionally compact main in place.
 
-    Row ids: 1-2 main's delegation turn, 3-4 the helper's own turn, 5 main's hand-back
-    reply. With *compacted*, Hermes archives rows 1/2/5 (``active=0, compacted=1``) under
-    the same session id and inserts the summary as row 6 — no continuation child exists.
+    Rows 1-2 and 5 are main's turns, 3-4 the helper's. With *compacted*, rows 1/2/5 are
+    archived (``active=0, compacted=1``) and the summary is row 6; no continuation exists.
     """
     con = sqlite3.connect(db)
     con.executescript(_SCHEMA)
@@ -879,10 +878,8 @@ async def test_forward_loop_stays_on_main_after_in_place_compaction_with_helper(
 ) -> None:
     """In-place compaction must not re-pin onto the finished delegated helper.
 
-    Hermes compacts in place by default (``compacted = 1`` rows under the same session
-    id, no continuation), so main's only child is the ``delegate_task`` helper. The
-    forwarder has to stay on main: mirror its post-compaction rows, never the helper's
-    prompt or reply, and keep main as the conversation's external session id.
+    Main's only child is the helper, so the forwarder must stay on main: mirror its
+    post-compaction rows, never the helper's, and keep main as the external session id.
     """
     workspace = str(tmp_path)
     db = tmp_path / "state.db"
@@ -931,8 +928,8 @@ async def test_forward_loop_stays_on_main_after_in_place_compaction_with_helper(
 async def test_forward_loop_drops_persisted_helper_binding(tmp_path, monkeypatch) -> None:
     """A saved binding naming a delegated helper is discarded and main is rediscovered.
 
-    ``hermes_forwarder.json`` is trusted across supervisor restarts, so a binding
-    written before the side-session rule existed would keep tailing the helper.
+    The state file is trusted across supervisor restarts, so a stale helper binding
+    would otherwise keep tailing the helper.
     """
     workspace = str(tmp_path)
     db = tmp_path / "state.db"

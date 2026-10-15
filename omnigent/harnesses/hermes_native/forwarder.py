@@ -441,12 +441,10 @@ def _is_side_session(
 ) -> bool:
     """Whether a ``sessions`` row is a side conversation rather than a main transcript.
 
-    Delegated helpers and tool runs are recognised by ``source``; ``delegate_task``,
-    ``/branch`` and reset forks also stamp a ``model_config`` marker naming the parent
-    (a child spawned under a gateway turn inherits the gateway's ``source``). With
-    *parent_id*, only a marker naming that parent counts — a continuation inherits
-    its parent's ``model_config`` verbatim, so an inherited marker is not a fork.
-    Without it, any marker does.
+    Helpers and tool runs are recognised by ``source``; forks also stamp a
+    ``model_config`` marker naming their parent. With *parent_id*, only a marker
+    naming that parent counts (a continuation inherits its parent's ``model_config``
+    verbatim); without it, any marker does.
     """
     if isinstance(source, str) and source in _SIDE_SESSION_SOURCES:
         return True
@@ -467,8 +465,8 @@ def _is_side_session(
 def _is_side_session_id(db_path: Path, hermes_session_id: str) -> bool:
     """Whether the ``sessions`` row *hermes_session_id* is a side session.
 
-    ``False`` when the row is missing or the store is unreadable: a binding that
-    cannot be checked yet (a fork pre-seeds one before Hermes writes the row) is kept.
+    ``False`` when the row is missing or unreadable, so an uncheckable binding
+    (a fork pre-seeds one before Hermes writes the row) is kept.
     """
     con = _connect_ro(db_path)
     if con is None:
@@ -560,16 +558,12 @@ def _discover_session_id(
 def _discover_child_session(db_path: Path, parent_session_id: str) -> str | None:
     """Return the newest compression continuation of *parent_session_id*, or ``None``.
 
-    Hermes compresses either in place (the session's rows are archived with
-    ``compacted = 1``) or by ending the session with ``end_reason = 'compression'``
-    and forking a CHILD (``sessions.parent_session_id`` points at the old id). The
-    forwarder pins one id for life, so after a fork it would keep polling the dead
-    parent and the chat would go silent; re-discover the continuation so the mirror
-    re-pins. ``parent_session_id`` also links ``delegate_task`` helpers, ``/branch``
-    forks and tool runs to a still-live parent, so only a child of a parent ended by
-    compression qualifies and side sessions are skipped — matching Hermes' own
-    continuation predicate. Mirrors :func:`_discover_session_id`'s read-only connect
-    + swallow-and-warn handling; returns ``None`` on any error.
+    Hermes compresses in place (rows archived with ``compacted = 1``) or by ending the
+    session with ``end_reason = 'compression'`` and forking a child; the forwarder pins
+    one id for life, so it must re-pin to that child or the chat goes silent. Helpers,
+    ``/branch`` forks and tool runs hang off a still-live parent through the same
+    ``parent_session_id``, so only a child of a parent ended by compression qualifies
+    and side sessions are skipped (Hermes' own continuation rule).
     """
     con = _connect_ro(db_path)
     if con is None:
@@ -1407,13 +1401,10 @@ async def forward_hermes_store_to_session(
                                     exc_info=True,
                                 )
                             # A compression fork ends this Hermes session and
-                            # continues in a child (parent_session_id chain).
-                            # Re-pin to that continuation so the mirror follows
-                            # the live session instead of polling the dead parent
-                            # forever. Done at most once per compaction
-                            # (compaction_persisted resets to False for the child,
-                            # which carries no compacted rows yet); an in-place
-                            # compaction has no continuation, so we stay put.
+                            # continues in a child; re-pin to that continuation so
+                            # the mirror follows the live session. Done at most once
+                            # per compaction (compaction_persisted resets for the
+                            # child); an in-place compaction has none, so we stay.
                             try:
                                 child = await asyncio.to_thread(
                                     _discover_child_session, db, hermes_session_id
