@@ -406,7 +406,8 @@ def _runner_exit_report(
         ``None`` when unknown.
     :param log_path: The runner's captured stdout/stderr log file.
     :param had_connected: Whether the runner had connected its tunnel;
-        ``False`` localizes an unexplained death to the launch phase.
+        ``False`` localizes an unexplained death to the launch phase and
+        ``True`` keeps a refusal out of it.
     :returns: The report, whose ``error`` is ready to surface verbatim in
         a CLI error or API ``error`` field.
     """
@@ -417,10 +418,12 @@ def _runner_exit_report(
     tail = _read_log_tail(log_path)
     refusal = runner_tunnel_refusal(tail)
     if refusal is not None:
+        # A protocol-close refusal can follow a successful connect, so only a
+        # runner that never connected is localized to the launch phase.
         return _RunnerExitReport(
             error=f"{_redact_log_tail(refusal)}\n{exited}",
             category=ErrorCategory.CONFIG,
-            phase=ErrorPhase.RUNNER_LAUNCH,
+            phase=ErrorPhase.RUNNER_LAUNCH if had_connected is not True else ErrorPhase.UNKNOWN,
         )
     error = exited
     if tail.strip():
@@ -2063,7 +2066,7 @@ class HostProcess:
             # The runner died before Popen returned — its actual error
             # is in the captured log, so ship the tail with the result
             # instead of making the user go find the file on the host.
-            report = _runner_exit_report(proc.returncode, log_path)
+            report = await asyncio.to_thread(_runner_exit_report, proc.returncode, log_path)
             self._trigger_maintenance("runner_launch_failed")
             # The returned result retains the diagnostic tail, while
             # _launch_failed limits the host lifecycle line to its first line.
@@ -2505,15 +2508,21 @@ class HostProcess:
                 _logger.info("Runner %s exited cleanly (code 0); no crash report", runner_id)
                 return
             # Pre-connect code 0 is a failed launch; send its cause to the server.
-            error = _runner_exit_report(handle.proc.returncode, handle.log_path).error
+            report = await asyncio.to_thread(
+                _runner_exit_report, handle.proc.returncode, handle.log_path
+            )
+            error = report.error
             _logger.info(
                 "Runner %s exited cleanly (code 0) before connecting; reporting exit",
                 runner_id,
             )
             await self._report_runner_exit(runner_id, error, had_connected=had_connected)
             return
-        report = _runner_exit_report(
-            handle.proc.returncode, handle.log_path, had_connected=had_connected
+        report = await asyncio.to_thread(
+            _runner_exit_report,
+            handle.proc.returncode,
+            handle.log_path,
+            had_connected=had_connected,
         )
         _logger.warning(
             "Runner %s died unexpectedly: %s",
@@ -2551,9 +2560,11 @@ class HostProcess:
             # A stop may arrive while the marker check runs off-loop.
             return
         refusal = None
-        if exit_watcher.done():
+        if await asyncio.to_thread(handle.proc.poll) is not None:
             tail = await asyncio.to_thread(_read_log_tail, handle.log_path)
-            refusal = runner_tunnel_refusal(_redact_log_tail(tail))
+            refusal = runner_tunnel_refusal(tail)
+            if refusal is not None:
+                refusal = _redact_log_tail(refusal)
         _logger.error(
             "Runner %s for session %s never connected its tunnel within "
             "%.0fs of launch (pid=%d): %s. Runner log: %s",

@@ -1624,11 +1624,31 @@ async def test_live_host_repushes_when_only_gateway_inference_changes(
     _cleanup_host(host)
 
 
+_TUNNEL_REFUSAL = (
+    "runner tunnel rejected by server (HTTP 401 persisted across 3 attempts); "
+    "run `omnigent login http://127.0.0.1:8000` to re-authenticate"
+)
+
+# The last lines a refused runner leaves in its log: uvicorn's shutdown
+# traceback, the entry point's ERROR line, and its stderr summary.
+_REFUSED_RUNNER_LOG_TAIL = (
+    "ERROR 10-15 03:53:52.755 uvicorn.error send | Traceback (most recent call last):\n"
+    '  File "starlette/routing.py", line 645, in lifespan\n'
+    "    await receive()\n"
+    "asyncio.exceptions.CancelledError\n"
+    "\n"
+    f"ERROR 10-15 03:53:52.780 runner._entry main | runner exiting: {_TUNNEL_REFUSAL}\n"
+    f"error: {_TUNNEL_REFUSAL}\n"
+)
+
+
+@pytest.mark.parametrize("exit_output", ["crash", "refusal"])
 async def test_handle_launch_immediate_exit_reports_exit_code_and_log_tail(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     capsys: pytest.CaptureFixture[str],
+    exit_output: str,
 ) -> None:
     """An immediate runner death fails the launch with the actual cause.
 
@@ -1636,7 +1656,9 @@ async def test_handle_launch_immediate_exit_reports_exit_code_and_log_tail(
     with code N" — the real error (a traceback, a missing module)
     stayed in a log file on the host. The launch failure must now
     carry the exit code, the log path, and the log tail so the server
-    can surface the cause to the user verbatim.
+    can surface the cause to the user verbatim. A runner the server
+    refused before ``Popen`` returned instead leads with its own refusal
+    line and is a configuration problem, not a runner fault.
     """
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / ".omnigent"))
@@ -1645,6 +1667,12 @@ async def test_handle_launch_immediate_exit_reports_exit_code_and_log_tail(
     host._maintenance_janitor = SimpleNamespace(trigger=maintenance_reasons.append)  # type: ignore[assignment]
     workspace = tmp_path / "project"
     workspace.mkdir()
+    if exit_output == "refusal":
+        log_tail = tmp_path / "refused-tail.txt"
+        log_tail.write_text(_REFUSED_RUNNER_LOG_TAIL, encoding="utf-8")
+        script, exit_code = f"cat '{log_tail}' >&2; exit 1", 1
+    else:
+        script, exit_code = "echo 'RuntimeError: boom-traceback' >&2; exit 7", 7
 
     original_popen = subprocess.Popen
 
@@ -1658,10 +1686,10 @@ async def test_handle_launch_immediate_exit_reports_exit_code_and_log_tail(
         :param args: Command args (ignored — a failing sh is spawned).
         :param kwargs: Popen kwargs from production, including the log
             file handles.
-        :returns: A finished subprocess handle with returncode 7.
+        :returns: A finished subprocess handle.
         """
         proc = original_popen(
-            ["sh", "-c", "echo 'RuntimeError: boom-traceback' >&2; exit 7"],
+            ["sh", "-c", script],
             stdin=subprocess.DEVNULL,
             stdout=kwargs["stdout"],
             stderr=kwargs["stderr"],
@@ -1683,29 +1711,36 @@ async def test_handle_launch_immediate_exit_reports_exit_code_and_log_tail(
     assert result.status == "failed"
     error = result.error or ""
     # The exit code identifies the failure class without log-reading.
-    assert "code 7" in error
+    assert f"code {exit_code}" in error
     # The log path lets the user fetch the full log on the host.
     assert "~/.omnigent/logs/runner/runner-" in error
+    failure = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event_name", None) == "runner_launch_failed"
+    )
+    assert failure.attributes["error_impact"] == "blocking"
+    assert failure.attributes["error_phase"] == "runner_launch"
+    output = capsys.readouterr().out
+    assert "Runner launch failed" in output
+    assert maintenance_reasons == ["runner_launch_failed"]
+    if exit_output == "refusal":
+        # The runner's own refusal line leads and the shutdown traceback is dropped.
+        assert error.splitlines()[0] == _TUNNEL_REFUSAL
+        assert "CancelledError" not in error
+        assert _TUNNEL_REFUSAL in output
+        assert failure.attributes["error_category"] == "config"
+        return
     # The tail carries the actual cause — the whole point of the report.
     assert "RuntimeError: boom-traceback" in error
     # Host lifecycle output names the failure and log location but must not
     # duplicate arbitrary runner output into the daemon log or foreground.
     assert "runner process exited with code 7" in caplog.text
     assert "RuntimeError: boom-traceback" not in caplog.text
-    failure = next(
-        record
-        for record in caplog.records
-        if getattr(record, "event_name", None) == "runner_launch_failed"
-    )
-    # The runner itself died, unlike a host-side spawn failure.
-    assert failure.attributes["error_category"] == "runner"
-    assert failure.attributes["error_impact"] == "blocking"
-    assert failure.attributes["error_phase"] == "runner_launch"
-    output = capsys.readouterr().out
-    assert "Runner launch failed" in output
     assert "runner process exited with code 7" in output
     assert "RuntimeError: boom-traceback" not in output
-    assert maintenance_reasons == ["runner_launch_failed"]
+    # The runner itself died, unlike a host-side spawn failure.
+    assert failure.attributes["error_category"] == "runner"
 
 
 @pytest.mark.parametrize(
@@ -1824,30 +1859,22 @@ def test_runner_exit_report_redacts_credential_values(tmp_path: Path) -> None:
     assert "code 3" in error
 
 
-_TUNNEL_REFUSAL = (
-    "runner tunnel rejected by server (HTTP 401 persisted across 3 attempts); "
-    "run `omnigent login http://127.0.0.1:8000` to re-authenticate"
+@pytest.mark.parametrize(
+    ("had_connected", "expected_phase"),
+    [(False, "runner_launch"), (None, "runner_launch"), (True, "unknown")],
 )
+def test_runner_exit_report_leads_with_declared_tunnel_refusal(
+    tmp_path: Path, had_connected: bool | None, expected_phase: str
+) -> None:
+    """A refusal the runner printed heads the report; the noisy tail is dropped.
 
-# The last lines a refused runner leaves in its log: uvicorn's shutdown
-# traceback, the entry point's ERROR line, and its stderr summary.
-_REFUSED_RUNNER_LOG_TAIL = (
-    "ERROR 10-15 03:53:52.755 uvicorn.error send | Traceback (most recent call last):\n"
-    '  File "starlette/routing.py", line 645, in lifespan\n'
-    "    await receive()\n"
-    "asyncio.exceptions.CancelledError\n"
-    "\n"
-    f"ERROR 10-15 03:53:52.780 runner._entry main | runner exiting: {_TUNNEL_REFUSAL}\n"
-    f"error: {_TUNNEL_REFUSAL}\n"
-)
-
-
-def test_runner_exit_report_leads_with_declared_tunnel_refusal(tmp_path: Path) -> None:
-    """A refusal the runner printed heads the report; the noisy tail is dropped."""
+    Only a runner that never connected is a launch-phase failure: a fatal
+    protocol close can refuse a reconnecting runner too.
+    """
     log = tmp_path / "runner-refused.log"
     log.write_text(_REFUSED_RUNNER_LOG_TAIL, encoding="utf-8")
 
-    report = _runner_exit_report(1, log, had_connected=False)
+    report = _runner_exit_report(1, log, had_connected=had_connected)
 
     first_line, _, rest = report.error.partition("\n")
     assert first_line == _TUNNEL_REFUSAL
@@ -1855,7 +1882,7 @@ def test_runner_exit_report_leads_with_declared_tunnel_refusal(tmp_path: Path) -
     assert "CancelledError" not in report.error
     assert "runner log tail" not in report.error
     assert report.category.value == "config"
-    assert report.phase.value == "runner_launch"
+    assert report.phase.value == expected_phase
 
 
 @pytest.mark.parametrize(
@@ -1875,53 +1902,6 @@ def test_runner_exit_report_localizes_unexplained_pre_connect_death(
     assert "RuntimeError: boom-traceback" in report.error
     assert report.category.value == "runner"
     assert report.phase.value == expected_phase
-
-
-async def test_handle_launch_immediate_exit_leads_with_declared_tunnel_refusal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A runner refused before Popen returns fails the launch as a config problem."""
-    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / ".omnigent"))
-    caplog.set_level(logging.WARNING, logger="omnigent.host.connect")
-    host = _make_host_process()
-    workspace = tmp_path / "project"
-    workspace.mkdir()
-    log_tail = tmp_path / "refused-tail.txt"
-    log_tail.write_text(_REFUSED_RUNNER_LOG_TAIL, encoding="utf-8")
-
-    original_popen = subprocess.Popen
-
-    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
-        """Spawn a runner that prints the refusal and has exited before poll()."""
-        proc = original_popen(
-            ["sh", "-c", f"cat '{log_tail}' >&2; exit 1"],
-            stdin=subprocess.DEVNULL,
-            stdout=kwargs["stdout"],
-            stderr=kwargs["stderr"],
-        )
-        proc.wait()
-        return proc
-
-    frame = HostLaunchRunnerFrame(
-        request_id="req_refused_now",
-        binding_token="tok_refused_now",
-        workspace=str(workspace),
-    )
-    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
-        result = await host._handle_launch(frame)
-
-    assert result.status == "failed"
-    error = result.error or ""
-    assert error.splitlines()[0] == _TUNNEL_REFUSAL
-    assert "CancelledError" not in error
-    failure = next(
-        r for r in caplog.records if getattr(r, "event_name", None) == "runner_launch_failed"
-    )
-    assert failure.attributes["error_category"] == "config"
-    assert failure.attributes["error_phase"] == "runner_launch"
 
 
 async def test_watch_runner_attributes_declared_tunnel_refusal_to_launch_config(

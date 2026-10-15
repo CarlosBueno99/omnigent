@@ -532,13 +532,15 @@ async def serve_tunnel(
                 # fresh token each attempt, so the session survives
                 # once credentials become valid again.
                 if not ever_connected and login_redirect_streak >= _LOGIN_REDIRECT_FATAL_ATTEMPTS:
+                    # The hint precedes the long redirect URL so the session's
+                    # stored (255-char) message still carries the command.
                     raise RuntimeError(
                         f"{RUNNER_TUNNEL_REJECTION_PREFIX}"
-                        f"(redirect to non-WebSocket URL {redirect_url} "
-                        f"persisted across {login_redirect_streak} attempts); "
-                        "the server likely requires auth — "
+                        f"(login-page redirect persisted across {login_redirect_streak} "
+                        "attempts); the server likely requires auth — "
                         f"{_reauth_hint(server_url)}, or "
-                        f"run `{cli_invocation()} setup` to configure credentials"
+                        f"run `{cli_invocation()} setup` to configure credentials; "
+                        f"the upgrade was redirected to non-WebSocket URL {redirect_url}"
                     ) from exc
                 retry_reason = (
                     f"login-page redirect during upgrade ({redirect_url}); "
@@ -561,10 +563,10 @@ async def serve_tunnel(
                         raise RuntimeError(
                             f"{RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX}"
                             f"(HTTP {http_status} persisted across "
-                            f"{http_auth_rejection_streak} unauthenticated attempts; the "
-                            "credential source returned no token, e.g. the host "
-                            "credential service's grant expired or was rejected); "
-                            f"{_reauth_hint(server_url)}"
+                            f"{http_auth_rejection_streak} unauthenticated attempts); "
+                            f"{_reauth_hint(server_url)}; the credential source returned "
+                            "no token, e.g. the host credential service's grant expired "
+                            "or was rejected"
                         ) from exc
                     if (
                         not ever_connected

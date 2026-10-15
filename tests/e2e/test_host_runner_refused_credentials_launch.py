@@ -35,7 +35,7 @@ from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
 from tests._helpers.host import Host, isolated_host
 from tests._helpers.live_server import isolated_local_server
 from tests._helpers.session import bundle_files, post_session_bundle
-from tests.e2e.test_native_terminal_start_error_log_correlation_e2e import _ZeroBusCapture
+from tests._helpers.zerobus import ZeroBusCapture
 
 _STALE_BEARER = "stale-access-token-" + "0" * 24
 
@@ -81,7 +81,7 @@ class _CredentialFrontDoor:
         self._accepted.discard(token)
 
     def close(self) -> None:
-        self._server.close()
+        self._loop.call_soon_threadsafe(self._server.close)
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
 
@@ -99,7 +99,7 @@ class _CredentialFrontDoor:
         }
         bearer = headers.get("authorization", "").removeprefix("Bearer ").strip()
         if path.startswith("/.well-known/"):
-            await self._respond(writer, 404, {}, b"not found")
+            await self._respond(writer, 404, {}, b"not found", content_type="text/plain")
             return
         if not bearer or bearer not in self._accepted:
             self.rejections.append((method, path, 401))
@@ -120,7 +120,7 @@ class _CredentialFrontDoor:
                 self._backend_host, self._backend_port
             )
         except OSError:
-            await self._respond(writer, 502, {}, b"backend unavailable")
+            await self._respond(writer, 502, {}, b"backend unavailable", content_type="text/plain")
             return
         upstream_writer.write(head)
         await upstream_writer.drain()
@@ -136,7 +136,7 @@ class _CredentialFrontDoor:
             while chunk := await reader.read(65536):
                 writer.write(chunk)
                 await writer.drain()
-        except (ConnectionError, asyncio.CancelledError):
+        except ConnectionError:
             pass
         finally:
             with contextlib.suppress(Exception):
@@ -144,10 +144,15 @@ class _CredentialFrontDoor:
 
     @staticmethod
     async def _respond(
-        writer: asyncio.StreamWriter, status: int, headers: dict[str, str], body: bytes
+        writer: asyncio.StreamWriter,
+        status: int,
+        headers: dict[str, str],
+        body: bytes,
+        *,
+        content_type: str = "application/json",
     ) -> None:
         reason = {401: "Unauthorized", 404: "Not Found", 502: "Bad Gateway"}[status]
-        lines = [f"HTTP/1.1 {status} {reason}", "Content-Type: application/json"]
+        lines = [f"HTTP/1.1 {status} {reason}", f"Content-Type: {content_type}"]
         lines += [f"{name}: {value}" for name, value in headers.items()]
         lines += [f"Content-Length: {len(body)}", "Connection: close", "", ""]
         writer.write("\r\n".join(lines).encode("latin-1") + body)
@@ -178,7 +183,7 @@ def _stage_signed_in_host_home(home: Path, server_url: str, bearer: str) -> None
     )
 
 
-def _debug_log_env(capture: _ZeroBusCapture) -> dict[str, str]:
+def _debug_log_env(capture: ZeroBusCapture) -> dict[str, str]:
     return {
         "OMNIGENT_DEBUG_LOG_CLIENT_ID": "e2e-client",
         "OMNIGENT_DEBUG_LOG_CLIENT_SECRET": "e2e-secret",
@@ -237,8 +242,8 @@ def signed_in_host_behind_front_door(
     backend_url: str,
     *,
     host_id: str | None = None,
-    capture: _ZeroBusCapture | None = None,
-) -> Iterator[tuple[_CredentialFrontDoor, Host, _ZeroBusCapture]]:
+    capture: ZeroBusCapture | None = None,
+) -> Iterator[tuple[_CredentialFrontDoor, Host, ZeroBusCapture]]:
     """A connected host that signed in through the front door with a bearer.
 
     Callers revoke the bearer on the returned front door to stage the
@@ -246,7 +251,7 @@ def signed_in_host_behind_front_door(
     """
     with contextlib.ExitStack() as stack:
         if capture is None:
-            capture = stack.enter_context(contextlib.closing(_ZeroBusCapture()))
+            capture = stack.enter_context(contextlib.closing(ZeroBusCapture()))
         client = stack.enter_context(httpx.Client(base_url=backend_url, trust_env=False))
         front_door = _CredentialFrontDoor(backend_url, {_STALE_BEARER})
         stack.callback(front_door.close)
@@ -285,7 +290,7 @@ def refused_launch(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[st
     """Run the journey once; both symptom checks read the same outcome."""
     tmp_path = tmp_path_factory.mktemp("refused-launch")
     with (
-        contextlib.closing(_ZeroBusCapture()) as capture,
+        contextlib.closing(ZeroBusCapture()) as capture,
         isolated_local_server(tmp_path / "server", env=_debug_log_env(capture)) as backend_url,
         httpx.Client(base_url=backend_url, trust_env=False) as client,
         signed_in_host_behind_front_door(
@@ -311,7 +316,9 @@ def refused_launch(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[st
         session_id = create.json()["id"]
         session = _wait_for_session_failure(client, session_id, timeout=_SESSION_FAILURE_TIMEOUT_S)
         seconds_to_failed = round(time.monotonic() - created, 2)
-        runner_id = str(session.get("runner_id"))
+        runner_id = session.get("runner_id")
+        assert runner_id, f"failed session carries no runner_id: {session}"
+        runner_id = str(runner_id)
         # Let the host's and server's debug-log batches flush.
         deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline and not (

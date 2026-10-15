@@ -473,6 +473,8 @@ async def test_serve_tunnel_no_credential_error_after_streak(
     assert attempt == _HTTP_AUTH_REJECTION_FATAL_ATTEMPTS
     assert message.startswith(serve_module.RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX)
     assert "login https://ws.cloud.databricks.com/omnigent?o=123` " in message
+    # The hint precedes the explanation so the session's 255-char stored message keeps it.
+    assert message.index("to re-authenticate") < 255
 
 
 @pytest.mark.asyncio
@@ -655,8 +657,11 @@ async def test_serve_tunnel_fails_loud_on_auth_redirect(
     # The actual redirect target shows up so the user can see
     # what the server is asking for.
     assert login_url in message
-    # User-actionable next step.
+    # User-actionable next step, placed before the redirect URL so the
+    # session's 255-char stored message keeps the login command.
     assert "omnigent setup" in message
+    assert message.index("to re-authenticate") < 255
+    assert message.index(login_url) > message.index("omnigent setup")
 
 
 @pytest.mark.asyncio

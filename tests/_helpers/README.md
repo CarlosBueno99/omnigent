@@ -12,6 +12,7 @@ retain configuration, fault injection and behavioral assertions.
 | Isolated local server | `isolated_local_server` in [live_server.py](live_server.py) | [Multi-user server](../e2e_ui/collaboration/_multi_user_server.py) |
 | Server and runner lifecycle | `server_runner` in [server_runner.py](server_runner.py) | [Runner shutdown](../e2e/test_runner_shutdown_mcp_notify_hang_e2e.py) |
 | Real host with isolated identity/home | `isolated_host` in [host.py](host.py) | [Host reconnect](../e2e/test_host_transient_404_restart.py) |
+| Capture the debug-log rows a process ships to ZeroBus | `ZeroBusCapture` in [zerobus.py](zerobus.py) | [Refused host credentials](../e2e/test_host_runner_refused_credentials_launch.py) |
 | Per-user page, sync or async | `user_page`, `async_user_page` in [browser.py](browser.py) | [Permissions](../e2e_ui/collaboration/test_permissions_modal.py), [async readiness](../e2e_ui/chat/test_credentialless_host_harness_readiness.py) |
 | Native-wrapper session | `create_native_session` in [native_session.py](native_session.py) | [Native workspace](../e2e_ui/messages/test_native_codex_workspace_cwd.py) |
 

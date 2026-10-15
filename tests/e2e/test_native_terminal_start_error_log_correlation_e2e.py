@@ -35,13 +35,10 @@ searchable error id.
 from __future__ import annotations
 
 import contextlib
-import http.server
-import json
 import os
 import re
 import shlex
 import shutil
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +48,7 @@ import pytest
 
 from tests._helpers.server_runner import server_runner
 from tests._helpers.session import bundle_files, post_session_bundle
+from tests._helpers.zerobus import ZeroBusCapture
 
 # CI shells can carry an egress proxy in the environment; every HTTP call in
 # this test targets 127.0.0.1, so bypass proxy autodetection entirely.
@@ -109,71 +107,12 @@ def _create_session_with_scoped_agent(base_url: str, name: str) -> tuple[str, st
     return str(body["session_id"]), str(body["agent_id"])
 
 
-class _ZeroBusCapture:
-    """Local HTTP endpoint implementing the ZeroBus ingest contract.
-
-    The runner's real debug-log sink mints a token from
-    ``<workspace_url>/oidc/v1/token`` and POSTs serialized row batches to the
-    insert URL; this server answers both and records every received row, so a
-    test can assert on exactly what the sink persisted.
-    """
-
-    def __init__(self) -> None:
-        self._rows: list[dict[str, object]] = []
-        self._lock = threading.Lock()
-        rows, lock = self._rows, self._lock
-
-        class _Handler(http.server.BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                if self.path.endswith("/oidc/v1/token"):
-                    payload = json.dumps({"access_token": "e2e-token", "expires_in": 3600})
-                elif "/tables/" in self.path:
-                    with lock:
-                        rows.extend(json.loads(body))
-                    payload = "{}"
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-                    return
-                data = payload.encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-
-            def log_message(self, *_args: object) -> None:
-                return
-
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
-
-    @property
-    def base_url(self) -> str:
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
-
-    @property
-    def insert_url(self) -> str:
-        return f"{self.base_url}/zerobus/v1/tables/main.omnigent.debug_logs/insert"
-
-    def rows(self) -> list[dict[str, object]]:
-        with self._lock:
-            return list(self._rows)
-
-    def close(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join(timeout=5)
-
-
 @dataclass
 class _Stack:
     base_url: str
     runner_id: str
     parent_session_id: str
-    capture: _ZeroBusCapture
+    capture: ZeroBusCapture
     tmp_path: Path
 
     def runner_log_tail(self) -> str:
@@ -217,7 +156,7 @@ def _native_stack(tmp_path: Path, claude_stub_script: str, *, fail_tmux_launch: 
         )
         tmux_stub.chmod(0o755)
 
-    with contextlib.closing(_ZeroBusCapture()) as capture, server_runner(tmp_path) as stack:
+    with contextlib.closing(ZeroBusCapture()) as capture, server_runner(tmp_path) as stack:
         base_url, runner_id = stack.base_url, stack.runner_id
         # The host creates the parent before starting its runner.
         parent_session_id, _parent_agent_id = _create_session_with_scoped_agent(
