@@ -14,6 +14,7 @@ retain configuration, fault injection and behavioral assertions.
 | Real host with isolated identity/home | `isolated_host` in [host.py](host.py) | [Host reconnect](../e2e/test_host_transient_404_restart.py) |
 | Per-user page, sync or async | `user_page`, `async_user_page` in [browser.py](browser.py) | [Permissions](../e2e_ui/collaboration/test_permissions_modal.py), [async readiness](../e2e_ui/chat/test_credentialless_host_harness_readiness.py) |
 | Native-wrapper session | `create_native_session` in [native_session.py](native_session.py) | [Native workspace](../e2e_ui/messages/test_native_codex_workspace_cwd.py) |
+| Deterministic 429 retry timing | `fake_retry_clock` in [retry_clock.py](retry_clock.py) | [Retry budget](../test_native_terminal.py) |
 
 ## Session inputs stay explicit
 

@@ -1283,8 +1283,8 @@ def _agent_cache_dest(spec_cache_root: Path, agent_id: str, version: str) -> Pat
 
 
 # A server restart makes every runner re-initialize its sessions, and the API
-# front end throttles that burst for tens of seconds. Turn setup, where users see
-# the failure, has no shorter bound; the server already treats a late init like a 503.
+# front end throttles that burst for tens of seconds. Init and turn setup both
+# arrive over the runner tunnel, which waits for a late reply instead of failing.
 _SPEC_FETCH_429_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0)
 _SPEC_FETCH_MAX_RETRY_AFTER_S = 5.0
 _SPEC_FETCH_429_BUDGET_S = 30.0

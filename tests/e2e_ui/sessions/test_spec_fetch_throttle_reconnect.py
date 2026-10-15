@@ -39,7 +39,9 @@ AFTER_REPLY = "Hello from the freshly initialized session."
 
 _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 _WORKING = '[data-testid="working-indicator"]'
-_SPEC_RESOLVER_LINE = re.compile(r".*(spec_resolver|spec resolve|re-assign session).*")
+_SPEC_RESOLVER_LINE = re.compile(
+    r".*(spec_resolver|spec resolve|re-assign(ing)? session|Session-init handshake).*"
+)
 _THROTTLED_FETCH_LINE = re.compile(
     r"GET /v1/sessions/(?P<session>[0-9a-f]+)/agent/contents was throttled (?P<count>\d+) time"
 )
@@ -223,6 +225,13 @@ def test_new_session_rides_out_throttled_spec_fetch_after_server_restart(
     env.arm_throttle()
     env.stack.restart_server()
     env.wait_for_host_online(timeout=120)
+    # Let the first session's re-init recover first so that only the new session's
+    # fetch can start the next window.
+    _wait_until(
+        lambda: throttled_fetch_attempts(env, first_session) > 0,
+        timeout=90,
+        what="the first session's spec fetch recovering after the restart",
+    )
 
     # The user starts a fresh session during that window and sends a message; the
     # throttle window starts at that session's first spec fetch.
@@ -260,3 +269,6 @@ def test_new_session_rides_out_throttled_spec_fetch_after_server_restart(
     )
     attempts = throttled_fetch_attempts(env, new_session)
     assert attempts >= 5, f"the new session's spec fetch saw only {attempts} throttled response(s)"
+    # Both sessions' fetches rode out their windows: no init or turn setup failed.
+    failures = [line for line in env.spec_resolver_log_lines() if "spec_resolver_failed" in line]
+    assert not failures, failures

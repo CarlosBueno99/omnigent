@@ -18,7 +18,6 @@ import httpx
 import pytest
 
 from omnigent.native import _native_forwarder_health as native_forwarder_health
-from omnigent.native import native_terminal
 from omnigent.runner._entry import (
     _DEFAULT_RUNNER_IDLE_TIMEOUT_S,
     _DEFAULT_RUNNER_THREADPOOL_MAX_WORKERS,
@@ -62,6 +61,7 @@ from omnigent.runner.transports.ws_tunnel.serve import (
     RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX,
     RUNNER_TUNNEL_REJECTION_PREFIX,
 )
+from tests._helpers.retry_clock import fake_retry_clock
 
 # Force-load the MCP streamable-http client before any test monkeypatches
 # httpx.AsyncClient: the MCP SDK evaluates `httpx.AsyncClient | None` eagerly at
@@ -2760,21 +2760,6 @@ async def test_resolve_agent_spec_from_server_caches_by_version_and_content(
     ]
 
 
-def _fake_retry_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """Replace the 429 retry sleep and clock with a fake; returns the recorded pauses."""
-    sleeps: list[float] = []
-    now = 1_000.0
-
-    async def _fake_sleep(delay: float) -> None:
-        nonlocal now
-        sleeps.append(delay)
-        now += delay
-
-    monkeypatch.setattr(native_terminal, "_sleep", _fake_sleep)
-    monkeypatch.setattr(native_terminal, "_monotonic", lambda: now)
-    return sleeps
-
-
 @pytest.mark.asyncio
 async def test_resolve_agent_spec_from_server_rides_out_a_sustained_throttle(
     tmp_path: Path,
@@ -2799,7 +2784,7 @@ async def test_resolve_agent_spec_from_server_rides_out_a_sustained_throttle(
         attempts += 1
         return responses.pop(0)
 
-    sleeps = _fake_retry_clock(monkeypatch)
+    clock = fake_retry_clock(monkeypatch)
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_handler),
         base_url="http://server.test",
@@ -2811,7 +2796,7 @@ async def test_resolve_agent_spec_from_server_rides_out_a_sustained_throttle(
     assert spec is not None and spec.name == "throttled-agent"
     assert attempts == 16
     # The 30s hint is capped, a missing hint uses the schedule, and short hints are followed.
-    assert sleeps == [5.0, 1.0, *[1.0] * 13]
+    assert clock.sleeps == [5.0, 1.0, *[1.0] * 13]
 
 
 @pytest.mark.asyncio
@@ -2832,7 +2817,7 @@ async def test_resolve_agent_spec_from_server_raises_when_throttling_persists(
         attempts += 1
         return httpx.Response(429)
 
-    sleeps = _fake_retry_clock(monkeypatch)
+    clock = fake_retry_clock(monkeypatch)
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_handler),
         base_url="http://server.test",
@@ -2844,7 +2829,7 @@ async def test_resolve_agent_spec_from_server_raises_when_throttling_persists(
 
     # The last fallback repeats until another pause would end after the 30s budget.
     assert attempts == 10
-    assert sleeps == [0.5, 1.0, 2.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]
+    assert clock.sleeps == [0.5, 1.0, 2.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]
 
 
 @pytest.mark.asyncio

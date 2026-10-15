@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from omnigent.native import native_terminal
+from tests._helpers.retry_clock import fake_retry_clock
 
 
 @pytest.mark.asyncio
@@ -109,25 +110,6 @@ async def test_bind_session_runner_surfaces_429_after_retries(
     assert sleeps == [10.0] * 4
 
 
-class _FakeRetryClock:
-    """Fake sleep and monotonic clock for the 429 retry loop."""
-
-    def __init__(self) -> None:
-        self.now = 1_000.0
-        self.sleeps: list[float] = []
-
-    async def sleep(self, delay: float) -> None:
-        self.sleeps.append(delay)
-        self.now += delay
-
-
-def _fake_retry_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeRetryClock:
-    clock = _FakeRetryClock()
-    monkeypatch.setattr(native_terminal, "_sleep", clock.sleep)
-    monkeypatch.setattr(native_terminal, "_monotonic", lambda: clock.now)
-    return clock
-
-
 @pytest.mark.asyncio
 async def test_request_with_429_retry_budget_outlasts_repeated_hints(
     monkeypatch: pytest.MonkeyPatch,
@@ -142,7 +124,7 @@ async def test_request_with_429_retry_budget_outlasts_repeated_hints(
             return httpx.Response(429, headers={"Retry-After": "1"})
         return httpx.Response(200)
 
-    clock = _fake_retry_clock(monkeypatch)
+    clock = fake_retry_clock(monkeypatch)
     response = await native_terminal.request_with_429_retry(
         _send, delays_s=(0.5, 1.0), max_retry_after_s=5.0, budget_s=10.0
     )
@@ -164,7 +146,7 @@ async def test_request_with_429_retry_budget_repeats_last_fallback_until_spent(
         attempts += 1
         return httpx.Response(429)
 
-    clock = _fake_retry_clock(monkeypatch)
+    clock = fake_retry_clock(monkeypatch)
     response = await native_terminal.request_with_429_retry(
         _send, delays_s=(0.5, 1.0, 2.0), max_retry_after_s=5.0, budget_s=7.0
     )
@@ -179,7 +161,7 @@ async def test_request_with_429_retry_budget_counts_request_latency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Slow 429 responses consume the budget even when every pause is short."""
-    clock = _fake_retry_clock(monkeypatch)
+    clock = fake_retry_clock(monkeypatch)
     attempts = 0
 
     async def _send() -> httpx.Response:
@@ -203,7 +185,7 @@ async def test_request_with_429_retry_budget_floors_tiny_hints(
     monkeypatch: pytest.MonkeyPatch, delays_s: tuple[float, ...]
 ) -> None:
     """Under a budget a tiny ``Retry-After`` waits at least the smallest fallback."""
-    clock = _fake_retry_clock(monkeypatch)
+    clock = fake_retry_clock(monkeypatch)
     attempts = 0
 
     async def _send() -> httpx.Response:
