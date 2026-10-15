@@ -694,8 +694,8 @@ describe("firstPageOnly", () => {
   });
 });
 
-describe("cursor repair after a local eviction", () => {
-  it("moves a legacy cursor off an evicted anchor even when no row reordered", () => {
+describe("cursors after local patches", () => {
+  it("keeps the cursor on an evicted anchor so paging continues from it", () => {
     const before = data([conv("a", { updated_at: 30 }), conv("b", { updated_at: 20 })]);
     before.pages[0].has_more = true;
 
@@ -706,8 +706,8 @@ describe("cursor repair after a local eviction", () => {
     );
 
     expect(after!.pages[0].data.map((row) => row.id)).toEqual(["a"]);
-    // The next page continues after the oldest remaining row, not the evicted one.
-    expect(after!.pages[0].last_id).toBe("a");
+    // The archived row still exists server-side, so "after=b" resolves there.
+    expect(after!.pages[0].last_id).toBe("b");
   });
 
   it("places a new row into an emptied window that still has more pages", () => {

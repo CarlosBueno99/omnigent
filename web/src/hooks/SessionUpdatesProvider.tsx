@@ -413,8 +413,21 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
     const replayAfterFetch = (query: Query) => {
       if (query.state.fetchStatus !== "idle") return;
       replayLists.delete(query.queryHash);
-      applyItemsToCache(queryClient, [...replayItems.values()], getCurrentUserId());
-      if (replayRemoved.size > 0) removeIdsFromCache(queryClient, [...replayRemoved]);
+      const replayed = applyItemsToCache(
+        queryClient,
+        [...replayItems.values()],
+        getCurrentUserId(),
+      );
+      // The earlier invalidation ran against pre-fetch pages; the replay can
+      // strand the landed page as well.
+      const lists = [...replayed.unresolvedFolders];
+      if (replayRemoved.size > 0) {
+        const removal = removeIdsFromCache(queryClient, [...replayRemoved]);
+        if (removal.removedAny) lists.push(...removal.stranded);
+      }
+      if (replayed.needsRefetch || lists.length > 0) {
+        scheduleInvalidate({ membership: replayed.needsRefetch, lists });
+      }
       if (replayLists.size === 0) {
         replayItems.clear();
         replayRemoved.clear();
@@ -519,7 +532,11 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
             getCurrentUserId(),
           );
           if (fetchingLists.length > 0) {
-            for (const item of frame.items) replayItems.set(item.id, item);
+            for (const item of frame.items) {
+              // Last frame wins: a change after a buffered removal restores the row.
+              replayRemoved.delete(item.id);
+              replayItems.set(item.id, item);
+            }
             for (const hash of fetchingLists) replayLists.add(hash);
           }
           // A session new to every list, or a membership-deciding field change,
@@ -568,7 +585,10 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
         if (event.type === "removed") {
           // A list dropped mid-fetch never settles; forget its pending replay.
           replayLists.delete(event.query.queryHash);
-          if (replayLists.size === 0) replayItems.clear();
+          if (replayLists.size === 0) {
+            replayItems.clear();
+            replayRemoved.clear();
+          }
         } else if (event.type === "updated" && replayLists.has(event.query.queryHash)) {
           replayAfterFetch(event.query);
         }

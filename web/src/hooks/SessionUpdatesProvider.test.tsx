@@ -702,6 +702,7 @@ describe("SessionUpdatesProvider list reconciliation", () => {
         items: [{ ...conv("Alpha-0-2"), project_id: "id-New", updated_at: 990 }],
       }),
     );
+    expect(folderRows(client, "Alpha").map((row) => row.id)).toContain("Alpha-0-2");
     await settle();
     await waitFor(() => {
       expect(result.current.alpha.isFetching).toBe(false);
@@ -854,6 +855,120 @@ describe("SessionUpdatesProvider list reconciliation", () => {
     expect(result.current.beta.hasNextPage).toBe(true);
   });
 
+  it("keeps paging from an archived anchor when remote archives empty the last page", async () => {
+    const backend = listBackend({ endless: true });
+    vi.stubGlobal("fetch", backend.fetch);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["projects"], PROJECTS);
+    const { result } = renderSidebarLists(client);
+    await loadSecondFolderPages(result);
+    const baseline = backend.calls.length;
+
+    // Every row of Beta's last loaded page, cursor anchor included, archived elsewhere.
+    act(() =>
+      frameHandler()({
+        type: "changed",
+        items: Array.from({ length: 20 }, (_, i) => ({
+          ...conv(`Beta-1-${i}`),
+          project_id: "id-Beta",
+          updated_at: 900 - i,
+          archived: true,
+        })),
+      }),
+    );
+    await settle();
+    await waitFor(() => expect(result.current.beta.isFetching).toBe(false));
+
+    // The archived anchor still resolves server-side, so the folder keeps
+    // paging from it instead of refetching.
+    expect(backend.calls.slice(baseline)).toEqual([]);
+    expect(folderRows(client, "Beta").map((row) => row.id)).not.toContain("Beta-1-0");
+    expect(result.current.beta.hasNextPage).toBe(true);
+  });
+
+  it("refetches a folder whose landed page was emptied by a replayed removal", async () => {
+    let holdPages = false;
+    const backend = listBackend({
+      endless: true,
+      hold: (params) => holdPages && params.has("after"),
+    });
+    vi.stubGlobal("fetch", backend.fetch);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["projects"], PROJECTS);
+    const { result } = renderSidebarLists(client);
+    await waitFor(() => {
+      expect(result.current.mine.isFetching).toBe(false);
+      expect(result.current.alpha.isFetching).toBe(false);
+      expect(result.current.beta.isFetching).toBe(false);
+    });
+
+    holdPages = true;
+    let nextPage!: Promise<unknown>;
+    act(() => {
+      nextPage = result.current.alpha.fetchNextPage();
+    });
+    await waitFor(() => expect(backend.calls.some((params) => params.has("after"))).toBe(true));
+    // Every row of the page in flight is deleted elsewhere before it lands.
+    act(() =>
+      frameHandler()({
+        type: "removed",
+        ids: Array.from({ length: 20 }, (_, i) => `Alpha-1-${i}`),
+      }),
+    );
+    holdPages = false;
+    backend.release();
+    await act(async () => {
+      await nextPage;
+    });
+    await settle();
+    await waitFor(() => expect(result.current.alpha.isFetching).toBe(false));
+
+    expect(folderRows(client, "Alpha").map((row) => row.id)).not.toContain("Alpha-1-0");
+    // The replayed removal emptied the landed page, so its head is refetched to page on.
+    const alphaCalls = backend.calls.filter((params) => params.get("project") === "Alpha");
+    expect(alphaCalls.at(-1)?.has("after")).toBe(false);
+    expect(result.current.alpha.hasNextPage).toBe(true);
+  });
+
+  it("keeps a row restored after a buffered removal once the held fetch settles", async () => {
+    let holdPages = false;
+    const backend = listBackend({ hold: (params) => holdPages && params.has("after") });
+    vi.stubGlobal("fetch", backend.fetch);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["projects"], PROJECTS);
+    const { result } = renderSidebarLists(client);
+    await waitFor(() => {
+      expect(result.current.mine.isFetching).toBe(false);
+      expect(result.current.alpha.isFetching).toBe(false);
+      expect(result.current.beta.isFetching).toBe(false);
+    });
+
+    holdPages = true;
+    let nextPage!: Promise<unknown>;
+    act(() => {
+      nextPage = result.current.alpha.fetchNextPage();
+    });
+    await waitFor(() => expect(backend.calls.some((params) => params.has("after"))).toBe(true));
+    // Access revoked, then re-granted, while Alpha's page is in flight.
+    act(() => frameHandler()({ type: "removed", ids: ["Beta-0-3"] }));
+    expect(folderRows(client, "Beta").map((row) => row.id)).not.toContain("Beta-0-3");
+    act(() =>
+      frameHandler()({
+        type: "changed",
+        items: [{ ...conv("Beta-0-3"), project_id: "id-Beta", updated_at: 2_000 }],
+      }),
+    );
+    expect(folderRows(client, "Beta").map((row) => row.id)).toContain("Beta-0-3");
+    backend.release();
+    await act(async () => {
+      await nextPage;
+    });
+    await settle();
+
+    // Last frame wins: the replay must not re-apply the superseded removal.
+    expect(folderRows(client, "Beta").map((row) => row.id)).toContain("Beta-0-3");
+  });
+
   it("drops a collapsed folder's late page response after trimming it", async () => {
     let holdPages = false;
     const backend = listBackend({
@@ -890,9 +1005,14 @@ describe("SessionUpdatesProvider list reconciliation", () => {
     vi.stubGlobal("fetch", backend.fetch);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(["projects"], PROJECTS);
-    const { result } = renderSidebarLists(client, "needle");
+    const { result } = renderSidebarLists(client, "needle", { serverLists: true });
     await loadSecondFolderPages(result);
-    await waitFor(() => expect(result.current.search.isSuccess).toBe(true));
+    await waitFor(() => {
+      expect(result.current.search.isSuccess).toBe(true);
+      expect(result.current.archived.isSuccess).toBe(true);
+      expect(result.current.filtered.isSuccess).toBe(true);
+    });
+    await settle();
     const baseline = backend.calls.length;
 
     act(() =>
@@ -902,10 +1022,31 @@ describe("SessionUpdatesProvider list reconciliation", () => {
       }),
     );
     await settle();
-    await waitFor(() => expect(result.current.search.isFetching).toBe(false));
+    await waitFor(() => {
+      expect(result.current.search.isFetching).toBe(false);
+      expect(result.current.archived.isFetching).toBe(false);
+      expect(result.current.filtered.isFetching).toBe(false);
+    });
 
+    // Search, the archived view and its project-filtered picker reconcile; the
+    // Mine scope and the resolved folders keep the row they patched in place.
     const refetched = backend.calls.slice(baseline);
-    expect(refetched.map((params) => params.get("search_query"))).toEqual(["needle"]);
+    expect(refetched).toHaveLength(3);
+    expect(refetched.map((params) => params.get("search_query")).filter(Boolean)).toEqual([
+      "needle",
+    ]);
+    expect(refetched.some((params) => params.get("visibility") === "archived")).toBe(true);
+    expect(
+      refetched.some(
+        (params) => params.get("project") === "Alpha" && params.get("include_archived") === "true",
+      ),
+    ).toBe(true);
+    expect(
+      refetched.every(
+        (params) =>
+          params.get("search_query") !== null || params.get("include_archived") === "true",
+      ),
+    ).toBe(true);
   });
 
   it("evicts a remotely archived folder row locally without a fetch", async () => {
@@ -927,41 +1068,6 @@ describe("SessionUpdatesProvider list reconciliation", () => {
 
     expect(backend.calls.slice(baseline)).toEqual([]);
     expect(folderRows(client, "Alpha").map((row) => row.id)).not.toContain("Alpha-1-3");
-  });
-
-  it("reconciles a rename in the archived and project-filtered lists only", async () => {
-    const backend = listBackend();
-    vi.stubGlobal("fetch", backend.fetch);
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(["projects"], PROJECTS);
-    const { result } = renderSidebarLists(client, undefined, { serverLists: true });
-    await loadSecondFolderPages(result);
-    await waitFor(() => {
-      expect(result.current.archived.isSuccess).toBe(true);
-      expect(result.current.filtered.isSuccess).toBe(true);
-    });
-    await settle();
-    const baseline = backend.calls.length;
-
-    act(() =>
-      frameHandler()({
-        type: "changed",
-        items: [{ ...conv("mine-0-5"), title: "renamed elsewhere", updated_at: 990 }],
-      }),
-    );
-    await settle();
-    await waitFor(() => {
-      expect(result.current.archived.isFetching).toBe(false);
-      expect(result.current.filtered.isFetching).toBe(false);
-    });
-
-    // The Mine scope and the resolved folders keep the row they patched in
-    // place; only the server-decided lists reconcile.
-    const refetched = backend.calls.slice(baseline);
-    expect(refetched).toHaveLength(2);
-    expect(refetched.every((params) => params.get("include_archived") === "true")).toBe(true);
-    expect(refetched.some((params) => params.get("visibility") === "archived")).toBe(true);
-    expect(refetched.some((params) => params.get("project") === "Alpha")).toBe(true);
   });
 });
 

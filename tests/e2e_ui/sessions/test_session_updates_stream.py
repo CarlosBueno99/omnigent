@@ -285,7 +285,7 @@ class SidebarTraffic:
         for t, frame in self.frames:
             items = frame.get("items") or []
             summary = ",".join(
-                f"{item['id'][:8]}(parent={str(item.get('parent_session_id'))[:8]},"
+                f"{item.get('id', '?')[:8]}(parent={str(item.get('parent_session_id'))[:8]},"
                 f"status={item.get('status')},updated_at={item.get('updated_at')})"
                 for item in items
             )

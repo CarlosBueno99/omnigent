@@ -333,11 +333,9 @@ export function mergeItemsIntoPages(
     }
     if (!rowChanged) return page;
     anyPageChanged = true;
-    if (!reordered) {
-      if (nextData.length === page.data.length) return { ...page, data: nextData };
-      // An evicted row may have anchored the legacy row-id cursor.
-      return { ...page, data: nextData, last_id: repairedLastId(page, nextData) };
-    }
+    // An evicted anchor still exists server-side (archived or moved), so its
+    // cursor stays valid and paging continues from it.
+    if (!reordered) return { ...page, data: nextData };
     // Keep the page in server order and move a legacy row-id cursor off a
     // bumped anchor, which the server would otherwise resolve at its new time.
     nextData.sort((a, b) => compareSessionRows(a, b, sortBy));
@@ -456,9 +454,9 @@ export function lastIdAfterFiltering(
 }
 
 /**
- * Cursor for a page whose rows were re-sorted or evicted. Only a legacy row-id
- * cursor anchored at the page tail follows the tail; a rewind cursor placed
- * before retained history (see `refreshScopeWindow`) must stay where it is.
+ * Cursor for a re-sorted page. Only a legacy row-id cursor anchored at the page
+ * tail follows the tail; a rewind cursor placed before retained history (see
+ * `refreshScopeWindow`) must stay where it is.
  */
 function repairedLastId(page: ConversationsPage, rows: Conversation[]): string | null {
   return page.last_id === page.data.at(-1)?.id ? lastIdAfterFiltering(page, rows) : page.last_id;
