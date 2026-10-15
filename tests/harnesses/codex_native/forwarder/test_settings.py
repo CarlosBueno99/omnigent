@@ -305,6 +305,10 @@ def test_note_resume_response_records_model_without_seeding_baseline() -> None:
     state.note_resume_response({"result": {"model": "gpt-5.4-mini"}})
 
     assert state.model == "gpt-5.4-mini"
+    # The resumed thread's model is the running process's truth, like a live
+    # ``thread/settings/updated``, so a launch-pinned config.toml cannot
+    # overwrite it on the subscription-time read.
+    assert state.settings_model == "gpt-5.4-mini"
     # Baseline NOT seeded → the spawn model will be mirrored on the next sync.
     assert state.posted_model is None
 
@@ -332,6 +336,87 @@ async def test_sync_after_resume_posts_spawn_model() -> None:
         )
     ]
     assert state.posted_model == "gpt-5.4-mini"
+
+
+@pytest.mark.asyncio
+async def test_subscribe_mirrors_resumed_thread_model_over_divergent_launch_pin(
+    tmp_path: Path,
+) -> None:
+    """A cold resume mirrors the model the resumed thread runs, not the launch pin.
+
+    The resume relaunch pins config.toml to ``model_override or the spec
+    default`` before Codex resumes the thread, and Codex can keep the thread's
+    rollout model instead — the ``thread/resume`` response reports which. The
+    subscription's first config read on the fresh forwarder state must not let
+    the pinned file overwrite that model, or the composer picker shows the
+    default while the Codex TUI keeps running the thread's model.
+    """
+
+    class _ResumeClient:
+        async def request(self, _method: str, _params: dict) -> dict:
+            return {
+                "result": {
+                    "model": "databricks-kimi-k3",
+                    "thread": {"id": "thread_1", "turns": []},
+                }
+            }
+
+    _write_codex_config(tmp_path, 'model = "gpt-5.6-sol"\n')
+    client = _RecordingClient()
+    state = fwd._CodexForwarderState()
+    tracker = fwd._CodexElicitationTaskTracker()
+    usage = fwd._SessionUsageCoalescer(client, "conv_x")  # type: ignore[arg-type]
+    locks_token = fwd._conversation_item_locks.set({})
+    try:
+        await fwd._subscribe_until_ready(
+            _ResumeClient(),  # type: ignore[arg-type]
+            client,  # type: ignore[arg-type]
+            session_id="conv_x",
+            bridge_dir=tmp_path,
+            thread_id="thread_1",
+            usage_coalescer=usage,
+            elicitation_tracker=tracker,
+            forwarder_state=state,
+        )
+    finally:
+        fwd._conversation_item_locks.reset(locks_token)
+        await usage.close()
+        await tracker.close()
+
+    model_posts = [
+        body["data"]["model"]
+        for _url, body in client.posts
+        if body["type"] == "external_model_change"
+    ]
+    assert model_posts == ["databricks-kimi-k3"]
+    assert state.posted_model == "databricks-kimi-k3"
+
+
+def test_refresh_after_resume_keeps_thread_model_until_config_is_rewritten(
+    tmp_path: Path,
+) -> None:
+    """After a resume, only a rewritten config.toml replaces the thread's model.
+
+    The launch pin read at subscription seeds the change-detection baseline
+    rather than counting as a change: the next ``turn/started`` re-read of the
+    unchanged file keeps the resumed thread's model, while an in-TUI ``/model``
+    that rewrites the file is still the freshest signal and wins.
+    """
+    _write_codex_config(tmp_path, 'model = "gpt-5.6-sol"\n')
+    state = fwd._CodexForwarderState()
+    state.note_resume_response({"result": {"model": "databricks-kimi-k3"}})
+
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == "databricks-kimi-k3"
+
+    # turn/started re-read of the unchanged pin keeps the thread's model.
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == "databricks-kimi-k3"
+
+    # The user picks a model in the TUI: /model rewrites config.toml.
+    _write_codex_config(tmp_path, 'model = "gpt-5.5"\n')
+    fwd._refresh_model_from_config(tmp_path, state)
+    assert state.model == "gpt-5.5"
 
 
 def test_thread_settings_updated_records_effort_and_collaboration_mode() -> None:

@@ -444,8 +444,9 @@ class _CodexForwarderState:
 
     model: str | None = None
     posted_model: str | None = None
-    # The running thread's authoritative model, from a live
-    # ``thread/settings/updated``; beats a stale config.toml re-read.
+    # The running thread's authoritative model, from the ``thread/resume``
+    # response or a live ``thread/settings/updated``; beats a stale or
+    # launch-pinned config.toml read.
     settings_model: str | None = None
     # The config.toml model as of the last _refresh_model_from_config read,
     # so the refresh can tell an unchanged file from a rewritten one.
@@ -513,6 +514,12 @@ class _CodexForwarderState:
         if not isinstance(result, dict):
             return
         self._note_model_fields(result)
+        # The response reports the model the resumed thread actually runs,
+        # whether Codex adopted the relaunch's config.toml pin or kept the
+        # thread's rollout model; see _refresh_model_from_config.
+        model = result.get("model")
+        if isinstance(model, str) and model:
+            self.settings_model = model
         self._note_approval_mode_fields(result)
         # Do NOT seed ``posted_model`` here. Omnigent must learn the session's
         # ACTUAL model — including the spawn default — because the cost-budget
@@ -2660,10 +2667,10 @@ async def _subscribe_until_ready_inner(
             return
         if forwarder_state is not None:
             forwarder_state.note_resume_response(response)
-            # Source of truth for the cost policy is config.toml's model (what
-            # /model writes). Read it now so model_override reflects it from
-            # the first tool call, not a turn later. Falls back to the resume
-            # response's model when config.toml has none.
+            # Read config.toml (what /model writes) now so the mirror reflects
+            # the session's model from the first tool call, not a turn later.
+            # The resumed thread's model from the response wins over a
+            # divergent launch pin; see _refresh_model_from_config.
             _refresh_model_from_config(bridge_dir, forwarder_state)
             _refresh_developer_instructions_from_config(bridge_dir, forwarder_state)
             _refresh_effort_from_config(bridge_dir, forwarder_state)
@@ -3309,8 +3316,13 @@ def _refresh_model_from_config(bridge_dir: Path, forwarder_state: _CodexForwarde
 
     Precedence: a config.toml value that CHANGED since the last read wins
     (an in-TUI ``/model`` or the executor's mirror write — the freshest
-    signal). An unchanged config defers to the last live
-    ``thread/settings/updated`` model when one was seen: an
+    signal). The first read only seeds that baseline: a resume relaunch
+    pins config.toml to the saved pick or the default before Codex resumes
+    the thread, and Codex may keep the thread's rollout model instead, so
+    adopting the pin over the ``thread/resume`` model would show the picker
+    a model the terminal is not running. An unchanged (or first-read)
+    config defers to the running thread's model when one was seen — the
+    ``thread/resume`` response or a live ``thread/settings/updated``: an
     Omnigent-initiated ``thread/settings/update`` switches the running
     thread without touching config.toml, so re-adopting the stale file
     would revert a routed model one turn after it applied. No-op when
@@ -3322,7 +3334,12 @@ def _refresh_model_from_config(bridge_dir: Path, forwarder_state: _CodexForwarde
     :returns: None.
     """
     config_model = read_codex_config_model(bridge_dir)
-    config_changed = bool(config_model) and config_model != forwarder_state.last_config_model
+    previous_config_model = forwarder_state.last_config_model
+    config_changed = (
+        bool(config_model)
+        and previous_config_model is not None
+        and config_model != previous_config_model
+    )
     if config_model:
         forwarder_state.last_config_model = config_model
     if config_changed:
