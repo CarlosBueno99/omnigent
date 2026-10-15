@@ -39,6 +39,10 @@ AFTER_REPLY = "Hello from the freshly initialized session."
 _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 _WORKING = '[data-testid="working-indicator"]'
 _SPEC_RESOLVER_LINE = re.compile(r".*(spec_resolver|spec resolve|re-assign session).*")
+_THROTTLED_FETCH_LINE = re.compile(
+    r"GET /v1/sessions/(?P<session>[0-9a-f]+)/agent/contents was throttled "
+    r"(?P<count>\d+) time\(s\); last status HTTP 200"
+)
 
 
 @dataclass
@@ -91,6 +95,16 @@ def _wait_until(predicate: Callable[[], bool], *, timeout: float, what: str) -> 
             pass
         time.sleep(0.5)
     raise AssertionError(f"{what} did not happen within {timeout:.0f}s")
+
+
+def throttled_fetch_attempts(env: ThrottledStack, session_id: str) -> int:
+    """Largest throttled-attempt count the runner logged for one spec fetch of *session_id*."""
+    counts = [
+        int(match.group("count"))
+        for match in map(_THROTTLED_FETCH_LINE.search, env.spec_resolver_log_lines())
+        if match is not None and match.group("session") == session_id
+    ]
+    return max(counts, default=0)
 
 
 def _online_host_id(client: httpx.Client) -> str | None:
@@ -231,3 +245,12 @@ def test_new_session_rides_out_throttled_spec_fetch_after_server_restart(
     )
     expect_reply(page, AFTER_REPLY, timeout_ms=120_000)
     expect(pill).to_have_count(0)
+
+    # A single resolver call rode out several throttled responses before succeeding.
+    _wait_until(
+        lambda: throttled_fetch_attempts(env, new_session) > 0,
+        timeout=15,
+        what="the runner logging the new session's throttled spec fetch",
+    )
+    attempts = throttled_fetch_attempts(env, new_session)
+    assert attempts >= 5, f"the new session's spec fetch saw only {attempts} throttled response(s)"

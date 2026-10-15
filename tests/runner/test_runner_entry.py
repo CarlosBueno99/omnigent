@@ -2776,11 +2776,11 @@ def _fake_retry_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 
 @pytest.mark.asyncio
-async def test_resolve_agent_spec_from_server_retries_a_throttled_fetch(
+async def test_resolve_agent_spec_from_server_rides_out_a_sustained_throttle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rate-limited fetch is retried, honoring a capped ``Retry-After``, not failed.
+    """A long burst of 429s is retried to success, honoring capped and missing hints.
 
     :param tmp_path: Temporary spec cache root.
     :param monkeypatch: Pytest patch fixture for the retry sleep and clock.
@@ -2789,41 +2789,15 @@ async def test_resolve_agent_spec_from_server_retries_a_throttled_fetch(
     responses = [
         httpx.Response(429, headers={"Retry-After": "30"}),
         httpx.Response(429),
+        *[httpx.Response(429, headers={"Retry-After": "1"}) for _ in range(13)],
         httpx.Response(200, content=_spec_bundle("throttled-agent")),
     ]
-    sleeps = _fake_retry_clock(monkeypatch)
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda _request: responses.pop(0)),
-        base_url="http://server.test",
-    ) as client:
-        spec = await _resolve_agent_spec_from_server(
-            client, tmp_path, "ag_throttled", session_id="conv_test"
-        )
-
-    assert spec is not None and spec.name == "throttled-agent"
-    # The 30s hint is capped; a response without a hint falls back to the schedule.
-    assert sleeps == [5.0, 1.0]
-
-
-@pytest.mark.asyncio
-async def test_resolve_agent_spec_from_server_rides_out_a_sustained_throttle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Repeated short ``Retry-After`` hints keep the fetch retrying across a long burst.
-
-    :param tmp_path: Temporary spec cache root.
-    :param monkeypatch: Pytest patch fixture for the retry sleep and clock.
-    :returns: None.
-    """
     attempts = 0
 
     def _handler(_request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
-        if attempts <= 15:
-            return httpx.Response(429, headers={"Retry-After": "1"})
-        return httpx.Response(200, content=_spec_bundle("throttled-agent"))
+        return responses.pop(0)
 
     sleeps = _fake_retry_clock(monkeypatch)
     async with httpx.AsyncClient(
@@ -2836,7 +2810,8 @@ async def test_resolve_agent_spec_from_server_rides_out_a_sustained_throttle(
 
     assert spec is not None and spec.name == "throttled-agent"
     assert attempts == 16
-    assert sleeps == [1.0] * 15
+    # The 30s hint is capped, a missing hint uses the schedule, and short hints are followed.
+    assert sleeps == [5.0, 1.0, *[1.0] * 13]
 
 
 @pytest.mark.asyncio
