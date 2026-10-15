@@ -1,10 +1,6 @@
-"""A side chat never renders its parent's transcript.
-
-Drives the generic side-chat fork on the mock openai-agents parent and leaves
-the pane while its first transcript page is still loading; a held request
-stands in for a slow deployment. Staying on the pane is covered by
-``test_side_chat_entrypoints``.
-"""
+"""A side chat never renders its parent's transcript, even when the pane is left
+while its first transcript page is still loading; a held request stands in for a
+slow deployment. Staying on the pane is covered by ``test_side_chat_entrypoints``."""
 
 from __future__ import annotations
 
