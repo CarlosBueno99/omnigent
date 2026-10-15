@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
+import types
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -29,6 +31,15 @@ from omnigent.runner.native.orchestration import (
     _native_terminal_start_error_payload,
     _native_terminal_start_error_response,
     _publish_native_terminal_start_error,
+)
+from omnigent.server.routes._sessions.helpers import (
+    _LAST_TASK_ERROR_CAUSE_LABEL_KEY,
+    _LAST_TASK_ERROR_CODE_LABEL_KEY,
+    _LAST_TASK_ERROR_MESSAGE_LABEL_KEY,
+    _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY,
+    _LAST_TASK_ERROR_TITLE_LABEL_KEY,
+    _last_task_error_from_labels,
+    _truncate_label,
 )
 from omnigent.terminals.registry import TerminalExitedDuringLaunch
 
@@ -126,6 +137,8 @@ def test_mixed_version_import_failure_guides_host_restart(
         name="omnigent.runner.transports.ws_tunnel.frames",
         path=frames_path,
     )
+    # CPython sets ``name_from`` via the C constructor; typeshed omits it, so
+    # assign the attribute to stay type-clean while modelling the real failure.
     exc.name_from = "EventAckFrame"
 
     payload = _native_terminal_start_error_payload(exc, "Claude", session_id="conv_1")
@@ -157,7 +170,92 @@ def test_mixed_version_import_failure_guides_host_restart(
     assert _ERROR_ID_RE.search(payload["message"]) is not None
 
 
+def _stale_host_import_error() -> ImportError:
+    """Build the mixed-version in-tree lazy-import failure from the bug report."""
+    frames_path = (
+        "/opt/pipx/venvs/omnigent/lib/python3.12/site-packages/"
+        "omnigent/runner/transports/ws_tunnel/frames.py"
+    )
+    exc = ImportError(
+        "cannot import name 'EventAckFrame' from "
+        "'omnigent.runner.transports.ws_tunnel.frames' "
+        f"({frames_path})",
+        name="omnigent.runner.transports.ws_tunnel.frames",
+        path=frames_path,
+    )
+    exc.name_from = "EventAckFrame"
+    return exc
+
+
+def test_long_wrapper_command_keeps_restart_guidance_across_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long wrapper command must not truncate the reload-visible guidance.
+
+    ``cli_invocation()`` echoes ``OMNIGENT_WRAPPER_COMMAND`` verbatim, so an
+    unusually long wrapper would push the remediation past the per-field label
+    budget and silently clip ``--server`` on reload. The guidance falls back
+    to a wrapper-independent phrasing, and the complete remedy survives the
+    actual label persistence/read-back boundary intact.
+    """
+    monkeypatch.setenv(
+        "OMNIGENT_WRAPPER_COMMAND",
+        "/home/alice/.local/share/acme-enterprise/omnigent-wrapper/current/bin/isaac-omnigent",
+    )
+
+    payload = _native_terminal_start_error_payload(
+        _stale_host_import_error(), "Claude", session_id="conv_1"
+    )
+
+    # Persist exactly as the status relay does, then project back for a reload.
+    labels = {
+        _LAST_TASK_ERROR_CODE_LABEL_KEY: _truncate_label(payload["code"]),
+        _LAST_TASK_ERROR_MESSAGE_LABEL_KEY: _truncate_label(payload["message"]),
+        _LAST_TASK_ERROR_TITLE_LABEL_KEY: _truncate_label(payload["title"]),
+        _LAST_TASK_ERROR_CAUSE_LABEL_KEY: _truncate_label(payload["cause"]),
+        _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY: _truncate_label(payload["remediation"]),
+    }
+    reloaded = _last_task_error_from_labels(labels)
+
+    assert reloaded is not None
+    # The complete remedy survives the reload with no truncation marker, keeps
+    # the endpoint-preserving instruction, and never embeds the long wrapper.
+    assert reloaded["remediation"] == payload["remediation"]
+    assert "\u2026" not in reloaded["remediation"]
+    assert "keeping `--server`" in reloaded["remediation"]
+    assert "isaac-omnigent" not in reloaded["remediation"]
+    assert reloaded["title"] == payload["title"]
+    assert reloaded["cause"] == payload["cause"]
+
+
+def test_stale_host_classified_before_fragile_lazy_imports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mixed-version host is classified before the fragile lazy imports.
+
+    The harness/registry imports in the payload builder can themselves raise
+    the same stale-host ``ImportError``; classifying first keeps the restart
+    guidance from being lost to a second import failure.
+    """
+    # A broken replacement makes ``from ... import PiNativeCliOutdatedError``
+    # raise, so a stale-host failure must return before reaching that import.
+    broken = types.ModuleType("omnigent.harnesses.pi_native.main")
+    monkeypatch.setitem(sys.modules, "omnigent.harnesses.pi_native.main", broken)
+
+    payload = _native_terminal_start_error_payload(
+        _stale_host_import_error(), "Claude", session_id="conv_1"
+    )
+
+    assert payload["title"] == "Claude can't start until you restart the host"
+    assert "Restart the host" in payload["remediation"]
+
+
 def _third_party_cannot_import_name() -> ImportError:
+    """A dependency "cannot import name" failure with ``name_from`` set.
+
+    A ``parametrize`` entry is an expression, so set ``name_from`` through a
+    helper: the constructor kwarg exists at runtime but not in typeshed.
+    """
     exc = ImportError(
         "cannot import name 'Timeout' from 'httpx'",
         name="httpx",
