@@ -14,8 +14,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy.exc import StatementError
-
 from omnigent.entities import (
     Conversation,
     ConversationItem,
@@ -1307,6 +1305,9 @@ def _bound_agent_names(children: list[Conversation]) -> dict[str, str]:
     :param children: Child conversations to resolve.
     :returns: ``{agent_id: agent.name}`` for every binding that resolves.
     """
+    # Runner startup imports this module, so SQLAlchemy stays off the module path.
+    from sqlalchemy.exc import StatementError
+
     from omnigent.runtime import get_agent_store
 
     agent_ids = {child.agent_id for child in children if child.agent_id}
