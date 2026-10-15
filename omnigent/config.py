@@ -76,11 +76,13 @@ def _merge_effective_config(
     l_harness = local_cfg.get("harness")
     if isinstance(l_harness, str):
         l_harness = {"default": l_harness}
-    # A project may only select the default harness, and only as a string; a
-    # malformed default is ignored so untrusted project config fails safe.
-    if isinstance(l_harness, dict) and isinstance(l_harness.get("default"), str):
+    # A project may only select the default harness, and only as a non-empty
+    # string; a malformed or empty default is ignored so untrusted project
+    # config fails safe and keeps the user's harness selection.
+    l_default = l_harness.get("default") if isinstance(l_harness, dict) else None
+    if isinstance(l_default, str) and l_default:
         trusted = g_harness if isinstance(g_harness, dict) else {}
-        merged["harness"] = {**trusted, "default": l_harness["default"]}
+        merged["harness"] = {**trusted, "default": l_default}
     return merged
 
 

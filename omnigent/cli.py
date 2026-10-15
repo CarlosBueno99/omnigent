@@ -11122,6 +11122,17 @@ def _print_config_defaults() -> None:
         if local_is_global or not isinstance(raw_local_harness, dict)
         else sorted(key for key in raw_local_harness if isinstance(key, str) and key != "default")
     )
+    raw_project_default = (
+        raw_local_harness.get("default") if isinstance(raw_local_harness, dict) else None
+    )
+    # A project may select the default harness, but only as a non-empty string.
+    # Surface an invalid value so the author sees why it was dropped; the merge
+    # strips it before the resolver, so nothing else would report it.
+    project_default_ignored = (
+        not local_is_global
+        and raw_project_default is not None
+        and not (isinstance(raw_project_default, str) and raw_project_default)
+    )
     local_cfg = {
         k: v
         for k, v in raw_local_cfg.items()
@@ -11136,6 +11147,7 @@ def _print_config_defaults() -> None:
         and not local_cfg
         and not ignored_local_keys
         and not ignored_harness_overrides
+        and not project_default_ignored
     ):
         click.echo(
             f"  (none set — `{cli_invocation()} config set key=value` for project,\n"
@@ -11167,6 +11179,10 @@ def _print_config_defaults() -> None:
             "  # ignored project harness launch override(s): "
             f"{', '.join(ignored_harness_overrides)} (command/args are user-owned)"
         )
+    if project_default_ignored:
+        if not local_cfg and not ignored_local_keys and not ignored_harness_overrides:
+            click.echo(f"  # {local_path}")
+        click.echo("  # ignored invalid project harness default (expected a non-empty harness id)")
 
 
 class _ConfigGroup(click.Group):

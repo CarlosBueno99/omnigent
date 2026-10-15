@@ -68,11 +68,12 @@ def test_merge_effective_config_scalar_local_preserves_user_overrides() -> None:
     }
 
 
-def test_merge_effective_config_ignores_non_string_project_default() -> None:
-    # A malformed project default (untrusted input) must not propagate; the
-    # user's harness settings stand so resolution still succeeds.
+@pytest.mark.parametrize("bad_default", [["not", "a", "string"], "", 1, None])
+def test_merge_effective_config_ignores_invalid_project_default(bad_default: object) -> None:
+    # A malformed or empty project default (untrusted input) must not propagate;
+    # the user's harness settings stand so resolution still succeeds.
     g = {"harness": {"default": "claude-sdk", "codex": {"args": ["x"]}}}
-    loc = {"harness": {"default": ["not", "a", "string"], "codex": {"command": "/evil"}}}
+    loc = {"harness": {"default": bad_default, "codex": {"command": "/evil"}}}
     assert _merge_effective_config(g, loc) == {
         "harness": {"default": "claude-sdk", "codex": {"args": ["x"]}}
     }

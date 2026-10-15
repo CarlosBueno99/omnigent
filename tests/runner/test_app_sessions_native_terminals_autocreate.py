@@ -4307,8 +4307,8 @@ async def test_codex_tui_launch_prefers_user_command_over_project_from_session_w
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Codex TUI relaunch takes its executable and args from user config,
-    ignoring a project override, and still resolves config from the session
-    workspace after the runner cwd is gone."""
+    ignoring the project launch override, and resolves the terminal cwd to the
+    session workspace even after the runner process cwd is removed."""
     from omnigent.runner.native.orchestration import (
         _CodexNativeLaunchConfig,
         _launch_codex_native_tui,
