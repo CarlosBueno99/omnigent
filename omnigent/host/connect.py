@@ -2528,11 +2528,12 @@ class HostProcess:
             and had_connected is not True
         ):
             # The exit code still marks a credential refusal when the log lost its line.
+            login = f"{cli_invocation()} login {self._login_hint_url()}"
             report = _RunnerExitReport(
                 error=(
                     "The server rejected this host's credentials, so the runner could not "
-                    f"connect. Sign in again with `{cli_invocation()} login {self._login_hint_url()}` "
-                    f"on this host, then retry. Details: {report.error}"
+                    f"connect. Sign in again with `{login}` on this host, then retry. "
+                    f"Details: {report.error}"
                 ),
                 category=ErrorCategory.CONFIG,
                 phase=ErrorPhase.RUNNER_LAUNCH,
