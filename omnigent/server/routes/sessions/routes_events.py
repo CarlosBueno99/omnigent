@@ -950,7 +950,9 @@ def register_events_routes(
           ``"external_codex_approval_mode_change"`` persist the
           pane-observed Claude permission mode / Codex approval+sandbox
           settings into ``terminal_launch_args`` and a mode label. Only
-          the owner or the runner bound to the session may post them.
+          the owner or a runner-authorized caller (a tunnel token bound to
+          the session's runner, or a server-configured runner token) may
+          post them.
         - ``"stop_session"`` terminates the live session without
           deleting the conversation (owner-only). Forwarded
           harness-agnostically to the runner, which hard-kills the

@@ -45,6 +45,7 @@ from tests.server.conftest import ControllableMockClient, _app_client
 from tests.server.helpers import (
     build_agent_bundle,
     create_test_agent,
+    register_test_runner,
     start_session_stream_collector,
 )
 
@@ -717,16 +718,6 @@ async def _snapshot_as(client: httpx.AsyncClient, session_id: str, user: str) ->
     return resp.json()
 
 
-class _IdleRunnerWS:
-    """Runner WebSocket stand-in that accepts frames and never sends any."""
-
-    async def send_text(self, data: str) -> None:
-        del data
-
-    async def receive_text(self) -> str:
-        return await asyncio.Future()
-
-
 async def _bind_token_runner(
     app: FastAPI,
     client: httpx.AsyncClient,
@@ -738,35 +729,18 @@ async def _bind_token_runner(
 ) -> None:
     """Register an online runner for *binding_token* and bind the session to it as *owner*.
 
-    The runner is only a tunnel-registry entry; bind-time runner init and relay are stubbed.
+    The runner is only a tunnel-registry entry; the bind-time runner client is stubbed out.
     """
-    from unittest.mock import AsyncMock
-
     from omnigent.runner.identity import token_bound_runner_id
-    from omnigent.runner.transports.ws_tunnel.frames import HelloFrame
     from omnigent.server.routes import sessions as sessions_module
 
     runner_id = token_bound_runner_id(binding_token)
-    app.state.tunnel_registry.register(
-        runner_id,
-        _IdleRunnerWS(),
-        HelloFrame(
-            runner_version="0.1.0-test",
-            frame_protocol_version=1,
-            harnesses=["claude-native", "codex-native"],
-        ),
-        owner=owner,
-    )
-    runner_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
-        base_url="http://runner",
-    )
+    register_test_runner(app, runner_id, harnesses=["claude-native", "codex-native"], owner=owner)
 
-    async def _runner_client(*_args: object, **_kwargs: object) -> httpx.AsyncClient:
-        return runner_client
+    async def _no_runner_client(*_args: object, **_kwargs: object) -> None:
+        return None
 
-    monkeypatch.setattr(sessions_module, "_get_runner_client", _runner_client)
-    monkeypatch.setattr(sessions_module, "_ensure_runner_relay_ready", AsyncMock())
+    monkeypatch.setattr(sessions_module, "_get_runner_client", _no_runner_client)
     resp = await client.patch(
         f"/v1/sessions/{session_id}",
         json={"runner_id": runner_id},
