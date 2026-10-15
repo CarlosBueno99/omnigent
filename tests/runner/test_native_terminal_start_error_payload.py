@@ -116,10 +116,10 @@ def test_mixed_version_import_failure_guides_host_restart(
     After an in-place upgrade the running host imports an upgraded module whose
     new symbol its in-memory copy lacks. The card must read as a recognized
     failure (title + cause + remediation), name both the foreground host and
-    the host user-service restart in the configured CLI spelling, and never
-    echo the on-disk install path. Each field must fit the per-field
-    conversation-label budget, or a reloaded card silently truncates the
-    guidance away.
+    the host user-service restart in the configured CLI spelling, each with
+    its original options, and never echo the on-disk install path. Each field
+    must fit the per-field conversation-label budget, or a reloaded card
+    silently truncates the guidance away.
     """
     if wrapper_command is None:
         monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND", raising=False)
@@ -141,11 +141,11 @@ def test_mixed_version_import_failure_guides_host_restart(
     assert "in-place upgrade" in cause
     assert "mixed-version" in cause
     assert "Restart the host" in remediation
-    # The foreground host restarts in the configured CLI spelling; the
-    # service restart must re-enable with the original options so a remote
-    # `--server` is not dropped to local mode (never the bare disable+enable).
-    assert f"re-run `{cli} host`" in remediation
-    assert "re-enable it" in remediation
+    # Both recipes must carry the original options: a bare `host` re-run falls
+    # back to the configured or a local server, and the bare disable+enable
+    # deletes the stored service definition, dropping a remote `--server`.
+    assert f"re-run `{cli} host` with the options you started it with" in remediation
+    assert "re-enable it with the options you installed it with" in remediation
     assert "keeping `--server`" in remediation
     assert "disable &&" not in remediation
     # The web card hides `message` once a cause is set, so the log-correlation
@@ -161,6 +161,9 @@ def test_mixed_version_import_failure_guides_host_restart(
         assert "see the runner log" not in text
     # The ID is well-formed and sits at the end of the displayed cause field.
     assert _ERROR_ID_RE.search(cause) is not None
+    # The labelless `message` fallback ends with the ID like every other branch
+    # of the payload builder, so HTTP consumers keep one correlation convention.
+    assert _ERROR_ID_RE.search(payload["message"]) is not None
 
 
 def _stale_host_import_error() -> ImportError:
@@ -217,6 +220,9 @@ def test_long_wrapper_command_keeps_restart_guidance_across_reload(
     assert "\u2026" not in reloaded["remediation"]
     assert "keeping `--server`" in reloaded["remediation"]
     assert "isaac-omnigent" not in reloaded["remediation"]
+    assert (
+        "re-run your host command with the options you started it with" in reloaded["remediation"]
+    )
     assert reloaded["title"] == payload["title"]
     assert reloaded["cause"] == payload["cause"]
     # The ID is carried in the cause, so it must survive the reload too.
@@ -272,6 +278,9 @@ def test_stale_host_guidance_survives_label_limit_import_failure(
     cause = payload["cause"]
     assert "mixed-version" in cause
     assert payload["error_id"] in cause
+    # Pin the fallback literal to the schema constant so a limit change
+    # surfaces here instead of silently diverging.
+    assert LABEL_VALUE_MAX_LEN == 256
     assert len(cause) <= LABEL_VALUE_MAX_LEN
 
 
