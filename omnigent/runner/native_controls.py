@@ -349,8 +349,10 @@ def build_native_controls(
     ) -> tuple[Response, _JsonObject]:
         """Apply *settings* and return the response with the settings as resolved."""
         from omnigent.harnesses.codex_native.app_server import (
+            _ACCOUNT_MODEL_LOOKUP_TIMEOUT_SECONDS,
             CodexAppServerResponseError,
             client_for_transport,
+            resolve_codex_account_model,
             resolve_codex_effort_for_model,
         )
         from omnigent.harnesses.codex_native.bridge import (
@@ -420,6 +422,19 @@ def build_native_controls(
         try:
             # Bounded so a hung app-server cannot hold the settings lock indefinitely.
             await asyncio.wait_for(codex_client.connect(), timeout=SETTINGS_UPDATE_TIMEOUT_S)
+            loop = asyncio.get_running_loop()
+            settings_deadline = loop.time() + (
+                _LEGACY_SERVER_UPDATE_TIMEOUT_S if legacy_server else SETTINGS_UPDATE_TIMEOUT_S
+            )
+            model_deadline = min(
+                settings_deadline, loop.time() + _ACCOUNT_MODEL_LOOKUP_TIMEOUT_SECONDS
+            )
+            requested_model = settings.get("model")
+            if isinstance(requested_model, str):
+                model = await resolve_codex_account_model(
+                    codex_client, state.thread_id, requested_model, deadline=model_deadline
+                )
+                settings["model"] = model
             if "model" in settings or "effort" in settings:
                 # Only an absent key inherits config; null selects the model's default.
                 effort = (
@@ -445,9 +460,7 @@ def build_native_controls(
                     settings["effort"] = resolved
             update_pending = False
             try:
-                async with asyncio.timeout(
-                    _LEGACY_SERVER_UPDATE_TIMEOUT_S if legacy_server else SETTINGS_UPDATE_TIMEOUT_S
-                ):
+                async with asyncio.timeout_at(settings_deadline):
                     params = {"threadId": state.thread_id, **settings}
                     update_pending = True
                     try:
@@ -464,6 +477,15 @@ def build_native_controls(
                         await codex_client.request(
                             "thread/resume", {"threadId": state.thread_id, "excludeTurns": True}
                         )
+                        retry_model = settings.get("model")
+                        if isinstance(retry_model, str):
+                            settings["model"] = await resolve_codex_account_model(
+                                codex_client,
+                                state.thread_id,
+                                retry_model,
+                                deadline=model_deadline,
+                            )
+                            params = {"threadId": state.thread_id, **settings}
                         update_pending = True
                         await codex_client.request("thread/settings/update", params)
             except TimeoutError:
