@@ -49,8 +49,14 @@ class HostSkillDiscovery:
             tuple[str | tuple[str, ...] | None, ...], tuple[float, list[dict[str, str]]]
         ] = OrderedDict()
 
-    def discover(self, frame: HostSkillsFrame, root: Path) -> list[dict[str, str]]:
-        """Return metadata for the exact launch target or effective session bundle."""
+    def discover(
+        self, frame: HostSkillsFrame, root: Path, *, warnings: list[str] | None = None
+    ) -> list[dict[str, str]]:
+        """Return metadata for the exact launch target or effective session bundle.
+
+        Sources a provider could not read are reported through ``warnings``.
+        Such incomplete catalogs are not cached, so a retry rescans them.
+        """
         key = (
             str(root),
             frame.harness,
@@ -67,9 +73,13 @@ class HostSkillDiscovery:
             if cached is not None and cached[0] > time.monotonic():
                 self._cache.move_to_end(key)
                 return list(cached[1])
+            problems: list[str] = []
             if frame.session_id is None:
                 ctx = skill_source_context_from_env(
-                    roots=(root,), harness=frame.harness, skills_filter=frame.skills_filter
+                    roots=(root,),
+                    harness=frame.harness,
+                    skills_filter=frame.skills_filter,
+                    warnings=problems,
                 )
                 skills = resolve_harness_skills(ctx, frame.harness)
             else:
@@ -91,14 +101,19 @@ class HostSkillDiscovery:
                     )
                     if frame.sub_agent_name:
                         spec, directory = _subagent_bundle(spec, directory, frame.sub_agent_name)
-                    skills = resolve_session_skills(spec, (root, directory), directory)
+                    skills = resolve_session_skills(
+                        spec, (root, directory), directory, warnings=problems
+                    )
             result = [
                 {"name": skill.name, "description": skill.description}
                 | ({"display_name": skill.display_name} if skill.display_name else {})
                 for skill in skills
             ]
-            self._cache[key] = (time.monotonic() + SKILLS_CACHE_TTL_SECONDS, result)
-            self._cache.move_to_end(key)
-            while len(self._cache) > _MAX_CACHED_CATALOGS:
-                self._cache.popitem(last=False)
+            if warnings is not None:
+                warnings.extend(problems)
+            if not problems:
+                self._cache[key] = (time.monotonic() + SKILLS_CACHE_TTL_SECONDS, result)
+                self._cache.move_to_end(key)
+                while len(self._cache) > _MAX_CACHED_CATALOGS:
+                    self._cache.popitem(last=False)
             return list(result)

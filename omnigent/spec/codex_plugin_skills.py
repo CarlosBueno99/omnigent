@@ -40,10 +40,41 @@ def _skill_roots(root: Path, paths: object) -> list[Path]:
     return sorted(roots)
 
 
+def _inventory_failure(exc: Exception) -> str:
+    """Describe why ``codex plugin list`` produced no inventory."""
+    if isinstance(exc, subprocess.CalledProcessError):
+        stderr = " ".join(str(exc.stderr or "").split())[:200]
+        detail = f"`codex plugin list` exited {exc.returncode}"
+        return f"{detail}: {stderr}" if stderr else detail
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"`codex plugin list` timed out after {exc.timeout:g}s"
+    if isinstance(exc, ValueError):
+        return "`codex plugin list` returned unreadable JSON"
+    return f"could not run `codex plugin list`: {exc}"
+
+
+def _without_inventory(detail: str, warnings: list[str] | None) -> list[SkillSpec]:
+    """Omit plugin skills, telling the log and the caller's menu why."""
+    message = f"Codex plugin skills unavailable: {detail}"
+    _log.warning(message)
+    if warnings is not None:
+        warnings.append(message)
+    return []
+
+
 def discover_codex_plugin_skills(
-    codex_home: Path, skills_filter: str | list[str], *, cwd: Path | None = None
+    codex_home: Path,
+    skills_filter: str | list[str],
+    *,
+    cwd: Path | None = None,
+    warnings: list[str] | None = None,
 ) -> list[SkillSpec]:
-    """Ask Codex which plugin versions are installed, then parse their skills."""
+    """Ask Codex which plugin versions are installed, then parse their skills.
+
+    When the inventory cannot be read, plugin skills are omitted and, if
+    ``warnings`` is given, a user-facing explanation is appended to it so
+    the caller can show the catalog as incomplete rather than empty.
+    """
     from omnigent.inner.codex_executor import _find_codex_cli
 
     if skills_filter == "none" or skills_filter == []:
@@ -63,11 +94,10 @@ def discover_codex_plugin_skills(
         )
         inventory = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        _log.debug("Codex plugin inventory unavailable: %s", exc)
-        return []
+        return _without_inventory(_inventory_failure(exc), warnings)
     plugins = inventory.get("installed") if isinstance(inventory, dict) else None
     if not isinstance(plugins, list):
-        return []
+        return _without_inventory("`codex plugin list` returned an unexpected inventory", warnings)
     filter_names = set(skills_filter) if isinstance(skills_filter, list) else None
     out: list[SkillSpec] = []
     for plugin in plugins:

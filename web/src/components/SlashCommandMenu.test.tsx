@@ -115,6 +115,37 @@ describe("skill discovery state", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Skills unavailable while disconnected.");
   });
 
+  it("explains an incomplete catalog instead of calling it empty and offers retry", () => {
+    const onRetrySkills = vi.fn();
+    const warning = "Codex plugin skills unavailable: `codex plugin list` exited 1: Error: broken";
+    const { rerender } = render(
+      <SlashCommandMenu
+        {...props}
+        skillsStatus="ready"
+        skillsWarnings={[warning]}
+        onRetrySkills={onRetrySkills}
+      />,
+    );
+    expect(screen.getByText("Skills")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent(warning);
+    expect(screen.queryByText("No skills available")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetrySkills).toHaveBeenCalledOnce();
+
+    // Skills that were read still list alongside the explanation.
+    rerender(
+      <SlashCommandMenu
+        {...props}
+        commands={{ ...props.commands, "/review": "Review code" }}
+        skillsStatus="ready"
+        skillsWarnings={[warning]}
+      />,
+    );
+    expect(screen.getByTestId("slash-menu-item-review")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent(warning);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
   it("preserves the existing empty-menu behavior when discovery state is absent", () => {
     const { container } = render(<SlashCommandMenu {...props} commands={{}} />);
     expect(container).toBeEmptyDOMElement();

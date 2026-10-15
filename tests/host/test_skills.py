@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import json
+import subprocess
 import tarfile
 from dataclasses import replace
 from pathlib import Path
@@ -234,3 +236,59 @@ def test_directory_catalog_never_downloads_a_session_bundle(tmp_path: Path) -> N
         HostSkillsFrame("request", "claude-native", str(tmp_path)), tmp_path
     ) == [{"name": "local", "description": "local description"}]
     fetch.assert_not_called()
+
+
+def test_incomplete_codex_catalog_reports_warnings_and_is_not_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex_home = tmp_path / "home" / ".codex"
+    for directory in (codex_home / "skills" / "local", codex_home / "skills" / "later"):
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(_skill(directory.name))
+    plugin = codex_home / "plugins" / "cache" / "market" / "toolkit" / "1.0.0"
+    (plugin / ".codex-plugin").mkdir(parents=True)
+    (plugin / ".codex-plugin" / "plugin.json").write_text(json.dumps({"name": "toolkit"}))
+    (plugin / "skills" / "review").mkdir(parents=True)
+    (plugin / "skills" / "review" / "SKILL.md").write_text(_skill("review"))
+    monkeypatch.setattr("omnigent.inner.codex_executor._find_codex_cli", lambda: "/test/codex")
+    cli = Mock(side_effect=subprocess.CalledProcessError(1, "codex", stderr="Error: broken"))
+    monkeypatch.setattr("omnigent.spec.codex_plugin_skills.subprocess.run", cli)
+    discovery = HostSkillDiscovery(lambda _: pytest.fail("No bundle expected"))
+    frame = HostSkillsFrame("request", "codex-native", str(tmp_path))
+
+    def names(warnings: list[str]) -> list[str]:
+        return [skill["name"] for skill in discovery.discover(frame, tmp_path, warnings=warnings)]
+
+    # Standalone skills survive a failed inventory, and the catalog says why it is incomplete.
+    warnings: list[str] = []
+    assert names(warnings) == ["later", "local"]
+    assert warnings == [
+        "Codex plugin skills unavailable: `codex plugin list` exited 1: Error: broken"
+    ]
+
+    # A retry rescans instead of serving the incomplete catalog from the cache.
+    cli.side_effect = None
+    cli.return_value = subprocess.CompletedProcess(
+        [],
+        0,
+        stdout=json.dumps(
+            {
+                "installed": [
+                    {
+                        "marketplaceName": "market",
+                        "name": "toolkit",
+                        "version": "1.0.0",
+                        "enabled": True,
+                    }
+                ]
+            }
+        ),
+    )
+    assert names(warnings := []) == ["later", "local", "toolkit:review"]
+    assert warnings == []
+
+    # The complete catalog is cached, so a later inventory failure is not consulted.
+    cli.side_effect = OSError("gone")
+    assert names(warnings := []) == ["later", "local", "toolkit:review"]
+    assert warnings == []
+    assert cli.call_count == 2

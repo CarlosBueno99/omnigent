@@ -2624,6 +2624,7 @@ function ComposerImpl(
   const hostOnline = useSessionHostOnline(composerSessionId ?? undefined);
   const {
     skills,
+    skillsWarnings,
     skillsStatus,
     refetch: refreshSkills,
   } = useSkills({
@@ -3722,6 +3723,7 @@ function ComposerImpl(
                   builtinNames={slashCompletion.builtinNames}
                   labels={slashCompletion.labels}
                   skillsStatus={skillsStatus}
+                  skillsWarnings={skillsWarnings}
                   onRetrySkills={() => void refreshSkills()}
                 />
               )}
