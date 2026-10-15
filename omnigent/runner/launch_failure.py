@@ -373,9 +373,8 @@ def describe_failure_code(code: str | None) -> str | None:
 
 
 # --- runner tunnel refusals ---------------------------------------------------
-# A runner that never upgraded its tunnel gives up after a streak of HTTP
-# 401/403s, login redirects, or a fatal close code and prints that reason as
-# its last line; the host and server read it back to attribute the exit.
+# A runner that never upgraded its tunnel gives up after repeated 401/403s, login
+# redirects, or a fatal close code and prints that reason as its last line.
 RUNNER_TUNNEL_REJECTION_PREFIX = "runner tunnel rejected by server "
 # Raised instead of the rejection above when the runner had no credential
 # to send, so the message names the local cause rather than the server.
