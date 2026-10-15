@@ -564,7 +564,7 @@ describe("createSideChat", () => {
   afterEach(() => {
     // Reset here, not after each assertion, so a thrown assertion can't leak a
     // stop marker into the next test.
-    useStoppedSessions.setState({ stoppedAt: {} });
+    useStoppedSessions.setState({ stoppedAt: {}, relaunchSeq: {} });
   });
 
   it.each(["worktree-from-another-machine", "main", null])(

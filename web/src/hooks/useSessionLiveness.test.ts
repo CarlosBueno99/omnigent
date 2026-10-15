@@ -59,7 +59,7 @@ function derive(
 describe("useSessionLiveness — derivation truth table", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    useStoppedSessions.setState({ stoppedAt: {} });
+    useStoppedSessions.setState({ stoppedAt: {}, relaunchSeq: {} });
   });
 
   it("online whenever the runner tunnel is up, regardless of host", () => {

@@ -114,7 +114,13 @@ import { isSideChatCommand, usesNativeSideChatFork } from "@/lib/sideChat";
 // pure helpers live in a leaf module so low-level session hooks can gate on temp
 // ids without an import cycle back to the store.
 import { isTempConvId, newTempConversation } from "@/lib/tempConversationId";
-import { clearSessionStopped, markSessionStopped, useStoppedSessions } from "./stoppedSessions";
+import {
+  clearSessionStopped,
+  markSessionStopped,
+  recordRelaunch,
+  relaunchSeqOf,
+  useStoppedSessions,
+} from "./stoppedSessions";
 import { useTerminalActivityStore } from "./terminalActivity";
 import { terminalInfoFromResource, terminalsQueryKey, type TerminalInfo } from "@/lib/terminals";
 import type {
@@ -2350,6 +2356,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // already relaunched. `didClearStopMarker` gates the restore to our own clear.
     const relaunchTargetId = pinnedId ?? get().conversationId;
     let didClearStopMarker = false;
+    let clearSeq = 0;
     if (!alreadyStreaming && !opensSideChat) {
       // Latch on the SAME entry as `status`, in one patch, so they can't
       // diverge — a new chat buffers both on root and `adoptPreSessionState`
@@ -2505,6 +2512,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         // Sending is the relaunch the stopped band promises (a `/side` fork
         // relaunches the parent too), so a confirmed stop no longer describes
         // this session.
+        clearSeq = relaunchSeqOf(relaunchTargetId);
         clearSessionStopped(relaunchTargetId);
         didClearStopMarker = true;
       }
@@ -2522,8 +2530,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // bubble. Settle local state from the POST response instead of
       // depending on the live stream being connected.
       if (postResult.denied) {
-        // The relaunch never ran, so restore the stopped band.
-        if (didClearStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
+        // The relaunch never ran, so restore the stopped band — unless a newer
+        // relaunch (bumping the sequence) has since taken effect.
+        if (didClearStopMarker && relaunchTargetId !== null)
+          markSessionStopped(relaunchTargetId, clearSeq);
         // Target the session this send posted to: the user may have navigated
         // away while the POST was open, and settling the VISIBLE conversation
         // would clobber an unrelated chat's composer state.
@@ -2540,6 +2550,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           return patch;
         });
       } else {
+        // The POST landed, so this send is a confirmed relaunch: bump the
+        // sequence so a stop completion still in flight can't re-stamp a marker.
+        if (relaunchTargetId !== null) recordRelaunch(relaunchTargetId);
         // POST accepted: the server can now account for this message
         // (native: pending_inputs replay until the round-trip commits it;
         // non-native: already persisted). Mark the bubble settled — that is
@@ -2573,8 +2586,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // status transitions that happen during the turn.
       queryClient?.invalidateQueries({ queryKey: ["conversations"] });
     } catch (err) {
-      // The relaunch POST failed, so the session is still stopped — restore its band.
-      if (didClearStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
+      // The relaunch POST failed, so the session is still stopped — restore its
+      // band unless a newer relaunch has since bumped the sequence.
+      if (didClearStopMarker && relaunchTargetId !== null)
+        markSessionStopped(relaunchTargetId, clearSeq);
       if (initialDraft && !initialDispatched && !initialSendPending()) return;
       const { message, code } = describeSendFailure(err);
       // A codex `/side` that armed the side-chat latch (line ~2103) but then
@@ -2718,6 +2733,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // Cleared just before the relaunch POST (below), inside the send chain, so a
     // late failure can't re-stamp a session a later send already relaunched.
     let didClearStopMarker = false;
+    let clearSeq = 0;
     if (!alreadyStreaming) {
       // See `send`: latch and status on one entry, in one patch.
       pinnedSetter({ status: "streaming", activeResponse: null, sendLatchedAt: Date.now() });
@@ -2766,6 +2782,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       ) {
         // Invoking a skill relaunches a stopped session just like an ordinary
         // send, so a confirmed stop no longer describes it.
+        clearSeq = relaunchSeqOf(relaunchTargetId);
         clearSessionStopped(relaunchTargetId);
         didClearStopMarker = true;
       }
@@ -2777,8 +2794,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         data: { kind: "skill", name, arguments: args },
       });
       if (postResult.denied) {
-        // The relaunch never ran, so restore the stopped band.
-        if (didClearStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
+        // The relaunch never ran, so restore the stopped band — unless a newer
+        // relaunch (bumping the sequence) has since taken effect.
+        if (didClearStopMarker && relaunchTargetId !== null)
+          markSessionStopped(relaunchTargetId, clearSeq);
         // Denied commands publish no receipt, so nothing will pop the
         // optimistic echo — roll it back here alongside the status settle.
         // Targets the session the command posted to: a backgrounded
@@ -2797,6 +2816,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           return patch;
         });
       } else {
+        // The POST landed, so this command is a confirmed relaunch: bump the
+        // sequence so a stop completion still in flight can't re-stamp a marker.
+        if (relaunchTargetId !== null) recordRelaunch(relaunchTargetId);
         // POST accepted: the server persisted the visible receipt, so
         // navigation can rely on the snapshot — mark the echo settled
         // and drop any stash copy. Without this, an echo stashed by a
@@ -2811,8 +2833,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       }
       queryClient?.invalidateQueries({ queryKey: ["conversations"] });
     } catch (err) {
-      // The relaunch POST failed, so the session is still stopped — restore its band.
-      if (didClearStopMarker && relaunchTargetId !== null) markSessionStopped(relaunchTargetId);
+      // The relaunch POST failed, so the session is still stopped — restore its
+      // band unless a newer relaunch has since bumped the sequence.
+      if (didClearStopMarker && relaunchTargetId !== null)
+        markSessionStopped(relaunchTargetId, clearSeq);
       const message = err instanceof Error ? err.message : String(err);
       // Settle the conversation this command targeted, wherever the user is
       // now: its echo must roll back and its status must not stay "streaming"
@@ -3129,11 +3153,11 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   },
 
   markRunnerLaunched: (sessionId) => {
-    // A host switch relaunches the runner, so a confirmed stop no longer applies.
-    // Clear the launched session explicitly: the switch's await can resolve after
+    // A host switch is a confirmed relaunch, so a stop no longer applies. Record
+    // it against the launched id explicitly: the switch's await can resolve after
     // the user navigated away, so the open conversation may not be the relaunched one.
     const id = sessionId ?? get().conversationId;
-    if (id !== null) clearSessionStopped(id);
+    if (id !== null) recordRelaunch(id);
     setActive({ runnerLaunchedAt: Date.now() });
   },
 

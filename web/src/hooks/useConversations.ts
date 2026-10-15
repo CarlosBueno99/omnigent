@@ -68,7 +68,7 @@ import {
   updateProjectConfig as apiUpdateProjectConfig,
 } from "@/lib/projectsApi";
 import { releaseConversation, useChatStore } from "@/store/chatStore";
-import { clearSessionStopped, markSessionStopped } from "@/store/stoppedSessions";
+import { clearSessionStopped, markSessionStopped, relaunchSeqOf } from "@/store/stoppedSessions";
 import type { Session } from "@/lib/types";
 import { useSessionUpdatesConnected } from "./useSessionUpdatesConnected";
 import { markConversationSeen } from "./useUnseenConversations";
@@ -1291,8 +1291,11 @@ export function useStopSession() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => stopSession(id),
-    onSuccess: (_data, id) => {
-      markSessionStopped(id);
+    // Capture the relaunch sequence at stop time so a message that relaunches
+    // the session while this stop is in flight suppresses the late marker.
+    onMutate: (id) => ({ relaunchSeq: relaunchSeqOf(id) }),
+    onSuccess: (_data, id, context) => {
+      markSessionStopped(id, context?.relaunchSeq);
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
@@ -1547,6 +1550,9 @@ export function useBulkStopSessions() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (ids: string[]) => {
+      // Capture each session's relaunch sequence before stopping so a concurrent
+      // relaunch suppresses that session's late marker (see useStopSession).
+      const seqAtStop = new Map(ids.map((id) => [id, relaunchSeqOf(id)]));
       const results = await Promise.allSettled(ids.map((id) => stopSession(id)));
       const succeeded: string[] = [];
       const failed: string[] = [];
@@ -1555,7 +1561,7 @@ export function useBulkStopSessions() {
         else failed.push(ids[i]);
       }
       for (const id of succeeded) {
-        markSessionStopped(id);
+        markSessionStopped(id, seqAtStop.get(id));
         // Mirror useStopSession: a stale per-session snapshot would otherwise
         // clobber the now-stopped state in the header merge.
         void queryClient.invalidateQueries({ queryKey: ["session", id] });

@@ -65,7 +65,7 @@ import type {
 import type { TerminalInfo } from "@/hooks/useTerminals";
 import { terminalsQueryKey } from "@/hooks/useTerminals";
 import { type ChildSessionInfo, childSessionsQueryKey } from "@/hooks/useChildSessions";
-import { markSessionStopped, useStoppedSessions } from "@/store/stoppedSessions";
+import { markSessionStopped, recordRelaunch, useStoppedSessions } from "@/store/stoppedSessions";
 import {
   ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS,
   ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS,
@@ -18831,7 +18831,7 @@ describe("chatStore — one error card per failed turn", () => {
 
 describe("confirmed-stop markers", () => {
   beforeEach(() => {
-    useStoppedSessions.setState({ stoppedAt: {} });
+    useStoppedSessions.setState({ stoppedAt: {}, relaunchSeq: {} });
   });
 
   it("send clears the session's stop marker — the message is the relaunch", async () => {
@@ -18930,6 +18930,29 @@ describe("confirmed-stop markers", () => {
     await useChatStore.getState().send("wake up", "agent_xyz");
 
     expect(useStoppedSessions.getState().stoppedAt.conv_stopped).toEqual(expect.any(Number));
+  });
+
+  it("a failed send does not restore the marker after a host switch relaunched the session", async () => {
+    // The send clears the marker, a host switch relaunches the session while the
+    // POST is open, then the older send fails: its restore must back off instead
+    // of resurrecting a stopped band over the now-live session.
+    useChatStore.setState({
+      conversationId: "conv_stopped",
+      abortController: new AbortController(),
+      status: "idle",
+    });
+    markSessionStopped("conv_stopped");
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/v1/sessions/conv_stopped/events")) {
+        recordRelaunch("conv_stopped");
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    await useChatStore.getState().send("wake up", "agent_xyz");
+
+    expect(useStoppedSessions.getState().stoppedAt.conv_stopped).toBeUndefined();
   });
 
   it("sendSlashCommand clears the stop marker on success — the command is the relaunch", async () => {

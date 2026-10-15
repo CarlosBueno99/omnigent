@@ -46,7 +46,7 @@ import {
 import { PINNED_LABEL_KEY, PROJECT_LABEL_KEY } from "@/lib/sessionListCache";
 import { SidebarConfigContext, sidebarConfig } from "@/lib/sidebarConfig";
 import { PINNED_CONVERSATION_IDS_STORAGE_KEY } from "@/shell/sidebarNav";
-import { useStoppedSessions } from "@/store/stoppedSessions";
+import { recordRelaunch, useStoppedSessions } from "@/store/stoppedSessions";
 
 vi.mock("./useSessionUpdatesConnected", () => ({ useSessionUpdatesConnected: vi.fn() }));
 
@@ -747,7 +747,7 @@ describe("useStopAndDeleteConversation cache eviction", () => {
   }
 
   it("drops the session's confirmed-stop marker along with its caches", async () => {
-    onTestFinished(() => useStoppedSessions.setState({ stoppedAt: {} }));
+    onTestFinished(() => useStoppedSessions.setState({ stoppedAt: {}, relaunchSeq: {} }));
     useStoppedSessions.setState({ stoppedAt: { conv_x: Date.now(), conv_other: Date.now() } });
     const { rendered } = seedAndDelete();
 
@@ -2076,7 +2076,7 @@ describe("fetchPinnedConversations filter-honored detection", () => {
 
 describe("useStopSession invalidation", () => {
   beforeEach(() => {
-    useStoppedSessions.setState({ stoppedAt: {} });
+    useStoppedSessions.setState({ stoppedAt: {}, relaunchSeq: {} });
   });
 
   it('records the confirmed stop so the open view can say "stopped"', async () => {
@@ -2105,6 +2105,26 @@ describe("useStopSession invalidation", () => {
     const { result } = renderHook(() => useStopSession(), { wrapper });
     result.current.mutate("conv_x");
     await waitFor(() => expect(result.current.isError).toBe(true));
+
+    expect(useStoppedSessions.getState().stoppedAt.conv_x).toBeUndefined();
+  });
+
+  it("does not re-mark a session a send relaunched while the stop was in flight", async () => {
+    // Stop completes server-side, a message relaunches the session, and the Stop
+    // response arrives last — the late marker captured at stop time must back off.
+    fetchMock.mockImplementationOnce(() => {
+      recordRelaunch("conv_x");
+      return Promise.resolve(mockResponse({ queued: false }));
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+
+    const { result } = renderHook(() => useStopSession(), { wrapper });
+    result.current.mutate("conv_x");
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     expect(useStoppedSessions.getState().stoppedAt.conv_x).toBeUndefined();
   });
@@ -2428,7 +2448,7 @@ describe("useBulkStopSessions", () => {
   });
 
   it("records stop markers only for the sessions whose stop landed", async () => {
-    useStoppedSessions.setState({ stoppedAt: {} });
+    useStoppedSessions.setState({ stoppedAt: {}, relaunchSeq: {} });
     fetchMock
       .mockResolvedValueOnce(mockResponse({ queued: false }))
       .mockResolvedValueOnce(mockResponse({}, { ok: false, status: 503 }));
