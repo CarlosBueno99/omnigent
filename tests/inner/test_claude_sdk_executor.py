@@ -2129,7 +2129,7 @@ class TestSystemMessages(unittest.TestCase):
             SystemMessage as SDKSystemMessage,
         )
 
-        from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+        from omnigent.inner.claude_sdk_executor import CLAUDE_AUTH_FAILED_CODE, ClaudeSDKExecutor
 
         class _Sentinel:
             pass
@@ -2176,9 +2176,11 @@ class TestSystemMessages(unittest.TestCase):
             self.assertIsInstance(events[0], ExecutorError)
             self.assertIn("authentication failed", events[0].message)
             self.assertIn("401", events[0].message)
-            # Non-gateway executor should suggest checking CLI login, not databrickscfg
-            self.assertIn("claude /status", events[0].message)
-            self.assertNotIn("databrickscfg", events[0].message)
+            self.assertEqual(events[0].code, CLAUDE_AUTH_FAILED_CODE)
+            # Non-gateway executor should point at the Claude Code login, not databrickscfg
+            remediation = events[0].remediation or ""
+            self.assertIn("claude auth login", remediation)
+            self.assertNotIn("databrickscfg", remediation)
 
         _run(_t())
 
@@ -2253,7 +2255,7 @@ class TestSystemMessages(unittest.TestCase):
             self.assertIsInstance(events[0], ExecutorError)
             self.assertIn("authentication failed", events[0].message)
             # Databricks gateway should mention databrickscfg
-            self.assertIn("databrickscfg", events[0].message)
+            self.assertIn("databrickscfg", events[0].remediation or "")
 
         _run(_t())
 
@@ -3961,6 +3963,156 @@ async def test_result_message_is_error_yields_executor_error() -> None:
             "Failure text must not appear in TurnComplete.response"
             " — it leaked as assistant content."
         )
+
+
+@pytest.mark.parametrize(
+    "result_text",
+    [
+        "Failed to authenticate: OAuth session expired and could not be refreshed",
+        "Not logged in · Please run /login",
+        "OAuth token revoked · Please run /login",
+        "Invalid API key · Please run /login",
+        "Authentication failed: invalid or missing API key",
+    ],
+)
+def test_claude_auth_failure_text_matches_claude_code_wording(result_text: str) -> None:
+    from omnigent.inner.claude_sdk_executor import is_claude_auth_failure_text
+
+    assert is_claude_auth_failure_text(result_text)
+
+
+@pytest.mark.parametrize(
+    "result_text",
+    ["Prompt is too long", "Error: tool execution failed", "claude-sdk harness error"],
+)
+def test_claude_auth_failure_text_ignores_other_failures(result_text: str) -> None:
+    from omnigent.inner.claude_sdk_executor import is_claude_auth_failure_text
+
+    assert not is_claude_auth_failure_text(result_text)
+
+
+def _failed_result_sdk(result_text: str):
+    """Scripted SDK whose only message is a ``ResultMessage`` with ``is_error=True``."""
+    from claude_agent_sdk.types import ClaudeAgentOptions as SDKClaudeAgentOptions
+    from claude_agent_sdk.types import ResultMessage as SDKResultMessage
+    from claude_agent_sdk.types import StreamEvent as SDKStreamEvent
+
+    class _Sentinel:
+        pass
+
+    sdk_result = SDKResultMessage(
+        subtype="success",
+        session_id="s1",
+        result=result_text,
+        total_cost_usd=0.0,
+        duration_ms=100,
+        duration_api_ms=80,
+        is_error=True,
+        num_turns=1,
+        usage=None,
+    )
+
+    class _FakeSDK(_sdk_types()):
+        AssistantMessage = _Sentinel
+        UserMessage = _Sentinel
+        SystemMessage = _Sentinel
+        StreamEvent = SDKStreamEvent
+        ResultMessage = SDKResultMessage
+        ClaudeAgentOptions = SDKClaudeAgentOptions
+        messages = [sdk_result]
+
+        class ClaudeSDKClient(_SDKClient):
+            async def receive_response(self):
+                for message in _FakeSDK.messages:
+                    yield message
+
+    return _FakeSDK
+
+
+async def _only_executor_error(executor, fake_sdk):
+    from unittest.mock import patch
+
+    from omnigent.inner.executor import ExecutorError
+
+    with patch("omnigent.inner.claude_sdk_executor._ensure_sdk", return_value=fake_sdk):
+        events = [
+            e
+            async for e in executor.run_turn(
+                [{"role": "user", "content": "hi"}],
+                [],
+                "",
+            )
+        ]
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert len(errors) == 1, events
+    return errors[0]
+
+
+@pytest.mark.asyncio
+async def test_result_message_auth_failure_names_the_fix() -> None:
+    """Claude Code's own login failure surfaces with a headline and a next step.
+
+    Without a gateway the harness runs on Claude Code's claude.ai login, so the
+    remediation must point at that login rather than at a gateway.
+    """
+    from omnigent.inner.claude_sdk_executor import (
+        CLAUDE_AUTH_FAILED_CODE,
+        CLAUDE_AUTH_FAILED_TITLE,
+        ClaudeSDKExecutor,
+    )
+
+    failure = "Failed to authenticate: OAuth session expired and could not be refreshed"
+    error = await _only_executor_error(ClaudeSDKExecutor(), _failed_result_sdk(failure))
+
+    assert error.message == failure
+    assert error.code == CLAUDE_AUTH_FAILED_CODE
+    assert error.title == CLAUDE_AUTH_FAILED_TITLE
+    assert error.remediation is not None
+    assert "claude auth login" in error.remediation
+    assert "setup" in error.remediation
+    assert "databrickscfg" not in error.remediation
+
+
+@pytest.mark.asyncio
+async def test_result_message_auth_failure_on_databricks_gateway_points_at_profile() -> None:
+    """On a Databricks-profile gateway the next step is the profile, not a claude.ai login."""
+    from unittest.mock import patch
+
+    from omnigent.inner.claude_sdk_executor import CLAUDE_AUTH_FAILED_CODE, ClaudeSDKExecutor
+
+    with patch(
+        "omnigent.inner.claude_sdk_executor._resolve_gateway_env",
+        return_value={
+            "ANTHROPIC_BASE_URL": "https://host/ai-gateway/anthropic",
+            "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "900000",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+            "OMNIGENT_CLAUDE_API_KEY_HELPER": "databricks auth token ...",
+        },
+    ):
+        executor = ClaudeSDKExecutor(gateway=True)
+    error = await _only_executor_error(
+        executor, _failed_result_sdk("Failed to authenticate: invalid or missing API key")
+    )
+
+    assert error.code == CLAUDE_AUTH_FAILED_CODE
+    assert error.remediation is not None
+    assert "databrickscfg" in error.remediation
+    assert "claude auth login" not in error.remediation
+
+
+@pytest.mark.asyncio
+async def test_result_message_other_failure_stays_unclassified() -> None:
+    """A failed result that is not about authentication keeps the generic error path."""
+    from omnigent.inner.claude_sdk_executor import ClaudeSDKExecutor
+
+    error = await _only_executor_error(
+        ClaudeSDKExecutor(), _failed_result_sdk("Prompt is too long")
+    )
+
+    assert error.message == "Prompt is too long"
+    assert error.code is None
+    assert error.title is None
+    assert error.remediation is None
 
 
 @pytest.mark.asyncio
