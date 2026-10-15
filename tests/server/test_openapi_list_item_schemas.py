@@ -1,12 +1,13 @@
-"""Typed list-item guard for the checked-in OpenAPI artifact.
+"""Item-schema guard for the paginated list operations in the checked-in OpenAPI artifact.
 
-:mod:`tests.server.test_openapi_drift` pins :file:`openapi.json` to the
-live ``scripts/dump_openapi.py`` output, so asserting on the artifact
-asserts on the running server's schema. This test checks that the
-paginated list operations whose records external consumers depend on
-declare an item schema, rather than the bare ``{}`` the shared
-``PaginatedList`` envelope emits for ``list[Any]`` (which generated
-clients type as ``data: Any[]``).
+``GET /v1/sessions/{session_id}/items`` and ``GET /v1/agents`` return pages
+of records, so their documented 200 response must describe a record. A shared
+``data: list[Any]`` envelope serialises to ``items: {}``, which generated
+clients turn into an untyped element: transcript readers and agent-name
+resolvers cannot validate the fields they read, and the document cannot
+detect response-shape drift. ``tests/server/test_openapi_drift.py`` pins
+``openapi.json`` to the live ``generate_spec()`` output, so asserting on the
+artifact is equivalent to asserting on the running server's document.
 """
 
 from __future__ import annotations
@@ -18,85 +19,112 @@ from typing import Any
 _REPO_ROOT: Path = Path(__file__).resolve().parent.parent.parent
 _OPENAPI_JSON_PATH: Path = _REPO_ROOT / "openapi.json"
 
+_SESSION_ITEMS_PATH = "/v1/sessions/{session_id}/items"
+_AGENTS_PATH = "/v1/agents"
+
 
 def _load_spec() -> dict[str, Any]:
     assert _OPENAPI_JSON_PATH.exists(), (
         f"openapi.json not found at {_OPENAPI_JSON_PATH}; regenerate with "
         f"`python scripts/dump_openapi.py`."
     )
-    with _OPENAPI_JSON_PATH.open(encoding="utf-8") as fh:
-        return json.load(fh)
+    return json.loads(_OPENAPI_JSON_PATH.read_text(encoding="utf-8"))
 
 
-def _resolve(spec: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
-    while "$ref" in schema:
-        name = schema["$ref"].rsplit("/", 1)[-1]
-        schema = spec["components"]["schemas"][name]
-    return schema
+def _resolve(spec: dict[str, Any], node: Any) -> Any:
+    while isinstance(node, dict) and "$ref" in node:
+        node = spec["components"]["schemas"][node["$ref"].rsplit("/", 1)[-1]]
+    return node
 
 
-def _variants(spec: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
-    """Concrete object schemas *schema* admits, one per ``oneOf``/``anyOf`` alternative."""
-    schema = _resolve(spec, schema)
-    alternatives = schema.get("oneOf") or schema.get("anyOf")
-    if not alternatives:
-        return [schema]
-    return [variant for alternative in alternatives for variant in _variants(spec, alternative)]
+def _variants(spec: dict[str, Any], node: Any) -> list[dict[str, Any]]:
+    """Expand a schema into the concrete object schemas a value may match.
+
+    Follows ``$ref``, flattens ``oneOf``/``anyOf`` (dropping ``null``
+    branches) and merges ``allOf`` so a discriminated union and a flat
+    object are checked the same way.
+    """
+    node = _resolve(spec, node)
+    if not isinstance(node, dict):
+        return []
+    if "allOf" in node:
+        merged: dict[str, Any] = {"properties": {}}
+        for part in node["allOf"]:
+            for variant in _variants(spec, part):
+                merged["properties"].update(variant.get("properties", {}))
+        return [merged]
+    for key in ("oneOf", "anyOf"):
+        if key in node:
+            return [
+                v
+                for branch in node[key]
+                if not (isinstance(branch, dict) and branch.get("type") == "null")
+                for v in _variants(spec, branch)
+            ]
+    return [node]
 
 
-def _declared_properties(spec: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
-    """Property schemas declared by one object schema, merged across ``allOf`` parts."""
-    schema = _resolve(spec, schema)
-    properties = dict(schema.get("properties", {}))
-    for part in schema.get("allOf", []):
-        properties.update(_declared_properties(spec, part))
-    return properties
-
-
-def _array_items(spec: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any] | None:
-    for candidate in _variants(spec, schema):
-        if candidate.get("type") == "array":
-            return candidate.get("items", {})
-    return None
-
-
-def _list_item_schema(spec: dict[str, Any], path: str) -> dict[str, Any]:
-    response = spec["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]
-    envelope = _resolve(spec, response["schema"])
-    data = envelope.get("properties", {}).get("data")
-    assert data is not None, f"GET {path} 200 response declares no `data` property"
-    items = _array_items(spec, data)
-    assert items is not None, f"GET {path} 200 response `data` is not an array"
+def _item_variants(spec: dict[str, Any], path: str) -> list[dict[str, Any]]:
+    schema = spec["paths"][path]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]
+    envelopes = _variants(spec, schema)
+    assert envelopes, f"GET {path}: 200 response has no object schema: {schema!r}"
+    items: list[dict[str, Any]] = []
+    for envelope in envelopes:
+        data = envelope.get("properties", {}).get("data")
+        assert data is not None, f"GET {path}: 200 schema declares no `data` property"
+        for array in _variants(spec, data):
+            items.extend(_variants(spec, array.get("items", {})))
     return items
 
 
-def test_session_items_response_documents_record_fields() -> None:
-    spec = _load_spec()
-    items = _list_item_schema(spec, "/v1/sessions/{session_id}/items")
-    required_fields = {"id", "type", "role", "content"}
-    message_records = [
-        properties
-        for properties in (_declared_properties(spec, v) for v in _variants(spec, items))
-        if required_fields <= properties.keys()
-    ]
-    assert message_records, (
-        f"GET /v1/sessions/{{session_id}}/items documents its records as "
-        f"{items!r}, so generated clients receive data: Any[]; no record "
-        f"variant documents all of {sorted(required_fields)}"
-    )
-    content_items = _array_items(spec, message_records[0]["content"])
-    assert content_items is not None, "session-item `content` is not documented as an array"
-    assert "text" in _declared_properties(spec, content_items), (
-        "session-item content[].text is not documented"
-    )
+def _properties(variant: dict[str, Any]) -> set[str]:
+    return set(variant.get("properties", {}))
 
 
-def test_agents_response_documents_record_fields() -> None:
+def test_session_items_operation_documents_item_fields() -> None:
+    """Items declare ``id``/``type``; messages also ``role`` and ``content[].text``."""
     spec = _load_spec()
-    items = _list_item_schema(spec, "/v1/agents")
-    properties = _declared_properties(spec, items)
-    missing = {"id", "name"} - properties.keys()
-    assert not missing, (
-        f"GET /v1/agents documents its records as {items!r}, so generated "
-        f"clients receive data: Any[]; undocumented fields: {sorted(missing)}"
+    variants = _item_variants(spec, _SESSION_ITEMS_PATH)
+    assert variants, f"GET {_SESSION_ITEMS_PATH}: data.items resolves to no object schema"
+    for variant in variants:
+        missing = {"id", "type"} - _properties(variant)
+        assert not missing, (
+            f"GET {_SESSION_ITEMS_PATH}: data.items variant declares "
+            f"{sorted(_properties(variant))} and lacks {sorted(missing)}; the record "
+            f"schema is untyped (`items: {{}}`), so generated clients receive `Any[]`. "
+            f"Document the session item shape (e.g. SessionItemList -> SessionItem) and "
+            f"regenerate openapi.json."
+        )
+    message_variants = [v for v in variants if {"role", "content"} <= _properties(v)]
+    assert message_variants, (
+        f"GET {_SESSION_ITEMS_PATH}: no data.items variant declares both `role` and "
+        f"`content`; message items must be documented."
     )
+    for variant in message_variants:
+        blocks = [
+            block
+            for array in _variants(spec, variant["properties"]["content"])
+            for block in _variants(spec, array.get("items", {}))
+        ]
+        assert any("text" in _properties(block) for block in blocks), (
+            f"GET {_SESSION_ITEMS_PATH}: message `content[]` blocks declare "
+            f"{sorted({p for b in blocks for p in _properties(b)})}; `text` must be documented."
+        )
+
+
+def test_agents_operation_documents_item_fields() -> None:
+    """Every documented agent record declares ``id`` and ``name``."""
+    spec = _load_spec()
+    variants = _item_variants(spec, _AGENTS_PATH)
+    assert variants, f"GET {_AGENTS_PATH}: data.items resolves to no object schema"
+    for variant in variants:
+        missing = {"id", "name"} - _properties(variant)
+        assert not missing, (
+            f"GET {_AGENTS_PATH}: data.items variant declares "
+            f"{sorted(_properties(variant))} and lacks {sorted(missing)}; the record "
+            f"schema is untyped (`items: {{}}`), so generated clients receive `Any[]`. "
+            f"Document the agent shape (e.g. AgentList -> AgentObject) and regenerate "
+            f"openapi.json."
+        )

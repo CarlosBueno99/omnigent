@@ -340,6 +340,7 @@ class AgentList(BaseModel):
     last_id: str | None = None
     has_more: bool = False
 
+
 # ── Session Policies ───────────────────────────────────────────
 
 

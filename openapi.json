@@ -6477,6 +6477,17 @@
             "title": "Name",
             "type": "string"
           },
+          "namespace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Namespace"
+          },
           "response_id": {
             "description": "ID of the task/response that produced this item.",
             "title": "Response Id",
@@ -10952,7 +10963,7 @@
     },
     "/v1/agents": {
       "get": {
-        "description": "List server agents, or with `scope=user` the caller's own agents.\n\nServer agents come from `agent_store.list()`, which never returns\nuser agents. `scope=user` returns the caller's user agents newest\nfirst, at most 50 per page and paged with `after` only; `last_id`\nis the last row the server read, which may not be in `data`.\n\n**Returns:** A `PaginatedList` of agents.",
+        "description": "List server agents, or with `scope=user` the caller's own agents.\n\nServer agents come from `agent_store.list()`, which never returns\nuser agents. `scope=user` returns the caller's user agents newest\nfirst, at most 50 per page and paged with `after` only; `last_id`\nis the last row the server read, which may not be in `data`.\n\n**Returns:** An `AgentList` of agents.",
         "operationId": "list_builtin_agents_v1_agents_get",
         "parameters": [
           {
