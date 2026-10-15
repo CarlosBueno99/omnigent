@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import http
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -106,9 +108,15 @@ class _CredentialFrontDoor:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            self._loop.stop()
 
-        asyncio.run_coroutine_threadsafe(_shutdown(), self._loop)
+        shutdown = asyncio.run_coroutine_threadsafe(_shutdown(), self._loop)
+        try:
+            shutdown.result(timeout=10)
+        except Exception as exc:
+            warnings.warn(f"front door shutdown failed: {exc!r}", stacklevel=2)
+        # Stop the loop from here: stopping it inside the coroutine would exit the
+        # loop before the future's completion callback runs.
+        self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=10)
         if self._thread.is_alive():
             warnings.warn("front door loop did not stop; leaking it", stacklevel=2)
@@ -118,8 +126,14 @@ class _CredentialFrontDoor:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             await self._serve(reader, writer)
-        except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
-            pass  # a peer that dropped mid-request is not a test failure
+        except (
+            OSError,
+            ValueError,
+            asyncio.IncompleteReadError,
+            asyncio.LimitOverrunError,
+            TimeoutError,
+        ):
+            pass  # a peer that dropped or sent a malformed request is not a test failure
         finally:
             writer.close()
 
@@ -202,7 +216,7 @@ class _CredentialFrontDoor:
         *,
         content_type: str = "application/json",
     ) -> None:
-        reason = {401: "Unauthorized", 404: "Not Found", 502: "Bad Gateway"}[status]
+        reason = http.HTTPStatus(status).phrase
         lines = [f"HTTP/1.1 {status} {reason}", f"Content-Type: {content_type}"]
         lines += [f"{name}: {value}" for name, value in headers.items()]
         lines += [f"Content-Length: {len(body)}", "Connection: close", "", ""]
@@ -325,7 +339,9 @@ def _first_line(text: str) -> str:
     return next((line for line in text.splitlines() if line.strip()), "")
 
 
-def _attribution_rows(rows: list[dict[str, Any]], source: str, runner_id: str) -> list[dict]:
+def _attribution_rows(
+    rows: list[dict[str, Any]], source: str, runner_id: str
+) -> list[dict[str, Any]]:
     return [
         row
         for row in rows
@@ -411,8 +427,9 @@ def test_refused_runner_credentials_name_sign_in(refused_launch: dict[str, Any])
         f"runner logs={refused_launch['runner_logs']}"
     )
     headline = _first_line(message)
-    assert "login" in headline, (
-        "session failure does not lead with the sign-in instruction:\n"
+    # The whole command survives the persisted message, not just a prefix of it.
+    assert re.search(r"run `\S+ login \S+` to re-authenticate", headline), (
+        "session failure does not lead with the complete sign-in instruction:\n"
         f"code={error.get('code')!r}\n--- message ---\n{message}"
     )
     assert "CancelledError" not in message, (

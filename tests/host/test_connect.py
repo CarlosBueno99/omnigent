@@ -1885,6 +1885,22 @@ def test_runner_exit_report_leads_with_declared_tunnel_refusal(
     assert report.phase.value == expected_phase
 
 
+def test_runner_exit_report_redacts_credentials_in_the_refusal_line(tmp_path: Path) -> None:
+    """The refusal-first report masks credential-shaped values like the tail does."""
+    token = "ghp_0123456789abcdef0123456789abcdef"
+    refusal = _TUNNEL_REFUSAL.replace(
+        "http://127.0.0.1:8000", f"http://127.0.0.1:8000?token={token}"
+    )
+    log = tmp_path / "runner-refused.log"
+    log.write_text(f"error: {refusal}\n", encoding="utf-8")
+
+    report = _runner_exit_report(1, log, had_connected=False)
+
+    assert token not in report.error
+    assert report.error.startswith("runner tunnel rejected by server")
+    assert "to re-authenticate" in report.error.splitlines()[0]
+
+
 @pytest.mark.parametrize(
     ("had_connected", "expected_phase"),
     [(False, "runner_launch"), (True, "unknown"), (None, "unknown")],

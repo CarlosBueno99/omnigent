@@ -3692,7 +3692,9 @@ def create_app(
         runner_ran = (
             had_connected is True or session_live_state.last_liveness_stamp(runner_id) is not None
         )
-        if runner_ran:
+        # Liveness only fills in missing evidence: a stale stamp from an earlier
+        # runner with the same id must not override a definite never-connected.
+        if had_connected is None and runner_ran:
             had_connected = True
         try:
             affected = await asyncio.to_thread(
