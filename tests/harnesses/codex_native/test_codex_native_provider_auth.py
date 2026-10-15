@@ -261,6 +261,9 @@ def test_wrapped_command_names_the_interpreter_and_keeps_the_helper_verbatim() -
             (None, "https://x.databricks.com"),
         ),
         ("databricks auth token | jq -r .access_token --profile stray", (None, None)),
+        # A flag or separator where the value should be is not a profile.
+        ("databricks auth token --profile --output json | jq -er .access_token", (None, None)),
+        ("databricks auth token --profile | jq -r .access_token", (None, None)),
         ("printf %s sk-static", (None, None)),
         ("databricks auth login --profile oss", (None, None)),
         ("unbalanced 'quote databricks auth token --profile oss", (None, None)),

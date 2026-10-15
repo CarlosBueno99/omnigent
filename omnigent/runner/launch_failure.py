@@ -333,6 +333,9 @@ def diagnose_codex_model_rejection(message: str) -> FailureDiagnosis | None:
 # (``FAILURE_CODE_DESCRIPTIONS`` in ``web/src/components/blocks/StatusBlocks.tsx``)
 # because the failure card renders client-side. Keep the two in sync when adding
 # or editing a code.
+# The code a Codex-native forwarder sends when the provider's bearer helper failed.
+CODEX_PROVIDER_AUTH_FAILED_CODE = "codex_provider_auth_failed"
+
 _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
     "required_terminal_exited": (
         "The agent's terminal exited unexpectedly, so the session can't continue."
@@ -348,7 +351,7 @@ _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
         "Codex hit an error reloading the earlier transcript, so it started a fresh thread."
     ),
     "codex_turn_error": "Codex ran into an error during this turn.",
-    "codex_provider_auth_failed": (
+    CODEX_PROVIDER_AUTH_FAILED_CODE: (
         "Codex couldn't get a model credential from the configured provider's auth command "
         "on the host."
     ),
@@ -374,9 +377,9 @@ _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-# Codes a native forwarder may diagnose itself and send on a failed status
+# Codes a Codex-native forwarder may diagnose itself and send on a failed status
 # edge (``error_code``); the server classifies every other failure.
-FORWARDED_TURN_ERROR_CODES = frozenset({"codex_provider_auth_failed"})
+FORWARDED_TURN_ERROR_CODES = frozenset({CODEX_PROVIDER_AUTH_FAILED_CODE})
 
 
 def describe_failure_code(code: str | None) -> str | None:

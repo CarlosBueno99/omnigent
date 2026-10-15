@@ -24,9 +24,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-#: Failure code the turn error carries; described in ``launch_failure.py`` and
-#: the web ``FAILURE_CODE_DESCRIPTIONS`` mirror.
-PROVIDER_AUTH_FAILED_CODE = "codex_provider_auth_failed"
 _MODULE = "omnigent.harnesses.codex_native.provider_auth"
 
 OUTCOME_EXITED = "exited"
@@ -283,6 +280,8 @@ def databricks_cli_selector(auth_command: str) -> tuple[str | None, str | None]:
         if word in _SHELL_SEPARATORS:
             break
         following = arguments[position + 1] if position + 1 < len(arguments) else None
+        if following is not None and (following in _SHELL_SEPARATORS or following.startswith("-")):
+            following = None
         if word in {"--profile", "-p"}:
             profile = following
         elif word.startswith("--profile="):

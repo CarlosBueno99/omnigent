@@ -1983,7 +1983,7 @@ def register_events_routes(
                 # output/reauth fields.
                 forwarded = _forwarded_status_error(data)
                 forwarded_code = forwarded.get("code")
-                if forwarded_code not in FORWARDED_TURN_ERROR_CODES:
+                if forwarded_code not in FORWARDED_TURN_ERROR_CODES or harness != "codex-native":
                     forwarded_code = None
                 if forwarded_code is not None:
                     error_code = forwarded_code
@@ -2011,7 +2011,7 @@ def register_events_routes(
                     "native_turn_error",
                 }:
                     diagnosis = diagnose_codex_model_rejection(output)
-                if card:
+                if any(card.get(field) for field in ("title", "cause", "remediation")):
                     diagnosis = None
                 status_error = ErrorDetail(
                     code=classified_code,

@@ -64,7 +64,6 @@ from omnigent.harnesses.codex_native.elicitation import (
     is_codex_request_id as _is_codex_request_id,
 )
 from omnigent.harnesses.codex_native.provider_auth import (
-    PROVIDER_AUTH_FAILED_CODE,
     diagnose_provider_auth_failure,
     is_provider_auth_error,
 )
@@ -80,6 +79,7 @@ from omnigent.native._native_post_delivery import (
     post_may_have_been_delivered,
     replay_dead_letters,
 )
+from omnigent.runner.launch_failure import CODEX_PROVIDER_AUTH_FAILED_CODE
 from omnigent.runtime.tool_output import cap_tool_output
 from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -1184,7 +1184,7 @@ def _describe_provider_auth_error(
     return replace(
         error,
         message=diagnosis.message(error.message),
-        code=PROVIDER_AUTH_FAILED_CODE,
+        code=CODEX_PROVIDER_AUTH_FAILED_CODE,
         title=diagnosis.title,
         cause=diagnosis.cause,
         remediation=diagnosis.remediation,

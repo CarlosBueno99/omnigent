@@ -23,10 +23,10 @@ from omnigent.harnesses.codex_native.bridge import (
 )
 from omnigent.harnesses.codex_native.provider_auth import (
     OUTCOME_EXITED,
-    PROVIDER_AUTH_FAILED_CODE,
     ProviderAuthFailure,
     ProviderAuthHelper,
 )
+from omnigent.runner.launch_failure import CODEX_PROVIDER_AUTH_FAILED_CODE
 from tests.harnesses.codex_native.forwarder._support import (
     _RecordingClient,
 )
@@ -1114,7 +1114,7 @@ def test_terminal_turn_status_edge_provider_auth_error_names_profile_and_recover
     assert error is not None
     assert error.kind == fwd._CODEX_ERROR_KIND_PROVIDER_AUTH
     assert error.is_auth is False
-    assert error.code == PROVIDER_AUTH_FAILED_CODE
+    assert error.code == CODEX_PROVIDER_AUTH_FAILED_CODE
     assert error.title == "Codex could not get a Databricks token"
     assert error.cause is not None
     assert "provider 'DatabricksOSS' (Databricks profile 'oss')" in error.cause
@@ -1138,7 +1138,7 @@ def test_terminal_turn_status_edge_provider_auth_error_without_record_still_expl
 
     assert edge is not None
     assert edge.error is not None
-    assert edge.error.code == PROVIDER_AUTH_FAILED_CODE
+    assert edge.error.code == CODEX_PROVIDER_AUTH_FAILED_CODE
     assert edge.error.title == "Codex could not get a provider token"
     assert edge.error.cause is not None
     assert _PROVIDER_AUTH_EXIT_1 in edge.error.cause
@@ -1155,7 +1155,7 @@ def test_resume_terminal_status_edge_diagnoses_provider_auth_error(tmp_path: Pat
 
     assert edge is not None
     assert edge.error is not None
-    assert edge.error.code == PROVIDER_AUTH_FAILED_CODE
+    assert edge.error.code == CODEX_PROVIDER_AUTH_FAILED_CODE
     assert edge.error.is_auth is False
     assert edge.error.remediation is not None
     assert "`databricks auth login --profile oss`" in edge.error.remediation
@@ -1195,7 +1195,7 @@ async def test_handle_event_provider_auth_error_notification_posts_the_diagnosis
     assert data["status"] == "failed"
     assert data["response_id"] == "codex_turn_123"
     assert "reauth_required" not in data
-    assert data["error_code"] == PROVIDER_AUTH_FAILED_CODE
+    assert data["error_code"] == CODEX_PROVIDER_AUTH_FAILED_CODE
     assert data["error_title"] == "Codex could not get a Databricks token"
     assert "Databricks profile 'oss'" in data["error_cause"]
     assert "`databricks auth login --profile oss`" in data["error_remediation"]

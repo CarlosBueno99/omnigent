@@ -5794,9 +5794,10 @@ _PROVIDER_AUTH_FORWARDED = {
 
 
 @pytest.mark.parametrize(
-    ("forwarded", "output", "expected_code", "expected_card"),
+    ("wrapper", "forwarded", "output", "expected_code", "expected_card"),
     [
         (
+            "codex-native-ui",
             _PROVIDER_AUTH_FORWARDED,
             _PROVIDER_AUTH_OUTPUT,
             "codex_provider_auth_failed",
@@ -5804,6 +5805,7 @@ _PROVIDER_AUTH_FORWARDED = {
         ),
         # Blank or non-string fields are an older runner's edge: the server classifies as before.
         (
+            "codex-native-ui",
             {"error_code": "", "error_title": None, "error_cause": 7},
             _PROVIDER_AUTH_OUTPUT,
             "codex_turn_error",
@@ -5811,6 +5813,7 @@ _PROVIDER_AUTH_FORWARDED = {
         ),
         # A code the forwarders are not known to diagnose is ignored, card and all.
         (
+            "codex-native-ui",
             {**_PROVIDER_AUTH_FORWARDED, "error_code": "made_up_code"},
             _PROVIDER_AUTH_OUTPUT,
             "codex_turn_error",
@@ -5819,18 +5822,28 @@ _PROVIDER_AUTH_FORWARDED = {
         # The forwarded card describes its own code; it is dropped when the
         # server's classification moves the failure elsewhere.
         (
+            "codex-native-ui",
             _PROVIDER_AUTH_FORWARDED,
             'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED","message":'
             '"Budget \\"team\\" has reached its limit of $100."}',
             "budget_exhausted",
             {},
         ),
+        # The Codex-specific code is not accepted from another native harness.
+        (
+            "claude-code-native-ui",
+            _PROVIDER_AUTH_FORWARDED,
+            _PROVIDER_AUTH_OUTPUT,
+            "native_turn_error",
+            {},
+        ),
     ],
-    ids=["forwarder-diagnosed", "ignored-blanks", "unknown-code", "reclassified"],
+    ids=["forwarder-diagnosed", "ignored-blanks", "unknown-code", "reclassified", "other-harness"],
 )
 async def test_forwarder_diagnosed_native_failure_keeps_its_card(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    wrapper: str,
     forwarded: dict[str, Any],
     output: str,
     expected_code: str,
@@ -5842,12 +5855,11 @@ async def test_forwarder_diagnosed_native_failure_keeps_its_card(
         "omnigent.server.routes.sessions.session_stream.publish",
         lambda _session_id, event: published.append(event),
     )
+    harness = "codex-native" if wrapper == "codex-native-ui" else "claude-native"
     agent = await create_test_agent(
-        client, executor={"type": "omnigent", "config": {"harness": "codex-native"}}
+        client, executor={"type": "omnigent", "config": {"harness": harness}}
     )
-    session = await _create_session(
-        client, agent["id"], labels={"omnigent.wrapper": "codex-native-ui"}
-    )
+    session = await _create_session(client, agent["id"], labels={"omnigent.wrapper": wrapper})
     session_id = session["id"]
     item_resp = await client.post(
         f"/v1/sessions/{session_id}/events",
@@ -5859,7 +5871,7 @@ async def test_forwarder_diagnosed_native_failure_keeps_its_card(
                 "source_id": "src_provider_auth",
                 "item_data": {
                     "role": "assistant",
-                    "agent": "codex-native-ui",
+                    "agent": wrapper,
                     "content": [{"type": "output_text", "text": output}],
                 },
             },
@@ -5894,7 +5906,7 @@ async def test_forwarder_diagnosed_native_failure_keeps_its_card(
     assert output.startswith(last_task_error.pop("message").rstrip("…"))
     assert last_task_error == {
         "code": expected_code,
-        "agent_name": "codex-native-ui",
+        "agent_name": wrapper,
         **expected_card,
     }
 
