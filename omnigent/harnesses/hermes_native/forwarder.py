@@ -19,7 +19,10 @@ Unlike goose-native, Hermes auto-generates its ``sessions.id`` and gives no
 ``--name`` to pin it, so discovery follows cursor-native instead: bind the newest
 session whose ``cwd`` matches this terminal's workspace and whose ``started_at`` is
 at/after the recorded launch time, with a claim guard so two hermes-native sessions
-launched in the same cwd never mirror the same row into two conversations. We then
+launched in the same cwd never mirror the same row into two conversations. Side
+sessions Hermes spawns under the same cwd and parent chain — ``delegate_task``
+helpers, ``/branch`` forks, tool runs — are never bound (see
+:func:`_is_side_session`), neither at discovery nor by the compaction re-pin. We then
 poll ``messages`` past a high-water ``id`` and POST new user/assistant rows as
 ``external_conversation_item`` events (which also seeds the session title).
 
@@ -102,6 +105,15 @@ _EXTERNAL_OUTPUT_REASONING_DELTA = "external_output_reasoning_delta"
 # an older claim is treated as a dead session and may be taken over. Generous
 # relative to the ~0.4s poll so a brief supervisor backoff never drops a claim.
 _CLAIM_FRESH_MS = 30_000
+
+#: ``sessions.source`` values of side conversations that never back the main
+#: transcript: ``delegate_task`` helpers run as ``subagent``, tool runs as ``tool``.
+_SIDE_SESSION_SOURCES = frozenset({"subagent", "tool"})
+
+#: ``sessions.model_config`` keys Hermes stamps on forked children (``delegate_task``,
+#: ``/branch``, gateway resets), each naming the parent they forked from. A
+#: compression continuation inherits ``model_config`` verbatim and adds none.
+_FORK_MARKERS = ("_delegate_from", "_branched_from", "_reset_from")
 
 # Sqlite read errors are swallowed in the helpers below (a live DB is briefly
 # unreadable mid-checkpoint, so returning empty and retrying is correct). But a
@@ -419,6 +431,63 @@ def _table_columns(con: sqlite3.Connection, table: str) -> frozenset[str]:
         return frozenset()
 
 
+def _column_or_null(cols: frozenset[str], name: str) -> str:
+    """SELECT fragment for *name*: the column when the live schema has it, else ``NULL``."""
+    return name if name in cols else f"NULL AS {name}"
+
+
+def _is_side_session(
+    source: object, model_config: object, *, parent_id: str | None = None
+) -> bool:
+    """Whether a ``sessions`` row is a side conversation rather than a main transcript.
+
+    Delegated helpers and tool runs are recognised by ``source``; ``delegate_task``,
+    ``/branch`` and reset forks also stamp a ``model_config`` marker naming the parent
+    (a child spawned under a gateway turn inherits the gateway's ``source``). With
+    *parent_id*, only a marker naming that parent counts — a continuation inherits
+    its parent's ``model_config`` verbatim, so an inherited marker is not a fork.
+    Without it, any marker does.
+    """
+    if isinstance(source, str) and source in _SIDE_SESSION_SOURCES:
+        return True
+    if not isinstance(model_config, str) or not model_config.strip():
+        return False
+    try:
+        data = json.loads(model_config)
+    except ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    markers = [data[key] for key in _FORK_MARKERS if data.get(key) is not None]
+    if parent_id is None:
+        return bool(markers)
+    return parent_id in markers
+
+
+def _is_side_session_id(db_path: Path, hermes_session_id: str) -> bool:
+    """Whether the ``sessions`` row *hermes_session_id* is a side session.
+
+    ``False`` when the row is missing or the store is unreadable: a binding that
+    cannot be checked yet (a fork pre-seeds one before Hermes writes the row) is kept.
+    """
+    con = _connect_ro(db_path)
+    if con is None:
+        return False
+    try:
+        cols = _table_columns(con, "sessions")
+        row = con.execute(
+            f"SELECT {_column_or_null(cols, 'source')}, {_column_or_null(cols, 'model_config')} "
+            "FROM sessions WHERE id = ?",
+            (hermes_session_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        _warn_sqlite_once("binding check", exc)
+        return False
+    finally:
+        con.close()
+    return row is not None and _is_side_session(row[0], row[1])
+
+
 def _discover_session_id(
     db_path: Path,
     workspace: str,
@@ -434,7 +503,9 @@ def _discover_session_id(
     none match cwd we fall back to the newest qualifying row only when EXACTLY ONE
     qualifies — never guessing among multiple, so a concurrent session in another
     workspace can't be mirrored by mistake. Rows in *excluded* (already claimed by
-    a live sibling) are skipped.
+    a live sibling) are skipped, and so are side sessions (see
+    :func:`_is_side_session`): a ``delegate_task`` helper shares the workspace and
+    starts later, so it would otherwise be the newest match.
 
     :param db_path: The Hermes ``state.db`` to read.
     :param workspace: The terminal's working directory (realpath-normalized).
@@ -450,28 +521,26 @@ def _discover_session_id(
     # Select it only when present; otherwise treat every row as cwd-less and
     # rely on the started_at-since-launch fallback below (the newest lone
     # session started after this terminal launched is this terminal's session).
-    has_cwd = "cwd" in _table_columns(con, "sessions")
+    cols = _table_columns(con, "sessions")
     try:
-        if has_cwd:
-            rows = con.execute(
-                "SELECT id, cwd FROM sessions WHERE started_at >= ? ORDER BY started_at DESC",
-                (floor_s,),
-            ).fetchall()
-        else:
-            rows = [
-                (sid, None)
-                for (sid,) in con.execute(
-                    "SELECT id FROM sessions WHERE started_at >= ? ORDER BY started_at DESC",
-                    (floor_s,),
-                ).fetchall()
-            ]
+        rows = con.execute(
+            f"SELECT id, {_column_or_null(cols, 'cwd')}, {_column_or_null(cols, 'source')}, "
+            f"{_column_or_null(cols, 'model_config')} "
+            "FROM sessions WHERE started_at >= ? ORDER BY started_at DESC",
+            (floor_s,),
+        ).fetchall()
     except sqlite3.Error as exc:
         _warn_sqlite_once("session discovery", exc)
         return None
     finally:
         con.close()
     candidates = [
-        (sid, cwd) for sid, cwd in rows if isinstance(sid, str) and sid and sid not in excluded
+        (sid, cwd)
+        for sid, cwd, source, model_config in rows
+        if isinstance(sid, str)
+        and sid
+        and sid not in excluded
+        and not _is_side_session(source, model_config)
     ]
     # Reliable case: a row whose cwd matches the workspace. Newest (rows are
     # already started_at DESC) wins.
@@ -489,30 +558,48 @@ def _discover_session_id(
 
 
 def _discover_child_session(db_path: Path, parent_session_id: str) -> str | None:
-    """Return the newest Hermes session whose parent is *parent_session_id*.
+    """Return the newest compression continuation of *parent_session_id*, or ``None``.
 
-    Hermes auto-compresses by ending the current session and forking a CHILD
-    (``sessions.parent_session_id`` points at the old id; present in hermes
-    v0.17.0 state.db). The forwarder pins one id for life, so after compaction it
-    keeps polling the dead parent and the chat goes silent. Re-discover the
-    newest child so the mirror re-pins. Mirrors :func:`_discover_session_id`'s
-    read-only connect + swallow-and-warn handling; returns ``None`` on any error.
+    Hermes compresses either in place (the session's rows are archived with
+    ``compacted = 1``) or by ending the session with ``end_reason = 'compression'``
+    and forking a CHILD (``sessions.parent_session_id`` points at the old id). The
+    forwarder pins one id for life, so after a fork it would keep polling the dead
+    parent and the chat would go silent; re-discover the continuation so the mirror
+    re-pins. ``parent_session_id`` also links ``delegate_task`` helpers, ``/branch``
+    forks and tool runs to a still-live parent, so only a child of a parent ended by
+    compression qualifies and side sessions are skipped — matching Hermes' own
+    continuation predicate. Mirrors :func:`_discover_session_id`'s read-only connect
+    + swallow-and-warn handling; returns ``None`` on any error.
     """
     con = _connect_ro(db_path)
     if con is None:
         return None
     try:
-        row = con.execute(
-            "SELECT id FROM sessions WHERE parent_session_id = ? ORDER BY started_at DESC LIMIT 1",
+        cols = _table_columns(con, "sessions")
+        if "end_reason" in cols:
+            parent = con.execute(
+                "SELECT end_reason FROM sessions WHERE id = ?", (parent_session_id,)
+            ).fetchone()
+            if parent is None or parent[0] != "compression":
+                return None
+        rows = con.execute(
+            f"SELECT id, {_column_or_null(cols, 'source')}, "
+            f"{_column_or_null(cols, 'model_config')} "
+            "FROM sessions WHERE parent_session_id = ? ORDER BY started_at DESC",
             (parent_session_id,),
-        ).fetchone()
+        ).fetchall()
     except sqlite3.Error as exc:
         _warn_sqlite_once("child discovery", exc)
         return None
     finally:
         con.close()
-    if row and isinstance(row[0], str) and row[0]:
-        return row[0]
+    for sid, source, model_config in rows:
+        if (
+            isinstance(sid, str)
+            and sid
+            and not _is_side_session(source, model_config, parent_id=parent_session_id)
+        ):
+            return sid
     return None
 
 
@@ -1103,6 +1190,18 @@ async def forward_hermes_store_to_session(
     """
     db = db_path or default_state_db()
     persisted = _read_state(bridge_dir)
+    if persisted.hermes_session_id is not None and await asyncio.to_thread(
+        _is_side_session_id, db, persisted.hermes_session_id
+    ):
+        # A saved binding outlives the rule that produced it; a helper or fork
+        # must never back the main transcript, so start over with discovery.
+        _logger.warning(
+            "hermes forwarder persisted binding %s is a side session; rediscovering; session=%s",
+            persisted.hermes_session_id,
+            session_id,
+        )
+        persisted = _ForwardState(launch_epoch_s=launch_epoch_s)
+        _write_state(bridge_dir, persisted)
     hermes_session_id: str | None = persisted.hermes_session_id
     last_id = persisted.last_id if hermes_session_id is not None else 0
     # A row whose mirroring failed partway, and how many of its items already
@@ -1307,13 +1406,14 @@ async def forward_hermes_store_to_session(
                                     session_id,
                                     exc_info=True,
                                 )
-                            # Compaction ends this Hermes session and forks a
-                            # child (parent_session_id chain). Re-pin to the
-                            # newest child so the mirror follows the live session
-                            # instead of polling the dead parent forever. Done at
-                            # most once per compaction (compaction_persisted resets
-                            # to False for the child, which carries no compacted
-                            # rows yet); if no child exists we stay on the parent.
+                            # A compression fork ends this Hermes session and
+                            # continues in a child (parent_session_id chain).
+                            # Re-pin to that continuation so the mirror follows
+                            # the live session instead of polling the dead parent
+                            # forever. Done at most once per compaction
+                            # (compaction_persisted resets to False for the child,
+                            # which carries no compacted rows yet); an in-place
+                            # compaction has no continuation, so we stay put.
                             try:
                                 child = await asyncio.to_thread(
                                     _discover_child_session, db, hermes_session_id

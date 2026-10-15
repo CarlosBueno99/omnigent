@@ -10,6 +10,7 @@ idempotent high-water cursor.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sqlite3
 from pathlib import Path
@@ -25,7 +26,9 @@ CREATE TABLE sessions (
     source TEXT NOT NULL,
     cwd TEXT,
     started_at REAL NOT NULL,
-    parent_session_id TEXT
+    parent_session_id TEXT,
+    end_reason TEXT,
+    model_config TEXT
 );
 CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,24 +109,105 @@ def test_discover_skips_excluded_session(tmp_path: Path) -> None:
 
 
 def test_discover_child_session_returns_newest_child(tmp_path: Path) -> None:
-    """After compaction Hermes forks a child via parent_session_id; pick the newest."""
+    """A compression fork ends the parent and creates a child; pick the newest continuation."""
     db = tmp_path / "state.db"
     con = sqlite3.connect(db)
     con.executescript(_SCHEMA)
     con.executemany(
-        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id) VALUES (?,?,?,?,?)",
+        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason)"
+        " VALUES (?,?,?,?,?,?)",
         [
-            ("parent", "cli", "/w", 1000.0, None),
-            ("child_old", "cli", "/w", 1005.0, "parent"),
-            ("child_new", "cli", "/w", 1010.0, "parent"),
-            ("unrelated", "cli", "/w", 1011.0, None),
+            ("parent", "cli", "/w", 1000.0, None, "compression"),
+            ("child_old", "cli", "/w", 1005.0, "parent", None),
+            ("child_new", "cli", "/w", 1010.0, "parent", None),
+            ("unrelated", "cli", "/w", 1011.0, None, None),
+        ],
+    )
+    con.commit()
+    assert f._discover_child_session(db, "parent") == "child_new"
+    # No children -> None (forwarder stays pinned to the parent).
+    assert f._discover_child_session(db, "child_new") is None
+    # A parent that is still live (or ended for another reason) has no continuation.
+    con.execute("UPDATE sessions SET end_reason = NULL WHERE id = 'parent'")
+    con.commit()
+    con.close()
+    assert f._discover_child_session(db, "parent") is None
+
+
+# Hermes marks a compression continuation by its parent's ``end_reason`` and keeps
+# delegated helpers as ``source='subagent'`` rows (``/branch`` and ``delegate_task``
+# also stamp ``model_config`` markers). Ancestry or newest-row order alone cannot
+# tell a helper from the continuation.
+_HELPER_ROWS = [
+    pytest.param("subagent", "{}", id="subagent-source"),
+    pytest.param("cli", '{"_delegate_from": "main"}', id="delegate-marker"),
+    pytest.param("cli", '{"_branched_from": "main"}', id="branch-marker"),
+]
+
+
+def _seed_compressed_main_with_late_helper(db: Path, *, source: str, model_config: str) -> None:
+    con = sqlite3.connect(db)
+    con.executescript(_SCHEMA)
+    con.executemany(
+        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason,"
+        " model_config) VALUES (?,?,?,?,?,?,?)",
+        [
+            ("main", "cli", "/w", 1000.0, None, "compression", None),
+            ("compression-child", "cli", "/w", 1001.0, "main", None, None),
+            ("late-helper", source, "/w", 1002.0, "main", None, model_config),
         ],
     )
     con.commit()
     con.close()
-    assert f._discover_child_session(db, "parent") == "child_new"
-    # No children -> None (forwarder stays pinned to the parent).
-    assert f._discover_child_session(db, "child_new") is None
+
+
+@pytest.mark.parametrize(("source", "model_config"), _HELPER_ROWS)
+def test_discover_session_id_skips_delegated_helper(
+    tmp_path: Path, source: str, model_config: str
+) -> None:
+    """Initial discovery binds the main conversation or its continuation, never a helper."""
+    db = tmp_path / "state.db"
+    _seed_compressed_main_with_late_helper(db, source=source, model_config=model_config)
+    assert f._discover_session_id(db, "/w", 1000.0) in {"main", "compression-child"}
+
+
+@pytest.mark.parametrize(("source", "model_config"), _HELPER_ROWS)
+def test_discover_child_session_prefers_compression_continuation(
+    tmp_path: Path, source: str, model_config: str
+) -> None:
+    """The post-compaction re-pin follows the continuation even when a helper is newer."""
+    db = tmp_path / "state.db"
+    _seed_compressed_main_with_late_helper(db, source=source, model_config=model_config)
+    assert f._discover_child_session(db, "main") == "compression-child"
+
+
+def test_discover_child_session_ignores_helper_of_live_parent(tmp_path: Path) -> None:
+    """In-place compaction keeps the parent live; its delegated helper is not a continuation."""
+    db = tmp_path / "state.db"
+    con = sqlite3.connect(db)
+    con.executescript(_SCHEMA)
+    con.executemany(
+        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason,"
+        " model_config) VALUES (?,?,?,?,?,?,?)",
+        [
+            ("main", "cli", "/w", 1000.0, None, None, None),
+            ("helper", "subagent", "/w", 1002.0, "main", None, '{"_delegate_from": "main"}'),
+        ],
+    )
+    con.commit()
+    con.close()
+    assert f._discover_child_session(db, "main") is None
+
+
+def test_is_side_session_binds_markers_to_the_queried_parent() -> None:
+    """A continuation inherits its parent's markers; only one naming the parent is a fork."""
+    inherited = '{"_branched_from": "root"}'
+    assert f._is_side_session("cli", inherited) is True  # no parent context: any marker
+    assert f._is_side_session("cli", inherited, parent_id="main") is False
+    assert f._is_side_session("cli", '{"_delegate_from": "main"}', parent_id="main") is True
+    assert f._is_side_session("subagent", None, parent_id="main") is True
+    assert f._is_side_session("cli", "not json", parent_id="main") is False
+    assert f._is_side_session("cli", '{"_delegate_from": null}') is False
 
 
 # Newer Hermes (schema_version >= 11) dropped ``sessions.cwd`` and
@@ -180,6 +264,20 @@ def test_discover_session_id_v11_no_cwd_binds_lone_session(tmp_path: Path) -> No
     assert f._discover_session_id(db, str(tmp_path), 1000.0) == "20260710_1"
     # Floor still applies: a session started before launch is not bound.
     assert f._discover_session_id(db, str(tmp_path), 2000.0) is None
+
+
+def test_discover_session_id_v11_no_cwd_skips_helper(tmp_path: Path) -> None:
+    """Without cwd, a delegated helper row must not defeat the lone-candidate fallback."""
+    db = tmp_path / "state.db"
+    _seed_db_v11(db, started_at=1000.0)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO sessions(id, source, started_at, parent_session_id) VALUES (?,?,?,?)",
+        ("helper", "subagent", 1002.0, "20260710_1"),
+    )
+    con.commit()
+    con.close()
+    assert f._discover_session_id(db, str(tmp_path), 1000.0) == "20260710_1"
 
 
 def test_read_new_items_v11_no_active_column(tmp_path: Path) -> None:
@@ -558,10 +656,11 @@ async def test_forward_loop_repins_to_child_after_compaction(tmp_path, monkeypat
     con = sqlite3.connect(db)
     con.executescript(_SCHEMA)
     con.executemany(
-        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id) VALUES (?,?,?,?,?)",
+        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason)"
+        " VALUES (?,?,?,?,?,?)",
         [
-            ("parent_1", "cli", workspace, 1000.0, None),
-            ("child_1", "cli", workspace, 1005.0, "parent_1"),
+            ("parent_1", "cli", workspace, 1000.0, None, "compression"),
+            ("child_1", "cli", workspace, 1005.0, "parent_1", None),
         ],
     )
     con.executemany(
@@ -641,10 +740,11 @@ async def test_forward_loop_rebases_idle_count_on_compaction_repin(tmp_path, mon
     con = sqlite3.connect(db)
     con.executescript(_SCHEMA)
     con.executemany(
-        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id) VALUES (?,?,?,?,?)",
+        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason)"
+        " VALUES (?,?,?,?,?,?)",
         [
-            ("parent_1", "cli", workspace, 1000.0, None),
-            ("child_1", "cli", workspace, 1005.0, "parent_1"),
+            ("parent_1", "cli", workspace, 1000.0, None, "compression"),
+            ("child_1", "cli", workspace, 1005.0, "parent_1", None),
         ],
     )
     con.executemany(
@@ -713,6 +813,173 @@ async def test_forward_loop_rebases_idle_count_on_compaction_repin(tmp_path, mon
     assert f._read_state(bridge_dir).hermes_session_id == "child_1"
     assert hstatus.read_posted_count(bridge_dir) == 1
     assert idle_posts == []  # child's single completed turn == baseline, no double-post
+
+
+def _seed_main_with_finished_helper(db: Path, workspace: str, *, compacted: bool) -> None:
+    """Main (``cli``) plus a finished ``delegate_task`` helper; optionally compact main in place.
+
+    Row ids: 1-2 main's delegation turn, 3-4 the helper's own turn, 5 main's hand-back
+    reply. With *compacted*, Hermes archives rows 1/2/5 (``active=0, compacted=1``) under
+    the same session id and inserts the summary as row 6 — no continuation child exists.
+    """
+    con = sqlite3.connect(db)
+    con.executescript(_SCHEMA)
+    con.executemany(
+        "INSERT INTO sessions(id, source, cwd, started_at, parent_session_id, end_reason,"
+        " model_config) VALUES (?,?,?,?,?,?,?)",
+        [
+            ("main", "cli", workspace, 1000.0, None, None, None),
+            ("helper", "subagent", workspace, 1002.0, "main", None, '{"_delegate_from": "main"}'),
+        ],
+    )
+    active, archived = int(not compacted), int(compacted)
+    rows = [
+        ("main", "user", "please delegate a tiny task", active, archived),
+        ("main", "assistant", "dispatching a helper", active, archived),
+        ("helper", "user", "Reply with exactly HELPER-DONE", 1, 0),
+        ("helper", "assistant", "HELPER-DONE", 1, 0),
+        ("main", "assistant", "the helper finished", active, archived),
+    ]
+    if compacted:
+        rows.append(("main", "assistant", "summary of the compacted turns", 1, 0))
+    con.executemany(
+        "INSERT INTO messages(session_id, role, content, active, compacted) VALUES (?,?,?,?,?)",
+        rows,
+    )
+    con.commit()
+    con.close()
+
+
+def _capture_external_session_patches(monkeypatch) -> list[str | None]:
+    """Replace the server client; return the ``external_session_id`` values PATCHed."""
+    patched: list[str | None] = []
+
+    class _Client:
+        async def post(self, url, json=None, **_kw):
+            return _Resp()
+
+        async def patch(self, url, json=None, **_kw):
+            patched.append((json or {}).get("external_session_id"))
+            return _Resp()
+
+    @contextlib.asynccontextmanager
+    async def _make_client(*_a, **_kw):
+        yield _Client()
+
+    monkeypatch.setattr("omnigent.cli_auth.open_server_client", _make_client)
+    return patched
+
+
+def _mirrored_texts(posted: list[f._MirrorItem]) -> list[str]:
+    return [str(i.item_data["content"][0]["text"]) for i in posted if i.item_type == "message"]
+
+
+async def test_forward_loop_stays_on_main_after_in_place_compaction_with_helper(
+    tmp_path, monkeypatch
+) -> None:
+    """In-place compaction must not re-pin onto the finished delegated helper.
+
+    Hermes compacts in place by default (``compacted = 1`` rows under the same session
+    id, no continuation), so main's only child is the ``delegate_task`` helper. The
+    forwarder has to stay on main: mirror its post-compaction rows, never the helper's
+    prompt or reply, and keep main as the conversation's external session id.
+    """
+    workspace = str(tmp_path)
+    db = tmp_path / "state.db"
+    _seed_main_with_finished_helper(db, workspace, compacted=True)
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    # Main's pre-compaction rows (1, 2, 5) were already mirrored.
+    f._write_state(bridge_dir, f._ForwardState(hermes_session_id="main", last_id=5))
+
+    posted: list[f._MirrorItem] = []
+
+    async def _fake_post(_client, *, session_id, item):
+        posted.append(item)
+
+    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
+    monkeypatch.setattr(f, "_persist_hermes_compaction_item", lambda *a, **k: _noop())
+    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
+    patched = _capture_external_session_patches(monkeypatch)
+
+    iteration = {"n": 0}
+
+    async def _sleep(_s):
+        iteration["n"] += 1
+        if iteration["n"] >= 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await f.forward_hermes_store_to_session(
+            base_url="http://x",
+            headers={},
+            session_id="conv_main",
+            bridge_dir=bridge_dir,
+            agent_name="hermes-native-ui",
+            workspace=workspace,
+            launch_epoch_s=1000.0,
+            db_path=db,
+        )
+
+    assert _mirrored_texts(posted) == ["summary of the compacted turns"]
+    assert f._read_state(bridge_dir).hermes_session_id == "main"
+    assert patched == ["main"]
+
+
+async def test_forward_loop_drops_persisted_helper_binding(tmp_path, monkeypatch) -> None:
+    """A saved binding naming a delegated helper is discarded and main is rediscovered.
+
+    ``hermes_forwarder.json`` is trusted across supervisor restarts, so a binding
+    written before the side-session rule existed would keep tailing the helper.
+    """
+    workspace = str(tmp_path)
+    db = tmp_path / "state.db"
+    _seed_main_with_finished_helper(db, workspace, compacted=False)
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    f._write_state(
+        bridge_dir, f._ForwardState(hermes_session_id="helper", last_id=0, launch_epoch_s=1000.0)
+    )
+
+    posted: list[f._MirrorItem] = []
+
+    async def _fake_post(_client, *, session_id, item):
+        posted.append(item)
+
+    monkeypatch.setattr(f, "_post_conversation_item", _fake_post)
+    monkeypatch.setattr(f, "_post_external_session_status", _ignore_status)
+    patched = _capture_external_session_patches(monkeypatch)
+
+    iteration = {"n": 0}
+
+    async def _sleep(_s):
+        iteration["n"] += 1
+        if iteration["n"] >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(f.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await f.forward_hermes_store_to_session(
+            base_url="http://x",
+            headers={},
+            session_id="conv_resume",
+            bridge_dir=bridge_dir,
+            agent_name="hermes-native-ui",
+            workspace=workspace,
+            launch_epoch_s=1000.0,
+            db_path=db,
+        )
+
+    assert f._read_state(bridge_dir).hermes_session_id == "main"
+    assert _mirrored_texts(posted) == [
+        "please delegate a tiny task",
+        "dispatching a helper",
+        "the helper finished",
+    ]
+    assert patched == ["main"]
 
 
 # --- Usage tracker tests ---------------------------------------------------
