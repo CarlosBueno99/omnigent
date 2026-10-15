@@ -117,8 +117,9 @@ def injected(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     Knobs, all mutable by the test before it drives ``run_turn``:
 
     * ``steps`` — the trajectory BEFORE delivery (default empty).
-    * ``reply`` — steps appended on a successful inject; ``None`` means agy
-      records nothing at all.
+    * ``reply`` — steps appended on a successful inject. ``None`` (the default)
+      records a completed turn (USER_INPUT + a DONE planner with text); ``[]``
+      records nothing.
     * ``cascade_status`` — agy's own run status for the idle backstop.
     * ``on_poll`` — ``callable(rec, poll_index)`` run before each trajectory read,
       for a trajectory that evolves across polls. Poll 0 is the executor's
@@ -446,6 +447,41 @@ def test_run_turn_inactive_session_errors(
     assert "no longer active" in events[0].message
 
 
+def test_run_turn_delivers_but_cannot_verify_when_the_session_flips_active(
+    tmp_path: Path, injected: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session going active mid-delivery reads as delivered-but-unverifiable.
+
+    When the pre-delivery snapshot finds no bridge state, run_turn re-reads it;
+    seeing no active session it delegates to ``_deliver``. But the session can
+    flip active between that read and ``_deliver``'s own locked read, so the text
+    IS typed. The turn must then be reported as delivered but unverifiable (no
+    baseline to attribute completion), never as undelivered, and the session kept
+    so agy's work is not torn down.
+    """
+    calls = {"n": 0}
+
+    def _flaky_state(_bridge_dir: Path) -> AntigravityNativeBridgeState | None:
+        calls["n"] += 1
+        # The snapshot read and run_turn's re-read (calls 1-2) see nothing;
+        # _deliver's own read (call 3) sees an active session, so the inject lands.
+        if calls["n"] <= 2:
+            return None
+        return AntigravityNativeBridgeState(
+            session_id="conv_test", conversation_id=_CONVERSATION_ID
+        )
+
+    monkeypatch.setattr(executor_mod, "read_bridge_state", _flaky_state)
+    events = asyncio.run(_run(_executor(tmp_path), "implement the thing"))
+
+    assert len(_injected(injected)) == 1, "the text WAS typed; it must not read as undelivered"
+    assert len(events) == 1
+    assert isinstance(events[0], ExecutorError)
+    assert "delivered but could not be verified" in events[0].message
+    assert events[0].preserve_session is True
+    assert not events[0].undelivered
+
+
 def test_run_turn_tui_inject_error_surfaces(tmp_path: Path, injected: dict[str, object]) -> None:
     """
     A ``RuntimeError`` from the TUI inject surfaces as an ExecutorError.
@@ -766,32 +802,27 @@ def test_repeated_text_with_no_snapshot_never_adopts_the_previous_turn(
     assert events[0].preserve_session is True
 
 
-def test_gate_returns_before_the_configured_harness_idle_watchdog(
-    tmp_path: Path, injected: dict[str, object], monkeypatch: pytest.MonkeyPatch
+def test_a_watchdog_at_or_under_the_safety_margin_is_rejected_before_delivery(
+    tmp_path: Path,
+    injected: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    REGRESSION: the gate reconciles with the CONFIGURED harness idle watchdog.
+    REGRESSION: a watchdog at/under the gate's safety margin is rejected before typing.
 
     The gate emits no progress events while it polls, so the harness idle
     watchdog (``_scaffold._TURN_IDLE_TIMEOUT_S``, env ``HARNESS_TURN_TIMEOUT_S``)
-    is never reset by this turn. If the gate outlived that watchdog the harness
-    would treat the turn as wedged, REPLAY ``run_turn`` and re-type the prompt
-    into agy. With a short configured watchdog and a turn that never terminates,
-    the gate must return its own diagnosable failure first — keyed to the
-    watchdog actually configured, not the module default — and must leave the
-    cascade uncancelled so agy keeps working.
+    is never reset by this turn; the gate must return a safety margin ahead of it
+    or the harness REPLAYS ``run_turn`` and re-types the prompt. A watchdog at or
+    under that margin leaves the gate no room to verify even a single poll, so
+    typing the turn would deliver work this executor could never confirm. It is
+    rejected up front as undelivered — keyed to the watchdog actually configured,
+    not the module default — so nothing is typed and the workflow may retry once
+    the config is fixed.
     """
     from omnigent.runtime.harnesses import _scaffold
 
     _seed_state(tmp_path)
-    # agy records the turn and keeps running a tool; it never reaches a terminal
-    # planner, so only the watchdog reconciliation can end the gate.
-    injected["reply"] = [
-        user_step("implement the thing"),
-        tool_step("CORTEX_STEP_STATUS_RUNNING"),
-    ]
-    # A watchdog shorter than the safety margin forces the reconciliation branch
-    # on the first poll, independently of real elapsed time.
     monkeypatch.setattr(_scaffold, "_TURN_IDLE_TIMEOUT_S", 30.0)
     monkeypatch.setattr(executor_mod, "_WATCHDOG_SAFETY_MARGIN_S", 60.0)
 
@@ -799,12 +830,94 @@ def test_gate_returns_before_the_configured_harness_idle_watchdog(
     assert len(events) == 1
     assert isinstance(events[0], ExecutorError)
     assert not any(isinstance(event, TurnComplete) for event in events)
-    # The configured 30s watchdog, not the module default, bounds the gate.
+    assert "was not delivered" in events[0].message
+    # Keyed to the configured 30s watchdog and 60s margin, not the module default.
     assert "harness idle watchdog (30s)" in events[0].message
+    assert "60s safety margin" in events[0].message
+    assert "HARNESS_TURN_TIMEOUT_S" in events[0].message
+    assert events[0].undelivered is True
+    assert events[0].preserve_session is True
+    assert events[0].retryable is False
+    # Nothing was typed and the gate was never entered, not even the snapshot.
+    assert _injected(injected) == []
+    assert injected["polls"] == 0
+
+
+def test_gate_returns_before_a_valid_watchdog_fires(
+    tmp_path: Path,
+    injected: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    REGRESSION: a deliverable turn that never terminates still returns before the watchdog.
+
+    A watchdog ABOVE the safety margin is deliverable, so the turn IS typed, but
+    the gate must still return its own diagnosable failure before the watchdog
+    could fire and replay ``run_turn``. agy records the turn and keeps running a
+    tool, never reaching a terminal planner, so only the watchdog reconciliation
+    can end the gate. The margin here is zero and the watchdog a hair above it,
+    so ordinary elapsed time crosses the reconciliation deadline within a poll
+    or two; the cascade is left uncancelled so agy keeps working.
+    """
+    from omnigent.runtime.harnesses import _scaffold
+
+    _seed_state(tmp_path)
+    injected["reply"] = [
+        user_step("implement the thing"),
+        tool_step("CORTEX_STEP_STATUS_RUNNING"),
+    ]
+    monkeypatch.setattr(_scaffold, "_TURN_IDLE_TIMEOUT_S", 0.001)
+    monkeypatch.setattr(executor_mod, "_WATCHDOG_SAFETY_MARGIN_S", 0.0)
+
+    events = _drive_gate(tmp_path, monkeypatch)
+    assert len(events) == 1
+    assert isinstance(events[0], ExecutorError)
+    assert not any(isinstance(event, TurnComplete) for event in events)
     assert "NOT confirmed" in events[0].message
     assert events[0].preserve_session is True
-    # Delivered exactly once: the gate returned before the harness could replay.
+    # Deliverable (watchdog above the margin), so it was typed exactly once; the
+    # gate returned before the harness could replay it.
     assert len(_injected(injected)) == 1
+
+
+def test_gate_keeps_waiting_when_a_steer_supersedes_the_close(
+    tmp_path: Path, injected: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    REGRESSION: a steer recorded after a close keeps the gate waiting for the steered work.
+
+    A mid-turn steer is delivered into the open turn; the gate holding that turn
+    is what waits for the steered work to finish. Here agy closes the first task,
+    then a steering USER_INPUT and its running work land in the SAME poll the gate
+    sees the close. Reporting completion off that first close would hand back the
+    pre-steer answer while the steered work ran with nothing waiting on it, so the
+    gate must wait for the steered work's OWN close and carry its text.
+    """
+    _seed_state(tmp_path)
+    # agy is running the first task after delivery; it has not closed yet.
+    injected["reply"] = [
+        user_step("do task A"),
+        tool_step("CORTEX_STEP_STATUS_RUNNING"),
+    ]
+
+    def _steer_after_close(rec: dict[str, object], index: int) -> None:
+        steps = rec["steps"]
+        assert isinstance(steps, list)
+        if index == 2:
+            # The close of A, the steer, and the steered work are all visible
+            # together: the steer must reopen the turn past A's close.
+            steps.append(planner_step(status="CORTEX_STEP_STATUS_DONE", text="done with A"))
+            steps.append(user_step("actually, also do B"))
+            steps.append(tool_step("CORTEX_STEP_STATUS_RUNNING"))
+        elif index == 4:
+            steps.append(planner_step(status="CORTEX_STEP_STATUS_DONE", text="done with B"))
+
+    injected["on_poll"] = _steer_after_close
+
+    events = _drive_gate(tmp_path, monkeypatch)
+    assert len(events) == 1
+    assert isinstance(events[0], TurnComplete)
+    assert events[0].response == "done with B"
 
 
 def test_idle_backstop_waits_for_evidence_the_model_started(

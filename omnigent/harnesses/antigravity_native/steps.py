@@ -1054,7 +1054,7 @@ def map_step_to_events(
         # Reuse the shared selector so the committed message text is byte-identical
         # to the text the completion gate reports (:func:`planner_response_text`).
         planner_text = planner_response_text(step)
-        if planner_text:
+        if planner_text and planner_text.strip():
             # ONE message event — NO delta (the double-render fix).
             events.append(
                 _message_event(
@@ -1114,18 +1114,13 @@ def map_step_to_events(
 
 
 # ---------------------------------------------------------------------------
-# Turn-state classification
-#
-# Pure predicates (no I/O) answering "has agy finished the turn, and how?" from
-# the RPC trajectory. Shared by the read driver (its ``idle`` / ``failed`` status
-# edges) and the write path's completion gate, which must not report a turn
-# complete until agy has actually finished the work.
+# Turn-state classification: pure, I/O-free predicates answering "has agy
+# finished the turn, and how?" Shared by the reader's status edges and the
+# write path's completion gate so the two can never disagree.
 # ---------------------------------------------------------------------------
 
-# agy's OWN per-cascade run status, published in every ``GetAllCascadeTrajectories``
-# summary. Live-verified against agy 1.1.8: RUNNING both while working AND for the
-# whole time a permission gate is parked (75s observed), so IDLE never means
-# "waiting for the human".
+# agy's own per-cascade run status. Live-verified on agy 1.1.8: RUNNING persists
+# through parked permission gates, so IDLE never means "waiting for the human".
 CASCADE_RUN_STATUS_IDLE = "CASCADE_RUN_STATUS_IDLE"
 
 # Terminal-state vocabulary for one agy turn, as reported by :class:`TurnOutcome`.
@@ -1176,12 +1171,14 @@ def is_user_turn_step(step: dict[str, object]) -> bool:
 
 def planner_response_text(step: dict[str, object]) -> str | None:
     """
-    Return a planner step's assistant text, or ``None`` when it carries none.
+    Return a planner step's assistant text verbatim, or ``None`` when it has none.
 
-    The single text selector shared by :func:`map_step_to_events` and the
-    completion gate, so both agree byte-for-byte: ``modifiedResponse`` (the
-    post-moderation text) is preferred over ``response``, and a whitespace-only
-    value counts as no text.
+    The single text selector shared by :func:`map_step_to_events`, the completion
+    gate and the reader's closing delta, so all three agree byte-for-byte:
+    ``modifiedResponse`` (the post-moderation text) is preferred over ``response``.
+    Whether a whitespace-only reply counts as "no visible text" is left to each
+    caller because they differ: the mapper and gate reject it (no empty bubble,
+    no false completion), while the reader keeps it to retire its streamed block.
 
     :param step: One RPC step dict.
     :returns: The assistant text, or ``None`` for a non-planner step or an
@@ -1194,7 +1191,7 @@ def planner_response_text(step: dict[str, object]) -> str | None:
         return None
     for key in ("modifiedResponse", "response"):
         text = planner.get(key)
-        if isinstance(text, str) and text.strip():
+        if isinstance(text, str) and text:
             return text
     return None
 
@@ -1330,14 +1327,13 @@ def find_turn_start_index(
     older turn, whose closing planner is already sitting in the same trajectory,
     can never be adopted.
 
-    An earlier revision fell back to matching the delivered TEXT when the
-    snapshot failed. That fallback was unsound: when the identical text had been
-    sent in the previous turn and the new USER_INPUT step had not yet appeared,
-    the OLD turn matched and its DONE planner was accepted as this turn's
-    completion — the exact false success this whole gate exists to prevent. There
-    is no text-only rule that separates two identical turns, so a caller that
-    cannot snapshot has no way to identify its turn and must report that rather
-    than guess (see
+    There is deliberately no text fallback when the snapshot fails. Matching the
+    delivered TEXT is unsound: when the identical text was sent in the previous
+    turn and the new USER_INPUT step has not yet appeared, the OLD turn matches
+    and its DONE planner is accepted as this turn's completion — the exact false
+    success this gate exists to prevent. No text-only rule separates two
+    identical turns, so a caller that cannot snapshot has no way to identify its
+    turn and must report that rather than guess (see
     :meth:`omnigent.inner.antigravity_native_executor.AntigravityNativeExecutor._snapshot_step_count`,
     which retries before giving up).
 
@@ -1362,12 +1358,16 @@ def classify_turn_outcome(steps: list[dict[str, object]], *, start_index: int) -
     Classify how the turn opened at ``start_index`` currently stands.
 
     Scans only the steps AFTER the turn's own USER_INPUT step, so nothing from a
-    previous turn can satisfy it, and returns at the first terminal step:
-    :func:`is_planner_error_step` → ``"error"``, :func:`is_assistant_text_close_step`
-    → ``"done"``. Everything else (tool steps, dispatching planners, a WAITING
-    interaction gate, a mid-turn steering USER_INPUT) leaves the turn
-    ``"running"`` — a tool step that ERRORs does NOT end the turn, because agy
-    routinely recovers from one and keeps working.
+    previous turn can satisfy it. An :func:`is_planner_error_step` ends the scan
+    immediately as ``"error"``. A DONE close (:func:`is_assistant_text_close_step`)
+    marks the turn ``"done"`` ONLY if no later step reopens it: a mid-turn
+    steering USER_INPUT delivered after a close supersedes it, because the gate
+    must keep waiting for that steered work instead of reporting the pre-steer
+    close as the turn's end. The done determination therefore uses the LAST
+    un-superseded close, not the first one seen. Everything else (tool steps,
+    dispatching planners, a WAITING interaction gate, the steering USER_INPUT
+    itself) leaves the turn ``"running"`` — a tool step that ERRORs does NOT end
+    the turn, because agy routinely recovers from one and keeps working.
 
     It also reports ``model_started``: whether agy has recorded a planner or tool
     step for this turn. A recorded USER_INPUT alone does NOT count. agy publishes
@@ -1385,8 +1385,17 @@ def classify_turn_outcome(steps: list[dict[str, object]], *, start_index: int) -
     latest_text: str | None = None
     waiting = False
     model_started = False
+    closed = False
+    close_text: str | None = None
     for step in steps[start_index + 1 :]:
         if not isinstance(step, dict):
+            continue
+        if is_user_turn_step(step):
+            # A mid-turn steering delivery reopens the turn: a close recorded
+            # before it is no longer this turn's end, and the steer itself is
+            # another delivery, not the model working.
+            closed = False
+            close_text = None
             continue
         if step.get("type") == _TYPE_PLANNER_RESPONSE or _is_tool_step(step):
             model_started = True
@@ -1398,12 +1407,16 @@ def classify_turn_outcome(steps: list[dict[str, object]], *, start_index: int) -
                 model_started=True,
             )
         text = planner_response_text(step)
-        if text:
+        if text and text.strip():
             latest_text = text
         if is_assistant_text_close_step(step):
-            return TurnOutcome(state="done", text=text, model_started=True)
+            closed = True
+            close_text = text
+            continue
         if step.get("status") == _STATUS_WAITING:
             waiting = True
+    if closed:
+        return TurnOutcome(state="done", text=close_text, model_started=True)
     return TurnOutcome(
         state="running",
         text=latest_text,

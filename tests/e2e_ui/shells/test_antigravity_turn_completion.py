@@ -143,6 +143,9 @@ def test_turn_completion_waits_for_agy_reply(
 
     # agy's reply reaches the chat through the read driver; the turn must not
     # be reported complete, nor the composer leave its queued state, before it.
+    # Confirm the composer HAS entered the queued state first, so the loop below
+    # cannot misread a not-yet-applied placeholder as that state already ending.
+    expect(composer).to_have_attribute("placeholder", _QUEUED_PLACEHOLDER, timeout=10_000)
     reply = page.locator(_ASSISTANT_BUBBLE).filter(has_text=token)
     placeholder_dropped_s: float | None = None
     while reply.count() == 0:
@@ -165,18 +168,18 @@ def test_turn_completion_waits_for_agy_reply(
     completed = stream.first_completed_after(sent_at)
     assert completed is not None
     completed_s = completed - sent_at
-    # Deterministic oracle: agy cannot finish before its own model delay has
-    # elapsed, so a turn reported complete earlier was reported on delivery —
-    # the exact regression. Compare against that fixed floor, not the DOM reply
-    # bubble whose render time carries polling and transport jitter.
-    floor_s = _MODEL_DELAY_S - 1.0
-    assert completed_s >= floor_s, (
-        f"turn reported complete at +{completed_s:.1f}s, before agy's "
-        f"{_MODEL_DELAY_S}s model delay could have elapsed"
-    )
-    assert placeholder_dropped_s is None or placeholder_dropped_s >= floor_s, (
-        f"composer left its queued state at +{placeholder_dropped_s:.1f}s, before "
-        f"agy's {_MODEL_DELAY_S}s model delay could have elapsed"
-    )
+    # Deterministic oracle (mock model only): agy cannot finish before its own
+    # scripted delay, so an earlier completion was reported on delivery — the
+    # regression. A live model has no guaranteed delay, so skip the timing floor.
+    if antigravity_model is not None:
+        floor_s = _MODEL_DELAY_S - 1.0
+        assert completed_s >= floor_s, (
+            f"turn reported complete at +{completed_s:.1f}s, before agy's "
+            f"{_MODEL_DELAY_S}s model delay could have elapsed"
+        )
+        assert placeholder_dropped_s is None or placeholder_dropped_s >= floor_s, (
+            f"composer left its queued state at +{placeholder_dropped_s:.1f}s, before "
+            f"agy's {_MODEL_DELAY_S}s model delay could have elapsed"
+        )
     expect(page.get_by_test_id("working-indicator")).to_have_count(0, timeout=60_000)
     page.close()

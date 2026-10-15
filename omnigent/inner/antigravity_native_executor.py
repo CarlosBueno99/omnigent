@@ -67,11 +67,10 @@ already ending in its own closing planner, so the gate must know exactly which
 USER_INPUT step is its own or it will read a stale close as this turn's success.
 The executor snapshots the step count BEFORE delivering; only a USER_INPUT step
 at or past that index can be the one it just delivered. That snapshot is retried
-(:data:`_SNAPSHOT_TIMEOUT_S`) because nothing else can substitute for it — an
-earlier revision fell back to matching the delivered TEXT, which silently
-accepted the PREVIOUS turn whenever the same text was sent twice and the new step
-had not yet appeared. A turn whose snapshot never succeeds is rejected
-undelivered, never guessed at.
+(:data:`_SNAPSHOT_TIMEOUT_S`) because nothing else can substitute for it —
+matching the delivered TEXT instead would silently accept the PREVIOUS turn
+whenever the same text was sent twice and the new step had not yet appeared. A
+turn whose snapshot never succeeds is rejected undelivered, never guessed at.
 
 The gate is bounded by two named budgets, :data:`_TURN_START_TIMEOUT_S` and
 :data:`_TURN_COMPLETION_TIMEOUT_S`; the latter documents why the harness idle
@@ -253,12 +252,12 @@ def _harness_idle_watchdog_s() -> float | None:
     it — governs the gate too. The import is deferred because the scaffold lives
     in the runtime layer, above this inner executor.
 
-    :returns: ``_scaffold._TURN_IDLE_TIMEOUT_S`` when the watchdog is enabled
+    :returns: the scaffold's configured idle budget when the watchdog is enabled
         (``> 0``), else ``None``.
     """
     from omnigent.runtime.harnesses import _scaffold
 
-    watchdog_s = _scaffold._TURN_IDLE_TIMEOUT_S
+    watchdog_s = _scaffold.turn_idle_timeout_s()
     return watchdog_s if watchdog_s > 0 else None
 
 
@@ -311,11 +310,16 @@ class AntigravityNativeExecutor(Executor):
         holding that turn is what waits for the steered work to finish; gating
         here too would block the caller that is trying to steer.
 
-        Known limitation: a steer delivered in the narrow window between agy
-        recording the open turn's DONE text planner and the gate's next poll is
-        read as that turn's close, so the gate reports completion while the
-        steer runs as a fresh turn with nothing waiting on it. agy still runs the
-        steer; only the completion signal races it.
+        A steer agy has already recorded by the gate's next poll is waited on:
+        the gate re-reads the whole trajectory each poll and
+        :func:`~omnigent.harnesses.antigravity_native.steps.classify_turn_outcome`
+        treats a steering USER_INPUT recorded after a close as reopening the
+        turn, so the gate keeps waiting for the steered work. The remaining
+        limitation is a narrow recording race: if the gate polls and sees the
+        open turn's DONE close before agy has appended THIS steer's USER_INPUT
+        step, it reports the turn complete while the steer runs as a fresh turn
+        with nothing waiting on it. agy still runs the steer; only the completion
+        signal can still race it.
 
         :param session_key: Adapter session key. Unused; the native bridge is
             per conversation.
@@ -442,6 +446,24 @@ class AntigravityNativeExecutor(Executor):
             self._interrupted.clear()
             yield TurnCancelled()
             return
+        # Reject a watchdog so small the gate could never verify a turn BEFORE
+        # typing anything. The gate must return a safety margin ahead of the
+        # harness idle watchdog, which would otherwise replay run_turn and
+        # re-type the turn; a watchdog at or under that margin leaves no polling
+        # room, so delivering would type work this executor could not confirm.
+        watchdog_s = _harness_idle_watchdog_s()
+        if watchdog_s is not None and watchdog_s <= _WATCHDOG_SAFETY_MARGIN_S:
+            yield ExecutorError(
+                message=(
+                    "Antigravity native turn was not delivered: the harness idle watchdog "
+                    f"({watchdog_s:.0f}s) is at or below the completion gate's "
+                    f"{_WATCHDOG_SAFETY_MARGIN_S:.0f}s safety margin, so the turn could not be "
+                    "verified before the harness would replay it; raise HARNESS_TURN_TIMEOUT_S"
+                ),
+                preserve_session=True,
+                undelivered=True,
+            )
+            return
         try:
             # Snapshot BEFORE delivering: the step count is the ONLY signal that
             # tells this turn's USER_INPUT step apart from the previous turn's,
@@ -454,17 +476,27 @@ class AntigravityNativeExecutor(Executor):
                 yield TurnCancelled()
                 return
             if baseline is None:
-                # A missing bridge state or an inactive session is a hard,
-                # specific failure, not merely an unverifiable turn: delegate to
-                # _deliver, which surfaces its actionable message and injects
-                # nothing in those cases.
+                # No pre-delivery snapshot. A missing/inactive bridge state is a
+                # hard, specific failure, so delegate to _deliver for its
+                # actionable message (it injects nothing in those cases).
                 state = await asyncio.to_thread(read_bridge_state, self._bridge_dir)
                 if state is None or not _session_is_active(
                     state.session_id, self._request_session_id
                 ):
                     failure = await self._deliver(text)
+                    if failure is not None:
+                        yield ExecutorError(message=failure)
+                        return
+                    # The session went active between this read and _deliver's own
+                    # locked read, so the text WAS typed. Report it as delivered
+                    # but unverifiable, never as undelivered, and keep the session.
                     yield ExecutorError(
-                        message=failure or "Antigravity native turn was not delivered"
+                        message=(
+                            "Antigravity native turn was delivered but could not be "
+                            "verified: no pre-delivery trajectory snapshot to attribute "
+                            "its completion"
+                        ),
+                        preserve_session=True,
                     )
                     return
                 # Deliverable, but unverifiable: with no baseline the gate cannot
@@ -705,25 +737,25 @@ class AntigravityNativeExecutor(Executor):
                     preserve_session=True,
                 )
             watchdog_s = _harness_idle_watchdog_s()
-            if (
-                watchdog_s is not None
-                and time.monotonic() - turn_started_at >= watchdog_s - _WATCHDOG_SAFETY_MARGIN_S
-            ):
-                # Beat the harness idle watchdog, which this silent gate never
-                # resets: once delivery has succeeded, letting the watchdog fire
-                # would REPLAY run_turn and re-type the turn. Return our own
-                # timeout first and leave the cascade uncancelled so agy keeps
-                # working.
-                return _GateResult(
-                    completed=False,
-                    text=latest_text,
-                    error=(
-                        "Antigravity native turn did not reach a terminal state before the "
-                        f"harness idle watchdog ({watchdog_s:.0f}s). The turn was delivered and "
-                        "may still be running in the agy TUI; its work is NOT confirmed"
-                    ),
-                    preserve_session=True,
-                )
+            if watchdog_s is not None:
+                # Return a safety margin before the watchdog fires: it would
+                # replay run_turn and re-type the delivered turn (see
+                # _TURN_COMPLETION_TIMEOUT_S). A watchdog at/under the margin is
+                # rejected before delivery (see run_turn), so the floor here only
+                # guards a watchdog lowered after this turn was already typed.
+                gate_deadline = max(watchdog_s - _WATCHDOG_SAFETY_MARGIN_S, 0.0)
+                if time.monotonic() - turn_started_at >= gate_deadline:
+                    return _GateResult(
+                        completed=False,
+                        text=latest_text,
+                        error=(
+                            "Antigravity native turn did not reach a terminal state before "
+                            f"the harness idle watchdog ({watchdog_s:.0f}s). The turn was "
+                            "delivered and may still be running in the agy TUI; its work is "
+                            "NOT confirmed"
+                        ),
+                        preserve_session=True,
+                    )
             if elapsed >= _TURN_COMPLETION_TIMEOUT_S:
                 blocked = (
                     " — agy is parked on a WAITING interaction (an ask-question or "

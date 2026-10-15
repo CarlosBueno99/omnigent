@@ -29,6 +29,7 @@ from typing import Any, cast
 from omnigent.harnesses.antigravity_native.steps import (
     OutboundEvent,
     _execution_discriminator,
+    is_assistant_text_close_step,
     map_step_to_events,
     output_reasoning_delta_event,
     pending_interaction,
@@ -662,11 +663,13 @@ class TestModifiedResponsePrecedence:
         assert content[0]["text"] == "Non-empty response."
 
     def test_whitespace_only_response_counts_as_no_text(self) -> None:
-        """A planner whose only text is whitespace is treated as no reply.
+        """A planner whose only text is whitespace produces no visible reply.
 
-        The selector strips before deciding, so a DONE planner carrying only
-        blank text commits no message (no empty bubble) and reports no text to
-        the completion gate, which then falls back to its cascade-idle backstop.
+        The selector returns the chosen text verbatim, so whitespace comes back
+        unchanged rather than as ``None``; whether that counts as "no reply" is a
+        per-caller policy. The mapper commits no message (no empty bubble) and
+        the close predicate does not treat a blank step as an assistant-text
+        close, so the completion gate falls back to its cascade-idle backstop.
         """
         import copy
 
@@ -677,8 +680,11 @@ class TestModifiedResponsePrecedence:
         planner["response"] = "   \n\t "
         planner["modifiedResponse"] = "  "
 
-        assert planner_response_text(step) is None
+        # Verbatim selection: modifiedResponse wins and is returned unstripped.
+        assert planner_response_text(step) == "  "
+        # Callers that must not surface blank text reject it behaviourally.
         assert map_step_to_events(step, conversation_id=_CID) == []
+        assert is_assistant_text_close_step(step) is False
 
 
 # ---------------------------------------------------------------------------
@@ -1488,6 +1494,39 @@ class TestClassifyTurnOutcome:
 
         steps = [user_step("go"), tool_step("CORTEX_STEP_STATUS_RUNNING")]
         assert classify_turn_outcome(steps, start_index=0).model_started is True
+
+    def test_a_steer_recorded_after_a_close_reopens_the_turn(self) -> None:
+        """
+        REGRESSION: a steering USER_INPUT after a DONE close reopens the turn.
+
+        A mid-turn steer is delivered into the open turn and the gate holding
+        that turn is what waits for the steered work. If the first close still
+        ended the turn, the gate would report completion while the steer ran
+        with nothing waiting on it — the race this supersession closes.
+        """
+        from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
+
+        steps = [
+            user_step("do task A"),
+            planner_step(status="CORTEX_STEP_STATUS_DONE", text="done with A"),
+            user_step("actually, also do B"),
+            tool_step("CORTEX_STEP_STATUS_RUNNING"),
+        ]
+        assert classify_turn_outcome(steps, start_index=0).state == "running"
+
+    def test_the_turn_is_done_once_the_steered_work_also_closes(self) -> None:
+        """After a steer, only the steered work's own close completes the turn, with its text."""
+        from omnigent.harnesses.antigravity_native.steps import classify_turn_outcome
+
+        steps = [
+            user_step("do task A"),
+            planner_step(status="CORTEX_STEP_STATUS_DONE", text="done with A"),
+            user_step("actually, also do B"),
+            planner_step(status="CORTEX_STEP_STATUS_DONE", text="done with B too"),
+        ]
+        outcome = classify_turn_outcome(steps, start_index=0)
+        assert outcome.state == "done"
+        assert outcome.text == "done with B too"
 
 
 class TestCascadeIsIdle:
