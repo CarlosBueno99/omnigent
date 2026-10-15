@@ -29,6 +29,7 @@ import os
 import stat
 import tempfile
 import time
+import urllib.parse
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -615,6 +616,33 @@ def load_databricks_org_id(server_url: str) -> str | None:
         return None
     org_id = entry.get("org_id")
     return org_id if isinstance(org_id, str) and org_id else None
+
+
+def databricks_pairing_trusted(server_url: str, workspace_host: str) -> bool:
+    """Whether *server_url* may receive *workspace_host* credentials without asking.
+
+    True when both share an origin (workspace-hosted omnigent) or a saved
+    ``omnigent login`` record already pairs the server with that workspace.
+
+    :param server_url: The server URL, e.g.
+        ``"https://myapp-123.aws.databricksapps.com"``.
+    :param workspace_host: The workspace fronting it, e.g.
+        ``"https://example.databricks.com"``.
+    :returns: ``True`` when no consent question is needed before pairing.
+    """
+    server = urllib.parse.urlsplit(server_url)
+    workspace = urllib.parse.urlsplit(workspace_host)
+    same_origin = (server.scheme, server.hostname, server.port) == (
+        workspace.scheme,
+        workspace.hostname,
+        workspace.port,
+    )
+    return same_origin or load_databricks_workspace_host(server_url) == workspace_host
+
+
+def databricks_pairing_question(server_url: str, workspace_host: str) -> str:
+    """The consent question asked before a first cross-origin pairing."""
+    return f"Allow {server_url} to receive credentials for workspace {workspace_host}?"
 
 
 # Workspace-routing header. When a Databricks host fronts many workspaces

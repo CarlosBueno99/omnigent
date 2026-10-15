@@ -424,6 +424,7 @@ def login_app_oauth_in_sandbox(
     server_url: str | None,
     workspace: DerivedWorkspace | None,
     skip: bool = False,
+    pairing_approved: bool = False,
 ) -> None:
     """
     Log the sandbox in to *server_url* by running ``omnigent login``
@@ -461,7 +462,9 @@ def login_app_oauth_in_sandbox(
     PTY only streams output). A saved local ``omnigent login`` for the
     same pairing counts as consent; otherwise an interactive run asks
     here and an unattended run fails with the login hint. The in-sandbox
-    login then runs with ``--yes``.
+    login then runs with ``--yes`` when its CLI knows the flag; a sandbox
+    provisioned before the flag existed keeps the legacy command, whose
+    login does not ask either.
 
     The sandbox ends up the sole holder of its OAuth grant — nothing is
     shipped from the laptop — which sidesteps CLI-version cache-format
@@ -497,6 +500,8 @@ def login_app_oauth_in_sandbox(
         OIDC) flow.
     :param skip: When ``True``, skip authentication entirely (the
         ``--no-auth`` escape hatch).
+    :param pairing_approved: The caller already settled the cross-origin
+        consent (see :func:`bootstrap_sandbox_host`); do not ask again.
     :raises click.ClickException: If *server_url* is missing, the
         pairing is declined or cannot be approved unattended, the
         forward fails to bind, or the in-sandbox login exits non-zero.
@@ -518,7 +523,7 @@ def login_app_oauth_in_sandbox(
     from omnigent.util.server_url import display_server_url
 
     display = display_server_url(server_url)
-    if workspace is not None:
+    if workspace is not None and not pairing_approved:
         _confirm_sandbox_workspace_pairing(server_url, workspace.host, display)
     click.echo(f"▸ Logging sandbox '{sandbox_id}' in to {display}")
     if workspace is not None:
@@ -541,9 +546,11 @@ def login_app_oauth_in_sandbox(
             sandbox_id,
             f"rm -f ~/.databrickscfg && printf '%s' {shlex.quote(cfg_body)} > ~/.databrickscfg",
         )
-    # Consent was settled above; the in-sandbox login must not ask again
-    # over a PTY nobody can answer.
-    login_flag = "--yes " if workspace is not None else ""
+    # Consent is settled; the in-sandbox login must not ask again over a PTY
+    # nobody can answer. An older sandbox CLI has no --yes and does not ask.
+    login_flag = ""
+    if workspace is not None and _sandbox_login_supports_yes(launcher, sandbox_id):
+        login_flag = "--yes "
     login = launcher.stream_exec(
         sandbox_id,
         f"omnigent login {login_flag}{shlex.quote(server_url)}",
@@ -553,6 +560,16 @@ def login_app_oauth_in_sandbox(
         _complete_browser_login(launcher, sandbox_id, login)
     finally:
         login.close()
+
+
+def _sandbox_login_supports_yes(launcher: SandboxLauncher, sandbox_id: str) -> bool:
+    """Whether the sandbox's installed ``omnigent login`` accepts ``--yes``.
+
+    ``omnigent sandbox auth`` reuses whatever CLI the sandbox already has, so
+    a sandbox provisioned before the flag existed must keep the legacy command.
+    """
+    result = launcher.run(sandbox_id, "omnigent login --help", check=False)
+    return result.returncode == 0 and "--yes" in result.stdout
 
 
 def _confirm_sandbox_workspace_pairing(server_url: str, workspace_host: str, display: str) -> None:
@@ -570,21 +587,18 @@ def _confirm_sandbox_workspace_pairing(server_url: str, workspace_host: str, dis
     :raises click.ClickException: When the pairing is declined or cannot
         be approved because stdin is not a terminal.
     """
-    # Deferred import: cli.py imports this module at startup.
-    from omnigent.cli import _databricks_workspace_binding_trusted
+    from omnigent.cli_auth import databricks_pairing_question, databricks_pairing_trusted
 
-    if _databricks_workspace_binding_trusted(server_url, workspace_host):
+    if databricks_pairing_trusted(server_url, workspace_host):
         return
     if not sys.stdin.isatty():
         raise click.ClickException(
-            f"Not signed in to {display}. Its login would send {workspace_host} "
-            "credentials to a server on another origin, which needs your approval: "
-            f"run `{cli_invocation()} login {display}` first (or pass --no-auth) and retry."
+            f"No saved login pairs {display} with workspace {workspace_host}. The sandbox "
+            "login would send that workspace's credentials to a server on another origin, "
+            f"which needs your approval: run `{cli_invocation()} login {display}` first "
+            "(or pass --no-auth) and retry."
         )
-    if not click.confirm(
-        f"Allow {display} to receive credentials for workspace {workspace_host}?",
-        default=False,
-    ):
+    if not click.confirm(databricks_pairing_question(display, workspace_host), default=False):
         raise click.ClickException(
             f"Sandbox login cancelled: no workspace credentials were sent to {display}."
         )
@@ -756,9 +770,9 @@ def bootstrap_sandbox_host(
     """
     Run the full sandbox-host bootstrap end-to-end.
 
-    Six steps: provider preflight → provision or attach sandbox →
-    keep-alive → build wheels → ship wheels → ``omnigent login``
-    inside the sandbox.
+    Steps: provider preflight → cross-origin pairing consent → provision
+    or attach sandbox → keep-alive → build wheels → ship wheels →
+    ``omnigent login`` inside the sandbox.
 
     :param launcher: The provider's launcher.
     :param sandbox_id: Existing sandbox id to attach to, or ``None`` to
@@ -785,6 +799,16 @@ def bootstrap_sandbox_host(
     # without the capability; this backstops programmatic callers.)
     if not skip_auth and not launcher.capabilities.local_port_forward:
         raise launcher.forward_capability_error()
+    # Settle the cross-origin consent before provisioning, so declining does
+    # not leave a half-built sandbox behind.
+    pairing_approved = False
+    if not skip_auth and server_url is not None and workspace is not None:
+        from omnigent.util.server_url import display_server_url
+
+        _confirm_sandbox_workspace_pairing(
+            server_url, workspace.host, display_server_url(server_url)
+        )
+        pairing_approved = True
     launcher.prepare()
     if sandbox_id is None:
         sandbox_id = launcher.provision(sandbox_name)
@@ -805,5 +829,6 @@ def bootstrap_sandbox_host(
         server_url=server_url,
         workspace=workspace,
         skip=skip_auth,
+        pairing_approved=pairing_approved,
     )
     return sandbox_id

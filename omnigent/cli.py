@@ -3716,6 +3716,7 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
 
     from omnigent.chat import _remote_headers
     from omnigent.cli_auth import (
+        databricks_pairing_trusted,
         load_databricks_org_id,
         load_databricks_workspace_host,
         store_databricks_auth,
@@ -3748,7 +3749,7 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
     org_id = load_databricks_org_id(server)
     auth_info = (
         _databricks_workspace_auth_info(workspace_host)
-        if _databricks_workspace_binding_trusted(server, workspace_host)
+        if databricks_pairing_trusted(server, workspace_host)
         else None
     )
     if auth_info is not None:
@@ -12885,26 +12886,6 @@ def _databricks_host_needs_org_selector(workspace_host: str) -> bool:
     return not meta.workspace_id and bool(meta.account_id)
 
 
-def _databricks_workspace_binding_trusted(server: str, workspace_host: str) -> bool:
-    """Whether *server* may receive *workspace_host* credentials without asking.
-
-    True when both share an origin (workspace-hosted omnigent) or a saved
-    ``omnigent login`` record already pairs the server with that workspace.
-    """
-    import httpx
-
-    from omnigent.cli_auth import load_databricks_workspace_host
-
-    server_url = httpx.URL(server)
-    workspace_url = httpx.URL(workspace_host)
-    same_origin = (server_url.scheme, server_url.host, server_url.port) == (
-        workspace_url.scheme,
-        workspace_url.host,
-        workspace_url.port,
-    )
-    return same_origin or load_databricks_workspace_host(server) == workspace_host
-
-
 def _databricks_login(
     server: str,
     workspace_host: str,
@@ -12955,18 +12936,26 @@ def _databricks_login(
             f"{DATABRICKS_EXTRA_INSTALL_HINT}"
         )
 
-    from omnigent.cli_auth import is_workspace_hosted_url
+    from omnigent.cli_auth import (
+        databricks_pairing_question,
+        databricks_pairing_trusted,
+        is_workspace_hosted_url,
+    )
 
-    if not assume_yes and not _databricks_workspace_binding_trusted(server, workspace_host):
+    if not assume_yes and not databricks_pairing_trusted(server, workspace_host):
         # First pairing with a server on another origin: ask before any
         # workspace credential is resolved, let alone sent to it.
-        if not click.confirm(
-            f"Allow {server} to receive credentials for workspace {workspace_host}?",
-            default=False,
-        ):
+        try:
+            approved = click.confirm(
+                databricks_pairing_question(server, workspace_host), default=False
+            )
+        except click.Abort:
+            # Piped or closed stdin cannot answer: treat it as declined.
+            approved = False
+        if not approved:
             raise click.ClickException(
-                f"Login cancelled: no workspace credentials were sent to {server} "
-                "and nothing was stored."
+                f"Login cancelled: no workspace credentials were sent to {server} and "
+                "nothing was stored. Pass --yes to pre-approve this pairing in scripted logins."
             )
     auth_info = _databricks_workspace_auth_info(workspace_host)
     if org_id is None and auth_info is not None:

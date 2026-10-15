@@ -208,11 +208,11 @@ def test_login_apps_redirect_stores_pointer_record(
     assert "alice@example.com" in result.output
 
 
-@pytest.mark.parametrize("answer", ["n\n", ""])
+@pytest.mark.parametrize("answer", ["n\n", "\n", ""])
 def test_login_cross_origin_workspace_pairing_requires_confirmation(
     monkeypatch: pytest.MonkeyPatch, token_dir: Path, answer: str
 ) -> None:
-    """Declining (or not answering) a first cross-origin pairing sends and stores nothing.
+    """Declining, just pressing Enter, or EOF on a first cross-origin pairing sends nothing.
 
     The user must agree before the named workspace's credential is even resolved.
     """
@@ -234,8 +234,10 @@ def test_login_cross_origin_workspace_pairing_requires_confirmation(
     result = CliRunner().invoke(cli_group, ["login", _APPS_URL], input=answer)
 
     assert result.exit_code != 0, result.output
-    # The question names both origins so the user can check them.
+    # The question names both origins so the user can check them, and a piped
+    # (unanswerable) stdin gets the same explanation instead of a bare abort.
     assert _APPS_URL in result.output and _WORKSPACE in result.output
+    assert "Login cancelled" in result.output and "--yes" in result.output
     # Only the credential-less probe reached the app, and nothing was stored.
     forwarded = [req["authorization"] for req in fake.requests if req["authorization"]]
     assert forwarded == [], result.output
