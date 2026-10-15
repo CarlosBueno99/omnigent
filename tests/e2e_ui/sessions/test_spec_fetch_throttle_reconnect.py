@@ -30,7 +30,8 @@ _BOOTSTRAP = (
     "from tests.e2e_ui.sessions._spec_fetch_throttle import install; install(); "
     "from omnigent.cli import main; main()"
 )
-_THROTTLE_WINDOW_S = 15
+# Shorter than the runner's 30 s retry budget, with headroom for slow UI setup.
+_THROTTLE_WINDOW_S = 20
 
 BEFORE_PROMPT = "Hello before the server restart."
 BEFORE_REPLY = "Hi! Everything is working before the restart."
