@@ -8,6 +8,7 @@ import os
 import re
 import select
 import shlex
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from omnigent._platform import stable_user_id
 from omnigent.harnesses.claude_native import hook as claude_native_hook
 from omnigent.harnesses.claude_native.bridge import (
     OBSERVER_HOOK_STDERR_FILE,
@@ -1992,22 +1992,17 @@ class _DenyEveryPolicyRequest(BaseHTTPRequestHandler):
 _PRE_TOOL_USE_PAYLOAD = json.dumps(
     {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}
 )
-# Claude Code waits for the hook process to exit, not for the verdict bytes.
-# Module teardown used to hold the exit for 35 ms or more; a plain exit takes a
-# few milliseconds even through the generated ``/bin/sh`` wrapper.
+# Claude Code waits for the hook process to exit, not just for the verdict
+# bytes. A plain exit through the generated ``/bin/sh`` wrapper takes a few
+# milliseconds; interpreter module teardown adds tens.
 _MAX_VERDICT_TO_EXIT_S = 0.020
+_VERDICT_TO_EXIT_RUNS = 5
 _HOOK_TIMEOUT_S = 60.0
 
 
 @pytest.fixture
-def generated_policy_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+def generated_policy_command(tmp_path: Path) -> Iterator[str]:
     """The generated PreToolUse command, pointed at a server that denies every call."""
-    # The command runs the hook with TMPDIR set to the trusted parent, so the
-    # child derives this same bridge root.
-    monkeypatch.setattr(
-        "omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT",
-        tmp_path / f"omnigent-{stable_user_id()}" / "claude-native",
-    )
     with ThreadingHTTPServer(("127.0.0.1", 0), _DenyEveryPolicyRequest) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         bridge_dir = prepare_bridge_dir("conv_abc", bridge_id="bridge_shared", workspace=tmp_path)
@@ -2093,17 +2088,17 @@ def test_generated_policy_command_exits_promptly_after_its_verdict(
     """
     Process exit follows the verdict within milliseconds, not after module teardown.
 
-    Claude Code blocks on the exit, so this measures the wait it pays after the
-    verdict is already on the pipe. The minimum of three runs keeps scheduler
-    noise from failing a healthy hook.
+    The gap runs from the parent's read of the first verdict byte to EOF, so a
+    late-scheduled reader can only shorten it; the median of five runs tolerates
+    one or two such runs as well as one or two slow ones.
     """
     gaps: list[float] = []
-    for _ in range(3):
+    for _ in range(_VERDICT_TO_EXIT_RUNS):
         stdout, gap = _run_generated_policy_command(generated_policy_command)
         assert json.loads(stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
         gaps.append(gap)
 
-    assert min(gaps) < _MAX_VERDICT_TO_EXIT_S, (
+    assert statistics.median(gaps) < _MAX_VERDICT_TO_EXIT_S, (
         f"process exit lagged the verdict by {[round(g * 1000, 1) for g in gaps]} ms"
     )
 
