@@ -3,11 +3,12 @@
 The server prices a turn from the provider's static ``pricing:`` block or the
 MLflow catalog. A LiteLLM-style gateway alias such as ``bedrock.claude-sonnet-5``
 matches neither, so the session must take the per-request cost the gateway
-reports or it accrues tokens with no USD cost. A gateway reports that cost in
-one of two shapes, both covered here: an ``x-litellm-response-cost`` response
-header, or a ``usage.cost`` annotation on the completed response (LiteLLM's
-``include_cost_in_streaming_usage``, the only shape it puts on a streamed reply
-to the Agents SDK).
+reports or it accrues tokens with no USD cost. The gateway reply here annotates
+``usage.cost`` on the completed response (LiteLLM's
+``include_cost_in_streaming_usage``, the only cost signal it puts on a streamed
+reply to the Agents SDK); the ``x-litellm-response-cost`` header shape is
+covered through the real SDK and HTTP client in
+``tests/inner/test_openai_agents_sdk_executor.py``.
 
 Journey (real web SPA, live server + runner, openai-agents SDK harness pointed at
 the mock OpenAI-compatible gateway):
@@ -25,7 +26,6 @@ from __future__ import annotations
 import re
 import subprocess
 import uuid
-from typing import Any
 
 import httpx
 import pytest
@@ -46,17 +46,12 @@ _REPLY = "Gateway turn answered in brief."
 _INPUT_TOKENS = 10
 _OUTPUT_TOKENS = 5
 
-# The two shapes in which a gateway reports a reply's cost.
-_GATEWAY_SIGNALS: dict[str, dict[str, Any]] = {
-    "cost-header": {"response_headers": {"x-litellm-response-cost": str(_GATEWAY_COST_USD)}},
-    "usage-cost": {
-        "usage": {
-            "input_tokens": _INPUT_TOKENS,
-            "output_tokens": _OUTPUT_TOKENS,
-            "total_tokens": _INPUT_TOKENS + _OUTPUT_TOKENS,
-            "cost": _GATEWAY_COST_USD,
-        }
-    },
+# The scripted reply's usage, annotated with the gateway's cost like LiteLLM does.
+_GATEWAY_USAGE = {
+    "input_tokens": _INPUT_TOKENS,
+    "output_tokens": _OUTPUT_TOKENS,
+    "total_tokens": _INPUT_TOKENS + _OUTPUT_TOKENS,
+    "cost": _GATEWAY_COST_USD,
 }
 
 _AGENT_YAML = """\
@@ -136,21 +131,17 @@ def _run_gateway_turn(
     tmp_path_factory: pytest.TempPathFactory,
     *,
     model: str,
-    reply: dict[str, Any],
 ) -> tuple[Page, str, subprocess.Popen[bytes] | None]:
     """Set up the gateway session and scripted reply, then drive one chat turn.
 
     The recorded page is created only after the non-browser setup so the clip
     starts at the user's first navigation. A respawned runner is terminated here
     if setup or the turn fails; otherwise the caller owns it.
-
-    :param reply: Extra ``QueuedResponse`` fields for the scripted reply, i.e. how
-        the gateway reports the cost (see ``_GATEWAY_SIGNALS``).
     """
     respawned = _ensure_runner_online(base_url, tmp_path_factory)
     try:
         token = f"gateway-cost-{uuid.uuid4().hex[:8]}"
-        configure_mock_llm(mock_url, [{"text": _REPLY, **reply}], match=token)
+        configure_mock_llm(mock_url, [{"text": _REPLY, "usage": _GATEWAY_USAGE}], match=token)
         session_id = _create_gateway_session(base_url, str(_server_state["runner_id"]), model)
         page: Page = request.getfixturevalue("page")
         _complete_turn(page, base_url, session_id, token)
@@ -162,13 +153,11 @@ def _run_gateway_turn(
     return page, session_id, respawned
 
 
-@pytest.mark.parametrize("gateway_signal", sorted(_GATEWAY_SIGNALS))
 def test_gateway_reported_cost_prices_non_catalog_model(
     request: pytest.FixtureRequest,
     live_server: str,
     mock_llm_server_url: str,
     tmp_path_factory: pytest.TempPathFactory,
-    gateway_signal: str,
 ) -> None:
     """A turn on ``bedrock.claude-sonnet-5`` shows the cost the gateway reported.
 
@@ -182,7 +171,6 @@ def test_gateway_reported_cost_prices_non_catalog_model(
         mock_llm_server_url,
         tmp_path_factory,
         model=_GATEWAY_MODEL,
-        reply=_GATEWAY_SIGNALS[gateway_signal],
     )
     try:
         panel = _usage_panel(page)

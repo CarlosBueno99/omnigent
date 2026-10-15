@@ -37,6 +37,7 @@ from omnigent.inner.openai_agents_sdk_executor import (
     _GATEWAY_COST_HEADER,
     OpenAIAgentsSDKExecutor,
     _gateway_usage_cost,
+    _GatewayCharge,
     _history_via_extra_body,
     _normalize_content_blocks_for_chat,
     _normalize_responses_items_for_chat,
@@ -44,7 +45,7 @@ from omnigent.inner.openai_agents_sdk_executor import (
     _record_gateway_cost,
     _sanitize_replay_item,
     _skip_history_transform,
-    _turn_gateway_costs,
+    _turn_gateway_charges,
     _wrap_client_for_reasoning_models,
 )
 from omnigent.llms.errors import is_context_length_exceeded as _is_context_length_exceeded
@@ -2243,7 +2244,6 @@ def test_get_openai_client_invalid_profile_with_env_fallback_warns(monkeypatch, 
     :param monkeypatch: Pytest monkeypatch fixture.
     :param caplog: Pytest log capture fixture.
     """
-    import logging
 
     import omnigent.inner.databricks_executor as db_exec
     from omnigent.inner.openai_agents_sdk_executor import _get_openai_async_client
@@ -2319,7 +2319,6 @@ def test_get_openai_client_missing_databricks_sdk_with_env_falls_through(monkeyp
     :param monkeypatch: Pytest monkeypatch fixture.
     :param caplog: Pytest log capture fixture.
     """
-    import logging
 
     import omnigent.inner.databricks_executor as db_exec
     from omnigent.inner.openai_agents_sdk_executor import _get_openai_async_client
@@ -2416,7 +2415,6 @@ def test_run_turn_generic_error_redacts_cause_from_user_message(monkeypatch, cap
     :param caplog: Pytest log capture fixture.
     """
     import io
-    import logging
 
     secret = "fake-bearer-token-0123456789abcdef"
     cause = ValueError(f"Illegal header value b'Bearer {secret}'")
@@ -3726,7 +3724,6 @@ def test_shell_command_bearer_auth_reports_failed_command(caplog):
 
     :param caplog: Pytest log capture fixture.
     """
-    import logging
 
     from omnigent.inner.databricks_executor import DatabricksAuthError
 
@@ -3761,42 +3758,39 @@ def _completed_event(cost: object) -> _FakeRawEvent:
     )
 
 
+# One model call: its ``x-litellm-response-cost`` header value (``None`` when
+# absent) and the ``usage.cost`` annotation on its completed response.
+_GatewayCall = tuple[str | None, object]
+
+
 class _GatewayBilledResult(_FakeResult):
     """Fake run whose model calls answer through a gateway that reports their cost.
 
-    :param cost_headers: ``x-litellm-response-cost`` values, one per HTTP response.
-    :param usage_costs: ``usage.cost`` annotations, one per completed response.
+    :param calls: One ``(header, usage_cost)`` pair per model call, in call order.
     """
 
-    def __init__(
-        self,
-        *args,
-        cost_headers: Sequence[str] = (),
-        usage_costs: Sequence[object] = (),
-        **kwargs,
-    ):
+    def __init__(self, *args, calls: Sequence[_GatewayCall] = (), **kwargs):
         super().__init__(*args, **kwargs)
-        self._cost_headers = list(cost_headers)
-        self._usage_costs = list(usage_costs)
+        self._calls = list(calls)
         self._hook_tasks: list[asyncio.Task[None]] = []
 
     def on_run_streamed(self) -> None:
-        for value in self._cost_headers:
-            response = httpx.Response(200, headers={_GATEWAY_COST_HEADER: value})
+        for header, _usage_cost in self._calls:
+            headers = {} if header is None else {_GATEWAY_COST_HEADER: header}
+            response = httpx.Response(200, headers=headers)
             self._hook_tasks.append(asyncio.create_task(_record_gateway_cost(response)))
 
     async def stream_events(self):
         if self._hook_tasks:
             await asyncio.gather(*self._hook_tasks)
-        for cost in self._usage_costs:
-            yield _completed_event(cost)
+        for _header, usage_cost in self._calls:
+            yield _completed_event(usage_cost)
         async for event in super().stream_events():
             yield event
 
 
 def _gateway_billed_result(
-    cost_headers: Sequence[str] = (),
-    usage_costs: Sequence[object] = (),
+    calls: Sequence[_GatewayCall] = (),
     *,
     tokens: tuple[int, int, int] = (10, 5, 15),
 ) -> _GatewayBilledResult:
@@ -3813,8 +3807,7 @@ def _gateway_billed_result(
                 )
             )
         ],
-        cost_headers=cost_headers,
-        usage_costs=usage_costs,
+        calls=calls,
     )
 
 
@@ -3828,12 +3821,14 @@ async def _turn_usage(executor: OpenAIAgentsSDKExecutor, session_id: str) -> dic
     return next(e for e in events if isinstance(e, TurnComplete)).usage
 
 
-def test_turn_usage_carries_gateway_reported_cost() -> None:
-    """A gateway-billed turn reports the summed ``cost_usd`` beside its token counts."""
+def _billed_turn_usage(
+    calls: Sequence[_GatewayCall], *, tokens: tuple[int, int, int] = (10, 5, 15)
+) -> dict | None:
+    """Run one gateway-billed turn on a stand-in client and return its usage."""
 
     async def _t():
         _FakeRunner.last_calls = []
-        _FakeRunner.next_result = _gateway_billed_result(["0.0123", "0.0007"])
+        _FakeRunner.next_result = _gateway_billed_result(calls, tokens=tokens)
         executor = OpenAIAgentsSDKExecutor(client=object())
         with patch(
             "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
@@ -3841,33 +3836,27 @@ def test_turn_usage_carries_gateway_reported_cost() -> None:
         ):
             return await _turn_usage(executor, "s1")
 
-    usage = _run(_t())
+    return _run(_t())
+
+
+def test_turn_usage_carries_gateway_reported_cost() -> None:
+    """A gateway-billed turn reports the summed header costs beside its token counts."""
+    usage = _billed_turn_usage([("0.0123", None), ("0.0007", None)])
     assert usage is not None
     assert usage["cost_usd"] == pytest.approx(0.013)
     assert usage["input_tokens"] == 10
     assert usage["output_tokens"] == 5
 
 
-def test_turn_usage_omits_cost_without_gateway_header() -> None:
+def test_turn_usage_omits_cost_without_gateway_signal() -> None:
     """Without a reported cost the usage carries no ``cost_usd`` and stays catalog-priced."""
-
-    async def _t():
-        _FakeRunner.last_calls = []
-        _FakeRunner.next_result = _gateway_billed_result([])
-        executor = OpenAIAgentsSDKExecutor(client=object())
-        with patch(
-            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
-            return_value=_fake_agents_sdk(),
-        ):
-            return await _turn_usage(executor, "s1")
-
-    usage = _run(_t())
+    usage = _billed_turn_usage([(None, None)])
     assert usage is not None
     assert "cost_usd" not in usage
 
 
 def test_gateway_cost_does_not_carry_over_to_the_next_turn() -> None:
-    """Each turn starts from an empty cost accumulator, even within one task."""
+    """Each turn starts from an empty charge list, even within one task."""
 
     async def _t():
         executor = OpenAIAgentsSDKExecutor(client=object())
@@ -3876,15 +3865,128 @@ def test_gateway_cost_does_not_carry_over_to_the_next_turn() -> None:
             return_value=_fake_agents_sdk(),
         ):
             _FakeRunner.last_calls = []
-            _FakeRunner.next_result = _gateway_billed_result(["0.02"])
+            _FakeRunner.next_result = _gateway_billed_result([("0.02", None)])
             first = await _turn_usage(executor, "s1")
-            _FakeRunner.next_result = _gateway_billed_result([])
+            _FakeRunner.next_result = _gateway_billed_result([(None, None)])
             second = await _turn_usage(executor, "s2")
         return first, second
 
     first, second = _run(_t())
     assert first is not None and first["cost_usd"] == pytest.approx(0.02)
     assert second is not None and "cost_usd" not in second
+
+
+def test_turn_usage_prefers_gateway_usage_cost_over_header() -> None:
+    """A call's exact ``usage.cost`` annotation wins over its own header estimate."""
+    usage = _billed_turn_usage([("0.0007", 0.0123)])
+    assert usage is not None
+    assert usage["cost_usd"] == pytest.approx(0.0123)
+
+
+def test_turn_usage_sums_gateway_usage_costs_across_model_calls() -> None:
+    """Every completed response's ``usage.cost`` is credited to the turn."""
+    usage = _billed_turn_usage([(None, 0.0123), (None, 0.0007)])
+    assert usage is not None
+    assert usage["cost_usd"] == pytest.approx(0.013)
+    assert usage["input_tokens"] == 10
+    assert usage["output_tokens"] == 5
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [[(None, 0.01), ("0.02", None)], [("0.02", None), (None, 0.01)]],
+    ids=["annotation-then-header", "header-then-annotation"],
+)
+def test_turn_usage_credits_each_model_call_from_its_own_signal(calls: list) -> None:
+    """A header-only call and an annotated call in one turn are each billed once."""
+    usage = _billed_turn_usage(calls)
+    assert usage is not None
+    assert usage["cost_usd"] == pytest.approx(0.03)
+
+
+def test_turn_usage_keeps_a_zero_usage_cost_over_that_calls_header() -> None:
+    """An explicit ``usage.cost`` of 0 beats its call's header; other calls are unaffected."""
+    usage = _billed_turn_usage([("0.02", 0.0), ("0.01", None)])
+    assert usage is not None
+    assert usage["cost_usd"] == pytest.approx(0.01)
+
+
+def test_turn_usage_reports_zero_gateway_cost_as_priced() -> None:
+    """A gateway that billed nothing prices the turn at ``0`` instead of leaving it unpriced."""
+    usage = _billed_turn_usage([("0", None)])
+    assert usage is not None
+    assert usage["cost_usd"] == 0.0
+
+
+def test_token_less_turn_stays_unpriced_despite_gateway_cost() -> None:
+    """A turn with no token counts emits no usage, so a reported cost is not credited.
+
+    The server also drops usage without tokens; pricing a token-less billed call
+    would need both sides to change.
+    """
+    assert _billed_turn_usage([("0.0123", 0.0123)], tokens=(0, 0, 0)) is None
+
+
+def test_gateway_cost_context_does_not_leak_into_the_caller() -> None:
+    """The charge list is scoped to the SDK run's context, not the caller's."""
+
+    async def _t():
+        _FakeRunner.last_calls = []
+        _FakeRunner.next_result = _gateway_billed_result([("0.02", None)])
+        executor = OpenAIAgentsSDKExecutor(client=object())
+        with patch(
+            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+            return_value=_fake_agents_sdk(),
+        ):
+            usage = await _turn_usage(executor, "s1")
+        return usage, _turn_gateway_charges.get()
+
+    usage, leaked = _run(_t())
+    assert usage is not None
+    assert usage["cost_usd"] == pytest.approx(0.02)
+    assert leaked is None
+
+
+def test_turn_usage_includes_cost_of_a_retried_empty_attempt() -> None:
+    """A discarded empty attempt was still billed by the gateway, so its cost counts.
+
+    Token counts describe the surfaced attempt, as before; ``cost_usd`` covers
+    every model call the turn made.
+    """
+
+    async def _t():
+        _FakeRunner.last_calls = []
+        _FakeRunner.next_result = None
+        _FakeRunner.next_results = [
+            _GatewayBilledResult(
+                events=[],
+                final_output="",
+                new_items=[],
+                raw_responses=[_empty_raw_response()],
+                calls=[(None, 0.01)],
+            ),
+            _GatewayBilledResult(
+                events=[_FakeRawEvent(_FakeRawTextDelta("recovered"))],
+                final_output="recovered",
+                raw_responses=[
+                    _FakeRawResponse(_FakeUsage(input_tokens=10, output_tokens=5, total_tokens=15))
+                ],
+                calls=[(None, 0.02)],
+            ),
+        ]
+        executor = OpenAIAgentsSDKExecutor(client=object())
+        with patch(
+            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+            return_value=_fake_agents_sdk(),
+        ):
+            return await _turn_usage(executor, "s1")
+
+    usage = _run(_t())
+    assert usage is not None
+    assert len(_FakeRunner.last_calls) == 2
+    assert usage["cost_usd"] == pytest.approx(0.03)
+    assert usage["input_tokens"] == 10
+    assert usage["output_tokens"] == 5
 
 
 @pytest.mark.parametrize(
@@ -3898,35 +4000,36 @@ def test_gateway_cost_does_not_carry_over_to_the_next_turn() -> None:
         (500, "0.0123"),
     ],
 )
-def test_gateway_cost_hook_ignores_unusable_responses(status: int, value: str) -> None:
-    """Malformed, negative, or failed responses never contribute a cost."""
+def test_gateway_cost_hook_ignores_unusable_headers(status: int, value: str) -> None:
+    """A malformed or negative header records no cost; a failed response records nothing."""
 
     async def _t():
-        costs: list[float] = []
-        _turn_gateway_costs.set(costs)
+        charges: list[_GatewayCharge] = []
+        _turn_gateway_charges.set(charges)
         await _record_gateway_cost(httpx.Response(status, headers={_GATEWAY_COST_HEADER: value}))
-        return costs
+        return charges
 
-    assert _run(_t()) == []
+    charges = _run(_t())
+    assert [charge.header_cost for charge in charges] == ([] if status == 500 else [None])
 
 
 def test_gateway_cost_hook_records_zero_as_priced() -> None:
-    """A gateway reporting ``0`` priced the turn as free; the turn is not left unpriced."""
+    """A gateway reporting ``0`` priced the call as free; the call is not left unpriced."""
 
     async def _t():
-        costs: list[float] = []
-        _turn_gateway_costs.set(costs)
+        charges: list[_GatewayCharge] = []
+        _turn_gateway_charges.set(charges)
         await _record_gateway_cost(httpx.Response(200, headers={_GATEWAY_COST_HEADER: "0"}))
-        return costs
+        return charges
 
-    assert _run(_t()) == [0.0]
+    assert [charge.header_cost for charge in _run(_t())] == [0.0]
 
 
 def test_gateway_cost_hook_is_inert_outside_a_turn() -> None:
     """A response arriving with no turn in flight is ignored rather than raising."""
 
     async def _t():
-        _turn_gateway_costs.set(None)
+        _turn_gateway_charges.set(None)
         await _record_gateway_cost(httpx.Response(200, headers={_GATEWAY_COST_HEADER: "0.0123"}))
 
     _run(_t())
@@ -3951,115 +4054,19 @@ def test_gateway_cost_hook_observes_real_client_responses() -> None:
         )
         OpenAIAgentsSDKExecutor(client=client)
         OpenAIAgentsSDKExecutor(client=client)
-        costs: list[float] = []
-        _turn_gateway_costs.set(costs)
+        charges: list[_GatewayCharge] = []
+        _turn_gateway_charges.set(charges)
         try:
             await client.models.list()
         finally:
             await client.close()
-        return costs
+        return charges
 
-    assert _run(_t()) == [0.0123]
-
-
-def test_turn_usage_prefers_gateway_usage_cost_over_header() -> None:
-    """An exact ``usage.cost`` annotation wins over the header's pre-stream estimate."""
-
-    async def _t():
-        _FakeRunner.last_calls = []
-        _FakeRunner.next_result = _gateway_billed_result(
-            cost_headers=["0.0007"], usage_costs=[0.0123]
-        )
-        executor = OpenAIAgentsSDKExecutor(client=object())
-        with patch(
-            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
-            return_value=_fake_agents_sdk(),
-        ):
-            return await _turn_usage(executor, "s1")
-
-    usage = _run(_t())
-    assert usage is not None
-    assert usage["cost_usd"] == pytest.approx(0.0123)
-
-
-def test_turn_usage_sums_gateway_usage_costs_across_model_calls() -> None:
-    """Every completed response's ``usage.cost`` is credited to the turn."""
-
-    async def _t():
-        _FakeRunner.last_calls = []
-        _FakeRunner.next_result = _gateway_billed_result(usage_costs=[0.0123, 0.0007])
-        executor = OpenAIAgentsSDKExecutor(client=object())
-        with patch(
-            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
-            return_value=_fake_agents_sdk(),
-        ):
-            return await _turn_usage(executor, "s1")
-
-    usage = _run(_t())
-    assert usage is not None
-    assert usage["cost_usd"] == pytest.approx(0.013)
-    assert usage["input_tokens"] == 10
-    assert usage["output_tokens"] == 5
-
-
-def test_turn_usage_reports_zero_gateway_cost_as_priced() -> None:
-    """A gateway that billed nothing prices the turn at ``0`` instead of leaving it unpriced."""
-
-    async def _t():
-        _FakeRunner.last_calls = []
-        _FakeRunner.next_result = _gateway_billed_result(cost_headers=["0"])
-        executor = OpenAIAgentsSDKExecutor(client=object())
-        with patch(
-            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
-            return_value=_fake_agents_sdk(),
-        ):
-            return await _turn_usage(executor, "s1")
-
-    usage = _run(_t())
-    assert usage is not None
-    assert usage["cost_usd"] == 0.0
-
-
-def test_token_less_turn_stays_unpriced_despite_gateway_cost() -> None:
-    """A turn with no token counts emits no usage, so a reported cost is not credited.
-
-    The server also drops usage without tokens; pricing a token-less billed call
-    would need both sides to change.
-    """
-
-    async def _t():
-        _FakeRunner.last_calls = []
-        _FakeRunner.next_result = _gateway_billed_result(
-            cost_headers=["0.0123"], usage_costs=[0.0123], tokens=(0, 0, 0)
-        )
-        executor = OpenAIAgentsSDKExecutor(client=object())
-        with patch(
-            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
-            return_value=_fake_agents_sdk(),
-        ):
-            return await _turn_usage(executor, "s1")
-
-    assert _run(_t()) is None
-
-
-def test_gateway_cost_context_does_not_leak_into_the_caller() -> None:
-    """The header accumulator is scoped to the SDK run's context, not the caller's."""
-
-    async def _t():
-        _FakeRunner.last_calls = []
-        _FakeRunner.next_result = _gateway_billed_result(cost_headers=["0.02"])
-        executor = OpenAIAgentsSDKExecutor(client=object())
-        with patch(
-            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
-            return_value=_fake_agents_sdk(),
-        ):
-            usage = await _turn_usage(executor, "s1")
-        return usage, _turn_gateway_costs.get()
-
-    usage, leaked = _run(_t())
-    assert usage is not None
-    assert usage["cost_usd"] == pytest.approx(0.02)
-    assert leaked is None
+    charges = _run(_t())
+    # A non-model call carries its header cost but pairs with no response event.
+    assert [(charge.header_cost, charge.streams_response) for charge in charges] == [
+        (0.0123, False)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -4080,10 +4087,45 @@ def test_gateway_usage_cost_reads_annotated_usage() -> None:
     assert _gateway_usage_cost(None) is None
 
 
-def test_gateway_cost_hook_logs_clients_it_cannot_observe(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A client with no httpx AsyncClient is skipped with a debug note, not silently."""
-    with caplog.at_level(logging.DEBUG, logger="omnigent.inner.openai_agents_sdk_executor"):
-        OpenAIAgentsSDKExecutor(client=object())
-    assert "Gateway cost header hook not installed" in caplog.text
+def test_run_turn_credits_gateway_costs_through_the_real_sdk() -> None:
+    """The real Agents SDK's run task inherits the turn context.
+
+    A streamed gateway reply carrying both a cost header and a ``usage.cost``
+    annotation prices the turn from the annotation.
+    """
+    from openai import AsyncOpenAI
+
+    from tests.server.integration.mock_llm_server import sse_text_response
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/responses", request.url
+        body = sse_text_response(
+            "Gateway turn answered.",
+            model="bedrock.claude-sonnet-5",
+            usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "cost": 0.0123},
+            stream=True,
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream", _GATEWAY_COST_HEADER: "0.0007"},
+            content=body.encode(),
+        )
+
+    async def _t():
+        client = AsyncOpenAI(
+            api_key="mock-key",
+            base_url="http://gateway.test/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(_handler)),
+        )
+        executor = OpenAIAgentsSDKExecutor(client=client, model="bedrock.claude-sonnet-5")
+        try:
+            return await _turn_usage(executor, "real-sdk")
+        finally:
+            await executor.close()
+            await client.close()
+
+    usage = _run(_t())
+    assert usage is not None
+    assert usage["cost_usd"] == pytest.approx(0.0123)
+    assert usage["input_tokens"] == 10
+    assert usage["output_tokens"] == 5

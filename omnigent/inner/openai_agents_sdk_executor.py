@@ -1094,10 +1094,36 @@ def _skip_history_transform(resource: object, field: str) -> None:
 # ``usage.cost`` a gateway can annotate on the final response event instead.
 _GATEWAY_COST_HEADER = "x-litellm-response-cost"
 
-# Header costs of the model calls in flight. ``run_turn`` sets it only in the
+# Request paths of model calls, which end in one of the terminal response events.
+_MODEL_CALL_PATHS = ("/responses", "/chat/completions")
+_TERMINAL_RESPONSE_EVENTS = ("response.completed", "response.incomplete", "response.failed")
+
+
+@dataclass
+class _GatewayCharge:
+    """Cost a gateway reported for one HTTP response the turn made.
+
+    :param header_cost: Parsed cost header, or ``None`` when absent or unusable.
+    :param usage_cost: ``usage.cost`` annotated on the response this call streamed,
+        or ``None`` when absent or unusable.
+    :param streams_response: Whether this is a model call, which ends in a
+        terminal response event carrying the usage annotation.
+    """
+
+    header_cost: float | None = None
+    usage_cost: float | None = None
+    streams_response: bool = True
+
+    @property
+    def billed(self) -> float | None:
+        """The call's cost: the annotation (computed after the stream) over the header."""
+        return self.usage_cost if self.usage_cost is not None else self.header_cost
+
+
+# Charges of the HTTP responses in flight. ``run_turn`` sets it only in the
 # context the SDK's run task is created from, so it never outlives the turn.
-_turn_gateway_costs: contextvars.ContextVar[list[float] | None] = contextvars.ContextVar(
-    "openai_agents_turn_gateway_costs", default=None
+_turn_gateway_charges: contextvars.ContextVar[list[_GatewayCharge] | None] = (
+    contextvars.ContextVar("openai_agents_turn_gateway_charges", default=None)
 )
 
 
@@ -1144,13 +1170,35 @@ def _gateway_usage_cost(response: object) -> float | None:
 
 
 async def _record_gateway_cost(response: httpx.Response) -> None:
-    """httpx response hook: credit a successful response's cost header to the turn."""
-    costs = _turn_gateway_costs.get()
-    if costs is None or not response.is_success:
+    """httpx response hook: record each successful response's cost header for the turn."""
+    charges = _turn_gateway_charges.get()
+    if charges is None or not response.is_success:
         return
-    cost = _parse_gateway_cost(response.headers.get(_GATEWAY_COST_HEADER))
-    if cost is not None:
-        costs.append(cost)
+    try:
+        path = response.request.url.path
+    except RuntimeError:  # a response built without a request
+        path = ""
+    charges.append(
+        _GatewayCharge(
+            header_cost=_parse_gateway_cost(response.headers.get(_GATEWAY_COST_HEADER)),
+            streams_response=not path or path.endswith(_MODEL_CALL_PATHS),
+        )
+    )
+
+
+def _settle_gateway_charge(
+    charges: list[_GatewayCharge], index: int, usage_cost: float | None
+) -> None:
+    """Attach the *index*-th model call's usage annotation to its recorded charge.
+
+    Without the response hook (a client with no httpx client) no charge was
+    recorded, so the annotation is kept on its own.
+    """
+    model_calls = [charge for charge in charges if charge.streams_response]
+    if index < len(model_calls):
+        model_calls[index].usage_cost = usage_cost
+    else:
+        charges.append(_GatewayCharge(usage_cost=usage_cost))
 
 
 def _install_gateway_cost_hook(client: AsyncOpenAIClient) -> None:
@@ -1715,13 +1763,13 @@ class OpenAIAgentsSDKExecutor(Executor):
         config: ExecutorConfig | None = None,
     ) -> AsyncIterator[ExecutorEvent]:
         cfg = config or ExecutorConfig()
-        # Gateway-reported costs for this turn: exact ``usage.cost`` annotations and
-        # per-response cost headers. The header list is set only in ``run_context``
-        # (the SDK's run task copies it), so it never leaks into the caller's context.
-        gateway_usage_costs: list[float] = []
-        gateway_header_costs: list[float] = []
+        # Gateway-reported charges for this turn, including a retried empty attempt
+        # the gateway still billed. The list lives only in ``run_context``, which the
+        # SDK's run task copies, so the response hook sees it and the caller never does.
+        gateway_charges: list[_GatewayCharge] = []
+        terminal_events = 0
         run_context = contextvars.copy_context()
-        run_context.run(_turn_gateway_costs.set, gateway_header_costs)
+        run_context.run(_turn_gateway_charges.set, gateway_charges)
         # cfg.model (per-request /model override; agent name no longer
         # leaks here) wins over the spec default
         # (HARNESS_OPENAI_AGENTS_MODEL → self._model_override).
@@ -1889,10 +1937,15 @@ class OpenAIAgentsSDKExecutor(Executor):
                                 yield ReasoningChunk(
                                     delta=reasoning_delta, event_type="reasoning_text"
                                 )
-                        elif data.type in ("response.completed", "response.incomplete"):
-                            usage_cost = _gateway_usage_cost(getattr(data, "response", None))
-                            if usage_cost is not None:
-                                gateway_usage_costs.append(usage_cost)
+                        elif data.type in _TERMINAL_RESPONSE_EVENTS:
+                            # Model calls run in order, so the i-th terminal event ends the
+                            # i-th model call the response hook recorded.
+                            _settle_gateway_charge(
+                                gateway_charges,
+                                terminal_events,
+                                _gateway_usage_cost(getattr(data, "response", None)),
+                            )
+                            terminal_events += 1
 
                     elif event.type == "run_item_stream_event":
                         item_event = cast(_RunItemEvent, event)
@@ -2133,11 +2186,10 @@ class OpenAIAgentsSDKExecutor(Executor):
                 }
                 if cached_tok:
                     turn_usage["cache_read_input_tokens"] = cached_tok
-                # What the gateway billed; the server prefers it over a catalog
-                # estimate. Usage annotations are exact, so they win over headers.
-                gateway_costs = gateway_usage_costs or gateway_header_costs
-                if gateway_costs:
-                    turn_usage["cost_usd"] = sum(gateway_costs)
+                # What the gateway billed; the server prefers it over a catalog estimate.
+                billed = [charge.billed for charge in gateway_charges]
+                if any(cost is not None for cost in billed):
+                    turn_usage["cost_usd"] = sum(cost for cost in billed if cost is not None)
         _notify_usage_from_dict(model=model, usage=turn_usage)
 
         # Emit CompactionComplete if the SDK compacted this turn.
