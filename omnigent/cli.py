@@ -3747,11 +3747,8 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
     if workspace_host is None:
         return
     org_id = load_databricks_org_id(server)
-    auth_info = (
-        _databricks_workspace_auth_info(workspace_host)
-        if databricks_pairing_trusted(server, workspace_host)
-        else None
-    )
+    trusted = databricks_pairing_trusted(server, workspace_host)
+    auth_info = _databricks_workspace_auth_info(workspace_host) if trusted else None
     if auth_info is not None:
         if org_id is None:
             org_id = _workspace_hosted_profile_org_id(
@@ -3772,9 +3769,17 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
         else f"Not signed in to {display}"
     )
     if non_interactive or not sys.stdin.isatty():
+        # A first cross-origin pairing needs consent, which a headless login
+        # cannot give without --yes; say so instead of hinting a command that
+        # would stop at the question.
+        remedy = (
+            f"Run `{login_cmd}` and retry."
+            if trusted
+            else f"Run `{login_cmd}` from a terminal (or `{login_cmd} --yes` to approve the "
+            "pairing unattended) and retry."
+        )
         raise click.ClickException(
-            f"{state} (Databricks-fronted; /v1/me answered "
-            f"HTTP {probe.status_code}). Run `{login_cmd}` and retry."
+            f"{state} (Databricks-fronted; /v1/me answered HTTP {probe.status_code}). {remedy}"
         )
     click.echo(f"{state} — running `{login_cmd}` first.")
     # Login selector comes from the URL, not the stored org_id used above: on a
@@ -12944,13 +12949,19 @@ def _databricks_login(
 
     if not assume_yes and not databricks_pairing_trusted(server, workspace_host):
         # First pairing with a server on another origin: ask before any
-        # workspace credential is resolved, let alone sent to it.
+        # workspace credential is resolved, let alone sent to it. Only a
+        # terminal can answer; piped input is not consent.
+        if not _stdin_is_tty():
+            raise click.ClickException(
+                f"Login cancelled: {server} is not paired with workspace {workspace_host} "
+                "yet, and approving that needs a terminal. Nothing was sent or stored. "
+                "Pass --yes to pre-approve the pairing in scripted logins."
+            )
         try:
             approved = click.confirm(
                 databricks_pairing_question(server, workspace_host), default=False
             )
         except click.Abort:
-            # Piped or closed stdin cannot answer: treat it as declined.
             approved = False
         if not approved:
             raise click.ClickException(

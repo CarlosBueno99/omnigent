@@ -59,6 +59,18 @@ WHEEL_PACKAGE_PATHS: tuple[str, ...] = ("sdks/python-client", "sdks/ui", ".")
 install: the python client SDK, the UI SDK, and the omnigent package
 itself (which path-depends on the first two)."""
 
+_LOGIN_HELP_PROBE_COMMAND = "sh -c " + shlex.quote(
+    "out=$(omnigent login --help 2>&1); rc=$?; "
+    'if [ "$rc" -ne 0 ]; then echo "probe-failed:$rc"; printf \'%s\\n\' "$out" | tail -n 3 >&2; '
+    "elif printf '%s\\n' \"$out\" | grep -qE "
+    "'^[[:space:]]+(-[[:alnum:]],[[:space:]]+)?--yes([[:space:]]|,|$)'; "
+    "then echo supports-yes; "
+    "else echo legacy; fi"
+)
+"""One-line verdict on whether the sandbox's ``omnigent login`` takes ``--yes``.
+Launchers echo captured output, so the probe prints a token instead of the
+whole help text: ``supports-yes``, ``legacy`` or ``probe-failed:<exit>``."""
+
 DEFAULT_WHEELS_TGZ: str = "/tmp/oa-wheels.tgz"
 """Local staging path for the packed wheel tarball. Rebuilt fresh on
 every bootstrap so the sandbox always gets exactly the current
@@ -457,14 +469,9 @@ def login_app_oauth_in_sandbox(
     URL (a cached workspace grant verified against the server), the
     browser steps are skipped and success is read from the exit code.
 
-    Sending a workspace's credentials to a server on another origin needs
-    the user's consent, which the in-sandbox login cannot collect (its
-    PTY only streams output). A saved local ``omnigent login`` for the
-    same pairing counts as consent; otherwise an interactive run asks
-    here and an unattended run fails with the login hint. The in-sandbox
-    login then runs with ``--yes`` when its CLI knows the flag; a sandbox
-    provisioned before the flag existed keeps the legacy command, whose
-    login does not ask either.
+    Cross-origin workspace credentials need local consent (see
+    :func:`_confirm_sandbox_workspace_pairing`); approved logins pass
+    ``--yes`` when the sandbox CLI supports it, with a legacy-CLI fallback.
 
     The sandbox ends up the sole holder of its OAuth grant — nothing is
     shipped from the laptop — which sidesteps CLI-version cache-format
@@ -526,6 +533,12 @@ def login_app_oauth_in_sandbox(
     if workspace is not None and not pairing_approved:
         _confirm_sandbox_workspace_pairing(server_url, workspace.host, display)
     click.echo(f"▸ Logging sandbox '{sandbox_id}' in to {display}")
+    # Consent is settled; the in-sandbox login must not ask again over a PTY
+    # nobody can answer. An older sandbox CLI has no --yes and does not ask.
+    # Probe before the cfg seed so a failed probe leaves the sandbox untouched.
+    login_flag = ""
+    if workspace is not None and _sandbox_login_supports_yes(launcher, sandbox_id):
+        login_flag = "--yes "
     if workspace is not None:
         # Reset ~/.databrickscfg to exactly one [DEFAULT] entry shaped
         # like what `databricks auth login` itself writes (host +
@@ -546,11 +559,6 @@ def login_app_oauth_in_sandbox(
             sandbox_id,
             f"rm -f ~/.databrickscfg && printf '%s' {shlex.quote(cfg_body)} > ~/.databrickscfg",
         )
-    # Consent is settled; the in-sandbox login must not ask again over a PTY
-    # nobody can answer. An older sandbox CLI has no --yes and does not ask.
-    login_flag = ""
-    if workspace is not None and _sandbox_login_supports_yes(launcher, sandbox_id):
-        login_flag = "--yes "
     login = launcher.stream_exec(
         sandbox_id,
         f"omnigent login {login_flag}{shlex.quote(server_url)}",
@@ -570,15 +578,17 @@ def _sandbox_login_supports_yes(launcher: SandboxLauncher, sandbox_id: str) -> b
     A probe that fails outright is reported, not guessed at: a current CLI
     mistaken for a legacy one would block on its own question in the PTY.
     """
-    result = launcher.run(sandbox_id, "omnigent login --help", check=False)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        raise click.ClickException(
-            f"Could not probe the sandbox CLI on '{sandbox_id}' "
-            f"(`omnigent login --help` exited {result.returncode}): {detail}"
-        )
-    help_text = result.stdout + result.stderr
-    return re.search(r"^\s+--yes\b", help_text, re.MULTILINE) is not None
+    result = launcher.run(sandbox_id, _LOGIN_HELP_PROBE_COMMAND, check=False)
+    lines = result.stdout.strip().splitlines()
+    verdict = lines[-1].strip() if lines else ""
+    if result.returncode == 0 and verdict == "supports-yes":
+        return True
+    if result.returncode == 0 and verdict == "legacy":
+        return False
+    detail = (result.stderr.strip() or verdict or f"exit {result.returncode}").strip()
+    raise click.ClickException(
+        f"Could not probe the sandbox CLI on '{sandbox_id}' (`omnigent login --help`): {detail}"
+    )
 
 
 def _confirm_sandbox_workspace_pairing(server_url: str, workspace_host: str, display: str) -> None:

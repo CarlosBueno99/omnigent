@@ -618,11 +618,24 @@ def load_databricks_org_id(server_url: str) -> str | None:
     return org_id if isinstance(org_id, str) and org_id else None
 
 
+def _url_origin(url: str) -> tuple[str, str, int | None] | None:
+    """``(scheme, lowercased host, port)`` for *url*, or ``None`` when malformed."""
+    parts = urllib.parse.urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if not parts.scheme or not parts.hostname:
+        return None
+    return (parts.scheme, parts.hostname, port or {"https": 443, "http": 80}.get(parts.scheme))
+
+
 def databricks_pairing_trusted(server_url: str, workspace_host: str) -> bool:
     """Whether *server_url* may receive *workspace_host* credentials without asking.
 
     True when both share an origin (workspace-hosted omnigent) or a saved
     ``omnigent login`` record already pairs the server with that workspace.
+    A workspace host that does not parse as an origin is never trusted.
 
     :param server_url: The server URL, e.g.
         ``"https://myapp-123.aws.databricksapps.com"``.
@@ -630,20 +643,13 @@ def databricks_pairing_trusted(server_url: str, workspace_host: str) -> bool:
         ``"https://example.databricks.com"``.
     :returns: ``True`` when no consent question is needed before pairing.
     """
-    default_ports = {"https": 443, "http": 80}
-    server = urllib.parse.urlsplit(server_url)
-    workspace = urllib.parse.urlsplit(workspace_host)
-    same_origin = (
-        server.scheme,
-        server.hostname,
-        server.port or default_ports.get(server.scheme),
-    ) == (
-        workspace.scheme,
-        workspace.hostname,
-        workspace.port or default_ports.get(workspace.scheme),
-    )
-    # The record is stored without a trailing slash; compare like for like.
-    return same_origin or load_databricks_workspace_host(server_url) == workspace_host.rstrip("/")
+    workspace = _url_origin(workspace_host)
+    if workspace is None:
+        return False
+    if _url_origin(server_url) == workspace:
+        return True
+    saved = load_databricks_workspace_host(server_url)
+    return saved is not None and _url_origin(saved) == workspace
 
 
 def databricks_pairing_question(server_url: str, workspace_host: str) -> str:

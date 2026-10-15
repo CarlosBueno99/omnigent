@@ -3461,6 +3461,8 @@ def test_databricks_preflight_non_interactive_requires_saved_pairing(
         cli._ensure_databricks_server_auth(_HOST_DATABRICKS_SERVER, non_interactive=True)
 
     assert f"omnigent login {_HOST_DATABRICKS_SERVER}" in str(exc.value)
+    # The hinted command must be able to succeed where this one ran: unattended.
+    assert "--yes" in str(exc.value)
     assert stored == []
     # Only the initial probe reached the server (carrying whatever the ambient
     # chain already had); the workspace grant was never sent.

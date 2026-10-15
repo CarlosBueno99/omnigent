@@ -41,14 +41,10 @@ if TYPE_CHECKING:
 
 # ── Fake launcher plumbing ──────────────────────────────────
 
-_LOGIN_HELP_COMMAND = "omnigent login --help"
-_LOGIN_HELP_WITH_YES = (
-    "Usage: omnigent login [OPTIONS] SERVER_URL\n\nOptions:\n"
-    "  --yes, -y  Approve sending your Databricks workspace credentials ...\n"
-)
-_LOGIN_HELP_LEGACY = (
-    "Usage: omnigent login [OPTIONS] SERVER_URL\n\nOptions:\n  --help  Show this message.\n"
-)
+# The bootstrap probes the sandbox CLI for `login --yes` with a one-line verdict.
+_LOGIN_HELP_COMMAND = bootstrap_mod._LOGIN_HELP_PROBE_COMMAND
+_LOGIN_HELP_WITH_YES = "supports-yes\n"
+_LOGIN_HELP_LEGACY = "legacy\n"
 
 
 class _FakeRemoteProcess(RemoteProcess):
@@ -134,7 +130,7 @@ class _FakeLauncher(SandboxLauncher):
         :param login_returncode: Exit code of the fake login process.
         :param exec_foreground_returncode: Exit code of
             ``exec_foreground``.
-        :param login_help: What the sandbox's ``omnigent login --help`` prints.
+        :param login_help: The ``--yes`` probe's verdict line.
         :param login_help_returncode: Exit code of that probe.
         """
         self._login_lines = list(login_lines or [])
@@ -385,14 +381,15 @@ def test_login_runs_in_sandbox_and_forwards_callback_port(
         "[DEFAULT]\nhost = https://ws.example.com\n"
         "auth_type = databricks-cli\nworkspace_id = 123456\n"
     )
-    # Then one capability probe decides whether the login takes --yes.
+    # The --yes probe runs first (a failed probe leaves the sandbox untouched),
+    # then the cfg seed.
     assert launcher.run_commands == [
+        _LOGIN_HELP_COMMAND,
         f"rm -f ~/.databrickscfg && printf '%s' {shlex.quote(expected_cfg_body)} "
         "> ~/.databrickscfg",
-        _LOGIN_HELP_COMMAND,
     ]
     # The seed lands before the login spawn (the login reads the cfg).
-    assert launcher.log.index(f"run:{launcher.run_commands[0]}") < launcher.log.index(
+    assert launcher.log.index(f"run:{launcher.run_commands[1]}") < launcher.log.index(
         "stream:omnigent login --yes https://app.example.com"
     )
 
@@ -473,11 +470,11 @@ def test_login_seed_omits_workspace_id_line_when_unknown(
         server_url="https://app.example.com",
         workspace=DerivedWorkspace(host="https://ws.example.com", workspace_id=None),
     )
-    # The cfg seed still ran (then the --yes probe) — a missing org id must
+    # The cfg seed still ran (after the --yes probe) — a missing org id must
     # not disable the seed entirely.
-    assert launcher.run_commands[0].startswith("rm -f ~/.databrickscfg")
-    assert launcher.run_commands[1:] == [_LOGIN_HELP_COMMAND]
-    seed_command = launcher.run_commands[0]
+    assert launcher.run_commands[0] == _LOGIN_HELP_COMMAND
+    assert launcher.run_commands[1].startswith("rm -f ~/.databrickscfg")
+    seed_command = launcher.run_commands[1]
     assert "host = https://ws.example.com" in seed_command
     assert "auth_type = databricks-cli" in seed_command
     # No workspace_id line in any form (the key name itself is absent).
@@ -588,11 +585,7 @@ def test_login_fails_fast_when_sandbox_cli_probe_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A broken ``--yes`` probe is reported; guessing "legacy" could hang the login."""
-    launcher = _FakeLauncher(
-        login_lines=["Logged in.\r\n"],
-        login_help="omnigent: command not found",
-        login_help_returncode=127,
-    )
+    launcher = _FakeLauncher(login_lines=["Logged in.\r\n"], login_help="probe-failed:127\n")
     _patch_saved_local_pairing(monkeypatch)
 
     with pytest.raises(click.ClickException) as exc:
@@ -606,6 +599,8 @@ def test_login_fails_fast_when_sandbox_cli_probe_fails(
     assert "omnigent login --help" in str(exc.value) and "127" in str(exc.value)
     # No login was spawned against an unknown CLI.
     assert launcher.stream_calls == []
+    # ...and the sandbox was left untouched: no cfg seed ran.
+    assert launcher.run_commands == [_LOGIN_HELP_COMMAND]
 
 
 def test_login_requires_prior_local_login_when_unattended(

@@ -181,7 +181,9 @@ unattended commands (`omnigent host --non-interactive`, or any run without a
 terminal) need a prior `omnigent login`. Pass `omnigent login --yes <server-url>`
 to pre-approve the pairing in a script. `omnigent sandbox create` and
 `omnigent sandbox auth` ask the same question locally, or reuse your saved local
-login, before logging the sandbox in.
+login, before logging the sandbox in; a sandbox whose installed CLI predates this
+change keeps working, while `omnigent sandbox auth` from an older local CLI
+against a newer sandbox needs the local CLI upgraded first.
 
 ### Context
 
