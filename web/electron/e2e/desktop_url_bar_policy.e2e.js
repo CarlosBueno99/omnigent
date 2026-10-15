@@ -5,8 +5,7 @@
 // Journey: boot the shell on a local server → open a session → Workspace "+" →
 // Browser → type a loopback URL into the Address bar → Enter. The expected
 // outcome is a "navigation blocked" alert under the toolbar and no load; the
-// pane rendering the loopback page is the failure. A bridge-level control then
-// requests the same URL with agent intent, which the policy denies.
+// pane rendering the loopback page is the failure.
 //
 // Run from web/electron after building the SPA:
 //   OMNIGENT_PW_NO_SANDBOX=1 xvfb-run -a node --test e2e/desktop_url_bar_policy.e2e.js
@@ -79,7 +78,7 @@ async function observeNavigation(window, pane, viewId, target, timeoutMs = 15_00
     const alert = (await alerts.count()) > 0 ? await alerts.first().innerText() : null;
     const loaded = !!(view.exists && view.url && view.url.startsWith(target));
     if (loaded || alert || Date.now() > deadline) {
-      return { viewUrl: view.url ?? null, alert, loaded };
+      return { viewUrl: view.url ?? null, alert, loaded, timedOut: !loaded && !alert };
     }
     // oxlint-disable-next-line no-await-in-loop -- Wait before the next probe.
     await window.waitForTimeout(250);
@@ -163,19 +162,15 @@ describe("desktop shell — embedded browser address bar applies the URL policy"
       await address.press("Enter");
       mark("enter pressed");
       observations.loopback = await observeNavigation(window, pane, viewId, loopback.url);
-      mark(observations.loopback.loaded ? "loopback page loaded in pane" : "loopback not loaded");
-      await window.waitForTimeout(5_000);
-
-      observations.agentControl = await window.evaluate(
-        ([id, url]) =>
-          window.omnigentDesktop.browserOpenOrNavigate(id, url, undefined, {
-            force: true,
-            agent: true,
-          }),
-        [viewId, loopback.url],
+      mark(
+        observations.loopback.alert
+          ? "navigation blocked alert shown"
+          : observations.loopback.loaded
+            ? "loopback page loaded in pane"
+            : "no load or alert within the window",
       );
-      mark("agent-intent control requested");
-      await window.waitForTimeout(3_000);
+      // Hold the outcome on film before closing.
+      await window.waitForTimeout(5_000);
     } finally {
       fs.mkdirSync(RECORD_DIR, { recursive: true });
       fs.writeFileSync(
@@ -189,8 +184,7 @@ describe("desktop shell — embedded browser address bar applies the URL policy"
       fs.rmSync(userDataDir, { recursive: true, force: true });
     }
 
-    assert.equal(observations.agentControl.ok, false, "agent-intent control was not denied");
-    assert.match(observations.agentControl.error ?? "", /navigation blocked/);
+    assert.equal(observations.loopback.timedOut, false, "neither a load nor an alert within 15 s");
     assert.equal(
       observations.loopback.loaded,
       false,

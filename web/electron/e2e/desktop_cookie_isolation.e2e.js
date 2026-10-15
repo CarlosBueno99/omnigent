@@ -30,10 +30,6 @@ const deps = desktopDepsAvailable();
 
 // Drive the preload-exposed browser APIs from the shell renderer. Each helper
 // runs in the SPA window's context, where window.omnigentDesktop exists.
-async function openView(window, conversationId, url) {
-  return openBrowserFixture(window, conversationId, url);
-}
-
 async function execInView(window, conversationId, js) {
   return window.evaluate(
     ([cid, code]) => window.omnigentDesktop.browserExecute(cid, code),
@@ -152,7 +148,7 @@ describe(
           const site = `${server.serverUrl}/health`;
 
           // Conversation A opens the site and "signs in" (sets an identity cookie).
-          const openedA = await openView(window, "conv_A", site);
+          const openedA = await openBrowserFixture(electronApp, "conv_A", site);
           assert.equal(openedA.ok, true, `conv_A open failed: ${openedA.error}`);
           await setActive(window, "conv_A");
           await waitForViewOnOrigin(window, "conv_A", server.serverUrl);
@@ -178,7 +174,7 @@ describe(
           const secondTab = "browser-tab:conv_A:second";
           for (const tab of [firstTab, secondTab]) {
             // oxlint-disable-next-line no-await-in-loop -- Open each fixture before observing its cookies.
-            const opened = await openView(window, tab, site);
+            const opened = await openBrowserFixture(electronApp, tab, site);
             assert.equal(opened.ok, true, `${tab} open failed: ${opened.error}`);
             // oxlint-disable-next-line no-await-in-loop -- Wait for this tab's navigation.
             await waitForViewOnOrigin(window, tab, server.serverUrl);
@@ -198,13 +194,13 @@ describe(
             firstTab,
           );
           assert.equal(closed.ok, true, `tab close failed: ${closed.error}`);
-          const reopened = await openView(window, firstTab, site);
+          const reopened = await openBrowserFixture(electronApp, firstTab, site);
           assert.equal(reopened.ok, true, `tab reopen failed: ${reopened.error}`);
           await waitForViewOnOrigin(window, firstTab, server.serverUrl);
           await waitForIdentityCookie(window, firstTab, "agent_identity=bob");
 
           // Conversation B opens its own view on the same site.
-          const openedB = await openView(window, "conv_B", site);
+          const openedB = await openBrowserFixture(electronApp, "conv_B", site);
           assert.equal(openedB.ok, true, `conv_B open failed: ${openedB.error}`);
           await setActive(window, "conv_B");
           await waitForViewOnOrigin(window, "conv_B", server.serverUrl);

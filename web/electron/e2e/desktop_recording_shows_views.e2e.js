@@ -97,10 +97,6 @@ function bannerFractions(clip, fps = 2, width = 160, height = 120) {
 
 // Drive the preload-exposed browser APIs from the shell renderer (same helpers
 // as desktop_cookie_isolation.e2e.js — they run in the SPA window's context).
-async function openView(window, conversationId, url) {
-  return openBrowserFixture(window, conversationId, url);
-}
-
 async function execInView(window, conversationId, js) {
   return window.evaluate(
     ([cid, code]) => window.omnigentDesktop.browserExecute(cid, code),
@@ -183,7 +179,7 @@ describe(
           // full-viewport solid-green banner — the user-visible content the
           // recording is supposed to capture.
           const site = `${server.serverUrl}/health`;
-          const opened = await openView(window, "conv_A", site);
+          const opened = await openBrowserFixture(electronApp, "conv_A", site);
           assert.equal(opened.ok, true, `conv_A open failed: ${opened.error}`);
           await setActive(window, "conv_A");
           await waitForViewOnOrigin(window, "conv_A", server.serverUrl);

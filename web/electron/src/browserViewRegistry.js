@@ -130,13 +130,9 @@ function createBrowserViewRegistry({
       // Last URL we EXPLICITLY requested (not getURL(), which drifts as the page
       // navigates) — lets openOrNavigate skip reissuing loadURL on a re-mount.
       lastRequestedUrl: "",
-      // Whether the CURRENT navigation is policy-gated. Set on every
-      // openOrNavigate from opts.agent (browserIpc sets it for every renderer
-      // request, URL bar included; only main-owned callers omit it) and read by
-      // the will-navigate/will-redirect guard so the allowlist covers the whole
-      // nav chain (initial load + every redirect / meta-refresh / location.href).
-      // SECURITY: without this, the allowlist only guards the first hop and a
-      // redirect to an internal host slips through (SSRF via screenshot).
+      // Whether the CURRENT navigation is policy-gated (opts.agent; only main-owned
+      // callers omit it). Read by the will-navigate/will-redirect guard so the
+      // allowlist covers the whole nav chain, not just the first hop (SSRF).
       agentNavLocked: false,
       agentContext: null,
       // Design-mode listeners + webContents, set by browserIpc's enable handler
@@ -258,10 +254,8 @@ function createBrowserViewRegistry({
   // redirect the view to an internal host (metadata / loopback / RFC-1918) with
   // no re-check, and browser_screenshot could read it back. `will-navigate` and
   // `will-redirect` (plus subframes via `will-frame-navigate`) are the blocking
-  // hooks — did-navigate is report-only and fires too late. Enforced while
-  // `entry.agentNavLocked` (set per-navigation from opts.agent), which every
-  // renderer-originated navigation carries; only a main-owned navigation (the
-  // desktop E2E fixture driver) leaves the view unguarded.
+  // hooks — did-navigate is report-only and fires too late. Enforced only while
+  // `entry.agentNavLocked`; main-owned navs (desktop E2E fixture driver) are ungated.
   function attachAgentNavGuard(conversationId, entry) {
     const wc = entry.view && entry.view.webContents;
     if (!wc || typeof wc.on !== "function") return;
@@ -370,11 +364,9 @@ function createBrowserViewRegistry({
 
   function openOrNavigate(conversationId, url, bounds, opts) {
     const force = !!(opts && opts.force);
-    // A gated nav (opts.agent — every renderer request, URL bar included) runs
-    // the allowlist (see browserUrlPolicy) so neither the model nor the renderer
-    // can point the view at file:// / metadata / loopback / private hosts and
-    // exfiltrate via screenshot. Only main-owned callers omit the flag. Checked
-    // before getOrCreate so a rejected nav creates no blank view.
+    // Gated navs (opts.agent — every renderer request; only main-owned callers
+    // omit it) run the allowlist (see browserUrlPolicy) before getOrCreate so a
+    // rejected nav creates no blank view.
     if (opts && opts.agent && url) {
       const verdict = isAgentNavigationAllowed(url, {
         allowLocalhost: isArcaAgentContext(opts.agentContext),

@@ -178,10 +178,6 @@ async function shellWindow(electronApp, timeoutMs = 60_000) {
 
 // Drive the preload-exposed browser APIs from the shell renderer. Each helper
 // runs in the SPA window's context, where window.omnigentDesktop exists.
-async function openView(window, conversationId, url) {
-  return openBrowserFixture(window, conversationId, url);
-}
-
 async function execInView(window, conversationId, js) {
   return window.evaluate(
     ([cid, code]) => window.omnigentDesktop.browserExecute(cid, code),
@@ -285,7 +281,11 @@ describe(
           // The conversation opens its embedded browser pane on a website.
           // Point the view at the upstream server directly: agent-view traffic
           // rides its own partition (not the gate), like a real external site.
-          const opened = await openView(window, "conv_A", `${server.serverUrl}/health`);
+          const opened = await openBrowserFixture(
+            electronApp,
+            "conv_A",
+            `${server.serverUrl}/health`,
+          );
           assert.equal(opened.ok, true, `browser view open failed: ${opened.error}`);
           await setActive(window, "conv_A");
           await waitForViewOnOrigin(window, "conv_A", server.serverUrl);

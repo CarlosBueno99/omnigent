@@ -8,7 +8,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { desktopDepsAvailable, saveRecording } = require("./desktopHarness");
+const { desktopDepsAvailable, openBrowserFixture, saveRecording } = require("./desktopHarness");
 const {
   MOCK_REPLY,
   eventually,
@@ -197,11 +197,16 @@ describe(
           const fixture = fixtures[kind];
           const exitDesign = window.getByRole("button", { name: "Exit design mode", exact: true });
           if (await exitDesign.isVisible()) await exitDesign.click();
-          const address = window.getByRole("textbox", { name: "Address bar", exact: true });
-          await address.click();
-          await window.keyboard.press("ControlOrMeta+A");
-          await window.keyboard.type(fixture.url);
-          await window.keyboard.press("Enter");
+          // The URL policy refuses loopback fixtures typed into the address bar, so
+          // main opens them in the Browser tab's view.
+          const pane = window.locator("[data-browser-pane-conversation]");
+          await pane.waitFor();
+          const opened = await openBrowserFixture(
+            electronApp,
+            await pane.getAttribute("data-browser-pane-conversation"),
+            fixture.url,
+          );
+          assert.equal(opened.ok, true, `fixture open failed: ${opened.error}`);
           const page = await eventually(
             () =>
               electronApp

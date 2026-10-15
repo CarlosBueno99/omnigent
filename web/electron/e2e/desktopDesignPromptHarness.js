@@ -6,7 +6,13 @@ const { createHash, randomBytes } = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
-const { APP_ROOT, REPO_ROOT, WEB_UI_DIST, findFreePort } = require("./desktopHarness");
+const {
+  APP_ROOT,
+  REPO_ROOT,
+  WEB_UI_DIST,
+  findFreePort,
+  writeProfileBootstrap,
+} = require("./desktopHarness");
 
 const PYTHON = process.env.OMNIGENT_PYTHON || "python3";
 const MOCK_REPLY = "Design instruction received.";
@@ -245,17 +251,25 @@ async function startFormFixture() {
 async function launchDesignDesktop(tmpDir, recordDir, serverUrl) {
   const { _electron } = require("playwright");
   const userDataDir = path.join(tmpDir, "user-data");
-  fs.mkdirSync(userDataDir);
-  fs.writeFileSync(
-    path.join(userDataDir, "settings.json"),
-    JSON.stringify({
-      server_url: serverUrl,
-      update_mode: "none",
-      update_auto_install: false,
-    }),
-  );
+  // Seed both profile locations, matching main.js's development userData path.
+  for (const profile of [userDataDir, path.join(userDataDir, "Omnigent Dev")]) {
+    fs.mkdirSync(profile, { recursive: true });
+    fs.writeFileSync(
+      path.join(profile, "settings.json"),
+      JSON.stringify({
+        server_url: serverUrl,
+        update_mode: "none",
+        update_auto_install: false,
+      }),
+    );
+  }
   const executablePath = process.env.OMNIGENT_DESKTOP_EXECUTABLE;
-  const args = [...(executablePath ? [] : [APP_ROOT]), `--user-data-dir=${userDataDir}`];
+  // The dev app preloads the profile bootstrap, which also lets openBrowserFixture
+  // host the loopback fixtures that the renderer URL policy refuses.
+  const args = [
+    ...(executablePath ? [] : ["-r", writeProfileBootstrap(userDataDir), APP_ROOT]),
+    `--user-data-dir=${userDataDir}`,
+  ];
   if (process.env.OMNIGENT_PW_NO_SANDBOX) args.push("--no-sandbox", "--disable-dev-shm-usage");
   const electronApp = await _electron.launch({
     ...(executablePath ? { executablePath } : {}),

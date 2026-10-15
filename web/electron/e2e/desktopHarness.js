@@ -28,8 +28,6 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 
-const applicationsByWindow = new WeakMap();
-
 /** Repo root: web/electron/e2e → ../../.. */
 const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
 /** The Electron app package root (its package.json `main` is src/main.js). */
@@ -390,17 +388,7 @@ async function launchDesktop(opts) {
   }
   fs.mkdirSync(opts.recordDir, { recursive: true });
 
-  // Development builds derive userData from appData, overriding --user-data-dir.
-  // Redirect both before main.js loads so tests cannot touch a developer profile.
-  const profileBootstrap = path.join(userDataDir, "isolate-profile.cjs");
-  fs.writeFileSync(
-    profileBootstrap,
-    `require("electron").app.setPath("appData", ${JSON.stringify(userDataDir)});\n` +
-      `const mod = require(${JSON.stringify(path.join(APP_ROOT, "src/browserViewRegistry.js"))});\n` +
-      `const create = mod.createBrowserViewRegistry;\n` +
-      `global.omnigentTestBrowserRegistries = [];\n` +
-      `mod.createBrowserViewRegistry = (...args) => { const registry = create(...args); global.omnigentTestBrowserRegistries.push(registry); return registry; };\n`,
-  );
+  const profileBootstrap = writeProfileBootstrap(userDataDir);
   const preloads = (opts.preload ?? []).flatMap((file) => ["-r", file]);
   const args = ["-r", profileBootstrap, ...preloads, APP_ROOT, `--user-data-dir=${userDataDir}`];
   // Headless-Linux / CI hardening, gated on the same env var the Python e2e_ui
@@ -466,7 +454,6 @@ async function launchDesktop(opts) {
     await stopDisplayCapture();
     throw err;
   }
-  applicationsByWindow.set(window, electronApp);
   return { electronApp, window, userDataDir, stopDisplayCapture };
 }
 
@@ -521,13 +508,33 @@ function saveRecording(recordDir, name) {
   return saved;
 }
 
-/** Create a local fixture through main's test driver, outside renderer IPC. */
-async function openBrowserFixture(window, conversationId, url) {
-  const application = applicationsByWindow.get(window);
-  if (!application) throw new Error("Unknown desktop test window");
-  return application.evaluate(
+/** Main-process bootstrap for `electron -r`: pins appData to the test profile
+ *  (dev builds derive userData from it, ignoring --user-data-dir) and captures
+ *  every browser registry for openBrowserFixture. Packaged apps can't preload it. */
+function writeProfileBootstrap(userDataDir) {
+  const bootstrap = path.join(userDataDir, "isolate-profile.cjs");
+  fs.writeFileSync(
+    bootstrap,
+    `require("electron").app.setPath("appData", ${JSON.stringify(userDataDir)});\n` +
+      `const mod = require(${JSON.stringify(path.join(APP_ROOT, "src/browserViewRegistry.js"))});\n` +
+      `const create = mod.createBrowserViewRegistry;\n` +
+      `global.omnigentTestBrowserRegistries = [];\n` +
+      `mod.createBrowserViewRegistry = (...args) => { const registry = create(...args); global.omnigentTestBrowserRegistries.push(registry); return registry; };\n`,
+  );
+  return bootstrap;
+}
+
+/** Open a fixture view through main's registry, bypassing the renderer URL
+ *  policy; only for test sites served on loopback. */
+async function openBrowserFixture(electronApp, conversationId, url) {
+  return electronApp.evaluate(
     (_electron, { conversationId: viewId, url: target }) => {
-      const registry = global.omnigentTestBrowserRegistries[0];
+      const registries = global.omnigentTestBrowserRegistries;
+      if (!registries || registries.length === 0) {
+        throw new Error("No browser registry captured; the bootstrap hook did not fire");
+      }
+      // One registry per shell window; the newest belongs to the window under test.
+      const registry = registries[registries.length - 1];
       const { ok, error } = registry.openOrNavigate(viewId, target, {
         x: 40,
         y: 80,
@@ -542,6 +549,7 @@ async function openBrowserFixture(window, conversationId, url) {
 
 module.exports = {
   openBrowserFixture,
+  writeProfileBootstrap,
   APP_ROOT,
   REPO_ROOT,
   WEB_UI_DIST,

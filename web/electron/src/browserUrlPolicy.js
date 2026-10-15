@@ -1,8 +1,6 @@
-// Allowlist for browser navigation requested through the renderer — the agent
-// relay and the URL bar alike, since main cannot verify a renderer's claim of
-// user intent. An unguarded loadURL could point the view at file:// /
-// cloud-metadata / loopback / private hosts and read the bytes back via
-// screenshot (SSRF + local-file read + exfil).
+// Allowlist for renderer-requested navigation (relay and URL bar alike — main
+// can't verify user intent): blocks file:// / cloud-metadata / loopback /
+// private hosts, which could otherwise be read back via screenshot (SSRF/exfil).
 // Runs in the main process (gate holds regardless of caller); pure + dep-free
 // so `node --test` can exercise it without Electron.
 

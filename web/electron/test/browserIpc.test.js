@@ -848,14 +848,33 @@ describe("browser IPC — URL policy independent of renderer intent", () => {
     assert.deepEqual(loaded, ["https://example.com/"]);
   });
 
-  it("evaluates main-owned Arca eligibility for every request, not only flagged ones", async () => {
-    const context = { serverTarget: "selected-server", sourceHostId: "arca-host" };
+  it("grants the Arca loopback exception by verified host, never by renderer flag", async () => {
+    const { arcaTarget, isArcaAgentContext } = require("../src/arcaIdentity");
+    const identity = {
+      serverUrl: arcaTarget("https://workspace.example.com"),
+      hostId: "a".repeat(32),
+    };
     const { navigate, loaded } = makeRealRegistryIpc({
-      isArcaAgentContext: (ctx) => ctx === context,
-      getAgentContextForEvent: () => context,
+      isArcaAgentContext: (context) =>
+        isArcaAgentContext(identity, context, {
+          enabled: true,
+          managed: true,
+          serverTarget: identity.serverUrl,
+        }),
+      // Mirrors main.js: the renderer may name its session host; main owns the target.
+      getAgentContextForEvent: (_event, sourceHostId) => ({
+        serverTarget: identity.serverUrl,
+        sourceHostId: typeof sourceHostId === "string" ? sourceHostId : null,
+      }),
     });
-    assert.equal((await navigate("http://localhost:5173/", { force: true })).ok, true);
-    assert.deepEqual(loaded, ["http://localhost:5173/"]);
-    assert.equal((await navigate("http://10.0.0.1/", { force: true })).ok, false);
+    const url = "http://localhost:5173/";
+    // The address bar supplies no host, so it never qualifies, flagged or not.
+    assert.equal((await navigate(url, { force: true })).ok, false);
+    assert.equal((await navigate(url, { agent: true })).ok, false);
+    assert.deepEqual(loaded, []);
+    // A relay request naming the captured Arca host does; other hosts stay blocked.
+    assert.equal((await navigate(url, { force: true, sourceHostId: identity.hostId })).ok, true);
+    assert.deepEqual(loaded, [url]);
+    assert.equal((await navigate("http://10.0.0.1/", { sourceHostId: identity.hostId })).ok, false);
   });
 });
