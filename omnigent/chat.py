@@ -1100,6 +1100,17 @@ def _chat_with_server(
         agent_name = _attach_session_info(
             base_url=base_url, conversation_id=resume_conversation_id
         ).agent_name
+        if agent_name is None and initial_message is not None:
+            from omnigent.util.server_url import display_server_url
+
+            # --agent is rejected with --resume, so the generic "pass --agent"
+            # advice would be a dead end here.
+            raise _server_setup_error(
+                f"Could not read the agent of session {resume_conversation_id} from "
+                f"{display_server_url(base_url)}, so this headless resume cannot choose one. "
+                f"Resume it interactively (`{cli_invocation()} run --server <url> --resume "
+                f"{resume_conversation_id}`) or start a new session with --agent <name>."
+            )
     # A headless one-shot cannot answer the agent menu, so it fails with the
     # candidates instead.
     selected_agent = agent_name or _pick_agent(base_url, interactive=initial_message is None)
@@ -1426,6 +1437,15 @@ def _require_url_target_for_agent(target: str, agent_name: str | None) -> None:
         )
 
 
+def _discovery_error(base_url: str, path: str, detail: str) -> click.ClickException:
+    """Build the CLI error for an agent-discovery listing the client cannot use."""
+    from omnigent.util.server_url import display_server_url
+
+    return _server_setup_error(
+        f"Agent discovery failed: GET {path} on {display_server_url(base_url)} {detail}."
+    )
+
+
 def _discovery_get(base_url: str, path: str, params: dict[str, Any]) -> dict[str, Any]:
     """
     Fetch one agent-discovery listing from the server as JSON.
@@ -1433,8 +1453,9 @@ def _discovery_get(base_url: str, path: str, params: dict[str, Any]) -> dict[str
     :param base_url: Server base URL.
     :param path: Listing route, e.g. ``"/v1/agents"``.
     :param params: Query parameters for the listing.
-    :returns: The decoded JSON body.
-    :raises click.ClickException: If the server is unreachable.
+    :returns: The decoded JSON object.
+    :raises click.ClickException: If the server is unreachable, answers with an
+        HTTP error, or returns something other than a JSON object.
     """
     try:
         resp = _server_get(
@@ -1452,14 +1473,16 @@ def _discovery_get(base_url: str, path: str, params: dict[str, Any]) -> dict[str
     try:
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        from omnigent.util.server_url import display_server_url
-
-        raise click.ClickException(
-            f"Agent discovery failed: GET {path} on {display_server_url(base_url)} "
-            f"returned HTTP {exc.response.status_code}."
+        raise _discovery_error(
+            base_url, path, f"returned HTTP {exc.response.status_code}"
         ) from exc
-    body = resp.json()
-    return body if isinstance(body, dict) else {}
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise _discovery_error(base_url, path, "returned a non-JSON body") from exc
+    if not isinstance(body, dict):
+        raise _discovery_error(base_url, path, "returned an unexpected body shape")
+    return body
 
 
 def _session_agent_names(base_url: str) -> list[str]:
@@ -1514,11 +1537,8 @@ def _server_agent_names(base_url: str, *, stop_at: str | None = None) -> list[st
             return names
         last_id = page.get("last_id")
         if not last_id or last_id == after:
-            from omnigent.util.server_url import display_server_url
-
-            raise click.ClickException(
-                f"Agent discovery failed: GET /v1/agents on {display_server_url(base_url)} "
-                "reported more agents but no usable cursor to fetch them."
+            raise _discovery_error(
+                base_url, "/v1/agents", "reported more agents but no usable cursor to fetch them"
             )
         after = last_id
 

@@ -1885,15 +1885,6 @@ def test_pick_agent_without_registered_agents_is_a_clean_error(
     assert suppresses_recovery_hint(excinfo.value)
 
 
-def test_require_registered_agent_accepts_a_registered_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``--agent`` with a registered name is accepted as given."""
-    _serve_listings(monkeypatch, sessions=[], agent_pages=[_agents_page(["coder", "scribe"])])
-
-    assert _require_registered_agent("http://127.0.0.1:6767", "scribe") == "scribe"
-
-
 def test_require_registered_agent_rejects_an_unknown_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1972,18 +1963,45 @@ def test_chat_with_server_resume_uses_the_sessions_own_agent(
     assert captured["resume_conversation_id"] == "conv_1"
 
 
-def test_chat_with_server_resume_without_session_agent_falls_back_to_discovery(
+def _snapshot_without_agent(**_kw: object) -> chat_module._AttachSessionInfo:
+    """A session snapshot from an older server that omits ``agent_name``."""
+    return chat_module._AttachSessionInfo(runner_online=True, agent_name=None, harness=None)
+
+
+def test_chat_with_server_headless_resume_without_session_agent_is_a_clear_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An older snapshot without agent_name still discovers, headless rules intact."""
+    """A headless resume that cannot read the session's agent must not point at --agent.
+
+    ``--agent`` is rejected together with ``--resume``, so the generic discovery
+    error would send the user to a flag combination the CLI forbids.
+    """
     monkeypatch.setattr(chat_module, "_redirect_native_resume_if_needed", lambda **_kw: False)
-    monkeypatch.setattr(
-        chat_module,
-        "_attach_session_info",
-        lambda **_kw: chat_module._AttachSessionInfo(
-            runner_online=True, agent_name=None, harness=None
-        ),
-    )
+    monkeypatch.setattr(chat_module, "_attach_session_info", _snapshot_without_agent)
+
+    def _must_not_pick(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("agent discovery ran on a headless resume")
+
+    monkeypatch.setattr(chat_module, "_pick_agent", _must_not_pick)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        chat_module._chat_with_server(
+            "http://127.0.0.1:6767", None, initial_message="hi", resume_conversation_id="conv_1"
+        )
+
+    message = str(excinfo.value)
+    assert "session conv_1" in message
+    assert "--resume conv_1" in message
+    assert "pass --agent" not in message
+    assert suppresses_recovery_hint(excinfo.value)
+
+
+def test_chat_with_server_interactive_resume_without_session_agent_offers_the_menu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In the REPL the same older-server snapshot still falls back to the agent menu."""
+    monkeypatch.setattr(chat_module, "_redirect_native_resume_if_needed", lambda **_kw: False)
+    monkeypatch.setattr(chat_module, "_attach_session_info", _snapshot_without_agent)
     picked: dict[str, bool] = {}
 
     def _fake_pick(base_url: str, *, quiet: bool = False, interactive: bool = True) -> str:
@@ -1991,22 +2009,23 @@ def test_chat_with_server_resume_without_session_agent_falls_back_to_discovery(
         return "scribe"
 
     monkeypatch.setattr(chat_module, "_pick_agent", _fake_pick)
-    monkeypatch.setattr(chat_module, "_run_one_shot", lambda **_kw: None)
+    monkeypatch.setattr(chat_module, "_run_repl", lambda *_args, **_kw: None)
 
     chat_module._chat_with_server(
-        "http://127.0.0.1:6767", None, initial_message="hi", resume_conversation_id="conv_1"
+        "http://127.0.0.1:6767", None, initial_message=None, resume_conversation_id="conv_1"
     )
 
-    assert picked["interactive"] is False
+    assert picked["interactive"] is True
 
 
-def test_pick_agent_reports_a_failed_agent_listing_as_a_cli_error(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("failing_route", ["/v1/sessions", "/v1/agents"])
+def test_pick_agent_reports_a_failed_listing_as_a_cli_error(
+    monkeypatch: pytest.MonkeyPatch, failing_route: str
 ) -> None:
-    """An HTTP error from the agent listing (e.g. an older server) is a clean CLI error."""
+    """An HTTP error from either discovery listing is a clean CLI error, hint withheld."""
 
     def _get(url: str, **_kwargs: object) -> SimpleNamespace:
-        if url.endswith("/v1/sessions"):
+        if not url.endswith(failing_route):
             return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"data": []})
         request = httpx.Request("GET", url)
         response = httpx.Response(404, request=request)
@@ -2022,7 +2041,42 @@ def test_pick_agent_reports_a_failed_agent_listing_as_a_cli_error(
         _pick_agent("http://127.0.0.1:6767")
 
     message = str(excinfo.value)
-    assert "/v1/agents" in message and "404" in message
+    assert failing_route in message and "404" in message
+    assert suppresses_recovery_hint(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    [
+        (ValueError("not json"), "non-JSON body"),
+        (["not", "an", "object"], "unexpected body shape"),
+    ],
+)
+def test_pick_agent_reports_an_unusable_agent_listing_as_a_cli_error(
+    monkeypatch: pytest.MonkeyPatch, body: object, detail: str
+) -> None:
+    """A 200 with a non-JSON or non-object body is a discovery error, not a crash."""
+
+    def _get(url: str, **_kwargs: object) -> SimpleNamespace:
+        if url.endswith("/v1/sessions"):
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"data": []})
+
+        def _json() -> object:
+            if isinstance(body, Exception):
+                raise body
+            return body
+
+        return SimpleNamespace(raise_for_status=lambda: None, json=_json)
+
+    monkeypatch.setattr(chat_module.httpx, "get", _get)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _pick_agent("http://127.0.0.1:6767")
+
+    message = str(excinfo.value)
+    assert "/v1/agents" in message and detail in message
+    assert "No agents are registered" not in message
+    assert suppresses_recovery_hint(excinfo.value)
 
 
 def test_run_prompt_url_target_runs_the_requested_agent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2046,6 +2100,14 @@ def test_run_prompt_url_target_runs_the_requested_agent(monkeypatch: pytest.Monk
         "agent_name": "scribe",
         "prompt": "hi",
     }
+
+
+def test_run_prompt_rejects_agent_name_for_a_local_agent_path(tmp_path: Path) -> None:
+    """The headless entry point applies the same local-path guard as ``run_chat``."""
+    with pytest.raises(click.ClickException, match="--agent"):
+        chat_module.run_prompt(
+            str(tmp_path / "agent.yaml"), None, prompt="hi", agent_name="scribe"
+        )
 
 
 def test_run_chat_checks_agent_flag_against_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
