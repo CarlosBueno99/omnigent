@@ -22,6 +22,8 @@ _SHADOWED_DEPENDENCY = "anyio"
 
 _ENV_TO_CLEAR = (
     "PYTHONSAFEPATH",
+    "OMNIGENT_REQUIRE_WRAPPER",
+    "OMNIGENT_WRAPPER_BYPASS",
     "DATABRICKS_TOKEN",
     "DATABRICKS_CONFIG_PROFILE",
     "ANTHROPIC_API_KEY",
@@ -158,3 +160,23 @@ def test_cli_dispatch_ignores_workspace_shadow_of_runtime_dependency(
         f"--- stdout (clean) ---\n{control.stdout}"
         f"--- stderr (workspace) ---\n{shadowed.stderr}"
     )
+
+
+def test_console_entry_appends_workspace_after_startup_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``main()`` adds the launch directory behind every entry the interpreter started with."""
+    from omnigent.cli import main
+
+    for key in _ENV_TO_CLEAR:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+    startup_path = [entry for entry in sys.path if entry != str(tmp_path)]
+    monkeypatch.setattr(sys, "path", list(startup_path))
+    monkeypatch.setattr(sys, "argv", ["omnigent", "--version"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 0
+    assert sys.path == [*startup_path, str(tmp_path)]

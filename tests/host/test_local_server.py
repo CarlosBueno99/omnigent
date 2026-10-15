@@ -486,9 +486,8 @@ def test_ensure_local_omnigent_server_spawns_when_none_healthy(
     assert env["DATABRICKS_CONFIG_PROFILE"] == "ambient"
 
 
-@pytest.mark.parametrize("entrypoint", ["module", "console"])
 def test_spawn_local_server_preserves_runtime_and_workspace(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, entrypoint: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Keep the runtime, cwd and state paths; workspace tools resolve after installed packages."""
     workspace = tmp_path / "workspace"
@@ -533,11 +532,7 @@ def test_spawn_local_server_preserves_runtime_and_workspace(
         with contextlib.redirect_stdout(io.StringIO()):
             try:
                 sys.argv = ["omnigent.cli", "--help"]
-                if os.environ["OMNIGENT_TEST_ENTRYPOINT"] == "module":
-                    runpy.run_module("omnigent.cli", run_name="__main__")
-                else:
-                    from omnigent.cli import main
-                    main()
+                runpy.run_module("omnigent.cli", run_name="__main__")
             except SystemExit as exc:
                 assert exc.code == 0, exc.code
 
@@ -558,7 +553,7 @@ def test_spawn_local_server_preserves_runtime_and_workspace(
     result = subprocess.run(
         [*args[:module_index], "-c", probe],
         cwd=kwargs.get("cwd"),
-        env={**probe_env, "OMNIGENT_TEST_ENTRYPOINT": entrypoint},
+        env=probe_env,
         capture_output=True,
         text=True,
         check=True,

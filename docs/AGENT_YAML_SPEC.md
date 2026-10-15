@@ -683,8 +683,11 @@ For client-provided tools, use `runtime: client` and do not set `callable`.
 
 The CLI appends its working directory to Python's import path, so a `callable:`
 module that lives in the project resolves without being installed. Installed
-packages take precedence: a project module with the same top-level name as an
-installed package is not imported in its place.
+packages take precedence over that entry: a project package whose top-level name
+collides with an installed package (for example a project `agents/` next to the
+installed `agents` distribution) is not imported in its place, and its callables
+fail to resolve until the project package is renamed. Entries you add through
+`PYTHONPATH` keep their usual position ahead of installed packages.
 
 ### Linux desktop keyrings
 
