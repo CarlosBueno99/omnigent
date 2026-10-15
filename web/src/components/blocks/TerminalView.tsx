@@ -37,6 +37,7 @@ import {
   subscribeTerminalTheme,
   type TerminalThemeMode,
 } from "@/lib/terminalThemePreferences";
+import { resumeErrorText } from "@/lib/resumeErrorText";
 import { getSessionHost, markHostKeyless, isHostKeyless } from "@/lib/sessionHost";
 import {
   TerminalClipboardPrompt,
@@ -850,11 +851,6 @@ function StatusOverlay({
       {state.kind === "error" && <span>Bridge error</span>}
     </div>
   );
-}
-
-function resumeErrorText(error: unknown): string {
-  if (error instanceof Error && error.message) return `Couldn't resume session: ${error.message}`;
-  return "Couldn't resume session.";
 }
 
 /**

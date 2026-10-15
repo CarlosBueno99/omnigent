@@ -17,6 +17,7 @@ import { FileViewerContext, type OpenFileOptions } from "@/shell/FileViewerConte
 import { toast } from "sonner";
 import * as host from "@/lib/host";
 import { isHostKeyless, setSessionHost } from "@/lib/sessionHost";
+import { ApiError } from "@/lib/sessionsApi";
 import { resolveInitialAttachUrl, watchDirectUpgrade } from "@/lib/terminals";
 import {
   readTerminalClipboardPreference,
@@ -1414,6 +1415,30 @@ describe("closed bridge overlay", () => {
     // Failed resume must not remount xterm: the original closed bridge stays
     // visible so the user can retry after fixing the host.
     expect(terminalSessionMock.instances).toHaveLength(1);
+  });
+
+  it("explains a wrong_replica resume failure instead of echoing the routing error", async () => {
+    // The sharded server's wrong_replica message is a routing instruction for
+    // the client, not something the user can act on verbatim.
+    const onResume = vi
+      .fn()
+      .mockRejectedValue(
+        new ApiError("session runner is on another replica; retry", 400, "wrong_replica"),
+      );
+    render(<TerminalView sessionId="conv_abc" terminalId="terminal_bash_s1" onResume={onResume} />);
+    await waitFor(() => expect(terminalSessionMock.instances).toHaveLength(1));
+
+    act(() => {
+      terminalSessionMock.instances[0].onState({ kind: "closed", reason: "stopped", code: 4405 });
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^resume session$/i }));
+
+    await waitFor(() => expect(onResume).toHaveBeenCalledTimes(1));
+    await screen.findByText(
+      "Couldn't resume session: the session's runner isn't reachable from this server right now. Try again in a moment.",
+    );
+    expect(screen.queryByText(/on another replica/i)).toBeNull();
+    expect(screen.getByRole("button", { name: /^resume session$/i })).toBeEnabled();
   });
 });
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { authenticatedFetch } from "../lib/identity";
+import { authenticatedFetch, WRONG_REPLICA_CODE } from "../lib/identity";
 import { useSessionRunnerOnline } from "@/hooks/RunnerHealthProvider";
 import { isTempConvId } from "@/lib/tempConversationId";
 import { terminalInfoFromResource, terminalsQueryKey, type TerminalInfo } from "@/lib/terminals";
@@ -168,6 +168,22 @@ interface UseTerminalsOptions {
 const SOFT_TERMINAL_LIST_STATUSES = new Set([404, 409, 502, 503]);
 
 /**
+ * Whether `res` is a sharded server's structured ``400 wrong_replica`` miss —
+ * the runner is live but on a replica this request did not reach. That is the
+ * soft "not reachable from here" case above, not a bad request.
+ */
+async function isWrongReplica400(res: Response): Promise<boolean> {
+  if (res.status !== 400) return false;
+  try {
+    const body = (await res.json()) as { error?: { code?: string } };
+    return body?.error?.code === WRONG_REPLICA_CODE;
+  } catch {
+    // Non-JSON body — a plain bad request, not the routing miss.
+    return false;
+  }
+}
+
+/**
  * Fetch the current terminal resources for a conversation over HTTP.
  *
  * This is the authoritative snapshot the server builds from the
@@ -192,14 +208,15 @@ const SOFT_TERMINAL_LIST_STATUSES = new Set([404, 409, 502, 503]);
  * :param conversationId: Session/conversation identifier,
  *     e.g. ``"conv_abc123"``.
  * :returns: The mapped terminals, or an empty array when the runner is
- *     not yet reachable (see :data:`SOFT_TERMINAL_LIST_STATUSES`).
+ *     not yet reachable (see :data:`SOFT_TERMINAL_LIST_STATUSES`) or the
+ *     sharded server answered ``wrong_replica`` (see :func:`isWrongReplica400`).
  * :raises Error: On a non-soft HTTP error status.
  */
 export async function fetchTerminals(conversationId: string): Promise<TerminalInfo[]> {
   const res = await authenticatedFetch(
     `/v1/sessions/${encodeURIComponent(conversationId)}/resources/terminals?order=asc&limit=1000`,
   );
-  if (SOFT_TERMINAL_LIST_STATUSES.has(res.status)) return [];
+  if (SOFT_TERMINAL_LIST_STATUSES.has(res.status) || (await isWrongReplica400(res))) return [];
   if (!res.ok) throw new Error(`terminals fetch failed: ${res.status} ${res.statusText}`);
   const json = (await res.json()) as { data?: unknown };
   const rows = Array.isArray(json.data) ? json.data : [];

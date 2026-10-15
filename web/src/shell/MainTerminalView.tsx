@@ -22,6 +22,7 @@ import {
   terminalTabKey,
   useTerminals,
 } from "@/hooks/useTerminals";
+import { resumeErrorText } from "@/lib/resumeErrorText";
 import { useTerminalFirst } from "./TerminalFirstContext";
 import { TerminalStatusBadge } from "./terminalStatus";
 import { useTerminalStatuses } from "./useTerminalStatuses";
@@ -292,9 +293,4 @@ export function MainTerminalView({
       </div>
     </div>
   );
-}
-
-function resumeErrorText(error: unknown): string {
-  if (error instanceof Error && error.message) return `Couldn't resume session: ${error.message}`;
-  return "Couldn't resume session.";
 }

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { useLayoutEffect, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type TerminalInfo, useTerminals } from "@/hooks/useTerminals";
+import { ApiError } from "@/lib/sessionsApi";
 import { MainTerminalView } from "./MainTerminalView";
 import type { TerminalFirstContextValue } from "./TerminalFirstContext";
 import { TerminalFirstContextProvider } from "./TerminalFirstContext";
@@ -252,6 +253,29 @@ describe("MainTerminalView — terminal-first SDK sessions", () => {
 
     expect(await screen.findByText("Couldn't resume session: host offline")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resume session" })).toBeEnabled();
+  });
+
+  it("does not surface the raw wrong_replica routing error to the user", async () => {
+    // retrySession rejects with the server's wrong_replica ApiError, whose
+    // message is a routing instruction for the client; the stopped state must
+    // explain the failure in user terms and keep Resume actionable.
+    const onResume = vi
+      .fn()
+      .mockRejectedValue(
+        new ApiError("session runner is on another replica; retry", 400, "wrong_replica"),
+      );
+    renderView({ terminals: [], runnerOnline: false, onResume });
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume session" }));
+
+    await waitFor(() => expect(onResume).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByText(
+        "Couldn't resume session: the session's runner isn't reachable from this server right now. Try again in a moment.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume session" })).toBeEnabled();
+    expect(screen.queryByText(/on another replica/i)).toBeNull();
   });
 });
 

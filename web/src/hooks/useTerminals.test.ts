@@ -324,9 +324,35 @@ describe("fetchTerminals", () => {
     },
   );
 
+  it("treats a sharded wrong_replica 400 as a not-yet-reachable runner (no throw)", async () => {
+    // On a multi-replica sandbox the list GET returns 400 wrong_replica while
+    // the runner is on another replica; the seed must land empty like 409.
+    fetchMock.mockResolvedValueOnce(
+      mockResponse(
+        {
+          error: { code: "wrong_replica", message: "session runner is on another replica; retry" },
+        },
+        { ok: false, status: 400 },
+      ),
+    );
+    expect(await fetchTerminals("conv_abc")).toEqual([]);
+  });
+
   it("throws on a hard error status so React Query can retry", async () => {
     fetchMock.mockResolvedValueOnce(mockResponse(null, { ok: false, status: 500 }));
     await expect(fetchTerminals("conv_abc")).rejects.toThrow(/500/);
+  });
+
+  it("still throws on a 400 that is not the structured wrong_replica miss", async () => {
+    // Only the sharded routing miss is soft; a genuine bad request must keep
+    // surfacing as an error instead of reading as an empty inventory.
+    fetchMock.mockResolvedValueOnce(
+      mockResponse(
+        { error: { code: "invalid_input", message: "bad order" } },
+        { ok: false, status: 400 },
+      ),
+    );
+    await expect(fetchTerminals("conv_abc")).rejects.toThrow(/400/);
   });
 });
 
