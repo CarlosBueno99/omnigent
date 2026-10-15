@@ -99,10 +99,10 @@ def _pane_claude_env(advert: dict[str, str]) -> dict[str, str] | None:
 
 
 def _assistant_replied(client: httpx.Client, session_id: str, token: str) -> bool:
-    items = client.get(
-        f"/v1/sessions/{session_id}/items", params={"limit": 100, "order": "asc"}
-    ).json()
-    for item in items.get("data", []):
+    resp = client.get(f"/v1/sessions/{session_id}/items", params={"limit": 100, "order": "asc"})
+    if resp.status_code != 200:
+        return False
+    for item in resp.json().get("data", []):
         if item.get("type") != "message" or item.get("role") != "assistant":
             continue
         blocks = item.get("content") or []

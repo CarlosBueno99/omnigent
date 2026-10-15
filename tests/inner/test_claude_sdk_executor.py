@@ -5627,8 +5627,9 @@ def test_claude_internal_write_roots_follow_the_configured_claude_home(
 
     roots = _claude_internal_write_roots()
 
-    assert profile / "sessions" in roots
-    assert home / ".claude" / "sessions" not in roots
+    for name in ("backups", "plugins", "session-env", "sessions"):
+        assert profile / name in roots
+        assert home / ".claude" / name not in roots
 
 
 def test_claude_internal_write_files_follow_the_configured_claude_home(

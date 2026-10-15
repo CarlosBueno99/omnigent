@@ -21,7 +21,6 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-import subprocess
 import time
 import uuid
 from collections.abc import Iterator
@@ -35,10 +34,7 @@ import pytest
 from playwright.sync_api import Page, expect
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
-from tests._helpers.compat import apply_runner_env, compat_runner_cwd, runner_executable
-from tests._helpers.host import Host
-from tests._helpers.live_server import isolated_process_env, terminate_process
+from tests._helpers.host import Host, isolated_host
 from tests.e2e_ui.conftest import (
     _CLAUDE_MOCK_MODEL,
     configure_mock_llm,
@@ -96,33 +92,11 @@ def claude_config_dir_host(root: Path, base_url: str, mock_url: str) -> Iterator
     The provider config routes Claude Code to *mock_url*; the daemon registers
     against *base_url* with a fixed identity so the journey can name its host.
     """
-    home = root / "home"
-    config_home = root / "omnigent-config"
     claude_config = root / "claude-config"
     workspace = root / "workspace"
-    for directory in (home, config_home, claude_config, workspace):
+    for directory in (claude_config, workspace):
         directory.mkdir(parents=True, exist_ok=True)
     (workspace / "README.md").write_text("fork-history e2e workspace\n")
-    name = f"claude-config-dir-{HOST_ID[:8]}"
-    (config_home / "config.yaml").write_text(
-        json.dumps(
-            {
-                "host": {"host_id": HOST_ID, "name": name},
-                "runner": {"idle_timeout_s": 0},
-                "providers": {
-                    "e2e-claude": {
-                        "kind": "key",
-                        "default": ["anthropic"],
-                        "anthropic": {
-                            "base_url": mock_url,
-                            "api_key": "mock-key",
-                            "models": {"default": _CLAUDE_MOCK_MODEL},
-                        },
-                    }
-                },
-            }
-        )
-    )
     (claude_config / ".claude.json").write_text(
         json.dumps(
             {
@@ -131,36 +105,35 @@ def claude_config_dir_host(root: Path, base_url: str, mock_url: str) -> Iterator
             }
         )
     )
-    log_path = root / "host.log"
-    env = isolated_process_env(
-        home,
-        {
+    with isolated_host(
+        root,
+        base_url,
+        host_id=HOST_ID,
+        name=f"claude-config-dir-{HOST_ID[:8]}",
+        env={
             "CLAUDE_CONFIG_DIR": str(claude_config),
-            "OMNIGENT_CONFIG_HOME": str(config_home),
-            "OMNIGENT_HOST_ID": HOST_ID,
-            "OMNIGENT_HOST_NAME": name,
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            PROCESS_LOG_FILE_ENV_VAR: str(log_path),
             "ANTHROPIC_BASE_URL": None,
             "ANTHROPIC_AUTH_TOKEN": None,
             "CLAUDE_CODE_OAUTH_TOKEN": None,
             "LLM_API_KEY": None,
         },
-        None,
-    )
-    log_path.write_bytes(b"")
-    with log_path.open("ab") as log:
-        proc = subprocess.Popen(
-            [runner_executable(), "-m", "omnigent.host._daemon_entry", "--server", base_url],
-            env=apply_runner_env(env),
-            cwd=compat_runner_cwd(),
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
-        try:
-            yield ConfigDirHost(Host(proc, HOST_ID, home, log_path), workspace, claude_config)
-        finally:
-            terminate_process(proc)
+        config={
+            "runner": {"idle_timeout_s": 0},
+            "providers": {
+                "e2e-claude": {
+                    "kind": "key",
+                    "default": ["anthropic"],
+                    "anthropic": {
+                        "base_url": mock_url,
+                        "api_key": "mock-key",
+                        "models": {"default": _CLAUDE_MOCK_MODEL},
+                    },
+                }
+            },
+        },
+    ) as host:
+        yield ConfigDirHost(host, workspace, claude_config)
 
 
 def script_history_dependent_recall(mock_url: str, code_word: str) -> None:
@@ -247,7 +220,8 @@ def assistant_texts(client: httpx.Client, session_id: str) -> list[str]:
     resp = client.get(
         f"/v1/sessions/{session_id}/items", params={"limit": 100, "order": "asc"}, timeout=30.0
     )
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        return []
     texts: list[str] = []
     for item in resp.json().get("data", []):
         if item.get("role") != "assistant":

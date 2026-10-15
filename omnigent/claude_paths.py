@@ -2,6 +2,11 @@
 
 ``CLAUDE_CONFIG_DIR`` selects a Claude profile. Anything Omnigent reads or writes
 on Claude's behalf has to follow the same choice, or it lands in the wrong profile.
+
+These helpers read the selector from this process's environment. The launch-aware
+lookup of Claude's global config (legacy ``.config.json``, custom-OAuth variants,
+Claude's own working directory) stays in
+:func:`omnigent.harnesses.claude_native.bridge.claude_global_config_path`.
 """
 
 from __future__ import annotations
@@ -18,8 +23,8 @@ def _configured_dir() -> Path | None:
 def claude_config_dir() -> Path:
     """Return Claude's config dir: ``$CLAUDE_CONFIG_DIR`` when set, else ``~/.claude``.
 
-    A ``~``-relative value is expanded as a shell would, like the resolvers this
-    helper replaced; Claude itself joins such a value to its own working directory.
+    A ``~``-prefixed value is expanded; Claude itself resolves such a value relative
+    to its own working directory.
 
     :returns: The directory holding ``settings.json``, ``projects/`` and ``sessions/``.
     """
