@@ -1358,19 +1358,45 @@ def test_transcript_mirrors_prompt_blocked_by_hook_from_notice_text(tmp_path: Pa
     assert items[1].data["message"].endswith("hook blocked it.\n\nBlocked: test")
 
 
+_HEADER = "UserPromptSubmit operation blocked by hook:\n"
+
+
 @pytest.mark.parametrize(
-    "reason,prompt",
-    [("a\n\nOriginal prompt: b", "c"), ("No.", "line one\n\nOriginal prompt: quoted")],
-    ids=["separator-in-reason", "separator-in-prompt"],
+    "entry,expected_reason",
+    [
+        (
+            _notice_only_blocked_prompt_entry("a\n\nOriginal prompt: b", "c"),
+            "a\n\nOriginal prompt: b\n\nOriginal prompt: c",
+        ),
+        (
+            _notice_only_blocked_prompt_entry("No.", "line one\n\nOriginal prompt: quoted"),
+            "No.\n\nOriginal prompt: line one\n\nOriginal prompt: quoted",
+        ),
+        ({"type": "system", "subtype": "informational", "content": f"{_HEADER}No."}, "No."),
+        (_blocked_prompt_entry("No.", "", content=f"{_HEADER}No."), "No."),
+        (
+            _blocked_prompt_entry(
+                "Blocked.",
+                "hi",
+                content=f"{_HEADER}Blocked!\n\nOriginal prompt: x\n\nOriginal prompt: hi",
+            ),
+            "Blocked.",
+        ),
+    ],
+    ids=[
+        "separator-in-reason",
+        "separator-in-prompt",
+        "notice-without-prompt",
+        "structured-without-prompt",
+        "structured-reason-mismatch",
+    ],
 )
-def test_transcript_keeps_an_ambiguous_notice_only_block_for_the_server(
-    tmp_path: Path, reason: str, prompt: str
+def test_transcript_emits_only_the_notice_when_the_prompt_is_unrecoverable(
+    tmp_path: Path, entry: dict[str, Any], expected_reason: str
 ) -> None:
-    """Without a structured reason, a repeated separator makes the split a guess: notice only."""
+    """A block whose prompt cannot be split out unambiguously yields the notice alone."""
     transcript = tmp_path / "session.jsonl"
-    transcript.write_text(
-        _transcript_line(_notice_only_blocked_prompt_entry(reason, prompt)), encoding="utf-8"
-    )
+    transcript.write_text(_transcript_line(entry), encoding="utf-8")
 
     _cursor, current_response_id, items = read_transcript_items_since(
         transcript, 0, agent_name="Claude", current_response_id="active"
@@ -1379,11 +1405,28 @@ def test_transcript_keeps_an_ambiguous_notice_only_block_for_the_server(
     assert current_response_id == "active"
     assert [item.item_type for item in items] == ["error"]
     assert items[0].data["code"] == "native_prompt_blocked_by_hook"
-    assert (
-        items[0]
-        .data["message"]
-        .endswith(f"hook blocked it.\n\n{reason}\n\nOriginal prompt: {prompt}")
+    assert items[0].data["message"].endswith(f"hook blocked it.\n\n{expected_reason}")
+
+
+def test_transcript_splits_on_the_only_separator_when_the_structured_reason_does_not_anchor(
+    tmp_path: Path,
+) -> None:
+    """A reason reformatted in the notice still yields the message when one separator remains."""
+    entry = _blocked_prompt_entry(
+        "Blocked: test ",
+        "BLOCKME hello",
+        content=f"{_HEADER}Blocked: test\n\nOriginal prompt: BLOCKME hello",
     )
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(_transcript_line(entry), encoding="utf-8")
+
+    _cursor, _current_response_id, items = read_transcript_items_since(
+        transcript, 0, agent_name="Claude", current_response_id="active"
+    )
+
+    assert [item.item_type for item in items] == ["message", "error"]
+    assert items[0].data["content"] == [{"type": "input_text", "text": "BLOCKME hello"}]
+    assert items[1].data["message"].endswith("hook blocked it.\n\nBlocked: test")
 
 
 @pytest.mark.parametrize(
@@ -1393,21 +1436,13 @@ def test_transcript_keeps_an_ambiguous_notice_only_block_for_the_server(
         _blocked_prompt_entry(
             "No.", "hi", promptSubmitEnding={"ending": {"kind": "stopped_by_hook"}}
         ),
-        _blocked_prompt_entry(
-            "No.", "", content="UserPromptSubmit operation blocked by hook:\nNo."
-        ),
-        {
-            "type": "system",
-            "subtype": "informational",
-            "content": "UserPromptSubmit operation blocked by hook:\nNo.",
-        },
     ],
-    ids=["other-notice", "not-a-block", "prompt-missing", "notice-without-prompt"],
+    ids=["other-notice", "not-a-block"],
 )
 def test_transcript_skips_system_records_without_a_blocked_prompt(
     tmp_path: Path, entry: dict[str, Any]
 ) -> None:
-    """Only a hook block that names its prompt becomes conversation items."""
+    """Only a hook block becomes conversation items."""
     transcript = tmp_path / "session.jsonl"
     transcript.write_text(_transcript_line(entry), encoding="utf-8")
 

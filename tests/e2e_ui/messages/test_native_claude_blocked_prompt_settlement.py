@@ -80,7 +80,11 @@ def hook_blocked_claude_session(
     workspaces_root.mkdir(parents=True, exist_ok=True)
     # A killed run leaves its workspace behind; anything an hour old is not in use.
     for stale in workspaces_root.iterdir():
-        if stale.is_dir() and time.time() - stale.stat().st_mtime > 3600:
+        try:
+            is_stale = stale.is_dir() and time.time() - stale.stat().st_mtime > 3600
+        except OSError:
+            continue
+        if is_stale:
             shutil.rmtree(stale, ignore_errors=True)
     workspace = workspaces_root / uuid.uuid4().hex[:8]
     hooks_dir = workspace / ".claude" / "hooks"

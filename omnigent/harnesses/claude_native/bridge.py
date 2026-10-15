@@ -8214,32 +8214,28 @@ def _blocked_prompt_transcript_items(
     :param line_number: One-based transcript line number.
     :param record_offset: Byte offset where the transcript record
         starts, or ``None`` for legacy line-cursor reads.
-    :returns: The user message and the notice; only the notice when a
-        notice-only record cannot be split unambiguously; no items when
-        the record names no prompt.
+    :returns: The user message and the notice, or only the notice when
+        the prompt cannot be recovered from the record unambiguously.
     """
     content = entry.get("content")
     if not isinstance(content, str) or not content.startswith(_BLOCKED_PROMPT_HEADER):
         return []
     body = content.removeprefix(_BLOCKED_PROMPT_HEADER)
-    reason = outcome.get("reason")
-    ambiguous = False
-    if isinstance(reason, str) and body.startswith(reason + _BLOCKED_PROMPT_SEPARATOR):
+    structured = outcome.get("reason")
+    structured = structured if isinstance(structured, str) else None
+    if structured is not None and body.startswith(structured + _BLOCKED_PROMPT_SEPARATOR):
         # The structured reason marks where the prompt starts even when either
         # one contains the separator text.
-        prompt = body[len(reason + _BLOCKED_PROMPT_SEPARATOR) :]
-    elif isinstance(reason, str) or body.count(_BLOCKED_PROMPT_SEPARATOR) <= 1:
+        reason, prompt = structured, body[len(structured + _BLOCKED_PROMPT_SEPARATOR) :]
+    elif body.count(_BLOCKED_PROMPT_SEPARATOR) == 1:
         notice_reason, _separator, prompt = body.partition(_BLOCKED_PROMPT_SEPARATOR)
-        if not isinstance(reason, str):
-            reason = notice_reason
+        reason = structured if structured is not None else notice_reason
     else:
-        # A notice-only record whose reason or prompt repeats the separator
-        # cannot be split without guessing: leave the queued message to the
-        # server's own settlement and show the hook's whole output instead.
-        ambiguous, reason, prompt = True, body, ""
+        # No separator, or a repeated one with nothing to anchor on: any split
+        # is a guess, so emit only the notice and leave the queued message to
+        # the server's own settlement.
+        reason, prompt = (structured if structured is not None else body), ""
     prompt = _unwrap_pasted_content_markers(prompt)
-    if not prompt.strip() and not ambiguous:
-        return []
     source_key = _transcript_source_key(entry, line_number, record_offset)
     response_id = _response_id_from_source(source_key)
     notice = _BLOCKED_PROMPT_NOTICE
