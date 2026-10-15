@@ -41,7 +41,7 @@ from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import (
     SqlAlchemyPermissionStore,
 )
-from tests.server.conftest import ControllableMockClient, _app_client
+from tests.server.conftest import ControllableMockClient
 from tests.server.helpers import (
     build_agent_bundle,
     create_test_agent,
@@ -83,6 +83,7 @@ def _build_auth_app(db_uri: str, tmp_path: Path, **extra: Any) -> FastAPI:
 
 @pytest.fixture()
 def auth_app(
+    request: pytest.FixtureRequest,
     runtime_init: None,
     db_uri: str,
     tmp_path: Path,
@@ -92,37 +93,15 @@ def auth_app(
     Mirrors the shared ``app`` fixture from ``conftest.py`` but adds
     a :class:`SqlAlchemyPermissionStore` so
     :class:`UnifiedAuthProvider` and permission checks are active on
-    all session routes.
+    all session routes. Indirect parametrization may pass extra
+    ``create_app`` keyword arguments.
 
+    :param request: Fixture request carrying optional ``create_app`` overrides.
     :param runtime_init: Fixture that initializes the runtime with a mock LLM.
     :param db_uri: Test database URI.
     :param tmp_path: Pytest temporary directory fixture.
     """
-    return _build_auth_app(db_uri, tmp_path)
-
-
-_POOL_RUNNER_TOKEN = "pool-runner-token"
-
-
-@pytest.fixture()
-def pool_token_auth_app(
-    runtime_init: None,
-    db_uri: str,
-    tmp_path: Path,
-) -> FastAPI:
-    """Like :func:`auth_app`, but trusts one server-configured runner tunnel token."""
-    return _build_auth_app(db_uri, tmp_path, runner_tunnel_tokens=frozenset({_POOL_RUNNER_TOKEN}))
-
-
-@pytest_asyncio.fixture()
-async def pool_token_auth_client(
-    pool_token_auth_app: FastAPI,
-    mock_llm: ControllableMockClient,
-    tmp_path: Path,
-) -> AsyncIterator[httpx.AsyncClient]:
-    """HTTP client wired to :func:`pool_token_auth_app`."""
-    async with _app_client(pool_token_auth_app, mock_llm, tmp_path) as client:
-        yield client
+    return _build_auth_app(db_uri, tmp_path, **getattr(request, "param", {}))
 
 
 @pytest.fixture()
@@ -710,6 +689,7 @@ _CLAUDE_BYPASS_EVENT = {
 }
 _BOUND_RUNNER_TOKEN = "repro-bound-runner-token"
 _UNRELATED_RUNNER_TOKEN = "repro-unrelated-runner-token"
+_POOL_RUNNER_TOKEN = "pool-runner-token"
 
 
 async def _snapshot_as(client: httpx.AsyncClient, session_id: str, user: str) -> dict[str, Any]:
@@ -862,13 +842,19 @@ async def test_owner_and_bound_runner_persist_native_approval_settings_via_event
     assert snapshot["labels"]["omnigent.codex_native.approval_mode"] == "full-access"
 
 
+@pytest.mark.parametrize(
+    "auth_app",
+    [{"runner_tunnel_tokens": frozenset({_POOL_RUNNER_TOKEN})}],
+    indirect=True,
+    ids=["pool-token"],
+)
 async def test_pool_runner_token_persists_native_approval_settings_via_events(
-    pool_token_auth_client: httpx.AsyncClient,
+    auth_client: httpx.AsyncClient,
 ) -> None:
     """A runner presenting a server-configured tunnel token has runner authority."""
     from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER
 
-    client = pool_token_auth_client
+    client = auth_client
     agent = await create_test_agent(client, user="bryan")
     session_id = (await _create_session_as(client, agent["id"], "user-a"))["id"]
     resp = await _grant_permission(
