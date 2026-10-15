@@ -11,6 +11,7 @@ runner rides out the transient 429 instead of failing the turn with
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from collections.abc import Callable, Iterator
@@ -62,7 +63,9 @@ class ThrottledStack:
 
     def arm_throttle(self) -> None:
         """Start answering spec fetches with HTTP 429 for the throttle window."""
-        self.flag.write_text(str(time.time()))
+        pending = self.flag.with_suffix(".tmp")
+        pending.write_text(str(time.time()))
+        os.replace(pending, self.flag)
 
     def throttled_paths(self) -> list[str]:
         return edge.served_429s(self.counter)

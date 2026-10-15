@@ -198,6 +198,28 @@ async def test_request_with_429_retry_budget_counts_request_latency(
 
 
 @pytest.mark.asyncio
+async def test_request_with_429_retry_budget_floors_tiny_hints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under a budget a tiny ``Retry-After`` cannot drive back-to-back retries."""
+    clock = _fake_retry_clock(monkeypatch)
+    attempts = 0
+
+    async def _send() -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(429, headers={"Retry-After": "0.01"})
+
+    response = await native_terminal.request_with_429_retry(
+        _send, delays_s=(0.5, 1.0), max_retry_after_s=5.0, budget_s=2.0
+    )
+
+    assert response.status_code == 429
+    assert attempts == 5
+    assert clock.sleeps == [0.5] * 4
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("delays_s", [(0.5, 0.0), ()])
 async def test_request_with_429_retry_budget_rejects_a_non_positive_repeat_delay(
     delays_s: tuple[float, ...],
