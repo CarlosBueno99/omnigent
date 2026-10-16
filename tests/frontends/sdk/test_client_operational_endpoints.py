@@ -18,13 +18,6 @@ from omnigent_client._errors import OmnigentError
 from omnigent.server.schemas import UsageReport
 
 
-def _read(value: object, key: str) -> object:
-    """Read *key* from a raw JSON dict or an attribute of a typed model."""
-    if isinstance(value, dict):
-        return value[key]
-    return getattr(value, key)
-
-
 def _mock_client(
     handler: Callable[[httpx.Request], httpx.Response],
 ) -> tuple[OmnigentClient, httpx.AsyncBaseTransport, httpx.MockTransport]:
@@ -71,8 +64,11 @@ async def test_info_returns_server_info() -> None:
         await _close(client, original, mock_transport)
 
     assert calls == ["GET /v1/info"]
-    assert _read(info, "server_version") == "0.19.0.dev0"
-    assert _read(info, "single_user") is True
+    assert info == {
+        "server_version": "0.19.0.dev0",
+        "single_user": True,
+        "accounts_enabled": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -100,9 +96,9 @@ async def test_usage_returns_usage_report() -> None:
 
     assert calls == ["GET /v1/usage"]
     assert isinstance(usage, UsageReport)
-    assert _read(usage, "total_cost_usd") == 3.0
-    assert _read(usage, "cost_today") == 0.5
-    assert _read(usage, "cost_last_7d") == 1.25
+    assert usage.total_cost_usd == 3.0
+    assert usage.cost_today == 0.5
+    assert usage.cost_last_7d == 1.25
 
 
 @pytest.mark.asyncio
@@ -161,9 +157,7 @@ async def test_list_hosts_returns_hosts() -> None:
         await _close(client, original, mock_transport)
 
     assert calls == ["GET /v1/hosts"]
-    rows = hosts["hosts"] if isinstance(hosts, dict) else hosts
-    assert [_read(row, "host_id") for row in rows] == ["host_a1"]
-    assert _read(rows[0], "status") == "online"
+    assert hosts == [host]
 
 
 @pytest.mark.asyncio

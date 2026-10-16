@@ -1473,13 +1473,6 @@ async def test_list_preserves_host_id_on_rows() -> None:
 # ── session metadata: cost / usage / lineage / kind ──────────────────
 
 
-def _read(value: object, key: str) -> object:
-    """Read *key* from a raw JSON dict or an attribute of a typed model."""
-    if isinstance(value, dict):
-        return value[key]
-    return getattr(value, key)
-
-
 @pytest.mark.asyncio
 async def test_get_parses_cost_usage_and_lineage_metadata() -> None:
     usage_by_model = {
@@ -1501,7 +1494,7 @@ async def test_get_parses_cost_usage_and_lineage_metadata() -> None:
                 "usage_by_model": usage_by_model,
                 "parent_session_id": "conv_parent",
                 "root_conversation_id": "conv_root",
-                "kind": "default",
+                "kind": "sub_agent",
                 "sub_agent_name": "summarizer",
             },
         )
@@ -1514,13 +1507,32 @@ async def test_get_parses_cost_usage_and_lineage_metadata() -> None:
 
     assert session.total_cost_usd == 0.42
     assert session.usage_included is True
-    assert set(session.usage_by_model) == {"claude-sonnet-4-6"}
-    assert _read(session.usage_by_model["claude-sonnet-4-6"], "input_tokens") == 12000
-    assert _read(session.usage_by_model["claude-sonnet-4-6"], "total_tokens") == 12800
+    assert session.usage_by_model == usage_by_model
     assert session.parent_session_id == "conv_parent"
     assert session.root_conversation_id == "conv_root"
-    assert session.kind == "default"
+    assert session.kind == "sub_agent"
     assert session.sub_agent_name == "summarizer"
+
+
+@pytest.mark.asyncio
+async def test_get_marks_usage_unknown_when_not_included() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json=_session_response_body()
+            | {"usage_included": False, "total_cost_usd": None, "usage_by_model": None},
+        )
+
+    ns, client = _make_namespace(handler)
+    try:
+        session = await ns.get("conv_abc")
+    finally:
+        await client.aclose()
+
+    assert session.usage_included is False
+    assert session.total_cost_usd is None
+    assert session.usage_by_model is None
 
 
 @pytest.mark.asyncio
@@ -1536,9 +1548,11 @@ async def test_get_metadata_defaults_to_none_when_omitted() -> None:
         await client.aclose()
 
     assert session.total_cost_usd is None
+    assert session.usage_included is True
     assert session.usage_by_model is None
     assert session.parent_session_id is None
     assert session.root_conversation_id is None
+    assert session.kind == "default"
     assert session.sub_agent_name is None
 
 
@@ -1553,11 +1567,12 @@ async def test_set_labels_patches_labels_and_returns_snapshot() -> None:
         captured["url"] = str(request.url)
         captured["method"] = request.method
         captured["body"] = json.loads(request.content.decode())
-        # The server upserts, so a key the patch omits survives.
+        # The server upserts: a key the patch omits survives and an
+        # empty value is stored rather than deleting its key.
         return httpx.Response(
             200,
             json=_session_response_body(status="idle")
-            | {"labels": {"env": "test", "team": "platform"}},
+            | {"labels": {"env": "test", "team": "platform", "note": ""}},
         )
 
     ns, client = _make_namespace(handler)
@@ -1571,18 +1586,25 @@ async def test_set_labels_patches_labels_and_returns_snapshot() -> None:
         "method": "PATCH",
         "body": {"labels": {"team": "platform", "note": ""}},
     }
-    assert session.labels == {"env": "test", "team": "platform"}
+    assert session.labels == {"env": "test", "team": "platform", "note": ""}
 
 
 # ── delete() ─────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_delete_sends_delete_request() -> None:
+@pytest.mark.parametrize(
+    ("delete_branch", "expected_url"),
+    [
+        (False, "http://srv/v1/sessions/conv_abc"),
+        (True, "http://srv/v1/sessions/conv_abc?delete_branch=true"),
+    ],
+)
+async def test_delete_sends_delete_request(delete_branch: bool, expected_url: str) -> None:
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(f"{request.method} {request.url.path}")
+        calls.append(f"{request.method} {request.url}")
         return httpx.Response(
             200,
             json={"id": "conv_abc", "object": "conversation.deleted", "deleted": True},
@@ -1590,11 +1612,11 @@ async def test_delete_sends_delete_request() -> None:
 
     ns, client = _make_namespace(handler)
     try:
-        await ns.delete("conv_abc")
+        await ns.delete("conv_abc", delete_branch=delete_branch)
     finally:
         await client.aclose()
 
-    assert calls == ["DELETE /v1/sessions/conv_abc"]
+    assert calls == [f"DELETE {expected_url}"]
 
 
 @pytest.mark.asyncio
@@ -1636,26 +1658,6 @@ async def test_set_labels_forbidden_raises_omnigent_error() -> None:
 
     assert exc_info.value.status_code == 403
     assert "runner-owned" in str(exc_info.value)
-
-
-@pytest.mark.asyncio
-async def test_delete_with_delete_branch_sends_query_flag() -> None:
-    captured: dict[str, Any] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        return httpx.Response(
-            200,
-            json={"id": "conv_abc", "object": "conversation.deleted", "deleted": True},
-        )
-
-    ns, client = _make_namespace(handler)
-    try:
-        await ns.delete("conv_abc", delete_branch=True)
-    finally:
-        await client.aclose()
-
-    assert captured["url"] == "http://srv/v1/sessions/conv_abc?delete_branch=true"
 
 
 # ── caller-supplied ids stay inside the session path ─────────────────
