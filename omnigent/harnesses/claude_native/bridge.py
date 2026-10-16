@@ -414,10 +414,6 @@ _ESCAPE_DISMISS_HINT = re.compile(r"\b(?:\w+/)*Esc(?:/\w+)* to \w", re.IGNORECAS
 SWITCH_MODEL_DIALOG_HINT = "Switch model?"
 EFFORT_DIALOG_HINT = "Change effort level?"
 _CONFIRM_DIALOG_HINTS = (SWITCH_MODEL_DIALOG_HINT, EFFORT_DIALOG_HINT)
-# Boxed prompts without the "Enter to … · Esc to …" footer, which
-# ``_terminal_dialog_headline`` cannot name: the confirmations above and tool
-# permission prompts.
-_UNNAMED_DIALOG_HINTS = (*_CONFIRM_DIALOG_HINTS, "Do you want to ")
 # Only this informational notice is acknowledged automatically. The gateway
 # varies; all decision text and the continuation footer must match exactly.
 _AUTO_MODE_BILLING_BODY_PATTERN = (
@@ -4682,7 +4678,7 @@ def wait_for_input_ready(
         bridge_dir,
         info["socket_path"],
         info["tmux_target"],
-        timeout_s=timeout_s,
+        timeout_s=_TMUX_READY_TIMEOUT_S,
         ready_timeout_s=ready_timeout_s,
     )
 
@@ -6448,21 +6444,22 @@ def _reclaim_and_wait_for_prompt(
             )
         ),
     )
-    if surface is not None:
-        if surface != _OVERLAY_SURFACE:
-            # Typing into these would run bash or filter history, and the wait
-            # below could only poll out its whole budget on them.
-            raise ClaudeTerminalDialog(
-                f"Claude Code's input box is occupied by {surface}, so the command was "
-                "not sent. Open the terminal, dismiss it, then retry."
-            )
-        # Launcher output is waited out below; a footer-less dialog would only be
-        # waited on until the budget lapses, then the pane reaped. A torn frame
-        # is re-read once rather than taken for "no dialog".
+    if surface is not None and surface != _OVERLAY_SURFACE:
+        # Typing into these would run bash or filter history, and the wait below
+        # could only poll out its whole budget on them.
+        raise ClaudeTerminalDialog(
+            f"Claude Code's input box is occupied by {surface}, so the command was "
+            "not sent. Open the terminal, dismiss it, then retry."
+        )
+    # Launcher output is waited out below, but a footer-less dialog would only be
+    # waited on until the budget lapses, then the pane reaped; the reclaim may
+    # also have read a torn frame as a free input box. A torn frame here is
+    # re-read once rather than taken for "no dialog".
+    pane = _capture_pane(socket_path, tmux_target)
+    if not pane.strip():
+        time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
         pane = _capture_pane(socket_path, tmux_target)
-        if not pane.strip():
-            time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
-            pane = _capture_pane(socket_path, tmux_target)
+    if _composer_row(pane) is None:
         dialog = _unnamed_dialog_hint(pane)
         if dialog is not None:
             raise ClaudeTerminalDialog(
@@ -6485,12 +6482,14 @@ def _reclaim_and_wait_for_prompt(
 
 def _unnamed_dialog_hint(pane: str) -> str | None:
     """
-    Return the known footer-less dialog text boxed on *pane*, or ``None``.
+    Return the confirmation-dialog title boxed on *pane*, or ``None``.
 
-    Only the last ``╭ … ╰`` box is searched: the same words echoed in the
+    These dialogs lack the footer :func:`_terminal_dialog_headline` names;
+    permission prompts are refused earlier by the pending-prompt guard. Only
+    the last ``╭ … ╰`` box is searched: the same words echoed in the
     scrollback above launcher output are not a dialog.
     """
-    lines = [line for line in pane.splitlines() if line.strip()]
+    lines = pane.splitlines()
     top = max((i for i, line in enumerate(lines) if line.lstrip().startswith("╭")), default=None)
     if top is None:
         return None
@@ -6504,7 +6503,7 @@ def _unnamed_dialog_hint(pane: str) -> str | None:
             return None
         bottom = len(lines) - 1
     region = "\n".join(lines[top : bottom + 1])
-    return next((hint for hint in _UNNAMED_DIALOG_HINTS if hint in region), None)
+    return next((hint for hint in _CONFIRM_DIALOG_HINTS if hint in region), None)
 
 
 def _paste_payload_bytes(text: str) -> bytes:

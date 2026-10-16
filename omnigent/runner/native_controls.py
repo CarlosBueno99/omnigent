@@ -1264,7 +1264,6 @@ def build_native_controls(
     ) -> Response:
         from omnigent.harnesses.claude_native.bridge import (
             SWITCH_MODEL_DIALOG_HINT,
-            ClaudeInjectionCancelled,
             ClaudePromptTimeout,
             bridge_dir_for_bridge_id,
             confirm_dialog_if_open,
@@ -1456,10 +1455,9 @@ def build_native_controls(
             # inside the window. A lapsed budget ends the window like a timeout.
             if deadline.is_set():
                 break
-            with contextlib.suppress(ClaudeInjectionCancelled):
-                await _drive_claude_pane(
-                    deadline, confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
-                )
+            await _drive_claude_pane(
+                deadline, confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
+            )
             if time.monotonic() >= confirm_deadline:
                 break
             await asyncio.sleep(_CLAUDE_MODEL_CONFIRM_POLL_S)

@@ -11994,9 +11994,29 @@ def test_capped_readiness_probes_liveness_until_its_cap(
     assert probe.call_count == 3
 
 
+@pytest.mark.parametrize(
+    ("pane", "error", "match"),
+    [
+        pytest.param(
+            _EFFORT_DIALOG_PANE,
+            claude_native_bridge.ClaudeTerminalDialog,
+            "Change effort level",
+            id="effort-confirmation",
+        ),
+        pytest.param(
+            _PERMISSION_PROMPT_PANE,
+            claude_native_bridge.ClaudeUserPromptPending,
+            "Answer the pending",
+            id="permission-prompt",
+        ),
+    ],
+)
 def test_inject_slash_command_fails_loud_at_a_surface_escape_cannot_clear(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    pane: str,
+    error: type[Exception],
+    match: str,
 ) -> None:
     """
     A composer-less dialog with no Escape hint is refused at once, untouched.
@@ -12005,15 +12025,15 @@ def test_inject_slash_command_fails_loud_at_a_surface_escape_cannot_clear(
     and one spent on launcher output reaches the composer later), and the
     readiness gate cannot name a boxed dialog without an Enter/Esc footer, so
     an uncapped command would otherwise wait out the whole slow-boot budget
-    and reap the pane. The ``/effort`` confirmation shows the shape — the
-    pending-user-prompt guard does not recognize it as a decision prompt
-    either, and a blind submit Enter would accept its highlighted option.
+    and reap the pane. The ``/effort`` confirmation is refused by the dialog
+    check; a tool permission prompt is refused earlier by the pending-prompt
+    guard. Either way a blind submit Enter would have accepted an option.
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
-    sends = _fake_tmux(monkeypatch, [_EFFORT_DIALOG_PANE])
+    sends = _fake_tmux(monkeypatch, [pane])
     clock = claude_native_bridge.time
 
-    with pytest.raises(claude_native_bridge.ClaudeTerminalDialog, match="Change effort level"):
+    with pytest.raises(error, match=match):
         claude_native_bridge.inject_slash_command(bridge_dir, command="/compact")
 
     # No Escape either: the dialog advertises none. Never a C-u, command text or Enter.
@@ -12112,6 +12132,12 @@ def test_a_lowercase_escape_hint_still_marks_a_surface_dismissible(
             + "⎿  Change effort level? Kept the current effort level.\n",
             id="stray-corner",
         ),
+        pytest.param(
+            "╭ old frame\n"
+            + "\n" * 20
+            + "⎿  Change effort level? Kept the current effort level.\n",
+            id="stray-corner-blank-screen",
+        ),
     ],
 )
 def test_inject_slash_command_waits_out_scrollback_that_echoes_a_dialog_title(
@@ -12137,15 +12163,29 @@ def test_inject_slash_command_waits_out_scrollback_that_echoes_a_dialog_title(
     assert all(at >= pane.boot_s for at, _ in pane.sends), pane.sends
 
 
+@pytest.mark.parametrize(
+    "frames",
+    [
+        pytest.param(
+            [_EFFORT_DIALOG_PANE, _EFFORT_DIALOG_PANE, "", _EFFORT_DIALOG_PANE],
+            id="torn-after-reclaim",
+        ),
+        pytest.param(["", _EFFORT_DIALOG_PANE], id="torn-first-frame"),
+    ],
+)
 def test_inject_slash_command_rereads_a_torn_frame_before_trusting_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    frames: list[str],
 ) -> None:
-    """An empty capture right after the reclaim does not hide a boxed dialog."""
+    """
+    An empty capture does not hide a boxed dialog.
+
+    Torn after the reclaim, the frame is re-read; torn before it, the reclaim
+    reads a free input box, so the dialog check runs on a fresh capture anyway.
+    """
     bridge_dir = _picker_bridge_dir(tmp_path)
-    sends = _fake_tmux(
-        monkeypatch, [_EFFORT_DIALOG_PANE, _EFFORT_DIALOG_PANE, "", _EFFORT_DIALOG_PANE]
-    )
+    sends = _fake_tmux(monkeypatch, frames)
 
     with pytest.raises(claude_native_bridge.ClaudeTerminalDialog, match="Change effort level"):
         claude_native_bridge.inject_slash_command(bridge_dir, command="/compact")

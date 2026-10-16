@@ -2443,28 +2443,35 @@ async def test_events_model_change_reports_a_tmux_failure_as_503(
 
 
 @pytest.mark.asyncio
-async def test_events_model_change_treats_a_cancelled_dialog_check_as_unconfirmed(
+async def test_events_model_change_skips_the_dialog_check_once_its_budget_lapsed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A budget that lapses inside the dialog check ends the window with a 503, not a 500."""
-    monkeypatch.setattr(native_controls, "_CLAUDE_MODEL_CONFIRM_TIMEOUT_S", 0.2)
+    """A boot that spends the whole budget ends the confirm window without driving the pane."""
+    clock = _VirtualClock()
+    monkeypatch.setattr(native_controls, "_CLAUDE_CONTROL_PROMPT_WAIT_S", 5.0)
+    monkeypatch.setattr(native_controls, "_CLAUDE_CONTROL_BUDGET_S", 1.5)
+    dialog_checks: list[str] = []
 
-    def _cancelled_dialog(_bridge_dir: Any, *, hint: str) -> bool:
-        del hint
-        raise claude_native_bridge.ClaudeInjectionCancelled(
-            "Claude Code message delivery was cancelled"
-        )
+    def _wait(bridge_dir: Any, *, ready_timeout_s: float, timeout_s: float = 1.0) -> None:
+        del bridge_dir, ready_timeout_s, timeout_s
+        clock.sleep(1.6)
+
+    def _dialog(_bridge_dir: Any, *, hint: str) -> bool:
+        dialog_checks.append(hint)
+        return False
 
     resp = await _post_model_change_through_a_boot(
         monkeypatch,
-        wait=lambda *_args, **_kwargs: None,
+        wait=_wait,
         inject=lambda _bridge_dir, *, command, **_kwargs: None,
         status=lambda _bridge_dir: "claude-opus-4-6",
-        dialog=_cancelled_dialog,
+        clock=clock,
+        dialog=_dialog,
     )
 
     assert resp.status_code == 503, resp.text
     assert resp.json()["error"] == "claude_native_model_unconfirmed"
+    assert dialog_checks == []
 
 
 def test_claude_control_deadline_wait_returns_once_the_budget_lapses(
