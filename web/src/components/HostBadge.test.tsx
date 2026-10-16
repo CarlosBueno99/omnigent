@@ -285,45 +285,44 @@ describe("HostBadge", () => {
     expect(screen.getByTestId("composer-host-icon")).not.toHaveClass("lucide-monitor-cloud");
   });
 
-  it.each(["session change", "host change", "ordinary host recovery"])(
-    "forgets the launch identity after %s",
-    (transition) => {
-      useSessionMock.mockReturnValue({
-        session: {
-          hostId: transition === "session change" ? null : "host_sandbox",
-          sandboxStatus: {
-            provider: "arclet",
-            stage: transition === "ordinary host recovery" ? "failed" : "connecting",
-          },
+  it.each([
+    "session change",
+    "host change",
+    "ordinary host recovery",
+    "shared ordinary host recovery",
+  ])("forgets the launch identity after %s", (transition) => {
+    const sharedRecovery = transition === "shared ordinary host recovery";
+    const recovering = transition === "ordinary host recovery" || sharedRecovery;
+    useSessionMock.mockReturnValue({
+      session: {
+        hostId: transition === "session change" || sharedRecovery ? null : "host_sandbox",
+        sandboxStatus: {
+          provider: "arclet",
+          stage: recovering ? "failed" : "connecting",
         },
-      });
-      useHostsMock.mockReturnValue({ data: [] });
-      const { rerender } = render(<HostBadge sessionId="conv_1" appearance="composer" />);
-      expect(screen.getByTestId("composer-host-icon")).toHaveClass("lucide-monitor-cloud");
+      },
+    });
+    useHostsMock.mockReturnValue({ data: [] });
+    const { rerender } = render(<HostBadge sessionId="conv_1" appearance="composer" />);
+    expect(screen.getByTestId("composer-host-icon")).toHaveClass("lucide-monitor-cloud");
 
-      const hostId =
-        transition === "session change"
-          ? null
-          : transition === "ordinary host recovery"
-            ? "host_a1b2"
-            : "host_other";
-      useSessionMock.mockReturnValue({ session: { hostId, sandboxStatus: null } });
-      useHostsMock.mockReturnValue({
-        data: transition === "ordinary host recovery" ? [host()] : [],
-      });
-      rerender(
-        <HostBadge
-          sessionId={transition === "session change" ? "conv_2" : "conv_1"}
-          appearance="composer"
-        />,
-      );
-      const expectedLabel = transition === "ordinary host recovery" ? "mac-laptop" : "host_other";
-      expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
-        hostId ? expect.stringContaining(`Host ${expectedLabel},`) : "No host bound",
-      );
-      expect(screen.getByTestId("composer-host-icon")).not.toHaveClass("lucide-monitor-cloud");
-    },
-  );
+    const hostId = transition === "session change" ? null : recovering ? "host_a1b2" : "host_other";
+    useSessionMock.mockReturnValue({ session: { hostId, sandboxStatus: null } });
+    useHostsMock.mockReturnValue({
+      data: transition === "ordinary host recovery" ? [host()] : [],
+    });
+    rerender(
+      <HostBadge
+        sessionId={transition === "session change" ? "conv_2" : "conv_1"}
+        appearance="composer"
+      />,
+    );
+    const expectedLabel = transition === "ordinary host recovery" ? "mac-laptop" : hostId;
+    expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
+      hostId ? expect.stringContaining(`Host ${expectedLabel},`) : "No host bound",
+    );
+    expect(screen.getByTestId("composer-host-icon")).not.toHaveClass("lucide-monitor-cloud");
+  });
 
   it("keeps a runner-startup failure visible even though its sandbox host is bound", () => {
     useSessionMock.mockReturnValue({

@@ -6805,6 +6805,25 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
         sandboxStatus: expected,
       });
       expect(client.getQueryData(["session", "conv_other"])).toMatchObject({ sandboxStatus: null });
+
+      // A side chat's event on its parent's stream updates only the named query.
+      handleSessionEvent(
+        {
+          type: "session_sandbox_status",
+          conversationId: "conv_other",
+          stage: "starting",
+          provider: "modal",
+          error: null,
+        },
+        "conv_abc",
+      );
+      expect(useChatStore.getState().sandboxStatus).toEqual(expected);
+      expect(client.getQueryData(["session", "conv_abc"])).toMatchObject({
+        sandboxStatus: expected,
+      });
+      expect(client.getQueryData(["session", "conv_other"])).toMatchObject({
+        sandboxStatus: { stage: "starting", provider: "modal", error: null },
+      });
     });
 
     it("clears the indicator on ready", () => {
