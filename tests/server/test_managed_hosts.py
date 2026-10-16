@@ -9,7 +9,7 @@ import subprocess
 import sys
 import types
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,6 +88,16 @@ from tests.server.helpers import (
 pytestmark = pytest.mark.asyncio
 
 _OWNER = "alice@example.com"
+
+
+@pytest.fixture(autouse=True)
+def _reset_sandbox_launch_status() -> Iterator[None]:
+    """Launch tests reuse session IDs and may stop before a terminal stage."""
+    from omnigent.server.routes.sessions import _session_sandbox_status_cache
+
+    _session_sandbox_status_cache.clear()
+    yield
+    _session_sandbox_status_cache.clear()
 
 
 def _injected_config(

@@ -1200,6 +1200,7 @@ def create_hosts_router(
         add_audit_attrs(session_id=body.session_id, host_id=host_id, runner_id=runner_id)
         # An explicit successful bind can recover a failed managed launch.
         # Keep its failure visible until this replacement launch is accepted.
+        # Progress and tracker entries are local to the replica handling the launch.
         from omnigent.server.routes.sessions import (
             _publish_sandbox_status,
             _session_sandbox_status_cache,
