@@ -376,25 +376,46 @@ def _transcript_write_blocker(transcript_path: Path) -> str:
     return f"no ancestor of {transcript_path} exists (ENOENT)"
 
 
-def _unwritable_directory_errno(directory: Path) -> str:
-    """Name the errno a writer hits in a directory ``os.access`` reports unwritable."""
+def _mount_is_read_only(directory: Path) -> bool:
+    """Whether the filesystem holding ``directory`` is mounted read-only."""
     try:
-        read_only = bool(os.statvfs(directory).f_flag & os.ST_RDONLY)
+        return bool(os.statvfs(directory).f_flag & os.ST_RDONLY)
     except OSError:
-        read_only = False
+        return False
+
+
+def _unwritable_directory_errno(
+    directory: Path, *, mount_is_read_only: Callable[[Path], bool] = _mount_is_read_only
+) -> str:
+    """Name the errno a writer hits in a directory ``os.access`` reports unwritable."""
     # access(2) carries no errno; a read-only mount is the other common cause.
-    return "EROFS" if read_only else "EACCES"
+    return "EROFS" if mount_is_read_only(directory) else "EACCES"
+
+
+@dataclass(frozen=True)
+class _UnreadTranscript:
+    """
+    A hook-reported transcript the forwarder could not read at the turn's ``Stop``.
+
+    :param path: Transcript path Claude Code reported.
+    :param blocker: Why it is unreadable, e.g. ``"/home/u/.claude is not writable (EACCES)"``.
+    :param exists: Whether the file exists but cannot be read, rather than never appeared.
+    """
+
+    path: Path
+    blocker: str
+    exists: bool
 
 
 def _missing_transcript_blocker(
     bridge_dir: Path, hook_transcript_path: Path | None
-) -> tuple[Path, str] | None:
+) -> _UnreadTranscript | None:
     """
-    Return the hook-reported transcript and why it is unreadable, or ``None`` when it exists.
+    Return the hook-reported transcript and why it is unreadable, or ``None`` when it is fine.
 
     :param bridge_dir: Native Claude bridge directory.
     :param hook_transcript_path: Transcript path carried by the ``Stop`` hook record.
-    :returns: ``(transcript_path, blocker)`` for a missing or unreadable file.
+    :returns: The unread transcript for a missing or unreadable file.
     """
     transcript_path = hook_transcript_path or read_transcript_path(bridge_dir)
     if transcript_path is None:
@@ -403,11 +424,15 @@ def _missing_transcript_blocker(
         if transcript_path.exists():
             if os.access(transcript_path, os.R_OK):
                 return None
-            return transcript_path, f"{transcript_path} exists but is not readable (EACCES)"
+            return _UnreadTranscript(
+                transcript_path, f"{transcript_path} is not readable (EACCES)", exists=True
+            )
     except OSError:
         # An unsearchable ancestor hides the file as surely as a missing one.
         pass
-    return transcript_path, _transcript_write_blocker(transcript_path)
+    return _UnreadTranscript(
+        transcript_path, _transcript_write_blocker(transcript_path), exists=False
+    )
 
 
 async def _surface_missing_transcript(
@@ -435,19 +460,40 @@ async def _surface_missing_transcript(
     :returns: Parent-facing notice naming the unread transcript, or ``None``
         when the transcript exists or no path is known yet.
     """
-    probe = await asyncio.to_thread(
+    unread = await asyncio.to_thread(
         _missing_transcript_blocker, bridge_dir, record.transcript_path
     )
-    if probe is None:
+    if unread is None:
         return None
-    transcript_path, blocker = probe
-    if transcript_path not in dedupe.missing_transcript_warned_paths:
-        dedupe.missing_transcript_warned_paths.add(transcript_path)
+    if unread.exists:
+        problem = "exists but could not be read"
+        title = "Claude Code's transcript could not be read"
+        message = (
+            f"Claude Code's transcript at {unread.path} exists, but Omnigent cannot read it, "
+            "so this turn's prompt and replies were not mirrored into this session."
+        )
+        remediation = (
+            "Make the transcript file readable by the session user so Omnigent can mirror it."
+        )
+    else:
+        problem = "never appeared"
+        title = "Claude Code's transcript was never written"
+        message = (
+            f"Claude Code reported its transcript at {unread.path}, but the file never "
+            "appeared, so this turn's prompt and replies were not mirrored into this session."
+        )
+        remediation = (
+            "Make that directory writable by the session user so Claude Code can write "
+            "its transcript."
+        )
+    if unread.path not in dedupe.missing_transcript_warned_paths:
+        dedupe.missing_transcript_warned_paths.add(unread.path)
         _logger.warning(
-            "Claude transcript %s reported by hooks never appeared before the turn's Stop "
-            "(%s); the turn's prompt and replies were not mirrored; session=%s",
-            transcript_path,
-            blocker,
+            "Claude transcript %s reported by hooks %s before the turn's Stop (%s); "
+            "the turn's prompt and replies were not mirrored; session=%s",
+            unread.path,
+            problem,
+            unread.blocker,
             session_id,
             extra={"session_id": session_id},
         )
@@ -461,17 +507,10 @@ async def _surface_missing_transcript(
             "item_data": {
                 "source": "harness",
                 "code": _MISSING_TRANSCRIPT_ERROR_CODE,
-                "title": "Claude Code's transcript was never written",
-                "message": (
-                    f"Claude Code reported its transcript at {transcript_path}, but the "
-                    "file never appeared, so this turn's prompt and replies were not "
-                    "mirrored into this session."
-                ),
-                "cause": f"{blocker}.",
-                "remediation": (
-                    "Make that directory writable by the session user so Claude Code "
-                    "can write its transcript."
-                ),
+                "title": title,
+                "message": message,
+                "cause": f"{unread.blocker}.",
+                "remediation": remediation,
             },
         },
     }
@@ -511,7 +550,7 @@ async def _surface_missing_transcript(
         )
     return (
         "Omnigent could not read this turn's output: Claude Code's transcript "
-        f"{transcript_path} never appeared ({blocker})."
+        f"{unread.path} {problem} ({unread.blocker})."
     )
 
 

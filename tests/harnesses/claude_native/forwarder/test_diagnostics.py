@@ -8,7 +8,6 @@ import logging
 import os
 import queue
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -562,20 +561,14 @@ def test_transcript_write_blocker_names_the_missing_or_writable_directory(
     )
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
-def test_transcript_write_blocker_names_a_read_only_mount(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An unwritable directory on a read-only mount is reported as EROFS, not EACCES."""
-    projects = tmp_path / "projects"
-    projects.mkdir()
-    projects.chmod(0o555)
-    monkeypatch.setattr(forwarder.os, "statvfs", lambda path: SimpleNamespace(f_flag=os.ST_RDONLY))
-    try:
-        blocker = forwarder._transcript_write_blocker(projects / "slug" / "claude-session.jsonl")
-    finally:
-        projects.chmod(0o755)
-    assert blocker == f"{projects} is not writable (EROFS)"
+def test_unwritable_directory_errno_names_a_read_only_mount(tmp_path: Path) -> None:
+    """An unwritable directory on a read-only mount is EROFS; otherwise it is EACCES."""
+    read_only = forwarder._unwritable_directory_errno(tmp_path, mount_is_read_only=lambda p: True)
+    writable_mount = forwarder._unwritable_directory_errno(
+        tmp_path, mount_is_read_only=lambda p: False
+    )
+    assert (read_only, writable_mount) == ("EROFS", "EACCES")
+    assert forwarder._unwritable_directory_errno(tmp_path) == "EACCES"
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
@@ -591,7 +584,9 @@ def test_missing_transcript_blocker_treats_an_unsearchable_directory_as_unreadab
         probe = forwarder._missing_transcript_blocker(tmp_path / "bridge", transcript_path)
     finally:
         locked.chmod(0o755)
-    assert probe == (transcript_path, f"{transcript_path.parent} is not accessible (EACCES)")
+    assert probe == forwarder._UnreadTranscript(
+        transcript_path, f"{transcript_path.parent} is not accessible (EACCES)", exists=False
+    )
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
@@ -604,7 +599,9 @@ def test_missing_transcript_blocker_reports_an_unreadable_existing_file(tmp_path
         probe = forwarder._missing_transcript_blocker(tmp_path / "bridge", transcript_path)
     finally:
         transcript_path.chmod(0o644)
-    assert probe == (transcript_path, f"{transcript_path} exists but is not readable (EACCES)")
+    assert probe == forwarder._UnreadTranscript(
+        transcript_path, f"{transcript_path} is not readable (EACCES)", exists=True
+    )
     assert forwarder._missing_transcript_blocker(tmp_path / "bridge", transcript_path) is None
 
 
@@ -793,3 +790,52 @@ async def test_missing_transcript_notice_deadline_frees_the_idle_edge_during_a_t
     ]
     assert len(dropped) == 1
     assert "outcome=deadline" in dropped[0].getMessage()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+@pytest.mark.asyncio
+async def test_unreadable_existing_transcript_gets_its_own_wording(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A transcript that exists but cannot be read is explained as unreadable, not unwritten."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    transcript_path = tmp_path / "claude-session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    transcript_path.chmod(0o000)
+    _record_turn(bridge_dir, transcript_path)
+    caplog.set_level(logging.WARNING, logger=forwarder.__name__)
+    requests: list[dict[str, Any]] = []
+
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(202, json={})
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_handle_request), base_url="http://test"
+        ) as client:
+            await forwarder._forward_available_status_events(
+                client=client,
+                session_id="conv_unreadable",
+                bridge_dir=bridge_dir,
+                state=forwarder.HookForwardState(event_cursor=0, byte_offset=0),
+                retry_tracker=forwarder._PostRetryTracker(),
+                dedupe=forwarder._ForwardDedupeState(),
+                task_subjects={},
+                task_statuses={},
+                task_order=[],
+            )
+    finally:
+        transcript_path.chmod(0o644)
+
+    [notice] = [r["data"] for r in requests if r["type"] == "external_conversation_item"]
+    [status] = [r["data"] for r in requests if r["type"] == "external_session_status"]
+    assert notice["item_data"]["title"] == "Claude Code's transcript could not be read"
+    assert "cannot read it" in notice["item_data"]["message"]
+    assert notice["item_data"]["cause"] == f"{transcript_path} is not readable (EACCES)."
+    assert "readable by the session user" in notice["item_data"]["remediation"]
+    assert status["turn_completed"] is True
+    assert f"{transcript_path} exists but could not be read" in status["output"]
+    warned = [r for r in caplog.records if "exists but could not be read" in r.getMessage()]
+    assert len(warned) == 1
