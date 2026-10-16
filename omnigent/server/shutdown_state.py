@@ -45,6 +45,7 @@ that never marks first is still covered.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import TypedDict, cast
 
@@ -113,6 +114,9 @@ def server_shutting_down(now: float | None = None) -> bool:
 # workspace scope (a background rebalance) while readers run in tunnel scopes.
 # custom-lint: disable-next=workspace-scoped-cache -- runner_id is globally unique
 _handed_off: dict[str, tuple[float, str]] = {}
+# The registry's deregister is thread-safe and may mark off the event loop, so
+# guard the map: a concurrent prune could otherwise raise or drop an entry.
+_handoff_lock = threading.Lock()
 
 
 def mark_runner_handed_off(runner_id: str, *, reason: str, **attributes: object) -> None:
@@ -128,11 +132,17 @@ def mark_runner_handed_off(runner_id: str, *, reason: str, **attributes: object)
     :param attributes: Extra debug-event attributes, e.g. ``slice_key="123"``.
     """
     now = time.monotonic()
-    for stale_id in [rid for rid, (at, _) in _handed_off.items() if now - at >= SHUTDOWN_WINDOW_S]:
-        del _handed_off[stale_id]
-    _handed_off[runner_id] = (now, reason)
+    with _handoff_lock:
+        for stale_id in [
+            rid for rid, (at, _) in _handed_off.items() if now - at >= SHUTDOWN_WINDOW_S
+        ]:
+            del _handed_off[stale_id]
+        _handed_off[runner_id] = (now, reason)
     extra = debug_event("runner_tunnel_handed_off", runner_id=runner_id, handoff_reason=reason)
-    cast("dict[str, object]", extra["attributes"]).update(attributes)
+    # Canonical keys win so a caller's extra attributes can't shadow them.
+    merged = cast("dict[str, object]", extra["attributes"])
+    for key, value in attributes.items():
+        merged.setdefault(key, value)
     _logger.info(
         "Runner %s tunnel handed off to another replica (%s)",
         runner_id,
@@ -149,7 +159,8 @@ def clear_runner_handoff(runner_id: str) -> None:
 
     :param runner_id: Runner that just connected, e.g. ``"runner_0123456789abcdef"``.
     """
-    _handed_off.pop(runner_id, None)
+    with _handoff_lock:
+        _handed_off.pop(runner_id, None)
 
 
 def note_runner_tunnel_retired(runner_id: str) -> None:
@@ -180,7 +191,8 @@ def runner_handoff_reason(runner_id: str | None, now: float | None = None) -> st
     """
     if runner_id is None:
         return None
-    entry = _handed_off.get(runner_id)
+    with _handoff_lock:
+        entry = _handed_off.get(runner_id)
     if entry is None:
         return None
     current = time.monotonic() if now is None else now
@@ -214,4 +226,5 @@ def reset_for_tests() -> None:
     """
     global _marked_at
     _marked_at = None
-    _handed_off.clear()
+    with _handoff_lock:
+        _handed_off.clear()

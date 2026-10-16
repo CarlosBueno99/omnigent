@@ -3570,9 +3570,14 @@ def create_app(
                     exc_info=True,
                 )
                 handed_off = []
-            if tunnel_registry.get(runner_id) is None:
-                for conv in handed_off:
-                    _relinquish_session_live_state(conv.id)
+            if tunnel_registry.get(runner_id) is not None:
+                _logger.info(
+                    "Runner %s reconnected during the handoff lookup; skipping offline-marking",
+                    runner_id,
+                )
+                return
+            for conv in handed_off:
+                _relinquish_session_live_state(conv.id)
             _logger.info(
                 "Runner %s dropped because this server handed it off (%s); "
                 "skipping offline-marking",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import threading
 import time
 from collections.abc import Iterator
 
@@ -116,3 +118,40 @@ def test_handoff_and_shutdown_marks_are_logged_for_attribution(
         "server_shutting_down": True,
         "runner_handoff_reason": "rebalance",
     }
+
+
+def test_concurrent_handoff_marks_tolerate_threaded_callers() -> None:
+    """The registry's deregister is thread-safe, so marks must not race the prune."""
+    # A large live map plus frequent GIL yields make the prune comprehension
+    # iterate long enough that, without the lock, a concurrent mark changes its
+    # size mid-iteration and raises "dictionary changed size during iteration".
+    for seed in range(5000):
+        shutdown_state.mark_runner_handed_off(f"seed-{seed}", reason="rebalance")
+
+    errors: list[BaseException] = []
+    stop = threading.Event()
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+
+    def hammer(worker: int) -> None:
+        index = 0
+        try:
+            while not stop.is_set():
+                runner_id = f"runner-{worker}-{index}"
+                shutdown_state.mark_runner_handed_off(runner_id, reason="rebalance")
+                shutdown_state.runner_handoff_reason(runner_id)
+                index += 1
+        except BaseException as exc:  # surface any thread's failure to the test
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer, args=(worker,)) for worker in range(4)]
+    try:
+        for thread in threads:
+            thread.start()
+        time.sleep(0.3)
+        stop.set()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(previous_interval)
+    assert not errors, errors

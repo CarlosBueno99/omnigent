@@ -78,6 +78,7 @@ from sqlalchemy.engine import Engine, make_url
 
 fault_file = Path(sys.argv.pop(1))
 fault_scope = sys.argv.pop(1)
+assert fault_scope in ("conversation", "reads"), fault_scope
 conversation_database = make_url(sys.argv.pop(1))
 retire_file = Path(sys.argv.pop(1))
 events_file = Path(sys.argv.pop(1))
@@ -141,11 +142,14 @@ def watch_retire_requests():
         for logger in (logging.getLogger(), logging.getLogger("omnigent")):
             if event_sink not in logger.handlers:
                 logger.addHandler(event_sink)
-        if retire_file.exists():
-            runner_id = retire_file.read_text().strip()
-            retire_file.unlink()
-            for registry in registries:
-                registry.deregister(runner_id)
+        try:
+            if retire_file.exists():
+                runner_id = retire_file.read_text().strip()
+                retire_file.unlink()
+                for registry in registries:
+                    registry.deregister(runner_id)
+        except Exception:
+            logging.getLogger(__name__).exception("retire watcher failed")
         time.sleep(0.1)
 
 threading.Thread(target=watch_retire_requests, daemon=True).start()
@@ -154,12 +158,6 @@ from omnigent.cli import main
 
 main()
 """
-# The relay's give-up row names its decision; the outage-start row has
-# ``(intentional=...)`` in the same position.
-_RELAY_DECISION = re.compile(
-    r"Relay: runner transport lost for session=(\S+) \((?!intentional=)([a-z_]+)\)"
-)
-
 pytestmark = [pytest.mark.timeout(420, method="signal")]
 
 
@@ -453,7 +451,9 @@ class _ReconnectStack:
         assert self._retire_request is not None, (
             "the stack was started without the replica bootstrap"
         )
-        self._retire_request.write_text(self.runner_id)
+        tmp = self._retire_request.with_suffix(".tmp")
+        tmp.write_text(self.runner_id)
+        os.replace(tmp, self._retire_request)
         _poll_until(
             lambda: not self._runner_online(),
             timeout=15.0,
@@ -461,10 +461,12 @@ class _ReconnectStack:
         )
 
     def relay_decision(self, session_id: str) -> str | None:
-        """Return replica A's relay give-up decision for *session_id*, if logged."""
-        for match in _RELAY_DECISION.finditer(self.process_log.read_text()):
-            if match.group(1) == session_id:
-                return match.group(2)
+        """Return replica A's structured relay give-up decision for *session_id*, if logged."""
+        if self.events_log is None:
+            return None
+        for row in map(json.loads, self.events_log.read_text().splitlines()):
+            if row["session_id"] == session_id and row["event"] == "runner_stream_disconnected":
+                return row["attributes"].get("decision")
         return None
 
     def start_second_replica(self) -> _Replica:
@@ -926,22 +928,12 @@ def test_server_retired_tunnel_handoff_does_not_fail_the_turn_when_store_reads_f
             what="replica A to log the injected store read failure",
         )
 
-        _poll_until(
-            lambda: stack.relay_decision(session_id) is not None,
-            timeout=RUNNER_DISCONNECT_GRACE_S + 30.0,
-            what="replica A to resolve the disconnect while the turn is still running on B",
-        )
         # Wait for A's structured give-up row rather than a blind sleep: it is
         # written when the relay commits its decision, which is terminal, so a
         # handed-off outcome never goes on to publish a failed edge below.
-        events_log = stack.events_log
-        assert events_log is not None
         _poll_until(
-            lambda: any(
-                row["session_id"] == session_id and row["event"] == "runner_stream_disconnected"
-                for row in map(json.loads, events_log.read_text().splitlines())
-            ),
-            timeout=30.0,
+            lambda: stack.relay_decision(session_id) is not None,
+            timeout=RUNNER_DISCONNECT_GRACE_S + 30.0,
             what="replica A to publish its runner_stream_disconnected give-up row",
         )
         server_a_log = stack.process_log.read_text()
