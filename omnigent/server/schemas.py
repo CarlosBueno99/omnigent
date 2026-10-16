@@ -1954,10 +1954,12 @@ class SandboxStatus(BaseModel):
     :param error: Failure detail when ``stage == "failed"``, e.g.
         ``"managed sandbox launch failed: spend limit reached"``.
         ``None`` otherwise.
+    :param provider: Selected sandbox provider before a host is bound, e.g. ``"modal"``.
     """
 
     stage: SandboxLaunchStage
     error: str | None = None
+    provider: str | None = None
 
 
 class ModelUsage(BaseModel):
@@ -3525,6 +3527,7 @@ class SessionSandboxStatusEvent(_SSEEventBase):
     :param error: Failure detail when ``stage == "failed"``, e.g.
         ``"managed sandbox launch failed: spend limit reached"``.
         ``None`` otherwise.
+    :param provider: Selected sandbox provider, e.g. ``"modal"``.
 
     Category: **transient** (SSE-only). On reconnect, clients seed the
     progress indicator from the session snapshot's ``sandbox_status``
@@ -3536,6 +3539,7 @@ class SessionSandboxStatusEvent(_SSEEventBase):
     conversation_id: str
     stage: SandboxLaunchStage
     error: str | None = None
+    provider: str | None = None
 
 
 class McpServerStartup(BaseModel):

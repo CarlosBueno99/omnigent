@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { CircleAlertIcon, Loader2Icon, MonitorCloudIcon } from "lucide-react";
 
 import { useHosts } from "@/hooks/useHosts";
 import type { Host } from "@/hooks/useHosts";
@@ -6,6 +7,7 @@ import { useSession } from "@/hooks/useSession";
 import { useSessionActionRestrictions } from "@/hooks/useSessionActionRestrictions";
 import { useSessionHostOnline } from "@/hooks/RunnerHealthProvider";
 import { sandboxOptionLabel } from "@/lib/capabilities";
+import { SANDBOX_STAGE_LABELS } from "@/lib/sandboxStatus";
 import { DisabledActionTooltip } from "./DisabledActionTooltip";
 import { SessionActionMenuItem } from "./SessionActionMenuItem";
 import { SwitchHostDialog } from "@/shell/SwitchHostDialog";
@@ -101,8 +103,7 @@ export function HostBadge({
   const { session } = useSession(sessionId);
   const hostId = session?.hostId ?? null;
   // Keep sandbox hosts so managed sessions resolve to a provider label.
-  // Skip the fetch (and its 10s refetch loop) when there's no host to
-  // resolve — the badge renders nothing in that case anyway.
+  // Launch progress supplies identity until there is a host record to resolve.
   const { data: hosts } = useHosts({ includeSandbox: true, enabled: Boolean(hostId) });
   const liveOnline = useSessionHostOnline(sessionId);
 
@@ -148,19 +149,38 @@ export function HostBadge({
     if (!canSwitch) setSwitchOpen(false);
   }, [canSwitch]);
   if (appearance === "composer") {
-    const reconnectable = badge?.status === "offline" && !session?.hostResumable && !!onReconnect;
-    const label = badge ? `Host ${badge.label}, ${STATUS_WORD[badge.status]}` : "No host bound";
+    const launch = session?.sandboxStatus?.stage !== "ready" ? session?.sandboxStatus : null;
+    const provider = launch?.provider ?? host?.sandbox_provider;
+    const hostLabel = launch
+      ? provider
+        ? sandboxOptionLabel(provider)
+        : "Sandbox"
+      : (badge?.label ?? "No host bound");
+    const launchStatus = launch ? SANDBOX_STAGE_LABELS[launch.stage] : "";
+    const reconnectable =
+      !launch && badge?.status === "offline" && !session?.hostResumable && !!onReconnect;
+    const label = launch
+      ? `Host ${hostLabel}, ${launchStatus}`
+      : badge
+        ? `Host ${badge.label}, ${STATUS_WORD[badge.status]}`
+        : "No host bound";
     // A dormant resumable host wakes on the next message; it isn't disconnected.
     const asleep = badge?.status === "offline" && !!session?.hostResumable;
-    const tooltipRows = badge
+    const tooltipRows = launch
       ? [
-          { label: "Host", value: badge.label },
-          {
-            label: "Status",
-            value: asleep ? "Asleep — wakes on next message" : CONNECTION_WORD[badge.status],
-          },
+          { label: "Host", value: hostLabel },
+          { label: "Status", value: launchStatus },
+          ...(launch.error ? [{ label: "Error", value: launch.error }] : []),
         ]
-      : [{ label: "Host", value: "None" }];
+      : badge
+        ? [
+            { label: "Host", value: badge.label },
+            {
+              label: "Status",
+              value: asleep ? "Asleep — wakes on next message" : CONNECTION_WORD[badge.status],
+            },
+          ]
+        : [{ label: "Host", value: "None" }];
     return (
       <>
         <DropdownMenu onOpenChange={setMenuOpen}>
@@ -173,8 +193,8 @@ export function HostBadge({
             <DropdownMenuTrigger asChild>
               <ComposerHostTrigger
                 label={label}
-                status={badge?.status ?? "unknown"}
-                cloud={!!host?.sandbox_provider}
+                status={launch ? undefined : (badge?.status ?? "unknown")}
+                cloud={!!launch || !!host?.sandbox_provider}
                 data-testid="composer-host-select"
               />
             </DropdownMenuTrigger>
@@ -187,17 +207,39 @@ export function HostBadge({
             data-testid="composer-host-menu"
           >
             <div className="px-2 py-1 text-xs text-muted-foreground">
-              {host?.sandbox_provider ? "Cloud" : "My machines"}
+              {launch || host?.sandbox_provider ? "Cloud" : "My machines"}
             </div>
             <DropdownMenuItem disabled className="gap-2" data-selected="true">
-              <span
-                className={cn(
-                  "size-2 shrink-0 rounded-full",
-                  STATUS_DOT_CLASS[badge?.status ?? "unknown"],
-                )}
-              />
-              <span>{badge?.label ?? "No host bound"}</span>
+              {launch ? (
+                <MonitorCloudIcon className="size-4 shrink-0" />
+              ) : (
+                <span
+                  className={cn(
+                    "size-2 shrink-0 rounded-full",
+                    STATUS_DOT_CLASS[badge?.status ?? "unknown"],
+                  )}
+                />
+              )}
+              <span>{hostLabel}</span>
             </DropdownMenuItem>
+            {launch && (
+              <div className="max-w-72 whitespace-normal px-2 py-1 text-xs text-muted-foreground">
+                <p
+                  className={cn(
+                    "flex items-center gap-2",
+                    launch.stage === "failed" && "text-destructive",
+                  )}
+                >
+                  {launch.stage === "failed" ? (
+                    <CircleAlertIcon className="size-3 shrink-0" />
+                  ) : (
+                    <Loader2Icon className="size-3 shrink-0 animate-spin" />
+                  )}
+                  {launchStatus}
+                </p>
+                {launch.error && <p className="mt-1 break-words">{launch.error}</p>}
+              </div>
+            )}
             {reconnectable && (
               <DropdownMenuItem disabled={readOnly} onSelect={onReconnect}>
                 Reconnect host
@@ -211,7 +253,7 @@ export function HostBadge({
                 Switch host…
               </SessionActionMenuItem>
             )}
-            {!badge && (
+            {!badge && !launch && (
               <p className="max-w-60 px-2 py-1 text-xs text-muted-foreground">
                 This session has no host binding.
               </p>

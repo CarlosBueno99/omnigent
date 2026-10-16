@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -789,7 +789,11 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
     # create returns — what the navigating Web UI cold-loads.
     snapshot = await env.client.get(f"/v1/sessions/{session_id}")
     assert snapshot.status_code == 200, snapshot.text
-    assert snapshot.json()["sandbox_status"] == {"stage": "provisioning", "error": None}
+    assert snapshot.json()["sandbox_status"] == {
+        "stage": "provisioning",
+        "error": None,
+        "provider": "modal",
+    }
 
     message_task = asyncio.create_task(
         env.client.post(
@@ -846,12 +850,15 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
     assert failed_snapshot.status_code == 200, failed_snapshot.text
     sandbox_status = failed_snapshot.json()["sandbox_status"]
     assert sandbox_status["stage"] == "failed"
+    assert sandbox_status["provider"] == "modal"
     assert "host startup failed" in sandbox_status["error"]
 
 
+@pytest.mark.parametrize("provider", [None, "arclet"])
 async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
     managed_session_env: ManagedSessionEnv,
     monkeypatch: pytest.MonkeyPatch,
+    provider: str | None,
 ) -> None:
     """
     A managed launch reports live progress: the snapshot carries the
@@ -897,6 +904,13 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
 
     fake = FakeSandboxLauncher(provision_gate=gate, on_host_start=_start_fake_sandbox_host)
     install_fake_modal_launcher(monkeypatch, fake)
+    if provider is not None:
+        # Offer a second provider so an explicit selection cannot silently use the default.
+        monkeypatch.setattr(fake, "provider", provider)
+        default = env.app.state.sandbox_config.default
+        env.app.state.sandbox_config = ManagedSandboxDeployment(
+            configs=(default, replace(default, provider=provider, launcher_factory=lambda: fake))
+        )
 
     agent = await create_test_agent(env.client, name="managed-progress-agent")
     resp = await env.client.post(
@@ -905,6 +919,7 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
             "agent_id": agent["id"],
             "host_type": "managed",
             "workspace": "https://github.com/org/myrepo.git#main",
+            "sandbox_provider": provider,
         },
     )
     assert resp.status_code == 201, resp.text
@@ -916,7 +931,11 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
     # session page to a silent dead chat during provisioning.
     snapshot = await env.client.get(f"/v1/sessions/{session_id}")
     assert snapshot.status_code == 200, snapshot.text
-    assert snapshot.json()["sandbox_status"] == {"stage": "provisioning", "error": None}
+    assert snapshot.json()["sandbox_status"] == {
+        "stage": "provisioning",
+        "error": None,
+        "provider": provider or "modal",
+    }
 
     # Tail live progress at the layer the SSE endpoint reads it from.
     # (The endpoint itself never terminates under the in-process ASGI
@@ -935,6 +954,7 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
                 continue
             if event.get("type") != "session.sandbox_status":
                 continue
+            assert event["provider"] == (provider or "modal")
             stages.append(event["stage"])
             if event["stage"] in ("ready", "failed"):
                 settled.set()
