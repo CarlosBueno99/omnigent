@@ -328,7 +328,14 @@ def _discover_codex(model_services: list[dict[str, object]]) -> tuple[str, ...]:
     )
 
 
-def test_discover_codex_models_filters_non_codex_and_ranks_curated_first() -> None:
+@pytest.mark.parametrize(
+    "api_types",
+    [None, ["codex/v1/responses"], ["codex/v1/responses", "openai/v1/responses"]],
+    ids=["legacy", "codex-route", "both-routes"],
+)
+def test_discover_codex_models_filters_non_codex_and_ranks_curated_first(
+    api_types: list[str] | None,
+) -> None:
     """Codex discovery keeps only codex-servable ids, curated catalog first.
 
     The listing says what a workspace *can* serve, not which to launch on:
@@ -336,16 +343,19 @@ def test_discover_codex_models_filters_non_codex_and_ranks_curated_first() -> No
     versioned GPT ids newest-first, then the rest — and non-codex families
     (Claude) are dropped entirely.
     """
-    servable = _discover_codex(
-        [
-            {"name": "model-services/system.ai.gpt-5-5"},
-            {"name": "model-services/system.ai.gpt-5-6-luna"},
-            {"name": "model-services/system.ai.gpt-5-6-sol"},
-            {"name": "model-services/system.ai.gpt-6-1"},
-            {"name": "model-services/system.ai.kimi-k2"},
-            {"name": "model-services/system.ai.claude-opus-5"},
-        ]
-    )
+    services: list[dict[str, object]] = [
+        {"name": "model-services/system.ai.gpt-5-5"},
+        {"name": "model-services/system.ai.gpt-5-6-luna"},
+        {"name": "model-services/system.ai.gpt-5-6-sol"},
+        {"name": "model-services/system.ai.gpt-6-1"},
+        {"name": "model-services/system.ai.kimi-k2"},
+        {"name": "model-services/system.ai.glm-9"},
+        {"name": "model-services/system.ai.claude-opus-5"},
+    ]
+    if api_types is not None:
+        for service in services:
+            service["supported_api_types"] = api_types
+    servable = _discover_codex(services)
 
     assert servable == (
         # Curated (cheapest-safe-first) beats a newer non-curated generation.
@@ -356,6 +366,7 @@ def test_discover_codex_models_filters_non_codex_and_ranks_curated_first() -> No
         "system.ai.gpt-6-1",
         # Codex-compatible but unversioned, last.
         "system.ai.kimi-k2",
+        "system.ai.glm-9",
     )
 
 
@@ -464,6 +475,12 @@ def test_discover_codex_models_truncated_listing_cannot_establish_absence(
         pytest.param([None, 3], None, id="no-string-entries"),
         pytest.param([], frozenset(), id="empty"),
         pytest.param(["mlflow/v1/responses"], frozenset(), id="unrecognized"),
+        pytest.param(["codex/v1/responses"], frozenset(), id="codex-only"),
+        pytest.param(
+            ["codex/v1/responses", "openai/v1/responses"],
+            frozenset({ModelWireAPI.OPENAI_RESPONSES}),
+            id="codex-and-generic-responses",
+        ),
         pytest.param(
             ["OpenAI/v1/Responses", "mlflow/v1/chat/completions", None],
             frozenset({ModelWireAPI.OPENAI_RESPONSES, ModelWireAPI.OPENAI_CHAT}),

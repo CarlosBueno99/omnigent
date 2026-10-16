@@ -26,10 +26,10 @@ _PAGE_SIZE = 100
 _MAX_PAGES = 100
 _HTTP_TIMEOUT_S = 10.0
 
-#: The ``supported_api_types`` entry for the Responses API, which is what the
-#: ``/ai-gateway/codex/v1`` route serves. The MLflow gateway's own
-#: ``mlflow/v1/responses`` is a different surface and does not count.
+#: Generic Responses and Codex Responses are separate advertised routes.
+#: The MLflow gateway's own ``mlflow/v1/responses`` is a different surface.
 _RESPONSES_API_TYPE = "openai/v1/responses"
+_CODEX_RESPONSES_API_TYPE = "codex/v1/responses"
 
 
 #: Catalog spellings the same endpoint can be served under. Ordered by
@@ -157,11 +157,18 @@ def preferred_served_claude_model(
     return _models_by_claude_family(claude_ids, marker="claude-").get(preferred_family)
 
 
+def _model_service_api_types(service: Mapping[str, object]) -> frozenset[str] | None:
+    api_types = service.get("supported_api_types")
+    if not isinstance(api_types, list):
+        return None
+    normalized = frozenset(api_type.lower() for api_type in api_types if isinstance(api_type, str))
+    return None if api_types and not normalized else normalized
+
+
 def model_service_wire_apis(service: Mapping[str, object]) -> frozenset[ModelWireAPI] | None:
     """Normalize a model service's advertised ``supported_api_types``.
 
-    One rule for every reader of the Unity Catalog listing (worker catalog,
-    pi-native, codex discovery), so they agree on which route serves a model.
+    Codex-only routes do not establish support for the generic Responses API.
 
     :param service: One ``model_services`` entry, e.g.
         ``{"name": "model-services/system.ai.gpt-5-5",
@@ -170,11 +177,8 @@ def model_service_wire_apis(service: Mapping[str, object]) -> frozenset[ModelWir
         but none is recognized), or ``None`` when the entry carries no usable
         route metadata: the field is missing, not a list, or has no string entry.
     """
-    api_types = service.get("supported_api_types")
-    if not isinstance(api_types, list):
-        return None
-    normalized = {api_type.lower() for api_type in api_types if isinstance(api_type, str)}
-    if api_types and not normalized:
+    normalized = _model_service_api_types(service)
+    if normalized is None:
         return None
     wire_apis: set[ModelWireAPI] = set()
     if any("chat/completions" in api_type for api_type in normalized):
@@ -190,12 +194,11 @@ def model_service_wire_apis(service: Mapping[str, object]) -> frozenset[ModelWir
 class _ModelService:
     """One ``system.ai`` model service from the Unity Catalog listing.
 
-    ``wire_apis`` follows :func:`model_service_wire_apis`: ``None`` means the
-    entry carried no usable route metadata.
+    ``api_types`` is ``None`` when the entry carries no usable route metadata.
     """
 
     model_id: str
-    wire_apis: frozenset[ModelWireAPI] | None
+    api_types: frozenset[str] | None
 
 
 @dataclass(frozen=True)
@@ -249,7 +252,7 @@ def _list_model_services(
             if model_id.startswith(_MODEL_SERVICE_PREFIX):
                 model_id = model_id[len(_MODEL_SERVICE_PREFIX) :]
             if model_id.startswith(_SYSTEM_MODEL_PREFIX):
-                services.append(_ModelService(model_id, model_service_wire_apis(service)))
+                services.append(_ModelService(model_id, _model_service_api_types(service)))
         raw_next = payload.get("next_page_token")
         if not isinstance(raw_next, str) or not raw_next:
             break
@@ -474,7 +477,9 @@ def discover_databricks_codex_models(
 
 def _serves_codex_route(service: _ModelService) -> bool:
     """Whether the codex Responses route can serve *service*."""
-    return service.wire_apis is None or ModelWireAPI.OPENAI_RESPONSES in service.wire_apis
+    return service.api_types is None or not service.api_types.isdisjoint(
+        {_RESPONSES_API_TYPE, _CODEX_RESPONSES_API_TYPE}
+    )
 
 
 def _codex_preference_rank(model_id: str) -> tuple[int, int, int, int, str]:

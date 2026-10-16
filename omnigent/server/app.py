@@ -200,11 +200,16 @@ class ServerInfoResponse(BaseModel):
     dictation_available: bool
     # The archive PATCH accepts ``delete_worktree``; older servers reject it.
     archive_worktree_cleanup: bool = True
+    # A managed create or fork accepts ``host_id`` naming its new sandbox host;
+    # older servers reject it.
+    request_managed_sandbox_host_id: bool = True
     # User agents (`omnigent agent add`, GET /v1/agents?scope=user); absent on
     # older servers, which clients treat as unsupported.
     agent_install: bool = False
     # GET /v1/agents/{id}; absent on older servers, which clients treat as unsupported.
     agent_detail: bool = False
+    # Owner configuration reads and conditional PATCH updates.
+    agent_config_edit: bool = False
     branding: BrandingInfo
 
 
@@ -1552,6 +1557,7 @@ def create_app(
             )
 
     from omnigent.runner.routing import RunnerRouter
+    from omnigent.runner.transports.ws_tunnel.frames import RUNNER_IDLE_SHUTDOWN_CLOSE_REASON
     from omnigent.runner.transports.ws_tunnel.registry import RunnerSession, TunnelRegistry
     from omnigent.server.host_registry import HostRegistry, RunnerExitReports
     from omnigent.server.routes._host_launch import configure_host_sharding
@@ -3147,8 +3153,11 @@ def create_app(
                 "installable_harnesses": installable_harnesses,
                 "dictation_available": dictation_available,
                 "archive_worktree_cleanup": True,
+                "request_managed_sandbox_host_id": True,
                 "agent_install": agent_store.supports_user_agents,
                 "agent_detail": True,
+                "agent_config_edit": agent_store.supports_config_edit
+                and artifact_store is not None,
                 "branding": branding_snapshot.config(),
             }
         )
@@ -3479,7 +3488,7 @@ def create_app(
             pending.cancel()
 
     async def _mark_disconnected_runner_failed(
-        runner_id: str, reference_stamp: int | None
+        runner_id: str, reference_stamp: int | None, *, idle_shutdown: bool = False
     ) -> None:
         """Reconcile a dropped runner's sessions once the liveness lease expires.
 
@@ -3513,10 +3522,14 @@ def create_app(
             *runner_id*, captured in :func:`_on_runner_disconnect` before
             the clear — the reference the cross-replica check compares
             against.
+        :param idle_shutdown: Whether the runner closed with
+            ``RUNNER_IDLE_SHUTDOWN_CLOSE_REASON``. Its idle watchdog found no
+            active work, so a stale mid-turn status is settled like a Stop.
         """
         from omnigent.server.routes.sessions import (
             RUNNER_DISCONNECT_GRACE_S,
             _mark_runner_sessions_offline,
+            _note_runner_idle_shutdown,
             _relinquish_session_live_state,
             _runner_live_on_another_replica_from_conversations,
         )
@@ -3567,11 +3580,25 @@ def create_app(
                 runner_id,
             )
             return
-        _logger.warning(
-            "Runner %s disconnected; reconciling %d bound session(s)",
-            runner_id,
-            len(affected),
-        )
+        if idle_shutdown:
+            # The sweep's stop path settles these to idle instead of failing them.
+            _note_runner_idle_shutdown(runner_id, affected)
+            _logger.info(
+                "Runner %s shut down with no active work; settling %d bound session(s)",
+                runner_id,
+                len(affected),
+                extra=debug_event(
+                    "runner_idle_shutdown",
+                    runner_id=runner_id,
+                    session_count=len(affected),
+                ),
+            )
+        else:
+            _logger.warning(
+                "Runner %s disconnected; reconciling %d bound session(s)",
+                runner_id,
+                len(affected),
+            )
         await _mark_runner_sessions_offline(
             affected,
             ErrorDetail(
@@ -3627,10 +3654,22 @@ def create_app(
                 runner_id,
             )
             return
+        from omnigent.server.routes.sessions import _note_runner_idle_shutdown
+
+        idle_shutdown = connection.peer_close_reason == RUNNER_IDLE_SHUTDOWN_CLOSE_REASON
         _logger.info(
             "Runner disconnected",
-            extra=debug_event("runner_disconnected", runner_id=runner_id),
+            extra=debug_event(
+                "runner_disconnected",
+                runner_id=runner_id,
+                peer_close_reason=connection.peer_close_reason,
+                idle_shutdown=idle_shutdown,
+            ),
         )
+        if idle_shutdown:
+            # Relays decide at the same deadline as the grace timer below and
+            # would fail a stale mid-turn status first; mark them now.
+            _note_runner_idle_shutdown(runner_id)
         # Capture this replica's own last stamp before clearing, so the grace
         # timer can tell a fresher stamp another replica writes later from
         # one we wrote ourselves (the clear itself never erases this record).
@@ -3647,7 +3686,11 @@ def create_app(
         # each outage a full grace window.
         _cancel_disconnect_grace(runner_id)
         task = asyncio.create_task(
-            _mark_disconnected_runner_failed(runner_id, reference_stamp),
+            _mark_disconnected_runner_failed(
+                runner_id,
+                reference_stamp,
+                idle_shutdown=idle_shutdown,
+            ),
             name=f"runner-disconnect-grace-{runner_id}",
         )
         _disconnect_grace_tasks[runner_id] = task
