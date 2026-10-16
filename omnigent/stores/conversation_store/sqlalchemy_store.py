@@ -1402,8 +1402,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     .all()
                 )
         meta_by_id = {m.id: m for m in meta_rows}
-        # Uuid16 reads back bare hex; return each row under every spelling the
-        # caller used for it.
+        # Return each row under every caller spelling of its id.
         spellings = spellings_by_normalized_uuid(unique_ids)
         result: dict[str, Conversation] = {}
         for row in rows:
@@ -1452,8 +1451,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     desc(self._tiebreaker_col),
                 )
             ).all()
-        # Uuid16 reads back bare hex; file each child under every spelling the
-        # caller used for its parent.
+        # Key children under every caller spelling of the parent.
         spellings = spellings_by_normalized_uuid(unique_ids)
         for parent_id, child_id in rows:
             if parent_id is not None:
@@ -2353,8 +2351,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 .order_by(ranked.c.conversation_id, ranked.c.position.desc())
             ).all()
             decoded = self._decode_item_data_batch([row.data for row in rows])
-            # Uuid16 reads back bare hex; file each item under every spelling the
-            # caller used for its conversation.
+            # Key items under every caller spelling of the conversation.
             spellings = spellings_by_normalized_uuid(unique_ids)
             for row, data_json in zip(rows, decoded, strict=True):
                 item = _to_item(row, data_json)  # type: ignore[arg-type]

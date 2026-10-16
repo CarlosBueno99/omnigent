@@ -403,8 +403,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
                 .all()
             ]
         result: dict[str, list[SessionPermission]] = {cid: [] for cid in conversation_ids}
-        # Uuid16 reads back bare hex; file each grant under every spelling the
-        # caller used for its session.
+        # File each grant under every caller spelling of its session.
         spellings = spellings_by_normalized_uuid(conversation_ids)
         for entity in entities:
             for conversation_id in spellings[entity.conversation_id]:

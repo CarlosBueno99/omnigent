@@ -895,26 +895,28 @@ def test_projects_changed_event_forwards_to_client(
 
 
 @pytest.mark.parametrize(
-    ("templates", "admin"),
+    ("templates", "owner", "admin"),
     [
-        pytest.param(["conv_{hex}"], False, id="prefixed"),
-        pytest.param(["{hex}", "conv_{hex}"], False, id="bare_then_prefixed"),
-        pytest.param(["conv_{hex}", "{hex}"], True, id="admin_prefixed_then_bare"),
-        pytest.param(["{hex}", "conv_{hex}"], True, id="admin_bare_then_prefixed"),
+        pytest.param(["conv_{hex}"], ALICE, False, id="prefixed"),
+        pytest.param(["{hex}", "conv_{hex}"], ALICE, False, id="bare_then_prefixed"),
+        pytest.param(["conv_{hex}", "{hex}"], BOB, True, id="admin_prefixed_then_bare"),
+        pytest.param(["{hex}", "conv_{hex}"], BOB, True, id="admin_bare_then_prefixed"),
     ],
 )
 def test_conv_prefixed_watch_streams_grant_fields(
-    app: FastAPI, stores, templates: list[str], admin: bool
+    app: FastAPI, stores, templates: list[str], owner: str, admin: bool
 ) -> None:
     """A ``conv_``-prefixed watch, alone or alongside the bare id (the sidebar
     sends both when the opened session is on its loaded page), streams one
     item with the ``permission_level`` / ``owner`` a bare-hex watch does.
     Grants are keyed by the watched spellings while items carry bare ids, so
-    a mismatched lookup presented an owned session as ownerless.
+    a mismatched lookup presented an owned session as ownerless. An admin
+    watching another user's session must still see that user as its owner.
     """
     _, _, permission_store = stores
-    s1 = _seed_session(stores, owner=ALICE, title="prefixed")
+    s1 = _seed_session(stores, owner=owner, title="prefixed")
     if admin:
+        permission_store.ensure_user(ALICE)
         permission_store.set_admin(ALICE, True)
     watched = [template.format(hex=s1) for template in templates]
     with TestClient(app).websocket_connect(
@@ -925,4 +927,4 @@ def test_conv_prefixed_watch_streams_grant_fields(
         items = snapshot["items"]
         assert [item["id"] for item in items] == [s1]  # type: ignore[index]
         assert items[0]["permission_level"] == LEVEL_OWNER  # type: ignore[index]
-        assert items[0]["owner"] == ALICE  # type: ignore[index]
+        assert items[0]["owner"] == owner  # type: ignore[index]
