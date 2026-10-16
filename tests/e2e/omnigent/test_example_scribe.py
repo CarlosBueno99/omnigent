@@ -103,9 +103,7 @@ def test_scribe_scopes_self_authored_skills_outside_the_omnigent_repo() -> None:
 
     # Pins the prompt's exact wording; update these checks when the prompt changes.
     lowered = compact.lower()
-    describes_checkout_condition = (
-        "omnigent checkout" in lowered or "git checkout root" in lowered
-    )
+    describes_checkout_condition = "omnigent checkout" in lowered or "git checkout root" in lowered
     describes_user_owned_alternative = "user-owned" in lowered
     unconditional_repo_rule = (
         "skills directory (`examples/scribe/skills/<dir>/SKILL.md`)" in compact
@@ -134,10 +132,7 @@ def test_scribe_does_not_open_unsolicited_prs_on_the_upstream_repo() -> None:
         "an explicit user request"
     )
     lowered = compact.lower()
-    assert (
-        "never open a pull request or issue" in lowered
-        and "explicitly asks" in lowered
-    ), (
+    assert "never open a pull request or issue" in lowered and "explicitly asks" in lowered, (
         "omnigent-ai/omnigent is named, but the prohibition on opening both PRs "
         "and issues there without an explicit user request is missing"
     )
