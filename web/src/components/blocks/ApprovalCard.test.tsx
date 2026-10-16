@@ -1694,10 +1694,12 @@ describe("ElicitationCard — prompts mirrored from a sub-agent", () => {
   it("names and links the child session on pending and responded cards", () => {
     // WHY: the parent can run a different harness than the child, so a card
     // tagged "Claude Code" in a Codex chat must say which sub-agent asked.
+    // The label carries both the generated summary and the handle the
+    // orchestrator uses, exactly as the Agents rail row does.
     const cache = { conv_parent: [childSession()] };
     const { unmount } = renderCard(elicitationItem(), cache);
     const requester = screen.getByTestId("approval-card-requester");
-    expect(requester).toHaveTextContent("Requested by sub-agent Review the auth change");
+    expect(requester).toHaveTextContent("Requested by sub-agent Review the auth change · review");
     expect(within(requester).getByRole("link")).toHaveAttribute("href", "/c/conv_child");
     unmount();
 
@@ -1710,7 +1712,7 @@ describe("ElicitationCard — prompts mirrored from a sub-agent", () => {
     );
     expect(screen.getByText("Approved · auto mode")).toBeDefined();
     expect(screen.getByTestId("approval-card-requester")).toHaveTextContent(
-      "Requested by sub-agent Review the auth change",
+      "Requested by sub-agent Review the auth change · review",
     );
   });
 

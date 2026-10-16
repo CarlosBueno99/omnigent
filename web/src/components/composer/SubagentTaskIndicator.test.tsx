@@ -154,4 +154,22 @@ describe("SubagentTaskIndicator", () => {
     expect(pill).toHaveClass("text-warning");
     expect(pill).toHaveAccessibleName("1 sub-agent: 1 awaiting input");
   });
+
+  // An active worker carrying both a handle and a generated task_summary must
+  // name the handle in the popover too, matching the open-worker composer tray.
+  it("names an active worker by its handle, not only its task summary", () => {
+    setChildren([
+      child({
+        id: "worker",
+        busy: true,
+        title: "worker:deploy-profile-page",
+        session_name: "deploy-profile-page",
+        task_summary: "Deploy PR41 via web ops",
+        tool: "worker",
+      }),
+    ]);
+    renderIndicator();
+    fireEvent.click(screen.getByTestId("subagent-task-pill"));
+    expect(screen.getByRole("link", { name: /deploy-profile-page/ })).toBeInTheDocument();
+  });
 });

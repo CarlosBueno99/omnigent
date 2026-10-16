@@ -8,6 +8,7 @@ import { useChildSessions, type ChildSessionInfo } from "@/hooks/useChildSession
 import { Link, useLocation } from "@/lib/routing";
 import { sessionNavigationSearch } from "@/lib/sessionNavigation";
 import { cn } from "@/lib/utils";
+import { childPrimaryLabel } from "@/shell/subagentLabel";
 import { childStatus } from "@/shell/subagentStatus";
 
 /**
@@ -26,14 +27,11 @@ interface IndicatorChild {
   statusLabel: string;
 }
 
+// Shared with the Agents rail and approval cards so every surface names a
+// worker alike; a row with no title, name or tool reads "Sub-agent", not its id.
 function subagentLabel(child: ChildSessionInfo): string {
-  const summary = child.task_summary?.trim();
-  if (summary) return summary;
-  const name = child.session_name?.trim();
-  if (name) return name;
-  const title = child.title?.trim();
-  if (title) return title;
-  return "Sub-agent";
+  const label = childPrimaryLabel(child);
+  return label === child.id ? "Sub-agent" : label;
 }
 
 function indicatorChild(child: ChildSessionInfo): IndicatorChild | null {
