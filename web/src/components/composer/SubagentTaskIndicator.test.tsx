@@ -127,6 +127,9 @@ describe("SubagentTaskIndicator", () => {
     setChildren([
       child({
         id: "disconnected",
+        title: "researcher:docs-sync",
+        session_name: "docs-sync",
+        tool: "researcher",
         current_task_status: "failed",
         last_task_error: { code: "runner_disconnected", message: "Runner tunnel dropped" },
       }),
@@ -143,7 +146,7 @@ describe("SubagentTaskIndicator", () => {
       .getAllByRole("status")
       .find((status) => status.textContent === "Disconnected");
     expect(disconnectedStatus).toHaveClass("text-muted-foreground");
-    expect(screen.getByRole("link", { name: /Sub-agent.*Disconnected/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /docs-sync.*Disconnected/ })).toBeInTheDocument();
   });
 
   it("uses the parked trigger treatment when no child has an error", () => {
@@ -153,5 +156,23 @@ describe("SubagentTaskIndicator", () => {
     expect(pill).toHaveAttribute("data-state", "parked");
     expect(pill).toHaveClass("text-warning");
     expect(pill).toHaveAccessibleName("1 sub-agent: 1 awaiting input");
+  });
+
+  // An active worker carrying both a handle and a generated task_summary must
+  // name the handle in the popover too, matching the open-worker composer tray.
+  it("names an active worker by its handle, not only its task summary", () => {
+    setChildren([
+      child({
+        id: "worker",
+        busy: true,
+        title: "worker:deploy-profile-page",
+        session_name: "deploy-profile-page",
+        task_summary: "Deploy PR41 via web ops",
+        tool: "worker",
+      }),
+    ]);
+    renderIndicator();
+    fireEvent.click(screen.getByTestId("subagent-task-pill"));
+    expect(screen.getByRole("link", { name: /deploy-profile-page/ })).toBeInTheDocument();
   });
 });

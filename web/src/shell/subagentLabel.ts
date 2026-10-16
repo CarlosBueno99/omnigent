@@ -14,6 +14,10 @@ import {
 /**
  * Pick the primary label for a child-session row.
  *
+ * The generated ``task_summary`` leads so sibling rows read by what they do; the
+ * orchestrator-chosen handle (``session_name`` or the ``"{tool}:{name}"`` suffix)
+ * follows it, e.g. ``"Deploy PR41 via web ops · deploy-profile-page"``.
+ *
  * @param child - One child-session summary from the poll or stream.
  * @returns The label shown beside the child icon.
  */
@@ -38,7 +42,8 @@ export function childPrimaryLabel(child: ChildSessionInfo): string {
     const titleSuffix = child.title.split(":").slice(1).join(":");
     if (titleSuffix) titleTask = titleSuffix;
   }
-  return (
-    child.task_summary ?? child.session_name ?? titleTask ?? child.title ?? child.tool ?? child.id
-  );
+  const handle = child.session_name ?? titleTask;
+  const summary = child.task_summary;
+  if (summary && handle && handle !== summary) return `${summary} · ${handle}`;
+  return summary ?? handle ?? child.title ?? child.tool ?? child.id;
 }
