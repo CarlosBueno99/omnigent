@@ -33,8 +33,18 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 # Two SPA runner-health poll cycles (POLL_INTERVAL_MS in web/src/hooks/useRunnerHealth.ts),
 # so one delayed poll cannot pass the observation vacuously.
 _CONFLICT_OBSERVATION_MS = 20_000
+# Control window: with no session on the picked host nothing is registered for
+# health polling, so a banner here would not depend on the poll cycle.
 _NO_CONFLICT_BASELINE_MS = 3_000
 _AGENT_ROW = re.compile(r"^hello[ _]world$", re.I)
+
+
+async def _becomes_visible(locator: Locator, timeout_ms: int) -> bool:
+    try:
+        await expect(locator).to_be_visible(timeout=timeout_ms)
+    except AssertionError:
+        return False
+    return True
 
 
 async def _select_hello_world(page: Page) -> None:
@@ -43,7 +53,7 @@ async def _select_hello_world(page: Page) -> None:
     await expect(trigger).to_have_attribute("aria-expanded", "true")
     row = page.get_by_role("menuitem", name=_AGENT_ROW)
     # The server's hello_world agent is listed under "Other..." unless configured top-level.
-    if not await row.is_visible():
+    if not await _becomes_visible(row, 2_000):
         await page.get_by_test_id("new-chat-landing-custom-agents").click()
     await expect(row).to_be_visible(timeout=15_000)
     await row.click()
@@ -70,14 +80,6 @@ async def _browse_to_project(page: Page, project: Path) -> None:
     await expect(page.get_by_test_id("workspace-picker-entry-README.md")).to_be_visible(
         timeout=15_000
     )
-
-
-async def _becomes_visible(locator: Locator, timeout_ms: int) -> bool:
-    try:
-        await expect(locator).to_be_visible(timeout=timeout_ms)
-    except AssertionError:
-        return False
-    return True
 
 
 async def _wait_session_idle(

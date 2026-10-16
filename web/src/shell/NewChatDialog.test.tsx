@@ -671,8 +671,7 @@ describe("sessionsSharingDirectory", () => {
       expected: ["f"],
     },
     {
-      // Not idle, so the raw predicate counts it; useConversations maps a missing
-      // wire status to idle before rows reach the dialogs.
+      // An absent status counts as working; list rows reach the dialogs un-normalized.
       name: "counts a session with no status field",
       sessions: [conv({ id: "u", host_id: "host_1", workspace: "/repo", status: undefined })],
       hostId: "host_1",

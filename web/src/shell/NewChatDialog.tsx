@@ -684,7 +684,7 @@ export function composerWorktreeHeaderState({
   };
 }
 
-/** Idle is the only status that frees a directory; running, waiting and failed still occupy it. */
+/** Only idle frees a directory; running, failed and absent statuses still occupy it. */
 export function isWorkingStatus(status: Conversation["status"]): boolean {
   return status !== "idle";
 }
