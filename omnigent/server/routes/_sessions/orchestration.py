@@ -5989,17 +5989,7 @@ async def _forward_native_terminal_message(
 
 
 def _runner_held_behind(resp: httpx.Response) -> str | None:
-    """
-    Read what the runner queued a native message behind, if it did.
-
-    The runner answers ``202 {"status": "buffered", "held_behind": ...}``
-    when the pane is parked on a prompt only a person can answer; any
-    other 2xx means the message reached the harness.
-
-    :param resp: Completed runner response.
-    :returns: The ``held_behind`` reason, e.g. ``"pending prompt"``, or
-        ``None``.
-    """
+    """Return the ``held_behind`` reason from a runner ``202 buffered`` reply, else ``None``."""
     if resp.status_code != 202:
         return None
     try:

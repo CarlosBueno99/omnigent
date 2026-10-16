@@ -7400,14 +7400,7 @@ async def test_session_peek_appends_pending_elicitation_from_snapshot() -> None:
 
 @pytest.mark.asyncio
 async def test_session_peek_appends_held_inputs_after_the_prompt_they_wait_on() -> None:
-    """
-    ``sys_session_get_history`` shows a message the runner still holds.
-
-    A held message is not in the transcript until the harness records it, so
-    ``/items`` ends before it; the snapshot's ``pending_inputs`` is the only
-    place it lives. get_history must project it after the prompt it waits on,
-    or the parent cannot tell that its nudge never landed.
-    """
+    """``sys_session_get_history`` appends a held message after the prompt it waits on."""
     from omnigent.runner.tool_dispatch import _execute_session_query_tool
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -12818,15 +12811,7 @@ async def test_named_send_reuses_tracked_in_flight_entry_without_restamp(
 async def test_named_send_held_behind_child_prompt_reports_held_not_injected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A send the runner holds behind the child's terminal prompt must say so.
-
-    The server's ack carries ``held_behind`` when the child's runner queued the
-    message because its pane is parked on a prompt a person must answer. The
-    parent used to be told the message was "injected into the running turn"
-    regardless, so an orchestrator reported progress that was not happening.
-    The handle must report ``held`` with the reason, while the eventual turn's
-    completion stays deliverable under one tracked work entry.
-    """
+    """A send the runner holds behind the child's prompt reports ``held``, not injected."""
     from omnigent.runner import app as runner_app
 
     parent_id, child_id = "conv_parent_held", "conv_child_held"

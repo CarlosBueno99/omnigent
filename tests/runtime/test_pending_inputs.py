@@ -429,13 +429,7 @@ def test_created_by_in_snapshot() -> None:
 
 
 def test_project_for_peek_renders_text_and_sender() -> None:
-    """
-    :func:`project_for_peek` shapes a snapshot entry like the other peek items.
-
-    ``sys_session_get_history`` appends held messages from the snapshot, so a
-    parent reading a parked sub-agent sees the undelivered text and its sender;
-    non-text blocks are left out and an unknown sender omits ``created_by``.
-    """
+    """A snapshot entry projects to a ``pending_input`` item with its text and sender."""
     pending_inputs.record(
         "conv_a",
         [_text_block("hi"), {"type": "input_image", "file_id": "f1"}, _text_block("there")],

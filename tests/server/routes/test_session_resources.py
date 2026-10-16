@@ -4806,14 +4806,7 @@ async def test_native_dispatch_fast_fails_and_consumes_message_on_terminal_error
 async def test_claude_native_message_held_behind_prompt_is_reported_in_ack(
     client: httpx.AsyncClient,
 ) -> None:
-    """
-    The ack says when the runner queued the message behind a terminal prompt.
-
-    The runner answers ``202 buffered`` with ``held_behind`` when the pane is
-    parked on a prompt only a person can answer. The route used to drop that
-    body and ack ``queued`` alone, so ``sys_session_send`` told orchestrators
-    the message was injected into a running turn while it sat in the queue.
-    """
+    """The ack carries the runner's ``held_behind`` instead of a bare ``queued``."""
     from omnigent.runtime import pending_inputs
 
     session_id = "64a784c3aa907d1774f44313546947c6"

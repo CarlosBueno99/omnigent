@@ -431,14 +431,7 @@ def test_peek_returns_items_chronological(session_fixture: _Fixture) -> None:
 
 
 def test_peek_appends_held_inputs_after_pending_prompts(session_fixture: _Fixture) -> None:
-    """
-    Peek shows a message the runner still holds for the child.
-
-    A held message is not in the conversation store until the harness
-    records it, so without reading the pending-inputs index a peek on a
-    sub-agent parked on a terminal prompt would hide the undelivered nudge.
-    It is appended after the stored tail and after any parked prompt.
-    """
+    """Peek appends a message the runner still holds after the stored tail and parked prompts."""
     from omnigent.runtime import pending_inputs
 
     pending_inputs.reset_for_tests()

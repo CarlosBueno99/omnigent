@@ -1,14 +1,4 @@
-"""An orchestrator must learn when its message to a Claude Code worker is held, not injected.
-
-A mock-driven ``openai-agents`` parent dispatches a real ``claude-native`` worker through
-``sys_session_send``. The worker's scripted model calls ``AskUserQuestion``, which Claude Code
-prompts for in every permission mode, so the runner starts holding new messages for that worker
-(``202 {"status": "buffered", "detail": "Message buffered until the pending prompt is
-resolved."}``). The parent then sends a follow-up to the same worker and asks for the
-worker's info and history. The parent's tool results are what an orchestrator (and a
-person reading its chat) sees, so they must say the follow-up is held and expose why.
-
-"""
+"""An orchestrator must learn when its message to a Claude Code worker is held, not injected."""
 
 from __future__ import annotations
 
@@ -53,12 +43,7 @@ _HOLD_OBSERVATION_S = 60.0
 
 
 def _runner_visible_mock_url(mock_llm_server_url: str) -> str:
-    """Return the mock URL the runner's processes can reach.
-
-    Under the workflow-prepared environment the test process talks to the mock through a
-    per-invocation relay URL; the runner resolves the mock at the address recorded in its
-    environment file instead.
-    """
+    """Return the mock URL the runner can reach; the workflow env records it in its env file."""
     if os.environ.get("OMNIGENT_REPRO_SERVER_URL"):
         env_file = (
             Path(__file__).resolve().parents[3] / ".omnigent" / "repro-env" / "environment.json"
@@ -69,12 +54,7 @@ def _runner_visible_mock_url(mock_llm_server_url: str) -> str:
 
 
 def _claude_mock_provider(mock_llm_server_url: str) -> contextlib.AbstractContextManager[None]:
-    """Point the worker's Claude Code at the mock for the journey's lifetime.
-
-    The runner derives the pane's model endpoint from the provider config, so a
-    standalone server needs the mock provider installed; the workflow-prepared
-    environment already carries one, where this is a no-op.
-    """
+    """Point the worker's Claude Code at the mock provider; a no-op under the workflow env."""
     return _temp_omnigent_mock_config(
         _runner_visible_mock_url(mock_llm_server_url),
         "claude",
@@ -83,10 +63,7 @@ def _claude_mock_provider(mock_llm_server_url: str) -> contextlib.AbstractContex
 
 
 def _orchestrator_yaml(name: str, mock_v1_url: str) -> str:
-    """Compat-form spec: an openai-agents parent with one Claude Code worker.
-
-    The worker calls ``AskUserQuestion``, which Claude Code prompts for in every mode.
-    """
+    """Compat-form spec: an openai-agents parent with one Claude Code worker."""
     return f"""\
 name: {name}
 prompt: |
@@ -157,11 +134,7 @@ def _prepare_parent(
     *,
     worker_prompts: bool,
 ) -> tuple[HeldMessageJourney, subprocess.Popen[bytes] | None]:
-    """Register the orchestrator, bind its session, and script every model turn.
-
-    :param worker_prompts: Script the worker's first model reply as a ``Bash`` tool call
-        (Claude Code prompts for it) rather than plain text (the worker goes idle).
-    """
+    """Register the orchestrator, bind its session, and script every model turn."""
     nonce = uuid.uuid4().hex[:8]
     journey = HeldMessageJourney(base_url=base_url, mock_url=mock_url, parent_id="", nonce=nonce)
     journey.worker_title = f"deploy-{nonce}"
