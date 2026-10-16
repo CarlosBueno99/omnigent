@@ -25,7 +25,7 @@ from omnigent.terminals.pane_reaper import (
     resolve_native_pane_idle_timeout_s,
 )
 from omnigent.terminals.registry import TerminalRegistry
-from tests.runner.helpers import NullServerClient
+from tests.runner.helpers import NullServerClient, make_test_terminal_instance
 
 
 def _pane(conv: str, name: str = "claude") -> PaneRef:
@@ -208,6 +208,17 @@ def test_kimi_is_exempt_from_pane_reaping() -> None:
     assert "claude" in NATIVE_PANE_TERMINAL_NAMES
 
 
+def test_every_native_harness_pane_is_offered_to_the_reaper() -> None:
+    # A native harness missing from the hand-kept name filter leaks every one of
+    # its finished panes; only kimi may be absent (see the exemption test above).
+    from omnigent.harness_aliases import NATIVE_HARNESSES, native_terminal_name
+    from omnigent.terminals.pane_reaper import NATIVE_PANE_TERMINAL_NAMES
+
+    pane_names = {native_terminal_name(harness) for harness in NATIVE_HARNESSES}
+    uncovered = pane_names - NATIVE_PANE_TERMINAL_NAMES
+    assert uncovered <= {"kimi"}, f"native panes invisible to the reaper: {sorted(uncovered)}"
+
+
 async def test_runner_busy_check_spares_a_pane_parked_on_an_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -298,33 +309,8 @@ async def test_runner_busy_check_counts_a_viewer_only_on_recent_input(
     assert not await reaper._is_busy(pane)
 
 
-def _build_real_reaper(monkeypatch, tmp_path: Path) -> NativePaneReaper:
-    """Build the production app and hand back its real native pane reaper.
-
-    Mirrors the rig the ``_is_busy`` tests use: no tmux is available under test,
-    so the activity probes are stubbed before the app is built (they are bound by
-    name at construction time).
-    """
-    monkeypatch.setattr(native_cost_popup, "_tmux_last_client_input_at", lambda *_a: None)
-    monkeypatch.setattr(native_cost_popup, "_tmux_window_activity_at", lambda *_a: None)
-    registry = TerminalRegistry()
-    app = create_runner_app(
-        terminal_registry=registry,
-        resource_registry=SessionResourceRegistry(terminal_registry=registry),
-        server_client=NullServerClient(),  # type: ignore[arg-type]
-    )
-    reaper = app.state.native_pane_reaper
-    assert reaper is not None
-    return reaper
-
-
-async def _forever_forwarder_task() -> None:
-    """A restart-forever stand-in: it only ever exits via cancellation."""
-    await asyncio.Event().wait()
-
-
-class _FakeOpenCodeServer:
-    """Minimal double for an adopted OpenCode server — only ``close`` is used."""
+class _FakeSidecarServer:
+    """Stands in for a per-session codex app-server / opencode server."""
 
     def __init__(self) -> None:
         self.closed = False
@@ -333,56 +319,53 @@ class _FakeOpenCodeServer:
         self.closed = True
 
 
-async def test_reap_cancels_claude_transcript_forwarder(monkeypatch, tmp_path: Path) -> None:
-    """An idle reap of a claude pane cancels the session's live forwarder.
-
-    Before the fix, ``_reap_native_pane`` only awaited
-    ``teardown_codex_native_app_server``, which early-returns for a non-codex
-    session and so never touched the forwarder — the ~4Hz restart-forever tail
-    kept polling a dead bridge dir until the host was exhausted (#8077).
-    """
-    conv = "conv_reap_claude_8077"
-    reaper = _build_real_reaper(monkeypatch, tmp_path)
-    pane = PaneRef(conv, terminal_resource_id("claude", "main"), "claude", tmp_path / "tmux.sock")
-
-    task = asyncio.create_task(_forever_forwarder_task())
-    native_runtime._AUTO_FORWARDER_TASKS[conv] = task
-    try:
-        await reaper._reap(pane)
-
-        assert task.cancelled()
-        assert conv not in native_runtime._AUTO_FORWARDER_TASKS
-    finally:
-        native_runtime._AUTO_FORWARDER_TASKS.pop(conv, None)
-        if not task.done():
-            task.cancel()
-
-
-async def test_reap_tears_down_idle_opencode_server(monkeypatch, tmp_path: Path) -> None:
-    """An idle reap of an opencode pane closes its server and cancels its forwarder.
-
-    Mirrors the ``DELETE /v1/sessions`` teardown: ``_cancel_auto_forwarder_task``
-    plus ``teardown_opencode_native_server`` must both fire from the reap path.
-    """
-    conv = "conv_reap_opencode_8077"
-    reaper = _build_real_reaper(monkeypatch, tmp_path)
-    pane = PaneRef(
-        conv, terminal_resource_id("opencode", "main"), "opencode", tmp_path / "tmux.sock"
+@pytest.mark.parametrize(
+    ("terminal_name", "server_registry"),
+    [
+        ("codex", native_runtime._AUTO_CODEX_APP_SERVERS),
+        ("opencode", native_runtime._AUTO_OPENCODE_SERVERS),
+        ("claude", None),
+    ],
+)
+async def test_runner_reap_releases_the_sessions_sidecars(
+    tmp_path: Path,
+    terminal_name: str,
+    server_registry: dict[str, object] | None,
+) -> None:
+    """Reaping a pane must also release its forwarder and helper server, which
+    otherwise outlive the pane for the runner's lifetime."""
+    conv = f"conv_reap_{terminal_name}"
+    registry = TerminalRegistry()
+    instance = make_test_terminal_instance(terminal_name, "main", tmp_path)
+    registry._by_conversation[conv] = {(terminal_name, "main"): instance}
+    app = create_runner_app(
+        terminal_registry=registry,
+        resource_registry=SessionResourceRegistry(terminal_registry=registry),
+        server_client=NullServerClient(),  # type: ignore[arg-type]
     )
-
-    task = asyncio.create_task(_forever_forwarder_task())
-    server = _FakeOpenCodeServer()
-    native_runtime._AUTO_FORWARDER_TASKS[conv] = task
-    native_runtime._AUTO_OPENCODE_SERVERS[conv] = server  # type: ignore[assignment]
+    reaper = app.state.native_pane_reaper
+    assert reaper is not None
+    forwarder = asyncio.create_task(
+        asyncio.Event().wait(), name=f"{terminal_name}-forwarder-{conv}"
+    )
+    native_runtime._register_auto_forwarder_task(conv, forwarder)
+    server = _FakeSidecarServer()
+    if server_registry is not None:
+        server_registry[conv] = server  # type: ignore[index]
+    pane = PaneRef(
+        conv, terminal_resource_id(terminal_name, "main"), terminal_name, instance.socket_path
+    )
     try:
         await reaper._reap(pane)
 
-        assert server.closed
-        assert conv not in native_runtime._AUTO_OPENCODE_SERVERS
-        assert task.cancelled()
+        assert registry.get(conv, terminal_name, "main") is None
+        assert forwarder.done(), "transcript forwarder still running after the pane was reaped"
         assert conv not in native_runtime._AUTO_FORWARDER_TASKS
+        if server_registry is not None:
+            assert server.closed, f"{terminal_name} server not closed by the reap"
+            assert conv not in server_registry
     finally:
+        forwarder.cancel()
         native_runtime._AUTO_FORWARDER_TASKS.pop(conv, None)
-        native_runtime._AUTO_OPENCODE_SERVERS.pop(conv, None)
-        if not task.done():
-            task.cancel()
+        if server_registry is not None:
+            server_registry.pop(conv, None)
