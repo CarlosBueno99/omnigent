@@ -7777,6 +7777,14 @@ def create_runner_app(
             # prompt and strands its approval card unanswerable.
             if approval_wait_is_fresh(conv_id):
                 return True
+            # A background sub-agent runs in the parent's app-server with no
+            # parent turn, status, approval or pane output of its own; hold the
+            # pane while its child work is non-terminal, else reaping strands it.
+            if any(
+                entry.status not in _SUBAGENT_TERMINAL_STATUSES
+                for entry in list_subagent_work(conv_id)
+            ):
+                return True
             # An attached viewer alone does not spare the pane (a tab left open
             # overnight kept idle native stacks resident). Count it only when a
             # human drove it recently: a CLI keypress, or any web-bridge event.
