@@ -417,6 +417,35 @@ describe("parseEvent — response.output_item.done error level", () => {
     expect(plainError).not.toBeNull();
     expect(plainError).not.toHaveProperty("level");
   });
+
+  it("keeps a live notice's title, cause and remediation like the history path", () => {
+    // A persisted notice posted while the page is open arrives here, not via
+    // GET /items; dropping the title made the pill read "Notice" until reload.
+    const ev = parseEvent("response.output_item.done", {
+      item: {
+        id: "err_2",
+        response_id: "",
+        type: "error",
+        source: "harness",
+        code: "native_startup_dialog",
+        message: "Claude Code is showing “Settings Error” in its terminal.",
+        level: "info",
+        title: "Claude Code is waiting for an answer in its terminal (Settings Error)",
+        cause: "The settings file is not valid JSON.",
+        remediation: "Open the terminal to continue.",
+      },
+    });
+    expect(ev).toMatchObject({
+      type: "error",
+      error: {
+        code: "native_startup_dialog",
+        level: "info",
+        title: "Claude Code is waiting for an answer in its terminal (Settings Error)",
+        cause: "The settings file is not valid JSON.",
+        remediation: "Open the terminal to continue.",
+      },
+    });
+  });
 });
 
 describe("parseEvent — response.compaction.in_progress", () => {

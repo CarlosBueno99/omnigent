@@ -1255,15 +1255,13 @@ function parseOutputItem(data: Record<string, unknown>): StreamEvent | null {
   }
 
   if (itemType === "error") {
+    // Same fields the history path keeps, so a live notice shows its title
+    // instead of the generic headline until the page reloads.
     return {
       type: "error",
       source: String(rec.source ?? ""),
       toolName: null,
-      error: {
-        code: String(rec.code ?? ""),
-        message: String(rec.message ?? ""),
-        ...(rec.level === "info" ? { level: "info" as const } : {}),
-      },
+      error: parseErrorInfo(rec),
       itemId,
       responseId,
     } satisfies ErrorEvent;
