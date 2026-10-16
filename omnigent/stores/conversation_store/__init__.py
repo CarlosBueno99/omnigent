@@ -642,6 +642,21 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def list_child_conversation_ids_page(
+        self,
+        parent_conversation_id: str,
+        *,
+        after: tuple[int, str] | None = None,
+        limit: int = 128,
+    ) -> list[tuple[str, int]]:
+        """Return one parent's children as (ID, creation time) in descending key order.
+
+        Pass the last row's (creation time, ID) as *after* to continue via
+        the workspace/parent/creation-time/ID index.
+        """
+        ...
+
+    @abstractmethod
     def get_item(self, conversation_id: str, item_id: str) -> ConversationItem | None:
         """
         Fetch one persisted item by id, or ``None`` when absent.
@@ -1871,6 +1886,8 @@ class ConversationStore(ABC):
         ``response_id``, ``type``, ``status``, and ``data``. FTS
         records are inserted for each copied item. The entire
         operation runs in a single transaction for atomicity.
+        Source ``workspace_missing`` errors become historical notices and
+        matching failure labels are omitted; the fork binds its own workspace.
 
         :param source_conversation_id: ID of the conversation to
             fork, e.g. ``"conv_abc123"``.
