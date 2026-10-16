@@ -272,6 +272,24 @@ def live_server():
     return report
 
 
+def _assert_clip_ends_on_live_page(
+    raw: Path, observed: dict[str, object], frames_dir: Path
+) -> None:
+    """The one clip was already written when the later fixture ran, never shows the
+    teardown state, and stays on the live page once the screencast captured it."""
+    videos = sorted(path.name for path in raw.glob("*.webm"))
+    assert observed["videos"] == videos
+    assert len(videos) == 1
+    frames = extract_frames(raw / videos[0], frames_dir)
+    assert fraction_near(frames[-1], (0xDC, 0x26, 0x26)) < 0.1, (
+        "the final video frame shows the teardown state instead of the live page"
+    )
+    # A starved screencast can miss the live page entirely; the stop point still
+    # must not let the clip move off it once it was filmed.
+    live = [fraction_near(frame, (0x1D, 0x4E, 0xD8)) for frame in frames]
+    assert live[-1] >= max(live) - 0.1, "the clip moved off the live page before it ended"
+
+
 @pytest.mark.parametrize("inherited_compat", [False, True])
 def test_video_is_finalized_before_a_later_fixture_tears_down(
     pytester: pytest.Pytester,
@@ -397,13 +415,7 @@ def test_own_page_video_is_finalized_before_a_later_fixture_tears_down(
     assert observed["page_closed"], (
         "a page the test opened itself was still filming when the session fixture tore down"
     )
-    videos = sorted(path.name for path in raw.glob("*.webm"))
-    assert observed["videos"] == videos
-    assert len(videos) == 1
-    frames = extract_frames(raw / videos[0], tmp_path / "frames")
-    assert fraction_near(frames[-1], (0x1D, 0x4E, 0xD8)) > 0.5, (
-        "the final video frame shows the teardown state instead of the live page"
-    )
+    _assert_clip_ends_on_live_page(raw, observed, tmp_path / "frames")
 
 
 def test_page_opted_out_of_recording_is_left_to_its_owner(
@@ -441,13 +453,7 @@ def test_fixture_owned_page_video_is_finalized_before_a_later_fixture_tears_down
     assert observed["page_closed"], (
         "a fixture-owned page was still filming when the session fixture tore down"
     )
-    videos = sorted(path.name for path in raw.glob("*.webm"))
-    assert observed["videos"] == videos
-    assert len(videos) == 1
-    frames = extract_frames(raw / videos[0], tmp_path / "frames")
-    assert fraction_near(frames[-1], (0x1D, 0x4E, 0xD8)) > 0.5, (
-        "the final video frame shows the teardown state instead of the live page"
-    )
+    _assert_clip_ends_on_live_page(raw, observed, tmp_path / "frames")
 
 
 @pytest.mark.parametrize(
@@ -469,13 +475,7 @@ def test_async_own_page_video_is_finalized_before_a_later_fixture_tears_down(
     assert observed["page_closed"], (
         "an async-API page the test opened was still filming when the session fixture tore down"
     )
-    videos = sorted(path.name for path in raw.glob("*.webm"))
-    assert observed["videos"] == videos
-    assert len(videos) == 1
-    frames = extract_frames(raw / videos[0], tmp_path / "frames")
-    assert fraction_near(frames[-1], (0x1D, 0x4E, 0xD8)) > 0.5, (
-        "the final video frame shows the teardown state instead of the live page"
-    )
+    _assert_clip_ends_on_live_page(raw, observed, tmp_path / "frames")
 
 
 def test_route_cleanup_fixtures_tolerate_early_close(
