@@ -6527,3 +6527,95 @@ def test_run_turn_closes_failed_helper_on_turn_failed() -> None:
         ]
 
     _run(_t())
+
+
+def test_run_turn_registers_helper_spawned_during_completed_tail_drain() -> None:
+    """A helper whose spawn item lands in the drain is registered, not dropped.
+
+    The parent ends its turn with no final message, so the drain window opens. If
+    the ``spawnAgent`` item itself arrives during that window, the helper is not
+    yet known; its blocking tool call must still be deferred and answered on the
+    next turn rather than consumed by the drain's turn-id filter.
+    """
+
+    async def _t():
+        session = _spawn_helper_session()
+        tool_calls: list[tuple[str, dict]] = []
+
+        def _executor(name: str, args: dict):
+            tool_calls.append((name, dict(args)))
+            return {"result": "72F and sunny"}
+
+        session._tool_executor = _executor
+
+        first = await _run_turn_with_events(
+            session,
+            [
+                # Turn/completed with no final answer opens the drain; the spawn
+                # item and the new helper's blocking call then land inside it.
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-parent",
+                        "turnId": "turn-1",
+                        "turn": {"id": "turn-1", "status": "completed"},
+                    },
+                },
+                _spawn_completed_event(),
+                {
+                    "id": 781,
+                    "method": "item/tool/call",
+                    "params": {
+                        "threadId": "thread-child",
+                        "callId": "call_dyn_1",
+                        "tool": "search_web",
+                        "arguments": {"query": "weather in SF"},
+                    },
+                },
+                _child_event(
+                    "item/completed",
+                    {
+                        "turnId": "turn-child",
+                        "item": {
+                            "id": "msg-child",
+                            "type": "agentMessage",
+                            "phase": None,
+                            "text": "Helper task finished.",
+                        },
+                    },
+                ),
+                _child_event(
+                    "turn/completed", {"turn": {"id": "turn-child", "status": "completed"}}
+                ),
+            ],
+        )
+
+        # Nothing is announced or run on turn one, but the request is not consumed.
+        assert [e for e in first if isinstance(e, _SUBAGENT_EVENT_TYPES)] == []
+        assert tool_calls == []
+        assert isinstance(first[-1], TurnComplete)
+
+        second = await _run_turn_with_events(
+            session,
+            [_parent_final_answer("All done.", turn_id="turn-2", item_id="msg-parent-2")],
+        )
+
+        # The next turn registers the deferred helper, surfaces its card and
+        # completion, and answers its blocking request.
+        assert [e for e in second if isinstance(e, _SUBAGENT_EVENT_TYPES)] == [
+            SubAgentStarted(child_key="thread-child", title="Volta", task=_HELPER_PROMPT),
+            SubAgentToolCall(
+                child_key="thread-child",
+                call_id="call_dyn_1",
+                name="search_web",
+                args={"query": "weather in SF"},
+            ),
+            SubAgentCompleted(child_key="thread-child", ok=True, summary="Helper task finished."),
+        ]
+        assert tool_calls == [("search_web", {"query": "weather in SF"})]
+        responses = [json.loads(write.decode("utf-8")) for write in session._proc.stdin.writes]
+        answers = [r for r in responses if r.get("id") == 781 and "result" in r]
+        assert len(answers) == 1, responses
+        assert "72F and sunny" in answers[0]["result"]["contentItems"][0]["text"]
+
+    _run(_t())

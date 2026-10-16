@@ -2650,6 +2650,27 @@ def _collab_agent_states(item: CodexParams) -> dict[str, CodexParams]:
     }
 
 
+def _spawned_child_tasks(item: object) -> dict[str, str]:
+    """Map helper thread ids a spawn item names to the task prompt it carries.
+
+    Mirrors the registration sources in :meth:`_observe_parent_item`: the
+    ``collabAgentToolCall`` receivers and a ``subAgentActivity`` start.
+    """
+
+    if not isinstance(item, dict):
+        return {}
+    item_type = item.get("type")
+    if item_type == _CODEX_COLLAB_ITEM_TYPE:
+        prompt = item.get("prompt")
+        task = prompt if isinstance(prompt, str) else ""
+        return dict.fromkeys(_collab_child_thread_ids(item), task)
+    if item_type == _CODEX_SUBAGENT_ACTIVITY_ITEM_TYPE and item.get("kind") == "started":
+        thread_id = item.get("agentThreadId")
+        if isinstance(thread_id, str) and thread_id:
+            return {thread_id: ""}
+    return {}
+
+
 def _codex_builtin_tool_request(
     item: CodexParams,
     *,
@@ -3652,9 +3673,11 @@ class _CodexAppServerSession:
         """
         deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
         # A helper can outlive its spawning turn, so its notifications and
-        # blocking tool requests can land here. Defer them for the next turn;
-        # consuming a tool request here would strand the helper without a reply.
+        # blocking requests can land here; defer them for the next turn, since
+        # consuming a request here would strand the helper without a reply. A
+        # spawn item here registers its helper so that helper's events defer too.
         deferred: list[CodexMessage | HarnessTransportClosedError] = []
+        spawned_in_drain: dict[str, str] = {}
         try:
             while True:
                 remaining = deadline - time.monotonic()
@@ -3672,9 +3695,24 @@ class _CodexAppServerSession:
                     self._record_event(message)
                     continue
                 event_thread_id = _event_thread_id(params)
-                if event_thread_id is not None and event_thread_id in self._child_threads:
+                if (
+                    event_thread_id is not None
+                    and event_thread_id != self.thread_id
+                    and (
+                        event_thread_id in self._child_threads
+                        or event_thread_id in spawned_in_drain
+                    )
+                ):
                     deferred.append(message)
                     continue
+                for child_thread_id, child_task in _spawned_child_tasks(
+                    params.get("item")
+                ).items():
+                    if (
+                        child_thread_id != self.thread_id
+                        and child_thread_id not in self._child_threads
+                    ):
+                        spawned_in_drain.setdefault(child_thread_id, child_task)
                 self._record_event(message)
                 event_turn_id = params.get("turnId")
                 if (
@@ -3708,6 +3746,9 @@ class _CodexAppServerSession:
                 if phase == "final_answer":
                     return final_response
         finally:
+            for child_thread_id, child_task in spawned_in_drain.items():
+                if child_thread_id not in self._child_threads:
+                    await self._register_child_thread(child_thread_id, task=child_task)
             self._requeue_deferred_events(deferred)
 
     def _requeue_deferred_events(
@@ -4157,7 +4198,11 @@ class _CodexAppServerSession:
             if isinstance(queued_params, dict):
                 # A helper's events are never a stale tail of the prior turn.
                 queued_thread_id = _event_thread_id(queued_params)
-                if queued_thread_id is not None and queued_thread_id in self._child_threads:
+                if (
+                    queued_thread_id is not None
+                    and queued_thread_id != self.thread_id
+                    and queued_thread_id in self._child_threads
+                ):
                     retained_events.append(queued_message)
                     continue
                 raw_queued_turn_id = queued_params.get("turnId")
