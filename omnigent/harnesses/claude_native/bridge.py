@@ -5612,9 +5612,14 @@ def _user_prompt_visible(pane: str) -> bool:
         return False
     lines = [line for line in pane.splitlines() if line.strip()]
     rules = [i for i, line in enumerate(lines) if _is_box_rule(line)]
-    # A narrow pane wraps a dialog's text ("Esc to" / "cancel"), so phrases are
-    # matched with the line breaks collapsed.
-    text = _collapse_whitespace(lines[rules[-2] + 1 :] if len(rules) >= 2 else lines)
+    # A narrow pane wraps a dialog's text ("Esc to" / "cancel"), so match the
+    # rule-bounded dialog region with line breaks collapsed. Without a framing
+    # rule this is bare transcript; keep its line breaks, or wrapped output
+    # could cross-match a dialog phrase and wrongly refuse the message.
+    if len(rules) >= 2:
+        text = _collapse_whitespace(lines[rules[-2] + 1 :])
+    else:
+        text = "\n".join(lines)
     return (
         _auto_mode_billing_prompt_matches(pane, _AUTO_MODE_BILLING_CONSENT)
         or "Do you want to " in text
@@ -6179,14 +6184,23 @@ def _terminal_dialog_headline(pane: str) -> str | None:
         return None
     lines = [line for line in pane.splitlines() if line.strip()]
     last_rule = max((i for i, line in enumerate(lines) if _is_box_rule(line)), default=None)
-    region = lines[last_rule + 1 :] if last_rule is not None else lines[-_DIALOG_SCAN_TAIL_LINES:]
-    # Searched with line breaks collapsed: a narrow pane wraps the footer.
-    text = _collapse_whitespace(region)
-    footer_match = _DIALOG_FOOTER_RE.search(text)
-    if footer_match is None:
+    if last_rule is not None:
+        # Within the rule-bounded dialog region a narrow pane wraps the footer,
+        # so collapse line breaks before matching. Keeping the text past the
+        # hint lets the selector-less "press enter" check below read a wrapped
+        # notice.
+        region = lines[last_rule + 1 :]
+        text = _collapse_whitespace(region)
+        footer_match = _DIALOG_FOOTER_RE.search(text)
+        footer = text[footer_match.start() :] if footer_match is not None else None
+    else:
+        # No framing rule: this is the bare transcript tail. Match the footer
+        # within a single line, or wrapped output quoting a footer phrase could
+        # masquerade as a dialog and raise a spurious ClaudeTerminalDialog.
+        region = lines[-_DIALOG_SCAN_TAIL_LINES:]
+        footer = next((line for line in reversed(region) if _DIALOG_FOOTER_RE.search(line)), None)
+    if footer is None:
         return None
-    # The footer runs from its first hint to the end of the region.
-    footer = text[footer_match.start() :]
     has_selector = any(
         line.strip().lstrip("│ ").startswith(_CLAUDE_PROMPT_GLYPH) for line in region
     )

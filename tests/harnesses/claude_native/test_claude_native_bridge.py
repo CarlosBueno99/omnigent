@@ -11358,6 +11358,14 @@ _PRESS_ENTER_NOTICE_PANE = """\
 # The same dialog text scrolled into the transcript above a live input box.
 _DIALOG_ECHO_ABOVE_COMPOSER_PANE = _MCP_APPROVAL_DIALOG_PANE + _READY_PANE
 
+# A bare transcript tail with no box rule where Claude's own output happens to
+# quote a footer phrase that wraps across rows ("press enter to" / "continue").
+_WRAPPED_FOOTER_IN_TRANSCRIPT_PANE = """\
+⏺ Here is how the installer finishes: it waits
+for you to press enter to
+continue past the summary screen.
+"""
+
 
 @pytest.mark.parametrize(
     ("pane", "headline"),
@@ -11412,6 +11420,7 @@ def test_terminal_dialog_headline_names_startup_dialogs(pane: str, headline: str
         _SETTINGS_PANEL_PANE,
         _PERMISSION_PROMPT_PANE,
         _DIALOG_ECHO_ABOVE_COMPOSER_PANE,
+        _WRAPPED_FOOTER_IN_TRANSCRIPT_PANE,
     ],
     ids=[
         "ready",
@@ -11422,6 +11431,7 @@ def test_terminal_dialog_headline_names_startup_dialogs(pane: str, headline: str
         "settings-panel",
         "permission-prompt",
         "dialog-echo-above-composer",
+        "wrapped-footer-in-transcript",
     ],
 )
 def test_terminal_dialog_headline_ignores_other_panes(pane: str) -> None:
@@ -11431,7 +11441,8 @@ def test_terminal_dialog_headline_ignores_other_panes(pane: str) -> None:
     A live composer wins even with dialog text scrolled above it; a booting
     pane has no footer; the settings panel's "Esc to clear" is not a confirm
     footer; and a boxed tool permission prompt has no footer at all, so it
-    stays on its own PermissionRequest path.
+    stays on its own PermissionRequest path. Without a framing rule, a footer
+    phrase that only wraps across transcript rows is not a dialog either.
     """
     assert claude_native_bridge._terminal_dialog_headline(pane) is None
 

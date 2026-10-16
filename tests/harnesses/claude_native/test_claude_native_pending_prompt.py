@@ -185,6 +185,27 @@ def test_plan_dialog_words_in_the_transcript_are_not_a_plan_dialog(
     assert not bridge.has_pending_user_prompt(native_bridge)
 
 
+# Unframed transcript where a decision phrase or footer only wraps across rows.
+# Collapsing whole-pane whitespace would cross-match it as a live prompt.
+_DECISION_PHRASE_WRAPPED_IN_TRANSCRIPT = (
+    "● I can set that up. Do you want\nto configure the deploy target now?\n",
+    "● The picker that opens next uses Enter to\nselect an option and Esc to\ncancel.\n",
+)
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    _DECISION_PHRASE_WRAPPED_IN_TRANSCRIPT,
+    ids=["do-you-want-to", "enter-to-select-esc-to-cancel"],
+)
+def test_decision_phrase_wrapping_in_the_transcript_is_not_a_prompt(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch, transcript: str
+) -> None:
+    """Without a dialog frame, a phrase that only wraps across rows is not a prompt."""
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: transcript)
+    assert not bridge.has_pending_user_prompt(native_bridge)
+
+
 def test_hook_that_parks_between_overlay_captures_prevents_escape(
     native_bridge: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
