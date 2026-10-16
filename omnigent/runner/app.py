@@ -7802,20 +7802,20 @@ def create_runner_app(
             )
 
         async def _reap_native_pane(pane: PaneRef) -> None:
+            # Snapshot the sidecars this pane owns before closing it: close drops
+            # the pane before awaiting shutdown, so a message that recreates the
+            # session during that await keeps its own newer forwarder and servers.
+            reaped_sidecars = _native_runtime.capture_native_sidecars(pane.conversation_id)
             try:
                 await resource_registry.close_terminal(pane.conversation_id, pane.terminal_id)
             finally:
-                # Closing the codex TUI pane leaves its per-session app-server
-                # (and forwarder) running — no-op for other harnesses. Tear it
-                # down in ``finally`` so an idle-reaped codex session can't orphan
-                # a ``codex app-server`` for the runner's lifetime even when the
-                # pane close above partially fails (the very leak this guards).
-                await _native_runtime.teardown_codex_native_app_server(pane.conversation_id)
-                # That teardown is a no-op for every other harness, whose
-                # restart-forever forwarder (and any ``opencode serve``) would
-                # outlive the pane; mirror the ``DELETE /v1/sessions`` teardown.
-                await _cancel_auto_forwarder_task(pane.conversation_id)
-                await _native_runtime.teardown_opencode_native_server(pane.conversation_id)
+                # Release only that generation. The codex-only teardown left every
+                # other harness's restart-forever forwarder (and any ``opencode
+                # serve``) running past the pane; this reclaims them like the
+                # ``DELETE /v1/sessions`` teardown without clobbering a recreate.
+                await _native_runtime.release_reaped_native_sidecars(
+                    pane.conversation_id, reaped_sidecars
+                )
                 _publish_terminal_deleted_event(
                     conversation_id=pane.conversation_id,
                     terminal_name=pane.terminal_name,

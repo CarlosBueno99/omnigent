@@ -369,3 +369,58 @@ async def test_runner_reap_releases_the_sessions_sidecars(
         native_runtime._AUTO_FORWARDER_TASKS.pop(conv, None)
         if server_registry is not None:
             server_registry.pop(conv, None)
+
+
+async def test_runner_reap_leaves_a_recreated_sessions_sidecars_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session recreated while the reap's close is in flight keeps its new
+    forwarder and OpenCode server: the reap releases only the generation it
+    captured, so a message arriving before cleanup is not stripped of its stack."""
+    conv = "conv_reap_recreated"
+    registry = TerminalRegistry()
+    instance = make_test_terminal_instance("opencode", "main", tmp_path)
+    registry._by_conversation[conv] = {("opencode", "main"): instance}
+    resource_registry = SessionResourceRegistry(terminal_registry=registry)
+    app = create_runner_app(
+        terminal_registry=registry,
+        resource_registry=resource_registry,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    reaper = app.state.native_pane_reaper
+    assert reaper is not None
+
+    old_forwarder = asyncio.create_task(asyncio.Event().wait(), name=f"old-{conv}")
+    native_runtime._register_auto_forwarder_task(conv, old_forwarder)
+    old_server = _FakeSidecarServer()
+    native_runtime._AUTO_OPENCODE_SERVERS[conv] = old_server
+
+    new_forwarder = asyncio.create_task(asyncio.Event().wait(), name=f"new-{conv}")
+    new_server = _FakeSidecarServer()
+    original_close_terminal = resource_registry.close_terminal
+
+    async def recreate_before_cleanup(*args: object, **kwargs: object) -> bool:
+        # close() drops the pane before the reap's cleanup runs; an incoming
+        # message recreates the session with a fresh forwarder and server here.
+        result = await original_close_terminal(*args, **kwargs)  # type: ignore[arg-type]
+        native_runtime._register_auto_forwarder_task(conv, new_forwarder)
+        native_runtime._AUTO_OPENCODE_SERVERS[conv] = new_server
+        return result
+
+    monkeypatch.setattr(resource_registry, "close_terminal", recreate_before_cleanup)
+    pane = PaneRef(
+        conv, terminal_resource_id("opencode", "main"), "opencode", instance.socket_path
+    )
+    try:
+        await reaper._reap(pane)
+
+        assert native_runtime._AUTO_FORWARDER_TASKS.get(conv) is new_forwarder
+        assert not new_forwarder.done(), "replacement forwarder cancelled by the reap"
+        assert native_runtime._AUTO_OPENCODE_SERVERS.get(conv) is new_server
+        assert not new_server.closed, "replacement OpenCode server closed by the reap"
+    finally:
+        for task in (old_forwarder, new_forwarder):
+            task.cancel()
+        native_runtime._AUTO_FORWARDER_TASKS.pop(conv, None)
+        native_runtime._AUTO_OPENCODE_SERVERS.pop(conv, None)
