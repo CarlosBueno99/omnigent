@@ -71,12 +71,13 @@ def _preview(delta: str) -> dict[str, Any]:
 
 def _event_batch_bytes(events: list[dict[str, Any]]) -> int:
     """Return the encoded size used by the tunnel admission check."""
-    return len(encode_frame(EventBatchFrame("", "", events)).encode("utf-8"))
+    # The dispatcher uses a 32-character UUID for id and the URL's session_id.
+    return len(encode_frame(EventBatchFrame("0" * 32, "session-a", events)).encode("utf-8"))
 
 
 def _preview_at_batch_size(target_bytes: int) -> dict[str, Any]:
     """Build a preview whose encoded frame is exactly ``target_bytes``."""
-    marker = "m"
+    marker = "🙂"
     base_size = _event_batch_bytes([_preview("")])
     marker_size = _event_batch_bytes([_preview(marker)])
     marker_cost = marker_size - base_size
@@ -574,13 +575,14 @@ async def test_acknowledged_batch_stamps_last_dispatch_at() -> None:
         frame = decode_frame(text)
         assert isinstance(frame, EventBatchFrame)
         dispatcher.acknowledge(EventAckFrame(frame.id, len(frame.events)))
-        assert dispatcher.last_dispatch_at is not None
 
     dispatcher.ready(send)
-    try:
-        await dispatcher.submit("session-a", [_ITEM])
-    finally:
-        await _shutdown_dispatcher(dispatcher)
+    async with _client(dispatcher, []) as client:
+        before = loop.time()
+        response = await client.post(_URL, json=_ITEM)
+    assert response.status_code == 202
+    dispatched = dispatcher.last_dispatch_at
+    assert dispatched is not None and before <= dispatched <= loop.time()
 
 
 async def test_durable_partial_retryable_ack_replays_only_unapplied_suffix() -> None:
