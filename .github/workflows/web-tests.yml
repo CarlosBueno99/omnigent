@@ -9,11 +9,23 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "web/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".npmrc"
+      - ".github/actions/setup-pnpm/**"
+      - ".github/workflows/web-tests.yml"
   push:
     branches:
       - main
     paths:
       - "web/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".npmrc"
+      - ".github/actions/setup-pnpm/**"
+      - ".github/workflows/web-tests.yml"
 
 permissions:
   contents: read
@@ -54,8 +66,14 @@ jobs:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
         run: pnpm install --frozen-lockfile --filter web
 
-      - name: Run Electron Design-mode unit regressions
-        run: node --test web/electron/test/designModeScript.test.js
+      - name: Run Electron DOM and IPC regressions
+        # DOM suites use web's jsdom; IPC and preload suites stub Electron.
+        run: >-
+          node --test
+          web/electron/test/designModeScript.test.js
+          web/electron/test/browserActionScript.test.js
+          web/electron/test/browserIpc.test.js
+          web/electron/test/preload_update.test.js
 
       - name: Check formatting
         run: pnpm --filter web run format:check

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import signal
 import uuid
@@ -22,6 +23,10 @@ RUNNER_HOST_OWNS_GLOBAL_CLEANUP_ENV_VAR = "OMNIGENT_RUNNER_HOST_OWNS_GLOBAL_CLEA
 RUNNER_ADOPT_SIGNAL: signal.Signals | None = getattr(signal, "SIGUSR1", None)
 RUNNER_WORKSPACE_ENV_VAR = "OMNIGENT_RUNNER_WORKSPACE"
 RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR = "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN"
+# Exit code of a runner whose tunnel the server refused on credentials before
+# it ever connected, so the launching host reports a sign-in problem rather
+# than a crash. 77 is ``EX_NOPERM`` from sysexits.h.
+RUNNER_AUTH_REJECTED_EXIT_CODE = 77
 # A host-launched runner uses this bearer for its initial server connection,
 # then falls back to its own refreshable auth when the bearer is rejected.
 RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR = "OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN"
@@ -56,6 +61,10 @@ OMNIGENT_INTERNAL_WS_ORIGIN = "omnigent://internal"
 # CLI flows leave it unset (agent sees the project root directly).
 RUNNER_ISOLATE_SESSION_ENV_VAR = "OMNIGENT_RUNNER_ISOLATE_SESSION"
 
+# Set by a launching host for its first-connect watchdog; absent for CLI-local
+# runners, which have no host watching them.
+RUNNER_CONNECT_MARKER_ENV_VAR = "OMNIGENT_RUNNER_CONNECT_MARKER"
+
 # Marker env var stamped into every agent-facing environment so any
 # process launched inside an Omnigent agent session can detect it is
 # running under Omnigent. This is the analog of Claude Code's
@@ -80,6 +89,24 @@ RUNNER_AUTH_SECRET_ENV_VARS: frozenset[str] = frozenset(
         RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
     }
 )
+
+
+def touch_connect_marker(env: Mapping[str, str] | None = None) -> None:
+    """Mark a host-launched tunnel connect, if configured.
+
+    Reconnects may touch the same file; failure must not block the tunnel.
+    """
+    source = os.environ if env is None else env
+    path = source.get(RUNNER_CONNECT_MARKER_ENV_VAR)
+    if not path:
+        return
+    try:
+        Path(path).touch()
+    except OSError:
+        # A failed touch only affects the host's diagnostic.
+        logging.getLogger(__name__).warning(
+            "could not touch runner connect marker %s", path, exc_info=True
+        )
 
 
 def strip_runner_auth_secrets(env: Mapping[str, str]) -> dict[str, str]:
