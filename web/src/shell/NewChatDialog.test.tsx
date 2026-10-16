@@ -6280,6 +6280,8 @@ describe("NewChatLandingScreen", () => {
   });
 
   it("shows a conflict banner in the file browser for an occupied directory", async () => {
+    // A session actively working in the seeded workspace ("/Users/corey/repo")
+    // on the auto-selected host occupies the directory the picker opens at.
     useDirectorySessionsMock.mockReturnValue({
       data: [
         conv({ id: "s1", host_id: "host_1", workspace: "/Users/corey/repo", status: "running" }),
@@ -6300,7 +6302,9 @@ describe("NewChatLandingScreen", () => {
     expect(banner.textContent).toContain("1 other agent is");
   });
 
-  it("shows no conflict banner when the directory's only session sits idle", async () => {
+  it("shows no conflict banner when the only session in the directory is idle", async () => {
+    // The user's own finished session keeps its runner attached but nothing
+    // is working in the directory, so the picker must not warn.
     useDirectorySessionsMock.mockReturnValue({
       data: [conv({ id: "s1", host_id: "host_1", workspace: "/Users/corey/repo", status: "idle" })],
     } as unknown as ReturnType<typeof useDirectorySessions>);
@@ -6311,8 +6315,8 @@ describe("NewChatLandingScreen", () => {
     );
     fireEvent.click(screen.getByTestId("new-chat-landing-workspace-chip"));
     fireEvent.click(screen.getByTestId("new-chat-landing-workspace-open-folder"));
-    await screen.findByTestId("workspace-picker");
-    expect(screen.queryByTestId("workspace-picker-conflict")).not.toBeInTheDocument();
+    expect(screen.getByTestId("workspace-picker-listing")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-picker-conflict")).toBeNull();
   });
 
   it("keeps workspace, host, and permission controls compact", async () => {
