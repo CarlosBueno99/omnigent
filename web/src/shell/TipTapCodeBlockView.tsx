@@ -3,10 +3,38 @@
 // renders a live read-only diagram below the source.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { NodeViewContent, NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
+import { NodeViewWrapper, useReactNodeView, type NodeViewProps } from "@tiptap/react";
 import { MermaidPreview } from "./MermaidPreview";
 import { CODE_BLOCK_LANGUAGES } from "./codeBlockLanguages";
 import { CODE_BLOCK_LANGUAGE_EDIT_META } from "./codeBlockLanguageEdit";
+
+/**
+ * The editable fence body, wired like @tiptap/react's NodeViewContent: the
+ * editor's content element waits beside the React tree until it is moved in
+ * here. Upstream first reads the DOM selection so it can put a caret back after
+ * the move, and that read forces the browser to lay out the whole document —
+ * once per code block while a large file opens. A caret only needs preserving
+ * while the editor has focus, so an unfocused editor moves the content directly.
+ */
+function CodeBlockContent({ editor }: { editor: NodeViewProps["editor"] }) {
+  const { nodeViewContentRef } = useReactNodeView();
+  const ref = useCallback(
+    (element: HTMLElement | null) => {
+      if (!element || editor.isFocused) {
+        nodeViewContentRef?.(element);
+        return;
+      }
+      const content = element
+        .closest(".react-renderer")
+        ?.querySelector(":scope > [data-node-view-content-react]");
+      if (!content || element.firstChild === content) return;
+      content.removeAttribute("data-node-view-wrapper");
+      element.appendChild(content);
+    },
+    [editor, nodeViewContentRef],
+  );
+  return <code ref={ref} data-node-view-content="" style={{ whiteSpace: "pre-wrap" }} />;
+}
 
 export function TipTapCodeBlockView({ node, editor, getPos }: NodeViewProps) {
   const language = (node.attrs.language as string | null) ?? "";
@@ -79,7 +107,7 @@ export function TipTapCodeBlockView({ node, editor, getPos }: NodeViewProps) {
         ))}
       </select>
       <pre>
-        <NodeViewContent<"code"> as="code" />
+        <CodeBlockContent editor={editor} />
       </pre>
       {isMermaid && previewSource.trim() && (
         // The diagram is read-only output; the source above stays editable.
