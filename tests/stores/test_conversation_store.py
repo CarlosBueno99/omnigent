@@ -8271,3 +8271,23 @@ def test_get_conversation_keeps_distinct_query_names(
         "omnigent.conversation_store.select_conversation_metadata_by_id",
         "omnigent.conversation_store.select_conversation_labels",
     ], names
+
+
+def test_consume_leading_terminal_launch_arg_removes_only_a_matching_prompt(db_uri: str) -> None:
+    """A delivered one-shot prompt is removed by compare-and-swap; newer lists stay intact."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(
+        title="native", terminal_launch_args=["review the last commit", "--verbose"]
+    )
+
+    assert store.consume_leading_terminal_launch_arg(conv.id, "review the last commit") is True
+    assert store.get_conversation(conv.id).terminal_launch_args == ["--verbose"]
+    # Already consumed: nothing else is removed.
+    assert store.consume_leading_terminal_launch_arg(conv.id, "review the last commit") is False
+    assert store.get_conversation(conv.id).terminal_launch_args == ["--verbose"]
+
+    store.update_conversation(conv.id, terminal_launch_args=["new request"])
+    # Replaced by a newer prompt meanwhile: the stale expectation is a no-op.
+    assert store.consume_leading_terminal_launch_arg(conv.id, "review the last commit") is False
+    assert store.get_conversation(conv.id).terminal_launch_args == ["new request"]
+    assert store.consume_leading_terminal_launch_arg("c" * 32, "review the last commit") is False

@@ -3630,6 +3630,36 @@ class SqlAlchemyConversationStore(ConversationStore):
             )
             return result.rowcount == 1
 
+    def consume_leading_terminal_launch_arg(
+        self,
+        conversation_id: str,
+        expected_leading_arg: str,
+    ) -> bool:
+        """Remove a matching leading launch arg inside one row-locked write."""
+        workspace_id = current_workspace_id()
+
+        def write(session: Session) -> bool:
+            stmt = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == workspace_id,
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._supports_for_update:
+                stmt = stmt.with_for_update()
+            meta = session.execute(stmt).scalar_one_or_none()
+            if meta is None or meta.terminal_launch_args is None:
+                return False
+            stored = json.loads(meta.terminal_launch_args)
+            if not isinstance(stored, list) or not stored or stored[0] != expected_leading_arg:
+                return False
+            meta.terminal_launch_args = json.dumps(stored[1:])
+            return True
+
+        return bool(
+            run_write_transaction(
+                self._session_immediate, "consume_leading_terminal_launch_arg", write
+            )
+        )
+
     def rename_conversation_if_title_matches(
         self,
         conversation_id: str,

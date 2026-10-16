@@ -2441,6 +2441,20 @@ class ResetSessionModelOverrideResponse(BaseModel):
     reset: bool
 
 
+class ConsumeTerminalLaunchArgRequest(BaseModel):
+    """Remove a delivered one-shot launch arg only while it still leads the stored list."""
+
+    expected_leading_arg: str = Field(min_length=1, max_length=4096)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ConsumeTerminalLaunchArgResponse(BaseModel):
+    """Whether the leading launch arg still matched and was removed."""
+
+    consumed: bool
+
+
 class BackgroundSessionTitleRequest(BaseModel):
     """Private runner request for isolated background title inference."""
 

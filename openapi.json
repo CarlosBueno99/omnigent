@@ -1305,6 +1305,37 @@
         "title": "CompletedEvent",
         "type": "object"
       },
+      "ConsumeTerminalLaunchArgRequest": {
+        "additionalProperties": false,
+        "description": "Remove a delivered one-shot launch arg only while it still leads the stored list.",
+        "properties": {
+          "expected_leading_arg": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Expected Leading Arg",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_leading_arg"
+        ],
+        "title": "ConsumeTerminalLaunchArgRequest",
+        "type": "object"
+      },
+      "ConsumeTerminalLaunchArgResponse": {
+        "description": "Whether the leading launch arg still matched and was removed.",
+        "properties": {
+          "consumed": {
+            "title": "Consumed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "consumed"
+        ],
+        "title": "ConsumeTerminalLaunchArgResponse",
+        "type": "object"
+      },
       "ConversationDeleted": {
         "description": "Confirmation payload returned after deleting a conversation.",
         "properties": {
@@ -16324,6 +16355,59 @@
           }
         },
         "summary": "Stream Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/terminal-launch-args/consume": {
+      "post": {
+        "description": "Remove a delivered one-shot launch arg without disturbing newer stored args.",
+        "operationId": "consume_session_terminal_launch_arg_v1_sessions__session_id__terminal_launch_args_consume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsumeTerminalLaunchArgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsumeTerminalLaunchArgResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Consume Session Terminal Launch Arg",
         "tags": [
           "sessions"
         ]

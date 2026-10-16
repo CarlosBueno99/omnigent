@@ -43,6 +43,9 @@ from omnigent.cli_common import (
 from omnigent.cli_common import (
     RESUME_PICKER_SENTINEL as _RESUME_PICKER_SENTINEL,
 )
+from omnigent.cli_common import (
+    claude_prompt_conflicts_with_resume as _claude_prompt_conflicts_with_resume,
+)
 
 # Interactive harness/credential configuration lives in omnigent.cli_config; the
 # config/setup Click commands and the first-run plan call these entry points.
@@ -7850,11 +7853,8 @@ def _dispatch_native_terminal_harness(
 
     # A Claude resume-time prompt could only reach the session as persisted
     # launch config; refuse it before any backend or conversation lookup.
-    if (
-        native_agent.key == "claude"
-        and prompt
-        and prompt.strip()
-        and (resume_conversation_id is not None or resume_picker or resume_latest)
+    if native_agent.key == "claude" and _claude_prompt_conflicts_with_resume(
+        prompt, resuming=resume_conversation_id is not None or resume_picker or resume_latest
     ):
         raise click.UsageError(_CLAUDE_PROMPT_WITH_RESUME_ERROR)
 

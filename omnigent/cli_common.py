@@ -29,9 +29,20 @@ CLAUDE_STARTUP_PROFILE_ENV_VAR = "OMNIGENT_CLAUDE_STARTUP_PROFILE"
 # relaunch of the pane would replay, so the combination is refused up front.
 CLAUDE_PROMPT_WITH_RESUME_ERROR = (
     "-p/--prompt gives a new session its first message, so it cannot be combined "
-    "with --resume (or --continue on `omnigent run`). Resume without -p and type the "
-    "message in Claude."
+    "with --resume (or --session, or --continue on `omnigent run`). Resume without -p "
+    "and type the message in Claude."
 )
+
+
+def claude_prompt_conflicts_with_resume(prompt: str | None, *, resuming: bool) -> bool:
+    """Return whether a Claude ``-p`` prompt is combined with resuming a session.
+
+    :param prompt: The ``-p`` text, or ``None``. Blank text counts as no prompt.
+    :param resuming: ``True`` when the invocation targets an existing session.
+    :returns: ``True`` when the combination must be refused with
+        :data:`CLAUDE_PROMPT_WITH_RESUME_ERROR`.
+    """
+    return bool(resuming and prompt and prompt.strip())
 
 
 def reject_native_on_windows(harness: str) -> None:

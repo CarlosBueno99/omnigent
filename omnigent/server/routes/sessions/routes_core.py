@@ -190,6 +190,8 @@ from omnigent.server.routes._sessions.orchestration import (
 from omnigent.server.schemas import (
     AutomaticSessionRenameRequest,
     AutomaticSessionRenameResponse,
+    ConsumeTerminalLaunchArgRequest,
+    ConsumeTerminalLaunchArgResponse,
     CreatedSessionResponse,
     PaginatedList,
     ProjectSessionCreateRequest,
@@ -2301,6 +2303,30 @@ def register_core_routes(
             body.expected_model_override,
         )
         return ResetSessionModelOverrideResponse(reset=reset)
+
+    @router.post(
+        "/sessions/{session_id}/terminal-launch-args/consume",
+        response_model=ConsumeTerminalLaunchArgResponse,
+    )
+    async def consume_session_terminal_launch_arg(
+        request: Request,
+        session_id: str,
+        body: ConsumeTerminalLaunchArgRequest,
+    ) -> ConsumeTerminalLaunchArgResponse:
+        """Remove a delivered one-shot launch arg without disturbing newer stored args."""
+        user_id = _get_user_id(request, auth_provider)
+        await _require_access(
+            user_id, session_id, LEVEL_EDIT, permission_store, conversation_store
+        )
+        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if conv is None or conv.agent_id is None:
+            raise _session_not_found()
+        consumed = await asyncio.to_thread(
+            conversation_store.consume_leading_terminal_launch_arg,
+            session_id,
+            body.expected_leading_arg,
+        )
+        return ConsumeTerminalLaunchArgResponse(consumed=consumed)
 
     @router.patch(
         "/sessions/{session_id}",

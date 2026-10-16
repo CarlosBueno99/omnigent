@@ -1064,6 +1064,27 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    def consume_leading_terminal_launch_arg(
+        self,
+        conversation_id: str,
+        expected_leading_arg: str,
+    ) -> bool:
+        """Remove the first stored launch arg only while it still matches.
+
+        A native CLI's one-shot ``-p`` prompt is persisted as the leading
+        ``terminal_launch_args`` entry and removed by the runner after the
+        launch that delivered it. The compare-and-swap keeps a list another
+        writer replaced or extended meanwhile.
+
+        :param conversation_id: Conversation to update.
+        :param expected_leading_arg: Entry that must still lead the stored list.
+        :returns: ``True`` when removed; ``False`` when the row or list is
+            missing, the list no longer starts with that entry, or it changed
+            concurrently. Other entries and metadata remain unchanged.
+        """
+        ...
+
+    @abstractmethod
     def rename_conversation_if_title_matches(
         self,
         conversation_id: str,

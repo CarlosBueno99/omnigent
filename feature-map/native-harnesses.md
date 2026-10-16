@@ -21,6 +21,9 @@ implements them separately, so a fix for one harness does not reach the others.
   the answer reaches the harness.
 - `resume`: resume a previous conversation from the CLI (`--resume`, or a bare
   `--resume` picker that lists only this host's sessions) or by reopening it.
+  `omnigent claude` refuses `-p` together with `--resume`/`--session`: the
+  prompt is a new session's first message, and a relaunched pane must never
+  submit a stored first prompt again.
 - `steer`: sending while the harness is mid-turn steers the active turn.
 - `chat-render`: the harness's output renders in chat like other harnesses.
 - `side-chat`: Codex forks an ephemeral native thread through `/side`; follow-ups

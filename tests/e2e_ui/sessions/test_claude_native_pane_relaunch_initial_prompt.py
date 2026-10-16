@@ -13,7 +13,6 @@ import os
 import shutil
 import time
 import uuid
-from pathlib import Path
 
 import httpx
 import pytest
@@ -48,7 +47,6 @@ _REAP_TIMEOUT_S = 420
 # A relaunched pane that replays the prompt does so within seconds of
 # reconnecting; this is how long it gets before the relaunch counts as clean.
 _RESUBMIT_WATCH_S = 60
-_SHOTS_DIR = os.environ.get("OMNIGENT_E2E_SHOTS_DIR")
 
 
 def _terminals(base_url: str, session_id: str) -> list[dict[str, object]]:
@@ -96,17 +94,9 @@ def _wait_until(page: Page, predicate, timeout_s: float, what: str) -> None:
 
 
 def _pause(page: Page, ms: int) -> None:
-    """Hold a state on screen only when the run is being filmed or screenshotted."""
-    if _SHOTS_DIR is not None or os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+    """Hold a state on screen only when the run is being filmed."""
+    if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
         page.wait_for_timeout(ms)
-
-
-def _shot(page: Page, name: str) -> None:
-    if _SHOTS_DIR is None:
-        return
-    shots = Path(_SHOTS_DIR)
-    shots.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=str(shots / f"{name}.png"))
 
 
 def _short_idle_window_s() -> float | None:
@@ -212,13 +202,11 @@ def test_relaunched_claude_pane_does_not_resubmit_the_initial_prompt(
     )
     assert len(first_prompt_items) == 1, first_prompt_items
     _pause(page, 3000)
-    _shot(page, "01-first-prompt-submitted")
     _select_view_mode(page, "Chat")
     prompt_bubbles = page.locator(_USER_BUBBLE).filter(has_text=f"INITIAL_PROMPT_{nonce}")
     expect(prompt_bubbles).to_have_count(1, timeout=30_000)
     expect(prompt_bubbles.first).to_be_visible()
     _pause(page, 3000)
-    _shot(page, "01b-chat-one-prompt")
     _select_view_mode(page, "Terminal")
 
     _close_claude_pane(page, live_server, session_id)
@@ -226,7 +214,6 @@ def test_relaunched_claude_pane_does_not_resubmit_the_initial_prompt(
     expect(resume).to_be_visible(timeout=60_000)
     expect(page.get_by_text("The harness is not running.")).to_be_visible()
     _pause(page, 3000)
-    _shot(page, "02-pane-closed")
 
     resume.click()
     terminal = page.locator(_TERMINAL_VIEW).last
@@ -240,14 +227,12 @@ def test_relaunched_claude_pane_does_not_resubmit_the_initial_prompt(
             break
         page.wait_for_timeout(1000)
     _pause(page, 5000)
-    _shot(page, "03-terminal-after-resume")
     _select_view_mode(page, "Chat")
     prompt_bubbles = page.locator(_USER_BUBBLE).filter(has_text=f"INITIAL_PROMPT_{nonce}")
     expect(prompt_bubbles.first).to_be_visible(timeout=30_000)
     _pause(page, 5000)
     visible_prompt_bubbles = prompt_bubbles.count()
     print(f"[journey] chat view shows {visible_prompt_bubbles} user bubble(s) with the prompt")
-    _shot(page, "04-chat-after-resume")
 
     prompt_items = _user_items_with(live_server, session_id, f"INITIAL_PROMPT_{nonce}")
     prompt_requests = _mock_requests_with(mock_llm_server_url, f"INITIAL_PROMPT_{nonce}")

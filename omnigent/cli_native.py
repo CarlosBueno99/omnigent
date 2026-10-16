@@ -37,6 +37,9 @@ from omnigent.cli_common import (
     RESUME_PICKER_SENTINEL as _RESUME_PICKER_SENTINEL,
 )
 from omnigent.cli_common import (
+    claude_prompt_conflicts_with_resume as _claude_prompt_conflicts_with_resume,
+)
+from omnigent.cli_common import (
     reject_native_on_windows as _reject_native_on_windows,
 )
 
@@ -256,10 +259,9 @@ def register_native_commands(cli: click.Group) -> None:
                 "--session and --resume are mutually exclusive; "
                 "prefer --resume (--session is deprecated).",
             )
-        if (
-            prompt
-            and prompt.strip()
-            and (choice.picker or choice.conversation_id is not None or session_id is not None)
+        if _claude_prompt_conflicts_with_resume(
+            prompt,
+            resuming=choice.picker or choice.conversation_id is not None or session_id is not None,
         ):
             raise click.UsageError(_CLAUDE_PROMPT_WITH_RESUME_ERROR)
         if smart_routing:

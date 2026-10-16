@@ -7429,9 +7429,12 @@ def _leads_with_claude_prompt(terminal_launch_args: list[str] | None) -> bool:
 
     :param terminal_launch_args: Persisted pass-through args, e.g.
         ``["review the last commit", "--verbose"]``.
-    :returns: ``True`` when the first entry is a positional prompt.
+    :returns: ``True`` when the first entry is a non-blank positional prompt.
     """
-    return bool(terminal_launch_args) and not terminal_launch_args[0].startswith("-")
+    if not terminal_launch_args:
+        return False
+    first = terminal_launch_args[0]
+    return bool(first.strip()) and not first.startswith("-")
 
 
 def _build_claude_native_base_args(
@@ -8288,12 +8291,14 @@ async def _consume_claude_initial_prompt(
     Clear the one-shot prompt from a session's stored launch args after launching with it.
 
     ``omni claude -p`` persists the prompt as the leading ``terminal_launch_args``
-    entry so the runner's launch can pass it as Claude's positional prompt. Once
-    a launch has carried it, a later relaunch of the pane must not submit it
-    again. The stored args are re-read first so flags merged meanwhile (a
-    permission-mode pin) survive and a prompt replaced meanwhile stays pending;
-    only a still-leading copy of the delivered prompt is removed. Best-effort: a
-    failed write leaves the prompt stored, and a relaunch may submit it once more.
+    entry so the runner's launch can pass it as Claude's positional prompt. The
+    prompt counts as consumed once the terminal launched, not once Claude
+    submitted it: a startup failure after this point leaves the next relaunch
+    without it. The server removes the entry only while it still leads the
+    stored list, so flags merged meanwhile survive and a prompt another client
+    stored meanwhile stays pending. An older server without that operation gets
+    a re-read and a write-back of the remainder instead. Best-effort: a failed
+    write leaves the prompt stored, and a relaunch may submit it once more.
 
     :param session_id: Session/conversation identifier.
     :param server_client: Runner Omnigent server client.
@@ -8301,19 +8306,26 @@ async def _consume_claude_initial_prompt(
     """
     session_path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}"
     try:
-        current = await server_client.get(
-            session_path, params=_SESSION_METADATA_PARAMS, timeout=10.0
-        )
-        current.raise_for_status()
-        stored = current.json().get("terminal_launch_args")
-        if not (isinstance(stored, list) and stored and stored[0] == prompt):
-            return
-        resp = await server_client.patch(
-            session_path,
-            json={"terminal_launch_args": stored[1:]},
-            params={"include_usage": "false"},
+        resp = await server_client.post(
+            f"{session_path}/terminal-launch-args/consume",
+            json={"expected_leading_arg": prompt},
             timeout=10.0,
         )
+        if resp.status_code == 404:
+            # Older server without the conditional operation.
+            current = await server_client.get(
+                session_path, params=_SESSION_METADATA_PARAMS, timeout=10.0
+            )
+            current.raise_for_status()
+            stored = current.json().get("terminal_launch_args")
+            if not (isinstance(stored, list) and stored and stored[0] == prompt):
+                return
+            resp = await server_client.patch(
+                session_path,
+                json={"terminal_launch_args": stored[1:]},
+                params={"include_usage": "false"},
+                timeout=10.0,
+            )
         resp.raise_for_status()
     except (httpx.HTTPError, RuntimeError, ValueError):
         _logger.warning(

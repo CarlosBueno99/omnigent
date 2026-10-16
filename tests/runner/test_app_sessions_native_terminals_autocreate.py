@@ -1173,46 +1173,65 @@ async def test_auto_create_claude_terminal_passes_session_effort(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stored_args", "claude_session_id", "merged_during_launch", "write_back", "expected_patch"),
+    ("stored_args", "claude_session_id", "server_args", "server", "expected_patch", "warns"),
     [
-        # First launch: the prompt reaches Claude and is then cleared from the
+        # First launch: the prompt reaches Claude and is consumed from the
         # stored args; the flags after it stay persisted.
-        (["review the last commit", "--verbose"], None, [], "ok", ["--verbose"]),
+        (["review the last commit", "--verbose"], None, None, "conditional", None, False),
         # Relaunch of a session whose prompt was already consumed: nothing to
         # deliver or clear; the stored flags apply to the resumed Claude.
-        (["--verbose"], "02857840-6362-408f-b41f-309e396ed7c6", [], "ok", None),
+        (["--verbose"], "02857840-6362-408f-b41f-309e396ed7c6", None, "conditional", None, False),
         # An older CLI's ``--resume <id> -p`` stored a new prompt: the resumed
-        # Claude receives it once and it is cleared like a first prompt.
-        (["new request"], "02857840-6362-408f-b41f-309e396ed7c6", [], "ok", []),
-        # A permission-mode pin merged into the stored args while Claude was
-        # launching must survive the write-back.
+        # Claude receives it once and it is consumed like a first prompt.
+        (
+            ["new request"],
+            "02857840-6362-408f-b41f-309e396ed7c6",
+            None,
+            "conditional",
+            None,
+            False,
+        ),
+        # Another client replaced the stored list while Claude launched: the
+        # server reports no match and the newer prompt stays pending.
+        (["review the last commit"], None, ["new request"], "conditional", None, False),
+        # An older server without the conditional operation gets a re-read and
+        # a write-back that keeps flags merged meanwhile ...
         (
             ["review the last commit"],
             None,
+            ["review the last commit", "--permission-mode", "plan"],
+            "legacy-server",
             ["--permission-mode", "plan"],
-            "ok",
-            ["--permission-mode", "plan"],
+            False,
         ),
-        # The write-back is best-effort: a rejected or unreachable server
-        # leaves the launch intact and only logs a warning.
-        (["review the last commit"], None, [], "http-500", []),
-        (["review the last commit"], None, [], "transport-error", []),
+        # ... and leaves a list another client replaced before the re-read alone.
+        (["review the last commit"], None, ["new request"], "legacy-server", None, False),
+        # The write is best-effort: a rejected or unreachable server leaves
+        # the launch intact and only logs a warning.
+        (["review the last commit"], None, None, "http-500", None, True),
+        (["review the last commit"], None, None, "transport-error", None, True),
+        # A blank leading entry written by another client is not a prompt.
+        (["", "--verbose"], None, None, "conditional", None, False),
     ],
     ids=[
         "first-launch",
         "relaunch-consumed",
         "older-client-resume-prompt",
-        "keeps-flags-pinned-during-launch",
-        "write-back-rejected",
-        "write-back-unreachable",
+        "replaced-while-launching",
+        "older-server-write-back-keeps-merged-flags",
+        "older-server-keeps-replaced-prompt",
+        "consume-rejected",
+        "consume-unreachable",
+        "blank-entry-not-a-prompt",
     ],
 )
 async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
     stored_args: list[str],
     claude_session_id: str | None,
-    merged_during_launch: list[str],
-    write_back: str,
+    server_args: list[str] | None,
+    server: str,
     expected_patch: list[str] | None,
+    warns: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1222,14 +1241,19 @@ async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
 
     ``omni claude -p`` persists the prompt as the leading entry so the runner's
     launch can pass it as Claude's positional prompt. The launch that carries it
-    writes the remaining flags back without it, so the relaunch after the idle
-    reaper closed the pane (or any later cold resume) cannot submit it again.
+    asks the server to remove that entry only while it still leads the stored
+    list, so the relaunch after the idle reaper closed the pane (or any later
+    cold resume) cannot submit it again, while a list another client replaced
+    meanwhile stays pending.
 
     :param stored_args: Persisted ``terminal_launch_args`` in the init envelope.
     :param claude_session_id: Captured Claude session id enabling a cold resume.
-    :param merged_during_launch: Flags the server appended while Claude launched.
-    :param write_back: How the server answers the write-back PATCH.
-    :param expected_patch: ``terminal_launch_args`` written back, or ``None``.
+    :param server_args: Stored list on the server when the runner consumes,
+        when another client changed it after the envelope was built.
+    :param server: How the server answers the consume request.
+    :param expected_patch: ``terminal_launch_args`` written back by the
+        older-server fallback, or ``None``.
+    :param warns: Whether the launch logs the best-effort cleanup warning.
     :param tmp_path: Pytest-provided temporary directory.
     :param monkeypatch: Pytest monkeypatch fixture.
     :param caplog: Pytest log capture fixture.
@@ -1258,22 +1282,34 @@ async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
         fake_resume_transcript,
     )
     session_id = "4c1f0d2e9b8a7c6d5e4f3a2b1c0d9e8f"
-    patches: list[dict[str, Any]] = []
-    # Server-side state at the time the runner writes back: the launch args plus
-    # whatever another writer merged meanwhile.
-    server_args = [*stored_args, *merged_during_launch]
+    current_args = list(server_args if server_args is not None else stored_args)
+    consumes: list[str] = []
+    patches: list[list[str]] = []
 
     def _handle_request(request: httpx.Request) -> httpx.Response:
-        if request.url.path != f"/v1/sessions/{session_id}":
-            raise AssertionError(f"unexpected server call {request.method} {request.url}")
-        if request.method == "GET":
-            return httpx.Response(200, json={"terminal_launch_args": server_args, "labels": {}})
-        if request.method == "PATCH":
-            patches.append(json.loads(request.content))
-            if write_back == "http-500":
+        session_path = f"/v1/sessions/{session_id}"
+        if (
+            request.method == "POST"
+            and request.url.path == f"{session_path}/terminal-launch-args/consume"
+        ):
+            expected = json.loads(request.content)["expected_leading_arg"]
+            consumes.append(expected)
+            if server == "legacy-server":
+                return httpx.Response(404, json={"detail": "Not Found"})
+            if server == "http-500":
                 return httpx.Response(500, json={"error": "boom"})
-            if write_back == "transport-error":
+            if server == "transport-error":
                 raise httpx.ConnectError("server unreachable", request=request)
+            if current_args and current_args[0] == expected:
+                del current_args[0]
+                return httpx.Response(200, json={"consumed": True})
+            return httpx.Response(200, json={"consumed": False})
+        if request.url.path == session_path and request.method == "GET":
+            return httpx.Response(
+                200, json={"terminal_launch_args": list(current_args), "labels": {}}
+            )
+        if request.url.path == session_path and request.method == "PATCH":
+            patches.append(json.loads(request.content)["terminal_launch_args"])
             return httpx.Response(200, json={"id": session_id})
         raise AssertionError(f"unexpected server call {request.method} {request.url}")
 
@@ -1318,12 +1354,15 @@ async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
         assert args[args.index("--resume") + 1] == claude_session_id
     for stored in stored_args:
         assert stored in args
-    if expected_patch is None:
-        assert patches == []
-    else:
-        assert patches == [{"terminal_launch_args": expected_patch}]
+    pending_prompt = (
+        stored_args[0]
+        if stored_args and stored_args[0].strip() and not stored_args[0].startswith("-")
+        else None
+    )
+    assert consumes == ([pending_prompt] if pending_prompt is not None else [])
+    assert patches == ([expected_patch] if expected_patch is not None else [])
     cleanup_warned = "could not clear the delivered initial prompt" in caplog.text
-    assert cleanup_warned == (write_back != "ok")
+    assert cleanup_warned == warns
 
 
 @pytest.mark.asyncio
