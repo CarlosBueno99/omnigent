@@ -1,14 +1,10 @@
 """UI journey: an OIDC user's automation survives its first Run now.
 
-Under an external auth provider the scheduled-task store saves tasks without an
-account generation, while the owner's ``users`` row can still carry one (a
-password kept across an accounts-to-OIDC switch, or a later password reset).
-That owner is live, so the task must fire instead of being disabled as
-``owner_deleted``.
-
-Runs against a dedicated OIDC-mode server wired to the suite's fake IdP
-(:mod:`tests.e2e_ui.auth._oidc_server`); the browser signs in through the real
-redirect chain, then creates and runs the task from the Automations page.
+External auth saves tasks without an account generation while the owner's
+``users`` row may carry one (kept across an accounts-to-OIDC switch, or set by a
+password reset). That owner is live, so the task must fire rather than be
+disabled as ``owner_deleted``. Runs a dedicated OIDC-mode server behind the
+suite's fake IdP and drives the real sign-in redirect and Automations page.
 """
 
 from __future__ import annotations
@@ -49,11 +45,7 @@ def oidc_server(
 
 @pytest.fixture
 def owner_with_generation(oidc_server: OIDCServer, oidc_server_tmp: Path) -> str:
-    """Give the IdP identity a users row that carries an account generation.
-
-    ``update_password`` assigns the generation exactly as an admin password
-    reset (or the accounts-to-OIDC backfill) leaves it on a live row.
-    """
+    """Give the IdP identity a users row with a generation, as a password reset would."""
     db_uri = f"sqlite:///{oidc_server_tmp / 'test.db'}"
     permission_store = SqlAlchemyPermissionStore(db_uri)
     permission_store.ensure_user(FAKE_IDP_EMAIL)
@@ -90,11 +82,7 @@ def _wait_for_run(page: Page, base_url: str, task_id: str) -> dict[str, Any]:
 def test_oidc_owner_with_account_generation_run_now_fires(
     request: pytest.FixtureRequest, oidc_server: OIDCServer, owner_with_generation: str
 ) -> None:
-    """Run now on a freshly created task keeps it active and records a non-owner failure.
-
-    No host is connected, so the expected fire still fails later (no online
-    host) — the point is that the owner check does not disable the task first.
-    """
+    """Run now keeps the task active; with no host connected the run fails for a host reason."""
     page: Page = request.getfixturevalue("page")
     public_url, api_url = oidc_server.public_url, oidc_server.base_url
     started = time.monotonic()

@@ -560,9 +560,8 @@ async def _owner_is_deleted(deps: FireDeps, task: ScheduledTask) -> bool:
     A NULL owner (single-user / OSS) always resolves to
     :data:`RESERVED_USER_LOCAL` and is never considered deleted; without a
     permission store there is no account to check against. External auth saves
-    tasks without a generation, so there a live owner row is the whole check. A
-    saved generation is always compared, and under account checks a NULL one
-    cannot adopt a later registration's generation.
+    no task generation, so a live owner row is the whole check there. A saved
+    generation, or a NULL one under account checks, must match the row.
     """
     if task.user_id is None or deps.permission_store is None:
         return False
@@ -575,11 +574,7 @@ async def _owner_is_deleted(deps: FireDeps, task: ScheduledTask) -> bool:
 
 
 def _drop_timer(deps: FireDeps, task_id: str) -> None:
-    """Unregister a disabled task's timer on this server, as DELETE does.
-
-    Another replica's timer unregisters itself when its next fire re-reads the
-    deleted row.
-    """
+    """Drop the disabled task's timer on this server, as DELETE does."""
     scheduler = getattr(deps.app_state, "scheduled_task_scheduler", None)
     if scheduler is not None:
         scheduler.remove(task_id)

@@ -12,9 +12,8 @@
 import { authenticatedFetch } from "./identity";
 
 /**
- * Lifecycle state of a scheduled task. `paused` tasks don't fire. `deleted` is
- * assigned by the server when the owner's registration is gone; such a task
- * can't fire, run, or be resumed, so the Automations page hides it.
+ * Lifecycle state of a scheduled task. `paused` tasks don't fire. The server sets
+ * `deleted` when the owner's registration is gone; the Automations page hides those.
  */
 export type ScheduledTaskState = "active" | "paused" | "deleted";
 

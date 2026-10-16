@@ -1,10 +1,8 @@
-"""Scheduled fires under an external (OIDC) auth provider: owner check and timer.
+"""Scheduled fires under an OIDC auth provider: owner check and timer.
 
-Drives the real app lifespan (scheduler + run-now trigger) over real SQLAlchemy
-stores with an OIDC ``UnifiedAuthProvider``, authenticating API calls with a
+Real app lifespan, SQLAlchemy stores and run-now trigger, authenticated with a
 minted session JWT. No host is connected, so a fire that passes the owner check
-still ends in a failed run — the assertions are about the owner check and the
-scheduler timer, not about launching.
+still fails later; the assertions cover the owner check and the timer only.
 """
 
 from __future__ import annotations
