@@ -142,7 +142,12 @@ import {
 
 // Re-exported for tests that import the readiness helpers from this module.
 export { harnessUnavailableReasonOnHost, harnessUnconfiguredOnHost, harnessWarningBadgeText };
-import { isFeatureEnabled, sandboxOptionLabel, sandboxProviderOptions } from "@/lib/capabilities";
+import {
+  isFeatureEnabled,
+  sandboxDiscoveryProviders,
+  sandboxOptionLabel,
+  sandboxProviderOptions,
+} from "@/lib/capabilities";
 import { useHeading, usePoweredBy } from "@/lib/branding";
 import {
   isSlashCommandText,
@@ -2457,6 +2462,7 @@ export function NewChatLandingScreen() {
     () => (info !== "loading" ? sandboxProviderOptions(info) : []),
     [info],
   );
+  const discoveryProviders = info !== "loading" ? sandboxDiscoveryProviders(info) : [];
   // The provider a sandbox pick defaults to: the sticky last pick when the
   // server still offers it, else the first offered row. Mirrors the sticky
   // host choice — the composer reopens on the provider used last. Null until
@@ -7272,23 +7278,19 @@ export function NewChatLandingScreen() {
                           </>
                         )}
                         <DropdownMenuSeparator />
-                        {managedSandboxesEnabled &&
-                          sandboxProviderRows.map((provider) =>
-                            provider !== null &&
-                            info.sandbox_provider_capabilities?.[provider]?.reusable_hosts ? (
-                              <DropdownMenuItem
-                                key={`discover-${provider}`}
-                                onSelect={() => setDiscoveryProvider(provider)}
-                                className="composer-host-connect text-muted-foreground"
-                              >
-                                <PlusIcon className="size-4" aria-hidden="true" />
-                                <span>
-                                  Existing Static Sandbox
-                                  {sandboxProviderRows.length > 1 && ` (${provider})`}
-                                </span>
-                              </DropdownMenuItem>
-                            ) : null,
-                          )}
+                        {discoveryProviders.map((provider) => (
+                          <DropdownMenuItem
+                            key={`discover-${provider}`}
+                            onSelect={() => setDiscoveryProvider(provider)}
+                            className="composer-host-connect text-muted-foreground"
+                          >
+                            <PlusIcon className="size-4" aria-hidden="true" />
+                            <span>
+                              Existing Static Sandbox
+                              {discoveryProviders.length > 1 && ` (${provider})`}
+                            </span>
+                          </DropdownMenuItem>
+                        ))}
                         {/* Persistent escape hatch: open the connect-a-host
                     instructions. Present even with zero hosts so a fresh user
                     is never stuck. */}
