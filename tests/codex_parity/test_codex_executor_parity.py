@@ -144,7 +144,8 @@ async def test_real_codex_usage_and_model_override_cross_boundary(
     usage = dict(completion.usage)
     # Codex reports the window it serves for the model (modelContextWindow);
     # the figure is Codex's own, so only its presence and shape are pinned.
-    context_window = usage.pop("context_window")
+    context_window = usage.pop("context_window", None)
+    assert context_window is not None, f"usage missing context_window: {usage}"
     assert isinstance(context_window, int) and context_window > 0
     assert usage == {
         "input_tokens": 8,

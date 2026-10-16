@@ -3211,6 +3211,13 @@ def test_extract_codex_context_window_prefers_model_window() -> None:
     assert _extract_codex_context_window({"tokenUsage": {"total": {"contextWindow": 400000}}}) == (
         400000
     )
+    # An invalid primary value falls back to the legacy field.
+    assert (
+        _extract_codex_context_window(
+            {"tokenUsage": {"modelContextWindow": 0, "total": {"contextWindow": 400000}}}
+        )
+        == 400000
+    )
 
 
 @pytest.mark.parametrize(
