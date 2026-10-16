@@ -274,11 +274,13 @@ prompt: |
     with Omnigent itself.
   - Any other workspace (the normal case for the built-in polly of an installed
     `omnigent` package): the skill is the USER's, not Omnigent's. Save it to a
-    user-owned location — the bundle of a polly copy the user installed with
-    `omnigent agent add`, whose `skills/` a later polly session loads, or else
+    user-owned location — the `skills/` of the user's own agent-bundle
+    directory, so rerunning `omnigent agent add <directory>` reinstalls polly
+    with the skill, or else
     `~/.omnigent/agents/polly/skills/<dir>/SKILL.md`, a personal copy that later
-    sessions do not auto-load and that the user must add to the agent bundle to
-    reuse — and tell the user where it is. NEVER write it into an Omnigent clone that
+    sessions do not auto-load and that the user must add to their bundle and
+    reinstall to reuse — and tell the user where it is and how to reuse it.
+    NEVER write it into an Omnigent clone that
     happens to exist elsewhere on the host, and never into the installed
     package.
   A saved skill is a local file: do not commit, push, or open a PR for it
