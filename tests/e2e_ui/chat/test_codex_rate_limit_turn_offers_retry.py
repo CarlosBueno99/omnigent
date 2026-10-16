@@ -7,6 +7,7 @@ web UI as ``rate_limit_exceeded`` without launch-time stderr, and Retry must the
 
 from __future__ import annotations
 
+import contextlib
 import re
 import shutil
 import subprocess
@@ -16,16 +17,16 @@ from typing import Any
 
 import httpx
 import pytest
+import yaml
 from playwright.sync_api import Page, expect
 
-from tests._helpers.session import bind_session_runner, post_session_bundle
+from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
 from tests.e2e_ui.conftest import (
     _ensure_runner_online,
     _server_state,
     configure_mock_llm,
     reset_mock_llm,
 )
-from tests.e2e_ui.sessions.test_codex_multistep_turn_usage import _build_codex_bundle, _send
 
 pytestmark = pytest.mark.skipif(
     shutil.which("codex") is None,
@@ -38,6 +39,16 @@ _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 # Codex retries a 429 a few times per turn; queue enough refusals for all of them.
 _RATE_LIMIT_RESPONSES = 16
 _TURN_SETTLE_TIMEOUT_S = 180.0
+
+
+def _codex_bundle(name: str, model: str) -> bytes:
+    """A one-file headless ``codex`` (SDK mode) agent bundle; *model* keys the mock queue."""
+    spec = {
+        "name": name,
+        "prompt": "You are a terse assistant. Answer in as few words as possible.",
+        "executor": {"harness": "codex", "model": model},
+    }
+    return bundle_files({f"{name}.yaml": yaml.safe_dump(spec, sort_keys=False).encode()})
 
 
 def _error_fields(item: dict[str, Any]) -> dict[str, Any]:
@@ -76,9 +87,10 @@ def _stop_runner(proc: subprocess.Popen[bytes]) -> None:
     proc.terminate()
     try:
         proc.wait(timeout=5)
-    except Exception:  # best-effort teardown
+    except subprocess.TimeoutExpired:
         proc.kill()
-        proc.wait(timeout=5)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
 
 
 @pytest.mark.timeout(600)
@@ -103,12 +115,11 @@ def test_codex_rate_limited_turn_offers_retry(
         match=token,
     )
     request.addfinalizer(lambda: reset_mock_llm(mock_llm_server_url))
-    bundle = _build_codex_bundle(f"codex-rate-limit-{uid}", model)
     # The explicit title keeps background title inference off the scripted queue.
     create_resp = post_session_bundle(
         httpx.post,
         f"{live_server}/v1/sessions",
-        bundle,
+        _codex_bundle(f"codex-rate-limit-{uid}", model),
         metadata={"title": "Codex rate limit retry"},
         timeout=30.0,
     )
@@ -123,7 +134,10 @@ def test_codex_rate_limited_turn_offers_retry(
     page = request.getfixturevalue("page")
     assert isinstance(page, Page)
     page.goto(f"{live_server}/c/{session_id}")
-    _send(page, f"Please greet me. {token}")
+    composer = page.get_by_placeholder("Send a message…")
+    expect(composer).to_be_visible()
+    composer.fill(f"Please greet me. {token}")
+    page.get_by_role("button", name="Send", exact=True).click()
 
     error = _settled_turn_error(live_server, session_id)
     if error is None:
