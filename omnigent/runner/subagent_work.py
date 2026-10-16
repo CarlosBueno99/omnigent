@@ -337,6 +337,25 @@ def mark_subagent_work_started(child_session_id: str) -> _SubagentWorkEntry | No
     return entry
 
 
+def mark_subagent_work_waiting(child_session_id: str) -> _SubagentWorkEntry | None:
+    """
+    Record that a recovered sub-agent dispatch is awaiting a liveness edge.
+
+    Restart recovery re-queues an interrupted child whose local launch
+    bookkeeping can no longer judge it. ``"waiting"`` means the dispatch
+    still exists but its child liveness is unknown until the next
+    ``running`` or terminal edge arrives.
+
+    :param child_session_id: Child session id, e.g. ``"conv_child456"``.
+    :returns: The updated work entry, or ``None`` if the child is untracked.
+    """
+    entry = _subagent_work_by_child.get(child_session_id)
+    if entry is None:
+        return None
+    entry.status = "waiting"
+    return entry
+
+
 def unregister_subagent_work(
     child_session_id: str,
     *,
@@ -594,7 +613,7 @@ async def _recover_subagent_results_from_server(
         )
         if interrupted:
             # This dispatch already existed; a local launch timeout cannot judge it.
-            entry.status = "waiting"
+            mark_subagent_work_waiting(child_id)
             continue
         ack = mark_subagent_work_terminal(child_id, status=status, output=output)
         if ack.delivered_now:

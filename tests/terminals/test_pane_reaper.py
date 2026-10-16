@@ -19,6 +19,7 @@ from omnigent.runner.subagent_work import (
     get_subagent_work,
     mark_subagent_work_started,
     mark_subagent_work_terminal,
+    mark_subagent_work_waiting,
     register_child_session,
     register_subagent_work,
     unregister_child_session,
@@ -362,9 +363,8 @@ async def test_runner_busy_check_spares_a_pane_with_a_running_subagent(
         assert not await reaper._is_busy(other)
 
         # A restart-orphaned "waiting" entry has unknown liveness and must not
-        # pin the pane; restart recovery assigns this state internally, so set
-        # it directly. A genuinely resumed child re-enters "running" and holds.
-        entry.status = "waiting"
+        # pin the pane. A genuinely resumed child re-enters "running" and holds.
+        assert mark_subagent_work_waiting(child).status == "waiting"
         assert not await reaper._is_busy(pane)
         assert mark_subagent_work_started(child).status == "running"
         assert await reaper._is_busy(pane)
