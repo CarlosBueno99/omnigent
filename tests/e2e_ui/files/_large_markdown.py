@@ -46,11 +46,11 @@ def build_large_markdown(target_bytes: int) -> str:
     :returns: A document starting with an H1 followed by repeated sections.
     """
     parts = ["# Large design document\n\n"]
-    size = len(parts[0])
+    size = len(parts[0].encode("utf-8"))
     index = 0
     while size < target_bytes:
         section = _SECTION_TEMPLATE.format(index=index)
         parts.append(section)
-        size += len(section)
+        size += len(section.encode("utf-8"))
         index += 1
     return "".join(parts)

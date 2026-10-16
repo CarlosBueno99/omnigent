@@ -129,8 +129,8 @@ const boundedManager = new MarkdownManager({
 
 /** The private lexer surface a tokenizer receives from marked. */
 interface LexerFactory {
-  createLexer(): unknown;
-  createTokenizerHelpers(lexer: unknown): MarkdownLexerConfiguration;
+  createLexer: () => unknown;
+  createTokenizerHelpers: (lexer: unknown) => MarkdownLexerConfiguration;
 }
 
 function tokenizerOf(extension: Node): MarkdownTokenizer {
@@ -139,8 +139,20 @@ function tokenizerOf(extension: Node): MarkdownTokenizer {
   return tokenizer;
 }
 
+/** The manager's lexer factory, or a clear error when the private surface moved. */
+function lexerFactory(manager: MarkdownManager): LexerFactory {
+  const factory = manager as unknown as Partial<LexerFactory>;
+  if (
+    typeof factory.createLexer !== "function" ||
+    typeof factory.createTokenizerHelpers !== "function"
+  ) {
+    throw new Error("MarkdownManager no longer exposes createLexer/createTokenizerHelpers");
+  }
+  return factory as LexerFactory;
+}
+
 describe("bounded tokenizers tokenize like upstream", () => {
-  const manager = boundedManager as unknown as LexerFactory;
+  const manager = lexerFactory(boundedManager);
   const lexer = () => manager.createTokenizerHelpers(manager.createLexer());
   const PAIRS: [string, MarkdownTokenizer, MarkdownTokenizer][] = [
     ["orderedList", tokenizerOf(OrderedList), tokenizerOf(BoundedOrderedList)],
@@ -178,6 +190,17 @@ describe("bounded tokenizers tokenize like upstream", () => {
     "Text\n\n| a | b |\n|---|---|\n| x | y |\n\n- [ ] after table",
     "| not | a table\nsecond line",
     "a | b\n- | -\n1 | 2\n\nmore",
+    // Shapes where a prefix could decline or cut while upstream consumes.
+    "1.\n2. two\n\ntext",
+    "1. one\n\n   indented\nlazy\n\nafter",
+    "1. one\n\tindented with a tab\n\n2. two\n\nafter",
+    "\t1. tab-indented item\n\t2. two\nafter",
+    "- [ ]\n- [ ] second",
+    "- [ ] one\nlazy line\n\nAfter",
+    "- [ ] a\n\t- [ ] tab child\nText",
+    "\t- [ ] tab item\n\tcontent\nText",
+    "para one\npara two\n| a | b |\n| - | - |\n| 1 | 2 |",
+    "para\n| a | b |\n| - | - |\n| 1 | 2 |\n\nafter",
     largeMarkdown(4 * 1024),
   ];
 
@@ -211,23 +234,23 @@ describe("bounded tokenizers tokenize like upstream", () => {
   });
 });
 
-describe("parse cost grows with document size, not size × blocks", () => {
-  /** Best of two parses, after a warm-up so JIT compilation is not timed. */
-  function parseMs(md: string): number {
-    let best = Infinity;
-    for (let run = 0; run < 2; run += 1) {
-      const started = performance.now();
-      boundedManager.parse(md);
-      best = Math.min(best, performance.now() - started);
+describe("prefixes stay proportional to the document", () => {
+  it("hands upstream a bounded multiple of the document across all line starts", () => {
+    // marked calls the tokenizers at block starts, a subset of these line starts;
+    // an unbounded prefix would hand over the whole remainder each time.
+    const md = largeMarkdown(256 * 1024);
+    let handed = 0;
+    let start = 0;
+    while (start < md.length) {
+      const src = md.slice(start);
+      handed +=
+        (orderedListPrefix(src)?.length ?? 0) +
+        (taskListPrefix(src)?.length ?? 0) +
+        tableStartPrefix(src).length +
+        tableTokenizePrefix(src).length;
+      const newline = md.indexOf("\n", start);
+      start = newline === -1 ? md.length : newline + 1;
     }
-    return best;
-  }
-
-  it("parses 1 MiB in well under eight times the cost of 128 KiB", { timeout: 60_000 }, () => {
-    boundedManager.parse(largeMarkdown(64 * 1024));
-    const small = parseMs(largeMarkdown(128 * 1024));
-    const large = parseMs(largeMarkdown(1024 * 1024));
-    // Linear parsing lands near 8×; the unbounded tokenizers exceed 50×.
-    expect(large / small).toBeLessThan(24);
+    expect(handed).toBeLessThan(md.length * 16);
   });
 });

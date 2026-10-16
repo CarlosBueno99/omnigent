@@ -159,4 +159,10 @@ describe("fence body", () => {
     expect(reactNodeView.nodeViewContentRef).toHaveBeenCalledWith(body);
     expect(content.parentElement).toBe(host);
   });
+
+  it("falls back to @tiptap/react when the host markup is not recognised", () => {
+    renderView({ language: "python" });
+    const body = document.querySelector("code[data-node-view-content]");
+    expect(reactNodeView.nodeViewContentRef).toHaveBeenCalledWith(body);
+  });
 });

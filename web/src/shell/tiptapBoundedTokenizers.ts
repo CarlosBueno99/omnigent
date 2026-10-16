@@ -1,12 +1,6 @@
-// Markdown tokenizers that read only the lines they can consume.
-//
-// marked offers every registered block tokenizer the whole remaining document
-// at each block boundary, and asks each `start` callback for a cut position at
-// every paragraph. The upstream orderedList, taskList and table tokenizers
-// split that entire remainder into lines before (usually) declining it, so a
-// parse costs O(blocks × lines): a 1 MiB file keeps the tab frozen for minutes.
-// These variants hand the upstream tokenizers a prefix that ends where their
-// own grammar must stop, so the parsed document is unchanged.
+// Markdown tokenizers that read only the lines they can consume: marked offers
+// every block tokenizer the whole remaining document per block, and the upstream
+// list/table tokenizers split all of it, so a parse costs O(blocks × lines).
 
 import type { MarkdownTokenizer, Node } from "@tiptap/core";
 import { ORDERED_LIST_MARKER_PATTERN, OrderedList, TaskList } from "@tiptap/extension-list";
@@ -106,7 +100,16 @@ interface Bounds {
   start?: (src: string) => string;
 }
 
-/** Re-create `extension` with its markdown tokenizer reading bounded prefixes. */
+/**
+ * Re-create `extension` with its markdown tokenizer reading bounded prefixes.
+ *
+ * marked tries each block tokenizer at every block boundary with the remaining
+ * document and asks each `start` callback for a paragraph cut position. The
+ * upstream tokenizers split that whole remainder into lines before deciding,
+ * which froze the tab for minutes on a 1 MiB file. The wrapped tokenizer hands
+ * upstream a prefix that ends where its grammar must stop, so the parsed
+ * document is unchanged while the work stays proportional to the document.
+ */
 function withBoundedTokenizer<T extends Node>(extension: T, bounds: Bounds): T {
   const upstream = extension.config.markdownTokenizer;
   if (!upstream) return extension;

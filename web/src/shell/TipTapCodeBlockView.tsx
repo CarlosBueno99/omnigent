@@ -27,13 +27,19 @@ function CodeBlockContent({ editor }: { editor: NodeViewProps["editor"] }) {
       const content = element
         .closest(".react-renderer")
         ?.querySelector(":scope > [data-node-view-content-react]");
-      if (!content || element.firstChild === content) return;
+      if (!content) {
+        // The host's markup is not where this version of @tiptap/react put it;
+        // let upstream place the content rather than leave the fence empty.
+        nodeViewContentRef?.(element);
+        return;
+      }
+      if (element.firstChild === content) return;
       content.removeAttribute("data-node-view-wrapper");
       element.appendChild(content);
     },
     [editor, nodeViewContentRef],
   );
-  return <code ref={ref} data-node-view-content="" style={{ whiteSpace: "pre-wrap" }} />;
+  return <code ref={ref} data-node-view-content="" className="whitespace-pre-wrap" />;
 }
 
 export function TipTapCodeBlockView({ node, editor, getPos }: NodeViewProps) {
