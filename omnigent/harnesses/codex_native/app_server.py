@@ -3244,8 +3244,8 @@ class CodexDatabricksNoCodexModelsError(OmnigentError, OSError):
         super().__init__(
             f"Databricks profile {profile!r} exposes no model service on the Codex "
             "Responses route, so native Codex has no model to launch on. Ask a "
-            "workspace admin to enable a GPT model service on that workspace, or "
-            "choose an explicit model for this agent.",
+            "workspace admin to enable a Codex-compatible model service that "
+            "advertises the Responses route, or choose an explicit model for this agent.",
             code=ErrorCode.HARNESS_NOT_CONFIGURED,
         )
 

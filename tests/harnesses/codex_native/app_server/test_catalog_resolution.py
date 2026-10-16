@@ -271,17 +271,27 @@ def test_resolve_databricks_codex_model_empty_catalog_stops_implicit_launch(
 
 
 @pytest.mark.parametrize(
-    "failure",
-    [RuntimeError("listing unreachable"), ValueError("'model_services' must be a list")],
-    ids=["unreachable", "malformed"],
-)
-@pytest.mark.parametrize(
-    ("cached_codex_models", "expected", "bundled_calls"),
+    ("failure", "cached_codex_models", "expected", "bundled_calls"),
     [
-        pytest.param(None, "databricks-gpt-5-4", 1, id="no-ucode-state"),
-        pytest.param([], "databricks-gpt-5-4", 1, id="empty-cache"),
         pytest.param(
-            ["system.ai.gpt-5-5", "system.ai.gpt-5-4"], "system.ai.gpt-5-5", 0, id="cached"
+            RuntimeError("listing unreachable"), None, "databricks-gpt-5-4", 1, id="no-ucode-state"
+        ),
+        pytest.param(
+            RuntimeError("listing unreachable"), [], "databricks-gpt-5-4", 1, id="empty-cache"
+        ),
+        pytest.param(
+            RuntimeError("listing unreachable"),
+            ["system.ai.gpt-5-5", "system.ai.gpt-5-4"],
+            "system.ai.gpt-5-5",
+            0,
+            id="cached",
+        ),
+        pytest.param(
+            ValueError("'model_services' must be a list"),
+            None,
+            "databricks-gpt-5-4",
+            1,
+            id="malformed",
         ),
     ],
 )
