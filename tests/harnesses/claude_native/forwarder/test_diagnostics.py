@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import queue
 from pathlib import Path
 from typing import Any
@@ -402,6 +403,7 @@ def _is_error_item_post(post: dict[str, Any]) -> bool:
     )
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
 @pytest.mark.asyncio
 async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
     tmp_path: Path,
@@ -527,3 +529,156 @@ def test_transcript_write_blocker_names_the_missing_or_writable_directory(
     assert forwarder._transcript_write_blocker(transcript_path) == expected.format(
         parent=transcript_path.parent, root=tmp_path
     )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_missing_transcript_blocker_treats_an_unsearchable_directory_as_unreadable(
+    tmp_path: Path,
+) -> None:
+    """A transcript under a directory the runner cannot search is reported, not raised."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    transcript_path = locked / "slug" / "claude-session.jsonl"
+    locked.chmod(0o000)
+    try:
+        probe = forwarder._missing_transcript_blocker(tmp_path / "bridge", transcript_path)
+    finally:
+        locked.chmod(0o755)
+    assert probe == (transcript_path, f"{transcript_path.parent} is not accessible (EACCES)")
+
+
+@pytest.mark.asyncio
+async def test_failed_missing_transcript_diagnostic_does_not_block_the_idle_edge(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe that raises is logged; the turn's confirmed idle edge still posts."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / "claude-settings.json").write_text("{}", encoding="utf-8")
+    transcript_path = tmp_path / "claude-session.jsonl"
+    for event_name in ("SessionStart", "UserPromptSubmit", "Stop"):
+        record_hook_event(
+            bridge_dir,
+            {
+                "hook_event_name": event_name,
+                "session_id": "claude-session",
+                "transcript_path": str(transcript_path),
+            },
+        )
+
+    def exploding_probe(bridge_dir: Path, hook_transcript_path: Path | None) -> None:
+        raise PermissionError("probe denied")
+
+    monkeypatch.setattr(forwarder, "_missing_transcript_blocker", exploding_probe)
+    caplog.set_level(logging.INFO, logger=forwarder.__name__)
+
+    server, thread, base_url = _start_recording_server()
+    task = asyncio.create_task(
+        forwarder.forward_claude_transcript_to_session(
+            base_url=base_url,
+            headers={},
+            session_id="conv_probe_failed",
+            bridge_dir=bridge_dir,
+            agent_name="claude-native-ui",
+            start_at_end=False,
+            poll_interval_s=0.01,
+        )
+    )
+    try:
+        request = await _get_recorded_request(server, timeout_s=10.0)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+    assert request["body"] == {
+        "type": "external_session_status",
+        "data": {"status": "idle", "background_task_count": 0, "turn_completed": True},
+    }
+    failures = [
+        record
+        for record in caplog.records
+        if "missing-transcript diagnostic failed" in record.getMessage()
+    ]
+    assert len(failures) == 1
+    assert failures[0].levelno == logging.WARNING
+    assert failures[0].session_id == "conv_probe_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rejections", "notice_delivered"),
+    [pytest.param(1, True, id="transient"), pytest.param(10, False, id="persistent")],
+)
+async def test_missing_transcript_notice_retries_then_still_posts_the_idle_edge(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    rejections: int,
+    notice_delivered: bool,
+) -> None:
+    """A rejected chat notice is retried with its stable id; the idle edge never waits on it."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    transcript_path = tmp_path / "never-written.jsonl"
+    for event_name in ("SessionStart", "Stop"):
+        record_hook_event(
+            bridge_dir,
+            {
+                "hook_event_name": event_name,
+                "session_id": "claude-session",
+                "transcript_path": str(transcript_path),
+            },
+        )
+    caplog.set_level(logging.WARNING, logger=forwarder.__name__)
+    requests: list[dict[str, Any]] = []
+    remaining_rejections = rejections
+
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        nonlocal remaining_rejections
+        payload = json.loads(request.content.decode("utf-8"))
+        requests.append(payload)
+        if payload["type"] == "external_conversation_item" and remaining_rejections > 0:
+            remaining_rejections -= 1
+            return httpx.Response(503, json={"error": "busy"})
+        return httpx.Response(202, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_handle_request), base_url="http://test"
+    ) as client:
+        await forwarder._forward_available_status_events(
+            client=client,
+            session_id="conv_retry",
+            bridge_dir=bridge_dir,
+            state=forwarder.HookForwardState(event_cursor=0, byte_offset=0),
+            retry_tracker=forwarder._PostRetryTracker(),
+            dedupe=forwarder._ForwardDedupeState(),
+            task_subjects={},
+            task_statuses={},
+            task_order=[],
+        )
+
+    notices = [
+        request["data"] for request in requests if request["type"] == "external_conversation_item"
+    ]
+    statuses = [
+        request["data"] for request in requests if request["type"] == "external_session_status"
+    ]
+    expected_attempts = min(rejections + 1, forwarder._MISSING_TRANSCRIPT_NOTICE_ATTEMPTS)
+    assert len(notices) == expected_attempts
+    assert len({notice["source_id"] for notice in notices}) == 1
+    assert [status["status"] for status in statuses] == ["idle"]
+    assert statuses[0]["turn_completed"] is True
+    assert str(transcript_path) in statuses[0]["output"]
+    # Every notice attempt precedes the edge; the edge posts whether or not one landed.
+    assert requests[-1]["type"] == "external_session_status"
+    dropped = [
+        record
+        for record in caplog.records
+        if "Failed to post Claude missing-transcript notice" in record.getMessage()
+    ]
+    assert len(dropped) == (0 if notice_delivered else 1)
