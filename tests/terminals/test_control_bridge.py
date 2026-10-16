@@ -28,6 +28,12 @@ from fastapi import WebSocketDisconnect
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.terminal import create_terminal_instance
 from omnigent.terminals.control_bridge import (
+    _MIN_FORWARDED_COLS as _RESIZE_FLOOR_COLS,
+)
+from omnigent.terminals.control_bridge import (
+    _MIN_FORWARDED_ROWS as _RESIZE_FLOOR_ROWS,
+)
+from omnigent.terminals.control_bridge import (
     _SEND_KEYS_HEX_BYTES_PER_CALL,
     _clipboard_buffer_name,
     _hex_send_keys_commands,
@@ -58,10 +64,6 @@ def _tmux_supports_bracket_paste_flag() -> bool:
 
 
 _HAS_TMUX_BRACKET_PASTE_FLAG = _tmux_supports_bracket_paste_flag()
-
-# The bridge's resize floor: smaller browser sizes never reach tmux.
-_RESIZE_FLOOR_COLS = 20
-_RESIZE_FLOOR_ROWS = 5
 
 
 def test_unescape_control_output_round_trips_control_bytes() -> None:
@@ -1211,47 +1213,57 @@ async def test_control_attach_pins_client_term_over_inherited_dumb(
         await _kill_and_join(sock, task)
 
 
+class _SteppedWebSocket(_FakeWebSocket):
+    """A client whose inbound frames the test releases one at a time."""
+
+    def __init__(self) -> None:
+        super().__init__(inbound=[])
+        self._queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+    def feed(self, message: dict[str, object]) -> None:
+        self._queue.put_nowait(message)
+
+    async def receive(self) -> dict[str, object]:
+        return await self._queue.get()
+
+
 @pytest.mark.skipif(not _HAS_TMUX, reason="tmux not installed")
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("cols", "rows"),
-    [
-        # What xterm's fit addon reports under a display:none ancestor, at a
-        # large and at the default code font.
-        (6, 4),
-        (10, 5),
-        (_RESIZE_FLOOR_COLS - 1, _RESIZE_FLOOR_ROWS),
-        (_RESIZE_FLOOR_COLS, _RESIZE_FLOOR_ROWS - 1),
-    ],
-    ids=["hidden-large-font", "hidden-default-font", "one-column-narrow", "one-row-short"],
-)
-async def test_control_bridge_keeps_pane_size_on_resize_below_floor(cols: int, rows: int) -> None:
-    """A resize from a browser terminal with no layout must not shrink the shared pane."""
+async def test_control_bridge_keeps_pane_size_on_resize_below_floor() -> None:
+    """Resizes from a browser terminal with no layout must not shrink the shared pane."""
     sock, target = await _new_private_tmux("cat")
     await asyncio.sleep(0.3)
     assert await _window_size(sock, target) == (80, 24)
 
-    ws = _FakeWebSocket(
-        inbound=[
-            {
-                "type": "websocket.receive",
-                "text": json.dumps({"type": "resize", "cols": cols, "rows": rows}),
-            },
-            # ``cat`` echoes this once the bridge has handled the frame before it.
-            {"type": "websocket.receive", "bytes": b"ping\r"},
-        ]
-    )
+    ws = _SteppedWebSocket()
     task = asyncio.create_task(
         bridge_tmux_control_to_websocket(
             ws, socket_path=str(sock), tmux_target=target, read_only=False
         )
     )
+    # What xterm's fit addon reports under a display:none ancestor at a large and
+    # at the default code font, then one column and one row under the floor.
+    sizes = [
+        (6, 4),
+        (10, 5),
+        (_RESIZE_FLOOR_COLS - 1, _RESIZE_FLOOR_ROWS),
+        (_RESIZE_FLOOR_COLS, _RESIZE_FLOOR_ROWS - 1),
+    ]
     try:
-        await _wait_for_output(ws, b"ping")
-        width, height = await _window_size(sock, target)
-        assert (width, height) == (80, 24), (
-            f"a {cols}x{rows} browser resize shrank the pane to {width}x{height}"
-        )
+        for index, (cols, rows) in enumerate(sizes):
+            ws.feed(
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps({"type": "resize", "cols": cols, "rows": rows}),
+                }
+            )
+            # ``cat`` echoes this once the bridge has handled the frame before it.
+            ws.feed({"type": "websocket.receive", "bytes": f"ping{index}\r".encode()})
+            await _wait_for_output(ws, f"ping{index}".encode())
+            width, height = await _window_size(sock, target)
+            assert (width, height) == (80, 24), (
+                f"a {cols}x{rows} browser resize shrank the pane to {width}x{height}"
+            )
     finally:
         await _kill_and_join(sock, task)
 

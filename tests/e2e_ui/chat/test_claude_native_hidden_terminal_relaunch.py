@@ -14,6 +14,7 @@ import httpx
 import pytest
 from playwright.sync_api import Page, WebSocket, expect
 
+from omnigent.terminals.control_bridge import _MIN_FORWARDED_COLS as _USABLE_COLS
 from tests.e2e_ui.conftest import set_fallback_mock_llm
 from tests.e2e_ui.messages.test_message_render_parity import _ensure_chat_view, _send
 
@@ -22,7 +23,8 @@ _log = logging.getLogger(__name__)
 _CLAUDE_MOCK_MODEL = "claude-sonnet-4-20250514"
 _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 _ERROR_PILL = '[data-testid="error-pill"]'
-_HIDE_TERMINAL_VIEW_CSS = '[data-testid="main-terminal-view"] { display: none !important; }'
+_MAIN_TERMINAL_VIEW = "main-terminal-view"
+_HIDE_TERMINAL_VIEW_CSS = f'[data-testid="{_MAIN_TERMINAL_VIEW}"] {{ display: none !important; }}'
 
 _FIRST_TOKEN = "FIRST_TURN_ANSWERED"
 _RELAUNCH_TOKEN = "RELAUNCH_TURN_ANSWERED"
@@ -32,9 +34,7 @@ _FIRST_TURN_TIMEOUT_MS = 180_000
 _PANE_CLOSE_TIMEOUT_S = 30.0
 # 30 s pane re-create wait + 180 s readiness cap + attach latency.
 _RELAUNCH_OUTCOME_TIMEOUT_MS = 330_000
-# Narrowest size a laid-out browser terminal reports; the bridge drops smaller ones.
-_USABLE_COLS = 20
-_REVEAL_RESIZE_TIMEOUT_S = 15.0
+_RESIZE_TIMEOUT_S = 15.0
 
 
 def _running_terminal_ids(base_url: str, session_id: str) -> list[str]:
@@ -86,23 +86,31 @@ def _record_terminal_frames(page: Page) -> list[dict[str, object]]:
     return frames
 
 
+def _resize_columns(frame: dict[str, object]) -> int | None:
+    """Columns of a resize frame, or ``None`` for any other or malformed frame."""
+    try:
+        control = json.loads(str(frame["sent"]))
+        if not isinstance(control, dict) or control.get("type") != "resize":
+            return None
+        return int(control["cols"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _wait_for_usable_resize(
-    page: Page, frames: list[dict[str, object]], start: int
+    page: Page, frames: list[dict[str, object]], start: int, what: str
 ) -> dict[str, object]:
     """Wait for a resize frame of at least ``_USABLE_COLS`` columns sent after ``start``."""
-    deadline = time.monotonic() + _REVEAL_RESIZE_TIMEOUT_S
+    deadline = time.monotonic() + _RESIZE_TIMEOUT_S
     while time.monotonic() < deadline:
         for frame in frames[start:]:
-            try:
-                control = json.loads(str(frame["sent"]))
-            except ValueError:
-                continue
-            if control.get("type") == "resize" and int(control["cols"]) >= _USABLE_COLS:
-                return control
+            columns = _resize_columns(frame)
+            if columns is not None and columns >= _USABLE_COLS:
+                return frame
         page.wait_for_timeout(250)
     raise AssertionError(
-        f"no usable resize frame within {_REVEAL_RESIZE_TIMEOUT_S:.0f}s of revealing the "
-        f"terminal view; frames: {frames[start:]}"
+        f"no usable resize frame within {_RESIZE_TIMEOUT_S:.0f}s of {what}; "
+        f"frames: {frames[start:]}"
     )
 
 
@@ -148,11 +156,10 @@ def test_message_after_pane_relaunch_is_delivered(
 
     hide_style = None
     if hide_terminal_view:
+        # The chat view keeps the terminal view mounted (hidden) behind it.
+        expect(page.get_by_test_id(_MAIN_TERMINAL_VIEW)).to_be_attached()
         hide_style = page.add_style_tag(content=_HIDE_TERMINAL_VIEW_CSS)
-        display = page.evaluate(
-            "getComputedStyle(document.querySelector('[data-testid=\"main-terminal-view\"]')).display"
-        )
-        assert display == "none", display
+        expect(page.get_by_test_id(_MAIN_TERMINAL_VIEW)).to_have_css("display", "none")
 
     _close_running_terminals(page, base_url, session_id)
     _log.info("Claude pane closed")
@@ -186,10 +193,13 @@ def test_message_after_pane_relaunch_is_delivered(
     )
     expect(page.locator(_ASSISTANT, has_text=_RELAUNCH_TOKEN).first).to_be_visible(timeout=30_000)
 
-    if hide_style is not None:
-        # Revealing the view lays the terminal out again, so its real size must
-        # now reach the pane.
-        revealed_at = len(frames)
-        hide_style.evaluate("style => style.remove()")
-        control = _wait_for_usable_resize(page, frames, revealed_at)
-        _log.info("resize after revealing the terminal view: %s", json.dumps(control))
+    if hide_style is None:
+        # The stock hidden mount keeps its layout, so its re-attach still sizes the pane.
+        _wait_for_usable_resize(page, frames, frames_before_relaunch, "the relaunch")
+        return
+    # Revealing the view lays the terminal out again, so its real size must now
+    # reach the pane.
+    revealed_at = len(frames)
+    hide_style.evaluate("style => style.remove()")
+    frame = _wait_for_usable_resize(page, frames, revealed_at, "revealing the terminal view")
+    _log.info("resize after revealing the terminal view: %s", frame["sent"])

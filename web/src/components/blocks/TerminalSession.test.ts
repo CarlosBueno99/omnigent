@@ -953,6 +953,22 @@ describe("TerminalSession", () => {
     session.dispose();
   });
 
+  it("clamps a fitted grid below the bridge's floor before sending it", () => {
+    // WHY: the bridge drops resizes under 20x5, so a visible container that fits
+    // smaller would otherwise render a grid narrower than the pane it shows.
+    const { socket, session } = makeSession();
+    const term = (session as unknown as { term: Terminal }).term;
+    const fit = (session as unknown as { fit: { fit: () => void } }).fit;
+    vi.spyOn(fit, "fit").mockImplementation(() => term.resize(10, 3));
+
+    socket.open();
+
+    expect([term.cols, term.rows]).toEqual([20, 5]);
+    const frame = socket.sent.find((m) => typeof m === "string" && m.includes('"type":"resize"'));
+    expect(frame).toBe(JSON.stringify({ type: "resize", cols: 20, rows: 5 }));
+    session.dispose();
+  });
+
   it("surfaces close code + reason and error transitions", () => {
     // WHY: the closed variant carries the WS code so consumers can tell a
     // deliberate close from a transport drop; the error handler maps to
