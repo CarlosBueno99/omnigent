@@ -1259,8 +1259,10 @@ not look like an unanswered turn when it binds a runner. Only children
 created no later than the fork's newest copied item are named — a fork
 truncated with `up_to_response_id` omits later dispatches, and so does a
 child dispatched after the copy finished — since the fork holds no
-dispatch receipt for them. A source with no in-flight children gets
-neither item.
+dispatch receipt for them. A child that is dispatched and finishes
+entirely while the history is being copied is not named either; its
+result still reaches the source. A source with no in-flight children
+gets neither item.
 
 ### Stream Session
 

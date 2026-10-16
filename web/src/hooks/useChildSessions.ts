@@ -127,7 +127,9 @@ function isChildSessionsQueryKey(key: readonly unknown[]): boolean {
 /**
  * Query key for one ``useChildSessions`` call: a disabled placeholder for
  * ``null``, the shared list key, or that key extended by non-default fetch
- * options so ``invalidateQueries`` on the prefix still refreshes it.
+ * options so ``invalidateQueries`` on the prefix still refreshes it. An
+ * extended entry is a separate cache entry: the rail's descendant lookups
+ * read only the default list, which is what they render.
  */
 function childSessionsQueryKeyFor(
   sessionId: string | null,
@@ -227,25 +229,28 @@ function parseChildSessionError(value: unknown): ChildSessionError | null {
 
 interface UseChildSessionsResult {
   children: ChildSessionInfo[];
+  /** No data yet (first load). */
   isLoading: boolean;
+  /**
+   * A fetch is in flight, including a background refetch of cached data.
+   * Optional so existing hook mocks stay valid; absent reads as false.
+   */
+  isFetching?: boolean;
   error: Error | null;
 }
 
 /**
- * Fetch child sessions for a parent session.
- *
- * Exported for unit testing of the HTTP-shape contract; production
- * code should call ``useChildSessions``.
- */
-/**
  * Fetch one page of children and, when ``allPages`` is set and the server
  * reports more, the pages after it. Each cursor comes from the previous
- * response, so the pages are fetched one after another.
+ * response, so the pages are fetched one after another; ``seen`` holds the
+ * cursors already followed so a repeating or cycling cursor fails instead
+ * of paging forever.
  */
 async function fetchChildSessionPages(
   sessionId: string,
   options: ChildSessionsFetchOptions,
   after: string | null,
+  seen: Set<string>,
 ): Promise<ChildSessionWire[]> {
   const params = new URLSearchParams();
   if (options.limit !== undefined) params.set("limit", String(options.limit));
@@ -257,16 +262,22 @@ async function fetchChildSessionPages(
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const json = (await res.json()) as ChildSessionsResponse;
   if (!options.allPages || !json.has_more || !json.last_id) return json.data;
-  // A cursor that does not advance would otherwise page forever.
-  if (json.last_id === after) throw new Error("child_sessions cursor did not advance");
-  return [...json.data, ...(await fetchChildSessionPages(sessionId, options, json.last_id))];
+  if (seen.has(json.last_id)) throw new Error("child_sessions cursor did not advance");
+  seen.add(json.last_id);
+  return [...json.data, ...(await fetchChildSessionPages(sessionId, options, json.last_id, seen))];
 }
 
+/**
+ * Fetch child sessions for a parent session.
+ *
+ * Exported for unit testing of the HTTP-shape contract; production
+ * code should call ``useChildSessions``.
+ */
 export async function fetchChildSessions(
   sessionId: string,
   options: ChildSessionsFetchOptions = {},
 ): Promise<ChildSessionInfo[]> {
-  const rows = await fetchChildSessionPages(sessionId, options, null);
+  const rows = await fetchChildSessionPages(sessionId, options, null, new Set());
   // Children run on this session's runner: record the link so their
   // session-scoped requests key by this session's host before their own
   // snapshot loads.
@@ -314,7 +325,7 @@ export function useChildSessions(
   options: ChildSessionsFetchOptions = {},
 ): UseChildSessionsResult {
   const sessionId = isTempConvId(conversationId) ? null : conversationId;
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, isFetching, error } = useQuery({
     queryKey: childSessionsQueryKeyFor(sessionId, options),
     queryFn: () => fetchChildSessions(sessionId as string, options),
     enabled: sessionId !== null,
@@ -326,6 +337,7 @@ export function useChildSessions(
   return {
     children: data ?? [],
     isLoading,
+    isFetching,
     error: (error as Error | null) ?? null,
   };
 }

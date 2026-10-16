@@ -1202,8 +1202,12 @@ function SupportedForkSessionForm({
   const {
     children: sourceChildren,
     isLoading: sourceChildrenLoading,
+    isFetching: sourceChildrenFetching,
     error: sourceChildrenError,
   } = useChildSessions(sourceSessionId, null, { limit: CHILD_SESSIONS_MAX_LIMIT, allPages: true });
+  // A refetch of a cached list is still a check in progress: stale data must
+  // not read as "nothing running".
+  const checkingSubagents = sourceChildrenLoading || (sourceChildrenFetching ?? false);
   const runningSubagentCount = sourceChildren.filter((child) => child.busy).length;
 
   // On a DIFFERENT host than the source nothing prefills the directory, so it
@@ -1731,7 +1735,7 @@ function SupportedForkSessionForm({
           </p>
         )}
 
-        {sourceChildrenLoading && sourceChildrenError === null && (
+        {checkingSubagents && sourceChildrenError === null && (
           <p
             className="text-sm text-muted-foreground"
             data-testid="fork-session-subagent-check-pending"

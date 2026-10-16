@@ -210,7 +210,9 @@ def _items(base_url: str, session_id: str) -> list[dict[str, Any]]:
         f"{base_url}/v1/sessions/{session_id}/items?limit=200", timeout=10.0, trust_env=False
     )
     resp.raise_for_status()
-    return list(resp.json()["data"])
+    payload = resp.json()
+    assert not payload.get("has_more"), f"items for {session_id} truncated at limit=200"
+    return list(payload["data"])
 
 
 def _tool_output(items: list[dict[str, Any]], call_id_prefix: str) -> str:

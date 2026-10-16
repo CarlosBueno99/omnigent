@@ -111,6 +111,29 @@ describe("useChildSessions", () => {
     expect(result.current.children).toEqual([]);
     expect(authenticatedFetch).toHaveBeenCalledTimes(2);
   });
+  it("fails when the cursor cycles instead of advancing", async () => {
+    const page = (last_id: string) =>
+      new Response(
+        JSON.stringify({
+          object: "list",
+          data: [{ id: last_id, title: "worker:x", busy: false }],
+          has_more: true,
+          last_id,
+        }),
+      );
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(page("conv_a"))
+      .mockResolvedValueOnce(page("conv_b"))
+      .mockResolvedValueOnce(page("conv_a"));
+    const { result } = renderHook(
+      () => useChildSessions("conv_parent", null, { limit: 1, allPages: true }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.error?.message).toBe("child_sessions cursor did not advance");
+    expect(authenticatedFetch).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe("useDescendantSession", () => {

@@ -3837,7 +3837,8 @@ def register_core_routes(
                     )
 
         # Re-list after the copy too: a child dispatched during it has its receipt
-        # in the fork as well. A failed re-list keeps the pre-copy set.
+        # in the fork as well (one that also finished within the copy is missed; its
+        # result still reaches the source). A failed re-list keeps the pre-copy set.
         try:
             known_children = {child.id for child in running_children}
             running_children.extend(
