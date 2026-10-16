@@ -65,6 +65,24 @@ def test_runner_handoff_clears_when_the_runner_reconnects_here() -> None:
     assert shutdown_state.runner_handoff_reason("runner-a") is None
 
 
+def test_retired_tunnel_marks_a_handoff_without_replacing_an_explicit_reason() -> None:
+    shutdown_state.note_runner_tunnel_retired("runner-a")
+    assert shutdown_state.runner_handoff_reason("runner-a") == "tunnel_retired"
+    assert shutdown_state.server_shutting_down() is False
+
+    shutdown_state.mark_runner_handed_off("runner-b", reason="rebalance")
+    shutdown_state.note_runner_tunnel_retired("runner-b")
+    assert shutdown_state.runner_handoff_reason("runner-b") == "rebalance"
+
+    # An expired explicit mark no longer describes this retire.
+    shutdown_state._handed_off["runner-b"] = (
+        time.monotonic() - shutdown_state.SHUTDOWN_WINDOW_S,
+        "rebalance",
+    )
+    shutdown_state.note_runner_tunnel_retired("runner-b")
+    assert shutdown_state.runner_handoff_reason("runner-b") == "tunnel_retired"
+
+
 def test_handoff_and_shutdown_marks_are_logged_for_attribution(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
