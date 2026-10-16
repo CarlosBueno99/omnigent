@@ -389,28 +389,25 @@ def _discard_created_branch(repo_root: str, branch_name: str, created_commit: st
     """Best-effort deletion of the branch created for a ``git worktree add`` that failed.
 
     Git keeps the branch when the add fails, so a retry would hit "branch already
-    exists". The branch is left alone when it no longer points at the commit it
-    was created from, or when git refuses because a worktree still has it checked
-    out (for example the half-built worktree a killed add leaves registered).
+    exists". The branch is kept while a worktree has it checked out (for example
+    the half-built worktree a killed add leaves registered), and ``update-ref -d``
+    with the expected tip deletes it only if it still points at the commit it was
+    created from, so a branch another operation advanced survives as well.
 
     :param repo_root: Absolute main work-tree root, e.g. ``"/Users/alice/myrepo"``.
     :param branch_name: Branch this request created, e.g. ``"feature/login"``.
-    :param created_commit: Commit the branch pointed at right after its creation.
+    :param created_commit: Commit the branch was created at.
     """
     try:
-        current = _run_git(
-            ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch_name}"], cwd=repo_root
+        if any(worktree.branch == branch_name for worktree in list_worktrees(repo_path=repo_root)):
+            _logger.warning("Keeping branch %s: a worktree has it checked out", branch_name)
+            return
+        deleted = _run_git(
+            ["update-ref", "-d", f"refs/heads/{branch_name}", created_commit], cwd=repo_root
         )
-        if current.returncode != 0:
-            return
-        if current.stdout.strip() != created_commit:
-            _logger.warning(
-                "Keeping branch %s: it moved after this request created it", branch_name
-            )
-            return
-        deleted = _run_git(["branch", "-D", branch_name], cwd=repo_root)
         if deleted.returncode != 0:
-            raise _git_error("git branch -D failed", deleted)
+            detail = deleted.stderr.strip() or f"exit {deleted.returncode}"
+            _logger.warning("Keeping branch %s: %s", branch_name, detail)
     except WorktreeError:
         _logger.warning(
             "Could not roll back branch %s after a failed worktree add", branch_name, exc_info=True
@@ -541,21 +538,29 @@ def create_worktree(
 
     created_commit: str | None = None
     if not existing_branch:
-        # Create the branch in its own step rather than with ``worktree add -b``:
-        # git keeps the branch when the add fails, and only a branch this
-        # request created may be rolled back below.
+        # Create the branch separately from ``worktree add -b`` so a failed add can
+        # roll back exactly this request's branch; resolve its start point first so
+        # the created commit is known the moment the branch exists.
+        created_commit = validated_commit
+        if created_commit is None:
+            start_point = _run_git(
+                [
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    f"{base_branch or 'HEAD'}^{{commit}}",
+                ],
+                cwd=repo_root,
+            )
+            if start_point.returncode != 0:
+                raise _git_error("could not resolve the branch start point", start_point)
+            created_commit = start_point.stdout.strip()
         branch_args = ["branch", branch_name]
         if base_branch is not None:
             branch_args += ["--end-of-options", base_branch]
         created_branch = _run_git(branch_args, cwd=repo_root)
         if created_branch.returncode != 0:
             raise _git_error("could not create branch", created_branch)
-        branch_tip = _run_git(
-            ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch_name}"], cwd=repo_root
-        )
-        if branch_tip.returncode != 0:
-            raise _git_error("could not resolve the created branch", branch_tip)
-        created_commit = branch_tip.stdout.strip()
     # --end-of-options: treat the branch as a rev, never a git flag (argv-only, no shell).
     add_args = ["worktree", "add", str(worktree_path), "--end-of-options", branch_name]
     if validated_commit is not None and not existing_branch:

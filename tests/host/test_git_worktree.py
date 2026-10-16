@@ -834,10 +834,13 @@ def test_create_worktree_existing_branch_add_failure_keeps_branch(
     """Existing-branch mode created nothing, so a failed add deletes nothing."""
     _git(git_repo, "branch", "feature/keep")
     real_run = git_worktree_module._run_git
+    failed = False
 
     def fail_add(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
-        if args[:2] != ["worktree", "add"]:
+        nonlocal failed
+        if args[:2] != ["worktree", "add"] or failed:
             return real_run(args, cwd=cwd)
+        failed = True
         if failure == "exit":
             return subprocess.CompletedProcess(args, 128, "", "fatal: disk full")
         real_run([*args[:2], "--lock", *args[2:]], cwd=cwd)
@@ -849,7 +852,6 @@ def test_create_worktree_existing_branch_add_failure_keeps_branch(
     assert _branch_exists(git_repo, "feature/keep")
     assert _worktree_count(git_repo) == (1 if failure == "exit" else 2)
     if failure == "exit":
-        monkeypatch.setattr(git_worktree_module, "_run_git", real_run)
         created = create_worktree(
             repo_path=str(git_repo), branch_name="feature/keep", existing_branch=True
         )
@@ -865,7 +867,7 @@ def test_failed_add_rollback_failure_keeps_original_error(
     def fail_add_and_rollback(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
         if args[:2] == ["worktree", "add"]:
             return subprocess.CompletedProcess(args, 128, "", "fatal: disk full")
-        if args[:2] == ["branch", "-D"]:
+        if args[:2] == ["update-ref", "-d"]:
             return subprocess.CompletedProcess(args, 1, "", "rollback failed")
         return real_run(args, cwd=cwd)
 
@@ -896,10 +898,9 @@ def test_failed_add_rollback_keeps_another_requests_worktree(
     assert not _branch_exists(git_repo, "feature-x")
 
 
-@pytest.mark.parametrize("peer_locked", [False, True])
 @pytest.mark.parametrize("existing_branch", [False, True])
 def test_failed_add_rollback_keeps_peer_worktree_of_same_branch(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch, existing_branch: bool, peer_locked: bool
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, existing_branch: bool
 ) -> None:
     """Losing the race for the path leaves the peer's worktree, files and branch alone."""
     if existing_branch:
@@ -909,10 +910,8 @@ def test_failed_add_rollback_keeps_peer_worktree_of_same_branch(
 
     def peer_registers_first(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
         if args[:2] == ["worktree", "add"]:
-            # Both requests passed the checks; the peer registers first, locked like an
-            # add still initializing or a worktree someone locked on purpose.
-            lock = ["--lock"] if peer_locked else []
-            _git(git_repo, "worktree", "add", *lock, str(peer_path), "feature/x")
+            # Both requests passed the checks; the peer registers first.
+            _git(git_repo, "worktree", "add", str(peer_path), "feature/x")
             (peer_path / "wip.txt").write_text("uncommitted")
         return real_run(args, cwd=cwd)
 
@@ -927,25 +926,36 @@ def test_failed_add_rollback_keeps_peer_worktree_of_same_branch(
     assert _branch_exists(git_repo, "feature/x")
 
 
+@pytest.mark.parametrize("advanced", ["before_rollback", "during_rollback"])
 def test_failed_add_rollback_keeps_branch_another_operation_advanced(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, advanced: str
 ) -> None:
-    """The new branch is deleted only while it still points at its creation commit."""
+    """The new branch is deleted only if it still points at its creation commit."""
     peer_path = git_repo.parent / "peer"
     real_run = git_worktree_module._run_git
 
-    def advance_branch_then_fail_add(
-        args: list[str], *, cwd: str
-    ) -> subprocess.CompletedProcess[str]:
+    def advance_branch(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
         if args[:2] == ["worktree", "add"]:
-            # Another operation committed on the branch and released it before this add failed.
-            _git(git_repo, "worktree", "add", str(peer_path), "feature/x")
-            _git(peer_path, "commit", "-q", "--allow-empty", "-m", "peer work")
-            _git(git_repo, "worktree", "remove", str(peer_path))
+            if advanced == "before_rollback":
+                # Another operation committed on the branch and released it before the add failed.
+                _git(git_repo, "worktree", "add", str(peer_path), "feature/x")
+                _git(peer_path, "commit", "-q", "--allow-empty", "-m", "peer work")
+                _git(git_repo, "worktree", "remove", str(peer_path))
             return subprocess.CompletedProcess(args, 128, "", "fatal: disk full")
+        if args[:2] == ["update-ref", "-d"] and advanced == "during_rollback":
+            # The ref moves after the rollback checked for worktrees, right before its delete.
+            peer_commit = subprocess.run(
+                ["git", "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "peer work"],
+                cwd=git_repo,
+                env={**os.environ, **_GIT_ENV},
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            _git(git_repo, "update-ref", "refs/heads/feature/x", peer_commit)
         return real_run(args, cwd=cwd)
 
-    monkeypatch.setattr(git_worktree_module, "_run_git", advance_branch_then_fail_add)
+    monkeypatch.setattr(git_worktree_module, "_run_git", advance_branch)
     with pytest.raises(WorktreeError, match="disk full"):
         create_worktree(repo_path=str(git_repo), branch_name="feature/x")
     assert _branch_exists(git_repo, "feature/x")
