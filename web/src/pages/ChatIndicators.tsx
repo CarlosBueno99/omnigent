@@ -4,7 +4,7 @@ import { Message, MessageContent } from "@/components/ai-elements/message";
 import { ErrorBanner } from "@/components/blocks/StatusBlocks";
 import type { SessionLiveness } from "@/hooks/useSessionLiveness";
 import type { SandboxStatus } from "@/lib/types";
-import { SANDBOX_STAGE_LABELS } from "@/lib/sandboxStatus";
+import { sandboxStageLabel } from "@/lib/sandboxStatus";
 import { cn } from "@/lib/utils";
 import { useTerminalFirst } from "@/shell/TerminalFirstContext";
 import { useChatStore } from "@/store/chatStore";
@@ -140,11 +140,10 @@ export function ConnectionIndicator({
 export function RunnerStartingIndicator({ variant }: { variant: "hero" | "row" }) {
   const sandboxStatus = useChatStore((s) => s.sandboxStatus);
   // `ready` never reaches the store (cleared) and `failed` renders the
-  // destructive band in ConnectionIndicator — only in-flight stages
-  // with known copy show here.
+  // destructive band in ConnectionIndicator — only in-flight stages show here.
   const sandboxLabel =
     sandboxStatus !== null && sandboxStatus.stage !== "failed" && sandboxStatus.stage !== "ready"
-      ? SANDBOX_STAGE_LABELS[sandboxStatus.stage]
+      ? sandboxStageLabel(sandboxStatus.stage)
       : undefined;
   if (sandboxLabel === undefined) return null;
   const line = `${sandboxLabel}…`;

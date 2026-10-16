@@ -306,7 +306,9 @@ describe("HostBadge", () => {
     const { rerender } = render(<HostBadge sessionId="conv_1" appearance="composer" />);
     expect(screen.getByTestId("composer-host-icon")).toHaveClass("lucide-monitor-cloud");
 
-    const hostId = transition === "session change" ? null : recovering ? "host_a1b2" : "host_other";
+    let hostId: string | null = "host_other";
+    if (transition === "session change") hostId = null;
+    else if (recovering) hostId = "host_a1b2";
     useSessionMock.mockReturnValue({ session: { hostId, sandboxStatus: null } });
     useHostsMock.mockReturnValue({
       data: transition === "ordinary host recovery" ? [host()] : [],

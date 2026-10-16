@@ -7,7 +7,7 @@ import { useSession } from "@/hooks/useSession";
 import { useSessionActionRestrictions } from "@/hooks/useSessionActionRestrictions";
 import { useSessionHostOnline } from "@/hooks/RunnerHealthProvider";
 import { sandboxOptionLabel } from "@/lib/capabilities";
-import { SANDBOX_STAGE_LABELS } from "@/lib/sandboxStatus";
+import { sandboxStageLabel } from "@/lib/sandboxStatus";
 import type { SandboxStatus } from "@/lib/types";
 import { DisabledActionTooltip } from "./DisabledActionTooltip";
 import { SessionActionMenuItem } from "./SessionActionMenuItem";
@@ -186,7 +186,7 @@ export function HostBadge({
     const provider = launch?.provider ?? host?.sandbox_provider ?? launchIdentity?.provider;
     const sandboxLabel = provider ? sandboxOptionLabel(provider) : "Sandbox";
     const isSandbox = !!launch || !!host?.sandbox_provider || !!launchIdentity;
-    const launchStatus = launch ? (SANDBOX_STAGE_LABELS[launch.stage] ?? "Launching sandbox") : "";
+    const launchStatus = launch ? sandboxStageLabel(launch.stage) : "";
     const reconnectable =
       !launch && badge?.status === "offline" && !session?.hostResumable && !!onReconnect;
     // A dormant resumable host wakes on the next message; it isn't disconnected.
