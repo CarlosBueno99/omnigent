@@ -197,6 +197,12 @@ _SESSION_WRAPPER_LABEL_KEY = "omnigent.wrapper"
 _ASK_GATE_DELIVERY_READ_TIMEOUT_S: float = 86400.0
 _ASK_GATE_DELIVERY_TIMEOUT = httpx.Timeout(_ASK_GATE_DELIVERY_READ_TIMEOUT_S, connect=30.0)
 
+# PHASE_TOOL_RESULT never parks an ASK gate server-side (only TOOL_CALL and the
+# REQUEST/LLM_REQUEST phases hold it), so the result gate must not wait a day for
+# a verdict. Bound its read so a wedged server degrades to the documented
+# fail-open keep-result path instead of hanging a completed built-in's result.
+_RESULT_POLICY_EVALUATE_TIMEOUT = httpx.Timeout(60.0, connect=30.0)
+
 # Read timeouts for the two MCP-proxy hops that carry a tool call back to the
 # runner (runner → Omnigent server → runner). ``sys_os_shell`` accepts caller-provided
 # timeouts, so these must sit above the runner's execution timeout rather than
@@ -941,6 +947,36 @@ def _must_proxy_through_server_mcp(tool_name: str) -> bool:
     if not should_dispatch_locally(tool_name):
         return True
     return tool_name in _ADVISE_MODELS_TOOLS or tool_name in _SERVER_LIFECYCLE_HOOK_TOOLS
+
+
+# Server release that surfaces an approved ASK's policy-transformed arguments on
+# ``/policies/evaluate``. Local built-in dispatch applies that transform before
+# execution; an older server collapses an approved ASK to ALLOW without the
+# transform, so the runner would execute the un-rewritten arguments. Keep those
+# built-ins on the /mcp gate (which applies the transform server-side) until the
+# server is new enough to return it.
+_BUILTIN_LOCAL_DISPATCH_MIN_SERVER_VERSION = "0.19.0"
+
+
+def _server_supports_builtin_local_dispatch(server_version: str | None) -> bool:
+    """Whether *server_version* surfaces approved-ASK policy transforms.
+
+    Local built-in dispatch trusts ``/policies/evaluate`` to return an approved
+    ASK's transformed arguments. Servers older than
+    ``_BUILTIN_LOCAL_DISPATCH_MIN_SERVER_VERSION`` return ALLOW without that
+    data, so fall back to the /mcp gate when the version is unknown or older.
+    """
+    if server_version is None:
+        return False
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        return (
+            Version(server_version).release
+            >= Version(_BUILTIN_LOCAL_DISPATCH_MIN_SERVER_VERSION).release
+        )
+    except InvalidVersion:
+        return False
 
 
 # Granted tool names per live AgentSpec + effective harness, keyed by
@@ -6551,6 +6587,7 @@ async def execute_tool(
     publish_event: Callable[[str, _JsonObject], None] | None = None,
     filesystem_registry: FilesystemRegistry | None = None,
     effective_harness: str | None = None,
+    server_version: str | None = None,
 ) -> str:
     """
     Execute a tool and return the output string.
@@ -6588,9 +6625,20 @@ async def execute_tool(
     assert args is not None
     # Runner built-ins run locally even when an mcp_manager is present, so they
     # skip the per-call server /mcp round trip; spec-declared MCP-server tools
-    # and server-intercepted built-ins still dispatch through /mcp.
-    dispatch_builtin_locally = mcp_manager is not None and not _must_proxy_through_server_mcp(
-        tool_name
+    # and server-intercepted built-ins still dispatch through /mcp. Local
+    # dispatch also requires the server policy channel, so a built-in that lacks
+    # one falls back to the /mcp gate rather than executing ungated — keeping the
+    # fail-closed TOOL_CALL contract. (A no-AP runner has mcp_manager=None and
+    # runs ungated by design on the branch below.) It also requires a server new
+    # enough to surface an approved ASK's transformed arguments; against an older
+    # or unknown server the built-in stays on the /mcp gate so a policy rewrite
+    # survives approval instead of executing the original arguments.
+    dispatch_builtin_locally = (
+        mcp_manager is not None
+        and server_client is not None
+        and conversation_id is not None
+        and not _must_proxy_through_server_mcp(tool_name)
+        and _server_supports_builtin_local_dispatch(server_version)
     )
     # /mcp dispatch resolves the target against the spec inside the MCP
     # manager; every runner-local branch (including a locally dispatched
@@ -6618,9 +6666,10 @@ async def execute_tool(
             }
         )
     # A locally dispatched built-in skips the /mcp gate, so enforce TOOL_CALL
-    # policy here via /policies/evaluate. With no server_client there is no
-    # central policy store, so the tool runs ungated as a no-AP runner would.
-    if dispatch_builtin_locally and server_client is not None and conversation_id is not None:
+    # policy here via /policies/evaluate. dispatch_builtin_locally guarantees the
+    # server policy channel, so this gate always runs for a local AP built-in.
+    if dispatch_builtin_locally:
+        assert server_client is not None and conversation_id is not None
         decision = await _evaluate_builtin_tool_call_policy(
             tool_name,
             args,
@@ -6701,6 +6750,7 @@ async def execute_tool(
                 mcp_manager=mcp_manager,
                 filesystem_registry=filesystem_registry,
                 effective_harness=effective_harness,
+                server_version=server_version,
             )
         elif tool_name in _SUBAGENT_TOOLS:
             output = await _execute_subagent_tool(
@@ -6980,6 +7030,7 @@ async def dispatch_tool_locally(
     publish_event: Callable[[str, _JsonObject], None] | None = None,
     filesystem_registry: FilesystemRegistry | None = None,
     effective_harness: str | None = None,
+    server_version: str | None = None,
 ) -> str:
     """Execute a tool once and POST its result to the harness.
 
@@ -7030,6 +7081,7 @@ async def dispatch_tool_locally(
         filesystem_registry=filesystem_registry,
         publish_event=publish_event,
         effective_harness=effective_harness,
+        server_version=server_version,
     )
 
     # A file-mutating tool just ran — nudge the web to refetch the
@@ -7876,6 +7928,7 @@ async def _execute_async_inbox_tool(
     filesystem_registry: FilesystemRegistry | None = None,
     harness_client: httpx.AsyncClient | None = None,
     effective_harness: str | None = None,
+    server_version: str | None = None,
 ) -> str:
     """
     Runner-local dispatch for async inbox tools.
@@ -7926,6 +7979,7 @@ async def _execute_async_inbox_tool(
             mcp_manager=mcp_manager,
             filesystem_registry=filesystem_registry,
             effective_harness=effective_harness,
+            server_version=server_version,
         )
 
     if tool_name == SysCancelAsyncTool.name():
@@ -8467,10 +8521,13 @@ async def _apply_builtin_tool_result_policy(
     Enforce PHASE_TOOL_RESULT policy for a runner-dispatched built-in.
 
     Mirrors the server /mcp path's post-execution gate using
-    ``/policies/evaluate``: a DENY/ASK suppresses the output and an ALLOW may
-    replace it with policy-transformed text. PHASE_TOOL_RESULT is not a
-    fail-closed phase, so an evaluation failure keeps the output unchanged
-    rather than blanking a completed built-in's result.
+    ``/policies/evaluate``: a DENY suppresses the output, while an ALLOW or ASK
+    passes it through — replaced with policy-transformed ``data`` only when the
+    verdict carries it. The server /mcp gate this replaces suppresses a
+    runner-executed tool's result on DENY alone; a TOOL_RESULT ASK cannot prompt
+    mid-flight, so it falls through rather than blanking the result.
+    PHASE_TOOL_RESULT is not a fail-closed phase, so an evaluation failure keeps
+    the output unchanged rather than blanking a completed built-in's result.
 
     :returns: The policy-approved, possibly transformed or suppressed, output.
     """
@@ -8484,7 +8541,7 @@ async def _apply_builtin_tool_result_policy(
                     "request_data": {"name": tool_name, "arguments": args},
                 }
             },
-            timeout=_ASK_GATE_DELIVERY_TIMEOUT,
+            timeout=_RESULT_POLICY_EVALUATE_TIMEOUT,
         )
     except Exception:  # noqa: BLE001
         _logger.warning(
@@ -8509,7 +8566,7 @@ async def _apply_builtin_tool_result_policy(
     if verdict is None:
         return output
     action = verdict.get("result")
-    if action in {"POLICY_ACTION_DENY", "POLICY_ACTION_ASK"}:
+    if action == "POLICY_ACTION_DENY":
         reason = _optional_string(verdict.get("reason")) or "no reason given"
         return f"[Result suppressed by policy: {reason}]"
     transformed = verdict.get("data")
@@ -8543,6 +8600,7 @@ def _spawn_async_tool(
     filesystem_registry: FilesystemRegistry | None = None,
     local_tool_workdir: Path | None | _UnsetLocalToolWorkdir = _UNSET_LOCAL_TOOL_WORKDIR,
     effective_harness: str | None = None,
+    server_version: str | None = None,
 ) -> str:
     """
     Spawn a tool as a background asyncio.Task.
@@ -8638,6 +8696,7 @@ def _spawn_async_tool(
                 session_inbox=session_inbox if target_tool in _TERMINAL_TOOLS else None,
                 filesystem_registry=filesystem_registry,
                 effective_harness=effective_harness,
+                server_version=server_version,
             )
             execution_task = asyncio.create_task(exec_coro)
             cancellation_task = asyncio.create_task(cancel_event.wait())

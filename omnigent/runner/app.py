@@ -6074,6 +6074,7 @@ def create_runner_app(
                                                     effective_harness=_session_harness_name(
                                                         conv_id
                                                     ),
+                                                    server_version=_server_version,
                                                 )
                                             )
                                         )

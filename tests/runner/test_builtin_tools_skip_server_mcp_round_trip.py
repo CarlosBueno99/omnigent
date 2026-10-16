@@ -1,10 +1,10 @@
 """Built-in tools dispatch locally instead of taking a server ``/mcp`` round trip.
 
 A runner-dispatched session hands every locally dispatched tool a
-``ProxyMcpManager``, and ``execute_tool`` used to route anything with an
-``mcp_manager`` through ``call_tool`` — a ``POST /v1/sessions/{id}/mcp``
-that tunnels straight back to the same runner. Built-in ``sys_*`` tools run
-on the runner either way, so they now execute locally and enforce
+``ProxyMcpManager``. Routing a built-in through ``call_tool`` would
+``POST /v1/sessions/{id}/mcp`` and tunnel straight back to the same runner,
+and built-in ``sys_*`` tools run on the runner either way, so they dispatch
+locally instead and enforce
 TOOL_CALL/TOOL_RESULT policy through the server's ``/policies/evaluate``
 endpoint (which short-circuits when no policy applies to the phase).
 Spec-declared MCP-server tools, the server-intercepted ``sys_advise_models``,
@@ -32,6 +32,8 @@ pytestmark = pytest.mark.asyncio
 _SESSION_ID = "conv_omni12775"
 _LOCAL_OUTPUT = "ran locally on the runner"
 _TUNNELED_OUTPUT = "served by the server /mcp round trip"
+_SUPPORTED_SERVER_VERSION = "0.19.0"
+_UNSUPPORTED_SERVER_VERSION = "0.18.0"
 
 
 def _recording_proxy_client(paths: list[str]) -> httpx.AsyncClient:
@@ -82,7 +84,9 @@ async def test_builtin_tool_does_not_round_trip_through_server_mcp(
     monkeypatch.setattr(tool_dispatch, "_execute_os_env_tool", _fake_os_env)
 
     paths: list[str] = []
+    policy_calls: list[tuple[str, str]] = []
     client = _recording_proxy_client(paths)
+    policy_client = _recording_policy_client(policy_calls)
     proxy = ProxyMcpManager(_SESSION_ID, client)
     try:
         output = await execute_tool(
@@ -90,11 +94,14 @@ async def test_builtin_tool_does_not_round_trip_through_server_mcp(
             arguments=arguments,
             agent_spec=_claude_sdk_spec(),
             conversation_id=_SESSION_ID,
+            server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await client.aclose()
+        await policy_client.aclose()
 
     mcp_posts = [p for p in paths if p == f"/v1/sessions/{_SESSION_ID}/mcp"]
     assert mcp_posts == [], (
@@ -173,6 +180,7 @@ async def test_builtin_policy_enforced_via_policies_evaluate_not_mcp(
             server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await proxy_client.aclose()
@@ -219,6 +227,7 @@ async def test_builtin_tool_call_policy_deny_blocks_local_execution(
             server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await proxy_client.aclose()
@@ -232,9 +241,7 @@ async def test_builtin_tool_call_policy_deny_blocks_local_execution(
     )
 
 
-async def test_server_intercepted_builtin_still_round_trips_through_mcp(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_server_intercepted_builtin_still_round_trips_through_mcp() -> None:
     """sys_advise_models has no local branch, so it keeps the server /mcp round trip."""
     mcp_paths: list[str] = []
     policy_calls: list[tuple[str, str]] = []
@@ -250,6 +257,7 @@ async def test_server_intercepted_builtin_still_round_trips_through_mcp(
             server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await proxy_client.aclose()
@@ -290,6 +298,7 @@ async def test_builtin_tool_call_policy_non_json_body_denies(
             server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await proxy_client.aclose()
@@ -329,6 +338,7 @@ async def test_builtin_tool_result_policy_non_json_body_keeps_output(
             server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await proxy_client.aclose()
@@ -372,6 +382,7 @@ async def test_builtin_tool_result_policy_coerces_non_str_transform(
             server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await proxy_client.aclose()
@@ -414,6 +425,7 @@ async def test_builtin_policy_request_envelopes_match_contract(
             server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await proxy_client.aclose()
@@ -464,6 +476,7 @@ async def test_builtin_tool_call_policy_applies_transformed_arguments(
             server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await proxy_client.aclose()
@@ -505,6 +518,7 @@ async def test_sys_read_inbox_keeps_server_mcp_round_trip(
             server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await proxy_client.aclose()
@@ -522,8 +536,9 @@ async def test_sys_read_inbox_keeps_server_mcp_round_trip(
 async def test_ungranted_builtin_refused_locally_with_proxy_manager() -> None:
     """An ungranted built-in is refused on the local arm, before any round trip.
 
-    The /mcp manager used to resolve the granted surface. A locally dispatched
-    built-in is now gated by ``execute_tool`` itself, so an ungranted built-in
+    A locally dispatched built-in is gated by ``execute_tool`` itself rather
+    than by the /mcp manager that resolves the granted surface, so an
+    ungranted built-in
     with a ``ProxyMcpManager`` present must be refused without a /mcp dispatch
     or a TOOL_CALL policy round trip.
     """
@@ -541,6 +556,7 @@ async def test_ungranted_builtin_refused_locally_with_proxy_manager() -> None:
             server_client=policy_client,
             mcp_manager=cast(RunnerMcpManager, proxy),
             effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
         )
     finally:
         await proxy_client.aclose()
@@ -553,4 +569,142 @@ async def test_ungranted_builtin_refused_locally_with_proxy_manager() -> None:
     assert mcp_paths == [], "the grant refusal must not fall back to the /mcp round trip"
     assert policy_calls == [], (
         "the grant check must short-circuit before TOOL_CALL policy evaluation"
+    )
+
+
+async def test_builtin_without_policy_channel_falls_back_to_mcp_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A built-in with an mcp_manager but no server policy channel must not run
+    ungated. With ``server_client=None`` local dispatch is unavailable, so the
+    built-in falls back to the /mcp gate rather than executing without policy —
+    the fail-closed TOOL_CALL contract.
+    """
+
+    async def _unexpected(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("a built-in without a policy channel must not run locally")
+
+    monkeypatch.setattr(tool_dispatch, "_execute_os_env_tool", _unexpected)
+
+    mcp_paths: list[str] = []
+    proxy_client = _recording_proxy_client(mcp_paths)
+    proxy = ProxyMcpManager(_SESSION_ID, proxy_client)
+    try:
+        output = await execute_tool(
+            tool_name="sys_os_read",
+            arguments=json.dumps({"path": "notes.txt"}),
+            agent_spec=_claude_sdk_spec(),
+            conversation_id=_SESSION_ID,
+            mcp_manager=cast(RunnerMcpManager, proxy),
+            effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
+        )
+    finally:
+        await proxy_client.aclose()
+
+    assert mcp_paths == [f"/v1/sessions/{_SESSION_ID}/mcp"], (
+        "without a server policy channel a built-in must fall back to the /mcp gate"
+    )
+    assert output == _TUNNELED_OUTPUT
+
+
+async def test_builtin_tool_result_ask_passes_output_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A TOOL_RESULT ASK passes the built-in's output through unchanged.
+
+    The server /mcp bound-runner path suppresses only DENY on TOOL_RESULT and
+    otherwise returns the result (applying a transform only when the verdict
+    carries ``data``). The local path must mirror that: an ASK with no data is
+    a pass-through, not a suppression.
+    """
+    executed: list[str] = []
+
+    async def _fake_os_env(name: str, *_a: Any, **_kw: Any) -> str:
+        executed.append(name)
+        return _LOCAL_OUTPUT
+
+    monkeypatch.setattr(tool_dispatch, "_execute_os_env_tool", _fake_os_env)
+
+    mcp_paths: list[str] = []
+    policy_calls: list[tuple[str, str]] = []
+    proxy_client = _recording_proxy_client(mcp_paths)
+    policy_client = _recording_policy_client(
+        policy_calls,
+        tool_result={"result": "POLICY_ACTION_ASK", "reason": "needs review"},
+    )
+    proxy = ProxyMcpManager(_SESSION_ID, proxy_client)
+    try:
+        output = await execute_tool(
+            tool_name="sys_os_read",
+            arguments=json.dumps({"path": "notes.txt"}),
+            agent_spec=_claude_sdk_spec(),
+            conversation_id=_SESSION_ID,
+            server_client=policy_client,
+            mcp_manager=cast(RunnerMcpManager, proxy),
+            effective_harness="claude-sdk",
+            server_version=_SUPPORTED_SERVER_VERSION,
+        )
+    finally:
+        await proxy_client.aclose()
+        await policy_client.aclose()
+
+    assert executed == ["sys_os_read"], "the built-in runs before the TOOL_RESULT gate"
+    assert output == _LOCAL_OUTPUT, (
+        "a TOOL_RESULT ASK with no data must pass the result through, not suppress it"
+    )
+    assert mcp_paths == []
+    assert [phase for _path, phase in policy_calls] == [
+        "PHASE_TOOL_CALL",
+        "PHASE_TOOL_RESULT",
+    ]
+
+
+async def test_builtin_against_old_server_keeps_mcp_gate_not_local_transform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsupported server keeps the /mcp gate so approved transforms survive.
+
+    A server too old to surface approved-ASK transforms parks a TOOL_CALL ASK
+    and, once approved, returns an ALLOW without the transformed arguments.
+    Dispatching locally there would run the original arguments and drop the
+    approved transform, so local built-in dispatch is gated to supported
+    servers; older ones keep the /mcp gate that applies the transform
+    server-side. The original arguments must never execute on the local path.
+    """
+
+    async def _fail_local(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("a built-in must not dispatch locally against an unsupported server")
+
+    monkeypatch.setattr(tool_dispatch, "_execute_os_env_tool", _fail_local)
+
+    mcp_paths: list[str] = []
+    policy_calls: list[tuple[str, str]] = []
+    proxy_client = _recording_proxy_client(mcp_paths)
+    policy_client = _recording_policy_client(
+        policy_calls,
+        tool_call={"result": "POLICY_ACTION_ASK", "data": {"path": "redacted.txt"}},
+    )
+    proxy = ProxyMcpManager(_SESSION_ID, proxy_client)
+    try:
+        output = await execute_tool(
+            tool_name="sys_os_read",
+            arguments=json.dumps({"path": "notes.txt"}),
+            agent_spec=_claude_sdk_spec(),
+            conversation_id=_SESSION_ID,
+            server_client=policy_client,
+            mcp_manager=cast(RunnerMcpManager, proxy),
+            effective_harness="claude-sdk",
+            server_version=_UNSUPPORTED_SERVER_VERSION,
+        )
+    finally:
+        await proxy_client.aclose()
+        await policy_client.aclose()
+
+    assert mcp_paths == [f"/v1/sessions/{_SESSION_ID}/mcp"], (
+        "an unsupported server must keep the /mcp gate, not dispatch locally"
+    )
+    assert output == _TUNNELED_OUTPUT
+    assert policy_calls == [], (
+        "the /mcp path enforces policy server-side, not via /policies/evaluate"
     )
