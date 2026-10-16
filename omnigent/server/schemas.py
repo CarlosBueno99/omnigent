@@ -3518,6 +3518,11 @@ class SessionSandboxStatusEvent(_SSEEventBase):
     clone → host startup → runner connect → ready, or a terminal
     failure with the reason.
 
+    Category: **transient** (SSE-only). On reconnect, clients seed the
+    progress indicator from the session snapshot's ``sandbox_status``
+    field, which is populated by ``_session_sandbox_status_cache`` at
+    snapshot build time.
+
     :param type: Always ``"session.sandbox_status"``.
     :param conversation_id: Session identifier,
         e.g. ``"conv_abc123"``.
@@ -3528,11 +3533,6 @@ class SessionSandboxStatusEvent(_SSEEventBase):
         ``"managed sandbox launch failed: spend limit reached"``.
         ``None`` otherwise.
     :param provider: Selected sandbox provider, e.g. ``"modal"``.
-
-    Category: **transient** (SSE-only). On reconnect, clients seed the
-    progress indicator from the session snapshot's ``sandbox_status``
-    field, which is populated by ``_session_sandbox_status_cache`` at
-    snapshot build time.
     """
 
     type: Literal["session.sandbox_status"]

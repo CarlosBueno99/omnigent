@@ -8156,7 +8156,7 @@
         "type": "object"
       },
       "SessionSandboxStatusEvent": {
-        "description": "Managed-sandbox launch progress for a `host_type=\"managed\"` session.\n\nA managed create returns before its sandbox exists; the Omnigent\nserver emits this event as the background launch pipeline advances\nso the Web UI can show live provisioning progress on the session\npage instead of a silent dead chat: sandbox provision \u2192 repository\nclone \u2192 host startup \u2192 runner connect \u2192 ready, or a terminal\nfailure with the reason.",
+        "description": "Managed-sandbox launch progress for a `host_type=\"managed\"` session.\n\nA managed create returns before its sandbox exists; the Omnigent\nserver emits this event as the background launch pipeline advances\nso the Web UI can show live provisioning progress on the session\npage instead of a silent dead chat: sandbox provision \u2192 repository\nclone \u2192 host startup \u2192 runner connect \u2192 ready, or a terminal\nfailure with the reason.\n\nCategory: **transient** (SSE-only). On reconnect, clients seed the\nprogress indicator from the session snapshot's `sandbox_status`\nfield, which is populated by `_session_sandbox_status_cache` at\nsnapshot build time.",
         "properties": {
           "conversation_id": {
             "description": "Session identifier, e.g. `\"conv_abc123\"`.",
@@ -8186,7 +8186,7 @@
               }
             ],
             "default": null,
-            "description": "Selected sandbox provider, e.g. `\"modal\"`. Category: **transient** (SSE-only). On reconnect, clients seed the progress indicator from the session snapshot's `sandbox_status` field, which is populated by `_session_sandbox_status_cache` at snapshot build time.",
+            "description": "Selected sandbox provider, e.g. `\"modal\"`.",
             "title": "Provider"
           },
           "sequence_number": {
