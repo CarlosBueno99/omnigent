@@ -12100,19 +12100,34 @@ def test_a_lowercase_escape_hint_still_marks_a_surface_dismissible(
     assert [args[-1] for args in sends] == ["Escape", "Space", "C-u", "/compact", "Enter"]
 
 
+@pytest.mark.parametrize(
+    "scrollback",
+    [
+        pytest.param(
+            "⎿  Change effort level? Kept the current effort level.\n", id="echoed-title"
+        ),
+        pytest.param(
+            "╭ old frame\n"
+            + "".join(f"transcript line {i}\n" for i in range(20))
+            + "⎿  Change effort level? Kept the current effort level.\n",
+            id="stray-corner",
+        ),
+    ],
+)
 def test_inject_slash_command_waits_out_scrollback_that_echoes_a_dialog_title(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    scrollback: str,
 ) -> None:
     """
     Dialog words in the scrollback above a booting screen are not a dialog.
 
     Only a boxed dialog is refused; a confirmation title echoed in the
-    transcript above a composer-less pane is waited out like launcher output.
+    transcript above a composer-less pane is waited out like launcher output,
+    even below an unclosed box corner that scrolled up long ago.
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
-    boot_pane = "⎿  Change effort level? Kept the current effort level.\n" + _BOOTING_PANE
-    pane = _BootingClaudePane(monkeypatch, boot_s=2.0, boot_pane=boot_pane)
+    pane = _BootingClaudePane(monkeypatch, boot_s=2.0, boot_pane=scrollback + _BOOTING_PANE)
 
     claude_native_bridge.inject_slash_command(
         bridge_dir, command="/effort high", ready_timeout_s=9.0

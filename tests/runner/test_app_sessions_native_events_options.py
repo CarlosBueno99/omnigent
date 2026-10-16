@@ -127,11 +127,13 @@ async def test_events_effort_change_on_native_session_skips_inject_for_unsupport
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, OSError])
 async def test_events_effort_change_on_native_session_returns_503_when_bridge_not_ready(
     monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
 ) -> None:
     """
-    Bridge-not-ready RuntimeError surfaces as 503 from /events.
+    A bridge-not-ready RuntimeError or a tmux OSError surfaces as 503 from /events.
 
     Sister to the happy-path test. Pins that the failure mode of the
     native effort dispatch (tmux pane gone / bridge dir not yet
@@ -152,7 +154,7 @@ async def test_events_effort_change_on_native_session_returns_503_when_bridge_no
     ) -> None:
         """Simulate the bridge-not-ready path."""
         del bridge_dir, command, timeout_s
-        raise RuntimeError("tmux target is not advertised")
+        raise error_type("tmux target is not advertised")
 
     monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _fake_inject)
 
@@ -498,11 +500,13 @@ async def test_events_compact_on_native_session_types_slash_command(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, OSError])
 async def test_events_compact_on_native_session_returns_503_when_bridge_not_ready(
     monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
 ) -> None:
     """
-    Bridge-not-ready RuntimeError surfaces as 503 from /events.
+    A bridge-not-ready RuntimeError or a tmux OSError surfaces as 503 from /events.
 
     Sister to the happy-path test. When the tmux pane isn't attached
     there is no live Claude to compact, so the native compact handler
@@ -522,7 +526,7 @@ async def test_events_compact_on_native_session_returns_503_when_bridge_not_read
     ) -> None:
         """Simulate the bridge-not-ready path."""
         del bridge_dir, command, timeout_s, auto_confirm
-        raise RuntimeError("tmux target is not advertised")
+        raise error_type("tmux target is not advertised")
 
     monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _fake_inject)
 

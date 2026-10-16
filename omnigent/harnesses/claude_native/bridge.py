@@ -6495,9 +6495,14 @@ def _unnamed_dialog_hint(pane: str) -> str | None:
     if top is None:
         return None
     bottom = next(
-        (i for i, line in enumerate(lines) if i > top and line.lstrip().startswith("╰")),
-        len(lines) - 1,
+        (i for i, line in enumerate(lines) if i > top and line.lstrip().startswith("╰")), None
     )
+    if bottom is None:
+        # An unclosed box is a dialog only when clipped at the bottom of the
+        # screen; a stray corner higher up is scrollback.
+        if len(lines) - top > _DIALOG_SCAN_TAIL_LINES:
+            return None
+        bottom = len(lines) - 1
     region = "\n".join(lines[top : bottom + 1])
     return next((hint for hint in _UNNAMED_DIALOG_HINTS if hint in region), None)
 

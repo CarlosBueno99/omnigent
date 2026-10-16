@@ -1452,10 +1452,8 @@ def build_native_controls(
                     extra={"session_id": conv_id},
                 )
                 return Response(status_code=204)
-            # The confirm dialog can render well after the injection's own
-            # short watch (a warm repaint, or a queued command surfacing) —
-            # answer it whenever it shows inside the window. A budget that
-            # lapses inside the check ends the window like a timeout.
+            # The dialog can render after the injection's short watch; answer it
+            # inside the window. A lapsed budget ends the window like a timeout.
             if deadline.is_set():
                 break
             with contextlib.suppress(ClaudeInjectionCancelled):
