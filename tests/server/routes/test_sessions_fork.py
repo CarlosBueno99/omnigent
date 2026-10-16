@@ -146,8 +146,10 @@ class _ConversationStore:
         # When set, this child appears while the fork copies the history, like
         # a sub-agent dispatched in that window.
         self.spawn_child_during_fork: Conversation | None = None
-        # Store faults for the best-effort notice path.
+        # Store faults for the best-effort notice path. The second flag arms
+        # ``fail_child_reads`` once the copy has run, failing only the re-list.
         self.fail_child_reads = False
+        self.fail_child_reads_after_fork = False
         self.fail_appends = False
 
     def set_labels(
@@ -285,6 +287,8 @@ class _ConversationStore:
                     conv.live_status = "idle"
         if self.spawn_child_during_fork is not None:
             self._convs[self.spawn_child_during_fork.id] = self.spawn_child_during_fork
+        if self.fail_child_reads_after_fork:
+            self.fail_child_reads = True
         if up_to_response_id is not None and not any(
             item.response_id == up_to_response_id
             for item in self._items.get(source_conversation_id, [])
@@ -1396,10 +1400,11 @@ async def test_fork_notes_a_sub_agent_that_finishes_during_the_copy() -> None:
 
 @pytest.mark.asyncio
 async def test_fork_notes_a_sub_agent_dispatched_during_the_copy() -> None:
-    """The running set is read again after the copy, so a child dispatched meanwhile is noted.
+    """The running set is read again after the copy, so a child appearing meanwhile is noted.
 
-    Its dispatch receipt landed in the copied history, so without the second
-    read the fork would again hold a receipt for a result that never arrives.
+    The stub only adds the child row during the copy; the second read is what
+    this pins, the receipt that such a child leaves in the copied history is
+    not modelled here.
     """
     source = _make_conversation()
     before = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f801", "worker:first", "running")
@@ -1420,6 +1425,55 @@ async def test_fork_notes_a_sub_agent_dispatched_during_the_copy() -> None:
     for text in (agent_note.data.content[0]["text"], notice.data.cause or ""):
         assert before.id in text and during.id in text, text
         assert text.index(before.id) < text.index(during.id), "children keep dispatch order"
+
+
+@pytest.mark.asyncio
+async def test_fork_omits_a_sub_agent_created_after_its_newest_copied_item() -> None:
+    """A child dispatched after the copy finished is not named, even on a full fork.
+
+    The fork holds no receipt for it, so the note would describe context the
+    fork's agent never saw. The copied items keep the source's timestamps,
+    so the newest copied item marks the fork point.
+    """
+    source = _make_conversation()
+    before = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f801", "worker:first", "running", 5)
+    later = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f802", "worker:late", "running", 50)
+    store = _ConversationStore(
+        conversations={source.id: source, before.id: before},
+        items_by_conv={
+            source.id: [_make_item("msg_a", "send the worker its task", created_at=10)]
+        },
+    )
+    store.spawn_child_during_fork = later
+    client = TestClient(_build_app(store))
+
+    resp = client.post(f"/v1/sessions/{source.id}/fork", json={})
+
+    assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
+    _, agent_note, notice = store._items[resp.json()["id"]]
+    assert isinstance(agent_note.data, MessageData) and isinstance(notice.data, ErrorData)
+    assert notice.data.title == "1 sub-agent stayed with the original session"
+    for text in (agent_note.data.content[0]["text"], notice.data.cause or ""):
+        assert before.id in text and later.id not in text, text
+
+
+@pytest.mark.asyncio
+async def test_fork_keeps_the_pre_copy_sub_agents_when_the_re_list_fails() -> None:
+    """A failed re-list after the copy still notes the children read before it."""
+    source = _make_conversation()
+    running = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f801", "worker:long-task", "running")
+    store = _ConversationStore(
+        conversations={source.id: source, running.id: running},
+        items_by_conv={source.id: [_make_item("msg_a", "send the worker its task")]},
+    )
+    store.fail_child_reads_after_fork = True
+    client = TestClient(_build_app(store))
+
+    resp = client.post(f"/v1/sessions/{source.id}/fork", json={})
+
+    assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
+    _, _, notice = store._items[resp.json()["id"]]
+    assert isinstance(notice.data, ErrorData) and running.id in (notice.data.cause or "")
 
 
 @pytest.mark.asyncio

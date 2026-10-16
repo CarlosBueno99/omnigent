@@ -94,6 +94,23 @@ describe("useChildSessions", () => {
       "/v1/sessions/conv_parent/child_sessions?limit=1&after=conv_new_idle",
     );
   });
+
+  it("fails instead of paging forever when the cursor does not advance", async () => {
+    const stuck = (data: object[]) =>
+      new Response(JSON.stringify({ object: "list", data, has_more: true, last_id: "conv_stuck" }));
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(stuck([{ id: "conv_stuck", title: "worker:a", busy: false }]))
+      .mockResolvedValueOnce(stuck([{ id: "conv_stuck", title: "worker:a", busy: false }]));
+    const { result } = renderHook(
+      () => useChildSessions("conv_parent", null, { limit: 1, allPages: true }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.error?.message).toBe("child_sessions cursor did not advance");
+    expect(result.current.children).toEqual([]);
+    expect(authenticatedFetch).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("useDescendantSession", () => {

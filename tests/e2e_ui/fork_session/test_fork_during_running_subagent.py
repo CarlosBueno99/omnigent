@@ -364,7 +364,9 @@ def _run_journey(
         _wait_gate_pending(mock_url)
         children = _child_sessions(base_url, original_id)
         obs["children_before_fork"] = children
-        worker_id = str(children[0]["id"]) if children else ""
+        if not children:
+            raise AssertionError("the orchestrator never created a worker child session")
+        worker_id = str(children[0]["id"])
         obs["worker_id"] = worker_id
         _configure_fork_cancel_turn(mock_url, cancel_token=cancel_token, worker_id=worker_id)
         _expand_tool_card(page, "sys_session_send")
@@ -542,13 +544,16 @@ def test_fork_during_running_subagent_keeps_fork_informed(
             obs=obs,
         )
     finally:
-        if _gate_pending(mock_llm_server_url):
-            httpx.post(f"{mock_llm_server_url}/gate/release", timeout=5.0, trust_env=False)
+        # Always keep the observations, even when the mock server is gone.
+        try:
+            if _gate_pending(mock_llm_server_url):
+                httpx.post(f"{mock_llm_server_url}/gate/release", timeout=5.0, trust_env=False)
+        except httpx.HTTPError:
+            pass
         _save(evidence_dir, "observations.json", obs)
 
     worker_id = obs["worker_id"]
     fork_id = obs["fork_id"]
-    assert worker_id, "the orchestrator never created a worker child session"
     assert obs["original_has_marker"], (
         f"the worker's result never reached the original session {original_id}; "
         "the journey did not get far enough to judge the fork"

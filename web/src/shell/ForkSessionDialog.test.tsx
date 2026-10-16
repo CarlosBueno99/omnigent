@@ -777,6 +777,36 @@ describe("ForkSessionDialog", () => {
     );
   });
 
+  it("shows the sub-agent check as pending while the child list loads", () => {
+    // An unresolved fetch is not "no running children": the user sees the
+    // check is still running instead of a silently absent warning.
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: true,
+      error: null,
+    } as unknown as ReturnType<typeof useChildSessions>);
+    renderDialog({ sourceTitle: "My session" });
+
+    expect(screen.getByTestId("fork-session-subagent-check-pending")).toBeInTheDocument();
+    expect(screen.queryByTestId("fork-session-subagent-hint")).not.toBeInTheDocument();
+  });
+
+  it("says so when the running sub-agent check itself fails", () => {
+    // A failed child fetch must not silently drop the warning the dialog exists
+    // to give; the user is told the check could not run.
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: new Error("503 Service Unavailable"),
+    } as unknown as ReturnType<typeof useChildSessions>);
+    renderDialog({ sourceTitle: "My session" });
+
+    expect(screen.getByTestId("fork-session-subagent-check-failed")).toHaveTextContent(
+      "Couldn't check whether sub-agents are still running",
+    );
+    expect(screen.queryByTestId("fork-session-subagent-hint")).not.toBeInTheDocument();
+  });
+
   it("shows no sub-agent warning when every child has finished", () => {
     useChildSessionsMock.mockReturnValue({
       children: [{ id: "conv_done", title: "worker:done", busy: false }],

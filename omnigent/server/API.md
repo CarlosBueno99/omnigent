@@ -1250,13 +1250,17 @@ note that harnesses replaying the fork's items feed the agent on its
 first turn, and an info-level `error` item
 (`code: "fork_source_subagents_running"`, `level: "info"`) whose title,
 cause and remediation name those children and the source session id for
-the user. A native CLI that resumes a clone of the source's own
-transcript (Claude Code, Codex) never reads the hidden note; its user
+the user. A native CLI (Claude Code, Codex) whose first launch resumes a
+copy of the source's own transcript — a same-family full fork — does not
+see the hidden note until its transcript is rebuilt from the fork's items
+(a truncated or cross-family fork, or a later cold resume); its user
 still sees the notice card. The notice is the last item so the fork does
-not look like an unanswered turn when it binds a runner. A fork
-truncated with `up_to_response_id` names only children created no later
-than its newest copied item, since it holds no dispatch receipt for the
-others. A source with no in-flight children gets neither item.
+not look like an unanswered turn when it binds a runner. Only children
+created no later than the fork's newest copied item are named — a fork
+truncated with `up_to_response_id` omits later dispatches, and so does a
+child dispatched after the copy finished — since the fork holds no
+dispatch receipt for them. A source with no in-flight children gets
+neither item.
 
 ### Stream Session
 

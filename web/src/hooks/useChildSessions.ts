@@ -237,25 +237,36 @@ interface UseChildSessionsResult {
  * Exported for unit testing of the HTTP-shape contract; production
  * code should call ``useChildSessions``.
  */
+/**
+ * Fetch one page of children and, when ``allPages`` is set and the server
+ * reports more, the pages after it. Each cursor comes from the previous
+ * response, so the pages are fetched one after another.
+ */
+async function fetchChildSessionPages(
+  sessionId: string,
+  options: ChildSessionsFetchOptions,
+  after: string | null,
+): Promise<ChildSessionWire[]> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (after !== null) params.set("after", after);
+  const search = params.toString();
+  const res = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/child_sessions${search ? `?${search}` : ""}`,
+  );
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  const json = (await res.json()) as ChildSessionsResponse;
+  if (!options.allPages || !json.has_more || !json.last_id) return json.data;
+  // A cursor that does not advance would otherwise page forever.
+  if (json.last_id === after) throw new Error("child_sessions cursor did not advance");
+  return [...json.data, ...(await fetchChildSessionPages(sessionId, options, json.last_id))];
+}
+
 export async function fetchChildSessions(
   sessionId: string,
   options: ChildSessionsFetchOptions = {},
 ): Promise<ChildSessionInfo[]> {
-  const rows: ChildSessionWire[] = [];
-  let after: string | null = null;
-  do {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (after !== null) params.set("after", after);
-    const query = params.size === 0 ? "" : `?${params}`;
-    const res = await authenticatedFetch(
-      `/v1/sessions/${encodeURIComponent(sessionId)}/child_sessions${query}`,
-    );
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    const json = (await res.json()) as ChildSessionsResponse;
-    rows.push(...json.data);
-    after = options.allPages && json.has_more && json.last_id ? json.last_id : null;
-  } while (after !== null);
+  const rows = await fetchChildSessionPages(sessionId, options, null);
   // Children run on this session's runner: record the link so their
   // session-scoped requests key by this session's host before their own
   // snapshot loads.

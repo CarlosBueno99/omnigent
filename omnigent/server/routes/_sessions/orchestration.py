@@ -2241,15 +2241,15 @@ def _children_dispatched_in_copied_history(
     conversation_store: ConversationStore,
 ) -> list[Conversation]:
     """
-    Keep the children a truncated fork's copied history can know about.
+    Keep the children the fork's copied history can know about.
 
-    A fork cut at an earlier response carries no dispatch receipt for a child
-    created after that point, so naming it would describe context the fork's
-    agent never saw. Copied items keep the source's timestamps, so the newest
-    copied item marks the fork point. Timestamps are whole seconds, so a child
-    created in the same second as that item is kept: over-naming a child for
-    one second is harmless, while dropping one would recreate the silent
-    receipt this notice exists to explain.
+    A fork carries no dispatch receipt for a child created after its newest
+    copied item — one cut at an earlier response, or one dispatched after the
+    copy finished — so naming it would describe context the fork's agent never
+    saw. Copied items keep the source's timestamps, so that item marks the
+    fork point. Timestamps are whole seconds, so a child created in the same
+    second is kept: over-naming a child for one second is harmless, while
+    dropping one would recreate the silent receipt this notice explains.
 
     :param fork_id: The fork's session id, e.g. ``"conv_fork123"``.
     :param children: The source's in-flight children.
@@ -2329,8 +2329,9 @@ def _fork_running_subagents_agent_note(source_id: str, children: list[Conversati
     """
     Build the hidden ``[System: ...]`` context a replay-based fork agent sees on its first turn.
 
-    Native CLIs that resume a clone of the source's own transcript never read
-    the fork's Omnigent items, so this note does not reach them.
+    A native CLI whose first launch resumes a copy of the source's own
+    transcript does not see it until its transcript is rebuilt from the
+    fork's items (truncated or cross-family forks, later cold resumes).
 
     :param source_id: The forked session's id, e.g. ``"conv_src456"``.
     :param children: The source's in-flight children; must be non-empty.

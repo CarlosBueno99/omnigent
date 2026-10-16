@@ -1193,17 +1193,17 @@ function SupportedForkSessionForm({
   const showConflictHint =
     (branchName.trim() === "" || usingSourceWorktree) && conflictingSessions.length > 0;
 
-  // Sub-agents the source still has in flight stay with it — a clone never
-  // adopts them — so say up front where their results will land. The cached
-  // child list may predate a child's turn start, so refetch it on open, and
-  // walk every page: an older running worker can sit behind newer idle ones.
+  // In-flight sub-agents stay with the source — a clone never adopts them — so
+  // warn up front. Refetch on open (the cache may predate a child's turn start)
+  // and walk every page: an old running worker can sit behind newer idle ones.
   useEffect(() => {
     void queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(sourceSessionId) });
   }, [queryClient, sourceSessionId]);
-  const { children: sourceChildren } = useChildSessions(sourceSessionId, null, {
-    limit: CHILD_SESSIONS_MAX_LIMIT,
-    allPages: true,
-  });
+  const {
+    children: sourceChildren,
+    isLoading: sourceChildrenLoading,
+    error: sourceChildrenError,
+  } = useChildSessions(sourceSessionId, null, { limit: CHILD_SESSIONS_MAX_LIMIT, allPages: true });
   const runningSubagentCount = sourceChildren.filter((child) => child.busy).length;
 
   // On a DIFFERENT host than the source nothing prefills the directory, so it
@@ -1727,6 +1727,28 @@ function SupportedForkSessionForm({
                   Advanced settings to work in an isolated copy.
                 </>
               )}
+            </span>
+          </p>
+        )}
+
+        {sourceChildrenLoading && sourceChildrenError === null && (
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="fork-session-subagent-check-pending"
+          >
+            Checking whether sub-agents are still running in the original session…
+          </p>
+        )}
+
+        {sourceChildrenError !== null && (
+          <p
+            className="flex items-start gap-1.5 text-sm text-muted-foreground"
+            data-testid="fork-session-subagent-check-failed"
+          >
+            <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
+            <span>
+              Couldn't check whether sub-agents are still running in the original session. Any that
+              are stay with it, so their results will arrive there, not in the clone.
             </span>
           </p>
         )}
