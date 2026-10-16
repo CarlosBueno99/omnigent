@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from typing import Any
@@ -44,8 +45,12 @@ def _error_fields(item: dict[str, Any]) -> dict[str, Any]:
     return nested if isinstance(nested, dict) else item
 
 
-def _settled_turn_error(base_url: str, session_id: str) -> dict[str, Any]:
-    """Poll the transcript until the turn persists a failure item."""
+def _settled_turn_error(base_url: str, session_id: str) -> dict[str, Any] | None:
+    """Poll the transcript until the turn settles.
+
+    :returns: The persisted failure item's fields, or ``None`` when an assistant
+        reply landed instead (the mock's scripted refusals ran out).
+    """
     deadline = time.monotonic() + _TURN_SETTLE_TIMEOUT_S
     while time.monotonic() < deadline:
         resp = httpx.get(
@@ -54,12 +59,26 @@ def _settled_turn_error(base_url: str, session_id: str) -> dict[str, Any]:
             timeout=10.0,
         )
         resp.raise_for_status()
-        for item in resp.json().get("data", []):
+        items = resp.json().get("data", [])
+        for item in items:
             fields = _error_fields(item)
             if item.get("type") == "error" and str(fields.get("level") or "") != "info":
                 return fields
+        for item in items:
+            role = item.get("role") or _error_fields(item).get("role")
+            if item.get("type") == "message" and role == "assistant":
+                return None
         time.sleep(0.5)
-    raise AssertionError(f"no error item persisted within {_TURN_SETTLE_TIMEOUT_S:.0f}s")
+    raise AssertionError(f"the turn did not settle within {_TURN_SETTLE_TIMEOUT_S:.0f}s")
+
+
+def _stop_runner(proc: subprocess.Popen[bytes]) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except Exception:  # best-effort teardown
+        proc.kill()
+        proc.wait(timeout=5)
 
 
 @pytest.mark.timeout(600)
@@ -69,68 +88,67 @@ def test_codex_rate_limited_turn_offers_retry(
     mock_llm_server_url: str,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
+    # Each cleanup step is a finalizer so one failing step cannot skip the others.
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
-    try:
-        runner_id = str(_server_state["runner_id"])
-        uid = uuid.uuid4().hex[:6]
-        model = f"mock-codex-429-{uid}"
-        token = f"ratelimit-{uid}"
-        configure_mock_llm(
-            mock_llm_server_url,
-            [{"error": "rate limit exceeded", "status_code": 429}] * _RATE_LIMIT_RESPONSES,
-            key=model,
-            match=token,
+    if respawned is not None:
+        request.addfinalizer(lambda: _stop_runner(respawned))
+    runner_id = str(_server_state["runner_id"])
+    uid = uuid.uuid4().hex[:6]
+    model = f"mock-codex-429-{uid}"
+    token = f"ratelimit-{uid}"
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"error": "rate limit exceeded", "status_code": 429}] * _RATE_LIMIT_RESPONSES,
+        key=model,
+        match=token,
+    )
+    request.addfinalizer(lambda: reset_mock_llm(mock_llm_server_url))
+    bundle = _build_codex_bundle(f"codex-rate-limit-{uid}", model)
+    # The explicit title keeps background title inference off the scripted queue.
+    create_resp = post_session_bundle(
+        httpx.post,
+        f"{live_server}/v1/sessions",
+        bundle,
+        metadata={"title": "Codex rate limit retry"},
+        timeout=30.0,
+    )
+    create_resp.raise_for_status()
+    session_id = create_resp.json()["session_id"]
+    request.addfinalizer(
+        lambda: httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+    )
+    bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
+
+    # Create the page only after setup so a recording starts at the journey.
+    page = request.getfixturevalue("page")
+    assert isinstance(page, Page)
+    page.goto(f"{live_server}/c/{session_id}")
+    _send(page, f"Please greet me. {token}")
+
+    error = _settled_turn_error(live_server, session_id)
+    if error is None:
+        pytest.fail(
+            "the turn completed instead of failing: codex outlasted the mock's "
+            f"{_RATE_LIMIT_RESPONSES} scripted refusals; raise _RATE_LIMIT_RESPONSES"
         )
-        bundle = _build_codex_bundle(f"codex-rate-limit-{uid}", model)
-        # The explicit title keeps background title inference off the scripted queue.
-        create_resp = post_session_bundle(
-            httpx.post,
-            f"{live_server}/v1/sessions",
-            bundle,
-            metadata={"title": "Codex rate limit retry"},
-            timeout=30.0,
-        )
-        create_resp.raise_for_status()
-        session_id = create_resp.json()["session_id"]
-        bind_session_runner(httpx.patch, live_server, session_id, runner_id, timeout=10.0)
+    pill = page.get_by_test_id("error-pill").first
+    expect(pill).to_be_visible(timeout=15_000)
+    expect(pill.get_by_test_id("error-headline")).to_have_text(
+        _RATE_LIMIT_HEADLINE, timeout=10_000
+    )
+    retry = page.get_by_role("button", name=re.compile(r"^Retry")).first
+    expect(retry).to_be_visible(timeout=10_000)
+    pill.click()
+    expect(pill).to_contain_text("429", timeout=10_000)
 
-        # Create the page only after setup so a recording starts at the journey.
-        page = request.getfixturevalue("page")
-        assert isinstance(page, Page)
-        try:
-            page.goto(f"{live_server}/c/{session_id}")
-            _send(page, f"Please greet me. {token}")
+    message = str(error.get("message") or "")
+    assert error.get("code") == "rate_limit_exceeded", error
+    assert "429" in message, message
+    assert "stderr:" not in message, message
 
-            error = _settled_turn_error(live_server, session_id)
-            pill = page.get_by_test_id("error-pill").first
-            expect(pill).to_be_visible(timeout=15_000)
-            expect(pill.get_by_test_id("error-headline")).to_have_text(
-                _RATE_LIMIT_HEADLINE, timeout=10_000
-            )
-            retry = page.get_by_role("button", name=re.compile(r"^Retry")).first
-            expect(retry).to_be_visible(timeout=10_000)
-            pill.click()
-            expect(pill).to_contain_text("429", timeout=10_000)
-
-            message = str(error.get("message") or "")
-            assert error.get("code") == "rate_limit_exceeded", error
-            assert "429" in message, message
-            assert "stderr:" not in message, message
-
-            # The provider recovers; Retry continues the turn in place.
-            configure_mock_llm(mock_llm_server_url, [{"text": _RECOVERED_TEXT}], key=model)
-            retry.click()
-            expect(page.locator(_ASSISTANT).filter(has_text=_RECOVERED_TEXT).first).to_be_visible(
-                timeout=240_000
-            )
-        finally:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-            reset_mock_llm(mock_llm_server_url)
-    finally:
-        if respawned is not None:
-            respawned.terminate()
-            try:
-                respawned.wait(timeout=5)
-            except Exception:  # best-effort teardown
-                respawned.kill()
-                respawned.wait(timeout=5)
+    # The provider recovers; Retry continues the turn in place.
+    configure_mock_llm(mock_llm_server_url, [{"text": _RECOVERED_TEXT}], key=model)
+    retry.click()
+    expect(page.locator(_ASSISTANT).filter(has_text=_RECOVERED_TEXT).first).to_be_visible(
+        timeout=240_000
+    )

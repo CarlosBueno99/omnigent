@@ -2810,8 +2810,8 @@ class _CodexAppServerSession:
         self._default_effort: str | None = None
         self._thread_model: str | None = None
         self._recent_stderr: list[str] = []
-        # Stderr read since the current turn/start. The longer ring above also
-        # holds launch-time warnings, which must not be blamed for a later turn.
+        # Stderr since the current turn/start; ``_recent_stderr`` outlives turns
+        # and keeps launch-time warnings, which must not be blamed on a turn.
         self._turn_stderr: list[str] = []
         # Auth-class gateway rejection tracking, read off the CLI's stderr so a
         # turn that emits no events fails fast with the real cause instead of
