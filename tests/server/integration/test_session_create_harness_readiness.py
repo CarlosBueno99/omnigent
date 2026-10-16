@@ -101,6 +101,8 @@ async def test_child_create_preserves_ready_and_unknown_hosts(
     assert response.json()["harness"] == "jcode"
 
 
+# False is what older hosts report for a missing CLI; newer hosts send "binary-missing".
+@pytest.mark.parametrize("readiness", [False, "binary-missing"])
 @pytest.mark.parametrize("bundle", [False, True])
 async def test_top_level_create_rejects_unavailable_harness(
     client: httpx.AsyncClient,
@@ -108,6 +110,7 @@ async def test_top_level_create_rejects_unavailable_harness(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     bundle: bool,
+    readiness: bool | str,
 ) -> None:
     from unittest.mock import AsyncMock
 
@@ -130,7 +133,7 @@ async def test_top_level_create_rejects_unavailable_harness(
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "test-host",
         "local",
-        configured_harnesses={"jcode": False},
+        configured_harnesses={"jcode": readiness},
     )
     app.state.host_store = hosts
     metadata = {

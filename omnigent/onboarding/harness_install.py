@@ -51,6 +51,11 @@ from packaging.version import InvalidVersion, Version
 from omnigent._platform import resolve_cli_binary
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
 from omnigent.cli_invocation import cli_invocation
+from omnigent.harness_availability import (
+    HARNESS_BINARY_MISSING,
+    HARNESS_VERSION_TOO_LOW,
+    HarnessAvailability,
+)
 from omnigent.harness_install_spec import HarnessInstallSpec, SetupStep
 from omnigent.harnesses.opencode_native.client import (
     OPENCODE_MAX_VERSION_EXCLUSIVE,
@@ -814,17 +819,15 @@ def _binary_signature(binary: str) -> tuple[str, int, int] | None:
     return (binary, stat.st_mtime_ns, stat.st_size)
 
 
-def _harness_cli_version_satisfies(
+def _harness_cli_version_readiness(
     spec: HarnessInstallSpec,
     binary: str,
     timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_S,
-) -> bool:
+) -> HarnessAvailability:
     """Check *binary*'s ``--version`` against *spec*'s declared range.
 
-    A missing/unparseable version or a subprocess error is treated as not
-    satisfying the range, so an installed but incompatible CLI is reported
-    as not ready and the setup flow prompts for an upgrade before the
-    runtime gate rejects it.
+    Only a confirmed version below the minimum is reported as outdated.
+    Failed probes and versions above the supported range stay unconfigured.
 
     :param timeout: Seconds to wait for the ``--version`` subprocess before
         giving up, e.g. ``10.0`` on the readiness path.
@@ -850,7 +853,7 @@ def _harness_cli_version_satisfies(
     if spec.min_version is not None:
         try:
             if parsed < Version(spec.min_version):
-                return False
+                return HARNESS_VERSION_TOO_LOW
         except InvalidVersion:
             return False
     if spec.max_version_exclusive is not None:
@@ -904,7 +907,7 @@ def harness_cli_version_satisfies(key: str) -> bool:
     binary = harness_cli_binary(key)
     if binary is None:
         return False
-    return _harness_cli_version_satisfies(spec, binary)
+    return _harness_cli_version_readiness(spec, binary) is True
 
 
 def harness_cli_installed(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_S) -> bool:
@@ -926,13 +929,24 @@ def harness_cli_installed(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
         ``False`` when it doesn't resolve, the key has no associated CLI,
         or its version falls outside the declared range.
     """
+    return harness_cli_readiness(key, timeout) is True
+
+
+def harness_cli_readiness(
+    key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_S
+) -> HarnessAvailability:
+    """Distinguish missing/old CLIs from failures that need investigation.
+
+    Ambiguous failures retain the legacy ``False`` wire value so older servers
+    continue to block launches rather than dropping an unknown readiness value.
+    """
     spec = harness_install_spec(key)
     if spec is None:
         return False
     binary = harness_cli_binary(key)
     if binary is None:
-        return False
-    return _harness_cli_version_satisfies(spec, binary, timeout)
+        return HARNESS_BINARY_MISSING
+    return _harness_cli_version_readiness(spec, binary, timeout)
 
 
 def harness_cli_version(key: str) -> tuple[str | None, str | None]:
