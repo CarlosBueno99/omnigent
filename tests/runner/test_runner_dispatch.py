@@ -5604,6 +5604,9 @@ async def test_scaffold_subagent_defers_terminal_delivery_while_continuation_buf
             # have a continuation pending and the bug wouldn't apply.
             assert resp2.status_code == 202
             assert resp2.json()["status"] == "buffered"
+            # Buffering into a live turn is a steer the turn drains itself,
+            # not a hold behind a prompt.
+            assert "held_behind" not in resp2.json()
 
             # End turn 1. With the fix, the non-empty buffer defers delivery;
             # the continuation turn 2 then runs to its own empty-buffer end.
@@ -7396,6 +7399,84 @@ async def test_session_peek_appends_pending_elicitation_from_snapshot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_peek_appends_held_inputs_after_the_prompt_they_wait_on() -> None:
+    """
+    ``sys_session_get_history`` shows a message the runner still holds.
+
+    A held message is not in the transcript until the harness records it, so
+    ``/items`` ends before it; the snapshot's ``pending_inputs`` is the only
+    place it lives. get_history must project it after the prompt it waits on,
+    or the parent cannot tell that its nudge never landed.
+    """
+    from omnigent.runner.tool_dispatch import _execute_session_query_tool
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions/conv_target/items":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "i1",
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "run the probe"}],
+                        },
+                    ],
+                },
+            )
+        if request.url.path == "/v1/sessions/conv_target":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_target",
+                    "title": "worker:deploy",
+                    "pending_elicitations": [
+                        {
+                            "type": "response.elicitation_request",
+                            "elicitation_id": "elicit_probe",
+                            "params": {"mode": "form", "message": "Proceed with the probe?"},
+                        }
+                    ],
+                    "pending_inputs": [
+                        {
+                            "pending_id": "pending_nudge",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": "permission granted, continue the deploy",
+                                }
+                            ],
+                            "created_by": "alice@example.com",
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(f"unexpected path {request.url.path}")
+
+    async with _session_query_client(handler) as client:
+        out = json.loads(
+            await _execute_session_query_tool(
+                "sys_session_get_history",
+                json.dumps({"conversation_id": "conv_target", "tail_items": 5}),
+                conversation_id="conv_caller",
+                server_client=client,
+            )
+        )
+    assert [item["type"] for item in out["items"]] == [
+        "message",
+        "pending_elicitation",
+        "pending_input",
+    ]
+    held = out["items"][-1]
+    assert held["pending_id"] == "pending_nudge"
+    assert held["role"] == "user"
+    assert held["text"] == "permission granted, continue the deploy"
+    assert held["created_by"] == "alice@example.com"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status,expected_error",
     [(404, "session_not_found"), (403, "session_out_of_tree")],
@@ -8571,6 +8652,9 @@ async def test_sys_session_get_info_defaults_to_caller_session() -> None:
     assert info["last_activity_at"] == 42
     assert info["pending_elicitations"] == []
     assert info["pending_elicitation_count"] == 0
+    # A snapshot without the field (older server) still reads as nothing held.
+    assert info["pending_inputs"] == []
+    assert info["pending_input_count"] == 0
     assert not any(p.startswith("/v1/runners") for p in requested_paths)
 
 
@@ -8967,6 +9051,15 @@ async def test_sys_session_get_info_projects_metadata_and_runner_connectivity() 
                     "workspace": "/repo",
                     "git_branch": "feature/x",
                     "pending_elicitations": [{"id": "el_1"}, {"id": "el_2"}],
+                    "pending_inputs": [
+                        {
+                            "pending_id": "pending_held1",
+                            "content": [
+                                {"type": "input_text", "text": "permission granted, continue"}
+                            ],
+                            "created_by": "alice@example.com",
+                        }
+                    ],
                 },
             )
         if request.method == "GET" and request.url.path == "/v1/runners/runner_1/status":
@@ -9016,6 +9109,18 @@ async def test_sys_session_get_info_projects_metadata_and_runner_connectivity() 
     # blocked session is waiting on.
     assert info["pending_elicitation_count"] == 2
     assert info["pending_elicitations"] == [{"id": "el_1"}, {"id": "el_2"}]
+    # A message the runner still holds (here behind the prompt) is projected
+    # too; without it a parked session reads as a bare "running".
+    assert info["pending_input_count"] == 1
+    assert info["pending_inputs"] == [
+        {
+            "type": "pending_input",
+            "pending_id": "pending_held1",
+            "role": "user",
+            "text": "permission granted, continue",
+            "created_by": "alice@example.com",
+        }
+    ]
     # Metadata-only: the full transcript is never embedded.
     assert "items" not in info
 
@@ -12568,6 +12673,7 @@ def _running_child_server_handler(
     child_busy: bool = False,
     delete_posts: list[int] | None = None,
     events_status: int = 200,
+    events_body: dict[str, Any] | None = None,
 ) -> Any:
     """Build a MockTransport handler for a named-mode in-flight-send test.
 
@@ -12575,9 +12681,10 @@ def _running_child_server_handler(
     per ``child_busy``), records the stamped dispatch id on PATCH and the posted
     message on the child's /events, and 500s any duplicate-create POST so an
     accidental untracked create is caught. ``events_status`` forces the child's
-    /events response code (e.g. 500 to exercise a post failure), and any DELETE
-    of the child is recorded in ``delete_posts`` so a test can assert a still-live
-    turn is never torn down.
+    /events response code (e.g. 500 to exercise a post failure) and
+    ``events_body`` its JSON body (e.g. the server's ``held_behind`` ack), and
+    any DELETE of the child is recorded in ``delete_posts`` so a test can assert
+    a still-live turn is never torn down.
     """
 
     async def _handler(request: httpx.Request) -> httpx.Response:
@@ -12613,7 +12720,8 @@ def _running_child_server_handler(
             return httpx.Response(204)
         if request.method == "POST" and path == f"/v1/sessions/{child_id}/events":
             event_posts.append(json.loads(request.content))
-            return httpx.Response(events_status, json={"ok": events_status < 400})
+            body = events_body if events_body is not None else {"ok": events_status < 400}
+            return httpx.Response(events_status, json=body)
         return httpx.Response(404, json={"error": str(request.url)})
 
     return _handler
@@ -12701,6 +12809,69 @@ async def test_named_send_reuses_tracked_in_flight_entry_without_restamp(
     assert len(event_posts) == 1
     assert event_posts[0]["created_by"] == "alice@example.com"
     assert event_posts[0]["data"]["content"][0]["text"] == "stop and report where the merge stands"
+    # A plain accepted post is a steer: no hold is reported.
+    assert "held_behind" not in payload
+    assert "injected into the running turn" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_named_send_held_behind_child_prompt_reports_held_not_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A send the runner holds behind the child's terminal prompt must say so.
+
+    The server's ack carries ``held_behind`` when the child's runner queued the
+    message because its pane is parked on a prompt a person must answer. The
+    parent used to be told the message was "injected into the running turn"
+    regardless, so an orchestrator reported progress that was not happening.
+    The handle must report ``held`` with the reason, while the eventual turn's
+    completion stays deliverable under one tracked work entry.
+    """
+    from omnigent.runner import app as runner_app
+
+    parent_id, child_id = "conv_parent_held", "conv_child_held"
+    stamped: list[str] = []
+    event_posts: list[dict[str, Any]] = []
+    create_posts: list[int] = []
+
+    monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
+    monkeypatch.setattr(subagent_work, "register_child_session", lambda *a, **k: None)
+
+    handler = _running_child_server_handler(
+        parent_id,
+        child_id,
+        stamped=stamped,
+        event_posts=event_posts,
+        create_posts=create_posts,
+        child_busy=True,
+        events_status=202,
+        events_body={
+            "queued": True,
+            "pending_id": "pending_held",
+            "held_behind": "pending prompt",
+        },
+    )
+    try:
+        output = await _run_named_continuation(parent_id, handler)
+        work = subagent_work.get_subagent_work(child_id)
+    finally:
+        subagent_work.unregister_subagent_work(child_id)
+        subagent_work._session_inboxes_ref.pop(parent_id, None)
+
+    payload = json.loads(output)
+    assert payload["status"] == "held"
+    assert payload["held_behind"] == "pending prompt"
+    assert payload["conversation_id"] == child_id
+    assert "injected into the running turn" not in payload["message"]
+    assert "queued, not delivered" in payload["message"]
+    assert "pending_inputs" in payload["message"]
+    assert len(event_posts) == 1
+    assert event_posts[0]["data"]["content"][0]["text"] == "stop and report where the merge stands"
+    # The held message still starts a turn once the prompt is answered, so its
+    # completion must stay deliverable: one adopted entry, tracked as running.
+    assert create_posts == []
+    assert work is not None and work.status == "running"
+    assert stamped == [work.work_id]
 
 
 @pytest.mark.asyncio

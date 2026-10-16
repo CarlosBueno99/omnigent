@@ -2975,6 +2975,10 @@ def register_events_routes(
         # stability) and relies on stableKey + FIFO instead.
         if dispatch.pending_id is not None:
             response["pending_id"] = dispatch.pending_id
+        # The runner queued the message behind a prompt the pane is parked
+        # on, so ``queued`` must not be read as delivered.
+        if dispatch.held_behind is not None:
+            response["held_behind"] = dispatch.held_behind
         return response
 
     # ── GET /sessions/{session_id}/stream ────────────────────────

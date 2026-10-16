@@ -6592,6 +6592,9 @@ def create_runner_app(
                             content={
                                 "status": "buffered",
                                 "detail": "Message buffered until the pending prompt is resolved.",
+                                # Unlike the active-turn buffer above, nothing drains
+                                # this queue until a person answers the prompt.
+                                "held_behind": "pending prompt",
                             },
                         )
 

@@ -430,6 +430,56 @@ def test_peek_returns_items_chronological(session_fixture: _Fixture) -> None:
     assert items[1]["content"] == "looking at handlers.py"
 
 
+def test_peek_appends_held_inputs_after_pending_prompts(session_fixture: _Fixture) -> None:
+    """
+    Peek shows a message the runner still holds for the child.
+
+    A held message is not in the conversation store until the harness
+    records it, so without reading the pending-inputs index a peek on a
+    sub-agent parked on a terminal prompt would hide the undelivered nudge.
+    It is appended after the stored tail and after any parked prompt.
+    """
+    from omnigent.runtime import pending_inputs
+
+    pending_inputs.reset_for_tests()
+    try:
+        pending_elicitations.record_publish(
+            session_fixture.child_conv_id,
+            {
+                "type": "response.elicitation_request",
+                "elicitation_id": "elicit_probe",
+                "params": {"mode": "form", "message": "Proceed with the probe?"},
+            },
+        )
+        pending_id = pending_inputs.record(
+            session_fixture.child_conv_id,
+            [{"type": "input_text", "text": "permission granted, continue"}],
+            created_by="alice@example.com",
+        )
+        raw = SysSessionGetHistoryTool().invoke(
+            json.dumps({"conversation_id": session_fixture.child_conv_id}),
+            session_fixture.ctx,
+        )
+    finally:
+        pending_inputs.reset_for_tests()
+
+    items = json.loads(raw)["items"]
+    # The two stored messages project as ``text`` activity items.
+    assert [item["type"] for item in items] == [
+        "text",
+        "text",
+        "pending_elicitation",
+        "pending_input",
+    ]
+    assert items[-1] == {
+        "type": "pending_input",
+        "pending_id": pending_id,
+        "role": "user",
+        "text": "permission granted, continue",
+        "created_by": "alice@example.com",
+    }
+
+
 def test_peek_projects_tool_call_and_result_items(
     session_fixture: _Fixture,
 ) -> None:

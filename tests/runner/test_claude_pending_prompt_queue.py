@@ -116,6 +116,9 @@ async def test_question_buffers_messages_and_resumes_fifo(
         second = await client.post(f"/v1/sessions/{sid}/events", json=_message("second"))
         assert first.status_code == second.status_code == 202
         assert first.json()["status"] == second.json()["status"] == "buffered"
+        # Unlike a live-turn buffer, this queue waits on a person; the body
+        # must say so for the server and sys_session_send to report it.
+        assert first.json()["held_behind"] == second.json()["held_behind"] == "pending prompt"
         assert app.state.claude_prompt_waiters[sid] is waiter
         assert sid not in app.state.active_turns
         assert app.state.has_active_work()

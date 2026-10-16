@@ -5822,7 +5822,7 @@ async def _forward_native_terminal_message(
     model_override: str | None = None,
     input_delivery: Mapping[str, object] | None = None,
     agent_revision: str | None = None,
-) -> None:
+) -> str | None:
     """
     Forward one Omnigent web-chat message to the native terminal harness.
 
@@ -5847,7 +5847,9 @@ async def _forward_native_terminal_message(
         ``None`` when routing did not pick a model.
     :param input_delivery: Queued input identifiers and original enqueue time.
     :param agent_revision: Effective spec revision used to invalidate runner caches.
-    :returns: None.
+    :returns: The runner's ``held_behind`` reason when it queued the message
+        behind a prompt the pane is parked on, e.g. ``"pending prompt"``;
+        ``None`` when the message reached the harness.
     :raises HTTPException: 502 when the runner or harness rejects
         the injection request.
     """
@@ -5956,6 +5958,16 @@ async def _forward_native_terminal_message(
             status_code=502,
             detail=f"{display_name} terminal message delivery failed: {failure}",
         )
+    held_behind = _runner_held_behind(resp)
+    if held_behind is not None:
+        _logger.info(
+            "%s terminal message held behind %s for session=%s",
+            display_name,
+            held_behind,
+            session_id,
+            extra={"session_id": session_id},
+        )
+        return held_behind
     # Native-terminal counterpart to the SDK path's turn_dispatched (same event
     # name so a session reads uniformly across harnesses); the message was
     # injected into the live terminal rather than dispatched as a discrete turn.
@@ -5973,6 +5985,31 @@ async def _forward_native_terminal_message(
             input_delivery,
         ),
     )
+    return None
+
+
+def _runner_held_behind(resp: httpx.Response) -> str | None:
+    """
+    Read what the runner queued a native message behind, if it did.
+
+    The runner answers ``202 {"status": "buffered", "held_behind": ...}``
+    when the pane is parked on a prompt only a person can answer; any
+    other 2xx means the message reached the harness.
+
+    :param resp: Completed runner response.
+    :returns: The ``held_behind`` reason, e.g. ``"pending prompt"``, or
+        ``None``.
+    """
+    if resp.status_code != 202:
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("status") != "buffered":
+        return None
+    held_behind = body.get("held_behind")
+    return held_behind if isinstance(held_behind, str) and held_behind else None
 
 
 async def _persist_session_event(
@@ -7642,10 +7679,11 @@ async def _dispatch_session_event_to_runner_impl(
         # at spawn, so the in-band switch is what makes routing take on an
         # already-running pane.
         forwarded = False
+        held_behind: str | None = None
         try:
             if pending_id is not None:
                 pending_inputs.mark_delivery_stage(session_id, pending_id, "forward_requested")
-            await _forward_native_terminal_message(
+            held_behind = await _forward_native_terminal_message(
                 runner_client,
                 session_id,
                 conv,
@@ -7715,7 +7753,9 @@ async def _dispatch_session_event_to_runner_impl(
                     harness=_resolve_harness(conv),
                     decision_id=_native_decision_id,
                 )
-        return _SessionEventDispatchResult(item_id=None, pending_id=pending_id)
+        return _SessionEventDispatchResult(
+            item_id=None, pending_id=pending_id, held_behind=held_behind
+        )
     item_id = await _forward_event_to_runner(
         session_id,
         conv,

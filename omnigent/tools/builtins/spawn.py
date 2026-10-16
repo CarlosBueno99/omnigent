@@ -146,7 +146,11 @@ class SysSessionSendTool(Tool):
             "its next step boundary (so you can nudge a running sub-agent), "
             "but a turn wedged inside a single long-running step won't see it "
             "until it yields — cancel with sys_cancel_task if you need to "
-            "stop such a turn. Either way the reply arrives once via "
+            "stop such a turn. If the sub-agent's terminal is parked on a "
+            "prompt or dialog, the result reports status 'held': the message "
+            "is queued, not delivered, until that prompt is answered "
+            "(sys_session_get_info lists it under pending_inputs). Either way "
+            "the reply arrives once via "
             "sys_read_inbox; don't resend to await it. "
             "To attach previously-uploaded files, "
             "pass their file ids via the object args form's 'file_ids' "
@@ -666,11 +670,12 @@ class SysSessionGetInfoTool(Tool):
     status, title, agent binding (id + name), runner binding and live
     connectivity, host and its reported harness readiness, reasoning effort,
     effective model, parent
-    linkage, workspace / git branch, persisted last-activity time, and
-    the count of outstanding approval prompts. Comparing
-    ``last_activity_at`` across polls distinguishes a running session that
-    is advancing from one whose persisted output has stalled. For the
-    conversation transcript, use
+    linkage, workspace / git branch, persisted last-activity time, the
+    outstanding approval prompts, and the messages the runner still
+    holds for the session (``pending_inputs``, e.g. behind a terminal
+    prompt). Comparing ``last_activity_at`` across polls distinguishes a
+    running session that is advancing from one whose persisted output has
+    stalled. For the conversation transcript, use
     ``sys_session_get_history`` instead.
 
     ``session_id`` is optional — when omitted, the caller's own
@@ -696,8 +701,9 @@ class SysSessionGetInfoTool(Tool):
             "agent binding (id/name), runner binding + connectivity, "
             "host + configured harness readiness, reasoning effort, model, "
             "parent session, workspace, "
-            "persisted last-activity time, and outstanding approval "
-            "prompts. Global read — any "
+            "persisted last-activity time, outstanding approval "
+            "prompts, and messages still held for the session "
+            "(pending_inputs — sent but not yet delivered). Global read — any "
             "session you can access. Pass session_id to target another "
             "session; omit it to describe your own. Metadata only — "
             "use sys_session_get_history for the conversation transcript."
@@ -1533,7 +1539,8 @@ class SysSessionGetHistoryTool(Tool):
             "access (not just sub-agents in your spawn tree), bounded "
             "by the server's per-user permission model. Returns the "
             "tail of conversation items (assistant/user messages, tool "
-            "calls, tool results) in chronological order. Returns "
+            "calls, tool results) in chronological order, then any prompt "
+            "the session is parked on and messages still held for it. Returns "
             "session_not_found if conversation_id is unknown, or "
             "session_out_of_tree if the server denies read access."
         )
@@ -1660,7 +1667,7 @@ class SysSessionGetHistoryTool(Tool):
             for item in reversed(page.data)
         ]
         # The server's pending index imports ORM models for workspace scoping.
-        from omnigent.runtime import pending_elicitations
+        from omnigent.runtime import pending_elicitations, pending_inputs
 
         # A parked elicitation never lands in the conversation store
         # (it lives only in the pending-elicitations index), so without
@@ -1671,6 +1678,12 @@ class SysSessionGetHistoryTool(Tool):
         items.extend(
             pending_elicitations.project_for_peek(event)
             for event in pending_elicitations.snapshot_for(resolution.child.id)
+        )
+        # A message the runner still holds for a native pane is not in the
+        # transcript yet either; it follows the prompt it waits on.
+        items.extend(
+            pending_inputs.project_for_peek(entry)
+            for entry in pending_inputs.snapshot_for(resolution.child.id)
         )
         labelled = _agent_title_from_conversation(resolution.child)
         return json.dumps(

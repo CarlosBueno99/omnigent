@@ -1603,8 +1603,10 @@ async def _send_to_in_flight_child(
     ``running`` entry that no turn will complete — a harmless phantom (the real
     result already delivered under the original entry) that is cleaned up with
     the rest of the child's work on teardown. Eliminating even that would take
-    the server surfacing its own buffered-vs-accepted disposition back through
-    the message response; delivery is already loss-safe without it.
+    the server echoing the runner's buffered-vs-accepted disposition; it reports
+    only ``held_behind`` (the runner queued the message behind a prompt the
+    pane is parked on, see the ``held`` handle below), and delivery is already
+    loss-safe without more.
 
     Concurrent sends to one child are serialized by the per-child lock so they
     can't install divergent entries; the lock is cleaned up with the child's
@@ -1643,6 +1645,7 @@ async def _send_to_in_flight_child(
             f"Error: failed to steer in-flight sub-agent {agent!r} title {title!r}: "
             f"{msg_resp.status_code} {msg_resp.text[:200]}"
         )
+    held_behind = _held_behind_from_ack(msg_resp)
 
     async with _subagent_work.in_flight_send_lock(child_session_id):
         entry = _subagent_work.get_subagent_work(child_session_id)
@@ -1691,23 +1694,52 @@ async def _send_to_in_flight_child(
                     stamp_error,
                 )
 
-    return json.dumps(
-        {
-            "task_id": child_session_id,
-            "handle_id": child_session_id,
-            "conversation_id": child_session_id,
-            "kind": "sub_agent",
-            "agent": agent,
-            "title": title,
-            "status": "running",
-            "message": (
+    handle: _JsonObject = {
+        "task_id": child_session_id,
+        "handle_id": child_session_id,
+        "conversation_id": child_session_id,
+        "kind": "sub_agent",
+        "agent": agent,
+        "title": title,
+    }
+    if held_behind is not None:
+        # The runner queued the message instead of injecting it: the pane is
+        # parked on a prompt a person must answer first.
+        handle.update(
+            status="held",
+            held_behind=held_behind,
+            message=(
+                f"Held the message for sub-agent {agent!r} title {title!r}: its terminal is "
+                f"parked on a {held_behind}, so the message was queued, not delivered, and "
+                "stays queued until that prompt is answered. sys_session_get_info lists it "
+                "under pending_inputs (and the prompt under pending_elicitations when it is "
+                "one). Don't resend; the turn's result still arrives via sys_read_inbox once "
+                "it runs."
+            ),
+        )
+    else:
+        handle.update(
+            status="running",
+            message=(
                 f"Steered the in-flight turn of sub-agent {agent!r} title {title!r}: the "
                 "message was injected into the running turn, which picks it up as it yields. "
                 "The turn's single result still arrives via sys_read_inbox — don't resend to "
                 "await it."
             ),
-        }
-    )
+        )
+    return json.dumps(handle)
+
+
+def _held_behind_from_ack(resp: httpx.Response) -> str | None:
+    """Return what the server says the child's runner queued the message behind."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    held_behind = body.get("held_behind")
+    return held_behind if isinstance(held_behind, str) and held_behind else None
 
 
 def _subagent_model_from_args(args: _JsonObject) -> str | None:
@@ -5004,8 +5036,9 @@ async def _session_get_info_via_rest(
     binding, runner binding, host and its reported harness readiness,
     reasoning effort, effective model,
     parent linkage, workspace / git branch, persisted last-activity time,
-    and the outstanding approval prompts (the prompts themselves plus a
-    count). Runner connectivity
+    the outstanding approval prompts (the prompts themselves plus a
+    count), and the messages the runner still holds for the session
+    (``pending_inputs`` plus a count). Runner connectivity
     is resolved best-effort via
     ``GET /v1/runners/{id}/status`` (``runner_online`` is ``None`` when
     the lookup fails or no runner is bound); host readiness is likewise
@@ -5044,6 +5077,13 @@ async def _session_get_info_via_rest(
     snap: _JsonObject = resp.json()
     pending_value = snap.get("pending_elicitations")
     pending = pending_value if isinstance(pending_value, list) else []
+    # Load the server's pending-index helpers only when this tool needs them.
+    from omnigent.runtime import pending_inputs
+
+    held_inputs = [
+        pending_inputs.project_for_peek(entry)
+        for entry in _json_object_list(snap.get("pending_inputs"))
+    ]
     snap_agent_name = _optional_string(snap.get("agent_name"))
     snap_runner_id = _optional_string(snap.get("runner_id"))
     snap_host_id = _optional_string(snap.get("host_id"))
@@ -5086,6 +5126,10 @@ async def _session_get_info_via_rest(
             # waiting on.
             "pending_elicitations": pending,
             "pending_elicitation_count": len(pending),
+            # Messages the runner still holds (e.g. behind a terminal prompt):
+            # a bare ``running`` with entries here is a parked session.
+            "pending_inputs": held_inputs,
+            "pending_input_count": len(held_inputs),
         }
     )
 
@@ -6276,7 +6320,7 @@ async def _session_get_history_via_rest(
     ]
     meta = await _fetch_peek_meta(target_id, server_client)
     # Load the server's pending-index helpers only when a history tool needs them.
-    from omnigent.runtime import pending_elicitations
+    from omnigent.runtime import pending_elicitations, pending_inputs
 
     # A parked elicitation never lands in the conversation store (it
     # lives only in the Omnigent server's pending-elicitations index, replayed
@@ -6285,6 +6329,14 @@ async def _session_get_history_via_rest(
     items.extend(
         pending_elicitations.project_for_peek(event) for event in meta.pending_elicitations
     )
+    # A message the runner still holds (e.g. behind that prompt) is not in the
+    # transcript yet either; it follows the prompt it waits on.
+    for entry in meta.pending_inputs:
+        held = pending_inputs.project_for_peek(entry)
+        held["text"] = _truncate_activity(
+            held["text"], max_chars=content_max_chars, offset_chars=content_offset_chars
+        )
+        items.append(held)
     return json.dumps(
         {
             "conversation_id": target_id,
@@ -6469,11 +6521,16 @@ class _PeekMeta:
         parked on, replayed on the snapshot from the Omnigent server's
         :mod:`omnigent.runtime.pending_elicitations` index. Empty list
         when the target has none (or the snapshot couldn't be read).
+    :param pending_inputs: Messages the runner still holds for the target
+        (not yet in its transcript), replayed on the snapshot from the
+        :mod:`omnigent.runtime.pending_inputs` index. Empty list when
+        none are held (or the snapshot couldn't be read).
     """
 
     agent: str | None
     title: str | None
     pending_elicitations: list[_JsonObject]
+    pending_inputs: list[_JsonObject]
 
 
 async def _fetch_peek_meta(
@@ -6481,7 +6538,7 @@ async def _fetch_peek_meta(
     server_client: httpx.AsyncClient,
 ) -> _PeekMeta:
     """
-    Fetch a session's title + pending elicitations for peek output.
+    Fetch a session's title, pending elicitations and held inputs for peek output.
 
     One snapshot read serves both peek's ``agent``/``title`` labels and
     the parked-elicitation items it appends. Best-effort: returns empty
@@ -6494,19 +6551,23 @@ async def _fetch_peek_meta(
     :returns: The parsed title plus any outstanding elicitation
         payloads (all empty/``None`` on any miss).
     """
+    empty = _PeekMeta(agent=None, title=None, pending_elicitations=[], pending_inputs=[])
     try:
         snap = await server_client.get(f"/v1/sessions/{target_id}", timeout=30.0)
     except Exception:  # noqa: BLE001
-        return _PeekMeta(agent=None, title=None, pending_elicitations=[])
+        return empty
     if snap.status_code != 200:
-        return _PeekMeta(agent=None, title=None, pending_elicitations=[])
+        return empty
     body = _string_object_dict(snap.json())
     if body is None:
-        return _PeekMeta(agent=None, title=None, pending_elicitations=[])
+        return empty
     parsed = _parse_session_title(_optional_string(body.get("title")))
-    raw_pending = body.get("pending_elicitations")
-    pending = _json_object_list(raw_pending)
-    return _PeekMeta(agent=parsed.agent, title=parsed.title, pending_elicitations=pending)
+    return _PeekMeta(
+        agent=parsed.agent,
+        title=parsed.title,
+        pending_elicitations=_json_object_list(body.get("pending_elicitations")),
+        pending_inputs=_json_object_list(body.get("pending_inputs")),
+    )
 
 
 async def execute_tool(

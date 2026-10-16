@@ -954,6 +954,36 @@ def snapshot_for(conversation_id: str) -> list[dict[str, Any]]:
         ]
 
 
+def project_for_peek(entry: dict[str, Any]) -> dict[str, Any]:
+    """
+    Project a :func:`snapshot_for` entry into a compact peek item.
+
+    A message the runner still holds (for example behind a prompt the
+    native pane is parked on) is not in the transcript until the harness
+    records it, so ``sys_session_get_history`` synthesizes an item from
+    the snapshot entry, shaped like the other compact items. Shared by the
+    in-process tool and the runner's REST path so both read the same.
+
+    :param entry: One snapshot entry, e.g. ``{"pending_id":
+        "pending_a1b2c3", "content": [{"type": "input_text", "text":
+        "hi"}], "created_by": "alice@example.com"}``.
+    :returns: ``{"type": "pending_input", "pending_id": "pending_a1b2c3",
+        "role": "user", "text": "hi"}`` plus ``created_by`` when the
+        sender identity was recorded.
+    """
+    content = entry.get("content")
+    item: dict[str, Any] = {
+        "type": "pending_input",
+        "pending_id": entry.get("pending_id"),
+        "role": "user",
+        "text": _content_text(content if isinstance(content, list) else []),
+    }
+    created_by = entry.get("created_by")
+    if isinstance(created_by, str) and created_by:
+        item["created_by"] = created_by
+    return item
+
+
 def _drained_input(entry: _Entry) -> DrainedInput:
     """Copy a pending entry into the public drained shape."""
     return DrainedInput(

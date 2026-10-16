@@ -761,6 +761,8 @@ async def test_claude_native_message_forwards_to_runner_without_persisting(
     body = resp.json()
     assert body["queued"] is True
     assert body["pending_id"].startswith("pending_")
+    # A plain accepted forward reports no hold.
+    assert "held_behind" not in body
     assert fake_runner.calls == [
         ("POST", "/v1/sessions/64a784c3aa907d1774f44313546947c6/resources/terminals"),
         ("POST", "/v1/sessions/64a784c3aa907d1774f44313546947c6/events"),
@@ -4798,6 +4800,69 @@ async def test_native_dispatch_fast_fails_and_consumes_message_on_terminal_error
     assert len(errors) == 1
     assert errors[0].data.code == "native_terminal_start_failed"
     assert errors[0].data.message == "Native Claude requires the 'claude' CLI on PATH."
+
+
+@pytest.mark.asyncio
+async def test_claude_native_message_held_behind_prompt_is_reported_in_ack(
+    client: httpx.AsyncClient,
+) -> None:
+    """
+    The ack says when the runner queued the message behind a terminal prompt.
+
+    The runner answers ``202 buffered`` with ``held_behind`` when the pane is
+    parked on a prompt only a person can answer. The route used to drop that
+    body and ack ``queued`` alone, so ``sys_session_send`` told orchestrators
+    the message was injected into a running turn while it sat in the queue.
+    """
+    from omnigent.runtime import pending_inputs
+
+    session_id = "64a784c3aa907d1774f44313546947c6"
+    events_path = f"/v1/sessions/{session_id}/events"
+    fake_runner = _FakeRunnerClient(
+        payload={},
+        responses={
+            events_path: (
+                202,
+                {
+                    "status": "buffered",
+                    "detail": "Message buffered until the pending prompt is resolved.",
+                    "held_behind": "pending prompt",
+                },
+            )
+        },
+    )
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+    set_runner_client(fake_runner)  # type: ignore[arg-type]
+    pending_inputs.reset_for_tests()
+
+    try:
+        resp = await client.post(
+            events_path,
+            json={
+                "type": "message",
+                "data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "permission granted, continue"}],
+                },
+            },
+        )
+
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+        assert body["queued"] is True
+        assert body["held_behind"] == "pending prompt"
+        # The runner has custody, so the message stays a pending input that the
+        # snapshot (and sys_session_get_info) can show until it is consumed.
+        assert body["pending_id"].startswith("pending_")
+        assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [
+            body["pending_id"]
+        ]
+        assert [call[0] for call in fake_runner.post_json_calls] == [
+            f"/v1/sessions/{session_id}/resources/terminals",
+            events_path,
+        ]
+    finally:
+        pending_inputs.reset_for_tests()
 
 
 @pytest.mark.asyncio
