@@ -233,7 +233,9 @@ def test_question_appearing_during_readiness_does_not_become_a_terminal_timeout(
     native_bridge: Path, monkeypatch: pytest.MonkeyPatch, pane: str
 ) -> None:
     """Refused at once, so the executor keeps the pane instead of reaping it at the cap."""
-    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: pane)
+    # The URL-bearing panes reach _capture_pane(..., join_wrapped=True) on a
+    # regression, so the stub must accept that keyword to surface the timeout.
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_a, **_k: pane)
     # A recognition regression would otherwise poll to the slow-boot hard cap; bound
     # it so the regression fails in one poll instead of the 180-second wait.
     monkeypatch.setattr(bridge, "_TMUX_READY_SLOW_BOOT_TIMEOUT_S", 0.0)
