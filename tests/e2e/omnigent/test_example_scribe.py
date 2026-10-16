@@ -90,3 +90,49 @@ def test_scribe_has_os_env(scribe_spec: AgentSpec) -> None:
     assert scribe_spec.os_env.type == "caller_process"
     assert scribe_spec.os_env.sandbox is not None
     assert scribe_spec.os_env.sandbox.type == "none"
+
+
+def test_scribe_scopes_self_authored_skills_outside_the_omnigent_repo() -> None:
+    """
+    Self-authored skills must be scoped by workspace: ``examples/scribe/skills/``
+    only when the workspace is an Omnigent checkout, otherwise a user-owned
+    location. Fails on a prompt that directs them unconditionally into
+    ``examples/scribe/skills/<dir>/SKILL.md``, which would write a private skill
+    into a package user's Omnigent clone.
+    """
+    config = (_SCRIBE_BUNDLE / "config.yaml").read_text(encoding="utf-8")
+    compact = " ".join(config.split())
+
+    unconditional_repo_rule = (
+        "skills directory (`examples/scribe/skills/<dir>/SKILL.md`)" in compact
+    )
+    # The fix may scope the directory or drop the unconditional directive; accept either.
+    scoped_to_checkout_or_user_location = any(
+        marker in compact.lower()
+        for marker in (
+            "omnigent checkout",
+            "git checkout root",
+            "user-owned",
+            "a user location",
+            "not an omnigent checkout",
+        )
+    )
+    assert scoped_to_checkout_or_user_location or not unconditional_repo_rule, (
+        "self-authored skills are directed unconditionally into "
+        "examples/scribe/skills/<dir>/SKILL.md with no Omnigent-checkout or "
+        "user-owned scoping, so a user's Omnigent clone receives them"
+    )
+
+
+def test_scribe_does_not_open_unsolicited_prs_on_the_upstream_repo() -> None:
+    """
+    Nothing gates ``gh pr create`` at the policy layer, so a prompt rule is the
+    only restraint. Fails on a prompt that never mentions omnigent-ai/omnigent
+    and so carries no rule against opening PRs/issues there unasked.
+    """
+    config = (_SCRIBE_BUNDLE / "config.yaml").read_text(encoding="utf-8")
+    compact = " ".join(config.split())
+    assert "omnigent-ai/omnigent" in compact, (
+        "no restraint on opening PRs/issues against omnigent-ai/omnigent without "
+        "an explicit user request"
+    )

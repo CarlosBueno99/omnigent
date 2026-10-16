@@ -464,3 +464,57 @@ def test_function_policies_have_nonempty_arguments(polly_spec: AgentSpec) -> Non
     # = 3; sub-agents: blast_radius x7 (claude_code, codex, opencode, cursor,
     # hermes, agy, pi) = 7 -> 10 total. Fewer = a policy dropped.
     assert checked == 10, f"expected 10 function policies in the bundle, inspected {checked}"
+
+
+def test_builtin_polly_scopes_self_authored_skills_outside_the_omnigent_repo() -> None:
+    """
+    Built-in Polly ships in the installed package and is frequently run from a
+    workspace that is not an Omnigent checkout, with a user's Omnigent clone
+    elsewhere on the host. Its prompt must then keep self-authored skills in a
+    user-owned place, or scope ``examples/polly/skills/`` to an Omnigent-checkout
+    workspace. Otherwise a "remember this workflow" request writes a private
+    skill into the user's clone, which Polly can then commit and push.
+
+    Fails on a prompt that directs self-authored skills unconditionally into
+    ``examples/polly/skills/<dir>/SKILL.md`` "in this repo" with no checkout or
+    user-owned scoping.
+    """
+    config = (_POLLY_BUNDLE / "config.yaml").read_text(encoding="utf-8")
+    compact = " ".join(config.split())
+
+    unconditional_repo_rule = "examples/polly/skills/<dir>/SKILL.md` in this repo" in compact
+    # The fix may scope the directory or drop the unconditional directive; accept either.
+    scoped_to_checkout_or_user_location = any(
+        marker in compact.lower()
+        for marker in (
+            "omnigent checkout",
+            "git checkout root",
+            "user-owned",
+            "a user location",
+            "not an omnigent checkout",
+        )
+    )
+    assert scoped_to_checkout_or_user_location or not unconditional_repo_rule, (
+        "self-authored skills are directed unconditionally into "
+        "examples/polly/skills/<dir>/SKILL.md 'in this repo' with no Omnigent-checkout "
+        "or user-owned scoping, so a package user's Omnigent clone receives them"
+    )
+
+
+def test_builtin_polly_does_not_open_unsolicited_prs_on_the_upstream_repo() -> None:
+    """
+    Built-in Polly must not open PRs/issues on omnigent-ai/omnigent unless the
+    user explicitly asks. Its blast_radius guardrail runs with
+    ``gate_pushes: false`` (an intentional unattended-batch setting), and that
+    policy never gates ``gh pr create`` at all, so the only possible restraint
+    is a prompt-level rule.
+
+    Fails on a prompt that never mentions omnigent-ai/omnigent and carries no
+    rule against opening PRs/issues there without an explicit request.
+    """
+    config = (_POLLY_BUNDLE / "config.yaml").read_text(encoding="utf-8")
+    compact = " ".join(config.split())
+    assert "omnigent-ai/omnigent" in compact, (
+        "no restraint on opening PRs/issues against omnigent-ai/omnigent without "
+        "an explicit user request"
+    )
