@@ -374,6 +374,11 @@ _TIMER_TOOLS = frozenset({"sys_timer_set", "sys_timer_cancel"})
 # included in the tool surface only when smart routing is enabled.
 _ADVISE_MODELS_TOOLS = frozenset({"sys_advise_models"})
 
+# Built-ins whose /mcp route runs a server-side lifecycle hook beyond policy.
+# sys_read_inbox triggers undrained-subagent-result recovery (runner/mcp_routes.py),
+# so it keeps the /mcp round trip rather than dispatching locally.
+_SERVER_LIFECYCLE_HOOK_TOOLS = frozenset({SysReadInboxTool.name()})
+
 # Priority 5h: Task lifecycle tools — runner-local sys_cancel_task.
 # The only cancellable task ids visible to the LLM are async dispatches
 # and sub-agent handles; observation happens through sys_read_inbox.
@@ -926,15 +931,16 @@ def _must_proxy_through_server_mcp(tool_name: str) -> bool:
     """Return True if a tool must traverse the server /mcp round trip.
 
     Spec-declared MCP-server tools need the server's held credentials and
-    configuration, and ``sys_advise_models`` is intercepted server-side (it
-    has no runner-local execution branch). Every other runner built-in runs
+    configuration, ``sys_advise_models`` is intercepted server-side (it has no
+    runner-local execution branch), and ``sys_read_inbox`` relies on the /mcp
+    route's subagent-result recovery hook. Every other runner built-in runs
     locally; its TOOL_CALL/TOOL_RESULT policy is enforced via the
     ``/policies/evaluate`` endpoint rather than the full /mcp dispatch, which
     avoids a server round trip on every built-in call.
     """
     if not should_dispatch_locally(tool_name):
         return True
-    return tool_name in _ADVISE_MODELS_TOOLS
+    return tool_name in _ADVISE_MODELS_TOOLS or tool_name in _SERVER_LIFECYCLE_HOOK_TOOLS
 
 
 # Granted tool names per live AgentSpec + effective harness, keyed by
@@ -8475,7 +8481,7 @@ async def _apply_builtin_tool_result_policy(
                 "event": {
                     "type": "PHASE_TOOL_RESULT",
                     "data": {"result": output},
-                    "request_data": {"name": tool_name, "tool": tool_name, "args": args},
+                    "request_data": {"name": tool_name, "arguments": args},
                 }
             },
             timeout=_ASK_GATE_DELIVERY_TIMEOUT,

@@ -7,8 +7,9 @@ that tunnels straight back to the same runner. Built-in ``sys_*`` tools run
 on the runner either way, so they now execute locally and enforce
 TOOL_CALL/TOOL_RESULT policy through the server's ``/policies/evaluate``
 endpoint (which short-circuits when no policy applies to the phase).
-Spec-declared MCP-server tools, and the server-intercepted
-``sys_advise_models``, keep the ``/mcp`` round trip.
+Spec-declared MCP-server tools, the server-intercepted ``sys_advise_models``,
+and ``sys_read_inbox`` (whose /mcp route runs subagent-result recovery) keep
+the ``/mcp`` round trip.
 """
 
 from __future__ import annotations
@@ -113,19 +114,23 @@ def _recording_policy_client(
     tool_result: dict[str, Any] | None = None,
     tool_call_body: str | None = None,
     tool_result_body: str | None = None,
+    bodies: list[dict[str, Any]] | None = None,
 ) -> httpx.AsyncClient:
     """Server client that records ``/policies/evaluate`` calls by phase.
 
     ``calls`` receives ``(path, phase)`` per request. ``tool_call`` and
     ``tool_result`` override the verdict for that phase; both default to ALLOW.
     ``tool_call_body``/``tool_result_body`` return a raw 200 body for that phase,
-    used to exercise a malformed, non-JSON policy response.
+    used to exercise a malformed, non-JSON policy response. ``bodies`` receives
+    each decoded request envelope so a test can assert the exact payload.
     """
 
     def _handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         phase = body["event"]["type"]
         calls.append((request.url.path, phase))
+        if bodies is not None:
+            bodies.append(body)
         if phase == "PHASE_TOOL_CALL":
             if tool_call_body is not None:
                 return httpx.Response(200, content=tool_call_body)
@@ -376,3 +381,139 @@ async def test_builtin_tool_result_policy_coerces_non_str_transform(
         "a non-str TOOL_RESULT transform must be coerced via str(), not dropped"
     )
     assert mcp_paths == []
+
+
+async def test_builtin_policy_request_envelopes_match_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local policy evaluation uses the established {name, arguments} envelope.
+
+    A result policy reads ``request_data["arguments"]``; the TOOL_RESULT request
+    must match the server /mcp and native-hook contract, not a bespoke shape.
+    """
+
+    async def _fake_os_env(name: str, *_a: Any, **_kw: Any) -> str:
+        del name
+        return _LOCAL_OUTPUT
+
+    monkeypatch.setattr(tool_dispatch, "_execute_os_env_tool", _fake_os_env)
+
+    arguments = {"path": "notes.txt"}
+    mcp_paths: list[str] = []
+    policy_calls: list[tuple[str, str]] = []
+    policy_bodies: list[dict[str, Any]] = []
+    proxy_client = _recording_proxy_client(mcp_paths)
+    policy_client = _recording_policy_client(policy_calls, bodies=policy_bodies)
+    proxy = ProxyMcpManager(_SESSION_ID, proxy_client)
+    try:
+        await execute_tool(
+            tool_name="sys_os_read",
+            arguments=json.dumps(arguments),
+            agent_spec=_claude_sdk_spec(),
+            conversation_id=_SESSION_ID,
+            server_client=policy_client,
+            mcp_manager=cast(RunnerMcpManager, proxy),
+            effective_harness="claude-sdk",
+        )
+    finally:
+        await proxy_client.aclose()
+        await policy_client.aclose()
+
+    phases = [body["event"]["type"] for body in policy_bodies]
+    assert phases == ["PHASE_TOOL_CALL", "PHASE_TOOL_RESULT"]
+    call_event = policy_bodies[0]["event"]
+    assert call_event["data"] == {"name": "sys_os_read", "arguments": arguments}
+    result_event = policy_bodies[1]["event"]
+    assert result_event["request_data"] == {"name": "sys_os_read", "arguments": arguments}, (
+        "the result-policy envelope must use the established {name, arguments} keys"
+    )
+
+
+async def test_builtin_tool_call_policy_applies_transformed_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A TOOL_CALL ALLOW carrying transformed data runs the approved arguments.
+
+    This is the sequence an approved-ASK transform produces once the endpoint
+    surfaces the policy data; the local path must execute the approved form.
+    """
+    captured_args: list[dict[str, Any]] = []
+
+    async def _fake_os_env(name: str, args: dict[str, Any], *_a: Any, **_kw: Any) -> str:
+        del name
+        captured_args.append(args)
+        return _LOCAL_OUTPUT
+
+    monkeypatch.setattr(tool_dispatch, "_execute_os_env_tool", _fake_os_env)
+
+    transformed = {"path": "redacted.txt"}
+    mcp_paths: list[str] = []
+    policy_calls: list[tuple[str, str]] = []
+    proxy_client = _recording_proxy_client(mcp_paths)
+    policy_client = _recording_policy_client(
+        policy_calls,
+        tool_call={"result": "POLICY_ACTION_ALLOW", "data": transformed},
+    )
+    proxy = ProxyMcpManager(_SESSION_ID, proxy_client)
+    try:
+        output = await execute_tool(
+            tool_name="sys_os_read",
+            arguments=json.dumps({"path": "notes.txt"}),
+            agent_spec=_claude_sdk_spec(),
+            conversation_id=_SESSION_ID,
+            server_client=policy_client,
+            mcp_manager=cast(RunnerMcpManager, proxy),
+            effective_harness="claude-sdk",
+        )
+    finally:
+        await proxy_client.aclose()
+        await policy_client.aclose()
+
+    assert captured_args == [transformed], (
+        "the built-in must execute the policy-transformed arguments, not the original"
+    )
+    assert output == _LOCAL_OUTPUT
+    assert mcp_paths == []
+
+
+async def test_sys_read_inbox_keeps_server_mcp_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sys_read_inbox keeps the /mcp route so its recovery hook still runs.
+
+    Dispatching it locally would skip the server-side undrained-subagent-result
+    recovery, so it must not short-circuit even with a ``ProxyMcpManager``.
+    """
+
+    async def _fail_local(name: str, *_a: Any, **_kw: Any) -> str:
+        del name
+        raise AssertionError("sys_read_inbox must not run on the local path")
+
+    monkeypatch.setattr(tool_dispatch, "_execute_async_inbox_tool", _fail_local)
+
+    mcp_paths: list[str] = []
+    policy_calls: list[tuple[str, str]] = []
+    proxy_client = _recording_proxy_client(mcp_paths)
+    policy_client = _recording_policy_client(policy_calls)
+    proxy = ProxyMcpManager(_SESSION_ID, proxy_client)
+    try:
+        output = await execute_tool(
+            tool_name="sys_read_inbox",
+            arguments=json.dumps({}),
+            agent_spec=_claude_sdk_spec(),
+            conversation_id=_SESSION_ID,
+            server_client=policy_client,
+            mcp_manager=cast(RunnerMcpManager, proxy),
+            effective_harness="claude-sdk",
+        )
+    finally:
+        await proxy_client.aclose()
+        await policy_client.aclose()
+
+    assert mcp_paths == [f"/v1/sessions/{_SESSION_ID}/mcp"], (
+        "sys_read_inbox must keep the /mcp round trip for subagent-result recovery"
+    )
+    assert output == _TUNNELED_OUTPUT
+    assert policy_calls == [], (
+        "a proxied built-in enforces policy on the /mcp path, not /policies/evaluate"
+    )
