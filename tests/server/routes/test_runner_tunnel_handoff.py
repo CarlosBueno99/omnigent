@@ -126,13 +126,17 @@ async def test_disconnect_decision_leaves_a_handed_off_turn_to_its_new_replica(
     assert decision["server_shutting_down"] is False
 
 
+@pytest.mark.parametrize("handed_off", [True, False])
 async def test_handoff_suppresses_even_an_authoritative_exit_report(
     caplog: pytest.LogCaptureFixture,
+    handed_off: bool,
 ) -> None:
-    """A reported runner exit on this replica still leaves a handed-off turn to its new one.
+    """A handoff defers even an authoritative idle exit; without it the turn fails before start.
 
-    The handoff decision short-circuits ahead of the idle-failure policy, so even
-    the strictest ``fail_idle_top_level`` setting must not fail the moved turn.
+    An idle top-level session under ``fail_idle_top_level`` reaches
+    ``failed_before_start`` on an authoritative ``runner_failed_to_start`` exit.
+    The handoff decision short-circuits ahead of that policy, so the moved turn
+    is left to its new replica while the no-handoff control still fails.
     """
     caplog.set_level(logging.INFO)
     session_id = "handoff-exit"
@@ -142,25 +146,23 @@ async def test_handoff_suppresses_even_an_authoritative_exit_report(
         created_at=0,
         updated_at=0,
         runner_id=_RUNNER,
-        live_status="running",
+        live_status="idle",
     )
-    sessions._session_status_cache[session_id] = "running"
-    shutdown_state.mark_runner_handed_off(_RUNNER, reason="rebalance")
-    try:
-        requires_failure = await orchestration._runner_disconnect_requires_failure(
-            session_id,
-            cast(ConversationStore, _UnavailableStore()),
-            origin="runner_offline_sweep",
-            snapshot=snapshot,
-            fail_idle_top_level=True,
-            error_code="runner_failed_to_start",
-        )
-    finally:
-        sessions._session_status_cache.pop(session_id, None)
+    if handed_off:
+        shutdown_state.mark_runner_handed_off(_RUNNER, reason="rebalance")
 
-    assert requires_failure is False
+    requires_failure = await orchestration._runner_disconnect_requires_failure(
+        session_id,
+        cast(ConversationStore, _UnavailableStore()),
+        origin="runner_offline_sweep",
+        snapshot=snapshot,
+        fail_idle_top_level=True,
+        error_code="runner_failed_to_start",
+    )
+
+    assert requires_failure is not handed_off
     [decision] = _event_attributes(caplog, "runner_disconnect_decision")
-    assert decision["decision"] == "handed_off"
+    assert decision["decision"] == ("handed_off" if handed_off else "failed_before_start")
 
 
 @pytest.mark.parametrize("handed_off", [True, False])
