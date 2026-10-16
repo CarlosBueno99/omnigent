@@ -124,6 +124,8 @@ def _run_git(
         )
     except FileNotFoundError as exc:
         raise WorktreeError("git is not installed on the host") from exc
+    except OSError as exc:
+        raise WorktreeError(f"could not run git: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
         raise WorktreeError(f"git command timed out after {_GIT_TIMEOUT_S:.0f}s") from exc
 
@@ -197,6 +199,8 @@ class WorktreeInfo:
         (no branch checked out).
     :param updated_at: Unix epoch seconds of the checked-out HEAD commit, or
         ``None`` when the commit timestamp cannot be resolved.
+    :param locked: ``True`` while git holds the worktree's lock, e.g. an add
+        that is still running or was killed before it finished.
     """
 
     path: str
@@ -204,6 +208,7 @@ class WorktreeInfo:
     is_main: bool
     detached: bool
     updated_at: int | None = None
+    locked: bool = False
 
 
 def _commit_updated_ats(repo_root: str, heads: list[str | None]) -> dict[str, int]:
@@ -257,17 +262,19 @@ def list_worktrees(*, repo_path: str, for_cleanup: bool = False) -> list[Worktre
     if result.returncode != 0:
         raise _git_error("git worktree list failed", result)
 
-    records: list[tuple[str, str | None, bool, str | None]] = []
+    records: list[tuple[str, str | None, bool, str | None, bool]] = []
     path: str | None = None
     branch: str | None = None
     head: str | None = None
     detached = False
+    locked = False
     for line in result.stdout.splitlines():
         if line.startswith("worktree "):
             path = line[len("worktree ") :].strip()
             branch = None
             head = None
             detached = False
+            locked = False
         elif line.startswith("HEAD "):
             head = line[len("HEAD ") :].strip()
         elif line.startswith("branch "):
@@ -275,13 +282,15 @@ def list_worktrees(*, repo_path: str, for_cleanup: bool = False) -> list[Worktre
             branch = ref[len("refs/heads/") :] if ref.startswith("refs/heads/") else ref
         elif line == "detached":
             detached = True
+        elif line == "locked" or line.startswith("locked "):
+            locked = True
         elif line == "" and path is not None:
             # Blank line terminates a record.
-            records.append((path, branch, detached, head))
+            records.append((path, branch, detached, head, locked))
             path = None
     # The porcelain output may omit a trailing blank line for the last record.
     if path is not None:
-        records.append((path, branch, detached, head))
+        records.append((path, branch, detached, head, locked))
     updated_ats = _commit_updated_ats(repo_root, [record[3] for record in records])
     return [
         WorktreeInfo(
@@ -290,10 +299,15 @@ def list_worktrees(*, repo_path: str, for_cleanup: bool = False) -> list[Worktre
             is_main=index == 0,
             detached=worktree_detached,
             updated_at=updated_ats.get(worktree_head) if worktree_head is not None else None,
+            locked=worktree_locked,
         )
-        for index, (worktree_path, worktree_branch, worktree_detached, worktree_head) in enumerate(
-            records
-        )
+        for index, (
+            worktree_path,
+            worktree_branch,
+            worktree_detached,
+            worktree_head,
+            worktree_locked,
+        ) in enumerate(records)
     ]
 
 
@@ -383,20 +397,18 @@ def _ensure_base_resolvable(repo_root: str, base_branch: str) -> None:
         raise WorktreeError(f"base branch does not exist: {base_branch}")
 
 
-def _discard_failed_worktree_add(
-    repo_root: str, branch_name: str, worktree_path: Path, *, delete_branch: bool
-) -> None:
-    """Best-effort rollback after ``git worktree add`` failed for ``worktree_path``.
+def _discard_failed_worktree_add(repo_root: str, branch_name: str, worktree_path: Path) -> None:
+    """Best-effort rollback after ``git worktree add`` failed for a branch this request created.
 
-    A git killed by the timeout can leave the worktree registered (and locked),
-    which would block every retry, so that registration goes first. The branch
-    is deleted only when this request created it: git keeps it when the add
-    fails, and a retry would otherwise hit "branch already exists".
+    Git keeps the branch when the add fails, so a retry would hit "branch already
+    exists". A git killed by the timeout also leaves the half-built worktree
+    registered; git holds a worktree's lock until its add completes, so a locked
+    registration of this branch at the target path is that unfinished add and is
+    removed first. An unlocked one was completed by another request and is kept.
 
     :param repo_root: Absolute main work-tree root, e.g. ``"/Users/alice/myrepo"``.
-    :param branch_name: Branch the failed add checked out, e.g. ``"feature/login"``.
+    :param branch_name: Branch this request created, e.g. ``"feature/login"``.
     :param worktree_path: Directory the failed add targeted.
-    :param delete_branch: ``True`` when this request created ``branch_name``.
     """
     try:
         target = os.path.normcase(os.path.realpath(worktree_path))
@@ -408,18 +420,15 @@ def _discard_failed_worktree_add(
             ),
             None,
         )
-        # Only this request's half-built worktree: another request may have
-        # created a worktree at the same sanitized directory name.
-        if registered is not None and registered.branch == branch_name:
+        if registered is not None and registered.branch == branch_name and registered.locked:
             removed = _run_git(
                 ["worktree", "remove", "--force", "--force", registered.path], cwd=repo_root
             )
             if removed.returncode != 0:
                 raise _git_error("git worktree remove failed", removed)
-        if delete_branch:
-            deleted = _run_git(["branch", "-D", branch_name], cwd=repo_root)
-            if deleted.returncode != 0:
-                raise _git_error("git branch -D failed", deleted)
+        deleted = _run_git(["branch", "-D", branch_name], cwd=repo_root)
+        if deleted.returncode != 0:
+            raise _git_error("git branch -D failed", deleted)
     except WorktreeError:
         _logger.warning(
             "Could not roll back the failed worktree add at %s", worktree_path, exc_info=True
@@ -568,9 +577,10 @@ def create_worktree(
         if result.returncode != 0:
             raise _git_error("git worktree add failed", result)
     except WorktreeError:
-        _discard_failed_worktree_add(
-            repo_root, branch_name, worktree_path, delete_branch=not existing_branch
-        )
+        # Existing-branch mode gets no rollback: a worktree of that branch at this
+        # path cannot be told apart from one another request just completed.
+        if not existing_branch:
+            _discard_failed_worktree_add(repo_root, branch_name, worktree_path)
         raise
     if validated_commit is not None:
         try:
