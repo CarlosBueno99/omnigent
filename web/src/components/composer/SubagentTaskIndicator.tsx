@@ -27,13 +27,6 @@ interface IndicatorChild {
   statusLabel: string;
 }
 
-// Shared with the Agents rail and approval cards so every surface names a
-// worker alike; a row with no title, name or tool reads "Sub-agent", not its id.
-function subagentLabel(child: ChildSessionInfo): string {
-  const label = childPrimaryLabel(child);
-  return label === child.id ? "Sub-agent" : label;
-}
-
 function indicatorChild(child: ChildSessionInfo): IndicatorChild | null {
   const status = childStatus(child);
   if (status.activity === "launching" || status.activity === "working") {
@@ -105,7 +98,7 @@ function SubagentNavigationRow({
   onNavigate: (event: MouseEvent<HTMLAnchorElement>) => void;
 }) {
   const search = sessionNavigationSearch(useLocation().search);
-  const label = subagentLabel(child);
+  const label = childPrimaryLabel(child, "Sub-agent");
   const tool = child.tool?.trim();
   const showTool = !!tool && tool !== label;
 

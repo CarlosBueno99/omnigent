@@ -19,9 +19,10 @@ import {
  * follows it, e.g. ``"Deploy PR41 via web ops · deploy-profile-page"``.
  *
  * @param child - One child-session summary from the poll or stream.
+ * @param fallback - Label for a row with no name at all; defaults to the id.
  * @returns The label shown beside the child icon.
  */
-export function childPrimaryLabel(child: ChildSessionInfo): string {
+export function childPrimaryLabel(child: ChildSessionInfo, fallback: string = child.id): string {
   // User-added rows use the reserved "ui:<agent>:<name>" title sentinel;
   // LLM-spawned titles cannot start with "ui:" because the spec validator
   // rejects "ui" as a sub-agent name.
@@ -35,15 +36,16 @@ export function childPrimaryLabel(child: ChildSessionInfo): string {
     childWrapper === ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER ||
     childWrapper === CLAUDE_NATIVE_SUBAGENT_WRAPPER;
   if (isNativeSubagent && !isUserAdded) {
-    return child.tool ?? child.title ?? child.id;
+    return child.tool ?? child.title ?? fallback;
   }
+  const trimmed = (value: string | null | undefined) => value?.trim() || null;
   let titleTask: string | null = null;
   if (child.title?.includes(":")) {
     const titleSuffix = child.title.split(":").slice(1).join(":");
     if (titleSuffix) titleTask = titleSuffix;
   }
-  const handle = child.session_name ?? titleTask;
-  const summary = child.task_summary;
+  const handle = trimmed(child.session_name) ?? trimmed(titleTask);
+  const summary = trimmed(child.task_summary);
   if (summary && handle && handle !== summary) return `${summary} · ${handle}`;
-  return summary ?? handle ?? child.title ?? child.tool ?? child.id;
+  return summary ?? handle ?? trimmed(child.title) ?? trimmed(child.tool) ?? fallback;
 }

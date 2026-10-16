@@ -30,12 +30,6 @@ function child(overrides: Partial<ChildSessionInfo> = {}): ChildSessionInfo {
 }
 
 describe("childPrimaryLabel", () => {
-  it("surfaces the orchestrator-chosen handle, not only the summary", () => {
-    // A non-ordinal, human-meaningful handle (unlike the auto "researcher-1"
-    // spawn key) must stay visible on the worker's row.
-    expect(childPrimaryLabel(child())).toContain(HANDLE);
-  });
-
   it("leads with the summary and follows it with the handle", () => {
     expect(childPrimaryLabel(child())).toBe(`${SUMMARY} · ${HANDLE}`);
   });
@@ -54,6 +48,17 @@ describe("childPrimaryLabel", () => {
 
   it("does not repeat a handle that equals the summary", () => {
     expect(childPrimaryLabel(child({ task_summary: HANDLE }))).toBe(HANDLE);
+  });
+
+  it("treats whitespace-only fields as missing", () => {
+    expect(childPrimaryLabel(child({ task_summary: "   " }))).toBe(HANDLE);
+    expect(childPrimaryLabel(child({ session_name: " ", title: " " }))).toBe(SUMMARY);
+  });
+
+  it("uses the caller's fallback for a row with no name at all", () => {
+    const nameless = child({ task_summary: null, session_name: null, title: null, tool: null });
+    expect(childPrimaryLabel(nameless)).toBe("child-1");
+    expect(childPrimaryLabel(nameless, "Sub-agent")).toBe("Sub-agent");
   });
 
   it("labels native sub-agents by their resolved tool, not the correlation id", () => {

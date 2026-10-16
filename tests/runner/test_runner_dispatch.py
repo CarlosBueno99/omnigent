@@ -6843,11 +6843,9 @@ async def test_session_list_maps_children_and_skips_closed() -> None:
                 "sys_session_list", "{}", conversation_id="conv_parent", server_client=client
             )
         )
-    # c3 (explicitly closed despite its mixed-type label map), c5
-    # (legacy title tombstone), and c4
-    # (no colon) dropped; the ui:-added child surfaces under its bound
-    # agent + label. The generated task_summary rides along so the caller
-    # can name a child the way the Agents rail does.
+    # c3 (explicitly closed despite its mixed-type label map), c5 (legacy title
+    # tombstone) and c4 (no colon) dropped; the ui:-added child surfaces under
+    # its bound agent + label, and task_summary rides along from the child row.
     assert out["sub_agents"] == [
         {
             "agent": "researcher",
