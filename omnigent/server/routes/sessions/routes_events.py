@@ -1658,6 +1658,11 @@ def register_events_routes(
                 )
             except Exception:
                 pass
+            # A stop that reached no live runner leaves the pending inputs
+            # above live for the next relaunch; flag that so the web client
+            # keeps its optimistic bubbles. Delivered stops omit the flag.
+            if not stop_delivered:
+                return {"queued": False, "stop_delivered": False}
             return {"queued": False}
         if body.type == _APPROVAL_TYPE:
             # Deliver the verdict through the shared resolver: it

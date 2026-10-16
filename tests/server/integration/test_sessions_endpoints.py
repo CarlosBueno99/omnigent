@@ -11050,6 +11050,10 @@ async def test_stop_session_that_did_not_land_keeps_queued_native_messages_pendi
         response = await _press_stop_session(client, session_id)
 
         assert response.status_code == expected_status, response.text
+        if expected_status == 202:
+            # The no-runner stop is a no-op success, so it reports that nothing
+            # was delivered; the client keeps the queued bubbles on this signal.
+            assert response.json() == {"queued": False, "stop_delivered": False}, response.text
         snapshot = pending_inputs.snapshot_for(session_id)
         assert [entry["pending_id"] for entry in snapshot] == [queued]
         assert pending_inputs.has_pending(session_id)

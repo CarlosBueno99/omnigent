@@ -2110,9 +2110,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   dropPendingUserMessages: (conversationId, tempIds) => {
     const dropping = new Set(tempIds);
     setterFor(conversationId)((s) => {
-      // A draft awaiting model readiness is unsent, so it stays the person's to send.
-      // Only bubbles present when Stop began were settled server-side; a send that
-      // landed while the stop was in flight is still live, so it keeps its bubble.
+      // A draft awaiting model readiness is unsent, so it is never dropped;
+      // the caller already narrowed tempIds to the bubbles settled by the stop.
       const kept = s.pendingUserMessages.filter(
         (p) => p.initialDraft !== undefined || !dropping.has(p.tempId),
       );

@@ -967,7 +967,11 @@ Request body matches `SessionEventInput`:
                                   preserved. On native-terminal sessions
                                   the web messages still queued are
                                   settled as for `interrupt` (see below).
-                                  Returns `{queued: false}`.
+                                  Returns `{queued: false}` when the stop
+                                  reached a live runner. When it reached no
+                                  runner nothing was settled, so the response
+                                  adds `stop_delivered: false` and the queued
+                                  web messages stay live for the relaunch.
       - "external_conversation_item"
                                 — internal terminal-observed item
                                   envelope; appends/broadcasts without
@@ -1068,6 +1072,7 @@ Request body matches `SessionEventInput`:
 {"queued": false}                           # "interrupt" and status/control bypasses
 {"queued": false, "item_id": "item_..."}    # "external_conversation_item"
 {"queued": true, "pending_id": "pending_..."} # native-terminal "message" (see below)
+{"queued": false, "stop_delivered": false}  # "stop_session" that reached no live runner
 [{"queued": false, "item_id": "item_..."}, ...] # top-level event array
 
 400 Bad Request — unknown `type`, or `data` fails the per-type schema

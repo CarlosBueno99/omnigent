@@ -2214,6 +2214,20 @@ describe("useStopSession pending bubbles", () => {
       "pend_unposted",
     ]);
   });
+
+  it("keeps the bubbles when the stop reached no live runner", async () => {
+    // A 202 that carries stop_delivered: false means the stop never reached a
+    // runner, so nothing was settled server-side and the queued messages stay
+    // live for the relaunch; their bubbles must survive the success handler.
+    fetchMock.mockResolvedValueOnce(mockResponse({ queued: false, stop_delivered: false }));
+    const { result } = renderStop();
+
+    result.current.mutate("conv_fg");
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(bubbleIds("conv_fg")).toEqual(["pend_fg"]);
+    expect(bubbleIds("conv_bg")).toEqual(["pend_bg"]);
+  });
 });
 
 describe("useBulkArchiveConversations", () => {

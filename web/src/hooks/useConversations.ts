@@ -1283,10 +1283,12 @@ export function useLeaveSession() {
  * so a snapshot left stale at the pre-stop state would clobber the
  * now-stopped state and the header's Stop gate would lag.
  *
- * Also drops the session's pending user bubbles: the server settles the web
- * messages queued before the stop without a `session.input.consumed` receipt.
+ * Also drops the session's pending user bubbles: a delivered stop settles the
+ * web messages queued before it without a `session.input.consumed` receipt.
  * Only the bubbles present when the stop began are dropped, so a message sent
  * while the stop is in flight — which the server keeps live — keeps its bubble.
+ * A stop that reached no live runner (`stop_delivered: false`) settles nothing,
+ * so every bubble is kept for the relaunch.
  */
 export function useStopSession() {
   const queryClient = useQueryClient();
@@ -1304,8 +1306,13 @@ export function useStopSession() {
           .map((p) => p.tempId) ?? [];
       return { stoppedTempIds };
     },
-    onSuccess: (_data, id, context) => {
-      useChatStore.getState().dropPendingUserMessages(id, context?.stoppedTempIds ?? []);
+    onSuccess: (data, id, context) => {
+      // Only a delivered stop settled the queued messages server-side. When it
+      // reached no live runner (``stop_delivered: false``) they stay live for
+      // the relaunch, so keep their optimistic bubbles rather than dropping.
+      if (data?.stopDelivered !== false) {
+        useChatStore.getState().dropPendingUserMessages(id, context?.stoppedTempIds ?? []);
+      }
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
