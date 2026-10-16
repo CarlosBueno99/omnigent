@@ -711,18 +711,51 @@ describe("side-chat slash commands", () => {
     skillsFixture.current = { skills: [], skillsStatus: "loading" };
     renderPane(<SideChatPane childId={childId} />);
     expect(skillsFixture.lastOptions?.starting).toBe(true);
+    // Submitting a lone command while discovery is in flight holds it locally
+    // instead of leaking "/review" to the agent as plaintext.
+    typeSlash("/review");
+    fireEvent.click(screen.getByTestId("side-chat-send"));
+    expect(send).not.toHaveBeenCalled();
+    expect(sendSlashCommand).not.toHaveBeenCalled();
   });
 
-  it("sends a typed skill as plaintext on a native terminal harness", () => {
-    // beforeEach binds the child to codex-native: the vendor TUI reads "/review" itself.
+  it("sends a lone command with a quote even while skill discovery loads", () => {
+    conversationRegistry
+      .acquire(childId)
+      .setState({ sessionHarness: "claude-sdk", sessionStatus: "idle" });
+    useChatStore.setState({
+      sideChatComposers: {
+        [childId]: { text: "", files: [], quotes: ["a selection"] },
+      },
+    });
+    skillsFixture.current = { skills: [], skillsStatus: "loading" };
+    renderPane(<SideChatPane childId={childId} selectionParentId="conv_main" />);
+    typeSlash("/review");
+    // A quote always routes as an ordinary message, so the discovery hold must
+    // not swallow it: the command goes out with the quote instead of stalling.
+    fireEvent.click(screen.getByTestId("side-chat-send"));
+    expect(send).toHaveBeenCalledExactlyOnceWith(
+      "> a selection\n\n/review",
+      "agent_side",
+      undefined,
+      { pinnedConversationId: childId },
+    );
+    expect(sendSlashCommand).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "a typed skill", input: "/review 123", menuTestId: "slash-menu-item-review" },
+    { label: "/help", input: "/help", menuTestId: "slash-menu-item-help" },
+  ])("sends $label as plaintext on a native terminal harness", ({ input, menuTestId }) => {
+    // beforeEach binds the child to codex-native: the vendor TUI reads the typed
+    // text itself, so no menu opens and neither local path runs.
     conversationRegistry.acquire(childId).setState({ sessionStatus: "idle" });
     skillsFixture.current = { skills: [review], skillsStatus: "ready" };
     renderPane(<SideChatPane childId={childId} />);
-    typeSlash("/review 123");
-    // No menu: a disconnected skill list would be misleading when the TUI owns slashes.
-    expect(screen.queryByTestId("slash-menu-item-review")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Send side question" }));
-    expect(send).toHaveBeenCalledExactlyOnceWith("/review 123", "agent_side", undefined, {
+    typeSlash(input);
+    expect(screen.queryByTestId(menuTestId)).toBeNull();
+    fireEvent.click(screen.getByTestId("side-chat-send"));
+    expect(send).toHaveBeenCalledExactlyOnceWith(input, "agent_side", undefined, {
       pinnedConversationId: childId,
     });
     expect(sendSlashCommand).not.toHaveBeenCalled();
@@ -768,21 +801,6 @@ describe("side-chat slash commands", () => {
     // command text so the user can edit it before sending.
     expect(input.value.startsWith("/help")).toBe(true);
     expect(send).not.toHaveBeenCalled();
-    expect(sendSlashCommand).not.toHaveBeenCalled();
-  });
-
-  it("sends /help as plaintext on a native terminal harness", () => {
-    // beforeEach binds the child to codex-native: built-ins stay out, so the
-    // vendor TUI receives the typed text itself.
-    conversationRegistry.acquire(childId).setState({ sessionStatus: "idle" });
-    skillsFixture.current = { skills: [review], skillsStatus: "ready" };
-    renderPane(<SideChatPane childId={childId} />);
-    typeSlash("/help");
-    expect(screen.queryByTestId("slash-menu-item-help")).toBeNull();
-    fireEvent.click(screen.getByTestId("side-chat-send"));
-    expect(send).toHaveBeenCalledExactlyOnceWith("/help", "agent_side", undefined, {
-      pinnedConversationId: childId,
-    });
     expect(sendSlashCommand).not.toHaveBeenCalled();
   });
 

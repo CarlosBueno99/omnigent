@@ -575,12 +575,13 @@ function SideChatComposer({
       return;
     }
     if (busy || (trimmed.length === 0 && files.length === 0) || agentId === null) return;
-    // A lone command token with skill discovery in flight has nothing to run yet.
-    if (slashCompletion.pendingCompletion) return;
     // On in-process harnesses /help and skills resolve locally; native TUIs
     // (claude-native, codex-native) read the text themselves, and a quote or
     // attachment is always an ordinary message.
     const routeLocally = !nativeSession && quotes.length === 0 && files.length === 0;
+    // A lone command token with skill discovery in flight has nothing to run
+    // yet; only hold when the submission would route locally.
+    if (routeLocally && slashCompletion.pendingCompletion) return;
     const builtin = routeLocally
       ? matchSlashCommandInvocation(trimmed, Object.keys(sideChatBuiltins))
       : null;
@@ -638,7 +639,11 @@ function SideChatComposer({
           }}
         />
       )}
-      {commandNotice !== null && <ComposerFeedbackRow>{commandNotice}</ComposerFeedbackRow>}
+      {commandNotice !== null && (
+        <ComposerFeedbackRow data-testid="side-chat-command-notice">
+          {commandNotice}
+        </ComposerFeedbackRow>
+      )}
       <ChatComposer
         keyboard={{ submitWithModEnter: false, preventsKeyboardSubmit: false }}
         input={{

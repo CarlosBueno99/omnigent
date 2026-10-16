@@ -111,7 +111,8 @@ def side_chat_host_session(
         try:
             yield (live_server, session_id)
         finally:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+            with contextlib.suppress(httpx.HTTPError):
+                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
 
 
 def _items(base_url: str, session_id: str) -> list[dict[str, Any]]:
@@ -223,6 +224,7 @@ def test_side_chat_slash_menu_and_skill_invocation(
 
     # Facet B: submitting "/<skill>" from the side chat should invoke the skill —
     # a receipt appears and the server records a slash_command (not plaintext).
+    assistant_before = pane.locator(_ASSISTANT).count()
     side_input.fill(f"/{_SKILL_NAME} {side_token}-invoke")
     page.get_by_test_id("side-chat-send").click()
     if not _poll(
@@ -233,6 +235,13 @@ def test_side_chat_slash_menu_and_skill_invocation(
         problems.append(
             "facet B: the side-chat /skill was not invoked (sent to the agent as plaintext)"
         )
+    # The receipt must survive the skill's own reply: once a later assistant turn
+    # streams in, the slash-command card still has to be visible so the user can
+    # see that a command ran.
+    if not _poll(lambda: pane.locator(_ASSISTANT).count() > assistant_before, timeout_s=60):
+        problems.append("facet B: the invoked skill never produced an assistant reply")
+    elif pane.get_by_test_id("slash-command-card").count() <= base_cards:
+        problems.append("facet B: the slash-command receipt disappeared after the skill replied")
 
     # Facet C: a built-in typed in the side chat should be handled locally, not
     # forwarded to the agent as a turn. Assert the local notice actually rendered
@@ -241,7 +250,7 @@ def test_side_chat_slash_menu_and_skill_invocation(
     side_input.fill("/help")
     page.get_by_test_id("side-chat-send").click()
     if not _poll(
-        lambda: pane.get_by_text("Show available slash commands").count() > 0, timeout_s=10
+        lambda: pane.get_by_test_id("side-chat-command-notice").count() > 0, timeout_s=10
     ):
         problems.append("facet C: the local /help notice never rendered in the side chat")
     if _poll(lambda: _user_said(base_url, child_id, "/help"), timeout_s=20):
