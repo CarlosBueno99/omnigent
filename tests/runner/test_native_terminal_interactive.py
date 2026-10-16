@@ -75,7 +75,7 @@ async def test_observer_records_the_redacted_pane_of_a_stalled_terminal(
     monkeypatch.setenv("OMNIGENT_HARNESS_STDERR_ENABLED", "1")
     terminal = _FakeTerminal([_STALLED_SCREEN])
 
-    with caplog.at_level(logging.WARNING, logger="omnigent.runner.app"):
+    with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
         await _observe_terminal_interactive(
             session_id="conv_stalled",
             terminal_id="terminal_claude_main",
@@ -181,7 +181,7 @@ async def test_observer_cancelled_after_the_slow_mark_keeps_its_record(
             if getattr(record, "event_name", None) == "terminal_interactive_slow"
         ]
 
-    with caplog.at_level(logging.WARNING, logger="omnigent.runner.app"):
+    with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
         task = asyncio.create_task(
             _observe_terminal_interactive(
                 session_id="conv_lost",
@@ -208,6 +208,48 @@ async def test_observer_cancelled_after_the_slow_mark_keeps_its_record(
         in {"terminal_interactive", "terminal_interactive_unobserved"}
         for record in caplog.records
     )
+
+
+class _UnreadableJoinedTerminal(_FakeTerminal):
+    """The readiness polls work, but the joined read for diagnostics fails."""
+
+    async def read(self, *, join_wrapped: bool = False) -> dict[str, object]:
+        if join_wrapped:
+            raise RuntimeError("tmux capture-pane failed")
+        return await super().read()
+
+
+@pytest.mark.asyncio
+async def test_observer_stays_content_free_when_the_pane_cannot_be_read(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed capture leaves the slow and deadline records without pane text."""
+    monkeypatch.setenv("OMNIGENT_HARNESS_STDERR_ENABLED", "1")
+    terminal = _UnreadableJoinedTerminal([_STALLED_SCREEN])
+
+    with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
+        await _observe_terminal_interactive(
+            session_id="conv_unreadable",
+            terminal_id="terminal_claude_main",
+            harness="claude-native",
+            readiness_signal="claude_composer",
+            instance=terminal,  # type: ignore[arg-type]
+            is_interactive=lambda _pane: False,
+            timeout_s=0.05,
+            slow_after_s=0.0,
+            poll_interval_s=0.0,
+        )
+
+    records = [r for r in caplog.records if getattr(r, "event_name", None)]
+    assert [r.event_name for r in records] == [
+        "terminal_interactive_slow",
+        "terminal_interactive_unobserved",
+    ]
+    for record in records:
+        assert record.attributes["sign_in_prompt_detected"] is False
+        assert "terminal_last_output" not in record.attributes
+        assert "Terminal output:" not in record.getMessage()
 
 
 @pytest.mark.asyncio

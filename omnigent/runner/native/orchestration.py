@@ -427,7 +427,8 @@ async def _observe_terminal_interactive(
             if not slow_logged and loop.time() >= started_at + slow_after_s:
                 slow_logged = True
                 tail, sign_in_prompt = await _stalled_pane_diagnostics(instance)
-                _logger.warning(
+                # Most slow starts still succeed, so this stays below the deadline's WARNING.
+                _logger.info(
                     "Native terminal is not interactive yet: session=%s harness=%s "
                     "terminal_id=%s waited_s=%.0f%s",
                     session_id,
@@ -442,8 +443,7 @@ async def _observe_terminal_interactive(
                         terminal_id=terminal_id,
                         terminal_instance_id=instance.diagnostic_id,
                         readiness_signal=readiness_signal,
-                        sign_in_prompt_detected=sign_in_prompt,
-                        terminal_last_output=tail,
+                        **_pane_attributes(tail, sign_in_prompt),
                     ),
                 )
             await asyncio.sleep(poll_interval_s)
@@ -472,8 +472,7 @@ async def _observe_terminal_interactive(
                 terminal_instance_id=instance.diagnostic_id,
                 readiness_signal=readiness_signal,
                 reason=type(exc).__name__,
-                sign_in_prompt_detected=sign_in_prompt,
-                terminal_last_output=tail,
+                **_pane_attributes(tail, sign_in_prompt),
             ),
         )
 
@@ -5671,6 +5670,16 @@ def _redacted_terminal_text(text: str) -> str | None:
 def _pane_tail_message(tail: str | None) -> str:
     """Append a captured pane to a log message; the local runner log renders only messages."""
     return f"\nTerminal output:\n{tail}" if tail else ""
+
+
+def _pane_attributes(tail: str | None, sign_in_prompt: bool | None) -> dict[str, object]:
+    """Pane attributes for a startup record: only what a live pane read established."""
+    attributes: dict[str, object] = {}
+    if sign_in_prompt is not None:
+        attributes["sign_in_prompt_detected"] = sign_in_prompt
+    if tail:
+        attributes["terminal_last_output"] = tail
+    return attributes
 
 
 def _startup_terminal_output(instance: TerminalInstance) -> str | None:
