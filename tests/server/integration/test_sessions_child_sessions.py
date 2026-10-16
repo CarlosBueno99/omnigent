@@ -616,12 +616,12 @@ async def test_child_sessions_busy_reflects_relay_status_cache(
 
 @pytest.mark.parametrize(
     "live_status,expected_busy",
-    [("running", True), ("waiting", True), ("idle", False)],
+    [("running", True), ("waiting", True), ("idle", False), (None, False)],
 )
 async def test_child_sessions_busy_falls_back_to_persisted_live_status(
     client: httpx.AsyncClient,
     db_uri: str,
-    live_status: str,
+    live_status: str | None,
     expected_busy: bool,
 ) -> None:
     """
@@ -634,7 +634,8 @@ async def test_child_sessions_busy_falls_back_to_persisted_live_status(
 
     :param client: The test HTTP client.
     :param db_uri: Per-test SQLite database URI.
-    :param live_status: Persisted status written to the child's row.
+    :param live_status: Persisted status written to the child's row, or
+        ``None`` for a child that never reported one.
     :param expected_busy: Expected ``busy`` field value in the summary.
     """
     from omnigent.server.routes import sessions as sessions_module
@@ -648,7 +649,8 @@ async def test_child_sessions_busy_falls_back_to_persisted_live_status(
         title="researcher:auth",
         agent_id=session["agent_id"],
     )
-    conv_store.set_session_live_status(child.id, live_status)
+    if live_status is not None:
+        conv_store.set_session_live_status(child.id, live_status)
     sessions_module._session_status_cache.pop(child.id, None)
 
     resp = await client.get(f"/v1/sessions/{session['id']}/child_sessions")

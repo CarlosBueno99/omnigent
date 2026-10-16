@@ -1196,12 +1196,13 @@ function SupportedForkSessionForm({
   // Sub-agents the source still has in flight stay with it — a clone never
   // adopts them — so say up front where their results will land. The cached
   // child list may predate a child's turn start, so refetch it on open, and
-  // ask for every child: an older running worker can sit past the first page.
+  // walk every page: an older running worker can sit behind newer idle ones.
   useEffect(() => {
     void queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(sourceSessionId) });
   }, [queryClient, sourceSessionId]);
   const { children: sourceChildren } = useChildSessions(sourceSessionId, null, {
     limit: CHILD_SESSIONS_MAX_LIMIT,
+    allPages: true,
   });
   const runningSubagentCount = sourceChildren.filter((child) => child.busy).length;
 

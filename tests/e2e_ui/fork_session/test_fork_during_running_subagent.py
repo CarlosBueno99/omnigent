@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 import pytest
 from playwright.sync_api import Browser, Page, expect
+from playwright.sync_api import Error as PlaywrightError
 
 from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
 from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm
@@ -170,10 +171,14 @@ def _configure_fork_cancel_turn(mock_url: str, *, cancel_token: str, worker_id: 
 
 def _create_orchestrator_session(base_url: str, runner_id: str, yaml_text: str) -> str:
     bundle = bundle_files({f"{_ORCHESTRATOR_NAME}.yaml": yaml_text.encode()})
-    create = post_session_bundle(httpx.post, f"{base_url}/v1/sessions", bundle, timeout=30.0)
+    create = post_session_bundle(
+        httpx.post, f"{base_url}/v1/sessions", bundle, timeout=30.0, trust_env=False
+    )
     create.raise_for_status()
     session_id = str(create.json()["session_id"])
-    bind_session_runner(httpx.patch, base_url, session_id, runner_id, timeout=10.0)
+    bind_session_runner(
+        httpx.patch, base_url, session_id, runner_id, timeout=10.0, trust_env=False
+    )
     return session_id
 
 
@@ -193,13 +198,17 @@ def _wait_gate_pending(mock_url: str, timeout: float = 60.0) -> None:
 
 
 def _child_sessions(base_url: str, session_id: str) -> list[dict[str, Any]]:
-    resp = httpx.get(f"{base_url}/v1/sessions/{session_id}/child_sessions", timeout=10.0)
+    resp = httpx.get(
+        f"{base_url}/v1/sessions/{session_id}/child_sessions", timeout=10.0, trust_env=False
+    )
     resp.raise_for_status()
     return list(resp.json().get("data", []))
 
 
 def _items(base_url: str, session_id: str) -> list[dict[str, Any]]:
-    resp = httpx.get(f"{base_url}/v1/sessions/{session_id}/items?limit=200", timeout=10.0)
+    resp = httpx.get(
+        f"{base_url}/v1/sessions/{session_id}/items?limit=200", timeout=10.0, trust_env=False
+    )
     resp.raise_for_status()
     return list(resp.json()["data"])
 
@@ -280,8 +289,11 @@ def _expand_tool_card(page: Page, tool_name: str) -> None:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline and not (trigger.count() and trigger.is_visible()):
         for fold in page.get_by_role("button", name=_FOLD_LABEL).all():
-            if fold.get_attribute("aria-expanded") != "true":
-                fold.click()
+            try:
+                if fold.get_attribute("aria-expanded") != "true":
+                    fold.click()
+            except PlaywrightError:
+                continue
         page.wait_for_timeout(500)
     expect(trigger).to_be_visible(timeout=5_000)
     if trigger.get_attribute("aria-expanded") != "true":
@@ -299,6 +311,12 @@ def _record_on_screen(page: Page, obs: dict[str, Any], key: str, pattern: str) -
     except AssertionError:
         visible = False
     obs.setdefault("on_screen", {})[key] = visible
+
+
+def _pace(seconds: float) -> None:
+    """Pause only while filming, so each step stays readable; unrecorded runs skip it."""
+    if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+        time.sleep(seconds)
 
 
 def _save(evidence_dir: Path | None, name: str, payload: Any) -> None:
@@ -353,33 +371,37 @@ def _run_journey(
         _record_on_screen(page, obs, "dispatch_ack", re.escape(_DISPATCH_ACK))
         _record_on_screen(page, obs, "dispatch_receipt", r"Result will appear in your inbox")
         _screenshot(page, evidence_dir, "01-original-dispatched.png")
-        time.sleep(2)
+        _pace(2)
 
         # 2. Fork from the header menu while the worker is still running.
         page.get_by_test_id("header-conversation-actions").click()
         page.get_by_role("menuitem", name="Fork", exact=True).click()
         dialog = page.get_by_test_id("fork-session-dialog")
         expect(dialog).to_be_visible(timeout=15_000)
-        time.sleep(1.5)
+        _pace(1.5)
         _record_on_screen(
             page, obs, "dialog_subagent_warning", r"sub-agents? (is|are) still running"
         )
         obs["dialog_text"] = dialog.inner_text()
         _screenshot(page, evidence_dir, "02-fork-dialog.png")
-        time.sleep(2)
+        _pace(2)
         page.get_by_test_id("fork-session-submit").click()
         expect(page).to_have_url(
             re.compile(rf"/c/(?!{re.escape(original_id)})[0-9a-f]{{32}}"), timeout=30_000
         )
         fork_id = page.url.rsplit("/c/", 1)[1].split("?", 1)[0]
         obs["fork_id"] = fork_id
-        fork_snapshot = httpx.get(f"{base_url}/v1/sessions/{fork_id}", timeout=10.0)
+        fork_snapshot = httpx.get(
+            f"{base_url}/v1/sessions/{fork_id}", timeout=10.0, trust_env=False
+        )
         obs["fork_snapshot"] = fork_snapshot.json() if fork_snapshot.status_code == 200 else None
         # A non-coding fork is created unbound; bind it to a runner so it can take a turn.
-        bind_session_runner(httpx.patch, base_url, fork_id, runner_id, timeout=10.0)
+        bind_session_runner(
+            httpx.patch, base_url, fork_id, runner_id, timeout=10.0, trust_env=False
+        )
         page.reload()
         expect(page.get_by_label(_COMPOSER_LABEL)).to_be_visible(timeout=30_000)
-        time.sleep(1.5)
+        _pace(1.5)
 
         # 3. In the fork, ask for status.
         _send(page, f"Status check: what is the worker doing right now? {status_token}")
@@ -396,7 +418,7 @@ def _run_journey(
         obs["fork_children_after_status"] = _child_sessions(base_url, fork_id)
         _save(evidence_dir, "fork-items-after-status.json", fork_items)
         _screenshot(page, evidence_dir, "03-fork-status.png")
-        time.sleep(3)
+        _pace(3)
 
         # 4. In the fork, try to stop the worker.
         _send(page, f"Please stop the worker now. {cancel_token}")
@@ -412,12 +434,12 @@ def _run_journey(
         obs["fork_item_count_before_finish"] = len(fork_items)
         _save(evidence_dir, "fork-items-after-cancel.json", fork_items)
         _screenshot(page, evidence_dir, "04-fork-cancel.png")
-        time.sleep(3)
+        _pace(3)
 
         # 5. Watch the original while the worker finishes.
         page.goto(f"{base_url}/c/{original_id}")
         expect(page.get_by_label(_COMPOSER_LABEL)).to_be_visible(timeout=30_000)
-        time.sleep(1.5)
+        _pace(1.5)
         httpx.post(f"{mock_url}/gate/release", timeout=5.0, trust_env=False).raise_for_status()
         obs["released_at"] = time.time()
         original_woke = False
@@ -435,7 +457,7 @@ def _run_journey(
         obs["original_has_marker"] = marker in _transcript_text(original_items)
         _save(evidence_dir, "original-items-after-finish.json", original_items)
         _screenshot(page, evidence_dir, "05-original-woke.png")
-        time.sleep(3)
+        _pace(3)
 
         # 6. Back in the fork: does anything arrive?
         page.goto(f"{base_url}/c/{fork_id}")
@@ -448,20 +470,22 @@ def _run_journey(
             time.sleep(2.0)
         page.reload()
         expect(page.get_by_label(_COMPOSER_LABEL)).to_be_visible(timeout=30_000)
-        time.sleep(3)
+        _pace(3)
         fork_items = _items(base_url, fork_id)
         obs["fork_after_marker_on_screen"] = page.get_by_text(marker).count() > 0
         obs["fork_after_text"] = _transcript_text(fork_items)
         obs["fork_after_messages"] = _transcript_text(fork_items, include_tool_outputs=False)
         obs["fork_item_count_after_finish"] = len(fork_items)
         obs["fork_children_after_finish"] = _child_sessions(base_url, fork_id)
-        worker_snapshot = httpx.get(f"{base_url}/v1/sessions/{worker_id}", timeout=10.0)
+        worker_snapshot = httpx.get(
+            f"{base_url}/v1/sessions/{worker_id}", timeout=10.0, trust_env=False
+        )
         obs["worker_snapshot"] = (
             worker_snapshot.json() if worker_snapshot.status_code == 200 else None
         )
         _save(evidence_dir, "fork-items-after-finish.json", fork_items)
         _screenshot(page, evidence_dir, "06-fork-after-finish.png")
-        time.sleep(3)
+        _pace(3)
     finally:
         context.close()
     return obs
@@ -549,7 +573,7 @@ def test_fork_during_running_subagent_keeps_fork_informed(
     if (
         obs["fork_children_after_status"]
         or worker_id in obs["fork_listed_sub_agent_ids"]
-        or obs["fork_inbox_output"] != _INBOX_EMPTY
+        or "Inbox is empty" not in obs["fork_inbox_output"]
     ):
         failures.append(
             f"fork {fork_id} adopted the worker: children {obs['fork_children_after_status']}, "

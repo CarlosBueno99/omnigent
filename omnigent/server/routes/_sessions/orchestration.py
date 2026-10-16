@@ -2246,7 +2246,10 @@ def _children_dispatched_in_copied_history(
     A fork cut at an earlier response carries no dispatch receipt for a child
     created after that point, so naming it would describe context the fork's
     agent never saw. Copied items keep the source's timestamps, so the newest
-    copied item marks the fork point.
+    copied item marks the fork point. Timestamps are whole seconds, so a child
+    created in the same second as that item is kept: over-naming a child for
+    one second is harmless, while dropping one would recreate the silent
+    receipt this notice exists to explain.
 
     :param fork_id: The fork's session id, e.g. ``"conv_fork123"``.
     :param children: The source's in-flight children.

@@ -143,6 +143,12 @@ class _ConversationStore:
         # When set, the source's children go idle while the fork copies the
         # history, like a sub-agent finishing in that window.
         self.finish_children_during_fork = False
+        # When set, this child appears while the fork copies the history, like
+        # a sub-agent dispatched in that window.
+        self.spawn_child_during_fork: Conversation | None = None
+        # Store faults for the best-effort notice path.
+        self.fail_child_reads = False
+        self.fail_appends = False
 
     def set_labels(
         self,
@@ -277,6 +283,8 @@ class _ConversationStore:
             for conv in self._convs.values():
                 if conv.parent_conversation_id == source_conversation_id:
                     conv.live_status = "idle"
+        if self.spawn_child_during_fork is not None:
+            self._convs[self.spawn_child_during_fork.id] = self.spawn_child_during_fork
         if up_to_response_id is not None and not any(
             item.response_id == up_to_response_id
             for item in self._items.get(source_conversation_id, [])
@@ -400,8 +408,11 @@ class _ConversationStore:
             )
         ]
         rows.sort(key=lambda conv: conv.created_at, reverse=order == "desc")
+        if self.fail_child_reads:
+            raise RuntimeError("child listing unavailable")
         if after is not None:
-            rows = rows[next(i for i, conv in enumerate(rows) if conv.id == after) + 1 :]
+            cursor = next((i for i, conv in enumerate(rows) if conv.id == after), None)
+            rows = [] if cursor is None else rows[cursor + 1 :]
         has_more = len(rows) > limit
         rows = rows[:limit]
         return PagedList(
@@ -424,6 +435,8 @@ class _ConversationStore:
         :returns: The persisted items with stub-assigned ids.
         """
         self.append_calls.append((conversation_id, list(items)))
+        if self.fail_appends:
+            raise RuntimeError("append unavailable")
         existing = self._items.setdefault(conversation_id, [])
         persisted = [
             ConversationItem(
@@ -1382,6 +1395,34 @@ async def test_fork_notes_a_sub_agent_that_finishes_during_the_copy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fork_notes_a_sub_agent_dispatched_during_the_copy() -> None:
+    """The running set is read again after the copy, so a child dispatched meanwhile is noted.
+
+    Its dispatch receipt landed in the copied history, so without the second
+    read the fork would again hold a receipt for a result that never arrives.
+    """
+    source = _make_conversation()
+    before = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f801", "worker:first", "running")
+    during = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f802", "worker:second", "running")
+    store = _ConversationStore(
+        conversations={source.id: source, before.id: before},
+        items_by_conv={source.id: [_make_item("msg_a", "send the workers their tasks")]},
+    )
+    store.spawn_child_during_fork = during
+    client = TestClient(_build_app(store))
+
+    resp = client.post(f"/v1/sessions/{source.id}/fork", json={})
+
+    assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
+    _, agent_note, notice = store._items[resp.json()["id"]]
+    assert isinstance(agent_note.data, MessageData) and isinstance(notice.data, ErrorData)
+    assert notice.data.title == "2 sub-agents stayed with the original session"
+    for text in (agent_note.data.content[0]["text"], notice.data.cause or ""):
+        assert before.id in text and during.id in text, text
+        assert text.index(before.id) < text.index(during.id), "children keep dispatch order"
+
+
+@pytest.mark.asyncio
 async def test_truncated_fork_notes_only_sub_agents_its_history_dispatched() -> None:
     """A fork cut before a dispatch does not hear about that child.
 
@@ -1413,6 +1454,30 @@ async def test_truncated_fork_notes_only_sub_agents_its_history_dispatched() -> 
         assert early.id in text and "worker:first" in text, text
         assert late.id not in text and "worker:second" not in text, text
     assert notice.data.title == "1 sub-agent stayed with the original session"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["fail_child_reads", "fail_appends"])
+async def test_fork_survives_a_failed_sub_agent_notice(fault: str) -> None:
+    """A store fault while noting sub-agents never fails or orphans the fork.
+
+    The fork already exists by the time the notice is attempted, so the route
+    logs the fault and still returns the created fork with its copied history.
+    """
+    source = _make_conversation()
+    running = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f801", "worker:long-task", "running")
+    store = _ConversationStore(
+        conversations={source.id: source, running.id: running},
+        items_by_conv={source.id: [_make_item("msg_a", "send the worker its task")]},
+    )
+    setattr(store, fault, True)
+    client = TestClient(_build_app(store))
+
+    resp = client.post(f"/v1/sessions/{source.id}/fork", json={})
+
+    assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
+    assert [item.id for item in store._items[resp.json()["id"]]] == ["msg_a"]
+    assert [item["id"] for item in resp.json()["items"]] == ["msg_a"]
 
 
 @pytest.mark.asyncio

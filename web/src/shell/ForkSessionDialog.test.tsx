@@ -748,7 +748,10 @@ describe("ForkSessionDialog", () => {
     const { invalidateSpy } = renderDialog({ sourceTitle: "My session" });
 
     // Every child is requested, not the server's default first page.
-    expect(useChildSessionsMock).toHaveBeenCalledWith("conv_src", null, { limit: 1000 });
+    expect(useChildSessionsMock).toHaveBeenCalledWith("conv_src", null, {
+      limit: 1000,
+      allPages: true,
+    });
     // A cached list can predate a child's turn start, so opening refetches it.
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: ["conversation", "conv_src", "child_sessions"],

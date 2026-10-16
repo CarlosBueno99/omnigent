@@ -93,6 +93,20 @@ interface ChildSessionWire {
 interface ChildSessionsResponse {
   object: "list";
   data: ChildSessionWire[];
+  has_more?: boolean;
+  last_id?: string | null;
+}
+
+/** Fetch options for ``fetchChildSessions`` / ``useChildSessions``. */
+export interface ChildSessionsFetchOptions {
+  /** Page size to request instead of the server default (20). */
+  limit?: number;
+  /**
+   * Follow ``has_more`` / ``last_id`` cursors until the list is exhausted.
+   * The endpoint pages newest-first, so a caller that must not miss an old
+   * child (the Clone dialog's running sub-agent warning) needs every page.
+   */
+  allPages?: boolean;
 }
 
 /**
@@ -108,6 +122,20 @@ export function childSessionsQueryKey(conversationId: string): readonly unknown[
 /** True for any key built by ``childSessionsQueryKey``. */
 function isChildSessionsQueryKey(key: readonly unknown[]): boolean {
   return key.length === 3 && key[0] === "conversation" && key[2] === "child_sessions";
+}
+
+/**
+ * Query key for one ``useChildSessions`` call: a disabled placeholder for
+ * ``null``, the shared list key, or that key extended by non-default fetch
+ * options so ``invalidateQueries`` on the prefix still refreshes it.
+ */
+function childSessionsQueryKeyFor(
+  sessionId: string | null,
+  options: ChildSessionsFetchOptions,
+): readonly unknown[] {
+  if (sessionId === null) return ["conversation", null, "child_sessions"];
+  const base = childSessionsQueryKey(sessionId);
+  return options.limit === undefined && !options.allPages ? base : [...base, options];
 }
 
 /**
@@ -211,19 +239,28 @@ interface UseChildSessionsResult {
  */
 export async function fetchChildSessions(
   sessionId: string,
-  limit?: number,
+  options: ChildSessionsFetchOptions = {},
 ): Promise<ChildSessionInfo[]> {
-  const query = limit === undefined ? "" : `?${new URLSearchParams({ limit: String(limit) })}`;
-  const res = await authenticatedFetch(
-    `/v1/sessions/${encodeURIComponent(sessionId)}/child_sessions${query}`,
-  );
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  const json = (await res.json()) as ChildSessionsResponse;
+  const rows: ChildSessionWire[] = [];
+  let after: string | null = null;
+  do {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (after !== null) params.set("after", after);
+    const query = params.size === 0 ? "" : `?${params}`;
+    const res = await authenticatedFetch(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/child_sessions${query}`,
+    );
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const json = (await res.json()) as ChildSessionsResponse;
+    rows.push(...json.data);
+    after = options.allPages && json.has_more && json.last_id ? json.last_id : null;
+  } while (after !== null);
   // Children run on this session's runner: record the link so their
   // session-scoped requests key by this session's host before their own
   // snapshot loads.
-  for (const row of json.data) setSessionParent(row.id, sessionId);
-  return json.data.map((row) => ({
+  for (const row of rows) setSessionParent(row.id, sessionId);
+  return rows.map((row) => ({
     id: row.id,
     title: row.title,
     task_summary: row.task_summary ?? null,
@@ -254,26 +291,21 @@ export async function fetchChildSessions(
  *     tab is backgrounded). The execution-logs panel passes a value
  *     here so the dropdown updates when new sub-agents spawn;
  *     callers that just need a snapshot (the rail card) can omit it.
- * :param options.limit: Page size to request instead of the server's
- *     default (20). Callers that must see every child pass
- *     ``CHILD_SESSIONS_MAX_LIMIT``; the entry is keyed under the same
- *     ``childSessionsQueryKey`` prefix, so one invalidation refreshes both.
+ * :param options: Page size and whether to follow continuation cursors
+ *     (see ``ChildSessionsFetchOptions``). Callers that must see every
+ *     child pass ``{ limit: CHILD_SESSIONS_MAX_LIMIT, allPages: true }``;
+ *     the entry is keyed under the same ``childSessionsQueryKey`` prefix,
+ *     so one invalidation refreshes it together with the default list.
  */
 export function useChildSessions(
   conversationId: string | null,
   pollMs?: number | null,
-  options?: { limit?: number },
+  options: ChildSessionsFetchOptions = {},
 ): UseChildSessionsResult {
   const sessionId = isTempConvId(conversationId) ? null : conversationId;
-  const limit = options?.limit;
   const { data, isLoading, error } = useQuery({
-    queryKey:
-      sessionId === null
-        ? ["conversation", null, "child_sessions"]
-        : limit === undefined
-          ? childSessionsQueryKey(sessionId)
-          : [...childSessionsQueryKey(sessionId), { limit }],
-    queryFn: () => fetchChildSessions(sessionId as string, limit),
+    queryKey: childSessionsQueryKeyFor(sessionId, options),
+    queryFn: () => fetchChildSessions(sessionId as string, options),
     enabled: sessionId !== null,
     staleTime: 60_000,
     retry: false,

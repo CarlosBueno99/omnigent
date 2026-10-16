@@ -62,6 +62,38 @@ describe("useChildSessions", () => {
       "/v1/sessions/conv_parent/child_sessions?limit=1000",
     );
   });
+
+  it("follows continuation cursors when every child is requested", async () => {
+    // WHY: the endpoint pages newest-first, so an old running worker behind
+    // a full first page of idle children must still reach the caller.
+    const page = (data: object[], has_more: boolean, last_id: string) =>
+      new Response(JSON.stringify({ object: "list", data, has_more, last_id }));
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(
+        page([{ id: "conv_new_idle", title: "worker:new", busy: false }], true, "conv_new_idle"),
+      )
+      .mockResolvedValueOnce(
+        page([{ id: "conv_old_busy", title: "worker:old", busy: true }], false, "conv_old_busy"),
+      );
+    const { result } = renderHook(
+      () => useChildSessions("conv_parent", null, { limit: 1, allPages: true }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.children).toHaveLength(2));
+    expect(result.current.children.map((child) => [child.id, child.busy])).toEqual([
+      ["conv_new_idle", false],
+      ["conv_old_busy", true],
+    ]);
+    expect(authenticatedFetch).toHaveBeenNthCalledWith(
+      1,
+      "/v1/sessions/conv_parent/child_sessions?limit=1",
+    );
+    expect(authenticatedFetch).toHaveBeenNthCalledWith(
+      2,
+      "/v1/sessions/conv_parent/child_sessions?limit=1&after=conv_new_idle",
+    );
+  });
 });
 
 describe("useDescendantSession", () => {

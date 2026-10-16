@@ -3295,8 +3295,7 @@ def register_core_routes(
         reporting to the source; the fork's copied history then ends
         with a hidden agent note and a visible info notice naming them
         and the source, so neither the user nor the fork's agent waits
-        on results that go to the source's inbox (see
-        :func:`_persist_fork_running_subagents_note`). A truncated fork
+        on results that go to the source's inbox. A truncated fork
         names only the children its copied history dispatched.
 
         ``body.host_type: "managed"`` gives the fork its own
@@ -3837,13 +3836,19 @@ def register_core_routes(
                         exc_info=True,
                     )
 
-        # Those sub-agents stay with the source (a fork never adopts them); say
-        # so in the fork before announcing it. A fork cut at an earlier response
-        # only hears about children its copied history dispatched. Best-effort
-        # like the file rows above: the fork exists, so a failed note must not
-        # orphan it.
-        if running_children:
-            try:
+        # Re-list after the copy too: a child dispatched during it has its receipt
+        # in the fork as well. Best-effort like the file rows above: the fork
+        # already exists, so a failed notice must not orphan it.
+        try:
+            known_children = {child.id for child in running_children}
+            running_children.extend(
+                child
+                for child in await asyncio.to_thread(
+                    _running_child_conversations, source_id, conversation_store
+                )
+                if child.id not in known_children
+            )
+            if running_children:
                 noted_children = running_children
                 if body.up_to_response_id is not None:
                     noted_children = await asyncio.to_thread(
@@ -3856,13 +3861,13 @@ def register_core_routes(
                     await _persist_fork_running_subagents_note(
                         new_conv.id, source_id, noted_children, conversation_store
                     )
-            except Exception:
-                _logger.warning(
-                    "failed to note the running sub-agents of session %s in fork %s",
-                    source_id,
-                    new_conv.id,
-                    exc_info=True,
-                )
+        except Exception:
+            _logger.warning(
+                "failed to note the running sub-agents of session %s in fork %s",
+                source_id,
+                new_conv.id,
+                exc_info=True,
+            )
 
         # Grant ownership BEFORE scheduling the managed launch, mirroring
         # both create paths: a managed-guard failure (misconfigured server,
