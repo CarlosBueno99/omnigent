@@ -2408,6 +2408,29 @@ async def test_events_model_change_keeps_a_short_injection_wait_after_a_long_boo
     assert budgets["inject"] == pytest.approx(1.0)
 
 
+@pytest.mark.asyncio
+async def test_events_model_change_reports_a_tmux_failure_during_the_wait_as_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tmux failure while waiting for the prompt is a 503, not an unhandled error."""
+    typed: list[str] = []
+
+    def _wait(bridge_dir: Any, *, ready_timeout_s: float, timeout_s: float = 1.0) -> None:
+        del bridge_dir, ready_timeout_s, timeout_s
+        raise OSError("tmux: command not found")
+
+    resp = await _post_model_change_through_a_boot(
+        monkeypatch,
+        wait=_wait,
+        inject=lambda _bridge_dir, *, command, **_kwargs: typed.append(command),
+        status=lambda _bridge_dir: None,
+    )
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["error"] == "claude_native_model_failed"
+    assert typed == []
+
+
 def test_claude_control_deadline_wait_returns_once_the_budget_lapses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

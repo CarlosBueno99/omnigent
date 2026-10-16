@@ -4700,16 +4700,9 @@ def inject_slash_command(
     """
     Type a Claude Code slash command into the tmux pane and submit it.
 
-    Like :func:`inject_user_message`, nothing is typed until Claude's input
-    box has rendered: a TUI still booting (a session woken just before the
-    command) drops the keystrokes, so the command would never run. Anything
-    the person left occupying the composer from the embedded terminal (ctrl+r
-    history search, rewind dialog, ``!`` shell mode) is dismissed first — see
-    :func:`_restore_occupied_input` — so the command cannot be typed into it.
-    A surface that stays (a dialog with no Escape dismissal, or one that
-    outlived the retries) fails the call instead — see
-    :func:`_reclaim_and_wait_for_prompt`: nothing would draft, so the submit
-    Enter would answer the dialog rather than run the command.
+    The input surface is reclaimed and the composer waited for before anything
+    is typed (see :func:`_reclaim_and_wait_for_prompt`): a booting TUI drops
+    keystrokes, and a surface left over the composer would swallow them.
 
     :param bridge_dir: Bridge directory path, e.g.
         ``/tmp/omnigent/claude-native/<digest>``.
@@ -6443,10 +6436,14 @@ def _reclaim_and_wait_for_prompt(
         socket_path,
         tmux_target,
         bridge_dir=bridge_dir,
+        # At least two polls, so a surface is confirmed before it is refused.
         timeout_s=(
             None
             if ready_timeout_s is None
-            else min(_OCCUPIED_INPUT_DISMISS_TIMEOUT_S, ready_timeout_s)
+            else max(
+                2 * _CLAUDE_READY_POLL_INTERVAL_S,
+                min(_OCCUPIED_INPUT_DISMISS_TIMEOUT_S, ready_timeout_s),
+            )
         ),
     )
     if surface is not None:
@@ -6458,8 +6455,13 @@ def _reclaim_and_wait_for_prompt(
                 "not sent. Open the terminal, dismiss it, then retry."
             )
         # Launcher output is waited out below; a footer-less dialog would only be
-        # waited on until the budget lapses, then the pane reaped.
-        dialog = _unnamed_dialog_hint(_capture_pane(socket_path, tmux_target))
+        # waited on until the budget lapses, then the pane reaped. A torn frame
+        # is re-read once rather than taken for "no dialog".
+        pane = _capture_pane(socket_path, tmux_target)
+        if not pane.strip():
+            time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
+            pane = _capture_pane(socket_path, tmux_target)
+        dialog = _unnamed_dialog_hint(pane)
         if dialog is not None:
             raise ClaudeTerminalDialog(
                 f"Claude Code's input box is occupied by a dialog ({dialog.strip()!r}), so "
@@ -6480,8 +6482,22 @@ def _reclaim_and_wait_for_prompt(
 
 
 def _unnamed_dialog_hint(pane: str) -> str | None:
-    """Return the text of a known footer-less dialog on *pane*, or ``None``."""
-    return next((hint for hint in _UNNAMED_DIALOG_HINTS if hint in pane), None)
+    """
+    Return the known footer-less dialog text boxed on *pane*, or ``None``.
+
+    Only the last ``╭ … ╰`` box is searched: the same words echoed in the
+    scrollback above launcher output are not a dialog.
+    """
+    lines = [line for line in pane.splitlines() if line.strip()]
+    top = max((i for i, line in enumerate(lines) if line.lstrip().startswith("╭")), default=None)
+    if top is None:
+        return None
+    bottom = next(
+        (i for i, line in enumerate(lines) if i > top and line.lstrip().startswith("╰")),
+        len(lines) - 1,
+    )
+    region = "\n".join(lines[top : bottom + 1])
+    return next((hint for hint in _UNNAMED_DIALOG_HINTS if hint in region), None)
 
 
 def _paste_payload_bytes(text: str) -> bytes:

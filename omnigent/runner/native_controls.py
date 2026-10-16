@@ -1362,7 +1362,7 @@ def build_native_controls(
         # pane's model rather than an empty or leftover snapshot.
         prompt_budget_s = min(_CLAUDE_CONTROL_PROMPT_WAIT_S, deadline.remaining_s())
         wait_started = time.monotonic()
-        wait_error: RuntimeError | None = None
+        wait_error: Exception | None = None
         try:
             await _drive_claude_pane(
                 deadline,
@@ -1371,7 +1371,7 @@ def build_native_controls(
                 ready_timeout_s=prompt_budget_s,
                 timeout_s=1.0,
             )
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             wait_error = exc
         waited_s = time.monotonic() - wait_started
         _logger.info(
