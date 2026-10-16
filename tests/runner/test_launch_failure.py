@@ -481,7 +481,7 @@ def test_codex_previous_model_budget_card_names_both_models(
     assert diagnosis.remediation is not None
     assert "fork this session to continue on" in diagnosis.remediation
     assert f"continue on `{selected_model}`" in diagnosis.remediation
-    assert f"without the `{previous_model}` turn" in diagnosis.remediation
+    assert f"without Codex's `{previous_model}` turn context" in diagnosis.remediation
     # Each half must fit the persisted-label width (255 chars) with long gateway ids.
     assert max(len(diagnosis.cause), len(diagnosis.remediation)) < 255
     # The hint keeps the refusal classified as budget exhaustion.

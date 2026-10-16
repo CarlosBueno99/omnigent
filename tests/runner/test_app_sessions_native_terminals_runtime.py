@@ -56,6 +56,28 @@ from tests.runner.conftest import (
 from tests.runner.helpers import NullServerClient
 
 
+def _write_source_rollout(
+    source_home: Path, thread_id: str, records: list[dict[str, Any]] | bytes
+) -> Path:
+    """
+    Write a fork source's rollout under its ``CODEX_HOME`` sessions tree.
+
+    :param source_home: The source session's private ``CODEX_HOME``.
+    :param thread_id: Source Codex thread id, used as the rollout stem.
+    :param records: Rollout records serialized as JSONL, or raw bytes for a
+        corrupt file.
+    :returns: Path of the written rollout.
+    """
+    rollout_dir = source_home / "sessions" / "2026" / "06" / "05"
+    rollout_dir.mkdir(parents=True, exist_ok=True)
+    rollout = rollout_dir / f"rollout-2026-06-05T15-23-07-{thread_id}.jsonl"
+    if isinstance(records, bytes):
+        rollout.write_bytes(records)
+    else:
+        rollout.write_text("".join(json.dumps(record) + "\n" for record in records))
+    return rollout
+
+
 @pytest.mark.asyncio
 async def test_create_session_threads_cursor_bridge_dir_without_dead_guard_env(
     tmp_path: Path,
@@ -953,18 +975,11 @@ async def test_auto_create_codex_terminal_fork_clones_rollout_and_resumes(
 
     # Seed the SOURCE rollout in the source session's CODEX_HOME so the
     # fork branch finds something to clone.
-    source_home = codex_home_for_bridge_dir(bridge_dir_for_bridge_id(source_id))
-    source_rollout_dir = source_home / "sessions" / "2026" / "06" / "05"
-    source_rollout_dir.mkdir(parents=True)
-    (source_rollout_dir / f"rollout-2026-06-05T15-23-07-{source_thread}.jsonl").write_text(
-        json.dumps(
-            {
-                "type": "session_meta",
-                "payload": {"id": source_thread, "cwd": "/old/source/dir"},
-            }
-        )
-        + "\n"
-        + json.dumps(
+    _write_source_rollout(
+        codex_home_for_bridge_dir(bridge_dir_for_bridge_id(source_id)),
+        source_thread,
+        [
+            {"type": "session_meta", "payload": {"id": source_thread, "cwd": "/old/source/dir"}},
             {
                 "type": "turn_context",
                 "payload": {
@@ -972,9 +987,8 @@ async def test_auto_create_codex_terminal_fork_clones_rollout_and_resumes(
                     "cwd": "/old/source/dir",
                     "model": "gpt-5-default",
                 },
-            }
-        )
-        + "\n"
+            },
+        ],
     )
 
     patched_external_ids: list[str] = []
@@ -1219,38 +1233,49 @@ async def test_auto_create_codex_terminal_fork_clones_rollout_and_resumes(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("source_thread", "forked", "source_turn_model"),
+    ("source_thread", "forked", "source_rollout"),
     [
         (None, True, None),
         ("019e96aa-0be2-7343-8d3b-6f914d60936b", True, None),
         (None, False, None),
-        ("019e96aa-0be2-7343-8d3b-6f914d60936b", True, "gpt-5-frontier"),
+        ("019e96aa-0be2-7343-8d3b-6f914d60936b", True, "pinned-to-another-model"),
+        ("019e96aa-0be2-7343-8d3b-6f914d60936b", True, "undecodable"),
+        ("019e96aa-0be2-7343-8d3b-6f914d60936b", True, "discovery-error"),
     ],
-    ids=["sdk-source", "missing-codex-rollout", "cli-import", "source-pinned-to-another-model"],
+    ids=[
+        "sdk-source",
+        "missing-codex-rollout",
+        "cli-import",
+        "source-pinned-to-another-model",
+        "source-rollout-undecodable",
+        "source-rollout-discovery-error",
+    ],
 )
 async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_resumes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     source_thread: str | None,
     forked: bool,
-    source_turn_model: str | None,
+    source_rollout: str | None,
 ) -> None:
     """A carry-history codex session builds from items when the source rollout can't be cloned.
 
     This covers a non-Codex source with no source thread id, an imported Codex
     source whose rollout lives outside Omnigent's private ``CODEX_HOME``, a
-    ``session import`` copy that has import labels but no fork source, and a
-    local source rollout whose last recorded turn ran on a different model than
-    the clone launches with. Cloning that rollout would make Codex compact on
-    the source's model before the clone's first turn, so a source stuck on an
-    over-budget model would hand the clone the same failure.
+    ``session import`` copy that has import labels but no fork source, a local
+    source rollout whose last recorded turn ran on a different model than the
+    clone launches with, and a local source rollout that cannot be decoded or
+    disappears while it is inspected. Cloning a rollout pinned to another model
+    would make Codex compact on that model before the clone's first turn, so a
+    source stuck on an over-budget model would hand the clone the same failure;
+    an unreadable one must still fall back to items instead of failing the launch.
 
     :param tmp_path: Temporary directory for isolated bridge state.
     :param monkeypatch: Pytest monkeypatch fixture.
     :param source_thread: Optional source Codex thread id.
     :param forked: Whether the session is a fork clone or a CLI import copy.
-    :param source_turn_model: When set, a local source rollout exists and its
-        newest ``turn_context`` names this model.
+    :param source_rollout: Shape of the local source rollout, or ``None`` when
+        no local rollout exists.
     :returns: None.
     """
     import omnigent.harnesses.codex_native.app_server as codex_app_mod
@@ -1280,39 +1305,58 @@ async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_res
     monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
     monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
 
-    if source_turn_model is not None:
+    source_home = codex_home_for_bridge_dir(bridge_dir_for_bridge_id(source_id))
+    if source_rollout == "pinned-to-another-model":
         assert source_thread is not None
-        source_home = codex_home_for_bridge_dir(bridge_dir_for_bridge_id(source_id))
-        source_rollout_dir = source_home / "sessions" / "2026" / "06" / "05"
-        source_rollout_dir.mkdir(parents=True)
         # An older turn on the clone's own model precedes the pinned turn, so
         # only the newest turn_context may decide the fork path.
-        source_records = (
-            {"type": "session_meta", "payload": {"id": source_thread, "cwd": "/old/source/dir"}},
-            {
-                "type": "turn_context",
-                "payload": {"turn_id": "turn_1", "cwd": "/old/source/dir", "model": "gpt-5-default"},
-            },
-            {
-                "type": "turn_context",
-                "payload": {
-                    "turn_id": "turn_2",
-                    "cwd": "/old/source/dir",
-                    "model": source_turn_model,
+        _write_source_rollout(
+            source_home,
+            source_thread,
+            [
+                {
+                    "type": "session_meta",
+                    "payload": {"id": source_thread, "cwd": "/old/source/dir"},
                 },
-            },
-            {
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": source_rollout_codeword}],
+                {
+                    "type": "turn_context",
+                    "payload": {
+                        "turn_id": "turn_1",
+                        "cwd": "/old/source/dir",
+                        "model": "gpt-5-default",
+                    },
                 },
-            },
+                {
+                    "type": "turn_context",
+                    "payload": {
+                        "turn_id": "turn_2",
+                        "cwd": "/old/source/dir",
+                        "model": "gpt-5-frontier",
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": source_rollout_codeword}],
+                    },
+                },
+            ],
         )
-        (source_rollout_dir / f"rollout-2026-06-05T15-23-07-{source_thread}.jsonl").write_text(
-            "".join(json.dumps(record) + "\n" for record in source_records)
-        )
+    elif source_rollout == "undecodable":
+        assert source_thread is not None
+        _write_source_rollout(source_home, source_thread, b"\xff\xfe\x00 not a rollout \xff\n")
+    elif source_rollout == "discovery-error":
+        real_find_thread_rollout = codex_native.find_thread_rollout
+
+        def _vanished(codex_home: Path, thread_id: str) -> Path | None:
+            # Only the SOURCE home misbehaves; the clone's own home stays readable.
+            if codex_home == source_home:
+                raise OSError("rollout vanished between discovery and inspection")
+            return real_find_thread_rollout(codex_home, thread_id)
+
+        monkeypatch.setattr(codex_native, "find_thread_rollout", _vanished)
 
     patched_external_ids: list[str] = []
 

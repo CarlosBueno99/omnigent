@@ -1942,7 +1942,10 @@ def _codex_source_rollout_last_turn_model(
         if source is None:
             return None
         return last_turn_context_model(source)
-    except OSError:
+    except Exception:  # noqa: BLE001 — unknown source model keeps the clone's own fallbacks
+        _logger.debug(
+            "Could not read the fork source rollout for its last turn model", exc_info=True
+        )
         return None
 
 

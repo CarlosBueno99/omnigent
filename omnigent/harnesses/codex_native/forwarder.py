@@ -1083,8 +1083,8 @@ def _explain_previous_model_budget_failure(
         return error
     try:
         previous_model = _last_turn_context_model(bridge_dir)
-    except OSError:
-        _logger.debug(
+    except Exception:  # noqa: BLE001 — the failed status must post without the diagnosis
+        _logger.warning(
             "Could not read the Codex rollout for the previous turn model", exc_info=True
         )
         return error

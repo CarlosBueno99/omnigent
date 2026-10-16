@@ -5701,7 +5701,8 @@ _CODEX_PREVIOUS_MODEL_BUDGET_CARD = {
     ),
     "remediation": (
         "Switching models again will not help; fork this session to continue on `gpt-5.6-sol`. "
-        "The fork starts from the conversation history without the `gpt-5.5` turn."
+        "The fork keeps the conversation history but starts without Codex's `gpt-5.5` turn "
+        "context."
     ),
 }
 

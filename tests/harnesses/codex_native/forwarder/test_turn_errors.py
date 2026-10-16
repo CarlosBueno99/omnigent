@@ -972,6 +972,32 @@ async def test_turn_error_without_a_stale_previous_model_stays_bare(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["undecodable-bytes", "truncated-json"])
+async def test_budget_refusal_with_unreadable_rollout_still_posts_bare_failure(
+    tmp_path: Path, corruption: str
+) -> None:
+    """A rollout the diagnosis cannot read never costs the turn its failed status.
+
+    The standalone error marks the turn surfaced before the diagnosis runs, and
+    the following ``turn/completed`` is then suppressed, so a diagnosis failure
+    would leave the session looking busy forever.
+    """
+    _seed_thread_rollout(tmp_path, ["gpt-5.6-sol", "gpt-5.5"])
+    rollout = next((tmp_path / "codex-home" / "sessions").glob("**/rollout-*.jsonl"))
+    if corruption == "undecodable-bytes":
+        rollout.write_bytes(b"\xff\xfe\x00 not a rollout \xff\n")
+    else:
+        rollout.write_text('{"type": "turn_context", "payload": {"model": "gpt-5.5"\n')
+
+    failed = await _drive_events(
+        tmp_path, _budget_refusal_events("standalone-error"), selected_model="gpt-5.6-sol"
+    )
+
+    assert len(failed) == 1
+    assert failed[0]["output"] == _BUDGET_REFUSAL
+
+
+@pytest.mark.asyncio
 async def test_post_turn_status_edge_surfaces_generic_error_output() -> None:
     """A failed edge with a generic error surfaces the message as output.
 

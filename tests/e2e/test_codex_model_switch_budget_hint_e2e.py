@@ -33,9 +33,15 @@ from omnigent.harnesses.codex_native.app_server import (
     preload_codex_thread_for_resume,
 )
 from omnigent.harnesses.codex_native.bridge import CodexNativeBridgeState, write_bridge_state
+from omnigent.harnesses.codex_native.main import _mint_codex_thread_id
 from omnigent.harnesses.codex_native.rollout import find_thread_rollout, last_turn_context_model
 from omnigent.runner.launch_failure import codex_previous_model_budget_hint
-from tests.e2e._codex_loopback_resume import clean_codex_env, sse_text_response
+from tests.e2e._codex_loopback_resume import (
+    clean_codex_env,
+    sse_text_response,
+    wait_for_turn_end,
+    write_cold_resume_rollout,
+)
 from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.harnesses.codex_native.forwarder._support import _RecordingClient
 
@@ -210,6 +216,77 @@ async def _forward_turn_on_selected_model(
     ]
 
 
+async def _run_turn_on_rebuilt_rollout(
+    *, short_root: Path, workspace: Path, child_home: Path, gateway: _BudgetGateway
+) -> tuple[dict[str, Any], list[str | None]]:
+    """Rebuild the conversation from Omnigent items, as a fork does, and run one turn.
+
+    The rebuilt rollout records no previous-model turn context, so Codex has
+    nothing to compact on before sampling on the selected model.
+
+    :returns: The terminal turn event and the models the gateway saw for it.
+    """
+    session_id = "conv_budget_switch_fork"
+    bridge_dir = short_root / "r"
+    codex_home = bridge_dir / "codex-home"
+    codex_home.mkdir(parents=True)
+    thread_id = _mint_codex_thread_id()
+    history: list[dict[str, Any]] = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Work on the frontier model."}],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Starting on the frontier model."}],
+        },
+    ]
+    await write_cold_resume_rollout(
+        history,
+        session_id=session_id,
+        thread_id=thread_id,
+        codex_home=codex_home,
+        workspace=workspace,
+        codex_path=shutil.which("codex"),
+    )
+    app_server = CodexNativeAppServer(
+        codex_path=shutil.which("codex"),
+        socket_path=bridge_dir / "app-server.sock",
+        codex_home=codex_home,
+        env=clean_codex_env(child_home),
+        config_overrides=_provider_config_overrides(gateway.base_url),
+        cwd=workspace,
+        bridge_dir=bridge_dir,
+        pinned_model=_SELECTED_MODEL,
+        reconcile_process_registry=False,
+        session_id=session_id,
+    )
+    client = None
+    gateway.models_requested.clear()
+    try:
+        await app_server.start()
+        client = await preload_codex_thread_for_resume(
+            str(app_server.socket_path), thread_id, retain_client=True, cwd=workspace
+        )
+        assert client is not None
+        await client.request(
+            "turn/start",
+            {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "Please continue on the cheaper model."}],
+            },
+        )
+        terminal = await wait_for_turn_end(client)
+    finally:
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.close()
+        await app_server.close()
+    return terminal, list(gateway.models_requested)
+
+
 @pytest.mark.posix_only
 @pytest.mark.timeout(300)
 async def test_budget_refusal_after_model_switch_explains_previous_model_compaction(
@@ -267,19 +344,23 @@ async def test_budget_refusal_after_model_switch_explains_previous_model_compact
             thread_id=thread_id,
             base_url=gateway.base_url,
         )
+        stuck_models = list(gateway.models_requested)
+        recovery_event, recovery_models = await _run_turn_on_rebuilt_rollout(
+            short_root=short_root, workspace=workspace, child_home=child_home, gateway=gateway
+        )
     finally:
         gateway.shutdown()
         gateway.server_close()
         shutil.rmtree(short_root, ignore_errors=True)
 
-    if _SELECTED_MODEL in gateway.models_requested:
+    if _SELECTED_MODEL in stuck_models:
         pytest.skip(
             "the installed codex reached the selected model after a refused previous-model "
-            f"compaction (models requested: {gateway.models_requested}); the stuck state this "
-            "hint explains no longer occurs"
+            f"compaction (models requested: {stuck_models}); the stuck state this hint "
+            "explains no longer occurs"
         )
-    assert gateway.models_requested and set(gateway.models_requested) == {_OVER_BUDGET_MODEL}, (
-        f"codex contacted {gateway.models_requested}, not only the previous model"
+    assert stuck_models and set(stuck_models) == {_OVER_BUDGET_MODEL}, (
+        f"codex contacted {stuck_models}, not only the previous model"
     )
 
     failed = [status for status in statuses if status.get("status") == "failed"]
@@ -290,3 +371,12 @@ async def test_budget_refusal_after_model_switch_explains_previous_model_compact
         codex_previous_model_budget_hint(_OVER_BUDGET_MODEL, _SELECTED_MODEL)
     ), f"the forwarded failure did not explain the previous-model compaction: {output!r}"
     assert "reauth_required" not in failed[0]
+
+    # The recovery the hint recommends: a rollout rebuilt from the conversation
+    # runs straight on the selected model and completes.
+    recovery_turn = (recovery_event.get("params") or {}).get("turn") or {}
+    assert recovery_event.get("method") == "turn/completed", recovery_event
+    assert recovery_turn.get("status") == "completed", recovery_event
+    assert recovery_models and set(recovery_models) == {_SELECTED_MODEL}, (
+        f"the rebuilt conversation contacted {recovery_models}, not only the selected model"
+    )

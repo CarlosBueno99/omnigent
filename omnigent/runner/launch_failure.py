@@ -347,8 +347,8 @@ def _codex_previous_model_budget_cause(previous_model: str, selected_model: str)
 def _codex_previous_model_budget_remediation(previous_model: str, selected_model: str) -> str:
     return (
         "Switching models again will not help; fork this session to continue on "
-        f"`{selected_model}`. The fork starts from the conversation history without the "
-        f"`{previous_model}` turn."
+        f"`{selected_model}`. The fork keeps the conversation history but starts without "
+        f"Codex's `{previous_model}` turn context."
     )
 
 
