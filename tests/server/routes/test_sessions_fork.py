@@ -140,6 +140,9 @@ class _ConversationStore:
         self.fork_calls: list[dict[str, Any]] = []
         self.label_writes: list[tuple[str, dict[str, str]]] = []
         self.append_calls: list[tuple[str, list[NewConversationItem]]] = []
+        # When set, the source's children go idle while the fork copies the
+        # history, like a sub-agent finishing in that window.
+        self.finish_children_during_fork = False
 
     def set_labels(
         self,
@@ -270,6 +273,10 @@ class _ConversationStore:
         src = self._convs.get(source_conversation_id)
         if src is None:
             raise LookupError(f"not found: {source_conversation_id}")
+        if self.finish_children_during_fork:
+            for conv in self._convs.values():
+                if conv.parent_conversation_id == source_conversation_id:
+                    conv.live_status = "idle"
         if up_to_response_id is not None and not any(
             item.response_id == up_to_response_id
             for item in self._items.get(source_conversation_id, [])
@@ -576,14 +583,18 @@ class _ArtifactStore:
 # ── Helpers ──────────────────────────────────────────────────────
 
 
+_SOURCE_ID = "e9f8f58523cec9a57d3bdf93be543e8c"
+
+
 def _make_conversation(
-    conv_id: str = "e9f8f58523cec9a57d3bdf93be543e8c",
+    conv_id: str = _SOURCE_ID,
     agent_id: str | None = "087b7cb7ac30abf4debfaa578d052ec6",
     title: str = "Source Chat",
     kind: str = "default",
     labels: dict[str, str] | None = None,
     parent_conversation_id: str | None = None,
     live_status: str | None = None,
+    created_at: int = 1,
 ) -> Conversation:
     """
     Build a minimal Conversation entity for testing.
@@ -599,12 +610,14 @@ def _make_conversation(
         ``None`` for a top-level session.
     :param live_status: Persisted relay status, e.g. ``"running"`` for a
         child whose turn is in flight; ``None`` when never reported.
+    :param created_at: Creation epoch seconds, ordered against item
+        timestamps by the truncated-fork tests.
     :returns: A Conversation.
     """
     return Conversation(
         id=conv_id,
-        created_at=1,
-        updated_at=1,
+        created_at=created_at,
+        updated_at=created_at,
         root_conversation_id=parent_conversation_id or conv_id,
         agent_id=agent_id,
         title=title,
@@ -615,13 +628,16 @@ def _make_conversation(
     )
 
 
-def _make_item(item_id: str, text: str, response_id: str = "resp_001") -> ConversationItem:
+def _make_item(
+    item_id: str, text: str, response_id: str = "resp_001", created_at: int = 1
+) -> ConversationItem:
     """
     Build a minimal ConversationItem for testing.
 
     :param item_id: Item id.
     :param text: Message text content.
     :param response_id: Response the item belongs to, e.g. ``"resp_001"``.
+    :param created_at: Creation epoch seconds.
     :returns: A ConversationItem.
     """
     return ConversationItem(
@@ -629,7 +645,7 @@ def _make_item(item_id: str, text: str, response_id: str = "resp_001") -> Conver
         type="message",
         status="completed",
         response_id=response_id,
-        created_at=1,
+        created_at=created_at,
         data=MessageData(
             role="user",
             content=[{"type": "input_text", "text": text}],
@@ -1252,21 +1268,23 @@ async def test_fork_session_sub_agent_replaces_presentation_labels() -> None:
     )
 
 
-def _make_child(conv_id: str, title: str, live_status: str) -> Conversation:
+def _make_child(conv_id: str, title: str, live_status: str, created_at: int = 1) -> Conversation:
     """
     Build a sub-agent child of the default source conversation.
 
     :param conv_id: Child conversation id.
     :param title: Sub-agent title, ``"{agent}:{session_name}"``.
     :param live_status: Relay status, e.g. ``"running"`` or ``"idle"``.
+    :param created_at: Creation epoch seconds.
     :returns: A ``kind="sub_agent"`` Conversation parented to the source.
     """
     return _make_conversation(
         conv_id=conv_id,
         title=title,
         kind="sub_agent",
-        parent_conversation_id="e9f8f58523cec9a57d3bdf93be543e8c",
+        parent_conversation_id=_SOURCE_ID,
         live_status=live_status,
+        created_at=created_at,
     )
 
 
@@ -1336,6 +1354,65 @@ async def test_fork_notes_sub_agents_still_running_under_the_source() -> None:
     assert snapshot_items[-2]["data"]["content"][0]["text"] == agent_text
     assert snapshot_items[-1]["data"]["code"] == FORK_SOURCE_SUBAGENTS_RUNNING_CODE
     assert snapshot_items[-1]["data"]["level"] == "info"
+
+
+@pytest.mark.asyncio
+async def test_fork_notes_a_sub_agent_that_finishes_during_the_copy() -> None:
+    """The running set is read before the copy, so a child finishing meanwhile is still noted.
+
+    Its result went to the source either way, and the fork's copied receipt
+    still promises it here; reading the children after the copy would miss it.
+    """
+    source = _make_conversation()
+    running = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f801", "worker:long-task", "running")
+    store = _ConversationStore(
+        conversations={source.id: source, running.id: running},
+        items_by_conv={source.id: [_make_item("msg_a", "send the worker its task")]},
+    )
+    store.finish_children_during_fork = True
+    client = TestClient(_build_app(store))
+
+    resp = client.post(f"/v1/sessions/{source.id}/fork", json={})
+
+    assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
+    assert running.live_status == "idle", "the stub must have finished the child during the copy"
+    _, _, notice = store._items[resp.json()["id"]]
+    assert notice.type == "error" and isinstance(notice.data, ErrorData)
+    assert running.id in (notice.data.cause or "")
+
+
+@pytest.mark.asyncio
+async def test_truncated_fork_notes_only_sub_agents_its_history_dispatched() -> None:
+    """A fork cut before a dispatch does not hear about that child.
+
+    Copied items keep the source's timestamps, so a child created after the
+    newest copied item has no receipt in the fork and is left out; one
+    created before it is still named.
+    """
+    source = _make_conversation()
+    early = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f801", "worker:first", "running", 5)
+    late = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f802", "worker:second", "running", 15)
+    store = _ConversationStore(
+        conversations={conv.id: conv for conv in (source, early, late)},
+        items_by_conv={
+            source.id: [
+                _make_item("msg_a", "first dispatch", response_id="resp_a", created_at=10),
+                _make_item("msg_b", "second dispatch", response_id="resp_b", created_at=20),
+            ]
+        },
+    )
+    client = TestClient(_build_app(store))
+
+    resp = client.post(f"/v1/sessions/{source.id}/fork", json={"up_to_response_id": "resp_a"})
+
+    assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
+    copied, agent_note, notice = store._items[resp.json()["id"]]
+    assert copied.id == "msg_a"
+    assert isinstance(agent_note.data, MessageData) and isinstance(notice.data, ErrorData)
+    for text in (agent_note.data.content[0]["text"], notice.data.cause or ""):
+        assert early.id in text and "worker:first" in text, text
+        assert late.id not in text and "worker:second" not in text, text
+    assert notice.data.title == "1 sub-agent stayed with the original session"
 
 
 @pytest.mark.asyncio

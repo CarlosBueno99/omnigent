@@ -12,6 +12,12 @@ import { isTempConvId } from "@/lib/tempConversationId";
  */
 export const MAX_TREE_DEPTH = 3;
 
+/**
+ * Largest page ``GET /v1/sessions/{id}/child_sessions`` serves. Callers that
+ * must see every child (not just the server's default first 20) request it.
+ */
+export const CHILD_SESSIONS_MAX_LIMIT = 1000;
+
 export interface ChildSessionError {
   code: string;
   message: string;
@@ -203,9 +209,13 @@ interface UseChildSessionsResult {
  * Exported for unit testing of the HTTP-shape contract; production
  * code should call ``useChildSessions``.
  */
-export async function fetchChildSessions(sessionId: string): Promise<ChildSessionInfo[]> {
+export async function fetchChildSessions(
+  sessionId: string,
+  limit?: number,
+): Promise<ChildSessionInfo[]> {
+  const query = limit === undefined ? "" : `?${new URLSearchParams({ limit: String(limit) })}`;
   const res = await authenticatedFetch(
-    `/v1/sessions/${encodeURIComponent(sessionId)}/child_sessions`,
+    `/v1/sessions/${encodeURIComponent(sessionId)}/child_sessions${query}`,
   );
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const json = (await res.json()) as ChildSessionsResponse;
@@ -244,18 +254,26 @@ export async function fetchChildSessions(sessionId: string): Promise<ChildSessio
  *     tab is backgrounded). The execution-logs panel passes a value
  *     here so the dropdown updates when new sub-agents spawn;
  *     callers that just need a snapshot (the rail card) can omit it.
+ * :param options.limit: Page size to request instead of the server's
+ *     default (20). Callers that must see every child pass
+ *     ``CHILD_SESSIONS_MAX_LIMIT``; the entry is keyed under the same
+ *     ``childSessionsQueryKey`` prefix, so one invalidation refreshes both.
  */
 export function useChildSessions(
   conversationId: string | null,
   pollMs?: number | null,
+  options?: { limit?: number },
 ): UseChildSessionsResult {
   const sessionId = isTempConvId(conversationId) ? null : conversationId;
+  const limit = options?.limit;
   const { data, isLoading, error } = useQuery({
     queryKey:
       sessionId === null
         ? ["conversation", null, "child_sessions"]
-        : childSessionsQueryKey(sessionId),
-    queryFn: () => fetchChildSessions(sessionId as string),
+        : limit === undefined
+          ? childSessionsQueryKey(sessionId)
+          : [...childSessionsQueryKey(sessionId), { limit }],
+    queryFn: () => fetchChildSessions(sessionId as string, limit),
     enabled: sessionId !== null,
     staleTime: 60_000,
     retry: false,

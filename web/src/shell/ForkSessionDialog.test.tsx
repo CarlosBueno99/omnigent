@@ -1,5 +1,6 @@
 import { testAgent } from "@/test/agentFixtures";
 import type * as ReactRouterDomModule from "react-router-dom";
+import type * as UseChildSessionsModule from "@/hooks/useChildSessions";
 import type * as WorkspacePickerModule from "./WorkspacePicker";
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -45,9 +46,11 @@ vi.mock("@/hooks/useAgents", () => ({ useSessionAgent: vi.fn() }));
 vi.mock("@/hooks/useSession", () => ({ useSession: vi.fn() }));
 vi.mock("@/hooks/useHosts", () => ({ useHosts: vi.fn(), useHostModelOptions: vi.fn() }));
 vi.mock("@/hooks/useDirectorySessions", () => ({ useDirectorySessions: vi.fn() }));
-vi.mock("@/hooks/useChildSessions", () => ({
+// Keep the real query-key factory so the on-open invalidation is asserted
+// against the cache entry production actually targets.
+vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
+  ...(await importOriginal<typeof UseChildSessionsModule>()),
   useChildSessions: vi.fn(),
-  childSessionsQueryKey: (id: string) => ["conversation", id, "child_sessions"],
 }));
 vi.mock("@/hooks/RunnerHealthProvider", () => ({ useRunnerHealthRegistration: vi.fn() }));
 vi.mock("@/hooks/useHostFilesystem", () => ({
@@ -744,7 +747,8 @@ describe("ForkSessionDialog", () => {
     } as unknown as ReturnType<typeof useChildSessions>);
     const { invalidateSpy } = renderDialog({ sourceTitle: "My session" });
 
-    expect(useChildSessionsMock).toHaveBeenCalledWith("conv_src");
+    // Every child is requested, not the server's default first page.
+    expect(useChildSessionsMock).toHaveBeenCalledWith("conv_src", null, { limit: 1000 });
     // A cached list can predate a child's turn start, so opening refetches it.
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: ["conversation", "conv_src", "child_sessions"],

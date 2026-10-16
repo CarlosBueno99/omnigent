@@ -31,6 +31,37 @@ describe("useChildSessions", () => {
     expect(result.current.children).toEqual([]);
     expect(authenticatedFetch).not.toHaveBeenCalled();
   });
+
+  it("requests the asked-for page size instead of the server default", async () => {
+    // WHY: a caller that must see every child (the Clone dialog's running
+    // sub-agent warning) cannot rely on the default first page of 20.
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          object: "list",
+          data: [
+            {
+              id: "conv_old_worker",
+              title: "worker:old",
+              tool: "worker",
+              session_name: "old",
+              current_task_status: "in_progress",
+              busy: true,
+            },
+          ],
+        }),
+      ),
+    );
+    const { result } = renderHook(() => useChildSessions("conv_parent", null, { limit: 1000 }), {
+      wrapper,
+    });
+
+    await waitFor(() => expect(result.current.children).toHaveLength(1));
+    expect(result.current.children[0]).toMatchObject({ id: "conv_old_worker", busy: true });
+    expect(authenticatedFetch).toHaveBeenCalledWith(
+      "/v1/sessions/conv_parent/child_sessions?limit=1000",
+    );
+  });
 });
 
 describe("useDescendantSession", () => {

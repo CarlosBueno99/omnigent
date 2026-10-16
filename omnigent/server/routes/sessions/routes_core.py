@@ -172,6 +172,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _build_session_list_item,
     _build_session_response,
     _cancel_pending_archive_stop,
+    _children_dispatched_in_copied_history,
     _create_session_from_bundle,
     _create_session_from_existing_agent,
     _ensure_native_terminal_ready,
@@ -3295,7 +3296,8 @@ def register_core_routes(
         with a hidden agent note and a visible info notice naming them
         and the source, so neither the user nor the fork's agent waits
         on results that go to the source's inbox (see
-        :func:`_persist_fork_running_subagents_note`).
+        :func:`_persist_fork_running_subagents_note`). A truncated fork
+        names only the children its copied history dispatched.
 
         ``body.host_type: "managed"`` gives the fork its own
         server-provisioned sandbox instead of leaving it unbound for the
@@ -3721,6 +3723,21 @@ def register_core_routes(
                     _delete_stored_session_bundle_after_failure, artifact_store, clone_location
                 )
 
+        # Read the source's in-flight sub-agents before copying its history: one
+        # that finishes during the copy still reported to the source, and the
+        # fork's copied receipt for it still needs the notice appended below.
+        try:
+            running_children = await asyncio.to_thread(
+                _running_child_conversations, source_id, conversation_store
+            )
+        except Exception:
+            running_children = []
+            _logger.warning(
+                "failed to list the running sub-agents of session %s before forking it",
+                source_id,
+                exc_info=True,
+            )
+
         try:
             new_conv = await asyncio.to_thread(
                 conversation_store.fork_conversation,
@@ -3820,24 +3837,32 @@ def register_core_routes(
                         exc_info=True,
                     )
 
-        # Sub-agents still in flight stay with the source (a fork never adopts
-        # them); say so in the fork before announcing it. Best-effort like the
-        # file rows above: the fork exists, so a failed note must not orphan it.
-        try:
-            running_children = await asyncio.to_thread(
-                _running_child_conversations, source_id, conversation_store
-            )
-            if running_children:
-                await _persist_fork_running_subagents_note(
-                    new_conv.id, source_id, running_children, conversation_store
+        # Those sub-agents stay with the source (a fork never adopts them); say
+        # so in the fork before announcing it. A fork cut at an earlier response
+        # only hears about children its copied history dispatched. Best-effort
+        # like the file rows above: the fork exists, so a failed note must not
+        # orphan it.
+        if running_children:
+            try:
+                noted_children = running_children
+                if body.up_to_response_id is not None:
+                    noted_children = await asyncio.to_thread(
+                        _children_dispatched_in_copied_history,
+                        new_conv.id,
+                        running_children,
+                        conversation_store,
+                    )
+                if noted_children:
+                    await _persist_fork_running_subagents_note(
+                        new_conv.id, source_id, noted_children, conversation_store
+                    )
+            except Exception:
+                _logger.warning(
+                    "failed to note the running sub-agents of session %s in fork %s",
+                    source_id,
+                    new_conv.id,
+                    exc_info=True,
                 )
-        except Exception:
-            _logger.warning(
-                "failed to note the running sub-agents of session %s in fork %s",
-                source_id,
-                new_conv.id,
-                exc_info=True,
-            )
 
         # Grant ownership BEFORE scheduling the managed launch, mirroring
         # both create paths: a managed-guard failure (misconfigured server,

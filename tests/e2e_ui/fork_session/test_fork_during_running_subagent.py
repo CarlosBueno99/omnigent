@@ -1,17 +1,8 @@
 """Browser e2e: forking an orchestrator while its sub-agent is still running.
 
-The user asks an orchestrator to send a worker sub-agent a long task, then
-forks the orchestrator session from the header menu while the worker is still
-running. The fork inherits the dispatch receipt ("Result will appear in your
-inbox"), so in the fork the user asks for status and tries to stop the worker,
-then the worker finishes.
-
-Expected (per the report): the fork gets the result, or the fork dialog and
-the fork's agent tell the user the sub-agent stayed with the original session.
-Observed on the buggy build: the dialog says nothing about the running worker,
-the fork's ``sys_read_inbox`` is empty and ``sys_session_list`` shows
-``"sub_agents": []``, ``sys_cancel_task`` refuses the worker, and when the
-worker finishes the wake notice and result land in the original session only.
+Forking while a child runs must warn the user up front and leave a notice in
+the fork, while the child's ownership, cancellation and result delivery stay
+with the original session.
 
 The worker's single model call is parked on the mock gate so it is "running"
 for exactly as long as the journey needs; ``POST /gate/release`` ends it.
@@ -338,12 +329,10 @@ def _run_journey(
 ) -> dict[str, Any]:
     """Drive the user journey, filling ``obs`` as it goes and asserting nothing."""
     obs["original_id"] = original_id
-    record_dir = os.environ.get("OMNIGENT_E2E_RECORD_DIR")
     viewport = {"width": 1280, "height": 720}
     context_kwargs: dict[str, Any] = {"viewport": viewport}
-    if record_dir:
-        Path(record_dir).mkdir(parents=True, exist_ok=True)
-        context_kwargs["record_video_dir"] = record_dir
+    if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+        # The e2e_ui conftest injects record_video_dir; keep the clip at full size.
         context_kwargs["record_video_size"] = viewport
     context = browser.new_context(**context_kwargs)
     try:
@@ -386,8 +375,7 @@ def _run_journey(
         obs["fork_id"] = fork_id
         fork_snapshot = httpx.get(f"{base_url}/v1/sessions/{fork_id}", timeout=10.0)
         obs["fork_snapshot"] = fork_snapshot.json() if fork_snapshot.status_code == 200 else None
-        # A non-coding fork is created unbound; the reporter's fork got its own
-        # runner from the dialog. Bind it so it can take a turn.
+        # A non-coding fork is created unbound; bind it to a runner so it can take a turn.
         bind_session_runner(httpx.patch, base_url, fork_id, runner_id, timeout=10.0)
         page.reload()
         expect(page.get_by_label(_COMPOSER_LABEL)).to_be_visible(timeout=30_000)
@@ -486,11 +474,12 @@ def test_fork_during_running_subagent_keeps_fork_informed(
     runner_id: str,
     tmp_path: Path,
 ) -> None:
-    """A fork made while a sub-agent runs must get its result or be told it stayed behind.
+    """A fork made while a sub-agent runs is told the worker stayed with the original.
 
-    Each check accepts either outcome the report calls expected: the fork
-    receives the worker's result, or the user/fork is told the worker stayed
-    with the original session (named by its id).
+    The dialog warns before cloning and the fork's transcript carries a visible
+    notice naming the original session; the worker itself stays owned by the
+    original, so the fork cannot list or cancel it and never receives its
+    result.
     """
     reset_mock_llm(mock_llm_server_url)
     uid = uuid.uuid4().hex[:6]
@@ -541,35 +530,41 @@ def test_fork_during_running_subagent_keeps_fork_informed(
         "the journey did not get far enough to judge the fork"
     )
 
-    told_in_fork = original_id in obs["fork_after_messages"]
+    on_screen = obs["on_screen"]
     failures: list[str] = []
-    if told_in_fork and not obs["on_screen"].get("fork_subagent_notice"):
-        failures.append(
-            "the fork's transcript names the original session, but no notice about the "
-            "sub-agent staying with the original was visible on screen in the fork"
-        )
-    if not re.search(r"sub-?agent", obs["dialog_text"], re.IGNORECASE):
+    if not on_screen.get("dialog_subagent_warning") or not re.search(
+        r"sub-?agent", obs["dialog_text"], re.IGNORECASE
+    ):
         failures.append(
             "the fork dialog did not warn that a sub-agent was still running; its text was: "
             + " ".join(obs["dialog_text"].split())
         )
-    if worker_id not in obs["fork_listed_sub_agent_ids"] and not told_in_fork:
+    if not on_screen.get("fork_subagent_notice") or original_id not in obs["fork_after_messages"]:
         failures.append(
-            f"in fork {fork_id} sys_read_inbox returned {obs['fork_inbox_output']!r} and "
-            f"sys_session_list listed sub_agents {obs['fork_listed_sub_agent_ids']} while worker "
-            f"{worker_id} was still running under the original; nothing told the fork"
+            f"fork {fork_id} showed no notice naming the original session {original_id} for "
+            f"the worker {worker_id} that stayed behind"
         )
-    if "Error: no in-flight task" in obs["fork_cancel_output"] and not told_in_fork:
+    # Ownership stays with the original: the fork neither lists, cancels nor
+    # hears from the worker, and its own inbox stays empty.
+    if (
+        obs["fork_children_after_status"]
+        or worker_id in obs["fork_listed_sub_agent_ids"]
+        or obs["fork_inbox_output"] != _INBOX_EMPTY
+    ):
         failures.append(
-            f"the fork could not stop the worker: sys_cancel_task returned "
-            f"{obs['fork_cancel_output']!r} "
-            f"(worker still running: {obs['gate_pending_after_cancel']})"
+            f"fork {fork_id} adopted the worker: children {obs['fork_children_after_status']}, "
+            f"sub_agents {obs['fork_listed_sub_agent_ids']}, inbox {obs['fork_inbox_output']!r}"
         )
-    if marker not in obs["fork_after_text"] and not told_in_fork:
+    if "Error: no in-flight task" not in obs["fork_cancel_output"]:
         failures.append(
-            f"after the worker finished, the original {original_id} received the wake notice and "
-            f"result (woke={obs['original_woke']}) but fork {fork_id} received neither the result "
-            f"nor a notice within {_FORK_WATCH_S:.0f}s (items "
-            f"{obs['fork_item_count_before_finish']} -> {obs['fork_item_count_after_finish']})"
+            f"the fork could act on the original's worker: sys_cancel_task returned "
+            f"{obs['fork_cancel_output']!r}"
+        )
+    if not obs["original_woke"] or marker in obs["fork_after_text"]:
+        failures.append(
+            f"the worker's result must wake the original {original_id} only "
+            f"(woke={obs['original_woke']}, marker in fork={marker in obs['fork_after_text']}, "
+            f"fork items {obs['fork_item_count_before_finish']} -> "
+            f"{obs['fork_item_count_after_finish']} over {_FORK_WATCH_S:.0f}s)"
         )
     assert not failures, "\n".join(failures)

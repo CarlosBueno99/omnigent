@@ -17,7 +17,7 @@ import secrets
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import httpx
 from fastapi import (
@@ -2202,11 +2202,6 @@ async def _persist_model_change_note(
     _publish_external_conversation_item(session_id, persisted_items[0])
 
 
-# Live statuses under which a child's turn is still in flight; the same pair
-# ``_child_session_summary_from_conversation`` reports as ``busy``.
-_IN_FLIGHT_CHILD_STATUSES: frozenset[str] = frozenset({"running", "waiting"})
-
-
 def _running_child_conversations(
     session_id: str,
     conversation_store: ConversationStore,
@@ -2233,16 +2228,84 @@ def _running_child_conversations(
         )
         for child in page.data:
             status = _session_status_cache.get(child.id, child.live_status)
-            if status in _IN_FLIGHT_CHILD_STATUSES:
+            if status in _MID_TURN_STATUSES:
                 running.append(child)
         if not page.has_more or page.last_id is None:
             return running
         after = page.last_id
 
 
+def _children_dispatched_in_copied_history(
+    fork_id: str,
+    children: list[Conversation],
+    conversation_store: ConversationStore,
+) -> list[Conversation]:
+    """
+    Keep the children a truncated fork's copied history can know about.
+
+    A fork cut at an earlier response carries no dispatch receipt for a child
+    created after that point, so naming it would describe context the fork's
+    agent never saw. Copied items keep the source's timestamps, so the newest
+    copied item marks the fork point.
+
+    :param fork_id: The fork's session id, e.g. ``"conv_fork123"``.
+    :param children: The source's in-flight children.
+    :param conversation_store: Store the fork's items are read from.
+    :returns: The children created no later than the fork's newest copied item.
+    """
+    newest = conversation_store.list_items(fork_id, limit=1, order="desc").data
+    if not newest:
+        return []
+    cutoff = newest[0].created_at
+    return [child for child in children if child.created_at <= cutoff]
+
+
 # Error-item classifier for the info notice a fork opens with when its source
 # still had sub-agents in flight.
 FORK_SOURCE_SUBAGENTS_RUNNING_CODE = "fork_source_subagents_running"
+
+
+class _SubagentWording(NamedTuple):
+    """Count-dependent words shared by the fork's agent note and visible notice."""
+
+    noun: str
+    these: str
+    was: str
+    they_stay: str
+    they_keep: str
+    results: str
+    wake: str
+    them: str
+
+
+def _fork_subagent_wording(count: int) -> _SubagentWording:
+    """
+    Pick singular or plural wording for *count* in-flight sub-agents.
+
+    :param count: Number of children named by the notice, e.g. ``1``.
+    :returns: The words to splice into the note and notice text.
+    """
+    if count == 1:
+        return _SubagentWording(
+            noun="1 sub-agent",
+            these="this sub-agent",
+            was="was",
+            they_stay="it stays",
+            they_keep="It keeps",
+            results="its result",
+            wake="wake notice",
+            them="it",
+        )
+    return _SubagentWording(
+        noun=f"{count} sub-agents",
+        these="these sub-agents",
+        was="were",
+        they_stay="they stay",
+        they_keep="They keep",
+        results="their results",
+        wake="wake notices",
+        them="them",
+    )
 
 
 def _fork_running_subagent_labels(children: list[Conversation]) -> list[str]:
@@ -2261,31 +2324,27 @@ def _fork_running_subagent_labels(children: list[Conversation]) -> list[str]:
 
 def _fork_running_subagents_agent_note(source_id: str, children: list[Conversation]) -> str:
     """
-    Build the hidden ``[System: ...]`` context the fork's agent replays on its first turn.
+    Build the hidden ``[System: ...]`` context a replay-based fork agent sees on its first turn.
+
+    Native CLIs that resume a clone of the source's own transcript never read
+    the fork's Omnigent items, so this note does not reach them.
 
     :param source_id: The forked session's id, e.g. ``"conv_src456"``.
     :param children: The source's in-flight children; must be non-empty.
     :returns: The multi-line note text.
     """
-    count = len(children)
-    header = (
-        "[System: forked while 1 sub-agent was still running — it stays with the original session]"
-        if count == 1
-        else (
-            f"[System: forked while {count} sub-agents were still running — "
-            "they stay with the original session]"
-        )
-    )
+    words = _fork_subagent_wording(len(children))
     lines = [
-        header,
-        f"This session was forked from {source_id} while these sub-agents were still running:",
+        f"[System: forked while {words.noun} {words.was} still running — "
+        f"{words.they_stay} with the original session]",
+        f"This session was forked from {source_id} while {words.these} {words.was} still running:",
         *(f"- {label}" for label in _fork_running_subagent_labels(children)),
-        f"They keep running under the original session {source_id}: their results and wake "
-        "notices arrive in that session's inbox, not this one, and sys_cancel_task cannot stop "
-        'them from here. Dispatch receipts copied into this history ("Result will appear in '
-        "your inbox\") refer to the original's inbox. Read a sub-agent's progress with "
-        "sys_session_get_history on its session id; to collect its result or stop it, use the "
-        "original session.",
+        f"{words.they_keep} running under the original session {source_id}: {words.results} and "
+        f"{words.wake} arrive in that session's inbox, not this one, and sys_cancel_task cannot "
+        f'stop {words.them} from here. Dispatch receipts copied into this history ("Result will '
+        "appear in your inbox\") refer to the original's inbox. Read a sub-agent's progress with "
+        f"sys_session_get_history on its session id; to collect {words.results} or stop "
+        f"{words.them}, use the original session.",
     ]
     return "\n".join(lines)
 
@@ -2299,24 +2358,23 @@ def _fork_running_subagents_notice(source_id: str, children: list[Conversation])
     :returns: An info-level :class:`ErrorData` naming the children and the source.
     """
     labels = ", ".join(_fork_running_subagent_labels(children))
-    if len(children) == 1:
-        noun, was, keeps, results, them = "1 sub-agent", "was", "It keeps", "its result", "it"
-    else:
-        noun = f"{len(children)} sub-agents"
-        was, keeps, results, them = "were", "They keep", "their results", "them"
+    words = _fork_subagent_wording(len(children))
     return ErrorData(
         source="execution",
         code=FORK_SOURCE_SUBAGENTS_RUNNING_CODE,
         level="info",
-        title=f"{noun} stayed with the original session",
+        title=f"{words.noun} stayed with the original session",
         message=f"Forked from {source_id} while still running: {labels}.",
         cause=(
-            f"This session was cloned from {source_id} while {labels} {was} still running. "
-            f"{keeps} running under the original session, so {results} and wake notices go "
-            f"there, not here, and this session cannot stop {them}. Dispatch receipts copied "
-            "into this history refer to the original session's inbox."
+            f"This session was cloned from {source_id} while {labels} {words.was} still running. "
+            f"{words.they_keep} running under the original session, so {words.results} and "
+            f"{words.wake} go there, not here, and this session cannot stop {words.them}. "
+            "Dispatch receipts copied into this history refer to the original session's inbox."
         ),
-        remediation=f"Open the original session {source_id} to collect {results} or stop {them}.",
+        remediation=(
+            f"Open the original session {source_id} to collect {words.results} "
+            f"or stop {words.them}."
+        ),
     )
 
 
@@ -2331,11 +2389,11 @@ async def _persist_fork_running_subagents_note(
 
     A fork never adopts its source's children, so its copied dispatch
     receipts promise inbox results that only reach the source. One append
-    adds a hidden ``is_meta`` user-role ``[System: ...]`` note the fork's
-    agent replays, then an info-level error item the UI renders as a notice
-    card. The notice must stay last: the runner resumes a history that ends
-    on a user message as an unanswered turn, which would start a model turn
-    as soon as the fork binds a runner.
+    adds a hidden ``is_meta`` user-role ``[System: ...]`` note that harnesses
+    replaying the fork's items feed the agent, then an info-level error item
+    the UI renders as a notice card. The notice must stay last: the runner
+    resumes a history that ends on a user message as an unanswered turn,
+    which would start a model turn as soon as the fork binds a runner.
 
     :param fork_id: The fork's session id, e.g. ``"conv_fork123"``.
     :param source_id: The forked session's id, e.g. ``"conv_src456"``.
@@ -13120,6 +13178,7 @@ __all__ = [
     "_build_session_response",
     "_cancel_pending_archive_stop",
     "_child_session_summaries_from_conversations",
+    "_children_dispatched_in_copied_history",
     "_create_session_from_bundle",
     "_create_session_from_existing_agent",
     "_detached_stop_tasks",
@@ -13136,6 +13195,7 @@ __all__ = [
     "_fork_running_subagent_labels",
     "_fork_running_subagents_agent_note",
     "_fork_running_subagents_notice",
+    "_fork_subagent_wording",
     "_forward_event_to_runner",
     "_forward_native_subagent_terminal_failure",
     "_forward_native_terminal_message",

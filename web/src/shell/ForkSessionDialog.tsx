@@ -38,7 +38,11 @@ import type { AvailableAgent } from "@/hooks/useAvailableAgents";
 import { partitionAgentsByKind } from "@/lib/agentGrouping";
 import { useSessionAgent } from "@/hooks/useAgents";
 import { useSession } from "@/hooks/useSession";
-import { childSessionsQueryKey, useChildSessions } from "@/hooks/useChildSessions";
+import {
+  CHILD_SESSIONS_MAX_LIMIT,
+  childSessionsQueryKey,
+  useChildSessions,
+} from "@/hooks/useChildSessions";
 import type { Session } from "@/lib/types";
 import { useHosts, useHostModelOptions, type Host } from "@/hooks/useHosts";
 import {
@@ -1191,11 +1195,14 @@ function SupportedForkSessionForm({
 
   // Sub-agents the source still has in flight stay with it — a clone never
   // adopts them — so say up front where their results will land. The cached
-  // child list may predate a child's turn start, so refetch it on open.
+  // child list may predate a child's turn start, so refetch it on open, and
+  // ask for every child: an older running worker can sit past the first page.
   useEffect(() => {
     void queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(sourceSessionId) });
   }, [queryClient, sourceSessionId]);
-  const { children: sourceChildren } = useChildSessions(sourceSessionId);
+  const { children: sourceChildren } = useChildSessions(sourceSessionId, null, {
+    limit: CHILD_SESSIONS_MAX_LIMIT,
+  });
   const runningSubagentCount = sourceChildren.filter((child) => child.busy).length;
 
   // On a DIFFERENT host than the source nothing prefills the directory, so it
