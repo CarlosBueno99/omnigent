@@ -1292,7 +1292,7 @@ def test_ui_setup_steps_install_then_ui_auth_for_codex() -> None:
     install, auth = steps
     assert install.action == "install"
     assert install.status_key == "installed"
-    assert install.command is None
+    assert install.command == "npm install -g @openai/codex"
     assert auth.action == "auth"
     assert auth.title == "Set up authentication"
     assert auth.command == "codex login"

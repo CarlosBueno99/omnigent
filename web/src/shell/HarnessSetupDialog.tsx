@@ -249,7 +249,7 @@ function SetupStepRow({
   const detail = done
     ? doneDetail(step.kind)
     : manualInstall
-      ? `Run ${step.command ?? "omni setup"} on ${host?.name} to ${updating ? "update" : "install"} ${label}.`
+      ? `Run this on ${host?.name} to ${updating ? "update" : "install"} ${label}.`
       : step.detail;
 
   return (
@@ -269,6 +269,12 @@ function SetupStepRow({
             </span>
           ) : (
             detail && <span className="text-sm text-muted-foreground">{detail}</span>
+          )}
+          {/* Under the text, not beside it: install commands can be long. */}
+          {manualInstall && (
+            <span className="self-start">
+              <CopyCommand command={step.command ?? "omni setup"} />
+            </span>
           )}
         </div>
         {/* Control: one-click Install (when the allowlist accepts it), an
@@ -306,8 +312,8 @@ function SetupStepRow({
           >
             Set up auth
           </Button>
-        ) : step.command || manualInstall ? (
-          <CopyCommand command={step.command ?? "omni setup"} />
+        ) : step.command && !manualInstall ? (
+          <CopyCommand command={step.command} />
         ) : null}
       </div>
 

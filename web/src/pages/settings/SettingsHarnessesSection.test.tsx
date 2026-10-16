@@ -224,6 +224,16 @@ describe("Harnesses grid", () => {
     expect(screen.getByTestId("harness-action-codex-native")).toBeTruthy();
   });
 
+  it("shows Needs sign-in for a credential the host reports as blocking", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "missing-credentials" } }];
+    renderHarnesses();
+
+    expect(within(card("codex-native")).getByText("Needs sign-in")).toBeTruthy();
+    expect(
+      within(card("codex-native")).getByRole("button", { name: "Sign in Codex" }),
+    ).toBeTruthy();
+  });
+
   it("opens the setup dialog for the clicked harness", () => {
     hosts = [ONLINE];
     renderHarnesses();

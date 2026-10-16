@@ -6335,9 +6335,11 @@ describe("NewChatLandingScreen", () => {
     renderLanding({ harness_install_enabled: false });
     breakSelectedHarness("a2", "codex-native", "binary-missing");
     fireEvent.click(screen.getByRole("button", { name: "Install" }));
-    expect(screen.getByRole("dialog")).toHaveTextContent(
-      "Run omni setup on machine-1 to install Codex.",
-    );
+    expect(screen.getByRole("dialog")).toHaveTextContent("Run this on machine-1 to install Codex.");
+    // The mocked step carries no command (an older server), so the dialog falls back to omni setup.
+    expect(
+      within(screen.getByTestId("harness-setup-step-install")).getByTestId("harness-setup-command"),
+    ).toHaveTextContent("omni setup");
     expect(screen.queryByTestId("harness-setup-install")).toBeNull();
     expect(installMutate).not.toHaveBeenCalled();
   });
@@ -6706,7 +6708,7 @@ describe("NewChatLandingScreen", () => {
       if (enabled) expect(screen.getByTestId("harness-setup-install")).toHaveTextContent("Update");
       else {
         expect(screen.getByRole("dialog")).toHaveTextContent(
-          "Run omni setup on machine-1 to update Codex.",
+          "Run this on machine-1 to update Codex.",
         );
         expect(screen.queryByTestId("harness-setup-install")).toBeNull();
       }

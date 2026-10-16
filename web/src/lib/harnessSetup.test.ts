@@ -99,6 +99,13 @@ const QWEN_STEPS: SetupStepWire[] = [
 
 describe("harnessUnavailableReasonOnHost", () => {
   it("classifies structured reasons and generic unconfigured", () => {
+    // Blocking credential gap: shown as sign-in, never selectable.
+    const noKey = hostWith({ cursor: "missing-credentials" });
+    expect(harnessUnavailableReasonOnHost("cursor", noKey)).toBe("needs-auth");
+    expect(harnessReadinessOnHost("cursor", noKey)).toMatchObject({
+      reason: "needs-auth",
+      selectable: false,
+    });
     expect(harnessUnavailableReasonOnHost("codex", hostWith({ codex: "binary-missing" }))).toBe(
       "binary-missing",
     );

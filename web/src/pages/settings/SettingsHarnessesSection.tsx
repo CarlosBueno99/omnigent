@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   ChevronDownIcon,
   KeyRoundIcon,
+  Plus,
   SearchIcon,
   SettingsIcon,
   TriangleAlertIcon,
@@ -363,6 +364,7 @@ function SetupButton({
       componentId="settings.harnesses.setup"
       onClick={onSetup}
     >
+      {reason === "binary-missing" && <Plus />}
       {harnessSetupActionText(reason)}
     </Button>
   );

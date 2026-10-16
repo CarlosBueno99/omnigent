@@ -323,7 +323,9 @@ def test_missing_harness_is_disabled_with_repair_tooltip(
         expect(dialog).to_contain_text("Codex is ready")
         assert len(install_requests) == 1
     else:
-        expect(dialog).to_contain_text(f"Run omni setup on {_HOST_NAME} to install Codex.")
+        expect(dialog).to_contain_text(f"Run this on {_HOST_NAME} to install Codex.")
+        install_step = dialog.get_by_test_id("harness-setup-step-install")
+        expect(install_step.get_by_test_id("harness-setup-command")).to_have_text("omni setup")
         expect(dialog.get_by_role("button", name="Install", exact=True)).to_have_count(0)
         assert install_requests == []
     dialog.get_by_role("button", name=re.compile("^(Close|Done)$")).first.click()

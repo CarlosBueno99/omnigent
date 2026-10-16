@@ -601,7 +601,7 @@ def test_copilot_ready_via_gh_cli_login_without_stored_token(
     import omnigent.onboarding.copilot_auth as _ca
 
     _all_clis_installed(monkeypatch)
-    assert configured_harness_map()["copilot"] is False
+    assert configured_harness_map()["copilot"] == "missing-credentials"
 
     monkeypatch.setattr(_ca, "gh_cli_github_token", lambda host=None: "gho_from_gh")
     assert configured_harness_map()["copilot"] is True
@@ -818,6 +818,7 @@ def test_kimi_readiness_keys_off_binary_and_credential(
     monkeypatch.setattr(_ka, "kimi_auth_configured", lambda: False)
     assert harness_is_configured("kimi") is False
     assert harness_is_configured("kimi-code") is False
+    assert configured_harness_map()["kimi"] == "missing-credentials"
 
     # Binary present and auth detected → configured.
     monkeypatch.setattr(_ka, "kimi_auth_configured", lambda: True)
@@ -840,6 +841,7 @@ def test_cursor_readiness_keys_off_api_key(
     # No key anywhere (autouse isolation), even with all CLIs present → False.
     _all_clis_installed(monkeypatch)
     assert harness_is_configured("cursor") is False
+    assert configured_harness_map()["cursor"] == "missing-credentials"
 
     # An inherited environment key satisfies it, with no CLI installed.
     _no_clis_installed(monkeypatch)

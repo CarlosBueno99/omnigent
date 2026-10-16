@@ -630,13 +630,18 @@ def ui_setup_steps(harness: str) -> list[SetupStep]:
 
     spec = _all_harness_install().get(key)
     display = spec.display if spec is not None else harness
+    try:
+        # Shown for the user to run when the one-click install is unavailable.
+        install_command: str | None = harness_install_display(key)
+    except (KeyError, ValueError):
+        install_command = None
     steps = [
         SetupStep(
             kind="install",
             title=f"Install {display}",
             detail=f"We'll install {display} on the host for you.",
             action="install",
-            command=None,
+            command=install_command,
             status_key="installed",
         )
     ]

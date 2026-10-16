@@ -117,6 +117,12 @@ export function harnessReadinessOnHost(
       description: "Install this harness on the selected host before using it.",
     });
   }
+  if (availability === "missing-credentials") {
+    return harnessReadinessResult("setup-required", "needs-auth", true, {
+      label: "Authentication required",
+      description: "Sign in or add credentials on the selected host before using this harness.",
+    });
+  }
   if (availability === "needs-auth") {
     if (isSdkHarness(harness)) {
       // Advisory only for the in-process SDK harnesses: the host daemon
@@ -214,6 +220,8 @@ export function harnessUnavailableReasonOnHost(
   ) {
     return availability;
   }
+  // Blocking counterpart of "needs-auth"; the UI shows both as needs sign-in.
+  if (availability === "missing-credentials") return "needs-auth";
   // Any other string from a newer/older server still means "not ready";
   // show a generic warning rather than silently treating it as available.
   if (typeof availability === "string") {

@@ -12,7 +12,9 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.mark.parametrize("bundle", [False, True])
-@pytest.mark.parametrize("readiness", [False, "binary-missing", "version-too-low", "absent"])
+@pytest.mark.parametrize(
+    "readiness", [False, "binary-missing", "version-too-low", "missing-credentials", "absent"]
+)
 async def test_child_create_rejects_unavailable_harness(
     client: httpx.AsyncClient,
     app: FastAPI,
@@ -101,8 +103,8 @@ async def test_child_create_preserves_ready_and_unknown_hosts(
     assert response.json()["harness"] == "jcode"
 
 
-# False is what older hosts report for a missing CLI; newer hosts send "binary-missing".
-@pytest.mark.parametrize("readiness", [False, "binary-missing"])
+# False is what older hosts report; newer hosts send the specific blocking reason.
+@pytest.mark.parametrize("readiness", [False, "binary-missing", "missing-credentials"])
 @pytest.mark.parametrize("bundle", [False, True])
 async def test_top_level_create_rejects_unavailable_harness(
     client: httpx.AsyncClient,
