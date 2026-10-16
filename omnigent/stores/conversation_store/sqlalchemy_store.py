@@ -3643,7 +3643,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 SqlConversationMetadata.workspace_id == workspace_id,
                 SqlConversationMetadata.id == conversation_id,
             )
-            if self._supports_for_update:
+            if self._meta_supports_for_update:
                 stmt = stmt.with_for_update()
             meta = session.execute(stmt).scalar_one_or_none()
             if meta is None or meta.terminal_launch_args is None:

@@ -8290,15 +8290,12 @@ async def _consume_claude_initial_prompt(
     """
     Clear the one-shot prompt from a session's stored launch args after launching with it.
 
-    ``omni claude -p`` persists the prompt as the leading ``terminal_launch_args``
-    entry so the runner's launch can pass it as Claude's positional prompt. The
-    prompt counts as consumed once the terminal launched, not once Claude
-    submitted it: a startup failure after this point leaves the next relaunch
-    without it. The server removes the entry only while it still leads the
-    stored list, so flags merged meanwhile survive and a prompt another client
-    stored meanwhile stays pending. An older server without that operation gets
-    a re-read and a write-back of the remainder instead. Best-effort: a failed
-    write leaves the prompt stored, and a relaunch may submit it once more.
+    Consumed on launch, not on Claude's submission: a startup failure after
+    this point leaves the next relaunch without the prompt. The server removes
+    the entry only while it still leads the stored list; an older server
+    without that operation gets a re-read and write-back, where a write landing
+    in between is still lost. Best-effort: a failed write may let a relaunch
+    submit the prompt once more.
 
     :param session_id: Session/conversation identifier.
     :param server_client: Runner Omnigent server client.

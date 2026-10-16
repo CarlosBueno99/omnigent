@@ -8291,3 +8291,64 @@ def test_consume_leading_terminal_launch_arg_removes_only_a_matching_prompt(db_u
     assert store.consume_leading_terminal_launch_arg(conv.id, "review the last commit") is False
     assert store.get_conversation(conv.id).terminal_launch_args == ["new request"]
     assert store.consume_leading_terminal_launch_arg("c" * 32, "review the last commit") is False
+
+
+@pytest.mark.parametrize(
+    "split_metadata_db", [False, True], ids=["single-db", "metadata-on-test-db"]
+)
+def test_consume_leading_terminal_launch_arg_never_loses_a_concurrent_replacement(
+    db_uri: str, tmp_path: Path, split_metadata_db: bool
+) -> None:
+    """A replacement racing the consume is serialized by the row lock, never overwritten.
+
+    With the metadata table on the test database and conversations on SQLite, the
+    lock must come from the metadata engine's dialect; on SQLite alone the
+    immediate transaction already serializes both writers.
+    """
+    import threading
+    import time
+
+    from omnigent.db.db_models import SqlConversationMetadata
+
+    def make_store() -> SqlAlchemyConversationStore:
+        if split_metadata_db:
+            return SqlAlchemyConversationStore(
+                db_uri, f"sqlite:///{tmp_path / 'conversations.db'}"
+            )
+        return SqlAlchemyConversationStore(db_uri)
+
+    consumer, replacer = make_store(), make_store()
+    conv = consumer.create_conversation(
+        title="native", terminal_launch_args=["review the last commit"]
+    )
+    consumer_thread = threading.current_thread()
+    row_locked = threading.Event()
+    replacement_started = threading.Event()
+
+    def pause_before_write(session: Session, *_: object) -> None:
+        if threading.current_thread() is not consumer_thread:
+            return
+        if any(
+            isinstance(obj, SqlConversationMetadata) and obj.id == conv.id for obj in session.dirty
+        ):
+            row_locked.set()
+            replacement_started.wait(timeout=5)
+            time.sleep(1.0)
+
+    def replace() -> None:
+        row_locked.wait(timeout=10)
+        replacement_started.set()
+        replacer.update_conversation(conv.id, terminal_launch_args=["new request"])
+
+    thread = threading.Thread(target=replace)
+    event.listen(Session, "before_flush", pause_before_write)
+    try:
+        thread.start()
+        consumed = consumer.consume_leading_terminal_launch_arg(conv.id, "review the last commit")
+        thread.join(timeout=30)
+    finally:
+        event.remove(Session, "before_flush", pause_before_write)
+
+    assert not thread.is_alive()
+    assert consumed is True
+    assert consumer.get_conversation(conv.id).terminal_launch_args == ["new request"]
