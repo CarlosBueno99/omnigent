@@ -3672,10 +3672,9 @@ class _CodexAppServerSession:
         :returns: The best final response observed during the drain window.
         """
         deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
-        # A helper can outlive its spawning turn, so its notifications and
-        # blocking requests can land here; defer them for the next turn, since
-        # consuming a request here would strand the helper without a reply. A
-        # spawn item here registers its helper so that helper's events defer too.
+        # A helper can outlive its spawning turn; defer its notifications and
+        # blocking requests to the next turn (answering here would strand it).
+        # Spawn items register their helper so that helper's events defer too.
         deferred: list[CodexMessage | HarnessTransportClosedError] = []
         spawned_in_drain: dict[str, str] = {}
         try:
@@ -3746,10 +3745,12 @@ class _CodexAppServerSession:
                 if phase == "final_answer":
                     return final_response
         finally:
+            # Requeue first so deferred helper events survive even if a
+            # registration below raises.
+            self._requeue_deferred_events(deferred)
             for child_thread_id, child_task in spawned_in_drain.items():
                 if child_thread_id not in self._child_threads:
                     await self._register_child_thread(child_thread_id, task=child_task)
-            self._requeue_deferred_events(deferred)
 
     def _requeue_deferred_events(
         self, deferred: list[CodexMessage | HarnessTransportClosedError]
@@ -3883,6 +3884,8 @@ class _CodexAppServerSession:
             prompt = item.get("prompt")
             task = prompt if isinstance(prompt, str) else ""
             for thread_id in _collab_child_thread_ids(item):
+                if thread_id == self.thread_id:
+                    continue
                 child = self._child_threads.get(thread_id)
                 if child is None:
                     child = await self._register_child_thread(thread_id, task=task)
@@ -3905,7 +3908,7 @@ class _CodexAppServerSession:
             return
         if item_type == _CODEX_SUBAGENT_ACTIVITY_ITEM_TYPE and item.get("kind") == "started":
             thread_id = item.get("agentThreadId")
-            if not isinstance(thread_id, str) or not thread_id:
+            if not isinstance(thread_id, str) or not thread_id or thread_id == self.thread_id:
                 return
             child = self._child_threads.get(thread_id)
             if child is None:
@@ -4241,6 +4244,11 @@ class _CodexAppServerSession:
                 observed_turn_id = event_turn_id
                 return True
             if observed_turn_id is None:
+                # Only the parent thread may rewrite the active turn id; an
+                # event from an unregistered helper thread must not be adopted.
+                event_thread_id = _event_thread_id(params)
+                if event_thread_id is not None and event_thread_id != self.thread_id:
+                    return False
                 # A first event that *terminates* the turn (final-answer
                 # item) is almost certainly a stale tail from the prior
                 # turn, not a Codex-quirk rewrite. Drop it instead of

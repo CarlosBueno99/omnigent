@@ -2974,6 +2974,78 @@ async def test_run_turn_still_adopts_non_terminal_first_event() -> None:
     assert turn_completes[0].response == "Hello"
 
 
+async def test_run_turn_ignores_unregistered_child_turn_id_in_adopt() -> None:
+    """A helper event arriving before its spawn item registers the child must
+    not let the helper's turn id be adopted as the parent's active turn, which
+    would strand the parent's own final answer.
+    """
+    session = _CodexAppServerSession(
+        codex_path="/bin/echo",
+        cwd="/tmp/workspace",
+        env={},
+        tool_executor=None,
+    )
+    session.start = AsyncMock()
+    session._proc = _FakeProcess()
+    session.thread_id = "thread-1"
+    session._request = AsyncMock(return_value={"result": {"turn": {"id": "turn-1"}}})
+
+    async def _inject_child_then_parent() -> None:
+        await asyncio.sleep(0.01)
+        # An unregistered helper's first event carries the helper's own turn id.
+        session._events.put_nowait(
+            {
+                "method": "item/started",
+                "params": {
+                    "threadId": "thread-child",
+                    "turnId": "turn-child",
+                    "item": {"type": "agentMessage", "id": "msg-child"},
+                },
+            }
+        )
+        # The parent's real final answer on its own turn.
+        session._events.put_nowait(
+            {
+                "method": "item/completed",
+                "params": {
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "agentMessage",
+                        "id": "msg-parent",
+                        "text": "Parent still answers.",
+                        "phase": "final_answer",
+                    },
+                },
+            }
+        )
+
+    inject_task = asyncio.create_task(_inject_child_then_parent())
+    events = [
+        event
+        async for event in session.run_turn(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            system_prompt="",
+            model="gpt-5.4-mini",
+            cwd=".",
+            sandbox="workspace-write",
+        )
+    ]
+    await inject_task
+
+    turn_completes = [e for e in events if isinstance(e, TurnComplete)]
+    assert len(turn_completes) == 1, (
+        f"Expected exactly one TurnComplete, got {len(turn_completes)}: {events}"
+    )
+    # If the helper's ``turn-child`` were adopted, the parent's ``turn-1``
+    # final answer would be dropped and this response would be empty.
+    assert turn_completes[0].response == "Parent still answers.", (
+        f"Expected the parent's own final answer; got "
+        f"{turn_completes[0].response!r}. An unregistered helper's turn id "
+        f"was adopted as the parent turn."
+    )
+
+
 def test_format_codex_error_params_extracts_provider_error_from_nested_error() -> None:
     """
     Codex App Server's ``method == "error"`` frames carry the

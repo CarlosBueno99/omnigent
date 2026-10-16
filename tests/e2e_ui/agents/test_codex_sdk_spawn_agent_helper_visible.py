@@ -281,6 +281,9 @@ def test_codex_spawn_agent_helper_appears_in_agents_rail(
         mark("prompt sent")
 
         _wait_for_model_requests(mock_llm_server_url, helper_token, 1, timeout_s=180)
+        # The helper's row must surface as soon as its turn begins, while the
+        # ``sleep`` tool call is still running, not only after it completes.
+        expect(child_rows).to_have_count(1, timeout=60_000)
         mark(f"helper's first model request seen; child rows: {child_rows.count()}")
         # The helper's second model request carries its tool-call result: the
         # child turn really ran a tool round-trip inside Codex while the parent
