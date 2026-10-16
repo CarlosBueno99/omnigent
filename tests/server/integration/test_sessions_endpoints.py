@@ -1209,6 +1209,42 @@ async def test_session_snapshot_reflects_terminal_pending_cache(
         sessions_module._session_terminal_pending_cache.pop(session["id"], None)
 
 
+async def test_external_conversation_item_with_source_id_is_persisted_once(
+    client: httpx.AsyncClient,
+) -> None:
+    """A repost carrying the same ``source_id`` does not add a second item.
+
+    The runner's startup-dialog notice retries a post whose response was lost,
+    so the person must still see exactly one notice after the retry.
+    """
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    event = {
+        "type": "external_conversation_item",
+        "data": {
+            "source_id": "native_startup_dialog:terminal-1:Settings Error",
+            "item_type": "error",
+            "item_data": {
+                "source": "harness",
+                "code": "native_startup_dialog",
+                "title": "Claude Code is waiting for an answer in its terminal (Settings Error)",
+                "message": "Claude Code is showing “Settings Error” in its terminal.",
+                "level": "info",
+            },
+        },
+    }
+    for _ in range(2):
+        resp = await client.post(f"/v1/sessions/{session['id']}/events", json=event)
+        assert resp.status_code in (200, 202)
+
+    items = (await client.get(f"/v1/sessions/{session['id']}/items")).json()["data"]
+    notices = [item for item in items if item.get("code") == "native_startup_dialog"]
+    assert len(notices) == 1
+    assert notices[0]["title"] == (
+        "Claude Code is waiting for an answer in its terminal (Settings Error)"
+    )
+
+
 async def test_external_session_status_event_lands_in_status_cache(
     client: httpx.AsyncClient,
 ) -> None:

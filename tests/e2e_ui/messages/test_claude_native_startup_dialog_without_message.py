@@ -72,13 +72,24 @@ def _pane_text(native_tmp: Path) -> str:
     except (OSError, ValueError):
         # The runner may still be writing the advert; the caller polls again.
         return ""
-    proc = subprocess.run(
-        ["tmux", "-S", advert["socket_path"], "capture-pane", "-t", advert["tmux_target"], "-p"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                "tmux",
+                "-S",
+                advert["socket_path"],
+                "capture-pane",
+                "-t",
+                advert["tmux_target"],
+                "-p",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return ""
     return proc.stdout if proc.returncode == 0 else ""
 
 

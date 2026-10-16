@@ -102,16 +102,20 @@ def _dialog_watch(
     category: ErrorCategory | None = None,
     notify_error: Exception | None = None,
     notify_errors: list[Exception | None] | None = None,
+    source_ids: list[str] | None = None,
 ) -> _StartupDialogWatch:
     """A watch that names a dialog by its first line and records each notice attempt.
 
     *notify_error* fails every post; *notify_errors* scripts one outcome per
-    attempt (``None`` succeeds), then the last outcome repeats.
+    attempt (``None`` succeeds), then the last outcome repeats. *source_ids*
+    collects the stable key each attempt carried.
     """
 
-    async def notify(headline: str) -> None:
+    async def notify(headline: str, source_id: str) -> None:
         attempt = len(notified)
         notified.append(headline)
+        if source_ids is not None:
+            source_ids.append(source_id)
         if notify_errors is not None:
             error = notify_errors[min(attempt, len(notify_errors) - 1)]
         else:
@@ -224,6 +228,39 @@ async def test_observer_keeps_watching_when_the_dialog_notice_fails(
     assert "terminal_interactive" in events
 
 
+_SECOND_DIALOG_SCREEN = "Accessing workspace:\n❯ No, exit\nEnter to confirm · Esc to cancel\n"
+
+
+@pytest.mark.asyncio
+async def test_observer_reports_each_distinct_dialog_once(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later, different dialog gets its own record and notice; a returning one is skipped."""
+    monkeypatch.setattr(orchestration, "_STARTUP_DIALOG_NOTICE_AFTER_S", 0.0)
+    screens = (
+        [_DIALOG_SCREEN] * 3
+        + ["booting"]
+        + [_SECOND_DIALOG_SCREEN] * 3
+        + [_DIALOG_SCREEN] * 3
+        + ["composer ready"]
+    )
+    terminal = _FakeTerminal(screens)
+    notified: list[str] = []
+
+    with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
+        await _observe(terminal, _dialog_watch(notified))
+
+    assert notified == ["Settings Error", "Accessing workspace:"]
+    records = [
+        r for r in caplog.records if getattr(r, "event_name", None) == "native_startup_dialog"
+    ]
+    assert [r.attributes["dialog_headline"] for r in records] == [
+        "Settings Error",
+        "Accessing workspace:",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_observer_retries_the_notice_until_it_is_posted(
     caplog: pytest.LogCaptureFixture,
@@ -233,12 +270,19 @@ async def test_observer_retries_the_notice_until_it_is_posted(
     monkeypatch.setattr(orchestration, "_STARTUP_DIALOG_NOTICE_AFTER_S", 0.0)
     terminal = _FakeTerminal([_DIALOG_SCREEN] * 8 + ["composer ready"])
     notified: list[str] = []
-    watch = _dialog_watch(notified, notify_errors=[httpx.ConnectError("server unreachable"), None])
+    source_ids: list[str] = []
+    watch = _dialog_watch(
+        notified,
+        notify_errors=[httpx.ConnectError("server unreachable"), None],
+        source_ids=source_ids,
+    )
 
     with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
         await _observe(terminal, watch)
 
     assert notified == ["Settings Error", "Settings Error"]
+    # The retry reuses the key, so a repost of a notice whose response was lost dedupes.
+    assert source_ids == ["native_startup_dialog:terminal-instance-test:Settings Error"] * 2
     events = [getattr(r, "event_name", None) for r in caplog.records]
     assert events.count("native_startup_dialog") == 1
     assert "terminal_interactive" in events
@@ -257,7 +301,10 @@ async def test_claude_startup_dialog_notice_posts_a_neutral_session_item() -> No
         transport=httpx.MockTransport(respond), base_url="http://server"
     ) as client:
         await _post_claude_startup_dialog_notice(
-            "Settings Error", session_id="conv_dialog", server_client=client
+            "Settings Error",
+            session_id="conv_dialog",
+            server_client=client,
+            source_id="native_startup_dialog:term-1:Settings Error",
         )
 
     [(path, body)] = posted
@@ -265,6 +312,7 @@ async def test_claude_startup_dialog_notice_posts_a_neutral_session_item() -> No
     assert body["type"] == "external_conversation_item"
     item = body["data"]["item_data"]  # type: ignore[index]
     assert body["data"]["item_type"] == "error"  # type: ignore[index]
+    assert body["data"]["source_id"] == "native_startup_dialog:term-1:Settings Error"  # type: ignore[index]
     assert item["level"] == "info"
     assert item["code"] == "native_startup_dialog"
     # The collapsed notice shows only the title, so it must say what and where.
