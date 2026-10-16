@@ -16,7 +16,9 @@ from omnigent.native import native_cost_popup
 from omnigent.runner.app import create_runner_app
 from omnigent.runner.resource_registry import SessionResourceRegistry
 from omnigent.runner.subagent_work import (
+    get_subagent_work,
     mark_subagent_work_started,
+    mark_subagent_work_terminal,
     register_child_session,
     register_subagent_work,
     unregister_child_session,
@@ -353,16 +355,24 @@ async def test_runner_busy_check_spares_a_pane_with_a_running_subagent(
         assert entry.status == "running"
         assert await reaper._is_busy(pane)
 
-        # A terminal child no longer holds the pane: it may be reaped again.
-        entry.status = "completed"
-        assert not await reaper._is_busy(pane)
-
         # The running child spares only its own parent's pane.
-        entry.status = "running"
         other = PaneRef(
             "conv_other", terminal_resource_id("codex", "main"), "codex", tmp_path / "tmux.sock"
         )
         assert not await reaper._is_busy(other)
+
+        # A restart-orphaned "waiting" entry has unknown liveness and must not
+        # pin the pane; restart recovery assigns this state internally, so set
+        # it directly. A genuinely resumed child re-enters "running" and holds.
+        entry.status = "waiting"
+        assert not await reaper._is_busy(pane)
+        assert mark_subagent_work_started(child).status == "running"
+        assert await reaper._is_busy(pane)
+
+        # A terminal child no longer holds the pane: it may be reaped again.
+        mark_subagent_work_terminal(child, status="completed", output=None)
+        assert get_subagent_work(child).status == "completed"
+        assert not await reaper._is_busy(pane)
     finally:
         unregister_subagent_work_for_session(parent)
         unregister_child_session(child)

@@ -32,6 +32,10 @@ if TYPE_CHECKING:
 _logger = logging.getLogger("omnigent.runner.app")
 
 _SUBAGENT_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+# Non-terminal states for a child the runner is still actively tracking:
+# "launching" (bounded by reap_stalled_subagent_launches) and "running".
+# "waiting" is omitted — restart recovery leaves it when liveness is unknown.
+_SUBAGENT_ACTIVE_STATUSES = frozenset({"launching", "running"})
 
 
 # Bound how long a sub-agent dispatch can wait for a start acknowledgment.
