@@ -1606,6 +1606,18 @@ async def test_codex_native_model_options_query_model_list(
     assert fake_client.closed
 
 
+async def _stored_codex_catalog(fingerprint: str) -> list[dict[str, Any]] | None:
+    """Read the shared catalog once the runner's background write-back has persisted it."""
+    from omnigent.models import model_catalog_store
+
+    for _ in range(200):
+        rows = model_catalog_store.read_catalog("codex-native", fingerprint)
+        if rows is not None:
+            return rows
+        await asyncio.sleep(0.01)
+    return None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["default", "other", "missing-spec", "invalid-config"])
 async def test_codex_model_catalog_writeback_uses_session_provider(
@@ -1667,7 +1679,12 @@ async def test_codex_model_catalog_writeback_uses_session_provider(
         fingerprint = codex.codex_catalog_fingerprint(codex.NativeCodexLaunch([], None, provider))
         model_catalog_store.write_catalog("codex-native", fingerprint, rows)
         catalogs[provider], fingerprints[provider] = rows, fingerprint
-    live_rows = [dict(row, displayName="Live model") for row in catalogs[profile]]
+    # Codex marks a different row than the stored default, so the write-back's
+    # precedence (stored default first) is observable in the persisted rows.
+    live_rows = codex.mark_launch_default(
+        [dict(row, displayName="Live model") for row in catalogs[profile]], "second-picker"
+    )
+    stored_live_rows = codex.mark_launch_default(live_rows, "shared-picker")
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     (codex_home / "config.toml").write_text('model = "second-picker"\n')
@@ -1738,7 +1755,7 @@ async def test_codex_model_catalog_writeback_uses_session_provider(
             )
             for provider in ("default", "other"):
                 expected = (
-                    live_rows
+                    stored_live_rows
                     if provider == profile and case in {"default", "other"}
                     else catalogs[provider]
                 )
@@ -1853,17 +1870,10 @@ async def test_codex_model_catalog_writeback_miss_pins_the_shapes_default(
         assert created.status_code == 201, created.text
         response = await client.get(f"/v1/sessions/{session_id}/codex-model-options")
         assert response.status_code == 200, response.text
-        await asyncio.gather(
-            *[
-                task
-                for task in asyncio.all_tasks()
-                if getattr(task.get_coro(), "__name__", "") == "_write_back_codex_catalog"
-            ]
-        )
+        stored = await _stored_codex_catalog(fingerprint)
 
     # The picker still marks the pane's own model; the store does not inherit it.
     assert response.json()["models"] == codex.mark_launch_default(live_rows, "shared-picker")
-    stored = model_catalog_store.read_catalog("codex-native", fingerprint)
     assert stored is not None, "the write-back did not persist the live rows"
     assert [row["id"] for row in stored if row.get("isDefault")] == (
         [expected_default] if expected_default else []
