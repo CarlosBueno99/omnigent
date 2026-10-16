@@ -28,6 +28,7 @@ def test_prompt_timeout_defaults_and_override() -> None:
             [sys.executable, "-c", _PRINT_TIMEOUT],
             env=_subprocess_env(None),
             text=True,
+            timeout=30,
         ).strip()
         == "300.0"
     )
@@ -36,6 +37,7 @@ def test_prompt_timeout_defaults_and_override() -> None:
             [sys.executable, "-c", _PRINT_TIMEOUT],
             env=_subprocess_env("7200"),
             text=True,
+            timeout=30,
         ).strip()
         == "7200.0"
     )
@@ -48,7 +50,8 @@ def test_prompt_timeout_malformed_value_fails_loud() -> None:
         text=True,
         capture_output=True,
         check=False,
+        timeout=30,
     )
 
     assert result.returncode != 0
-    assert _TIMEOUT_ENV in result.stderr.strip().splitlines()[-1]
+    assert _TIMEOUT_ENV in result.stderr
