@@ -18,8 +18,8 @@ from collections.abc import Iterator
 
 import httpx
 import pytest
-from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, expect
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from tests.e2e_ui.conftest import open_right_rail
 from tests.e2e_ui.files._large_markdown import build_large_markdown
@@ -87,10 +87,10 @@ def test_opening_large_markdown_keeps_page_responsive(
                 timeout=min(_PROBE_TIMEOUT_MS, remaining * 1000),
             )
             rendered = True
-        except PlaywrightError:
+        except PlaywrightTimeoutError:
             try:
                 page.wait_for_function("() => true", timeout=_PROBE_TIMEOUT_MS)
-            except PlaywrightError:
+            except PlaywrightTimeoutError:
                 pytest.fail(
                     f"page stopped responding to a {_PROBE_TIMEOUT_MS} ms probe "
                     f"while opening {file_path}"

@@ -62,8 +62,8 @@ function renderView(
   } as unknown as NodeViewProps;
   // @tiptap/react renders a node view through a portal into its host element.
   const view = <TipTapCodeBlockView {...props} />;
-  render(host ? createPortal(view, host) : view);
-  return { tr, dispatch };
+  const { unmount } = render(host ? createPortal(view, host) : view);
+  return { tr, dispatch, unmount };
 }
 
 /**
@@ -78,9 +78,18 @@ function renderInHost(focused: boolean) {
   content.setAttribute("data-node-view-wrapper", "");
   host.appendChild(content);
   document.body.appendChild(host);
-  renderView({ language: "python", focused }, host);
+  const { unmount } = renderView({ language: "python", focused }, host);
   const body = host.querySelector("code[data-node-view-content]");
-  return { host, content, body };
+  return {
+    content,
+    body,
+    host,
+    // Unmount the portal before its host leaves the document.
+    cleanup: () => {
+      unmount();
+      host.remove();
+    },
+  };
 }
 
 describe("TipTapCodeBlockView", () => {
@@ -141,23 +150,22 @@ describe("TipTapCodeBlockView", () => {
 describe("fence body", () => {
   // Unmounting the previous test's view forwards a null ref after mocks were cleared.
   beforeEach(() => reactNodeView.nodeViewContentRef.mockClear());
-  afterEach(() => {
-    document.querySelectorAll(".react-renderer").forEach((host) => host.remove());
-  });
 
   it("adopts the content element itself while the editor is unfocused", () => {
     // @tiptap/react's ref would first read the DOM selection, which lays out
     // the whole document; unfocused there is no caret to preserve.
-    const { content, body } = renderInHost(false);
+    const { content, body, cleanup } = renderInHost(false);
     expect(body?.firstChild).toBe(content);
     expect(content.hasAttribute("data-node-view-wrapper")).toBe(false);
     expect(reactNodeView.nodeViewContentRef).not.toHaveBeenCalled();
+    cleanup();
   });
 
   it("lets @tiptap/react place the content while the editor has focus", () => {
-    const { host, content, body } = renderInHost(true);
+    const { host, content, body, cleanup } = renderInHost(true);
     expect(reactNodeView.nodeViewContentRef).toHaveBeenCalledWith(body);
     expect(content.parentElement).toBe(host);
+    cleanup();
   });
 
   it("falls back to @tiptap/react when the host markup is not recognised", () => {

@@ -230,11 +230,12 @@ def _let_editor_follow_caret(page: Page) -> None:
     page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve)))")
 
 
-def _file_saved_and_reread(file_path: str) -> Callable[[Response], bool]:
-    """Match the GET that re-reads ``file_path`` after its auto-save PUT landed.
+def _file_saved_and_reread(file_path: str, containing: str) -> Callable[[Response], bool]:
+    """Match the GET that re-reads ``file_path`` after the auto-save PUT of an edit.
 
     The write invalidates the file query, and a clean editor adopts whatever
-    that refetch returns, resetting the caret; edits must not straddle it.
+    that refetch returns, resetting the caret; edits must not straddle it. The
+    PUT must carry ``containing`` so an earlier, partial save does not satisfy it.
     """
     saw_put = False
 
@@ -242,7 +243,7 @@ def _file_saved_and_reread(file_path: str) -> Callable[[Response], bool]:
         nonlocal saw_put
         if not response.url.split("?")[0].endswith(f"/filesystem/{file_path}"):
             return False
-        if response.request.method == "PUT":
+        if response.request.method == "PUT" and containing in (response.request.post_data or ""):
             saw_put = True
         return saw_put and response.request.method == "GET"
 
@@ -273,7 +274,7 @@ def test_code_fence_typed_into_the_editor_keeps_the_caret_inside(
     seeded_fence.click()
     page.keyboard.press("End")
     _let_editor_follow_caret(page)
-    with page.expect_response(_file_saved_and_reread(file_path), timeout=20_000):
+    with page.expect_response(_file_saved_and_reread(file_path, "# edited"), timeout=20_000):
         page.keyboard.type("  # edited")
         expect(seeded_fence).to_contain_text("# edited")
     expect(saved).to_be_visible(timeout=15_000)
@@ -285,14 +286,11 @@ def test_code_fence_typed_into_the_editor_keeps_the_caret_inside(
     page.keyboard.press("End")
     _let_editor_follow_caret(page)
     page.keyboard.press("Enter")
-    page.keyboard.type("``` ")
-    expect(editor.locator("pre")).to_have_count(2)
-    with page.expect_response(_file_saved_and_reread(file_path), timeout=20_000):
+    with page.expect_response(_file_saved_and_reread(file_path, "fenced text"), timeout=20_000):
+        page.keyboard.type("``` ")
+        expect(editor.locator("pre")).to_have_count(2)
         page.keyboard.type("fenced text")
-        fence = editor.locator("pre").filter(has_text="fenced text")
-        expect(fence).to_be_visible()
-        expect(editor.locator("p").filter(has_text="fenced text")).to_have_count(0)
-        # Read the caret before the save lands; its refetch may move it.
+        # Read the caret right after typing, before any auto-save refetch.
         caret_in_fence = editor.evaluate(
             """() => {
             const node = document.getSelection()?.anchorNode;
@@ -300,5 +298,8 @@ def test_code_fence_typed_into_the_editor_keeps_the_caret_inside(
             return !!element?.closest("pre");
         }"""
         )
+        fence = editor.locator("pre").filter(has_text="fenced text")
+        expect(fence).to_be_visible()
+        expect(editor.locator("p").filter(has_text="fenced text")).to_have_count(0)
     assert caret_in_fence, "the caret left the code block after its node view mounted"
     expect(saved).to_be_visible(timeout=15_000)
