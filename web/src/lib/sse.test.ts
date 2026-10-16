@@ -419,8 +419,7 @@ describe("parseEvent — response.output_item.done error level", () => {
   });
 
   it("keeps a live notice's title, cause and remediation like the history path", () => {
-    // A persisted notice posted while the page is open arrives here, not via
-    // GET /items; dropping the title made the pill read "Notice" until reload.
+    // Live notices must preserve title, cause and remediation, matching the history path.
     const ev = parseEvent("response.output_item.done", {
       item: {
         id: "err_2",

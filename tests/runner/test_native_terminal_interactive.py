@@ -131,8 +131,10 @@ def _dialog_watch(
 
 
 async def _observe(
-    terminal: _FakeTerminal, watch: _StartupDialogWatch, *, timeout_s: float = 1.0
+    terminal: _FakeTerminal, watch: _StartupDialogWatch, *, timeout_s: float = 30.0
 ) -> None:
+    # The scripted terminal reaches its last screen after a fixed number of polls,
+    # so the budget only has to outlast a loaded CI runner's logging.
     await _observe_terminal_interactive(
         session_id="conv_dialog",
         terminal_id="terminal_claude_main",

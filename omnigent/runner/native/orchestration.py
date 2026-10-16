@@ -3020,7 +3020,9 @@ async def _post_claude_startup_dialog_notice(
                 },
             },
         },
-        timeout=10.0,
+        # Awaited inside the readiness poll; a slow server costs at most one
+        # retry spacing before the loop reads the pane again.
+        timeout=_STARTUP_DIALOG_NOTICE_AFTER_S,
     )
     resp.raise_for_status()
 

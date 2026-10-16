@@ -64,7 +64,8 @@ def _write_mock_claude_provider(config_home: Path, mock_llm_server_url: str) -> 
 
 
 def _pane_text(native_tmp: Path) -> str:
-    adverts = list(native_tmp.rglob("tmux.json"))
+    # Newest advert first, in case the runner left an older terminal's behind.
+    adverts = sorted(native_tmp.rglob("tmux.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not adverts:
         return ""
     try:
@@ -157,4 +158,4 @@ def test_startup_dialog_is_reported_without_a_message(
             f"after Claude Code showed it; visible text:\n{visible}\npane:\n{pane}"
         )
         # The person still has to answer it in the terminal; nothing may have dismissed it.
-        assert _DIALOG_HEADLINE in _pane_text(native_tmp)
+        assert _DIALOG_HEADLINE in _wait_for_dialog(native_tmp, page)
