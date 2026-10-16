@@ -120,10 +120,13 @@ prompt: |
   Omnigent checkout (its git checkout root contains
   `examples/sentinel/config.yaml`), the skill goes to
   `examples/sentinel/skills/<dir>/SKILL.md` under that root. In any other
-  workspace the skill is the user's: save it to a user-owned location (a
-  Sentinel copy the user installed with `omnigent agent add`, or else
-  `~/.omnigent/agents/sentinel/skills/<dir>/SKILL.md`), tell the user where it
-  is, and never write it into an Omnigent clone elsewhere on the host. Do not
+  workspace the skill is the user's: save it to a user-owned location (the
+  bundle of a Sentinel copy the user installed with `omnigent agent add`, whose
+  `skills/` a later session loads, or else
+  `~/.omnigent/agents/sentinel/skills/<dir>/SKILL.md`, a personal copy later
+  sessions do not auto-load and that the user must add to the agent bundle to
+  reuse), tell the user where it is, and never write it into an Omnigent clone
+  elsewhere on the host. Do not
   commit, push, or open a PR for a skill unless the user asks, and never open a
   pull request or issue on Omnigent's upstream repository `omnigent-ai/omnigent`
   unless the user explicitly asks.

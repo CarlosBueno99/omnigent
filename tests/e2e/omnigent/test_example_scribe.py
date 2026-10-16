@@ -106,7 +106,7 @@ def test_scribe_scopes_self_authored_skills_outside_the_omnigent_repo() -> None:
     unconditional_repo_rule = (
         "skills directory (`examples/scribe/skills/<dir>/SKILL.md`)" in compact
     )
-    # The fix may scope the directory or drop the unconditional directive; accept either.
+    # Require both: a checkout or user-owned destination, and no unconditional directive.
     scoped_to_checkout_or_user_location = any(
         marker in compact.lower()
         for marker in (
@@ -117,10 +117,11 @@ def test_scribe_scopes_self_authored_skills_outside_the_omnigent_repo() -> None:
             "not an omnigent checkout",
         )
     )
-    assert scoped_to_checkout_or_user_location or not unconditional_repo_rule, (
-        "self-authored skills are directed unconditionally into "
-        "examples/scribe/skills/<dir>/SKILL.md with no Omnigent-checkout or "
-        "user-owned scoping, so a user's Omnigent clone receives them"
+    assert scoped_to_checkout_or_user_location and not unconditional_repo_rule, (
+        "self-authored skills must be scoped to an Omnigent checkout or a "
+        "user-owned location, and the unconditional "
+        "examples/scribe/skills/<dir>/SKILL.md directive must be gone; otherwise "
+        "a user's Omnigent clone receives them"
     )
 
 
@@ -135,4 +136,9 @@ def test_scribe_does_not_open_unsolicited_prs_on_the_upstream_repo() -> None:
     assert "omnigent-ai/omnigent" in compact, (
         "no restraint on opening PRs/issues against omnigent-ai/omnigent without "
         "an explicit user request"
+    )
+    lowered = compact.lower()
+    assert "never open a pull request" in lowered and "explicitly asks" in lowered, (
+        "omnigent-ai/omnigent is named, but the prohibition on opening PRs or "
+        "issues there without an explicit user request is missing"
     )
