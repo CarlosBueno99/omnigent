@@ -8,6 +8,7 @@ reach the session before the runner exits.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sys
@@ -73,7 +74,6 @@ class _ForegroundHostTerminal:
             TERM="xterm-256color",
         )
         env[PROCESS_LOG_FILE_ENV_VAR] = str(self.log_path)
-        self.transcript = (root / "terminal.txt").open("w", encoding="utf-8")
         self.child = pexpect.spawn(
             runner_executable(),
             ["-m", "omnigent", "host", "--server", base_url, "--non-interactive", "--no-open"],
@@ -83,6 +83,9 @@ class _ForegroundHostTerminal:
             timeout=5,
             dimensions=(40, 160),
         )
+        # Open the transcript only after a successful spawn so a spawn failure
+        # cannot leak the file handle (close() never runs in that case).
+        self.transcript = (root / "terminal.txt").open("w", encoding="utf-8")
         self.child.logfile_read = self.transcript
         self._stop = threading.Event()
         self._drain = threading.Thread(target=self._pump, name="host-pty-drain", daemon=True)
@@ -112,12 +115,22 @@ class _ForegroundHostTerminal:
 
     def close(self) -> None:
         self._stop.set()
+        self._drain.join(timeout=5)
         if self.child.isalive():
             self.child.kill(9)
             self.wait_exit(timeout=5)
         if self.child.child_fd != -1:
             self.child.close(force=True)
         self.transcript.close()
+
+
+def _pgid_or_none(pid: int | None) -> int | None:
+    if not pid:
+        return None
+    try:
+        return os.getpgid(pid)
+    except ProcessLookupError:
+        return None
 
 
 def _pid_running(pid: int) -> bool:
@@ -188,18 +201,22 @@ def test_terminal_hangup_lets_in_flight_turn_finish(
             runner_pid = int(launched.group(1))
             forked = re.search(r"zygote pid=(\d+), runner pid=", host_log)
             zygote_pid = int(forked.group(1)) if forked else None
-            host_pgid = os.getpgid(terminal.child.pid)
+            host_pgid = _pgid_or_none(terminal.child.pid)
             print(
                 f"host pid={terminal.child.pid} pgid={host_pgid} zygote={zygote_pid} "
-                f"(pgid={os.getpgid(zygote_pid) if zygote_pid else None}) runner={runner_pid} "
-                f"(pgid={os.getpgid(runner_pid)}) session={session_id} runner_id={runner_id}"
+                f"(pgid={_pgid_or_none(zygote_pid)}) runner={runner_pid} "
+                f"(pgid={_pgid_or_none(runner_pid)}) session={session_id} runner_id={runner_id}"
             )
 
             response_id = send_user_message_to_session(
                 client, session_id=session_id, content=f"Reply with exactly {_REPLY}."
             )
             assert _wait_until(
-                lambda: httpx.get(f"{mock_url}/gate/pending", timeout=5).json().get("pending"),
+                lambda: (
+                    httpx.get(f"{mock_url}/gate/pending", timeout=5, trust_env=False)
+                    .json()
+                    .get("pending")
+                ),
                 _GATE_TIMEOUT_S,
             ), "the turn never reached the model"
             before = client.get(f"/v1/sessions/{session_id}").json()
@@ -211,6 +228,9 @@ def test_terminal_hangup_lets_in_flight_turn_finish(
             print(
                 f"host exit (exitstatus, signalstatus)={host_exit} "
                 f"after {time.monotonic() - hangup_at:.2f}s"
+            )
+            assert not terminal.child.isalive(), (
+                f"host survived the terminal hangup (test precondition): {host_exit}"
             )
             time.sleep(2.0)
             runner_alive_at_release = _pid_running(runner_pid)
@@ -244,5 +264,6 @@ def test_terminal_hangup_lets_in_flight_turn_finish(
         finally:
             for pid in (runner_pid, zygote_pid):
                 if pid and _pid_running(pid):
-                    os.kill(pid, 9)
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.kill(pid, 9)
             terminal.close()

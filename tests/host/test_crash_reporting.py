@@ -675,6 +675,7 @@ def test_hangup_callback_runs_only_on_sighup_before_dying(
     assert len(_exit_rows(rows_path)) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 def test_failing_hangup_callback_does_not_block_the_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     def explode() -> None:
         raise RuntimeError("callback failed")

@@ -1232,9 +1232,9 @@ def _run_parent_death_killer(
         return
     if (
         finish_work is not None
-        and finish_work.is_set()
         and has_active_work is not None
         and _work_still_active(has_active_work)
+        and _await_finish_work_signal(finish_work, grace_s, poll_interval_s)
     ):
         _logger.info(
             "parent process hung up with work in flight; finishing it before exiting",
@@ -1277,8 +1277,26 @@ def _work_still_active(has_active_work: Callable[[], bool]) -> bool:
     """Probe loop-owned work state from a thread; a racing mutation counts as active."""
     try:
         return bool(has_active_work())
-    except RuntimeError:
+    except Exception:  # noqa: BLE001 — a racing probe failure keeps the watchdog alive
         return True
+
+
+def _await_finish_work_signal(
+    finish_work: threading.Event, grace_s: float, poll_interval_s: float
+) -> bool:
+    """Wait briefly for the finish-work signal after a parent death.
+
+    The signal is delivered through the event loop, which can lag the
+    parent-death probe. A busy runner must not be torn down before a
+    just-delivered hangup request becomes visible; a plain crash (no signal)
+    only waits out this short grace before the normal shutdown proceeds.
+    """
+    deadline = time.monotonic() + grace_s
+    while not finish_work.is_set():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_interval_s)
+    return True
 
 
 def _runner_workspace_from_env() -> Path | None:
@@ -2218,11 +2236,30 @@ def _maybe_prewarm_ambient_detection() -> None:
     prewarm_detect_providers()
 
 
+def _ignore_finish_work_signal_until_handled() -> None:
+    """Ignore the finish-work signal until the loop handler is installed.
+
+    The host may send the finish-work signal while a runner is still booting,
+    before :func:`_install_signal_handlers` runs. Its default action would
+    terminate the runner abruptly, so ignore it during boot; the loop handler
+    later swaps in finish-work handling.
+    """
+    from omnigent.runner.identity import RUNNER_FINISH_WORK_SIGNAL
+
+    if RUNNER_FINISH_WORK_SIGNAL is None:
+        return
+    with contextlib.suppress(ValueError, OSError):
+        signal.signal(RUNNER_FINISH_WORK_SIGNAL, signal.SIG_IGN)
+
+
 def main() -> None:
     """Console entry point for the runner tunnel process.
 
     :returns: None.
     """
+    # A hangup during boot delivers the finish-work signal before the loop
+    # handler exists; ignore it until then so it cannot kill the runner.
+    _ignore_finish_work_signal_until_handled()
     from omnigent.process_logging import configure_process_logging
 
     # Spawned with -P, so the workspace is not on sys.path. Re-add it now that

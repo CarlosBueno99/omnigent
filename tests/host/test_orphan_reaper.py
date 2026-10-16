@@ -451,14 +451,23 @@ def test_hangup_signals_live_runners_but_not_the_zygote(
 
     zygote_pid = 4000
     monkeypatch.setattr(host, "_zygote", SimpleNamespace(unreaped_pid=zygote_pid))
+    # Direct handles are polled so an unreaped exit never signals a reused PID.
     for name, pid, code in (
         ("live_a", 4001, None),
         ("exited", 4002, 0),
         ("live_b", 4003, None),
         ("zygote_alias", zygote_pid, None),
     ):
-        proc = SimpleNamespace(pid=pid, returncode=code)
+        proc = SimpleNamespace(pid=pid, poll=lambda c=code: c)
         host._runners[name] = _RunnerHandle(proc=proc, log_path=tmp_path / "runner.log")  # type: ignore[arg-type]
+    # A forked runner reports its cached status without a blocking zygote
+    # round trip, which the exit thread must never make.
+    manager = ZygoteManager()
+    monkeypatch.setattr(
+        manager, "poll", lambda *a, **k: pytest.fail("exit thread blocked on zygote IPC")
+    )
+    forked = ZygoteRunnerProc(4005, manager)
+    host._runners["forked_live"] = _RunnerHandle(proc=forked, log_path=tmp_path / "runner.log")
     sent: list[tuple[int, int]] = []
 
     def kill(pid: int, sig: int) -> None:
@@ -468,4 +477,8 @@ def test_hangup_signals_live_runners_but_not_the_zygote(
 
     host.signal_runners_finish_work(kill=kill)
 
-    assert sent == [(4001, RUNNER_FINISH_WORK_SIGNAL), (4003, RUNNER_FINISH_WORK_SIGNAL)]
+    assert sent == [
+        (4001, RUNNER_FINISH_WORK_SIGNAL),
+        (4003, RUNNER_FINISH_WORK_SIGNAL),
+        (4005, RUNNER_FINISH_WORK_SIGNAL),
+    ]

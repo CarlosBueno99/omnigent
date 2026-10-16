@@ -328,8 +328,13 @@ def _run_hangup_callback(signum: int) -> None:
     callback = _hangup_callback
     if callback is None or signum != getattr(signal, "SIGHUP", None):
         return
-    with contextlib.suppress(Exception):
+    try:
         callback()
+    except Exception:  # noqa: BLE001 — a broken callback must never block the exit
+        # A broken finish-work sweep would otherwise hard-kill runners with
+        # no trace; the exit path flushes handlers right after this.
+        with contextlib.suppress(Exception):
+            _logger.debug("hangup callback failed", exc_info=True)
 
 
 def drain_debug_sink() -> None:
@@ -375,7 +380,9 @@ def _on_stop_signal(signum: int, frame: FrameType | None) -> None:  # noqa: ARG0
     except RuntimeError:
         # No thread available (exhaustion, interpreter shutdown): skip the
         # report rather than risk logging from a signal handler, and still
-        # die by the signal.
+        # die by the signal. The hangup callback is non-blocking by
+        # contract, so still let a hangup finish in-flight work.
+        _run_hangup_callback(signum)
         _die_by_signal(signum)
         return
     _signal_exit_thread = thread
@@ -390,7 +397,9 @@ def _exit_on_signal(signum: int) -> None:
     try:
         watchdog.start()
     except RuntimeError:
-        # No deadline without a watchdog: don't risk wedging in logging.
+        # No deadline without a watchdog: don't risk wedging in logging. The
+        # non-blocking hangup callback still runs so a hangup finishes work.
+        _run_hangup_callback(signum)
         _die_by_signal(signum)
     try:
         _run_hangup_callback(signum)

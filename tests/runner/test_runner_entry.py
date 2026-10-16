@@ -25,7 +25,9 @@ from omnigent.runner._entry import (
     _DEFAULT_RUNNER_THREADPOOL_MAX_WORKERS,
     _agent_cache_dest,
     _apply_host_interactive_shells,
+    _await_finish_work_signal,
     _host_interactive_shells_from_env,
+    _ignore_finish_work_signal_until_handled,
     _InitialAuthTokenFactory,
     _install_crash_logging,
     _install_signal_handlers,
@@ -46,6 +48,7 @@ from omnigent.runner._entry import (
     _runner_workspace_from_env,
     _RunnerDatabricksAuth,
     _server_url_from_env,
+    _work_still_active,
     main,
 )
 from omnigent.runner.identity import (
@@ -2451,6 +2454,77 @@ def test_run_parent_death_killer_idle_runner_exits_immediately_after_hangup() ->
     events = _finish_work_killer(lambda: False)
 
     assert events == ["stop", "exit"]
+
+
+def test_run_parent_death_killer_waits_for_a_late_finish_work_signal() -> None:
+    """A finish-work signal landing just after parent death still saves the turn.
+
+    The signal is delivered through the event loop, which can lag the
+    parent-death probe; the killer must not tear down a busy runner before a
+    just-delivered hangup request becomes visible.
+    """
+    import threading
+
+    events: list[str] = []
+    finish_work = threading.Event()
+    probes: list[str] = []
+
+    def has_active_work() -> bool:
+        probes.append("probe")
+        return len(probes) < 4
+
+    # The signal becomes visible only after the killer has already observed
+    # the orphaned parent and begun waiting for it.
+    threading.Timer(0.05, finish_work.set).start()
+
+    _run_parent_death_killer(
+        os.getppid() + 100000,  # already "orphaned"
+        lambda: events.append("stop"),
+        finish_work=finish_work,
+        has_active_work=has_active_work,
+        request_idle_shutdown=lambda: events.append("idle_close"),
+        poll_interval_s=0.01,
+        grace_s=0.5,
+        idle_grace_s=0.01,
+        finish_work_max_s=5.0,
+        exit_fn=lambda code: events.append("exit"),
+    )
+
+    assert events == ["idle_close", "exit"], (
+        "a finish-work signal arriving after parent death must still finish the turn"
+    )
+
+
+def test_work_still_active_treats_any_exception_as_active() -> None:
+    """A probe failure of any type counts as active so the watchdog never dies."""
+
+    def boom() -> bool:
+        raise ValueError("state mutated during probe")
+
+    assert _work_still_active(boom) is True
+
+
+def test_await_finish_work_signal_times_out_without_a_signal() -> None:
+    """A crash (no finish-work signal) only waits out the short grace."""
+    import threading
+
+    assert (
+        _await_finish_work_signal(threading.Event(), grace_s=0.02, poll_interval_s=0.01) is False
+    )
+
+
+def test_ignore_finish_work_signal_until_handled_masks_the_default_kill() -> None:
+    """A boot-time finish-work signal is ignored so it cannot kill the runner."""
+    from omnigent.runner.identity import RUNNER_FINISH_WORK_SIGNAL
+
+    if RUNNER_FINISH_WORK_SIGNAL is None:
+        pytest.skip("no finish-work signal on this platform")
+    previous = signal.getsignal(RUNNER_FINISH_WORK_SIGNAL)
+    try:
+        _ignore_finish_work_signal_until_handled()
+        assert signal.getsignal(RUNNER_FINISH_WORK_SIGNAL) is signal.SIG_IGN
+    finally:
+        signal.signal(RUNNER_FINISH_WORK_SIGNAL, previous)
 
 
 def test_install_crash_logging_records_uncaught_exception(

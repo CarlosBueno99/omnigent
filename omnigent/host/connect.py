@@ -1375,8 +1375,13 @@ class HostProcess:
             return
         zygote_pid = self._zygote.unreaped_pid if self._zygote is not None else None
         for handle in list(self._runners.values()):
-            pid = handle.proc.pid
-            if handle.proc.returncode is not None or pid == zygote_pid:
+            proc = handle.proc
+            pid = proc.pid
+            # Poll direct children so an unreaped exit never signals a reused
+            # PID; a forked runner polls over zygote IPC, so trust its cached
+            # returncode instead of blocking that IPC on the exit thread.
+            code = proc.returncode if isinstance(proc, ZygoteRunnerProc) else proc.poll()
+            if code is not None or pid == zygote_pid:
                 continue
             with contextlib.suppress(OSError):
                 kill(pid, RUNNER_FINISH_WORK_SIGNAL)
@@ -5384,4 +5389,8 @@ def _serve_host_until_exit(
             flush=True,
         )
         raise SystemExit(HOST_FATAL_EXIT_CODE) from exc
+    finally:
+        # Serving is over: drop the callback so a hangup during the exit-drain
+        # window cannot signal runners through a torn-down host.
+        crash_reporting.set_hangup_callback(None)
     return host.lifecycle_lost
