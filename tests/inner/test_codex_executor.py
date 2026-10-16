@@ -1760,16 +1760,180 @@ class TestCodexExecutor(unittest.TestCase):
 
         _run(_t())
 
+    def test_app_server_run_turn_without_model_still_reports_resolved_model(self):
+        """A ``model=None`` turn still stamps the model Codex resolved.
+
+        Subscription / cli-config codex sessions pass ``model=None`` to
+        ``run_turn`` (the provider owns its model list), yet ``thread/start``
+        reports the model Codex actually ran. The usage must carry that
+        resolved model so per-model cost/token attribution keeps the turn
+        instead of dropping it under an unresolvable spec model, and the
+        usage observer must be told the same model.
+        """
+        from omnigent.llms import _usage_observer
+
+        async def _t():
+            session = _CodexAppServerSession(
+                codex_path="/bin/echo",
+                cwd="/tmp/workspace",
+                env={},
+                tool_executor=None,
+            )
+            session.start = AsyncMock()
+            session._proc = _FakeProcess()
+            session.thread_id = None  # fresh thread so thread/start resolves a model
+            session._request = AsyncMock(
+                side_effect=[
+                    {"result": {"thread": {"id": "thread-1"}, "model": "gpt-6-astra"}},
+                    {"result": {"turn": {"id": "turn-1"}}},
+                ]
+            )
+            seen: list[dict[str, object]] = []
+            remove = _usage_observer.add_observer(lambda **kw: seen.append(kw))
+
+            async def _inject_events() -> None:
+                await asyncio.sleep(0.01)
+                session._events.put_nowait(
+                    {
+                        "method": "thread/tokenUsage/updated",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "tokenUsage": {
+                                "last": {
+                                    "inputTokens": 100,
+                                    "outputTokens": 25,
+                                    "totalTokens": 125,
+                                    "cachedInputTokens": 0,
+                                    "reasoningOutputTokens": 0,
+                                },
+                                "total": {
+                                    "inputTokens": 100,
+                                    "outputTokens": 25,
+                                    "totalTokens": 125,
+                                    "cachedInputTokens": 0,
+                                    "reasoningOutputTokens": 0,
+                                },
+                            },
+                        },
+                    }
+                )
+                await asyncio.sleep(0.01)
+                session._events.put_nowait(
+                    {
+                        "method": "turn/completed",
+                        "params": {"turn": {"id": "turn-1"}},
+                    }
+                )
+
+            inject_task = asyncio.create_task(_inject_events())
+            try:
+                events = [
+                    event
+                    async for event in session.run_turn(
+                        messages=[{"role": "user", "content": "hi"}],
+                        tools=[],
+                        system_prompt="",
+                        model=None,
+                        cwd=".",
+                        sandbox="workspace-write",
+                    )
+                ]
+                await inject_task
+            finally:
+                remove()
+
+            self.assertEqual(session._thread_model, "gpt-6-astra")
+            completes = [event for event in events if isinstance(event, TurnComplete)]
+            self.assertEqual(len(completes), 1)
+            usage = completes[0].usage
+            assert usage is not None
+            self.assertIn("model", usage)
+            self.assertEqual(usage["model"], "gpt-6-astra")
+            self.assertEqual([entry["model"] for entry in seen], ["gpt-6-astra"])
+
+        _run(_t())
+
+    def test_app_server_run_turn_forwards_codex_context_window(self):
+        """``tokenUsage.modelContextWindow`` rides on usage as ``context_window``.
+
+        Codex reports the window it actually serves for the thread's model.
+        Forwarding it lets the server size the context ring from that figure
+        instead of a catalog lookup, which lacks Codex-only models and would
+        fall back to a default window.
+        """
+
+        async def _t():
+            session = _CodexAppServerSession(
+                codex_path="/bin/echo",
+                cwd="/tmp/workspace",
+                env={},
+                tool_executor=None,
+            )
+            session.start = AsyncMock()
+            session._proc = _FakeProcess()
+            session.thread_id = "thread-1"
+            session._request = AsyncMock(return_value={"result": {"turn": {"id": "turn-1"}}})
+
+            async def _inject_events() -> None:
+                await asyncio.sleep(0.01)
+                counters = {"inputTokens": 100, "outputTokens": 25, "totalTokens": 125}
+                session._events.put_nowait(
+                    self._usage_update_event(
+                        "turn-1", last=counters, total=counters, model_context_window=258400
+                    )
+                )
+                session._events.put_nowait(
+                    {"method": "turn/completed", "params": {"turn": {"id": "turn-1"}}}
+                )
+
+            inject_task = asyncio.create_task(_inject_events())
+            events = [
+                event
+                async for event in session.run_turn(
+                    messages=[{"role": "user", "content": "hi"}],
+                    tools=[],
+                    system_prompt="",
+                    model="gpt-5.4-mini",
+                    cwd=".",
+                    sandbox="workspace-write",
+                )
+            ]
+            await inject_task
+
+            self.assertEqual(len(events), 1)
+            self.assertIsInstance(events[0], TurnComplete)
+            self.assertEqual(
+                events[0].usage,
+                {
+                    "input_tokens": 100,
+                    "output_tokens": 25,
+                    "total_tokens": 125,
+                    "context_tokens": 125,
+                    "context_window": 258400,
+                    "model": "gpt-5.4-mini",
+                },
+            )
+
+        _run(_t())
+
     @staticmethod
     def _usage_update_event(
-        turn_id: str, last: dict[str, int], total: dict[str, int]
+        turn_id: str,
+        last: dict[str, int],
+        total: dict[str, int],
+        *,
+        model_context_window: int | None = None,
     ) -> dict[str, object]:
+        token_usage: dict[str, object] = {"last": last, "total": total}
+        if model_context_window is not None:
+            token_usage["modelContextWindow"] = model_context_window
         return {
             "method": "thread/tokenUsage/updated",
             "params": {
                 "threadId": "thread-1",
                 "turnId": turn_id,
-                "tokenUsage": {"last": last, "total": total},
+                "tokenUsage": token_usage,
             },
         }
 
@@ -3131,6 +3295,42 @@ def test_extract_codex_last_turn_usage_handles_missing_or_malformed() -> None:
     assert _extract_codex_last_turn_usage({}, "gpt-5.4-mini") is None
     assert _extract_codex_last_turn_usage({"tokenUsage": None}, "gpt-5.4-mini") is None
     assert _extract_codex_last_turn_usage({"tokenUsage": {"total": {}}}, "gpt-5.4-mini") is None
+
+
+def test_extract_codex_context_window_prefers_model_window() -> None:
+    """``modelContextWindow`` wins; ``total.contextWindow`` is the fallback."""
+    from omnigent.inner.codex_executor import _extract_codex_context_window
+
+    assert (
+        _extract_codex_context_window(
+            {"tokenUsage": {"modelContextWindow": 258400, "total": {"contextWindow": 400000}}}
+        )
+        == 258400
+    )
+    assert _extract_codex_context_window({"tokenUsage": {"total": {"contextWindow": 400000}}}) == (
+        400000
+    )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        None,
+        {},
+        {"tokenUsage": None},
+        {"tokenUsage": {"last": {"inputTokens": 1}}},
+        {"tokenUsage": {"modelContextWindow": 0}},
+        {"tokenUsage": {"modelContextWindow": -1}},
+        {"tokenUsage": {"modelContextWindow": True}},
+        {"tokenUsage": {"modelContextWindow": "258400"}},
+        {"tokenUsage": {"total": {"contextWindow": 0}}},
+    ],
+)
+def test_extract_codex_context_window_rejects_missing_or_malformed(params: object) -> None:
+    """Anything but a positive int window yields None rather than a bogus ring size."""
+    from omnigent.inner.codex_executor import _extract_codex_context_window
+
+    assert _extract_codex_context_window(params) is None
 
 
 def test_extract_codex_thread_total_usage_reads_cumulative_counters() -> None:
