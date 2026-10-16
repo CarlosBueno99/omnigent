@@ -2962,7 +2962,9 @@ async def _post_claude_startup_dialog_notice(
     Posts an ``error`` item with ``level: "info"``, so the web UI renders a
     neutral notice that persists across reload and stays out of the model's
     context. A session started from the web has no other sign that its agent
-    is waiting on the person rather than still starting.
+    is waiting on the person rather than still starting. The web UI shows the
+    title collapsed and the message on demand, so the title names the dialog
+    and where it is, in the words the delivery path already uses.
 
     :param headline: The dialog's first line, e.g. ``"Settings Error"``.
     :param session_id: Session/conversation identifier.
@@ -2978,7 +2980,7 @@ async def _post_claude_startup_dialog_notice(
                 "item_data": {
                     "source": "harness",
                     "code": "native_startup_dialog",
-                    "title": "Claude Code is waiting for an answer",
+                    "title": f"Claude Code is waiting for an answer in its terminal ({headline})",
                     "message": (
                         f"Claude Code is showing “{headline}” in its terminal and won't "
                         "start until it is answered. Open the terminal to continue."

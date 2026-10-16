@@ -233,4 +233,6 @@ async def test_claude_startup_dialog_notice_posts_a_neutral_session_item() -> No
     assert body["data"]["item_type"] == "error"  # type: ignore[index]
     assert item["level"] == "info"
     assert item["code"] == "native_startup_dialog"
+    # The collapsed notice shows only the title, so it must say what and where.
+    assert item["title"] == "Claude Code is waiting for an answer in its terminal (Settings Error)"
     assert "“Settings Error”" in item["message"]
