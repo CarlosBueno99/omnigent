@@ -3734,7 +3734,8 @@ class _CodexAppServerSession:
         except Exception as exc:  # noqa: BLE001 — a missing label must never fail the turn
             logger.info("Codex helper thread %s nickname unavailable: %s", thread_id, exc)
             return _CODEX_HELPER_TITLE_FALLBACK
-        thread = response.get("result", {}).get("thread")
+        result = response.get("result")
+        thread = result.get("thread") if isinstance(result, dict) else None
         nickname = thread.get("agentNickname") if isinstance(thread, dict) else None
         if isinstance(nickname, str) and nickname:
             return nickname
@@ -3779,6 +3780,11 @@ class _CodexAppServerSession:
         ok: bool,
         summary: str,
     ) -> AsyncIterator[ExecutorEvent]:
+        # A helper finishes once per turn. A terminal collab snapshot and the
+        # helper's own ``turn/completed`` can both arrive; ``turn/started``
+        # clears this flag to reopen the child for its next turn.
+        if child.finished:
+            return
         async for event in self._announce_child(child, announced):
             yield event
         child.finished = True
@@ -3900,6 +3906,48 @@ class _CodexAppServerSession:
             )
             async for event in self._finish_child(child, announced, ok=False, summary=error_text):
                 yield event
+
+    async def _answer_child_request(
+        self,
+        message: CodexMessage,
+        method: str | None,
+        params: CodexParams,
+        child: _CodexChildThread,
+        announced: set[str],
+    ) -> AsyncIterator[ExecutorEvent]:
+        """Answer a helper thread's server-initiated request.
+
+        A request carries an ``id`` and blocks the helper (and any parent
+        ``wait`` on it) until it is answered, so it must never be dropped the
+        way a notification can. A dynamic tool call runs the Omnigent tool and
+        shows a child tool card; any other request is refused so the helper
+        fails fast instead of hanging.
+        """
+
+        result: CodexToolResult
+        if method == "item/tool/call":
+            raw_call_id = params.get("callId")
+            raw_tool_name = params.get("tool")
+            if not isinstance(raw_call_id, str) or not isinstance(raw_tool_name, str):
+                result = {"error": "Codex helper tool call missing callId or tool"}
+            else:
+                tool_args = params.get("arguments", {})
+                if not isinstance(tool_args, dict):
+                    tool_args = {}
+                if raw_call_id not in child.tool_call_ids:
+                    child.tool_call_ids.add(raw_call_id)
+                    async for event in self._announce_child(child, announced):
+                        yield event
+                    yield SubAgentToolCall(
+                        child_key=child.thread_id,
+                        call_id=raw_call_id,
+                        name=raw_tool_name,
+                        args=tool_args,
+                    )
+                result = await self._execute_dynamic_tool(raw_tool_name, tool_args)
+        else:
+            result = {"error": f"Codex helper request {method!r} is not supported"}
+        await self._send_response(int(message["id"]), _dynamic_tool_result_payload(result))
 
     async def run_turn(
         self,
@@ -4222,8 +4270,17 @@ class _CodexAppServerSession:
                         else None
                     )
                     if child_thread is not None:
-                        async for child_event in self._route_child_event(
-                            method, params, child_thread, announced_children
+                        if message.get("id") is None:
+                            # Notifications translate into the helper's row events.
+                            async for child_event in self._route_child_event(
+                                method, params, child_thread, announced_children
+                            ):
+                                yield child_event
+                            continue
+                        # A helper's server->client request must be answered, or
+                        # the helper (and any parent waiting on it) blocks forever.
+                        async for child_event in self._answer_child_request(
+                            message, method, params, child_thread, announced_children
                         ):
                             yield child_event
                         continue

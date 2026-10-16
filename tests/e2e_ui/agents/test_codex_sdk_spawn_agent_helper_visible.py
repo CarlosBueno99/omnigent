@@ -168,7 +168,8 @@ def _function_call_output(request: dict[str, Any], call_id: str) -> str | None:
             and item.get("type") == "function_call_output"
             and item.get("call_id") == call_id
         ):
-            return json.dumps(item.get("output"))
+            output = item.get("output")
+            return None if output is None else json.dumps(output)
     return None
 
 
@@ -202,8 +203,7 @@ def test_codex_spawn_agent_helper_appears_in_agents_rail(
 
         spawn_tool = _probe_spawn_tool(live_server, runner_id, mock_llm_server_url, model)
         if spawn_tool is None:
-            # Codex offers no helper-spawning tool here, so no helper can run unseen.
-            return
+            pytest.skip("Codex offers no helper-spawning tool here, so no helper can run unseen")
         namespace, spawn_name = spawn_tool
 
         parent_token = f"codexspawn-parent-{uid}"
@@ -250,6 +250,9 @@ def test_codex_spawn_agent_helper_appears_in_agents_rail(
         session_id = _create_codex_session(
             live_server, runner_id, model, "Codex spawn_agent helper visibility"
         )
+        request.addfinalizer(
+            lambda: httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        )
         page: Page = request.getfixturevalue("page")
         clock = time.monotonic()
 
@@ -282,6 +285,10 @@ def test_codex_spawn_agent_helper_appears_in_agents_rail(
         helper_requests = _wait_for_model_requests(
             mock_llm_server_url, helper_token, 2, timeout_s=180
         )
+        # The helper is still running its turn: its row must already be visible.
+        # This is exactly what the bug removed - the SDK executor dropped the
+        # helper's events, so no row ever appeared while it ran.
+        expect(child_rows).to_have_count(1, timeout=60_000)
         rows_while_helper_ran = child_rows.count()
         mark(f"helper's shell command finished; child rows: {rows_while_helper_ran}")
 
@@ -302,27 +309,51 @@ def test_codex_spawn_agent_helper_appears_in_agents_rail(
         assert shell_output is not None and f"helper-done-{uid}" in shell_output, (
             f"the helper's shell command output never reached its model request: {shell_output}"
         )
-        completion_notices = [
-            text
-            for text in _user_texts(parent_requests[-1])
-            if _SUBAGENT_NOTIFICATION in text and _HELPER_FINAL in text
-        ]
+
+        def _completion_notices() -> list[str]:
+            notices: list[str] = []
+            for request_payload in _model_requests(mock_llm_server_url, parent_token):
+                notices.extend(
+                    text
+                    for text in _user_texts(request_payload)
+                    if _SUBAGENT_NOTIFICATION in text and _HELPER_FINAL in text
+                )
+            return notices
+
+        # The helper's completion notice reaches the parent model only after the
+        # helper finishes, which can trail the parent's rendered reply on a slow
+        # host, so poll rather than reading one request.
+        notice_deadline = time.monotonic() + 60.0
+        completion_notices = _completion_notices()
+        while not completion_notices and time.monotonic() < notice_deadline:
+            time.sleep(1.0)
+            completion_notices = _completion_notices()
         assert completion_notices, "Codex never told the parent model that the helper completed"
 
-        children = httpx.get(
-            f"{live_server}/v1/sessions/{session_id}/child_sessions", timeout=10.0
-        ).json()["data"]
-        print(
-            f"child rows while helper ran: {rows_while_helper_ran}; "
-            f"child_sessions after parent turn: {len(children)}; "
-            f"spawn result: {spawn_output[:200]}; "
-            f"completion notice to parent model: {completion_notices[0][:200]}"
-        )
         mark("checking the Agents tab for the helper's row")
         expect(rail.locator(_MAIN_ROW)).to_be_visible()
         expect(child_rows).to_have_count(1, timeout=30_000)
         expect(child_rows.first.get_by_test_id("subagent-status-avatar")).to_have_attribute(
             "aria-label", "Done", timeout=30_000
+        )
+
+        # Read child_sessions only after the row renders; the API listing can lag
+        # the UI slightly, so poll instead of trusting one early snapshot.
+        def _child_sessions() -> list[dict[str, Any]]:
+            return httpx.get(
+                f"{live_server}/v1/sessions/{session_id}/child_sessions", timeout=10.0
+            ).json()["data"]
+
+        children_deadline = time.monotonic() + 30.0
+        children = _child_sessions()
+        while not children and time.monotonic() < children_deadline:
+            time.sleep(1.0)
+            children = _child_sessions()
+        print(
+            f"child rows while helper ran: {rows_while_helper_ran}; "
+            f"child_sessions after parent turn: {len(children)}; "
+            f"spawn result: {spawn_output[:200]}; "
+            f"completion notice to parent model: {completion_notices[0][:200]}"
         )
         assert len(children) == 1, f"expected one child session for the helper, saw {children}"
     finally:

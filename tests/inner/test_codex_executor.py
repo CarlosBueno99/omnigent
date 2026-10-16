@@ -6210,3 +6210,151 @@ def test_codex_collab_completion_marks_failed_calls() -> None:
     assert completion.status is ToolCallStatus.ERROR
     assert completion.error == "spawn_agent failed."
     assert completion.result == ""
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"result": None},
+        {"result": {}},
+        {"result": {"thread": None}},
+        {"result": {"thread": {}}},
+        {"result": {"thread": {"agentNickname": ""}}},
+        {},
+    ],
+    ids=["null-result", "no-thread", "null-thread", "no-nickname", "empty-nickname", "no-result"],
+)
+def test_child_thread_title_falls_back_on_missing_nickname(response: dict) -> None:
+    """A malformed ``thread/read`` reply yields the fallback label instead of raising."""
+
+    async def _t():
+        session = _CodexAppServerSession(
+            codex_path="/bin/echo", cwd="/tmp/workspace", env={}, tool_executor=None
+        )
+        session._request = AsyncMock(return_value=response)
+
+        title = await session._child_thread_title("thread-child")
+
+        assert title == "Codex helper"
+        session._request.assert_awaited_once_with(
+            "thread/read", {"threadId": "thread-child", "includeTurns": False}
+        )
+
+    _run(_t())
+
+
+def test_run_turn_closes_helper_once_despite_snapshot_and_turn_end() -> None:
+    """A terminal ``wait`` snapshot and the helper's own ``turn/completed`` close it only once."""
+
+    async def _t():
+        session = _spawn_helper_session()
+
+        events = await _run_turn_with_events(
+            session,
+            [
+                _spawn_completed_event(),
+                _child_event(
+                    "turn/started", {"turn": {"id": "turn-child", "status": "inProgress"}}
+                ),
+                _child_event(
+                    "item/completed",
+                    {
+                        "turnId": "turn-child",
+                        "item": {
+                            "id": "msg-child",
+                            "type": "agentMessage",
+                            "phase": None,
+                            "text": "Helper task finished.",
+                        },
+                    },
+                ),
+                # The parent's ``wait`` snapshot reports the helper done first ...
+                _collab_event(
+                    "item/completed",
+                    id="call_wait_1",
+                    tool="wait",
+                    status="completed",
+                    receiverThreadIds=["thread-child"],
+                    agentsStates={
+                        "thread-child": {"status": "completed", "message": "Report written."}
+                    },
+                ),
+                # ... then the helper's own turn end arrives for the same turn.
+                _child_event(
+                    "turn/completed", {"turn": {"id": "turn-child", "status": "completed"}}
+                ),
+                _parent_final_answer("Done."),
+            ],
+        )
+
+        completions = [e for e in events if isinstance(e, SubAgentCompleted)]
+        assert len(completions) == 1, events
+        assert completions[0] == SubAgentCompleted(
+            child_key="thread-child", ok=True, summary="Report written."
+        )
+        assert [e for e in events if isinstance(e, _SUBAGENT_EVENT_TYPES)] == [
+            SubAgentStarted(child_key="thread-child", title="Volta", task=_HELPER_PROMPT),
+            SubAgentCompleted(child_key="thread-child", ok=True, summary="Report written."),
+        ]
+
+    _run(_t())
+
+
+def test_run_turn_answers_helper_dynamic_tool_call() -> None:
+    """A helper's blocking ``item/tool/call`` runs the tool, is answered, and shows a card."""
+
+    async def _t():
+        session = _spawn_helper_session()
+        tool_calls: list[tuple[str, dict]] = []
+
+        def _executor(name: str, args: dict):
+            tool_calls.append((name, dict(args)))
+            return {"result": "72F and sunny"}
+
+        session._tool_executor = _executor
+
+        events = await _run_turn_with_events(
+            session,
+            [
+                _spawn_completed_event(),
+                _child_event(
+                    "turn/started", {"turn": {"id": "turn-child", "status": "inProgress"}}
+                ),
+                # Codex asks the parent (us) to run a dynamic tool on the helper's behalf.
+                {
+                    "id": 777,
+                    "method": "item/tool/call",
+                    "params": {
+                        "threadId": "thread-child",
+                        "callId": "call_dyn_1",
+                        "tool": "search_web",
+                        "arguments": {"query": "weather in SF"},
+                    },
+                },
+                _child_event(
+                    "turn/completed", {"turn": {"id": "turn-child", "status": "completed"}}
+                ),
+                _parent_final_answer("The helper looked it up."),
+            ],
+        )
+
+        # The helper's tool call surfaces as a child card with the real arguments.
+        assert [e for e in events if isinstance(e, SubAgentToolCall)] == [
+            SubAgentToolCall(
+                child_key="thread-child",
+                call_id="call_dyn_1",
+                name="search_web",
+                args={"query": "weather in SF"},
+            )
+        ]
+        # The Omnigent tool actually ran with the helper's arguments.
+        assert tool_calls == [("search_web", {"query": "weather in SF"})]
+        # The helper's blocking request was answered, so it does not hang forever.
+        responses = [json.loads(write.decode("utf-8")) for write in session._proc.stdin.writes]
+        answers = [r for r in responses if r.get("id") == 777 and "result" in r]
+        assert len(answers) == 1, responses
+        payload = answers[0]["result"]
+        assert payload["success"] is True
+        assert "72F and sunny" in payload["contentItems"][0]["text"]
+
+    _run(_t())
