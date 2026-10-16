@@ -317,3 +317,161 @@ def test_submit_retry_respects_a_hook_even_when_the_draft_is_still_visible(
             bridge_dir=native_bridge,
         )
     assert sent == []
+
+
+# Settings surfaces the user opened from the terminal (Claude Code's own
+# /permissions dialog), not a decision Claude is waiting on to continue. Their
+# footers reuse the "Enter to submit"/"Enter to select" + "Esc to cancel" text
+# that real prompts carry; the add-rule field is captured live from Claude Code
+# 2.1.283, the Allow list is the form quoted in the report (2.1.299).
+_PERMISSIONS_RULE_FIELD = """\
+   Add allow permission rule
+   Permission rules are a tool name, optionally followed by a specifier in parentheses.
+   e.g., WebFetch or Bash(ls *)
+   ╭───────────────────────────────────────────────╮
+   │ Bash(echo:*)                                    │
+   ╰───────────────────────────────────────────────╯
+   Enter to submit · Esc to cancel
+"""
+_PERMISSIONS_ALLOW_LIST = """\
+   Permissions  Recently denied   Allow   Ask   Deny   Workspace
+   Claude Code won't ask before using allowed tools.
+   ❯ 1. Bash(echo:*)
+     2. Add a new rule…
+   ↑/↓ to navigate · Enter to select · ←/→ to switch · Esc to cancel
+"""
+
+
+@pytest.mark.parametrize(
+    "pane",
+    [_PERMISSIONS_RULE_FIELD, _PERMISSIONS_ALLOW_LIST],
+    ids=["rule-field", "allow-list"],
+)
+def test_open_permissions_settings_dialog_is_not_a_pending_user_prompt(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch, pane: str
+) -> None:
+    """A /permissions settings dialog is not a decision Claude asked the user."""
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: pane)
+    assert not bridge.has_pending_user_prompt(native_bridge)
+
+
+# Captured live from Claude Code 2.1.283. Its rule lists frame a search box
+# above the ``❯``-led selected row, which reads as the composer's own frame;
+# the Workspace tab and the save-location screen draw no box at all.
+_PERMISSIONS_LIST_HEADER_FOCUSED = """\
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ◐ medium · /effort ▔
+   Permissions  Recently denied   Allow   Ask   Deny   Auto mode   Workspace
+
+   Claude Code won't ask before using allowed tools.
+   ╭───────────────────────────────────────────────╮
+   │ ⌕ Search…                                     │
+   ╰───────────────────────────────────────────────╯
+
+     1. Add a new rule…
+
+   ←/→ to switch · ↓ to select · Esc to cancel
+"""
+_PERMISSIONS_LIST_ROW_FOCUSED = _PERMISSIONS_LIST_HEADER_FOCUSED.replace(
+    "     1. Add a new rule…", "   ❯ 1. Add a new rule…\n     2. Bash(echo:*)"
+).replace(
+    "←/→ to switch · ↓ to select · Esc to cancel",
+    "↑/↓ to navigate · Enter to select · ←/→ to switch · Esc to cancel",
+)
+_PERMISSIONS_WORKSPACE_TAB = """\
+   Permissions  Recently denied   Allow   Ask   Deny   Auto mode   Workspace
+
+   Claude Code can read files in the workspace, and make edits when auto-accept edits is on.
+     -  /home/user/project (Original working directory)
+   ❯ 1. Add directory…
+
+   ↑/↓ to navigate · Enter to select · ←/→ to switch · Esc to cancel
+"""
+_PERMISSIONS_SAVE_LOCATION = """\
+   Add allow permission rule
+
+     Bash(echo:*)
+     Any Bash command starting with echo
+
+   Where should this rule be saved?
+   ❯ 1. Project settings (local)  Saved in .claude/settings.local.json
+     2. Project settings          Checked in at .claude/settings.json
+     3. User settings             Saved in at ~/.claude/settings.json
+
+   Enter to confirm · Esc to cancel
+"""
+
+
+@pytest.mark.parametrize(
+    "pane",
+    [
+        _PERMISSIONS_RULE_FIELD,
+        _PERMISSIONS_ALLOW_LIST,
+        _PERMISSIONS_LIST_HEADER_FOCUSED,
+        _PERMISSIONS_LIST_ROW_FOCUSED,
+        _PERMISSIONS_WORKSPACE_TAB,
+        _PERMISSIONS_SAVE_LOCATION,
+    ],
+    ids=["rule-field", "allow-list", "list-header", "list-row", "workspace-tab", "save-location"],
+)
+def test_every_permissions_screen_is_an_occupying_surface_not_a_prompt(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch, pane: str
+) -> None:
+    """Each screen is dismissed like a settings panel, never held behind or typed into."""
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: pane)
+    assert not bridge.has_pending_user_prompt(native_bridge)
+    assert bridge._occupying_surface(pane) == "the /permissions dialog"
+    assert not bridge._claude_prompt_rendered(pane)
+
+
+def test_message_backs_out_of_the_permissions_rule_editor_then_delivers(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Escape returns the rule editor to its list and the list to the composer."""
+    tui = {"pane": _PERMISSIONS_RULE_FIELD}
+    sent: list[tuple[str, ...]] = []
+
+    def send(*args: str) -> None:
+        sent.append(args)
+        if args[-1] == "Escape":
+            closing = tui["pane"] is _PERMISSIONS_LIST_ROW_FOCUSED
+            tui["pane"] = _COMPOSER if closing else _PERMISSIONS_LIST_ROW_FOCUSED
+        elif "paste-buffer" in args:
+            tui["pane"] = _COMPOSER.replace("❯", "❯ Deliver once the dialog is gone")
+        elif args[-1] == "Enter":
+            tui["pane"] = _COMPOSER
+
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: tui["pane"])
+    monkeypatch.setattr(bridge, "_run_tmux", send)
+    monkeypatch.setattr(bridge, "_CLAUDE_READY_POLL_INTERVAL_S", 0)
+    monkeypatch.setattr(bridge, "_OCCUPIED_INPUT_DISMISS_RETRY_INTERVAL_S", 0)
+    monkeypatch.setattr(bridge, "_PASTE_SETTLE_S", 0)
+    bridge.inject_user_message(native_bridge, content="Deliver once the dialog is gone")
+    tails = [args[-1] for args in sent]
+    assert tails[:3] == ["Escape", "Escape", "Space"]
+    assert any("paste-buffer" in args for args in sent)
+    assert tails[-1] == "Enter"
+
+
+def test_permissions_dialog_chrome_above_a_ready_composer_keeps_it_ready() -> None:
+    """Transcript quoting the dialog neither stalls the readiness gate nor draws an Escape."""
+    pane = (
+        "⏺ In /permissions, ←/→ to switch tabs and Esc to cancel. The rule editor\n"
+        "  says: Permission rules are a tool name, optionally followed by a specifier.\n"
+        + _COMPOSER
+    )
+    assert bridge._claude_prompt_rendered(pane)
+    assert bridge._occupying_surface(pane) is None
+    assert not bridge._user_prompt_visible(pane)
+
+
+@pytest.mark.parametrize("pane", [_QUESTION, _PERMISSION], ids=["question", "permission"])
+def test_a_decision_prompt_under_permissions_talk_stays_pending(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch, pane: str
+) -> None:
+    """Loose transcript mentions of the dialog do not unprotect a real prompt."""
+    monkeypatch.setattr(
+        bridge,
+        "_capture_pane",
+        lambda *_: "⏺ Open /permissions, pick the Allow tab and add a new rule.\n" + pane,
+    )
+    assert bridge.has_pending_user_prompt(native_bridge)

@@ -10553,6 +10553,22 @@ _SETTINGS_PANEL_PANE = """\
    Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear
 """
 
+# The ``/permissions`` dialog's Allow tab with its selected row focused. The
+# framed search box above the ❯-led row is the composer's shape, and the
+# footer is a decision prompt's; only the tab hint tells it apart.
+_PERMISSIONS_LIST_PANE = """\
+❯ /permissions
+   Permissions  Recently denied   Allow   Ask   Deny   Auto mode   Workspace
+
+   Claude Code won't ask before using allowed tools.
+   ╭───────────────────────────────────────────────╮
+   │ ⌕ Search…                                     │
+   ╰───────────────────────────────────────────────╯
+   ❯ 1. Add a new rule…
+
+   ↑/↓ to navigate · Enter to select · ←/→ to switch · Esc to cancel
+"""
+
 # The details panel of a background shell, opened from the task indicator
 # below the input box. It replaces the input box, and its footer joins the
 # keys that close it into one hint: "Esc/Enter/Space to close".
@@ -11187,6 +11203,7 @@ def test_an_effort_injection_with_no_dialog_completes_without_hanging(
         _SHELL_MODE_PANE,
         _REWIND_PANE,
         _SETTINGS_PANEL_PANE,
+        _PERMISSIONS_LIST_PANE,
         _TASK_DETAILS_PANE,
     ],
     ids=[
@@ -11196,6 +11213,7 @@ def test_an_effort_injection_with_no_dialog_completes_without_hanging(
         "shell-mode",
         "rewind",
         "settings-panel",
+        "permissions-dialog",
         "task-details-panel",
     ],
 )
@@ -11469,6 +11487,7 @@ def test_wait_for_claude_prompt_ready_ignores_a_single_dialog_frame(
         _INLINE_REVERSE_SEARCH_PANE,
         _INLINE_REVERSE_SEARCH_NO_MATCH_PANE,
         _INLINE_REVERSE_SEARCH_WRAPPED_PANE,
+        _PERMISSIONS_LIST_PANE,
     ],
     ids=[
         "shell-mode",
@@ -11476,6 +11495,7 @@ def test_wait_for_claude_prompt_ready_ignores_a_single_dialog_frame(
         "inline-reverse-search",
         "inline-reverse-search-no-match",
         "inline-reverse-search-wrapped",
+        "permissions-dialog",
     ],
 )
 def test_an_occupied_pane_never_reads_as_a_mounted_input_box(occupied_pane: str) -> None:
@@ -11484,11 +11504,12 @@ def test_an_occupied_pane_never_reads_as_a_mounted_input_box(occupied_pane: str)
 
     All these panes carry the glyph — shell mode leaves earlier prompt
     echoes in the transcript above the ``!`` composer, the rewind dialog
-    marks its selected row with it, and the inline ctrl+r search rides
-    the framed composer itself as its filter field. Reading them as
+    marks its selected row with it, the inline ctrl+r search rides the
+    framed composer itself as its filter field, and the ``/permissions``
+    dialog frames its search box above the selected rule. Reading them as
     "ready" is what handed a chat message to bash, to a checkpoint
-    restore, and to a history replay; only a framed composer row with no
-    search footer counts.
+    restore, to a history replay, and to a settings dialog; only a framed
+    composer row with no search footer or dialog chrome counts.
     """
     assert _claude_prompt_rendered(occupied_pane) is False
 
