@@ -1514,41 +1514,26 @@ async def test_get_parses_cost_usage_and_lineage_metadata() -> None:
     assert session.sub_agent_name == "summarizer"
 
 
-@pytest.mark.asyncio
-async def test_get_marks_usage_unknown_when_not_included() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        del request
-        return httpx.Response(
-            200,
-            json=_session_response_body()
-            | {"usage_included": False, "total_cost_usd": None, "usage_by_model": None},
-        )
-
-    ns, client = _make_namespace(handler)
-    try:
-        session = await ns.get("conv_abc")
-    finally:
-        await client.aclose()
-
-    assert session.usage_included is False
-    assert session.total_cost_usd is None
-    assert session.usage_by_model is None
-
-
-@pytest.mark.asyncio
-async def test_get_metadata_defaults_to_none_when_omitted() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        del request
-        return httpx.Response(200, json=_session_response_body())
-
-    ns, client = _make_namespace(handler)
-    try:
-        session = await ns.get("conv_abc")
-    finally:
-        await client.aclose()
+@pytest.mark.parametrize(
+    ("extra", "expected_usage_included"),
+    [
+        # An older server omits the metadata keys entirely.
+        pytest.param({}, True, id="keys-omitted"),
+        # include_usage=false: usage is unknown rather than zero.
+        pytest.param(
+            {"usage_included": False, "total_cost_usd": None, "usage_by_model": None},
+            False,
+            id="usage-not-included",
+        ),
+    ],
+)
+def test_session_from_dict_metadata_compatibility(
+    extra: dict[str, Any], expected_usage_included: bool
+) -> None:
+    session = Session.from_dict(_session_response_body() | extra)
 
     assert session.total_cost_usd is None
-    assert session.usage_included is True
+    assert session.usage_included is expected_usage_included
     assert session.usage_by_model is None
     assert session.parent_session_id is None
     assert session.root_conversation_id is None

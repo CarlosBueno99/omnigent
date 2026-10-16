@@ -8,9 +8,9 @@ default, so a client built without ``trust_env=False`` fails with
 ``httpx.ConnectError: All connection attempts failed`` even though the
 server is listening and healthy.
 
-``session_url`` is the one place caller-supplied session and elicitation
-ids become URL path segments; it must keep each id inside its own segment
-so an id can never select a different route.
+``session_url`` builds every SDK path that embeds a caller-supplied
+session, file or elicitation id; it must keep each id inside its own
+segment so an id can never select a different route.
 """
 
 from __future__ import annotations
