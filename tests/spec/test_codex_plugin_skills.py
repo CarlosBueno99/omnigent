@@ -29,6 +29,21 @@ def _plugin(codex_home: Path, name: str = "toolkit", version: str = "1.0.0") -> 
     return root
 
 
+def _enable(
+    codex_home: Path,
+    name: str = "toolkit",
+    marketplace: str = "market",
+    *,
+    enabled: bool | None = True,
+) -> None:
+    codex_home.mkdir(parents=True, exist_ok=True)
+    table = f'[plugins."{name}@{marketplace}"]\n'
+    if enabled is not None:
+        table += f"enabled = {str(enabled).lower()}\n"
+    with (codex_home / "config.toml").open("a") as handle:
+        handle.write(table + "\n")
+
+
 def _entry(
     name: str = "toolkit", version: str = "1.0.0", **overrides: object
 ) -> dict[str, object]:
@@ -194,20 +209,88 @@ def test_plugin_inventory_uses_session_home_and_workspace(tmp_path: Path, codex_
 @pytest.mark.parametrize(
     "failure",
     [
+        None,
         FileNotFoundError(),
         subprocess.TimeoutExpired("codex", 5),
-        subprocess.CalledProcessError(2, "codex"),
+        subprocess.CalledProcessError(
+            1, "codex", stderr="failed to load configured marketplace snapshot(s)"
+        ),
     ],
+    ids=["cli-missing", "cli-unrunnable", "timeout", "nonzero-exit"],
 )
-def test_unavailable_plugin_inventory_keeps_standalone_skills(
-    tmp_path: Path, codex_cli: Mock, failure: Exception
+def test_unavailable_plugin_inventory_keeps_standalone_and_enabled_plugin_skills(
+    tmp_path: Path,
+    codex_cli: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception | None,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    standalone = _skill(codex_home / "skills")
+    enabled = _skill(_plugin(codex_home) / "skills")
+    default_enabled = _skill(_plugin(codex_home, "other") / "skills")
+    _skill(_plugin(codex_home, "disabled") / "skills")
+    _skill(_plugin(codex_home, "uninstalled") / "skills")
+    # Codex loads every configured plugin unless it says enabled = false; a cached
+    # plugin without a config table is not installed.
+    _enable(codex_home)
+    _enable(codex_home, "other", enabled=None)
+    _enable(codex_home, "disabled", enabled=False)
+    if failure is None:
+        monkeypatch.setattr("omnigent.inner.codex_executor._find_codex_cli", lambda: None)
+    else:
+        codex_cli.side_effect = failure
+
+    assert _discover(tmp_path) == {
+        "review": standalone,
+        "toolkit:review": enabled,
+        "other:review": default_enabled,
+    }
+    if failure is None:
+        codex_cli.assert_not_called()
+
+
+def test_unavailable_plugin_inventory_uses_the_highest_cached_version(
+    tmp_path: Path, codex_cli: Mock
+) -> None:
+    codex_home = tmp_path / ".codex"
+    _skill(_plugin(codex_home, version="9.0.0") / "skills", "nine")
+    _skill(_plugin(codex_home, version="10.0.0-rc.1") / "skills", "candidate")
+    newest = _skill(_plugin(codex_home, version="10.0.0") / "skills", "ten")
+    _enable(codex_home)
+    codex_cli.side_effect = subprocess.CalledProcessError(1, "codex")
+
+    assert _discover(tmp_path) == {"toolkit:ten": newest}
+
+
+@pytest.mark.parametrize(
+    "config",
+    [None, "[", "plugins = 1", "[plugins.toolkit]\nenabled = true\n"],
+    ids=["absent", "invalid-toml", "not-a-table", "no-marketplace"],
+)
+def test_unavailable_plugin_inventory_without_usable_config_hides_plugin_skills(
+    tmp_path: Path, codex_cli: Mock, config: str | None
 ) -> None:
     codex_home = tmp_path / ".codex"
     standalone = _skill(codex_home / "skills")
     _skill(_plugin(codex_home) / "skills")
-    codex_cli.side_effect = failure
+    if config is not None:
+        (codex_home / "config.toml").write_text(config)
+    codex_cli.side_effect = subprocess.CalledProcessError(1, "codex")
 
     assert _discover(tmp_path) == {"review": standalone}
+
+
+def test_plugin_config_cannot_escape_the_plugin_cache(tmp_path: Path, codex_cli: Mock) -> None:
+    codex_home = tmp_path / ".codex"
+    (codex_home / "plugins" / "cache").mkdir(parents=True)
+    outside = codex_home / "plugins" / "escaped" / "toolkit" / "1.0.0"
+    (outside / ".codex-plugin").mkdir(parents=True)
+    (outside / ".codex-plugin" / "plugin.json").write_text(json.dumps({"name": "toolkit"}))
+    _skill(outside / "skills")
+    _enable(codex_home, marketplace="../escaped")
+    codex_cli.side_effect = subprocess.CalledProcessError(1, "codex")
+
+    assert _discover(tmp_path) == {}
 
 
 @pytest.mark.parametrize("output", ["{", "[]", '{"installed": {}}', '{"installed": [null, {}]}'])

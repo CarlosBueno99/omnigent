@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
+import tomllib
 import yaml
 
 from omnigent.errors import OmnigentError
@@ -17,6 +18,18 @@ from omnigent.spec.parser import _discover_skills, _parse_skill
 from omnigent.spec.types import SkillSpec
 
 _log = logging.getLogger(__name__)
+
+
+def _is_path_segment(part: object) -> bool:
+    """Whether *part* names exactly one directory level under the plugin cache."""
+    return isinstance(part, str) and part not in {"", ".", ".."} and Path(part).name == part
+
+
+def _version_key(version: str) -> tuple[tuple[int, ...], bool, str]:
+    """Order cached versions as semantic versions; a release outranks its pre-releases."""
+    core, _, prerelease = version.partition("-")
+    numbers = tuple(int(part) if part.isdigit() else -1 for part in core.split("."))
+    return (numbers, not prerelease, prerelease)
 
 
 def _skill_roots(root: Path, paths: object) -> list[Path]:
@@ -40,17 +53,13 @@ def _skill_roots(root: Path, paths: object) -> list[Path]:
     return sorted(roots)
 
 
-def discover_codex_plugin_skills(
-    codex_home: Path, skills_filter: str | list[str], *, cwd: Path | None = None
-) -> list[SkillSpec]:
-    """Ask Codex which plugin versions are installed, then parse their skills."""
+def _inventory_plugins(codex_home: Path, cwd: Path | None) -> list[object] | None:
+    """Return the installed entries of ``codex plugin list --json``, or ``None`` if unreadable."""
     from omnigent.inner.codex_executor import _find_codex_cli
 
-    if skills_filter == "none" or skills_filter == []:
-        return []
-    cache = codex_home / "plugins" / "cache"
-    if not cache.is_dir() or (codex_path := _find_codex_cli()) is None:
-        return []
+    if (codex_path := _find_codex_cli()) is None:
+        _log.debug("Codex plugin inventory unavailable: codex CLI not found")
+        return None
     try:
         result = subprocess.run(
             [codex_path, "plugin", "list", "--json"],
@@ -63,21 +72,77 @@ def discover_codex_plugin_skills(
         )
         inventory = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        _log.debug("Codex plugin inventory unavailable: %s", exc)
-        return []
+        _log.info("Codex plugin inventory unavailable: %s", exc)
+        return None
     plugins = inventory.get("installed") if isinstance(inventory, dict) else None
-    if not isinstance(plugins, list):
+    return plugins if isinstance(plugins, list) else []
+
+
+def _cached_plugins(codex_home: Path, cache: Path) -> list[object]:
+    """
+    Read the plugins Codex loads when its inventory command cannot be used.
+
+    Codex itself needs no marketplace to start a session: it loads every plugin
+    whose ``[plugins."<name>@<marketplace>"]`` table in ``config.toml`` is not
+    ``enabled = false``, at the highest version present in its cache.
+    """
+    try:
+        with (codex_home / "config.toml").open("rb") as handle:
+            config = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        _log.debug("Codex config.toml unreadable; plugin skills unavailable: %s", exc)
         return []
+    tables = config.get("plugins")
+    if not isinstance(tables, dict):
+        return []
+    plugins: list[object] = []
+    for key, table in tables.items():
+        name, _, marketplace = key.partition("@")
+        if not isinstance(table, dict) or table.get("enabled") is False:
+            continue
+        if not (_is_path_segment(name) and _is_path_segment(marketplace)):
+            continue
+        try:
+            versions = [child.name for child in (cache / marketplace / name).iterdir()]
+        except OSError:
+            continue
+        if versions:
+            plugins.append(
+                {
+                    "marketplaceName": marketplace,
+                    "name": name,
+                    "version": max(versions, key=_version_key),
+                    "enabled": True,
+                }
+            )
+    return plugins
+
+
+def discover_codex_plugin_skills(
+    codex_home: Path, skills_filter: str | list[str], *, cwd: Path | None = None
+) -> list[SkillSpec]:
+    """
+    Ask Codex which plugin versions are installed, then parse their skills.
+
+    ``codex plugin list`` also loads every configured marketplace, so it can fail
+    while Codex still runs the installed plugins. When the inventory cannot be
+    read, fall back to the same local state Codex loads from.
+    """
+    if skills_filter == "none" or skills_filter == []:
+        return []
+    cache = codex_home / "plugins" / "cache"
+    if not cache.is_dir():
+        return []
+    plugins = _inventory_plugins(codex_home, cwd)
+    if plugins is None:
+        plugins = _cached_plugins(codex_home, cache)
     filter_names = set(skills_filter) if isinstance(skills_filter, list) else None
     out: list[SkillSpec] = []
     for plugin in plugins:
         if not isinstance(plugin, dict) or plugin.get("enabled") is not True:
             continue
         parts = [plugin.get(key) for key in ("marketplaceName", "name", "version")]
-        if not all(
-            isinstance(part, str) and part not in {"", ".", ".."} and Path(part).name == part
-            for part in parts
-        ):
+        if not all(_is_path_segment(part) for part in parts):
             continue
         root = cache.joinpath(*cast(list[str], parts))
         manifest_path = root / ".codex-plugin" / "plugin.json"
