@@ -409,6 +409,54 @@ def test_discover_codex_models_route_metadata_edge_cases(
     assert discovered == (("system.ai.gpt-9-9",) if servable else ())
 
 
+def test_discover_codex_models_rejects_a_malformed_listing() -> None:
+    """A wrong-type ``model_services`` field is malformed, not an authoritative empty listing."""
+    from omnigent.models.databricks_model_discovery import discover_databricks_codex_models
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"model_services": "oops"}, request=request)
+
+    with pytest.raises(ValueError, match="must be a list"):
+        discover_databricks_codex_models(
+            "https://workspace.example.com", "token", transport=httpx.MockTransport(_handler)
+        )
+
+
+@pytest.mark.parametrize("names_codex_model", [False, True], ids=["none-named", "gpt-named"])
+def test_discover_codex_models_truncated_listing_cannot_establish_absence(
+    names_codex_model: bool,
+) -> None:
+    """A listing cut off by the page budget is authoritative only for what it names."""
+    from omnigent.models.databricks_model_discovery import discover_databricks_codex_models
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        token = request.url.params.get("page_token", "0")
+        name = (
+            "system.ai.gpt-5-5"
+            if names_codex_model and token == "0"
+            else f"system.ai.claude-opus-{token}"
+        )
+        return httpx.Response(
+            200,
+            json={
+                "model_services": [{"name": f"model-services/{name}"}],
+                "next_page_token": str(int(token) + 1),
+            },
+            request=request,
+        )
+
+    def _discover() -> tuple[str, ...]:
+        return discover_databricks_codex_models(
+            "https://workspace.example.com", "token", transport=httpx.MockTransport(_handler)
+        )
+
+    if names_codex_model:
+        assert _discover() == ("system.ai.gpt-5-5",)
+    else:
+        with pytest.raises(ValueError, match="truncated"):
+            _discover()
+
+
 @pytest.mark.parametrize(
     ("api_types", "expected"),
     [

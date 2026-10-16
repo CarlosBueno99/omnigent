@@ -3242,10 +3242,10 @@ class CodexDatabricksNoCodexModelsError(OmnigentError, OSError):
         :param profile: ``~/.databrickscfg`` profile name, e.g. ``"oss"``.
         """
         super().__init__(
-            f"Databricks profile {profile!r} (from your provider config) exposes no "
-            "model service on the Codex Responses route, so native Codex has no "
-            "model to launch on. Ask a workspace admin to enable a GPT model service "
-            "on that workspace, or choose an explicit model for this agent.",
+            f"Databricks profile {profile!r} exposes no model service on the Codex "
+            "Responses route, so native Codex has no model to launch on. Ask a "
+            "workspace admin to enable a GPT model service on that workspace, or "
+            "choose an explicit model for this agent.",
             code=ErrorCode.HARNESS_NOT_CONFIGURED,
         )
 

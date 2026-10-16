@@ -270,13 +270,32 @@ def test_resolve_databricks_codex_model_empty_catalog_stops_implicit_launch(
     bundled.assert_not_called()
 
 
-@pytest.mark.parametrize("cached_codex_models", [None, []], ids=["no-ucode-state", "empty"])
-def test_resolve_databricks_codex_model_unreadable_listing_keeps_bundled_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cached_codex_models: list[str] | None
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("listing unreachable"), ValueError("'model_services' must be a list")],
+    ids=["unreachable", "malformed"],
+)
+@pytest.mark.parametrize(
+    ("cached_codex_models", "expected", "bundled_calls"),
+    [
+        pytest.param(None, "databricks-gpt-5-4", 1, id="no-ucode-state"),
+        pytest.param([], "databricks-gpt-5-4", 1, id="empty-cache"),
+        pytest.param(
+            ["system.ai.gpt-5-5", "system.ai.gpt-5-4"], "system.ai.gpt-5-5", 0, id="cached"
+        ),
+    ],
+)
+def test_resolve_databricks_codex_model_unreadable_listing_keeps_fallbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    cached_codex_models: list[str] | None,
+    expected: str,
+    bundled_calls: int,
 ) -> None:
-    """An unreadable listing is not authoritative: the bundled last resort stays.
+    """An unreadable or malformed listing is not authoritative.
 
-    Discovery failed and ucode state is missing or caches no codex model.
+    Cached ucode models win; with none cached, the bundled last resort stays.
     """
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -296,17 +315,16 @@ def test_resolve_databricks_codex_model_unreadable_listing_keeps_bundled_fallbac
         ),
         patch(
             "omnigent.models.databricks_model_discovery.discover_databricks_codex_models",
-            side_effect=RuntimeError("listing unreachable"),
+            side_effect=failure,
         ),
         patch("omnigent.onboarding.ucode_state.read_ucode_state", return_value=workspace_state),
         patch("omnigent.models.model_catalog.resolve_catalog_model", bundled),
     ):
-        assert (
-            _resolve_databricks_codex_model("https://h.example.com", "prof", None)
-            == "databricks-gpt-5-4"
-        )
+        assert _resolve_databricks_codex_model("https://h.example.com", "prof", None) == expected
 
-    bundled.assert_called_once_with("databricks", family="openai")
+    assert bundled.call_count == bundled_calls
+    if bundled_calls:
+        bundled.assert_called_once_with("databricks", family="openai")
 
 
 def test_resolve_databricks_codex_model_discovery_failure_warns_without_traceback(
