@@ -14,8 +14,8 @@ import pytest
 
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
 from tests._helpers.server_runner import server_runner
+from tests._helpers.zerobus_capture import ZeroBusCapture
 from tests.e2e.conftest import configure_mock_llm, lookup_agent_id, register_inline_agent
-from tests.e2e.test_native_terminal_start_error_log_correlation_e2e import _ZeroBusCapture
 from tests.e2e.test_runner_tunnel_mid_turn_reconnect_grace_e2e import (
     _gate_pending,
     _poll_until,
@@ -36,7 +36,7 @@ def test_host_ships_lost_status_evidence_for_a_real_forked_runner(
         isolated_mock_llm_server_url, [{"text": "HELD_TURN", "block": True}], key=model
     )
     with (
-        contextlib.closing(_ZeroBusCapture()) as capture,
+        contextlib.closing(ZeroBusCapture()) as capture,
         server_runner(
             tmp_path / "stack",
             base_env={

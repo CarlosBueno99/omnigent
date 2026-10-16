@@ -106,7 +106,7 @@ class ZygoteRunnerProc:
             manager._generation if zygote_generation is None else zygote_generation
         )
         self._zygote_process = zygote_process if zygote_process is not None else manager._proc
-        self._last_unavailable_child_alive: bool | None = None
+        self._last_unavailable_status: tuple[str | None, bool | None] = (None, None)
         self._session_id = session_id
         self._runner_id = runner_id
         self.returncode: int | None = None
@@ -120,11 +120,10 @@ class ZygoteRunnerProc:
         if self.returncode is not None:
             return self.returncode
         status = self._manager._poll_status(self.pid, zygote_generation=self._zygote_generation)
-        if (
-            status.unavailable_reason is not None
-            and status.child_alive != self._last_unavailable_child_alive
+        if status.unavailable_reason is not None and (
+            (status.unavailable_reason, status.child_alive) != self._last_unavailable_status
         ):
-            self._last_unavailable_child_alive = status.child_alive
+            self._last_unavailable_status = (status.unavailable_reason, status.child_alive)
             parent = self._zygote_process
             parent_code = parent.poll() if parent is not None else None
             logger.warning(
