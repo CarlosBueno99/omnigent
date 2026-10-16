@@ -9,6 +9,8 @@ YAML/config machinery it pulls in.
 
 from __future__ import annotations
 
+import os
+
 # The server provisions the sandbox, generates the identity + launch token, and
 # injects all three so the host registers under the server-chosen identity
 # without persisting anything to the sandbox's config.yaml (managed sandboxes
@@ -18,3 +20,12 @@ from __future__ import annotations
 HOST_TOKEN_ENV_VAR = "OMNIGENT_HOST_TOKEN"
 HOST_ID_ENV_VAR = "OMNIGENT_HOST_ID"
 HOST_NAME_ENV_VAR = "OMNIGENT_HOST_NAME"
+
+# Baked into the managed-sandbox host image and set on its Pod spec; never
+# present on a person's own host.
+MANAGED_SANDBOX_ENV_VAR = "IS_SANDBOX"
+
+
+def in_managed_sandbox() -> bool:
+    """Return whether this process runs inside a server-managed sandbox host."""
+    return (os.environ.get(MANAGED_SANDBOX_ENV_VAR) or "").strip() == "1"

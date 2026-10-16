@@ -34,6 +34,7 @@ from omnigent.harnesses.claude_native.bridge import (
     read_model_env,
     read_model_picker_values,
 )
+from omnigent.host.identity_env import in_managed_sandbox
 from omnigent.inner.executor import (
     EnqueuedContent,
     Executor,
@@ -53,6 +54,19 @@ from omnigent.inner.native_attachments import (
 from omnigent.models.claude_model_vocabulary import claude_model_command_arg, normalized_model_id
 
 _logger = logging.getLogger(__name__)
+
+_AUTH_COMMAND_GUIDANCE = (
+    "Claude Code's sign-in runs in its own terminal, so /login and /logout do "
+    "nothing from the web chat. Run omni setup on the host to sign in again — "
+    "or to sign out — then retry."
+)
+# A managed sandbox's credentials are provisioned at launch; a new session is
+# the only self-service way to get current ones.
+_AUTH_COMMAND_GUIDANCE_MANAGED_SANDBOX = (
+    "Claude Code's sign-in runs in its own terminal, so /login and /logout do "
+    "nothing from the web chat. This session's sandbox has no shell to sign in "
+    "from — start a new session to get freshly provisioned credentials."
+)
 
 
 class ClaudeNativeExecutor(Executor):
@@ -190,16 +204,16 @@ class ClaudeNativeExecutor(Executor):
             # Claude Code's sign-in flow is an interactive TUI handoff the
             # bridge cannot drive, so /login is escaped into plain text and
             # reaches the model as a prompt. An expired login answers it with
-            # "Login expired · Please run /login" — a loop. Point at the host
-            # command that does re-authenticate instead of typing anything.
+            # "Login expired · Please run /login" — a loop. Point at a remedy
+            # the user can reach instead of typing anything.
             # `omni setup` covers both directions: its harness menu signs in
             # (`claude auth login --claudeai`) and signs out (`claude auth
             # logout`), so one pointer serves /login and /logout alike.
             yield ExecutorError(
                 message=(
-                    "Claude Code's sign-in runs in its own terminal, so /login and "
-                    "/logout do nothing from the web chat. Run omni setup on the host "
-                    "to sign in again — or to sign out — then retry."
+                    _AUTH_COMMAND_GUIDANCE_MANAGED_SANDBOX
+                    if in_managed_sandbox()
+                    else _AUTH_COMMAND_GUIDANCE
                 ),
                 undelivered=True,
             )
