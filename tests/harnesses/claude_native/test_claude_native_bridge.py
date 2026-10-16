@@ -11364,27 +11364,31 @@ _DIALOG_ECHO_ABOVE_COMPOSER_PANE = _MCP_APPROVAL_DIALOG_PANE + _READY_PANE
 
 
 @pytest.mark.parametrize(
-    ("pane", "headline"),
+    ("pane", "headline", "category"),
     [
-        (_MCP_APPROVAL_DIALOG_PANE, "New MCP server found in this project: e2e-noop"),
-        (_MCP_APPROVAL_CHECKLIST_PANE, "2 new MCP servers found in this project"),
-        (_API_KEY_DIALOG_PANE, "Detected a custom API key in your environment"),
-        (_TRUST_DIALOG_PANE, "Accessing workspace:"),
-        (_SETTINGS_ERROR_DIALOG_PANE, "Settings Error"),
+        (_MCP_APPROVAL_DIALOG_PANE, "New MCP server found in this project: e2e-noop", None),
+        (_MCP_APPROVAL_CHECKLIST_PANE, "2 new MCP servers found in this project", None),
+        (_API_KEY_DIALOG_PANE, "Detected a custom API key in your environment", None),
+        (_TRUST_DIALOG_PANE, "Accessing workspace:", None),
+        (_SETTINGS_ERROR_DIALOG_PANE, "Settings Error", ErrorCategory.CONFIG),
     ],
     ids=["mcp-single", "mcp-checklist", "api-key", "folder-trust", "settings-error"],
 )
-def test_terminal_dialog_headline_names_startup_dialogs(pane: str, headline: str) -> None:
+def test_terminal_dialog_headline_names_startup_dialogs(
+    pane: str, headline: str, category: ErrorCategory | None
+) -> None:
     """
-    Each real startup dialog is recognised by shape and named by its headline.
+    Each real startup dialog is recognised by shape, named by its headline and attributed.
 
-    All four captures come from Claude Code 2.1.269. None of them is a mounted
-    input box, and each replaces the box with an option list under a
-    "Enter to … · Esc to …" footer, so the headline is what the web error
-    can show the person who has to answer it.
+    The first four captures come from Claude Code 2.1.269 and the settings
+    error from 2.1.283. None of them is a mounted input box, and each replaces
+    the box with an option list under a "Enter to … · Esc to …" footer, so the
+    headline is what the web error can show the person who has to answer it.
+    Only the invalid-settings dialog names a cause; the rest wait on a choice.
     """
     assert claude_native_bridge._terminal_dialog_headline(pane) == headline
     assert _claude_prompt_rendered(pane) is False
+    assert claude_native_bridge.claude_startup_dialog_category(headline) is category
 
 
 @pytest.mark.parametrize(
@@ -11420,24 +11424,6 @@ def test_terminal_dialog_headline_ignores_other_panes(pane: str) -> None:
     stays on its own PermissionRequest path.
     """
     assert claude_native_bridge._terminal_dialog_headline(pane) is None
-
-
-@pytest.mark.parametrize(
-    ("pane", "category"),
-    [
-        (_SETTINGS_ERROR_DIALOG_PANE, ErrorCategory.CONFIG),
-        (_MCP_APPROVAL_DIALOG_PANE, None),
-        (_TRUST_DIALOG_PANE, None),
-    ],
-    ids=["settings-error", "mcp-single", "folder-trust"],
-)
-def test_startup_dialog_category_attributes_only_an_unreadable_settings_file(
-    pane: str, category: ErrorCategory | None
-) -> None:
-    """Only the invalid-settings dialog names a cause; the rest just wait on a choice."""
-    headline = claude_native_bridge._terminal_dialog_headline(pane)
-    assert headline is not None
-    assert claude_native_bridge.claude_startup_dialog_category(headline) is category
 
 
 def test_wait_for_claude_prompt_ready_fails_fast_on_a_terminal_dialog(

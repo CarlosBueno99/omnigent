@@ -2957,13 +2957,10 @@ async def _post_claude_startup_dialog_notice(
     session_id: str,
     server_client: httpx.AsyncClient,
 ) -> None:
-    """Tell the person that Claude Code's startup is waiting on a terminal dialog.
+    """Post an informational startup notice naming the dialog and terminal in its collapsed title.
 
-    Posts an ``error`` item with ``level: "info"``, so the web UI renders a
-    neutral notice that persists across reload and stays out of the model's
-    context. A session started from the web has no other sign that its agent
-    is waiting on the person rather than still starting. Only the title shows
-    until the notice is expanded, so it names the dialog and where it is.
+    An ``error`` item with ``level: "info"`` renders as a neutral notice,
+    persists across reload and stays out of the model's context.
 
     :param headline: The dialog's first line, e.g. ``"Settings Error"``.
     :param session_id: Session/conversation identifier.
