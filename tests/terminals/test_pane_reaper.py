@@ -366,6 +366,7 @@ async def test_runner_reap_releases_the_sessions_sidecars(
             assert conv not in server_registry
     finally:
         forwarder.cancel()
+        await asyncio.gather(forwarder, return_exceptions=True)
         native_runtime._AUTO_FORWARDER_TASKS.pop(conv, None)
         if server_registry is not None:
             server_registry.pop(conv, None)
@@ -422,5 +423,6 @@ async def test_runner_reap_leaves_a_recreated_sessions_sidecars_untouched(
     finally:
         for task in (old_forwarder, new_forwarder):
             task.cancel()
+        await asyncio.gather(old_forwarder, new_forwarder, return_exceptions=True)
         native_runtime._AUTO_FORWARDER_TASKS.pop(conv, None)
         native_runtime._AUTO_OPENCODE_SERVERS.pop(conv, None)

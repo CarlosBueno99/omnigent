@@ -325,7 +325,11 @@ async def release_reaped_native_sidecars(session_id: str, captured: ReapedNative
     incoming message can recreate the session and register a replacement
     forwarder and server during that await. Each slot is compared against the
     captured object (the ``is``-identity guard ``close(expected=...)`` uses), so
-    a replacement is left running rather than cancelled or closed.
+    a replacement generation is left running rather than cancelled or closed.
+
+    Generations are distinguished by object identity, so a codex recreate that
+    reuses the still-live app-server and forwarder is not seen as new and stays
+    eligible for cleanup, as it was before this path released non-codex sidecars.
 
     :param session_id: Session/conversation id, e.g. ``\"conv_abc123\"``.
     :param captured: The pane's sidecars from :func:`capture_native_sidecars`.
