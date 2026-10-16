@@ -10760,6 +10760,68 @@ async def test_interrupted_native_message_is_not_reported_undelivered_by_a_later
             assert _consumed_pending_ids(published) == [cancelled, kept]
 
 
+async def test_stopped_native_message_is_relabelled_undelivered_by_a_later_mirror(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A delivered Stop session must settle a held claude-native web message, not relabel it.
+
+    A web message held behind a pending Claude prompt is recorded as a pending input.
+    Pressing "Stop session" forwards a ``stop_session`` the runner accepts (202), but
+    unlike ``interrupt`` (which settles the held entry via ``mark_interrupted``) the
+    stop_session route never settles it. The next message relaunches Claude, whose
+    transcript mirror text-matches that later message and skips the still-queued held
+    entry, persisting it with a ``native_prompt_not_recorded`` error that blames
+    Claude's transcript rather than naming the Stop. The held entry should instead be
+    settled by the Stop, so this asserts no such error survives a delivered stop.
+    """
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _interrupt_fenced_sessions
+
+    published: list[tuple[str, dict[str, Any]]] = []
+    _capture_published(monkeypatch, published)
+    pending_inputs.reset_for_tests()
+    agent = await create_test_agent(client)
+    session = await _create_session(
+        client,
+        agent["id"],
+        labels={"omnigent.ui": "terminal", "omnigent.wrapper": "claude-code-native-ui"},
+    )
+    session_id = session["id"]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(202)),
+        base_url="http://runner",
+    ) as fake_runner:
+        _route_to_runner(monkeypatch, fake_runner)
+        try:
+            held = _queue_web_message(session_id, "finish the deploy")
+            stop = await client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={"type": "stop_session", "data": {}},
+            )
+            assert stop.status_code == 202, stop.text
+            assert stop.json() == {"queued": False}, stop.text
+            kept = _queue_web_message(session_id, "actually hold off")
+            await _mirror_user_message(
+                client, session_id, "actually hold off", "claude:hold-off:0"
+            )
+
+            user_texts, error_codes = await _persisted_user_texts_and_error_codes(
+                client, session_id
+            )
+            assert "native_prompt_not_recorded" not in error_codes, (
+                "a web message held behind a Claude prompt and dropped by a "
+                "delivered Stop was silently relabelled native_prompt_not_recorded on the "
+                "next relaunch; the Stop should settle it instead. "
+                f"error_codes={error_codes!r} user_texts={user_texts!r} "
+                f"held={held!r} kept={kept!r}"
+            )
+        finally:
+            pending_inputs.reset_for_tests()
+            _interrupt_fenced_sessions.discard(session_id)
+
+
 async def test_message_resent_after_stop_takes_the_mirror_of_the_same_text(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
