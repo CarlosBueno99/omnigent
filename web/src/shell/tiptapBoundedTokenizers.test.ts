@@ -72,12 +72,16 @@ describe("table prefixes", () => {
   });
 
   it("gives tokenize only two lines when the second is not a delimiter row", () => {
-    // Blank lines with trailing whitespace never match "\n\n", so this keeps
-    // non-table blocks from handing over the rest of such a document.
     expect(tableTokenizePrefix("para one\npara two\n \nmore\n \n| a |\n| - |")).toBe(
       "para one\npara two",
     );
     expect(tableTokenizePrefix("single line")).toBe("single line");
+  });
+
+  it("ends a table candidate at a whitespace-only line as well", () => {
+    expect(tableTokenizePrefix("| a |\n| - |\n| 1 |\n \nnext\n \nlater")).toBe(
+      "| a |\n| - |\n| 1 |\n \nnext",
+    );
   });
 });
 
@@ -212,6 +216,11 @@ describe("bounded tokenizers tokenize like upstream", () => {
     "para\n| a | b |\n| - | - |\n| 1 | 2 |\n\nafter",
     "para\n \n| a | b |\n| - | - |\n| 1 | 2 |\n \nafter",
     "| a | b |\n| - | - |\n| 1 | 2 |\n \nparagraph",
+    "| a | b |\n| - | - |\n| 1 | 2 |\n\t\nafter a tab-only line",
+    "| a | b |\n| - | - |\n \nno data rows",
+    "| a | b |\n| - | - |\n| 1 | 2 |\n \nlater a | `b`\n\nend",
+    "| a | b |\n| - | - |\n| `x|y` | 2 |\n \nafter",
+    "a | b\n- | -\n1 | 2\n \n3 | `4`\n\nend",
     "  - [ ] item\n\tcontent\nText",
     "  1. item\n\tcontent\n\nText",
     "\t- [ ] tab item\n  - [ ] space child\nText",
@@ -262,16 +271,11 @@ describe("prefixes stay proportional to the document", () => {
     let start = 0;
     while (start < md.length) {
       const src = md.slice(start);
-      // A table candidate (header plus delimiter row) still receives upstream's
-      // own candidate, which runs to the next empty line; every other block
-      // must be cut short, so count candidates by their two-line start prefix.
-      const second = src.split("\n", 2)[1] ?? "";
-      const tableCandidate = /^[ \t|:]*-[ \t|:-]*$/.test(second) && second.includes("|");
       handed +=
         (orderedListPrefix(src)?.length ?? 0) +
         (taskListPrefix(src)?.length ?? 0) +
         tableStartPrefix(src).length +
-        (tableCandidate ? tableStartPrefix(src) : tableTokenizePrefix(src)).length;
+        tableTokenizePrefix(src).length;
       const newline = md.indexOf("\n", start);
       start = newline === -1 ? md.length : newline + 1;
     }

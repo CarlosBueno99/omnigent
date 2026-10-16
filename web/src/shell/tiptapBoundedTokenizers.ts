@@ -90,16 +90,16 @@ export function tableStartPrefix(src: string): string {
 /**
  * The prefix the upstream table tokenizer can consume. It declines unless the
  * second line is a delimiter row, so any other block gets just those two
- * lines; a table candidate runs to the first empty line plus the one line
- * upstream re-splits past it.
+ * lines. Table rows end at the first blank or whitespace-only line, so a
+ * candidate runs through that line plus the one upstream re-splits past it.
  */
 export function tableTokenizePrefix(src: string): string {
   const firstEnd = lineEnd(src, 0);
   const secondEnd = lineEnd(src, firstEnd + 1);
   const second = src.slice(firstEnd + 1, secondEnd);
   if (!TABLE_DELIMITER_ROW.test(second) || !second.includes("|")) return src.slice(0, secondEnd);
-  const blankLine = src.indexOf("\n\n");
-  return blankLine === -1 ? src : src.slice(0, lineEnd(src, blankLine + 2));
+  const blankLine = src.search(/\n[ \t]*\n/);
+  return blankLine === -1 ? src : src.slice(0, lineEnd(src, lineEnd(src, blankLine + 1) + 1));
 }
 
 interface Bounds {

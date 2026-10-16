@@ -12,11 +12,11 @@ from __future__ import annotations
 import contextlib
 import re
 import textwrap
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import httpx
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Response, expect
 
 from tests.e2e_ui.conftest import open_right_rail, switch_markdown_view_mode
 
@@ -220,6 +220,35 @@ def test_markdown_renders_rich_constructs_and_source_toggle(
     expect(editor.locator("h1")).to_contain_text("Rich Design Document")
 
 
+def _let_editor_follow_caret(page: Page) -> None:
+    """Yield a frame so ProseMirror adopts a native caret move.
+
+    Clicks and Home/End move the DOM caret directly; ProseMirror reads it on the
+    asynchronous ``selectionchange`` event, so a key sent in the same turn would
+    still apply at the editor's previous selection.
+    """
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve)))")
+
+
+def _file_saved_and_reread(file_path: str) -> Callable[[Response], bool]:
+    """Match the GET that re-reads ``file_path`` after its auto-save PUT landed.
+
+    The write invalidates the file query, and a clean editor adopts whatever
+    that refetch returns, resetting the caret; edits must not straddle it.
+    """
+    saw_put = False
+
+    def match(response: Response) -> bool:
+        nonlocal saw_put
+        if not response.url.split("?")[0].endswith(f"/filesystem/{file_path}"):
+            return False
+        if response.request.method == "PUT":
+            saw_put = True
+        return saw_put and response.request.method == "GET"
+
+    return match
+
+
 @pytest.mark.browser_context_args(viewport={"width": 1600, "height": 900})
 def test_code_fence_typed_into_the_editor_keeps_the_caret_inside(
     page: Page,
@@ -233,34 +262,43 @@ def test_code_fence_typed_into_the_editor_keeps_the_caret_inside(
     expect(file_button).to_be_visible(timeout=30_000)
     file_button.click()
 
-    editor = page.locator('[data-testid="file-viewer"]:visible [contenteditable="true"]')
+    file_viewer = page.locator('[data-testid="file-viewer"]:visible')
+    editor = file_viewer.locator("[contenteditable='true']")
     expect(editor.locator("h1")).to_contain_text("Rich Design Document", timeout=10_000)
     expect(editor.locator("pre")).to_have_count(1)
+    saved = file_viewer.get_by_role("button", name="All changes saved")
 
     # The seeded fence mounted while the editor was unfocused; edits land in it.
     seeded_fence = editor.locator("pre").first
     seeded_fence.click()
     page.keyboard.press("End")
-    page.keyboard.type("  # edited")
-    expect(seeded_fence).to_contain_text("# edited")
+    _let_editor_follow_caret(page)
+    with page.expect_response(_file_saved_and_reread(file_path), timeout=20_000):
+        page.keyboard.type("  # edited")
+        expect(seeded_fence).to_contain_text("# edited")
+    expect(saved).to_be_visible(timeout=15_000)
 
     # A new paragraph after the heading becomes a code block through the
     # ``` input rule, so its node view mounts while the editor has focus.
-    editor.locator("h1").click()
+    page.keyboard.press("Control+Home")
+    _let_editor_follow_caret(page)
     page.keyboard.press("End")
+    _let_editor_follow_caret(page)
     page.keyboard.press("Enter")
     page.keyboard.type("``` ")
     expect(editor.locator("pre")).to_have_count(2)
-    page.keyboard.type("fenced text")
-
-    fence = editor.locator("pre").filter(has_text="fenced text")
-    expect(fence).to_be_visible()
-    expect(editor.locator("p").filter(has_text="fenced text")).to_have_count(0)
-    caret_in_fence = editor.evaluate(
-        """() => {
+    with page.expect_response(_file_saved_and_reread(file_path), timeout=20_000):
+        page.keyboard.type("fenced text")
+        fence = editor.locator("pre").filter(has_text="fenced text")
+        expect(fence).to_be_visible()
+        expect(editor.locator("p").filter(has_text="fenced text")).to_have_count(0)
+        # Read the caret before the save lands; its refetch may move it.
+        caret_in_fence = editor.evaluate(
+            """() => {
             const node = document.getSelection()?.anchorNode;
             const element = node?.nodeType === Node.TEXT_NODE ? node.parentElement : node;
             return !!element?.closest("pre");
         }"""
-    )
+        )
     assert caret_in_fence, "the caret left the code block after its node view mounted"
+    expect(saved).to_be_visible(timeout=15_000)

@@ -80,11 +80,11 @@ def test_opening_large_markdown_keeps_page_responsive(
     # thread surfaces as a failed probe instead of a hung test.
     deadline = time.monotonic() + _WATCH_SECONDS
     rendered = False
-    while not rendered and time.monotonic() < deadline:
+    while not rendered and (remaining := deadline - time.monotonic()) > 0:
         try:
             page.wait_for_function(
                 f"() => !!document.querySelector({_RENDERED_HEADING!r})",
-                timeout=_PROBE_TIMEOUT_MS,
+                timeout=min(_PROBE_TIMEOUT_MS, remaining * 1000),
             )
             rendered = True
         except PlaywrightError:
