@@ -79,7 +79,7 @@ def _inventory_plugins(codex_home: Path, cwd: Path | None) -> list[object] | Non
 
 
 def _cached_plugins(codex_home: Path, cache: Path) -> list[object]:
-    """Enabled ``config.toml`` plugin tables at their highest cached version, as Codex loads them."""
+    """Enabled ``config.toml`` plugin tables at their highest cached version, as Codex does."""
     try:
         with (codex_home / "config.toml").open("rb") as handle:
             config = tomllib.load(handle)
