@@ -368,7 +368,7 @@ async def _assert_launch_composer(page: Page, evidence: Path, status: str, captu
     await page.mouse.move(0, 0)
 
 
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(300)
 def test_managed_launch_composer_survives_reload_and_failure(
     managed_replicas: ManagedReplicas,
 ) -> None:

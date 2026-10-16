@@ -6824,6 +6824,7 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       });
       expect(useChatStore.getState().sandboxStatus).toBeNull();
       expect(client.getQueryData(["session", "conv_abc"])).toMatchObject({ sandboxStatus: null });
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["session", "conv_abc"], exact: true });
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ["hosts"] });
       invalidate.mockRestore();
     });

@@ -7205,7 +7205,11 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         session ? { ...session, sandboxStatus } : session,
       );
       if (event.stage === "ready") {
-        // The pre-launch host list can still be a fresh, cached empty result.
+        // Refresh the binding and the pre-launch host list, which may still be empty.
+        void queryClient?.invalidateQueries({
+          queryKey: ["session", event.conversationId],
+          exact: true,
+        });
         void queryClient?.invalidateQueries({ queryKey: ["hosts"] });
       }
       return;

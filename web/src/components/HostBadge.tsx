@@ -151,36 +151,33 @@ export function HostBadge({
   if (appearance === "composer") {
     const launch = session?.sandboxStatus?.stage !== "ready" ? session?.sandboxStatus : null;
     const provider = launch?.provider ?? host?.sandbox_provider;
-    const hostLabel = launch
-      ? provider
-        ? sandboxOptionLabel(provider)
-        : "Sandbox"
-      : (badge?.label ?? "No host bound");
-    const launchStatus = launch ? SANDBOX_STAGE_LABELS[launch.stage] : "";
+    const launchStatus = launch ? (SANDBOX_STAGE_LABELS[launch.stage] ?? "Launching sandbox") : "";
     const reconnectable =
       !launch && badge?.status === "offline" && !session?.hostResumable && !!onReconnect;
-    const label = launch
-      ? `Host ${hostLabel}, ${launchStatus}`
-      : badge
-        ? `Host ${badge.label}, ${STATUS_WORD[badge.status]}`
-        : "No host bound";
     // A dormant resumable host wakes on the next message; it isn't disconnected.
     const asleep = badge?.status === "offline" && !!session?.hostResumable;
-    const tooltipRows = launch
-      ? [
-          { label: "Host", value: hostLabel },
-          { label: "Status", value: launchStatus },
-          ...(launch.error ? [{ label: "Error", value: launch.error }] : []),
-        ]
-      : badge
-        ? [
-            { label: "Host", value: badge.label },
-            {
-              label: "Status",
-              value: asleep ? "Asleep — wakes on next message" : CONNECTION_WORD[badge.status],
-            },
-          ]
-        : [{ label: "Host", value: "None" }];
+    let hostLabel = "No host bound";
+    let label = hostLabel;
+    let tooltipRows = [{ label: "Host", value: "None" }];
+    if (launch) {
+      hostLabel = provider ? sandboxOptionLabel(provider) : "Sandbox";
+      label = `Host ${hostLabel}, ${launchStatus}`;
+      tooltipRows = [
+        { label: "Host", value: hostLabel },
+        { label: "Status", value: launchStatus },
+        ...(launch.error ? [{ label: "Error", value: launch.error }] : []),
+      ];
+    } else if (badge) {
+      hostLabel = badge.label;
+      label = `Host ${hostLabel}, ${STATUS_WORD[badge.status]}`;
+      tooltipRows = [
+        { label: "Host", value: hostLabel },
+        {
+          label: "Status",
+          value: asleep ? "Asleep — wakes on next message" : CONNECTION_WORD[badge.status],
+        },
+      ];
+    }
     return (
       <>
         <DropdownMenu onOpenChange={setMenuOpen}>

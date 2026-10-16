@@ -4420,6 +4420,7 @@ async def _maybe_relaunch_managed_sandbox(
             _kick_managed_wake(
                 session_id=session_id,
                 conv=conv,
+                host=host,
                 sandbox_config=sandbox_config,
                 tracker=tracker,
                 conversation_store=conversation_store,
@@ -4861,7 +4862,7 @@ def _kick_managed_relaunch(
     tracker.begin(session_id)
     # Seed the relaunch's progress indicator immediately — the user is
     # typically watching the session page when "wake the sandbox" runs.
-    _publish_sandbox_status(session_id, "provisioning")
+    _publish_sandbox_status(session_id, "provisioning", provider=host.sandbox_provider)
     agent_store = getattr(app_state, "agent_store", None)
     if agent_store is None:
         _logger.warning(
@@ -4893,6 +4894,7 @@ def _kick_managed_wake(
     *,
     session_id: str,
     conv: Conversation,
+    host: Host,
     sandbox_config: ManagedSandboxDeployment,
     tracker: ManagedLaunchTracker,
     conversation_store: ConversationStore,
@@ -4910,6 +4912,7 @@ def _kick_managed_wake(
     return _facade._kick_managed_wake(
         session_id=session_id,
         conv=conv,
+        host=host,
         sandbox_config=sandbox_config,
         tracker=tracker,
         conversation_store=conversation_store,
@@ -4922,6 +4925,7 @@ def _kick_managed_wake_impl(
     *,
     session_id: str,
     conv: Conversation,
+    host: Host,
     sandbox_config: ManagedSandboxDeployment,
     tracker: ManagedLaunchTracker,
     conversation_store: ConversationStore,
@@ -4940,6 +4944,7 @@ def _kick_managed_wake_impl(
 
     :param session_id: Session/conversation identifier.
     :param conv: The session row bound to the dormant host.
+    :param host: The dormant host whose provider owns the wake.
     :param sandbox_config: The deployment's sandbox config.
     :param tracker: The app's launch tracker.
     :param conversation_store: Store holding the session row.
@@ -4956,7 +4961,7 @@ def _kick_managed_wake_impl(
     # Seed the progress indicator immediately — the user is watching the
     # session page when the wake fires (the composer let them send into a
     # host_asleep session).
-    _publish_sandbox_status(session_id, "provisioning")
+    _publish_sandbox_status(session_id, "provisioning", provider=host.sandbox_provider)
     wake_agent_store = getattr(app_state, "agent_store", None)
     if wake_agent_store is None:
         _logger.warning(

@@ -129,6 +129,7 @@ describe("HostBadge", () => {
     ["modal", "Modal Sandbox", "starting", "Connecting host"],
     ["arclet", "Arclet Sandbox", "connecting", "Starting agent"],
     [undefined, "Sandbox", "provisioning", "Provisioning sandbox"],
+    ["arclet", "Arclet Sandbox", "future_stage", "Launching sandbox"],
   ])(
     "shows %s launch progress at %s / %s before host binding",
     (provider, label, stage, status) => {
@@ -190,6 +191,21 @@ describe("HostBadge", () => {
     );
     expect(screen.getByTestId("composer-host-status")).toBeInTheDocument();
     expect(screen.getByTestId("composer-host-icon")).toHaveClass("lucide-monitor-cloud");
+  });
+
+  it("keeps a runner-startup failure visible even though its sandbox host is bound", () => {
+    useSessionMock.mockReturnValue({
+      session: {
+        hostId: "host_a1b2",
+        sandboxStatus: { provider: "arclet", stage: "failed", error: "Runner did not connect" },
+      },
+    });
+    useHostsMock.mockReturnValue({ data: [host({ sandbox_provider: "arclet" })] });
+    render(<HostBadge sessionId="conv_1" appearance="composer" />);
+    const trigger = screen.getByTestId("composer-host-select");
+    expect(trigger).toHaveAccessibleName("Host Arclet Sandbox, Sandbox launch failed");
+    fireEvent.pointerDown(trigger, { button: 0 });
+    expect(screen.getByRole("menu")).toHaveTextContent("Runner did not connect");
   });
 
   it.each([

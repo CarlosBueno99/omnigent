@@ -4795,7 +4795,7 @@ async def test_kick_managed_relaunch_defers_the_classifier_to_the_launch_task(
     orchestration._kick_managed_relaunch(
         session_id="conv_1",
         conv=conv,
-        host=SimpleNamespace(user_id=_OWNER),
+        host=SimpleNamespace(user_id=_OWNER, sandbox_provider="modal"),
         sandbox_config=SimpleNamespace(configs=()),
         tracker=tracker,
         conversation_store=SimpleNamespace(),
@@ -4808,6 +4808,8 @@ async def test_kick_managed_relaunch_defers_the_classifier_to_the_launch_task(
     assert reads == [], "the kick must not read the agent store; the launch task does"
     assert captured["agent_store"] is store
     assert captured["agent_id"] == builtin.id
+    status = orchestration._session_sandbox_status_cache.get("conv_1")
+    assert status is not None and status.stage == "provisioning" and status.provider == "modal"
 
 
 async def test_relaunch_claim_and_launch_task_are_one_synchronous_step(
@@ -4847,7 +4849,7 @@ async def test_relaunch_claim_and_launch_task_are_one_synchronous_step(
     orchestration._kick_managed_relaunch(
         session_id="conv_1",
         conv=conv,
-        host=SimpleNamespace(user_id=_OWNER),
+        host=SimpleNamespace(user_id=_OWNER, sandbox_provider="modal"),
         sandbox_config=SimpleNamespace(configs=()),
         tracker=tracker,
         conversation_store=SimpleNamespace(),
@@ -4880,7 +4882,7 @@ async def test_kick_managed_relaunch_without_agent_store_threads_none(
     orchestration._kick_managed_relaunch(
         session_id="conv_1",
         conv=conv,
-        host=SimpleNamespace(user_id=_OWNER),
+        host=SimpleNamespace(user_id=_OWNER, sandbox_provider="modal"),
         sandbox_config=SimpleNamespace(configs=()),
         tracker=ManagedLaunchTracker(),
         conversation_store=SimpleNamespace(),
@@ -5054,6 +5056,7 @@ async def test_kick_managed_wake_defers_the_classifier_to_the_wake_task(
     orchestration._kick_managed_wake_impl(
         session_id="conv_1",
         conv=conv,
+        host=SimpleNamespace(sandbox_provider="islo"),
         sandbox_config=SimpleNamespace(configs=()),
         tracker=ManagedLaunchTracker(),
         conversation_store=SimpleNamespace(),
@@ -5066,6 +5069,8 @@ async def test_kick_managed_wake_defers_the_classifier_to_the_wake_task(
     assert reads == [], "the kick must not read the agent store; the wake task does"
     assert captured["agent_store"] is store
     assert captured["agent_id"] == builtin.id
+    status = orchestration._session_sandbox_status_cache.get("conv_1")
+    assert status is not None and status.stage == "provisioning" and status.provider == "islo"
 
 
 async def test_run_managed_wake_re_stamps_the_woken_runner(

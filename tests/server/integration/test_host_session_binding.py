@@ -137,8 +137,10 @@ async def _connect_host(
     return comm
 
 
+@pytest.mark.parametrize("previously_failed", [False, True])
 async def test_launch_runner_writes_host_id_and_runner_id(
     binding_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    previously_failed: bool,
 ) -> None:
     """
     Verify that POST /hosts/{id}/runners writes both runner_id and
@@ -151,6 +153,16 @@ async def test_launch_runner_writes_host_id_and_runner_id(
     app, registry, _hs, conv_store = binding_app
     comm = await _connect_host(app, registry)
     conv = conv_store.create_conversation(agent_id=None)
+    from omnigent.server.routes import sessions as sessions_module
+
+    tracker = ManagedLaunchTracker()
+    app.state.managed_launches = tracker
+    if previously_failed:
+        tracker.begin(conv.id)
+        tracker.fail(conv.id, "Sandbox quota exhausted")
+        sessions_module._publish_sandbox_status(
+            conv.id, "failed", "Sandbox quota exhausted", provider="modal"
+        )
 
     async def _respond_launched() -> None:
         """Respond to the launch frame from the host."""
@@ -191,6 +203,8 @@ async def test_launch_runner_writes_host_id_and_runner_id(
     assert updated.runner_id is not None, "runner_id should be written to session row"
     assert updated.runner_id.startswith("runner_token_"), "runner_id should be a token-bound id"
     assert updated.host_id == _HOST_ID, "host_id should be written to session row"
+    assert sessions_module._session_sandbox_status_cache.get(conv.id) is None
+    assert tracker.get(conv.id) is None
 
 
 async def test_sandbox_fork_cannot_launch_on_ordinary_host(
