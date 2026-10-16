@@ -68,6 +68,7 @@ import {
   updateProjectConfig as apiUpdateProjectConfig,
 } from "@/lib/projectsApi";
 import { releaseConversation, useChatStore } from "@/store/chatStore";
+import { conversationRegistry } from "@/store/conversationRegistry";
 import type { Session } from "@/lib/types";
 import { useSessionUpdatesConnected } from "./useSessionUpdatesConnected";
 import { markConversationSeen } from "./useUnseenConversations";
@@ -1284,13 +1285,26 @@ export function useLeaveSession() {
  *
  * Also drops the session's pending user bubbles: the server settles the web
  * messages queued before the stop without a `session.input.consumed` receipt.
+ * Only the bubbles present when the stop began are dropped, so a message sent
+ * while the stop is in flight — which the server keeps live — keeps its bubble.
  */
 export function useStopSession() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => stopSession(id),
-    onSuccess: (_data, id) => {
-      useChatStore.getState().dropPendingUserMessages(id);
+    onMutate: (id: string) => {
+      // Snapshot the bubbles present when Stop begins. The server settles only
+      // these; a message sent while the stop is in flight stays live, so its
+      // bubble must survive onSuccess.
+      const stoppedTempIds =
+        conversationRegistry
+          .peek(id)
+          ?.getState()
+          .pendingUserMessages.map((p) => p.tempId) ?? [];
+      return { stoppedTempIds };
+    },
+    onSuccess: (_data, id, context) => {
+      useChatStore.getState().dropPendingUserMessages(id, context?.stoppedTempIds ?? []);
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
     },

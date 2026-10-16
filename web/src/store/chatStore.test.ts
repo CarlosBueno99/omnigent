@@ -6092,17 +6092,23 @@ describe("chatStore — stop", () => {
       { which: "active", target: "conv_fg", other: "conv_bg" },
       { which: "background", target: "conv_bg", other: "conv_fg" },
     ])(
-      "drops the $which conversation's bubbles, posted or in flight, and no other's",
+      "drops only the named $which bubbles, posted or in flight, keeping a later send and no other's",
       ({ target, other }) => {
-        const bubbles = (id: string) => [posted(`${id}_1`), inFlight(`${id}_2`)];
+        // `_1` and `_2` were present when Stop began; `_live` arrived while it was in flight.
+        const bubbles = (id: string) => [
+          posted(`${id}_1`),
+          inFlight(`${id}_2`),
+          inFlight(`${id}_live`),
+        ];
         // `conv_fg` is bound last, so it is the one on screen.
         bindConversationForTest("conv_bg", { pendingUserMessages: bubbles("conv_bg") });
         bindConversationForTest("conv_fg", { pendingUserMessages: bubbles("conv_fg") });
 
-        useChatStore.getState().dropPendingUserMessages(target);
+        useChatStore.getState().dropPendingUserMessages(target, [`${target}_1`, `${target}_2`]);
 
-        expect(idsOf(target)).toEqual([]);
-        expect(idsOf(other)).toEqual([`${other}_1`, `${other}_2`]);
+        // The pre-stop bubbles go; the in-flight send stays, and the other conversation is untouched.
+        expect(idsOf(target)).toEqual([`${target}_live`]);
+        expect(idsOf(other)).toEqual([`${other}_1`, `${other}_2`, `${other}_live`]);
         // The root store keeps projecting whichever entry is on screen.
         expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual(
           idsOf("conv_fg"),
@@ -6110,7 +6116,7 @@ describe("chatStore — stop", () => {
       },
     );
 
-    it("keeps an unsent initialDraft bubble", () => {
+    it("keeps an unsent initialDraft bubble even when its id is named", () => {
       const draft = { text: "waiting for the model", files: [] };
       bindConversationForTest("conv_abc", {
         pendingUserMessages: [
@@ -6120,7 +6126,9 @@ describe("chatStore — stop", () => {
         ],
       });
 
-      useChatStore.getState().dropPendingUserMessages("conv_abc");
+      useChatStore
+        .getState()
+        .dropPendingUserMessages("conv_abc", ["pend_1", "pend_draft", "pend_2"]);
 
       expect(useChatStore.getState().pendingUserMessages).toEqual([
         { ...inFlight("pend_draft"), initialDraft: draft },
@@ -6138,7 +6146,7 @@ describe("chatStore — stop", () => {
       });
       useChatStore.setState({ queuedMessages: queued });
 
-      useChatStore.getState().dropPendingUserMessages("conv_abc");
+      useChatStore.getState().dropPendingUserMessages("conv_abc", ["pend_1"]);
 
       const state = useChatStore.getState();
       expect(state.pendingUserMessages).toEqual([]);
@@ -6151,7 +6159,7 @@ describe("chatStore — stop", () => {
     it("does nothing for a conversation that is not live", () => {
       bindConversationForTest("conv_abc", { pendingUserMessages: [posted("pend_1")] });
 
-      useChatStore.getState().dropPendingUserMessages("conv_gone");
+      useChatStore.getState().dropPendingUserMessages("conv_gone", ["pend_1"]);
 
       // No entry is created for it, and the live conversation keeps its bubble.
       expect(conversationRegistry.has("conv_gone")).toBe(false);
