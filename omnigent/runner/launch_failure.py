@@ -31,6 +31,7 @@ __all__ = [
     "diagnose_client_update_required",
     "diagnose_codex_model_rejection",
     "diagnose_model_unavailable",
+    "is_rate_limit_error",
 ]
 
 
@@ -244,6 +245,27 @@ _CLIENT_UPDATE_REQUIRED = re.compile(
     r"\s+version\s+(?P<required>\S+)\s+or newer is required",
     re.IGNORECASE,
 )
+# Auth rejections are never rate limits, even when their text mentions limits.
+_AUTH_REJECTION_STATUSES = {"401", "403"}
+
+
+def _http_status(message: str) -> str | None:
+    match = _NATIVE_ERROR_HTTP_STATUS.search(message)
+    return match.group(1) if match else None
+
+
+def is_rate_limit_error(message: str) -> bool:
+    """Whether a turn error's text reports a model rate limit.
+
+    :param message: Harness or executor error text, e.g. codex's
+        ``"exceeded retry limit, last status: 429 Too Many Requests"``.
+    :returns: ``True`` for an HTTP 429 status or a rate-limit phrase, unless
+        the text reports an auth rejection instead.
+    """
+    status = _http_status(message)
+    if status in _AUTH_REJECTION_STATUSES:
+        return False
+    return status == "429" or _RATE_LIMIT_ERROR.search(message) is not None
 
 
 def classify_native_turn_error(code: str, message: str) -> str:
@@ -271,11 +293,10 @@ def classify_native_turn_error(code: str, message: str) -> str:
         return "client_update_required"
     if detect_request_size_overflow(message) is not None:
         return "context_length_exceeded"
-    status_match = _NATIVE_ERROR_HTTP_STATUS.search(message)
-    status = status_match.group(1) if status_match else None
-    if status in {"401", "403"}:
+    status = _http_status(message)
+    if status in _AUTH_REJECTION_STATUSES:
         return code
-    if status == "429" or _RATE_LIMIT_ERROR.search(message):
+    if is_rate_limit_error(message):
         return "rate_limit_exceeded"
     if (
         status in _TRANSIENT_UPSTREAM_STATUSES
