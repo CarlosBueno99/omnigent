@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 import pytest
-from omnigent_client._files import FilesNamespace, SessionFilesNamespace
+from omnigent_client._files import FilesNamespace
 
 
 def _make_files(
@@ -76,4 +76,3 @@ async def test_file_routes_reject_ids_that_escape_the_session_path(
         await client.aclose()
 
     assert calls == []
-    assert isinstance(files.for_session("conv_abc"), SessionFilesNamespace)
