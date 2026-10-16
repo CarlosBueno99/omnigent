@@ -2089,7 +2089,7 @@ def _install_signal_handlers(
         an intentional stop from a real crash when a terminal watcher races
         the shutdown. ``None`` skips it.
     :param finish_work_event: Optional event set when
-        :data:`RUNNER_FINISH_WORK_SIGNAL` or SIGHUP arrives (the host hung up).
+        :data:`RUNNER_FINISH_WORK_SIGNAL` arrives (the host's terminal hung up).
         ``None`` skips the handler.
     :returns: None.
     """
@@ -2148,11 +2148,6 @@ def _install_signal_handlers(
         _try_add_handler(RUNNER_ADOPT_SIGNAL, adopted_event.set)
     if finish_work_event is not None and RUNNER_FINISH_WORK_SIGNAL is not None:
         _try_add_handler(RUNNER_FINISH_WORK_SIGNAL, finish_work_event.set)
-    # A terminal hangup reaches the whole foreground group; finish in-flight work
-    # once the host is gone. No reason is recorded: the eventual exit path names it.
-    sighup = getattr(signal, "SIGHUP", None)
-    if finish_work_event is not None and sighup is not None:
-        _try_add_handler(sighup, finish_work_event.set)
 
 
 def _install_crash_logging() -> None:

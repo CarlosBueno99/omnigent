@@ -2552,31 +2552,29 @@ async def test_install_signal_handlers_finish_work_signal_sets_event() -> None:
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     not hasattr(signal, "SIGHUP") or sys.platform == "win32",
-    reason="POSIX signal delivery required",
+    reason="POSIX signal dispositions",
 )
-async def test_install_signal_handlers_sighup_finishes_work_instead_of_dying() -> None:
-    """A terminal hangup sent to the whole process group keeps the runner serving."""
+async def test_install_signal_handlers_leaves_sighup_alone() -> None:
+    """SIGHUP keeps its disposition, so a standalone or adopted runner still dies by it.
+
+    Host-managed runners live in their own session and learn about a hangup
+    through the host's finish-work signal instead.
+    """
     import threading
 
-    stop_event = asyncio.Event()
-    finish_work = threading.Event()
-    reasons: list[str] = []
-    _install_signal_handlers(
-        stop_event, finish_work_event=finish_work, record_reason=reasons.append
-    )
-    loop = asyncio.get_running_loop()
-    try:
-        os.kill(os.getpid(), signal.SIGHUP)
-        deadline = time.monotonic() + 2.0
-        while not finish_work.is_set() and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-    finally:
-        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGUSR2):
-            loop.remove_signal_handler(sig)
+    from omnigent.runner.identity import RUNNER_FINISH_WORK_SIGNAL
 
-    assert finish_work.is_set()
-    assert not stop_event.is_set()
-    assert reasons == [], "the eventual exit path, not the hangup, names the exit"
+    before = signal.getsignal(signal.SIGHUP)
+    finish_work = threading.Event()
+    loop = asyncio.get_running_loop()
+    _install_signal_handlers(asyncio.Event(), finish_work_event=finish_work)
+    try:
+        assert signal.getsignal(signal.SIGHUP) is before
+        assert not finish_work.is_set()
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM, RUNNER_FINISH_WORK_SIGNAL):
+            if sig is not None:
+                loop.remove_signal_handler(sig)
 
 
 @pytest.mark.asyncio

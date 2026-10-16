@@ -2234,6 +2234,9 @@ class HostProcess:
                     stdin=subprocess.DEVNULL,
                     stdout=log_fh,
                     stderr=log_fh,
+                    # Own session: a hangup of the daemon's terminal reaches only
+                    # the daemon, which asks its runners to finish in-flight work.
+                    **_proc.spawn_kwargs(),
                     **logging_kwargs,
                 )
             return proc, log_path
