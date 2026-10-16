@@ -719,6 +719,18 @@ def harness_setup_hint(harness: str | None) -> str:
         login`"`` for native Cursor, or the ``omni setup`` hint otherwise.
     """
     spec = required_cli_for_harness(harness or "")
+    if spec is not None and spec.binary == "agy":
+        from omnigent.errors import ErrorCode, OmnigentError
+        from omnigent.harnesses.antigravity_native.credentials import (
+            resolve_antigravity_credentials,
+        )
+
+        try:
+            resolve_antigravity_credentials()
+        except OmnigentError as exc:
+            if exc.code != ErrorCode.INVALID_INPUT:
+                raise
+            return exc.message + " Run omni setup on the host to repair the Gemini configuration."
     if spec is not None and spec.package is None and spec.install_hint:
         login = ""
         if spec.login_args:
@@ -873,6 +885,19 @@ def harness_install_spec(key: str) -> HarnessInstallSpec | None:
     return _all_harness_install().get(key)
 
 
+def harness_cli_binary(key: str) -> str | None:
+    """Resolve the CLI selected for an install key, including Pi's path override."""
+    spec = harness_install_spec(key)
+    if spec is None:
+        return None
+    command = spec.binary
+    if key == PI_KEY:
+        from omnigent.harness_startup_config import resolve_harness_path
+
+        command = resolve_harness_path("pi") or command
+    return resolve_cli_binary(command)
+
+
 def harness_cli_version_satisfies(key: str) -> bool:
     """Return whether the installed CLI for *key* satisfies its version range.
 
@@ -888,7 +913,7 @@ def harness_cli_version_satisfies(key: str) -> bool:
     spec = harness_install_spec(key)
     if spec is None:
         return False
-    binary = resolve_cli_binary(spec.binary)
+    binary = harness_cli_binary(key)
     if binary is None:
         return False
     return _harness_cli_version_satisfies(spec, binary)
@@ -916,7 +941,7 @@ def harness_cli_installed(key: str, timeout: float = _DEFAULT_CLI_PROBE_TIMEOUT_
     spec = harness_install_spec(key)
     if spec is None:
         return False
-    binary = resolve_cli_binary(spec.binary)
+    binary = harness_cli_binary(key)
     if binary is None:
         return False
     return _harness_cli_version_satisfies(spec, binary, timeout)
@@ -939,7 +964,7 @@ def harness_cli_version(key: str) -> tuple[str | None, str | None]:
     spec = harness_install_spec(key)
     if spec is None:
         return None, None
-    binary = resolve_cli_binary(spec.binary)
+    binary = harness_cli_binary(key)
     if binary is None:
         return None, None
     version = _harness_cli_version_string(spec, binary)
