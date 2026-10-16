@@ -230,22 +230,22 @@ async def teardown_codex_native_app_server(session_id: str) -> None:
     cancelled; the next native-terminal ensure can recreate the TUI.
 
     Cancelling the forwarder closes the app-server via the forwarder's own
-    ``finally`` (see :func:`_codex_discover_thread_and_forward`); the pop
-    below is the belt-and-suspenders close for the discovery-failed case
-    where no forwarder ever adopted the server. No-op for a session that
-    has no registered codex app-server, so this is safe to call from the
-    required-session teardown paths regardless of harness.
+    ``finally`` (see :func:`_codex_discover_thread_and_forward`). The captured
+    server is also closed if no forwarder adopted it; a replacement registered
+    during cancellation keeps its ownership. No-op for a session without a
+    registered codex app-server, so other harnesses can share this teardown path.
 
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :returns: None.
     """
-    if session_id not in _AUTO_CODEX_APP_SERVERS:
+    app_server = _AUTO_CODEX_APP_SERVERS.get(session_id)
+    if app_server is None:
         return
     await _cancel_auto_forwarder_task(session_id)
-    leftover_app_server = _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
-    if leftover_app_server is not None:
-        with contextlib.suppress(Exception):
-            await leftover_app_server.close()
+    if _AUTO_CODEX_APP_SERVERS.get(session_id) is app_server:
+        _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+    with contextlib.suppress(Exception):
+        await app_server.close()
 
 
 async def teardown_all_codex_native_app_servers() -> None:
@@ -3215,6 +3215,7 @@ async def _auto_create_goose_terminal(
     *,
     server_client: httpx.AsyncClient | None,
     ensure_comment_relay: _EnsureCommentRelay | None = None,
+    agent_spec: AgentSpec | ResolvedSpec | None = None,
 ) -> SessionResourceView:
     """
     Auto-create the Goose TUI terminal for a goose-native session.
@@ -3230,6 +3231,8 @@ async def _auto_create_goose_terminal(
     :param resource_registry: Session resource registry for launching the terminal.
     :param publish_event: Runner session event publisher.
     :param server_client: Runner Omnigent server client.
+    :param agent_spec: The session's resolved agent spec; its ``os_env`` (sandbox,
+        egress_rules, env_passthrough) is inherited by the terminal.
     :returns: Created terminal resource view.
     """
     from omnigent.harnesses.goose_native.main import resolve_goose_executable
@@ -3276,13 +3279,23 @@ async def _auto_create_goose_terminal(
         goose_session_name,
         *(launch_config.terminal_launch_args or []),
     ]
+    # Inherit the agent's os_env so its declared sandbox (e.g. ``type: none``),
+    # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
+    # and ``parent_os_env`` below, launch_required_terminal falls back to
+    # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
+    agent_os_env = _agent_os_env_from_spec(agent_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="goose",
         session_key="main",
         resource_role=GOOSE_NATIVE_TERMINAL_ROLE,
+        parent_os_env=agent_os_env,
         spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+            os_env=OSEnvSpec(
+                type="caller_process",
+                cwd=workspace,
+                sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+            ),
             command=goose_command,
             args=goose_args,
             # ANSI theme keeps the pane cheap to scrape; GOOSE_TELEMETRY_OFF
@@ -3382,6 +3395,7 @@ async def _auto_create_hermes_terminal(
     *,
     server_client: httpx.AsyncClient | None,
     ensure_comment_relay: _EnsureCommentRelay | None = None,
+    agent_spec: AgentSpec | ResolvedSpec | None = None,
 ) -> SessionResourceView:
     """
     Auto-create the Hermes TUI terminal for a hermes-native session.
@@ -3398,6 +3412,8 @@ async def _auto_create_hermes_terminal(
     :param resource_registry: Session resource registry for launching the terminal.
     :param publish_event: Runner session event publisher.
     :param server_client: Runner Omnigent server client.
+    :param agent_spec: The session's resolved agent spec; its ``os_env`` (sandbox,
+        egress_rules, env_passthrough) is inherited by the terminal.
     :returns: Created terminal resource view.
     """
     from omnigent.harnesses.hermes_native.main import resolve_hermes_executable
@@ -3516,13 +3532,23 @@ async def _auto_create_hermes_terminal(
     _hermes_terminal_env: dict[str, str] = {}
     if _hermes_home_path is not None:
         _hermes_terminal_env["HERMES_HOME"] = str(_hermes_home_path)
+    # Inherit the agent's os_env so its declared sandbox (e.g. ``type: none``),
+    # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
+    # and ``parent_os_env`` below, launch_required_terminal falls back to
+    # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
+    agent_os_env = _agent_os_env_from_spec(agent_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="hermes",
         session_key="main",
         resource_role=HERMES_NATIVE_TERMINAL_ROLE,
+        parent_os_env=agent_os_env,
         spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+            os_env=OSEnvSpec(
+                type="caller_process",
+                cwd=workspace,
+                sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+            ),
             command=hermes_command,
             args=hermes_args,
             env=_hermes_terminal_env,
@@ -3638,6 +3664,7 @@ async def _auto_create_kiro_terminal(
     *,
     server_client: httpx.AsyncClient | None,
     ensure_comment_relay: _EnsureCommentRelay | None = None,
+    agent_spec: AgentSpec | ResolvedSpec | None = None,
 ) -> SessionResourceView:
     """Auto-create the Kiro TUI terminal for a kiro-native session."""
     from omnigent.harnesses.kiro_native.bridge import (
@@ -3670,13 +3697,23 @@ async def _auto_create_kiro_terminal(
         model=launch_config.model_override,
     )
     launch_epoch_ms = int(time.time() * 1000)
+    # Inherit the agent's os_env so its declared sandbox (e.g. ``type: none``),
+    # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
+    # and ``parent_os_env`` below, launch_required_terminal falls back to
+    # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
+    agent_os_env = _agent_os_env_from_spec(agent_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="kiro",
         session_key="main",
         resource_role=KIRO_NATIVE_TERMINAL_ROLE,
+        parent_os_env=agent_os_env,
         spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+            os_env=OSEnvSpec(
+                type="caller_process",
+                cwd=workspace,
+                sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+            ),
             command=kiro_launch.executable,
             args=kiro_launch.argv[1:],
             env=build_kiro_native_terminal_env(session_id),
@@ -3889,13 +3926,23 @@ async def _auto_create_devin_terminal(
         model=launch_model,
         resume_id=launch_config.external_session_id,
     )
+    # Inherit the agent's os_env so its declared sandbox (e.g. ``type: none``),
+    # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
+    # and ``parent_os_env`` below, launch_required_terminal falls back to
+    # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
+    agent_os_env = _agent_os_env_from_spec(agent_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="devin",
         session_key="main",
         resource_role=DEVIN_NATIVE_TERMINAL_ROLE,
+        parent_os_env=agent_os_env,
         spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+            os_env=OSEnvSpec(
+                type="caller_process",
+                cwd=workspace,
+                sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+            ),
             command=devin_launch.executable,
             args=devin_launch.argv[1:],
             env=build_devin_native_terminal_env(session_id),
@@ -4085,6 +4132,7 @@ async def _auto_create_qwen_terminal(
     *,
     server_client: httpx.AsyncClient | None,
     ensure_comment_relay: _EnsureCommentRelay | None = None,
+    agent_spec: AgentSpec | ResolvedSpec | None = None,
 ) -> SessionResourceView:
     """
     Auto-create the qwen TUI terminal for a qwen-native session.
@@ -4101,6 +4149,8 @@ async def _auto_create_qwen_terminal(
     :param resource_registry: Session resource registry for launching the terminal.
     :param publish_event: Runner session event publisher.
     :param server_client: Runner Omnigent server client.
+    :param agent_spec: The session's resolved agent spec; its ``os_env`` (sandbox,
+        egress_rules, env_passthrough) is inherited by the terminal.
     :returns: Created terminal resource view.
     """
     from omnigent.harnesses.qwen_native.main import resolve_qwen_executable
@@ -4240,13 +4290,23 @@ async def _auto_create_qwen_terminal(
         "--json-file",
         str(out_path),
     ]
+    # Inherit the agent's os_env so its declared sandbox (e.g. ``type: none``),
+    # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
+    # and ``parent_os_env`` below, launch_required_terminal falls back to
+    # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
+    agent_os_env = _agent_os_env_from_spec(agent_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="qwen",
         session_key="main",
         resource_role=QWEN_NATIVE_TERMINAL_ROLE,
+        parent_os_env=agent_os_env,
         spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+            os_env=OSEnvSpec(
+                type="caller_process",
+                cwd=workspace,
+                sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+            ),
             command=qwen_command,
             args=qwen_args,
             scrollback=100_000,
@@ -4389,11 +4449,12 @@ async def _auto_create_kimi_terminal(
         workspace snapshot read).
     :param ensure_comment_relay: Unused; kept for call-site parity with the
         other native auto-create helpers.
-    :param agent_spec: Unused for now (model pinning via the kimi TUI is a
-        follow-up); kept for call-site parity.
+    :param agent_spec: The session's resolved agent spec. Its ``os_env`` is
+        inherited by the terminal so a declared sandbox is honoured (model
+        pinning via the kimi TUI is a follow-up).
     :returns: Created terminal resource view.
     """
-    del ensure_comment_relay, agent_spec
+    del ensure_comment_relay
     from omnigent.harnesses.kimi_native.bridge import (
         bridge_dir_for_session_id,
         write_hook_config,
@@ -4457,13 +4518,23 @@ async def _auto_create_kimi_terminal(
         bridge_dir / "kimi-code-home",
         bridge_dir=bridge_dir,
     )
+    # Inherit the agent's os_env so its declared sandbox (e.g. ``type: none``),
+    # egress_rules and env_passthrough are honoured. Without ``sandbox`` here
+    # and ``parent_os_env`` below, launch_required_terminal falls back to
+    # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
+    agent_os_env = _agent_os_env_from_spec(agent_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="kimi",
         session_key="main",
         resource_role=KIMI_NATIVE_TERMINAL_ROLE,
+        parent_os_env=agent_os_env,
         spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+            os_env=OSEnvSpec(
+                type="caller_process",
+                cwd=workspace,
+                sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+            ),
             command=kimi_command,
             args=kimi_args,
             env=kimi_env,
@@ -7739,13 +7810,18 @@ def _native_terminal_start_error_payload(
         if isinstance(exc, OmnigentError) and exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES
         else None
     )
+    configuration_error = (
+        isinstance(exc, OmnigentError) and exc.code == ErrorCode.HARNESS_NOT_CONFIGURED
+    )
     os_error = _os_error_with_errno(exc)
     extra = debug_event(
         "native_terminal_start_failed",
         session_id=session_id,
         error_id=error_id,
         runtime=runtime_name,
-        code=lifecycle_code or _NATIVE_TERMINAL_START_FAILED_CODE,
+        code=ErrorCode.HARNESS_NOT_CONFIGURED
+        if configuration_error
+        else lifecycle_code or _NATIVE_TERMINAL_START_FAILED_CODE,
         exception_type=type(exc).__name__,
         exception_cause_type=type(exc.__cause__).__name__ if exc.__cause__ is not None else None,
         cause_code=exc.code if isinstance(exc, OmnigentError) else None,
@@ -7757,13 +7833,26 @@ def _native_terminal_start_error_payload(
         exception_context_type=type(exc.__context__).__name__
         if exc.__context__ is not None
         else None,
-        # The warning below carries no exc_info for a missing agent, so the
-        # sink cannot derive its category.
+        # Expected lifecycle and configuration errors have no stack, so
+        # preserve their category explicitly for the log sink.
         error_category=exc.category.value
-        if isinstance(exc, OmnigentError) and lifecycle_code is not None
+        if isinstance(exc, OmnigentError) and (lifecycle_code is not None or configuration_error)
         else None,
         error_impact=ErrorImpact.BLOCKING.value,
     )
+    if isinstance(exc, OmnigentError) and configuration_error:
+        _logger.warning(
+            "Native %s configuration needs attention; error_id=%s: %s",
+            runtime_name,
+            error_id,
+            exc.message,
+            extra=extra,
+        )
+        return {
+            "code": exc.code,
+            "error_id": error_id,
+            "message": f"{exc.message} Error ID: {error_id}.",
+        }
     if lifecycle_code is not None:
         # Expected session-lifecycle condition: a required session resource was
         # removed. Log it without a stack and surface a distinct code plus a
@@ -7837,9 +7926,6 @@ def _native_terminal_start_error_payload(
         # The raise site composes a client-safe message (versions + upgrade
         # command), so it can be shown verbatim.
         message = str(exc)
-    elif isinstance(exc, OmnigentError) and exc.code == ErrorCode.HARNESS_NOT_CONFIGURED:
-        # Only the person can fix the host's setup, and the message says how.
-        message = exc.message
     elif IS_WINDOWS:
         # Native terminals are tmux/PTY-based and disabled on Windows by design.
         # Give the client an actionable message instead of a log pointer.
@@ -7909,11 +7995,15 @@ def _native_terminal_start_error_response(
     :param exc: Exception raised by terminal auto-create.
     :param runtime_name: Human-readable runtime name, e.g. ``"Codex"``.
     :param session_id: Session whose terminal ensure failed.
-    :returns: The lifecycle status for a removed agent or workspace, else 500,
+    :returns: HTTP 412 for configuration errors, the lifecycle status for a removed
+        agent or workspace, else 500,
         with an ``error`` object carrying the real failure message.
     """
     status_code = 500
-    if isinstance(exc, OmnigentError) and exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES:
+    if isinstance(exc, OmnigentError) and (
+        exc.code in _NATIVE_TERMINAL_LIFECYCLE_ERROR_CODES
+        or exc.code == ErrorCode.HARNESS_NOT_CONFIGURED
+    ):
         status_code = exc.http_status
     return JSONResponse(
         status_code=status_code,
@@ -9697,6 +9787,7 @@ async def _launch_kiro(ctx: NativeLaunchContext) -> SessionResourceView:
         ctx.publish_event,
         server_client=ctx.server_client,
         ensure_comment_relay=ctx.ensure_comment_relay,
+        agent_spec=ctx.agent_spec,
     )
 
 
@@ -9732,6 +9823,7 @@ async def _launch_goose(ctx: NativeLaunchContext) -> SessionResourceView:
         ctx.publish_event,
         server_client=ctx.server_client,
         ensure_comment_relay=ctx.ensure_comment_relay,
+        agent_spec=ctx.agent_spec,
     )
 
 
@@ -9743,6 +9835,7 @@ async def _launch_hermes(ctx: NativeLaunchContext) -> SessionResourceView:
         ctx.publish_event,
         server_client=ctx.server_client,
         ensure_comment_relay=ctx.ensure_comment_relay,
+        agent_spec=ctx.agent_spec,
     )
 
 
@@ -9754,6 +9847,7 @@ async def _launch_qwen(ctx: NativeLaunchContext) -> SessionResourceView:
         ctx.publish_event,
         server_client=ctx.server_client,
         ensure_comment_relay=ctx.ensure_comment_relay,
+        agent_spec=ctx.agent_spec,
     )
 
 
@@ -9922,19 +10016,22 @@ async def _launch_native_terminal(
             )
             return True
         except Exception as exc:
-            _logger.exception(
-                "Failed to auto-create %s terminal for %s",
-                agent.terminal_name,
-                ctx.session_id,
-                extra=debug_event(
-                    "terminal_start_failed",
-                    session_id=ctx.session_id,
-                    harness=harness_name,
-                    stage="terminal_start",
-                    error_impact=ErrorImpact.BLOCKING.value,
-                    error_phase=ErrorPhase.HARNESS_STARTUP.value,
-                ),
-            )
+            if not (
+                isinstance(exc, OmnigentError) and exc.code == ErrorCode.HARNESS_NOT_CONFIGURED
+            ):
+                _logger.exception(
+                    "Failed to auto-create %s terminal for %s",
+                    agent.terminal_name,
+                    ctx.session_id,
+                    extra=debug_event(
+                        "terminal_start_failed",
+                        session_id=ctx.session_id,
+                        harness=harness_name,
+                        stage="terminal_start",
+                        error_impact=ErrorImpact.BLOCKING.value,
+                        error_phase=ErrorPhase.HARNESS_STARTUP.value,
+                    ),
+                )
             if reraise:
                 raise
             _publish_native_terminal_start_error(
@@ -10084,7 +10181,9 @@ async def _ensure_native_terminal(
                     exc,
                     extra={"session_id": ctx.session_id},
                 )
-            else:
+            elif not (
+                isinstance(exc, OmnigentError) and exc.code == ErrorCode.HARNESS_NOT_CONFIGURED
+            ):
                 _logger.exception(
                     "%s terminal ensure failed for session=%s",
                     agent.display_name,
