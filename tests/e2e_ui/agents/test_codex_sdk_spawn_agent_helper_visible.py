@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from typing import Any
@@ -354,3 +355,8 @@ def test_codex_spawn_agent_helper_appears_in_agents_rail(
     finally:
         if respawned is not None:
             respawned.terminate()
+            try:
+                respawned.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                respawned.kill()
+                respawned.wait(timeout=5)

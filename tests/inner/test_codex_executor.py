@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import errno
+import itertools
 import json
 import os
 import stat
@@ -5950,11 +5951,11 @@ def _spawn_helper_session(nickname: str | None = "Volta") -> _CodexAppServerSess
     session.start = AsyncMock()
     session._proc = _FakeProcess()
     session.thread_id = "thread-parent"
-    turn_ids = iter(["turn-1", "turn-2"])
+    turn_numbers = itertools.count(1)
 
     async def _respond(method: str, params: dict) -> dict:
         if method == "turn/start":
-            return {"result": {"turn": {"id": next(turn_ids)}}}
+            return {"result": {"turn": {"id": f"turn-{next(turn_numbers)}"}}}
         if method == "thread/read":
             if nickname is None:
                 raise RuntimeError("thread not loaded")
@@ -6384,8 +6385,8 @@ def test_run_turn_defers_helper_events_during_completed_tail_drain() -> None:
             session,
             [
                 _spawn_completed_event(),
-                # The parent reports its turn complete with no final message,
-                # so the executor enters the trailing-final-answer drain ...
+                # Turn/completed with no final answer opens the drain window; the
+                # helper's blocking tool call and completion then land inside it.
                 {
                     "method": "turn/completed",
                     "params": {
@@ -6394,7 +6395,6 @@ def test_run_turn_defers_helper_events_during_completed_tail_drain() -> None:
                         "turn": {"id": "turn-1", "status": "completed"},
                     },
                 },
-                # ... and the helper's blocking tool call and completion land in it.
                 {
                     "id": 778,
                     "method": "item/tool/call",
@@ -6453,5 +6453,77 @@ def test_run_turn_defers_helper_events_during_completed_tail_drain() -> None:
         answers = [r for r in responses if r.get("id") == 778 and "result" in r]
         assert len(answers) == 1, responses
         assert "72F and sunny" in answers[0]["result"]["contentItems"][0]["text"]
+
+    _run(_t())
+
+
+def test_run_turn_refuses_unsupported_helper_request() -> None:
+    """A helper request the executor cannot serve is refused with a JSON-RPC error."""
+
+    async def _t():
+        session = _spawn_helper_session()
+
+        events = await _run_turn_with_events(
+            session,
+            [
+                _spawn_completed_event(),
+                _child_event(
+                    "turn/started", {"turn": {"id": "turn-child", "status": "inProgress"}}
+                ),
+                # A blocking request with no handler must still be answered so the
+                # helper (and any parent wait on it) fails fast instead of hanging.
+                {
+                    "id": 779,
+                    "method": "fs/readFile",
+                    "params": {"threadId": "thread-child", "path": "/etc/passwd"},
+                },
+                _child_event(
+                    "turn/completed", {"turn": {"id": "turn-child", "status": "completed"}}
+                ),
+                _parent_final_answer("The helper could not proceed."),
+            ],
+        )
+
+        # An unsupported request runs no tool and shows no child card.
+        assert [e for e in events if isinstance(e, SubAgentToolCall)] == []
+        responses = [json.loads(write.decode("utf-8")) for write in session._proc.stdin.writes]
+        for_request = [r for r in responses if r.get("id") == 779]
+        assert for_request and all("result" not in r for r in for_request), responses
+        errors = [r["error"] for r in for_request if "error" in r]
+        assert len(errors) == 1, responses
+        # -32601 is the JSON-RPC "method not found" code.
+        assert errors[0]["code"] == -32601
+        assert "fs/readFile" in errors[0]["message"]
+
+    _run(_t())
+
+
+def test_run_turn_closes_failed_helper_on_turn_failed() -> None:
+    """A helper's ``turn/failed`` closes its row as failed, carrying the error text."""
+
+    async def _t():
+        session = _spawn_helper_session()
+
+        events = await _run_turn_with_events(
+            session,
+            [
+                _spawn_completed_event(),
+                _child_event(
+                    "turn/started", {"turn": {"id": "turn-child", "status": "inProgress"}}
+                ),
+                _child_event(
+                    "turn/failed",
+                    {"turn": {"id": "turn-child"}, "message": "helper model overloaded"},
+                ),
+                _parent_final_answer("The helper could not finish."),
+            ],
+        )
+
+        assert [e for e in events if isinstance(e, _SUBAGENT_EVENT_TYPES)] == [
+            SubAgentStarted(child_key="thread-child", title="Volta", task=_HELPER_PROMPT),
+            SubAgentCompleted(
+                child_key="thread-child", ok=False, summary="helper model overloaded"
+            ),
+        ]
 
     _run(_t())

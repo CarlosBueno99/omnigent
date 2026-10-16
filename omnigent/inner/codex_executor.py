@@ -2838,6 +2838,8 @@ class _CodexChildThread:
     turn that spawned it. The event queue is only serviced while a parent turn
     runs, so a helper event or blocking tool request that arrives between turns
     stays queued and is delivered (and answered) when the next parent turn runs.
+    Closing the session tears down the app-server process and its in-process
+    helpers together, so a deferred request no later turn delivers strands no one.
 
     :param thread_id: Codex thread id of the helper; doubles as the child key.
     :param title: Row label (the Codex nickname when readable).
@@ -3649,10 +3651,9 @@ class _CodexAppServerSession:
         :returns: The best final response observed during the drain window.
         """
         deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
-        # A helper outlives the turn that spawned it, so its notifications and
-        # blocking tool requests can land in this tail window. Set them aside and
-        # restore them for the next turn; consuming a tool request here would
-        # leave the helper waiting on a response that never comes.
+        # A helper can outlive its spawning turn, so its notifications and
+        # blocking tool requests can land here. Defer them for the next turn;
+        # consuming a tool request here would strand the helper without a reply.
         deferred: list[CodexMessage | HarnessTransportClosedError] = []
         try:
             while True:
