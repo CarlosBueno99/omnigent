@@ -9,6 +9,9 @@ later turn repeats the failure. This drives the installed ``codex`` through
 Omnigent's app-server client against a loopback gateway that refuses one model,
 feeds the real notifications through the codex-native forwarder, and checks the
 surfaced failure explains the stuck compaction instead of a bare budget 403.
+
+Set ``OMNIGENT_TEST_CODEX_OVER_BUDGET_MODEL`` and ``OMNIGENT_TEST_CODEX_SWITCH_MODEL``
+to use other installed models; they must carry different ``comp_hash`` values.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import asyncio
 import contextlib
 import http.server
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -47,8 +51,8 @@ from tests.harnesses.codex_native.forwarder._support import _RecordingClient
 
 # Two built-in codex models whose ``comp_hash`` differ, so a switch between
 # them makes Codex compact on the previous model first.
-_OVER_BUDGET_MODEL = "gpt-5.5"
-_SELECTED_MODEL = "gpt-5.6-sol"
+_OVER_BUDGET_MODEL = os.environ.get("OMNIGENT_TEST_CODEX_OVER_BUDGET_MODEL", "gpt-5.5")
+_SELECTED_MODEL = os.environ.get("OMNIGENT_TEST_CODEX_SWITCH_MODEL", "gpt-5.6-sol")
 _BUDGET_REFUSAL = json.dumps(
     {
         "error_code": "PERMISSION_DENIED",
@@ -300,17 +304,16 @@ async def test_budget_refusal_after_model_switch_explains_previous_model_compact
     # The app-server socket lives under the bridge dir; pytest's tmp path is
     # too deep for the AF_UNIX path limit, so the bridge gets a short root.
     short_root = Path(tempfile.mkdtemp(prefix="cx-switch-"))
-    bridge_dir = short_root / "b"
-    codex_home = bridge_dir / "codex-home"
-    workspace = tmp_path / "workspace"
-    child_home = tmp_path / "home"
-    for path in (codex_home, workspace, child_home):
-        path.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(workspace)], check=True, capture_output=True)
-
     gateway = _BudgetGateway()
-    threading.Thread(target=gateway.serve_forever, daemon=True).start()
     try:
+        bridge_dir = short_root / "b"
+        codex_home = bridge_dir / "codex-home"
+        workspace = tmp_path / "workspace"
+        child_home = tmp_path / "home"
+        for path in (codex_home, workspace, child_home):
+            path.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(workspace)], check=True, capture_output=True)
+        threading.Thread(target=gateway.serve_forever, daemon=True).start()
         frontier_turn = _record_turn_on_over_budget_model(
             codex_home=codex_home,
             workspace=workspace,
@@ -353,17 +356,16 @@ async def test_budget_refusal_after_model_switch_explains_previous_model_compact
         gateway.server_close()
         shutil.rmtree(short_root, ignore_errors=True)
 
-    if _SELECTED_MODEL in stuck_models:
+    failed = [status for status in statuses if status.get("status") == "failed"]
+    if _SELECTED_MODEL in stuck_models and not failed:
         pytest.skip(
-            "the installed codex reached the selected model after a refused previous-model "
-            f"compaction (models requested: {stuck_models}); the stuck state this hint "
-            "explains no longer occurs"
+            "the installed codex completed the turn on the selected model after a refused "
+            f"previous-model compaction (models requested: {stuck_models}); the stuck state "
+            "this hint explains no longer occurs"
         )
     assert stuck_models and set(stuck_models) == {_OVER_BUDGET_MODEL}, (
         f"codex contacted {stuck_models}, not only the previous model"
     )
-
-    failed = [status for status in statuses if status.get("status") == "failed"]
     assert len(failed) == 1, f"expected one failed status, got {statuses}"
     output = failed[0]["output"]
     assert "has reached its limit" in output

@@ -1056,7 +1056,7 @@ def _last_turn_context_model(bridge_dir: Path) -> str | None:
     return last_turn_context_model(rollout)
 
 
-def _explain_previous_model_budget_failure(
+async def _explain_previous_model_budget_failure(
     error: _CodexTerminalError,
     *,
     bridge_dir: Path | None,
@@ -1082,7 +1082,7 @@ def _explain_previous_model_budget_failure(
     if bridge_dir is None or not selected_model or not _is_budget_exhausted_message(error.message):
         return error
     try:
-        previous_model = _last_turn_context_model(bridge_dir)
+        previous_model = await asyncio.to_thread(_last_turn_context_model, bridge_dir)
     except Exception:  # noqa: BLE001 — the failed status must post without the diagnosis
         _logger.warning(
             "Could not read the Codex rollout for the previous turn model", exc_info=True
@@ -3790,7 +3790,7 @@ async def _maybe_handle_turn_event(
                     status="failed",
                     turn_id=turn_id,
                     source="error",
-                    error=_explain_previous_model_budget_failure(
+                    error=await _explain_previous_model_budget_failure(
                         error, bridge_dir=bridge_dir, forwarder_state=forwarder_state
                     ),
                 ),
@@ -4100,7 +4100,7 @@ async def _handle_terminal_turn_boundary_inner(
     if edge is not None and edge.error is not None:
         edge = dataclasses.replace(
             edge,
-            error=_explain_previous_model_budget_failure(
+            error=await _explain_previous_model_budget_failure(
                 edge.error, bridge_dir=bridge_dir, forwarder_state=forwarder_state
             ),
         )
