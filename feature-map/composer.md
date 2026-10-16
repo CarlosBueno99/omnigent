@@ -333,6 +333,15 @@ Other connection providers alone do not enable the managed MCP picker.
   Choose a working directory and check that the tooltip disappears and Start
   enables. Repeat with a phone viewport and touch input. Component coverage:
   `web/src/shell/NewChatDialog.test.tsx`.
+- **Reusable sandbox hosts:**
+  `tests/e2e_ui/start_session/test_start_session.py::test_attached_sandbox_wakes_and_remains_a_reusable_picker_target`
+  checks the static-provider creation option, wake action and reuse across two
+  create requests; ad hoc sandbox hosts stay hidden. The browser stubs provider
+  responses, while
+  `tests/server/integration/test_hosts_api.py::test_attach_api_reuses_one_tunnel_for_two_session_launches`
+  exercises attachment and two launches through the real host tunnel. See the
+  [provider capability and attachment API](../docs/extending/attached_sandboxes.md)
+  for setup and manual verification.
 - **`offline-hosts`:**
   `tests/e2e_ui/start_session/test_start_session.py::test_start_session_keeps_offline_host_selected`
   covers the connected-host and managed-sandbox variants with stubbed host responses.
