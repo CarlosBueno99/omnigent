@@ -102,7 +102,6 @@ from omnigent.server.performance_metrics import (
     set_request_session_id_for_access_log,
     set_request_user_agent_for_access_log,
 )
-from omnigent.server.validation_audit import validation_audit_attrs
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
 from omnigent.server.routes.default_policies import create_default_policies_router
@@ -134,6 +133,7 @@ from omnigent.server.runner_session_init import (
     runner_response_error_body,
 )
 from omnigent.server.scheduled import ScheduledTaskScheduler
+from omnigent.server.validation_audit import validation_audit_attrs
 from omnigent.server.ws_origin import WebSocketOriginMiddleware
 from omnigent.stores import (
     AgentStore,
