@@ -105,9 +105,10 @@ _CONTROL_STDOUT_BUFFER_LIMIT: Final[int] = 16 * 1024 * 1024
 # client inherits the runner's TERM, which can be a non-interactive ``dumb``.
 _WEB_TERMINAL_TERM: Final[str] = "xterm-256color"
 
-# Resize floor. A browser terminal under a ``display:none`` ancestor has no
-# layout box, so xterm's fit addon measures its ``100%`` width as 100 px (a few
-# columns); forwarding that shrinks the shared pane under a TUI mid-boot.
+# Resize floor, mirrored by MIN_FORWARDED_COLS/ROWS in web/.../TerminalSession.ts
+# (which clamps outgoing sizes to it). A terminal under a ``display:none`` ancestor
+# has no layout box, so xterm's fit addon measures its ``100%`` width as 100 px (a
+# few columns); forwarding that shrinks the shared pane under a TUI mid-boot.
 _MIN_FORWARDED_COLS: Final[int] = 20
 _MIN_FORWARDED_ROWS: Final[int] = 5
 

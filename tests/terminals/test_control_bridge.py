@@ -1232,8 +1232,7 @@ class _SteppedWebSocket(_FakeWebSocket):
 async def test_control_bridge_keeps_pane_size_on_resize_below_floor() -> None:
     """Resizes from a browser terminal with no layout must not shrink the shared pane."""
     sock, target = await _new_private_tmux("cat")
-    await asyncio.sleep(0.3)
-    assert await _window_size(sock, target) == (80, 24)
+    await _wait_for_window_size(sock, target, (80, 24))
 
     ws = _SteppedWebSocket()
     task = asyncio.create_task(
@@ -1241,8 +1240,8 @@ async def test_control_bridge_keeps_pane_size_on_resize_below_floor() -> None:
             ws, socket_path=str(sock), tmux_target=target, read_only=False
         )
     )
-    # What xterm's fit addon reports under a display:none ancestor at a large and
-    # at the default code font, then one column and one row under the floor.
+    # Fit-addon sizes under a display:none ancestor (large and default code fonts),
+    # then one column and one row just under the floor.
     sizes = [
         (6, 4),
         (10, 5),

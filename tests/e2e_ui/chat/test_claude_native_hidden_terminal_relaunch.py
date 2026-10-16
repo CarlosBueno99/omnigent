@@ -15,6 +15,7 @@ import pytest
 from playwright.sync_api import Page, WebSocket, expect
 
 from omnigent.terminals.control_bridge import _MIN_FORWARDED_COLS as _USABLE_COLS
+from omnigent.terminals.control_bridge import _MIN_FORWARDED_ROWS as _USABLE_ROWS
 from tests.e2e_ui.conftest import set_fallback_mock_llm
 from tests.e2e_ui.messages.test_message_render_parity import _ensure_chat_view, _send
 
@@ -75,10 +76,14 @@ def _record_terminal_frames(page: Page) -> list[dict[str, object]]:
     def on_websocket(ws: WebSocket) -> None:
         if "terminal" not in ws.url or "attach" not in ws.url:
             return
+        # A direct-attach URL carries its bearer token in the query.
+        attach_url = ws.url.split("?", 1)[0]
 
         def on_sent(payload: str | bytes) -> None:
             if isinstance(payload, str):
-                frames.append({"t": round(time.monotonic(), 3), "url": ws.url, "sent": payload})
+                frames.append(
+                    {"t": round(time.monotonic(), 3), "url": attach_url, "sent": payload}
+                )
 
         ws.on("framesent", on_sent)
 
@@ -86,13 +91,13 @@ def _record_terminal_frames(page: Page) -> list[dict[str, object]]:
     return frames
 
 
-def _resize_columns(frame: dict[str, object]) -> int | None:
-    """Columns of a resize frame, or ``None`` for any other or malformed frame."""
+def _resize_size(frame: dict[str, object]) -> tuple[int, int] | None:
+    """``(cols, rows)`` of a resize frame, or ``None`` for any other or malformed frame."""
     try:
         control = json.loads(str(frame["sent"]))
         if not isinstance(control, dict) or control.get("type") != "resize":
             return None
-        return int(control["cols"])
+        return int(control["cols"]), int(control["rows"])
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -100,12 +105,12 @@ def _resize_columns(frame: dict[str, object]) -> int | None:
 def _wait_for_usable_resize(
     page: Page, frames: list[dict[str, object]], start: int, what: str
 ) -> dict[str, object]:
-    """Wait for a resize frame of at least ``_USABLE_COLS`` columns sent after ``start``."""
+    """Wait for a resize frame the bridge forwards (at least 20x5) sent after ``start``."""
     deadline = time.monotonic() + _RESIZE_TIMEOUT_S
     while time.monotonic() < deadline:
         for frame in frames[start:]:
-            columns = _resize_columns(frame)
-            if columns is not None and columns >= _USABLE_COLS:
+            size = _resize_size(frame)
+            if size is not None and size[0] >= _USABLE_COLS and size[1] >= _USABLE_ROWS:
                 return frame
         page.wait_for_timeout(250)
     raise AssertionError(
