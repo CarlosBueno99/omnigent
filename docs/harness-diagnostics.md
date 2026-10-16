@@ -288,8 +288,10 @@ and no sign-in prompt on screen they also carry `terminal_last_output`: the live
 pane read with wrapped rows joined, sanitized and trimmed like the startup-exit
 excerpt (the last 40 lines and 4,000 characters). The excerpt is also appended
 to the log message, so the runner's local log under `~/.omnigent/logs/runner/`
-carries it without a structured exporter. A sign-in prompt is reported
-only as the flag so its one-time code and address stay out of logs. The early
+carries it without a structured exporter. An actionable sign-in prompt is
+reported only as the flag, and the tail is withheld whenever any sign-in
+material (an address or a device code, even from a prompt the launcher has
+moved past) is on screen, so one-time codes stay out of logs. The early
 record exists so a runner lost before the deadline, for example by a host
 restart, still leaves the pane on record. A pane that has already stopped is
 described by its exit records instead; with capture disabled these records stay

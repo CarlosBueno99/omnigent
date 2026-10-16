@@ -5686,13 +5686,16 @@ def _startup_terminal_output(instance: TerminalInstance) -> str | None:
 async def _stalled_pane_diagnostics(instance: TerminalInstance) -> tuple[str | None, bool]:
     """Return a live pane's redacted tail and whether it shows a sign-in prompt.
 
-    A sign-in prompt is reported only as the flag, keeping its one-time code out of logs.
+    The flag reports an actionable prompt. The tail is withheld whenever any
+    sign-in material is on screen, including a prompt the launcher has already
+    moved past, so a one-time code or address never reaches a log.
     """
-    from omnigent.harnesses.diagnostics import detect_sign_in_prompt
+    from omnigent.harnesses.diagnostics import contains_sign_in_material, detect_sign_in_prompt
 
     screen = await _read_pane_screen(instance)
-    if detect_sign_in_prompt(screen) is not None:
-        return None, True
+    prompt = detect_sign_in_prompt(screen) is not None
+    if contains_sign_in_material(screen):
+        return None, prompt
     return _redacted_terminal_text(screen), False
 
 
@@ -5808,7 +5811,11 @@ async def _record_agent_startup_pending(
     :param waited_seconds: How long discovery has waited for the thread so far.
     """
     from omnigent.harnesses.codex_native.bridge import write_bridge_startup_error
-    from omnigent.harnesses.diagnostics import detect_sign_in_prompt, sign_in_next_step
+    from omnigent.harnesses.diagnostics import (
+        contains_sign_in_material,
+        detect_sign_in_prompt,
+        sign_in_next_step,
+    )
 
     screen = await _read_pane_screen(terminal_instance)
     prompt = detect_sign_in_prompt(screen)
@@ -5842,8 +5849,8 @@ async def _record_agent_startup_pending(
         "sign_in_prompt_detected": prompt is not None,
         "code": code,
     }
-    # Without a sign-in prompt, the pane is the only record of what is holding startup.
-    tail = _redacted_terminal_text(screen) if prompt is None else None
+    # The pane is the only record of what holds startup, unless sign-in material is on it.
+    tail = None if contains_sign_in_material(screen) else _redacted_terminal_text(screen)
     if tail:
         attributes["terminal_last_output"] = tail
     pending_event["attributes"] = attributes

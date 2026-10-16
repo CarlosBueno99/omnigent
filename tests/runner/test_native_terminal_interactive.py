@@ -106,17 +106,22 @@ async def test_observer_records_the_redacted_pane_of_a_stalled_terminal(
         assert _SCREEN_TOKEN not in record.getMessage()
 
 
+_SIGN_IN_PROMPT = "Sign in to continue:\n  https://signin.example.com/device\n  code: HQ7M-2KPD\n"
+
+
 @pytest.mark.parametrize(
     ("capture", "screen", "expected"),
     [
         ("0", _STALLED_SCREEN, {"sign_in_prompt_detected": False}),
+        ("1", _SIGN_IN_PROMPT, {"sign_in_prompt_detected": True}),
+        # The launcher moved past its prompt, but the code and address are still on screen.
         (
             "1",
-            "Sign in to continue:\n  https://signin.example.com/device\n  code: HQ7M-2KPD\n",
-            {"sign_in_prompt_detected": True},
+            _SIGN_IN_PROMPT + "See https://docs.example.com/oauth/troubleshooting\n",
+            {"sign_in_prompt_detected": False},
         ),
     ],
-    ids=["capture-disabled", "sign-in-prompt"],
+    ids=["capture-disabled", "sign-in-prompt", "sign-in-material-after-prompt"],
 )
 @pytest.mark.asyncio
 async def test_observer_keeps_pane_text_out_unless_captured_and_not_a_sign_in(
@@ -126,7 +131,7 @@ async def test_observer_keeps_pane_text_out_unless_captured_and_not_a_sign_in(
     screen: str,
     expected: dict[str, object],
 ) -> None:
-    """Pane text needs the capture opt-in, and a sign-in prompt is only flagged."""
+    """Pane text needs the capture opt-in and stays out while sign-in material is on screen."""
     monkeypatch.setenv("OMNIGENT_HARNESS_STDERR_ENABLED", capture)
     terminal = _FakeTerminal([screen])
 
@@ -150,6 +155,9 @@ async def test_observer_keeps_pane_text_out_unless_captured_and_not_a_sign_in(
     pane_keys = {"terminal_last_output", "sign_in_prompt_detected"}
     pane = {k: v for k, v in record.attributes.items() if k in pane_keys and v is not None}
     assert pane == expected
+    logged = record.getMessage() + "\n".join(map(str, record.attributes.values()))
+    assert "HQ7M-2KPD" not in logged
+    assert "signin.example.com" not in logged
 
 
 @pytest.mark.asyncio
