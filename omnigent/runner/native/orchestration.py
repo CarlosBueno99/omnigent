@@ -356,6 +356,10 @@ _TERMINAL_INTERACTIVE_TIMEOUT_S = 180.0
 _TERMINAL_INTERACTIVE_POLL_INTERVAL_S = 0.15
 # A startup dialog still up after this long is waiting on the person, not a repaint.
 _STARTUP_DIALOG_NOTICE_AFTER_S = 3.0
+# Notice posts that failed are retried at that same spacing while the dialog
+# stays up. The events route has no idempotency key, so a lost response may
+# already have persisted the notice; the cap keeps duplicates rare and bounded.
+_STARTUP_DIALOG_NOTICE_ATTEMPTS = 3
 # Sign-in may stay open indefinitely; limit its liveness subprocess rate.
 _CODEX_LOGIN_EXIT_POLL_INTERVAL_S = 1.0
 # How often a starting pane is read for a launcher sign-in prompt.
@@ -402,43 +406,53 @@ async def _report_startup_dialog(
     terminal_id: str,
     instance: TerminalInstance,
     waited_s: float,
-) -> None:
-    """Log the dialog holding a starting pane, then tell the person to answer it."""
+    record: bool = True,
+) -> bool:
+    """
+    Log the dialog holding a starting pane, then tell the person to answer it.
+
+    :param record: Write the ``native_startup_dialog`` record; ``False`` on a
+        retry of the notice alone.
+    :returns: Whether the notice was posted.
+    """
     from omnigent.process_logging import redact_log_text
 
-    category = watch.category(headline)
-    attribution = (
-        {
-            "error_category": category.value,
-            "error_impact": ErrorImpact.BLOCKING.value,
-            "error_phase": ErrorPhase.HARNESS_STARTUP.value,
-        }
-        if category is not None
-        else {}
-    )
-    _logger.warning(
-        "Native terminal startup is waiting on a dialog: session=%s harness=%s "
-        "terminal_id=%s waited_s=%.0f",
-        session_id,
-        harness,
-        terminal_id,
-        waited_s,
-        extra=debug_event(
-            "native_startup_dialog",
-            session_id=session_id,
-            harness=harness,
-            terminal_id=terminal_id,
-            terminal_instance_id=instance.diagnostic_id,
-            dialog_headline=redact_log_text(headline),
-            **attribution,
-        ),
-    )
+    if record:
+        category = watch.category(headline)
+        attribution = (
+            {
+                "error_category": category.value,
+                "error_impact": ErrorImpact.BLOCKING.value,
+                "error_phase": ErrorPhase.HARNESS_STARTUP.value,
+            }
+            if category is not None
+            else {}
+        )
+        _logger.warning(
+            "Native terminal startup is waiting on a dialog: session=%s harness=%s "
+            "terminal_id=%s waited_s=%.0f",
+            session_id,
+            harness,
+            terminal_id,
+            waited_s,
+            extra=debug_event(
+                "native_startup_dialog",
+                session_id=session_id,
+                harness=harness,
+                terminal_id=terminal_id,
+                terminal_instance_id=instance.diagnostic_id,
+                dialog_headline=redact_log_text(headline),
+                **attribution,
+            ),
+        )
     try:
         await watch.notify(headline)
     except Exception:  # noqa: BLE001 — a lost notice must not end the readiness watch
         _logger.warning(
             "Failed to post the startup dialog notice for %s", session_id, exc_info=True
         )
+        return False
+    return True
 
 
 async def _observe_terminal_interactive(
@@ -464,7 +478,10 @@ async def _observe_terminal_interactive(
     deadline = started_at + timeout_s
     dialog_headline: str | None = None
     dialog_since = started_at
-    dialog_reported = False
+    dialog_recorded: str | None = None
+    dialog_notified = False
+    notice_attempts = 0
+    next_notice_at = started_at
     try:
         while True:
             result = await instance.read()
@@ -489,15 +506,20 @@ async def _observe_terminal_interactive(
                 raise RuntimeError("terminal stopped before becoming interactive")
             if loop.time() >= deadline:
                 raise TimeoutError(f"terminal did not become interactive within {timeout_s:g}s")
-            if startup_dialog is not None and not dialog_reported and isinstance(screen, str):
+            if startup_dialog is not None and not dialog_notified and isinstance(screen, str):
                 headline = startup_dialog.headline(screen)
                 if headline != dialog_headline:
                     dialog_headline, dialog_since = headline, loop.time()
-                elif headline is not None and (
-                    loop.time() - dialog_since >= _STARTUP_DIALOG_NOTICE_AFTER_S
+                    notice_attempts = 0
+                elif (
+                    headline is not None
+                    and notice_attempts < _STARTUP_DIALOG_NOTICE_ATTEMPTS
+                    and loop.time()
+                    >= max(dialog_since + _STARTUP_DIALOG_NOTICE_AFTER_S, next_notice_at)
                 ):
-                    dialog_reported = True
-                    await _report_startup_dialog(
+                    notice_attempts += 1
+                    next_notice_at = loop.time() + _STARTUP_DIALOG_NOTICE_AFTER_S
+                    dialog_notified = await _report_startup_dialog(
                         startup_dialog,
                         headline,
                         session_id=session_id,
@@ -505,7 +527,9 @@ async def _observe_terminal_interactive(
                         terminal_id=terminal_id,
                         instance=instance,
                         waited_s=loop.time() - started_at,
+                        record=dialog_recorded != headline,
                     )
+                    dialog_recorded = headline
             await asyncio.sleep(poll_interval_s)
     except asyncio.CancelledError:
         raise

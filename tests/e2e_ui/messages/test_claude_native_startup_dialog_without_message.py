@@ -14,7 +14,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import textwrap
 import time
 from pathlib import Path
 
@@ -26,7 +25,7 @@ from tests._helpers.native_session import create_native_session
 from tests._helpers.server_runner import server_runner
 from tests._helpers.session import bind_session_runner
 from tests.e2e_ui.messages.test_message_render_parity import _select_view_mode
-from tests.helpers.ui_configuration import _CLAUDE_MOCK_MODEL
+from tests.helpers.ui_configuration import claude_mock_provider_config
 
 pytestmark = pytest.mark.skipif(
     shutil.which("claude") is None or shutil.which("tmux") is None,
@@ -61,26 +60,18 @@ _CHAT_TEXT_JS = """
 
 def _write_mock_claude_provider(config_home: Path, mock_llm_server_url: str) -> None:
     config_home.mkdir(parents=True, exist_ok=True)
-    (config_home / "config.yaml").write_text(
-        textwrap.dedent(f"""\
-        providers:
-          mock-claude:
-            kind: key
-            default: [anthropic]
-            anthropic:
-              base_url: "{mock_llm_server_url}"
-              api_key: "mock-key"
-              models:
-                default: {_CLAUDE_MOCK_MODEL}
-        """)
-    )
+    (config_home / "config.yaml").write_text(claude_mock_provider_config(mock_llm_server_url))
 
 
 def _pane_text(native_tmp: Path) -> str:
     adverts = list(native_tmp.rglob("tmux.json"))
     if not adverts:
         return ""
-    advert = json.loads(adverts[0].read_text())
+    try:
+        advert = json.loads(adverts[0].read_text())
+    except (OSError, ValueError):
+        # The runner may still be writing the advert; the caller polls again.
+        return ""
     proc = subprocess.run(
         ["tmux", "-S", advert["socket_path"], "capture-pane", "-t", advert["tmux_target"], "-p"],
         check=False,

@@ -101,13 +101,23 @@ def _dialog_watch(
     *,
     category: ErrorCategory | None = None,
     notify_error: Exception | None = None,
+    notify_errors: list[Exception | None] | None = None,
 ) -> _StartupDialogWatch:
-    """A watch that names a dialog by its first line and records each notice."""
+    """A watch that names a dialog by its first line and records each notice attempt.
+
+    *notify_error* fails every post; *notify_errors* scripts one outcome per
+    attempt (``None`` succeeds), then the last outcome repeats.
+    """
 
     async def notify(headline: str) -> None:
+        attempt = len(notified)
         notified.append(headline)
-        if notify_error is not None:
-            raise notify_error
+        if notify_errors is not None:
+            error = notify_errors[min(attempt, len(notify_errors) - 1)]
+        else:
+            error = notify_error
+        if error is not None:
+            raise error
 
     return _StartupDialogWatch(
         headline=lambda pane: pane.splitlines()[0] if "Enter to confirm" in pane else None,
@@ -198,16 +208,40 @@ async def test_observer_keeps_watching_when_the_dialog_notice_fails(
 ) -> None:
     """A notice the server refuses is logged, and readiness is still observed."""
     monkeypatch.setattr(orchestration, "_STARTUP_DIALOG_NOTICE_AFTER_S", 0.0)
-    terminal = _FakeTerminal([_DIALOG_SCREEN] * 3 + ["composer ready"])
+    terminal = _FakeTerminal([_DIALOG_SCREEN] * 8 + ["composer ready"])
     notified: list[str] = []
     watch = _dialog_watch(notified, notify_error=httpx.ConnectError("server unreachable"))
 
     with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
         await _observe(terminal, watch)
 
-    assert notified == ["Settings Error"]
+    # Retried while the dialog held the pane, but bounded: a lost response may
+    # already have persisted the notice.
+    assert notified == ["Settings Error"] * orchestration._STARTUP_DIALOG_NOTICE_ATTEMPTS
+    events = [getattr(r, "event_name", None) for r in caplog.records]
+    assert events.count("native_startup_dialog") == 1
     assert any("startup dialog notice" in r.getMessage() for r in caplog.records)
-    assert "terminal_interactive" in [getattr(r, "event_name", None) for r in caplog.records]
+    assert "terminal_interactive" in events
+
+
+@pytest.mark.asyncio
+async def test_observer_retries_the_notice_until_it_is_posted(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient failure does not lose the notice; once posted, no further attempt is made."""
+    monkeypatch.setattr(orchestration, "_STARTUP_DIALOG_NOTICE_AFTER_S", 0.0)
+    terminal = _FakeTerminal([_DIALOG_SCREEN] * 8 + ["composer ready"])
+    notified: list[str] = []
+    watch = _dialog_watch(notified, notify_errors=[httpx.ConnectError("server unreachable"), None])
+
+    with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
+        await _observe(terminal, watch)
+
+    assert notified == ["Settings Error", "Settings Error"]
+    events = [getattr(r, "event_name", None) for r in caplog.records]
+    assert events.count("native_startup_dialog") == 1
+    assert "terminal_interactive" in events
 
 
 @pytest.mark.asyncio
