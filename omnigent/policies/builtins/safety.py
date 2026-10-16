@@ -355,7 +355,20 @@ def ask_on_add_policy(event: PolicyEvent) -> PolicyResponse:
     }
 
 
+def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
+    """Require approval before an agent persists or changes unattended work."""
+    if event.get("type") != "tool_call":
+        return _ALLOW
+    if event.get("target") not in {"sys_scheduled_task_create", "sys_scheduled_task_update"}:
+        return _ALLOW
+    return {
+        "result": "ASK",
+        "reason": "Approve these scheduled task settings for future unattended runs?",
+    }
+
+
 # ── Skill blocking ──────────────────────────────────────────────────────────
+
 
 # Omnigent runner tools that load skills in non-native (SDK) harnesses.
 _SKILL_TOOLS = frozenset({"load_skill", "read_skill_file"})
@@ -518,7 +531,7 @@ _SANDBOX_OVERRIDE_KEYS = frozenset(
 def enforce_sandbox(
     sandbox_type: str = "linux_bwrap",
     allow_network: bool = True,
-    write_paths: list[str] | None = None,
+    write_paths: list[str | dict[str, object]] | None = None,
     read_paths: list[str] | None = None,
     env_passthrough: list[str] | None = None,
 ) -> PolicyCallable:
@@ -823,7 +836,20 @@ POLICY_REGISTRY: list[dict[str, object]] = [
                 },
                 "write_paths": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string", "minLength": 1},
+                                    "copy_on_write": {"type": "boolean", "default": False},
+                                },
+                                "required": ["path"],
+                                "additionalProperties": False,
+                            },
+                        ],
+                    },
                     "description": "Writable paths to enforce (null inherits agent's config)",
                 },
                 "read_paths": {

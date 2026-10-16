@@ -7,6 +7,7 @@ import {
   formatStatusEffortLabel,
   formatStatusModelLabel,
   nativeModelLabel,
+  nativeModelTooltip,
   normalizeEffortLabel,
 } from "@/lib/composerModelLabel";
 
@@ -20,11 +21,18 @@ describe("catalog model labels", () => {
     const row = Object.freeze({ id, model, displayName, isDefault: true });
     expect(nativeModelLabel(row)).toBe(displayName);
     expect(defaultModelLabel([row])).toBe(`Default (${displayName})`);
-    expect(compactModelTriggerLabel(defaultModelLabel([row]))).toBe(displayName);
+    expect(compactModelTriggerLabel(defaultModelLabel([row]))).toBe(
+      displayName.replace(" (1M context)", " 1M"),
+    );
     expect(formatStatusModelLabel(model)).toBe(model);
     expect(formatStatusModelLabel(model, [row])).toBe(displayName);
     expect(formatStatusModelLabel(id, [row])).toBe(displayName);
     expect(row).toEqual({ id, model, displayName, isDefault: true });
+  });
+
+  it("condenses context capacity in the composer button label", () => {
+    expect(compactModelTriggerLabel("Opus (1M context)")).toBe("Opus 1M");
+    expect(compactModelTriggerLabel("Default (Opus (1M context))")).toBe("Opus 1M");
   });
 
   it.each(["sonnet", "sonnet_5", "opus[1m]", "Unrecognized-ID"])(
@@ -46,6 +54,41 @@ describe("catalog model labels", () => {
   it("uses an alias's display name without guessing a version", () => {
     expect(nativeModelLabel({ id: "opus", displayName: "Opus" })).toBe("Opus");
   });
+
+  it.each(["system.ai.gpt-6-astra", "databricks-gpt-6-astra"])(
+    "hides the catalog namespace when %s is only a transport label",
+    (model) => {
+      const row = Object.freeze({ id: model, model, displayName: model, isDefault: true });
+      expect(nativeModelLabel(row)).toBe("gpt-6-astra");
+      expect(defaultModelLabel([row])).toBe("Default (gpt-6-astra)");
+      expect(formatStatusModelLabel(model, [row])).toBe("gpt-6-astra");
+      expect(row.model).toBe(model);
+    },
+  );
+
+  it("preserves a deliberate display name that contains a catalog namespace", () => {
+    expect(
+      nativeModelLabel({
+        id: "gpt-6-astra",
+        model: "system.ai.gpt-6-astra",
+        displayName: "system.ai.gpt-6-astra (managed)",
+      }),
+    ).toBe("system.ai.gpt-6-astra (managed)");
+  });
+
+  it.each(["system.ai.gpt-6-astra", "databricks-gpt-6-astra"])(
+    "formats provider-qualified Pi labels for %s without changing selection IDs",
+    (displayName) => {
+      const id = `omnigent-openai/${displayName}`;
+      const row = Object.freeze({ id, model: id, displayName });
+      expect(nativeModelLabel(row)).toBe("gpt-6-astra");
+      expect(formatStatusModelLabel(id, [row])).toBe("gpt-6-astra");
+      expect(row).toEqual({ id, model: id, displayName });
+      expect(nativeModelLabel({ ...row, displayName: `${displayName} (team)` })).toBe(
+        `${displayName} (team)`,
+      );
+    },
+  );
 
   it("prefers an exact catalog ID over another row's provider model", () => {
     const rows = [
@@ -70,6 +113,27 @@ describe("catalog model labels", () => {
     expect(formatStatusModelLabel(model, [{ id: model, displayName: "GPT-5.6 Luna" }])).toBe(
       "GPT-5.6 Luna",
     );
+  });
+
+  it("names the exact model a row launches in its hover text", () => {
+    expect(nativeModelTooltip({ id: "opus", model: "system.ai.claude-opus-4-8[1m]" })).toBe(
+      "system.ai.claude-opus-4-8[1m]",
+    );
+    // A label that differs from the id only in case still gets the exact id.
+    expect(nativeModelTooltip({ id: "GLM-5.3", displayName: "glm-5.3" })).toBe("GLM-5.3");
+    // A namespaced id shown without its prefix keeps the full id on hover.
+    const transport = "system.ai.glm-5-3";
+    expect(nativeModelTooltip({ id: transport, model: transport, displayName: transport })).toBe(
+      transport,
+    );
+  });
+
+  it.each([
+    ["has no display name", { id: "glm-5.3" }],
+    ["repeats its id as the label", { id: "glm-5.3", model: "glm-5.3", displayName: "glm-5.3" }],
+    ["is the Fusion row", { id: "fusion", fusion: { combos: [], default: "fusion-a-sidekick-b" } }],
+  ])("has no hover text when the row %s", (_case, row) => {
+    expect(nativeModelTooltip(row)).toBeUndefined();
   });
 
   it("retains the unknown and unmarked default states", () => {

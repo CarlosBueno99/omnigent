@@ -1,3 +1,5 @@
+import { appConfig, type SidebarConfig } from "./appConfig";
+import { IdentityAwareSidebarDataProvider } from "./hooks/useSidebarData";
 // Embed entry point.
 //
 // Exposes `OmnigentApp` — a plain React component (app-specific providers +
@@ -40,12 +42,13 @@ import {
   setEmbedScopeRoot,
   setOmnigentHostConfig,
 } from "./lib/host";
-import { resolveIdentity } from "./lib/identity";
+import { prefetchSessionHostChain } from "./hooks/useSession";
+import { resolveIdentity, setSessionHostResolver } from "./lib/identity";
+import { isMacElectronShell } from "./lib/nativeBridge";
 import {
-  applyDesktopUiFontSize,
+  applyStoredUiFontSize,
   applyUiFontFamily,
   readUiFontFamily,
-  readUiFontSizePx,
 } from "./lib/uiFontPreferences";
 import { applyThemePalette, readThemePalette } from "./lib/themePalette";
 import { applyCustomTheme, readCustomTheme } from "./lib/customTheme";
@@ -56,6 +59,7 @@ import {
   reactRouterRouting,
 } from "./lib/routing";
 import { initChatStore } from "./store/chatStore";
+import { cn } from "./lib/utils";
 import "katex/dist/katex.min.css";
 import "streamdown/styles.css";
 import "./index.css";
@@ -63,7 +67,7 @@ import { QueueFlushProvider } from "./hooks/QueueFlushProvider";
 import { ExtensionProvider } from "./extensions/ExtensionProvider";
 import { SessionUpdatesProvider } from "./hooks/SessionUpdatesProvider";
 
-export type { OmnigentHostConfig } from "./lib/host";
+export type { HtmlPreviewFrameProps, OmnigentHostConfig } from "./lib/host";
 export type { RoutingApi } from "./lib/routing";
 
 // Re-export the host-config setter so the host can install transport config
@@ -81,7 +85,11 @@ const queryClient = new QueryClient({
   },
 });
 
+export type { SidebarConfig } from "./appConfig";
+
 export interface OmnigentAppProps extends OmnigentHostConfig {
+  /** Runtime consumer policy, display pagination, and polling, resolved by the host. */
+  sidebarConfig?: Partial<SidebarConfig>;
   /**
    * Router basename, e.g. `/ml/omnigent-embed`. web's routes + navigation
    * use absolute paths (`/`, `/c/:conversationId`), so the app must be nested
@@ -146,10 +154,12 @@ function EmbedCapabilitiesProvider({ children }: { children: ReactNode }) {
 }
 
 function OmnigentProviders({
+  sidebarConfig: sidebarOverrides,
   routing,
   basename,
   isDarkMode,
 }: {
+  sidebarConfig?: Partial<SidebarConfig>;
   routing: RoutingApi;
   basename?: string;
   isDarkMode?: boolean;
@@ -161,6 +171,11 @@ function OmnigentProviders({
   const hostQueryClient = useQueryClient();
   useState(() => {
     initChatStore(hostQueryClient);
+    // Resolve a session's routing host on demand (a hostless sub-agent child
+    // walks up to its host-bound ancestor) before host-scoped requests key.
+    setSessionHostResolver((sessionId, options) =>
+      prefetchSessionHostChain(hostQueryClient, sessionId, options),
+    );
     void resolveIdentity();
     return null;
   });
@@ -182,7 +197,7 @@ function OmnigentProviders({
   const scopeRootRef = useCallback((el: HTMLDivElement | null) => {
     setEmbedScopeRoot(el);
     if (el) {
-      applyDesktopUiFontSize(readUiFontSizePx());
+      applyStoredUiFontSize();
       applyUiFontFamily(readUiFontFamily());
       applyThemePalette(readThemePalette());
       applyCustomTheme(readCustomTheme());
@@ -197,12 +212,19 @@ function OmnigentProviders({
     //     scope root, not the root itself.
     //   - the inner div carries the host-driven `dark` class (when dark) and is
     //     the Radix portal root, so both the app and its overlays read the dark
-    //     token overrides. Light mode = no class → inherits the scope root's
-    //     light tokens.
-    <div ref={scopeRootRef} className="omnigent-app" style={{ height: "100%", width: "100%" }}>
+    //     token overrides. Light mode = no `dark` class → inherits the scope
+    //     root's light tokens. It re-applies `text-foreground` because the scope
+    //     root resolves `color` from the light tokens, and overlays without
+    //     their own text color would inherit that value.
+    <div
+      ref={scopeRootRef}
+      className="omnigent-app"
+      data-electron-mac={isMacElectronShell() ? "true" : undefined}
+      style={{ height: "100%", width: "100%" }}
+    >
       <div
         ref={scopeRef}
-        className={isDarkMode ? "dark" : undefined}
+        className={cn(isDarkMode && "dark", "text-foreground")}
         style={{ height: "100%", width: "100%" }}
       >
         <EmbeddedProvider>
@@ -221,13 +243,17 @@ function OmnigentProviders({
               <ImageLightboxProvider>
                 <RoutingProvider value={routing}>
                   <EmbedCapabilitiesProvider>
-                    <SessionUpdatesProvider>
-                      <RunnerHealthProvider>
-                        <QueueFlushProvider>
-                          <App basename={basename} />
-                        </QueueFlushProvider>
-                      </RunnerHealthProvider>
-                    </SessionUpdatesProvider>
+                    <IdentityAwareSidebarDataProvider
+                      config={{ ...appConfig.sidebar, ...sidebarOverrides }}
+                    >
+                      <SessionUpdatesProvider>
+                        <RunnerHealthProvider>
+                          <QueueFlushProvider>
+                            <App basename={basename} />
+                          </QueueFlushProvider>
+                        </RunnerHealthProvider>
+                      </SessionUpdatesProvider>
+                    </IdentityAwareSidebarDataProvider>
                   </EmbedCapabilitiesProvider>
                 </RoutingProvider>
               </ImageLightboxProvider>
@@ -252,6 +278,7 @@ function OmnigentProviders({
  *     under `basename` via `basenamedRouting` (the routing IoC).
  */
 export function OmnigentApp({
+  sidebarConfig,
   basename,
   routing,
   isDarkMode,
@@ -284,7 +311,12 @@ export function OmnigentApp({
   return (
     <QueryClientProvider client={queryClient}>
       <ExtensionProvider>
-        <OmnigentProviders routing={routingApi} basename={basename} isDarkMode={isDarkMode} />
+        <OmnigentProviders
+          routing={routingApi}
+          basename={basename}
+          isDarkMode={isDarkMode}
+          sidebarConfig={sidebarConfig}
+        />
       </ExtensionProvider>
     </QueryClientProvider>
   );

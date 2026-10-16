@@ -21,6 +21,20 @@ except ImportError:
 # deliberately replaces ambient state; subprocesses inherit the safe override.
 _TEST_OMNIGENT_DATA_DIR = Path(tempfile.mkdtemp(prefix="omnigent-pytest-")).resolve()
 os.environ["OMNIGENT_DATA_DIR"] = str(_TEST_OMNIGENT_DATA_DIR)
+# Servers and runners booted by tests otherwise sweep the developer's live
+# harness root. Prefer /tmp for the AF_UNIX path-length limit; some sandboxes
+# only allow the default temp dir.
+try:
+    _TEST_HARNESS_TMP_PARENT = Path(tempfile.mkdtemp(prefix="omni-h-", dir="/tmp"))
+except OSError:
+    _TEST_HARNESS_TMP_PARENT = Path(tempfile.mkdtemp(prefix="omni-h-"))
+os.environ["OMNIGENT_HARNESS_TMP_PARENT"] = str(_TEST_HARNESS_TMP_PARENT)
+
+# Tests and their subprocesses must not ship logs through the caller's sink.
+# Sink tests configure their own credentials or sender explicitly.
+for _test_env_name in tuple(os.environ):
+    if _test_env_name.startswith("OMNIGENT_DEBUG_LOG_"):
+        os.environ.pop(_test_env_name)
 
 # Skip the synchronous api.litellm.ai/model_catalog HTTP fallback during
 # tests. Hardened CI runners can't reach the public internet, so every
@@ -144,6 +158,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     for cmdline in survivors:
         print(f"\nUNREAPED omnigent process survived SIGKILL: {cmdline}", file=sys.stderr)
     shutil.rmtree(_TEST_OMNIGENT_DATA_DIR, ignore_errors=True)
+    shutil.rmtree(_TEST_HARNESS_TMP_PARENT, ignore_errors=True)
 
 
 # Per-worker progress logger: fsync'd START/END lines so a
@@ -458,6 +473,38 @@ def _stub_untracked_cache_start(
     monkeypatch.setattr(GitFilesystemRegistry, "start", lambda self: None)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_origin_identity(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep debug-log workspace attribution off the network and out of later tests.
+
+    Host startup and CLI server resolution probe a workspace-hosted server once
+    when nothing records its workspace id. Unstubbed, that probe would consume a
+    response a test scripted into a patched ``httpx.get`` (or hit the real host),
+    and the published env would carry into later tests. The probe's own tests
+    request ``origin_identity_probe``.
+
+    :param request: Pytest request, inspected for the opt-in fixture.
+    :param monkeypatch: Pytest monkeypatch fixture; restores the env and probe
+        at teardown.
+    :returns: None.
+    """
+    from omnigent import debug_logging
+
+    monkeypatch.delenv(debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR, raising=False)
+    monkeypatch.setattr(debug_logging, "_probed_workspace_ids", {})
+    if "origin_identity_probe" in request.fixturenames:
+        return
+    monkeypatch.setattr(debug_logging, "_probe_workspace_id", lambda api_base: None)
+
+
+@pytest.fixture
+def origin_identity_probe() -> None:
+    """Opt in to the real workspace-id probe (see ``_isolate_origin_identity``)."""
+
+
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_snapshot_failures(pytestconfig: pytest.Config) -> Generator[None, None, None]:
     """Give every xdist worker its own snapshot-failures directory.
@@ -572,12 +619,21 @@ def _worker_db_uri() -> Generator[str, None, None]:
     root_engine2.dispose()
 
 
+@pytest.fixture(scope="session")
+def _sqlite_db_template() -> Path | None:
+    """Suites may supply a migrated SQLite snapshot; the default runs migrations."""
+    return None
+
+
 @pytest.fixture()
-def db_uri(tmp_path: Path, _worker_db_uri: str) -> Generator[str, None, None]:
+def db_uri(
+    tmp_path: Path, _worker_db_uri: str, _sqlite_db_template: Path | None
+) -> Generator[str, None, None]:
     """
     Per-test database URI.
 
-    * **SQLite** (default): fresh file per test, fully isolated.
+    * **SQLite** (default): fresh file per test, optionally copied from
+      a suite's migrated template. Engines and data remain fully isolated.
     * **Postgres / MySQL / CockroachDB** (``OMNIGENT_TEST_DB_URI`` set):
       reuses the session-scoped worker database and clears all non-alembic
       tables between tests so each test starts clean without re-migrating.
@@ -587,6 +643,8 @@ def db_uri(tmp_path: Path, _worker_db_uri: str) -> Generator[str, None, None]:
     if not _worker_db_uri:
         # SQLite: per-test file.
         db_path = tmp_path / "test.db"
+        if _sqlite_db_template is not None:
+            shutil.copyfile(_sqlite_db_template, db_path)
         uri = f"sqlite:///{db_path}"
         engine = get_or_create_engine(uri)
         yield uri

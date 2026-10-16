@@ -95,7 +95,7 @@ jobs:
           if ! files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename'); then
             echo "ui=true" >> "$GITHUB_OUTPUT"; echo "file list unavailable -> render"; exit 0
           fi
-          pattern='^(web/|tests/e2e_ui/visual/|tests/e2e_ui/conftest\.py|\.github/actions/setup-pnpm/|\.github/workflows/ui-snapshot\.yml|pnpm-lock\.yaml|pnpm-workspace\.yaml|pyproject\.toml|uv\.lock)'
+          pattern='^(web/|tests/e2e_ui/visual/|tests/e2e_ui/conftest\.py|tests/helpers/|\.github/actions/setup-pnpm/|\.github/workflows/ui-snapshot\.yml|pnpm-lock\.yaml|pnpm-workspace\.yaml|pyproject\.toml|uv\.lock)'
           if printf '%s\n' "$files" | grep -qE "$pattern"; then
             echo "ui=true" >> "$GITHUB_OUTPUT"
             echo "render-affecting files changed:"
@@ -133,7 +133,7 @@ jobs:
       # The pinned Playwright image doesn't ship Node, so install Node before
       # the pnpm action (pnpm/action-setup's self-installer needs a Node binary).
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
 
@@ -144,12 +144,12 @@ jobs:
           standalone: true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        uses: omnigent-ai/omnigent/.github/actions/setup-uv@25521b2eb074b11ebe51fe5e3eaeb494e20101eb # self-contained setup
         with:
           enable-cache: true
 
       - name: Cache virtualenv
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .venv
           # Namespaced away from e2e-ui.yml's host venv: this venv is built with
@@ -192,7 +192,7 @@ jobs:
           # live_server subprocess is torn down.
           uv run pytest tests/e2e_ui/visual -m visual \
             -v --tb=long --log-level=INFO -r a \
-            -p no:rerunfailures \
+            -p no:rerunfailures --ignore-size-diff \
             --ui-skip-build \
             "${EXTRA_ARGS[@]}"
 

@@ -12,14 +12,26 @@ name: CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore: ['web/**', 'tests/e2e_ui/**', 'CHANGELOG.md']
+    paths-ignore:
+      - 'web/**'
+      - 'docs/**'
+      - 'designs/**'
+      - 'CHANGELOG.md'
+      - 'tests/browser_ui/**'
+      - 'tests/e2e_ui/**'
   push:
     branches:
       - main
       # Release branches: release.yml's green-CI gate reads check runs off the
       # branch head, so cherry-picks and release-bump commits must run CI.
       - 'release/v[0-9]*'
-    paths-ignore: ['web/**', 'tests/e2e_ui/**', 'CHANGELOG.md']
+    paths-ignore:
+      - 'web/**'
+      - 'docs/**'
+      - 'designs/**'
+      - 'CHANGELOG.md'
+      - 'tests/browser_ui/**'
+      - 'tests/e2e_ui/**'
 
 permissions:
   contents: read
@@ -165,9 +177,15 @@ jobs:
           python-version-file: ".python-version"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v3
+        uses: ./.github/actions/setup-uv
         with:
           enable-cache: true
+
+      - name: Set up Node.js for local relay tests
+        if: matrix.group == 'misc'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
 
       - name: Install test system dependencies
         # ripgrep: the Grep tool prefers it. bubblewrap: the linux_bwrap sandbox
@@ -183,7 +201,7 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Cache virtualenv
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('.python-version') }}-${{ hashFiles('uv.lock') }}
@@ -241,6 +259,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pytest-${{ matrix.group }}-${{ github.run_id }}
+          # A retry must replace the failed attempt's partial coverage.
+          overwrite: true
           path: artifacts/
           retention-days: 14
           include-hidden-files: true  # the per-shard .coverage.<group> dotfile
@@ -269,7 +289,7 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version-file: ".python-version"
-      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
+      - uses: ./.github/actions/setup-uv
         with:
           enable-cache: true
       - name: Install dependencies
@@ -311,7 +331,7 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version-file: ".python-version"
-      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
+      - uses: ./.github/actions/setup-uv
         with:
           enable-cache: true
       - name: Start CockroachDB
@@ -366,7 +386,7 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version-file: ".python-version"
-      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
+      - uses: ./.github/actions/setup-uv
         with:
           enable-cache: true
       - name: Install system MySQL client library
@@ -406,7 +426,7 @@ jobs:
           python-version-file: ".python-version"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v3
+        uses: ./.github/actions/setup-uv
         with:
           enable-cache: true
 
@@ -425,23 +445,25 @@ jobs:
       # self-invalidates when the source, Cargo.lock, or rustc changes.
       - name: Cache parity sidecar binary
         id: sidecar-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .tmp-codex-parity-target/debug/codex-parity-sidecar
           key: codex-parity-bin-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('tests/codex_parity/sidecar/**') }}
 
       - name: Set up pnpm
+        # This job never runs pnpm install, so caching the (empty) pnpm store
+        # makes setup-node's post-step fail on a cache miss.
         uses: ./.github/actions/setup-pnpm
+        with:
+          cache: ""
 
       - name: Install codex CLI
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-        run: |
-          pnpm install --frozen-lockfile --ignore-scripts --filter e2e-ci-deps
-          echo "${GITHUB_WORKSPACE}/.github/ci-deps/node_modules/.bin" >> "$GITHUB_PATH"
+        uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@4f403d71435055cf820984e829cb630cbc73da53
+        with:
+          harness: codex
 
       - name: Cache virtualenv
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('.python-version') }}-${{ hashFiles('uv.lock') }}
@@ -527,9 +549,10 @@ jobs:
           echo "Combining ${#files[@]} shard data file(s)."
           coverage combine "${files[@]}"
           # --ignore-errors: a plain checkout lacks uv-sync-generated files.
-          { echo "## Coverage"; echo; coverage report --format=markdown --ignore-errors; } >> "$GITHUB_STEP_SUMMARY"
+          coverage report --format=markdown --ignore-errors > "$RUNNER_TEMP/coverage-report.md"
+          { echo "## Coverage"; echo; cat "$RUNNER_TEMP/coverage-report.md"; } >> "$GITHUB_STEP_SUMMARY"
           coverage xml -o coverage-summary/coverage.xml --ignore-errors
-          coverage report --format=total --ignore-errors > coverage-summary/total.txt
+          python .github/scripts/ci/coverage-total.py "$RUNNER_TEMP/coverage-report.md" > coverage-summary/total.txt
           echo "Total coverage: $(cat coverage-summary/total.txt)%"
 
       - name: Upload coverage summary
@@ -537,6 +560,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: coverage-summary-${{ github.run_id }}
+          # The status workflow must consume the recomputed summary on retries.
+          overwrite: true
           path: coverage-summary/
           retention-days: 14
           if-no-files-found: ignore

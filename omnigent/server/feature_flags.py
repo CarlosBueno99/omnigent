@@ -23,6 +23,10 @@ class Feature(StrEnum):
     USAGE_PAGE = "usage_page"
     HARNESS_INSTALL = "harness_install"
     CANVAS = "canvas"
+    ARCA_SHUTDOWN_WARNINGS = "arca_shutdown_warnings"
+    IMPORT_REVIEW = "import_review"
+    CUSTOM_AGENTS_SETTINGS_UI = "custom_agents_settings_ui"
+    SIDEBAR_GROUPING_UI = "sidebar_grouping_ui"
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,31 @@ FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
         description="Web Canvas page: sessions as draggable cards grouped by project",
         owner="web",
         review_by_release="0.15.0",
+    ),
+    FeatureDefinition(
+        feature=Feature.ARCA_SHUTDOWN_WARNINGS,
+        description="Weekday Arca shutdown warning in the web UI",
+        owner="web",
+        review_by_release="0.20.0",
+        frontend_visible=True,
+    ),
+    FeatureDefinition(
+        feature=Feature.IMPORT_REVIEW,
+        description="Auto-opening import review modal for a newly connected host's context",
+        owner="onboarding",
+        review_by_release="0.18.0",
+    ),
+    FeatureDefinition(
+        feature=Feature.CUSTOM_AGENTS_SETTINGS_UI,
+        description="Manage reusable custom agents from Settings",
+        owner="web",
+        review_by_release="0.18.0",
+    ),
+    FeatureDefinition(
+        feature=Feature.SIDEBAR_GROUPING_UI,
+        description="Sidebar grouping, ordering and row metadata options, Shared section",
+        owner="web",
+        review_by_release="0.19.0",
     ),
 )
 

@@ -9,8 +9,12 @@ const vm = require("node:vm");
 
 function loadMainHarness({
   settings = {},
+  serverUrl = "https://server.example/app",
+  sessionCookies = [],
   forceDevUpdateConfig = false,
   dialogResponses = [{ response: 1, checkboxChecked: false }],
+  saveDialogResult = { canceled: false, filePath: "/tmp/desktop-diagnostics.jsonl" },
+  exportError = null,
   serverShutdown = () => Promise.resolve(),
   isPackaged = false,
   platform = process.platform,
@@ -31,18 +35,29 @@ function loadMainHarness({
     quitAndInstall: [],
     sent: [],
     showMessageBox: [],
+    showSaveDialog: [],
+    exportedDiagnostics: [],
     setApplicationMenu: [],
     aboutOpens: [],
+    expiredAccess: [],
+    removedRefresh: [],
+    authRequests: [],
+    cookieReads: [],
+    cookieRemovals: [],
+    reloads: 0,
   };
 
   const sender = {
-    getURL: () => "https://server.example/app",
+    getURL: () => serverUrl,
   };
   const win = {
     isDestroyed: () => false,
     webContents: {
-      getURL: () => "https://server.example/app",
+      getURL: () => serverUrl,
       send: (channel, payload) => calls.sent.push({ channel, payload }),
+      reload: () => {
+        calls.reloads++;
+      },
     },
     isMinimized: () => false,
     restore: () => {},
@@ -85,6 +100,7 @@ function loadMainHarness({
       getPath: (name) => (name === "userData" ? userData : userData),
       getVersion: () => "0.3.0",
       setName: () => {},
+      setPath: () => {},
       requestSingleInstanceLock: () => true,
       on: (name, listener) => appEvents.set(name, listener),
       whenReady: () => ({ then: () => {} }),
@@ -108,6 +124,10 @@ function loadMainHarness({
     Notification: { isSupported: () => false },
     clipboard: {},
     dialog: {
+      showSaveDialog: (...args) => {
+        calls.showSaveDialog.push(args);
+        return Promise.resolve(saveDialogResult);
+      },
       showMessageBox: (dialogWin, options) => {
         calls.showMessageBox.push({ win: dialogWin, options });
         return Promise.resolve(dialogResponses.shift() ?? { response: 1, checkboxChecked: false });
@@ -122,7 +142,19 @@ function loadMainHarness({
     },
     nativeTheme: { shouldUseDarkColors: false, on: () => {} },
     screen: {},
-    session: { defaultSession: {} },
+    session: {
+      defaultSession: {
+        cookies: {
+          get: async (filter) => {
+            calls.cookieReads.push(filter);
+            return sessionCookies;
+          },
+          remove: async (url, name) => {
+            calls.cookieRemovals.push([url, name]);
+          },
+        },
+      },
+    },
     shell: {},
     systemPreferences: {
       getUserDefault: (key, type) =>
@@ -131,6 +163,15 @@ function loadMainHarness({
   };
 
   const localRequires = {
+    "./diagnostics": {
+      diagnostics: {
+        record: () => {},
+        exportTo: (destination) => {
+          if (exportError) throw exportError;
+          calls.exportedDiagnostics.push(destination);
+        },
+      },
+    },
     "./about_window": {
       createAboutWindow: () => ({
         open: (parent) => calls.aboutOpens.push(parent),
@@ -144,6 +185,24 @@ function loadMainHarness({
     },
     "./workspace-chrome": { registerWorkspaceChromeHide: () => {} },
     "./workspace-root-bounce": { registerWorkspaceRootBounce: () => {} },
+    // databricks-session (transitively) requires electron's `net`, unresolvable
+    // under the sandbox's real require; behavior is covered in databricks-*.test.js.
+    "./databricks-session": {
+      ensureDatabricksSession: async (_ses, origin) => {
+        calls.authRequests.push(origin);
+        return origin;
+      },
+    },
+    "./databricks-oauth": {
+      expireStoredAccessToken: (origin) => {
+        calls.expiredAccess.push(origin);
+        return true;
+      },
+      removeStoredRefreshToken: (origin) => {
+        calls.removedRefresh.push(origin);
+        return true;
+      },
+    },
     "./omnigent_cli": {
       isExecutableFile: () => false,
       resolveCliPath: () => null,
@@ -211,8 +270,8 @@ function loadMainHarness({
 
   vm.runInNewContext(source, sandbox, { filename: mainPath });
   module.exports.testApi.windows.set(win, {
-    origin: "https://server.example",
-    serverUrl: "https://server.example/app",
+    origin: new URL(serverUrl).origin,
+    serverUrl,
     badgeCount: 0,
   });
 
@@ -223,7 +282,7 @@ function loadMainHarness({
     calls,
     cleanup: () => fs.rmSync(userData, { recursive: true, force: true }),
     events: {
-      pinned: { sender, senderFrame: { url: "https://server.example/app" } },
+      pinned: { sender, senderFrame: { url: serverUrl } },
       unpinned: { sender, senderFrame: { url: "https://evil.example/app" } },
     },
     ipcHandlers,
@@ -248,8 +307,8 @@ function plain(value) {
 
 function findMenuItem(menu, id) {
   for (const item of menu.template) {
-    const submenu = item.submenu ?? [];
-    const found = submenu.find((entry) => entry.id === id);
+    if (item.id === id) return item;
+    const found = findMenuItem({ template: item.submenu ?? [] }, id);
     if (found) return found;
   }
   return null;
@@ -283,6 +342,45 @@ describe("in-app navigation menu actions", () => {
       channel: "omnigent:open-path",
       payload: "/",
     });
+  });
+});
+
+describe("diagnostics export menu wiring", () => {
+  it("exports from the production Server menu without renderer IPC", async (t) => {
+    const harness = loadMainHarness({ isPackaged: true, platform: "darwin" });
+    t.after(harness.cleanup);
+    harness.api.registerIpc();
+    harness.api.buildMenu();
+    const menu = harness.calls.setApplicationMenu.at(-1);
+    assert.equal(hasDebugMenu(menu), false);
+    assert.ok(harness.ipcHandlers.size > 0);
+    const item = findMenuItem(menu, "export_diagnostics");
+    assert.equal(item.label, "Export Diagnostics…");
+    item.click();
+    await flushPromises();
+    assert.equal(harness.calls.showSaveDialog.length, 1);
+    assert.deepEqual(harness.calls.exportedDiagnostics, ["/tmp/desktop-diagnostics.jsonl"]);
+    assert.equal(harness.ipcHandlers.has("omnigent:export-diagnostics"), false);
+  });
+
+  it("does not export when the save dialog is cancelled", async (t) => {
+    const harness = loadMainHarness({ saveDialogResult: { canceled: true } });
+    t.after(harness.cleanup);
+    harness.api.buildMenu();
+    findMenuItem(harness.calls.setApplicationMenu.at(-1), "export_diagnostics").click();
+    await flushPromises();
+    assert.deepEqual(harness.calls.exportedDiagnostics, []);
+  });
+
+  it("shows an error if the chosen destination cannot be written", async (t) => {
+    const harness = loadMainHarness({ exportError: new Error("Destination is not writable") });
+    t.after(harness.cleanup);
+    harness.api.buildMenu();
+    findMenuItem(harness.calls.setApplicationMenu.at(-1), "export_diagnostics").click();
+    await flushPromises();
+    assert.deepEqual(harness.calls.exportedDiagnostics, []);
+    assert.equal(harness.calls.showMessageBox.length, 1);
+    assert.equal(harness.calls.showMessageBox[0].options.title, "Could not export diagnostics");
   });
 });
 
@@ -325,13 +423,65 @@ describe("About menu wiring", () => {
 });
 
 describe("developer-mode menu wiring", () => {
-  it("keeps the Debug menu in development builds", (t) => {
+  it("places expiry simulations under Debug, not Server, in development builds", (t) => {
     const harness = loadMainHarness({ isPackaged: false, platform: "linux" });
     t.after(harness.cleanup);
 
     harness.api.buildMenu();
 
-    assert.equal(hasDebugMenu(harness.calls.setApplicationMenu.at(-1)), true);
+    const menu = harness.calls.setApplicationMenu.at(-1);
+    const debug = menu.template.find((item) => item.label === "Debug");
+    const server = menu.template.find((item) => item.label === "Server");
+    const authentication = debug.submenu.find((item) => item.id === "debug_authentication");
+    assert.equal(authentication.label, "Authentication");
+    for (const id of [
+      "simulate_session_expiry",
+      "simulate_oauth_token_expiry",
+      "invalidate_oauth_refresh_token",
+    ]) {
+      assert.equal(typeof authentication.submenu.find((item) => item.id === id)?.click, "function");
+      assert.equal(findMenuItem({ template: [server] }, id), null);
+    }
+  });
+
+  it("clears the focused workspace cookie without forcing a reload or renewal", async (t) => {
+    const origin = "https://workspace.cloud.databricks.com";
+    const harness = loadMainHarness({
+      isPackaged: false,
+      platform: "linux",
+      serverUrl: `${origin}/omnigent`,
+      sessionCookies: [
+        { name: "DBAUTH", domain: ".workspace.cloud.databricks.com", path: "/", secure: true },
+      ],
+    });
+    t.after(harness.cleanup);
+    harness.api.buildMenu();
+    findMenuItem(harness.calls.setApplicationMenu.at(-1), "simulate_session_expiry").click();
+    await flushPromises();
+    assert.deepEqual(plain(harness.calls.cookieReads), [{ url: origin, name: "DBAUTH" }]);
+    assert.deepEqual(harness.calls.cookieRemovals, [[`${origin}/`, "DBAUTH"]]);
+    assert.equal(harness.calls.reloads, 0);
+    assert.deepEqual(harness.calls.authRequests, []);
+  });
+
+  it("changes cached tokens without starting a refresh or reload", async (t) => {
+    const origin = "https://workspace.cloud.databricks.com";
+    const harness = loadMainHarness({
+      isPackaged: false,
+      platform: "linux",
+      serverUrl: `${origin}/omnigent`,
+    });
+    t.after(harness.cleanup);
+    harness.api.buildMenu();
+    const menu = harness.calls.setApplicationMenu.at(-1);
+    findMenuItem(menu, "simulate_oauth_token_expiry").click();
+    findMenuItem(menu, "invalidate_oauth_refresh_token").click();
+    await flushPromises();
+    assert.deepEqual(harness.calls.expiredAccess, [origin]);
+    assert.deepEqual(harness.calls.removedRefresh, [origin]);
+    assert.deepEqual(harness.calls.authRequests, []);
+    assert.equal(harness.calls.reloads, 0);
+    assert.deepEqual(harness.calls.showMessageBox, []);
   });
 
   it("hides the Debug menu in packaged builds by default", (t) => {
@@ -347,7 +497,7 @@ describe("developer-mode menu wiring", () => {
     assert.equal(hasDebugMenu(harness.calls.setApplicationMenu.at(-1)), false);
   });
 
-  it("shows the Debug menu when a packaged macOS build opts in", (t) => {
+  it("shows authentication debugging when a packaged macOS build opts in", (t) => {
     const harness = loadMainHarness({
       isPackaged: true,
       platform: "darwin",
@@ -357,7 +507,17 @@ describe("developer-mode menu wiring", () => {
 
     harness.api.buildMenu();
 
-    assert.equal(hasDebugMenu(harness.calls.setApplicationMenu.at(-1)), true);
+    const menu = harness.calls.setApplicationMenu.at(-1);
+    assert.equal(hasDebugMenu(menu), true);
+    const authentication = findMenuItem(menu, "debug_authentication");
+    assert.equal(authentication.label, "Authentication");
+    for (const id of [
+      "simulate_session_expiry",
+      "simulate_oauth_token_expiry",
+      "invalidate_oauth_refresh_token",
+    ]) {
+      assert.equal(typeof findMenuItem(menu, id)?.click, "function");
+    }
   });
 });
 
@@ -579,6 +739,7 @@ describe("auto-update main-process wiring", () => {
     const harness = loadMainHarness({
       forceDevUpdateConfig: true,
       settings: { update_mode: "manual" },
+      platform: "linux",
     });
     t.after(harness.cleanup);
     harness.api.updater.init();
@@ -607,6 +768,36 @@ describe("auto-update main-process wiring", () => {
     });
     assert.equal(harness.calls.appExit, 1); // fallback forced the exit
     assert.equal(harness.calls.appQuit, 1); // never re-issued
+  });
+
+  it("waits on macOS for an async install (admin prompt) instead of force-exiting", async (t) => {
+    // Squirrel.Mac installs asynchronously and may show an admin password
+    // prompt for a root-owned bundle; a timed exit would kill that prompt.
+    const harness = loadMainHarness({
+      forceDevUpdateConfig: true,
+      settings: { update_mode: "manual" },
+      platform: "darwin",
+    });
+    t.after(harness.cleanup);
+    harness.api.updater.init();
+    harness.autoUpdater.emit("update-downloaded", { version: "0.4.0" });
+    harness.api.registerIpc();
+    await harness.ipcHandlers.get("omnigent:update-install")(harness.events.pinned);
+
+    harness.api.setQuitTimeouts({ installFallback: 10, cleanup: 10 });
+    harness.appEvents.get("before-quit")({ preventDefault: () => {} });
+    await flushPromises();
+    harness.runMainImmediates();
+    assert.deepEqual(harness.calls.quitAndInstall, [[false, true]]);
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 30);
+    });
+    assert.equal(harness.calls.appExit, 0); // still waiting on the install
+
+    // A failed/cancelled install still exits rather than leaving the app up.
+    harness.autoUpdater.emit("error", new Error("authorization canceled"));
+    assert.equal(harness.calls.appExit, 1);
   });
 
   it("force-exits if the re-issued normal quit does not terminate", async (t) => {

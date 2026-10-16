@@ -15,12 +15,14 @@ import {
 import {
   ArrowUpIcon,
   CheckIcon,
+  ClockIcon,
   CopyIcon,
   FileTextIcon,
   FolderIcon,
-  GitForkIcon,
   ImageIcon,
+  Link2Icon,
   Loader2Icon,
+  SplitIcon,
   XIcon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -42,10 +44,12 @@ import {
 } from "@/components/blocks/BlockRenderer";
 import {
   CompactionMarker,
+  CONTINUE_TURN_ERROR_CODES,
   ErrorBanner,
   RoutingDecisionCard,
 } from "@/components/blocks/StatusBlocks";
 import { SystemMessageView } from "@/components/blocks/SystemMessage";
+import { SubagentActivityMessage } from "@/components/blocks/SubagentActivityMessage";
 import { isSystemUserContent, parseSystemMessage } from "@/lib/systemMessage";
 import { Button } from "@/components/ui/button";
 import { BrandLogo } from "@/components/BrandLogo";
@@ -61,15 +65,24 @@ import {
 } from "@/lib/blocks";
 import { type Bubble, type RenderItem, bubblesEqual } from "@/lib/renderItems";
 import { getCurrentAuthorId } from "@/lib/identity";
-import { retryRateLimitedTurn, retrySession } from "@/lib/sessionsApi";
+import { QueryClientContext } from "@tanstack/react-query";
+import { ApiError, continueFailedTurn, retrySession } from "@/lib/sessionsApi";
 import { useChatStore, type PendingUserMessage } from "@/store/chatStore";
+import { conversationRegistry } from "@/store/conversationRegistry";
+import { useConversationEntryState } from "@/hooks/useConversationEntryState";
+import {
+  ConversationScopeContext,
+  useScopedConversationId,
+} from "@/components/chat/conversationScope";
 import { useStickToBottomContext } from "use-stick-to-bottom";
-import { UserMessageNav } from "@/components/UserMessageNav";
 import { isSessionScopedDecision, showsRoutingDecisionChip } from "@/lib/routingDecision";
 import { useWorkingLabelTick } from "@/hooks/useWorkingLabelTick";
 import { useForkDialog } from "@/shell/ForkDialogContext";
+import { DisabledActionTooltip } from "@/components/DisabledActionTooltip";
 import { InlineImage, SessionImage } from "@/components/SessionImage";
+import { buildMessageDeepLink } from "@/lib/messageDeepLink";
 import { copyText } from "@/lib/clipboard";
+import { copyMarkdown } from "@/lib/copyMarkdown";
 import { showToast } from "@/components/ui/toast";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import type { SessionStatus } from "@/lib/types";
@@ -81,7 +94,14 @@ import {
 // Matches both wordings the native executors emit: "[Attached: <path>]"
 // (claude/pi/cursor) and "[Attached file: <path>]" (codex). Capturing group
 // is the path. Global so all markers in a message are found / stripped.
-const ATTACHED_RE = /\[Attached(?: file)?:\s*([^\]]*)\]\s*/g;
+const ATTACHED_RE = /\[Attached(?: file)?:\s*([^\]]*)\][ \t]*(?:\r?\n)*/g;
+
+const COLLAPSE_THRESHOLD = 12000;
+
+// Slice a string by threshold and remove corrupted symbols
+function sliceByCodePoint(str: string, limit: number): string {
+  return str.slice(0, limit).replace(/[\uD800-\uDBFF]$/, "");
+}
 
 // Author labels render only in a shared session; ChatPage provides the
 // value and UserBubble reads it, so the gate lives in one place.
@@ -93,7 +113,7 @@ export function extractUserText(content: MessageContentBlock[]): string {
     .map((c) => c.text)
     .join("")
     .replace(ATTACHED_RE, "")
-    .trim();
+    .trimEnd();
 }
 
 // An absolute filesystem path in any form a native executor might materialize
@@ -149,6 +169,7 @@ export function collectBubbleMarkdown(items: RenderItem[]): string {
 
 const TABLE_SEPARATOR_RE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 const DISPLAY_MATH_RE = /(^|\n)\s*(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\])/;
+const MERMAID_FENCE_RE = /^ {0,3}(?:`{3,}|~{3,})mermaid(?:\s|$)/im;
 
 function isMarkdownTableRow(line: string): boolean {
   return line.trim().includes("|");
@@ -173,6 +194,10 @@ export function containsDisplayMath(items: RenderItem[]): boolean {
   return items.some((item) => item.kind === "text" && DISPLAY_MATH_RE.test(item.text));
 }
 
+export function containsMermaidDiagram(items: RenderItem[]): boolean {
+  return items.some((item) => item.kind === "text" && MERMAID_FENCE_RE.test(item.text));
+}
+
 /**
  * Build optimistic user bubbles from the pending-send queue.
  *
@@ -193,6 +218,8 @@ export function buildPendingBubbles(
       kind: "user",
       // No server item id yet; tempId keeps React keys stable until promotion.
       itemId: p.tempId,
+      pending: true,
+      ...(p.sentMidTurn ? { awaitingAgent: true } : {}),
       content: p.content,
       ...(author !== null ? { createdBy: author } : {}),
       // Stamped once at send time; absent for snapshot-replayed entries,
@@ -331,6 +358,7 @@ export function bubbleKey(bubble: Bubble): string {
   if (bubble.kind === "compaction_loading") return `compaction_loading:${bubble.itemId}`;
   if (bubble.kind === "compaction") return `compaction:${bubble.itemId}`;
   if (bubble.kind === "routing_decision") return `routing_decision:${bubble.itemId}`;
+  if (bubble.kind === "subagent_activity") return `subagent_activity:${bubble.itemId}`;
   return `assistant:${bubble.stableId}`;
 }
 
@@ -374,10 +402,14 @@ export function isBackgroundTasksOnly(
  * Whether the agent's own turn is in progress — server `running`/`waiting`, or
  * a local send in flight.
  */
+export function computeIsTurnActive(sessionStatus: SessionStatus, localSending: boolean): boolean {
+  return computeIsWorking(sessionStatus) || localSending;
+}
+
 function useAgentTurnActive(): boolean {
   const sessionStatus = useChatStore((s) => s.sessionStatus);
   const localSending = useChatStore((s) => s.status === "streaming");
-  return computeIsWorking(sessionStatus) || localSending;
+  return computeIsTurnActive(sessionStatus, localSending);
 }
 
 /**
@@ -398,9 +430,16 @@ export function workingIndicatorLabel(tick = 0, blockedOn: string | null = null)
 }
 
 export function WorkingIndicator() {
-  const bgCount = useChatStore((s) => s.backgroundTaskCount);
-  const blockedOn = useChatStore((s) => s.blockedOn);
-  const agentWorking = useAgentTurnActive();
+  const scopedConversationId = useContext(ConversationScopeContext);
+  const scopedState = useConversationEntryState(scopedConversationId);
+  const rootBgCount = useChatStore((s) => s.backgroundTaskCount);
+  const rootBlockedOn = useChatStore((s) => s.blockedOn);
+  const rootAgentWorking = useAgentTurnActive();
+  const bgCount = scopedConversationId ? scopedState.backgroundTaskCount : rootBgCount;
+  const blockedOn = scopedConversationId ? scopedState.blockedOn : rootBlockedOn;
+  const agentWorking = scopedConversationId
+    ? computeIsTurnActive(scopedState.sessionStatus, scopedState.status === "streaming")
+    : rootAgentWorking;
   const tick = useWorkingLabelTick();
   // Once the turn ends but background shells outlive it, BackgroundTaskPill owns
   // the state and the shimmer stays off (it would misread as the agent still
@@ -519,17 +558,23 @@ export const BubbleView = memo(
     isLastAssistant = false,
     showsWorking = false,
     actionsPersistent = false,
+    recoveryDisabled = false,
   }: {
     bubble: Bubble;
     isLastAssistant?: boolean;
     showsWorking?: boolean;
     actionsPersistent?: boolean;
+    /** Hide retry/recovery controls when the surrounding session is sealed. */
+    recoveryDisabled?: boolean;
   }) {
     if (bubble.kind === "user") return <UserBubble bubble={bubble} />;
     if (bubble.kind === "compaction_loading") {
       return <CompactionLoadingIndicator createdAtS={bubble.createdAtS} />;
     }
     if (bubble.kind === "compaction") return <CompactionMarker />;
+    if (bubble.kind === "subagent_activity") {
+      return <SubagentActivityMessage data={bubble.data} />;
+    }
     if (bubble.kind === "routing_decision") {
       return (
         <RoutingDecisionCard
@@ -547,6 +592,7 @@ export const BubbleView = memo(
         isLastAssistant={isLastAssistant}
         showsWorking={showsWorking}
         actionsPersistent={actionsPersistent}
+        recoveryDisabled={recoveryDisabled}
       />
     );
   },
@@ -554,6 +600,7 @@ export const BubbleView = memo(
     (prev.isLastAssistant ?? false) === (next.isLastAssistant ?? false) &&
     (prev.showsWorking ?? false) === (next.showsWorking ?? false) &&
     (prev.actionsPersistent ?? false) === (next.actionsPersistent ?? false) &&
+    (prev.recoveryDisabled ?? false) === (next.recoveryDisabled ?? false) &&
     bubblesEqual(prev.bubble, next.bubble),
 );
 
@@ -561,9 +608,14 @@ export const BubbleView = memo(
  * Copy-to-clipboard handler for a message bubble's "Copy" action.
  *
  * @param getText - Produces the text to copy at click time.
+ * @param copy - Clipboard writer; assistant bubbles pass {@link copyMarkdown}
+ *   so the paste keeps its formatting.
  * @returns `{ isCopied, handleCopy }` for the action button.
  */
-function useCopyMessage(getText: () => string): {
+function useCopyMessage(
+  getText: () => string,
+  copy: (value: string) => Promise<void> = copyText,
+): {
   isCopied: boolean;
   handleCopy: () => void;
 } {
@@ -577,7 +629,7 @@ function useCopyMessage(getText: () => string): {
     if (isCopied) return;
     const text = getText();
     if (!text) return;
-    copyText(text).then(
+    copy(text).then(
       () => {
         setIsCopied(true);
         window.clearTimeout(timeoutRef.current);
@@ -590,7 +642,7 @@ function useCopyMessage(getText: () => string): {
         console.warn("Failed to copy message", error);
       },
     );
-  }, [getText, isCopied, isMobile]);
+  }, [copy, getText, isCopied, isMobile]);
 
   return { isCopied, handleCopy };
 }
@@ -621,8 +673,46 @@ const USER_MESSAGE_REMARK_REHYPE_OPTIONS: MessageResponseProps["remarkRehypeOpti
   },
 };
 
+/**
+ * Copy a deep link to this message (``?message=<id>`` on the session URL).
+ * Same confirmation UX as {@link useCopyMessage}.
+ *
+ * @param messageId - Stable id stamped on the bubble (user itemId / assistant responseId).
+ */
+function useCopyMessageLink(messageId: string | null): {
+  isLinkCopied: boolean;
+  handleCopyLink: () => void;
+} {
+  const [isLinkCopied, setIsLinkCopied] = useState(false);
+  const timeoutRef = useRef<number>(0);
+  const isMobile = useIsMobileViewport();
+
+  useEffect(() => () => window.clearTimeout(timeoutRef.current), []);
+
+  const handleCopyLink = useCallback(() => {
+    if (!messageId || isLinkCopied) return;
+    copyText(buildMessageDeepLink(messageId)).then(
+      () => {
+        setIsLinkCopied(true);
+        window.clearTimeout(timeoutRef.current);
+        timeoutRef.current = window.setTimeout(() => setIsLinkCopied(false), 2000);
+        if (isMobile) {
+          showToast(<span className="text-ui">Link copied</span>, { duration: 1500 });
+        }
+      },
+      (error) => {
+        console.warn("Failed to copy message link", error);
+      },
+    );
+  }, [messageId, isLinkCopied, isMobile]);
+
+  return { isLinkCopied, handleCopyLink };
+}
+
 function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
-  const sessionId = useChatStore((s) => s.conversationId);
+  // Scoped so a side-chat bubble builds attachment URLs against the CHILD, not
+  // the main conversation the root store projects.
+  const sessionId = useScopedConversationId();
   // Author labels only matter once the session is shared with someone else.
   const isSessionShared = useContext(SessionSharedContext);
   // - input_image: `imagePreview` picks the variant — an uploaded file, an
@@ -630,18 +720,27 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   //   for a block carrying neither.
   // - input_file: always render as a chip (non-image files can't be
   //   previewed inline).
-  const text = extractUserText(bubble.content);
+  const isShellCommand = bubble.shellCommand !== undefined;
+  const text = isShellCommand ? `!${bubble.shellCommand}` : extractUserText(bubble.content);
   const images = bubble.content.filter((c): c is ImageContentBlock => c.type === "input_image");
   const fileChips = bubble.content.filter(
     (c): c is Extract<MessageContentBlock, { type: "input_file" }> => c.type === "input_file",
   );
   // "@"-mentioned workspace files/folders ride in as "[Attached: …]" text
   // markers (no input_file block), so surface them as chips.
-  const mentionedChips = extractAttachedPaths(bubble.content);
+  const mentionedChips = isShellCommand ? [] : extractAttachedPaths(bubble.content);
   // Equality selector so Zustand only re-renders the matching bubble.
   const flashing = useChatStore((s) => s.flashItemId === bubble.itemId);
   const { isCopied, handleCopy } = useCopyMessage(() => text);
   const ts = formatBubbleTimestamp(bubble.createdAtS);
+  const { isLinkCopied, handleCopyLink } = useCopyMessageLink(
+    bubble.pending ? null : bubble.itemId,
+  );
+  // Collapse long prompts by default to avoid expensive Markdown parsing and
+  // a large DOM for text the user hasn't asked to read yet.
+  const isLong = text.length > COLLAPSE_THRESHOLD;
+  const [isCollapsed, setIsCollapsed] = useState(isLong);
+  const visibleText = isCollapsed ? sliceByCodePoint(text, COLLAPSE_THRESHOLD) : text;
   // Runtime-injected `[System: ...]` notifications ride in on role=user. When
   // the content is a pure system marker, swap in a muted centered indicator.
   if (images.length === 0 && fileChips.length === 0 && mentionedChips.length === 0) {
@@ -658,7 +757,8 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
       data-testid="message-bubble"
       data-role="user"
       data-user-message-id={bubble.itemId}
-      className="max-w-[640px]"
+      data-message-id={bubble.itemId}
+      className={cn("max-w-[640px]", bubble.pending && "animate-user-message-enter")}
     >
       <div className="ml-auto flex w-fit max-w-full flex-col items-end">
         {/* w-fit + ml-auto shrink-wrap the row so the author avatar sits
@@ -685,7 +785,7 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
             </Tooltip>
           )}
           <MessageContent
-            className={cn(flashing && "animate-user-msg-flash")}
+            className={flashing ? "animate-message-highlight" : undefined}
             // Another contributor's bubble takes their avatar color at low
             // alpha instead of the default bg-muted.
             style={
@@ -697,7 +797,7 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
                 non-wrapping strip would sit off-screen in the overflow and
                 look like it never rendered. */}
             {images.length > 0 && (
-              <div className="mb-1.5 flex flex-wrap gap-2">
+              <div className="mb-1.5 flex flex-wrap items-start gap-2">
                 {keyedAttachments(
                   images,
                   (img) => img.file_id ?? img.image_url ?? img.filename,
@@ -713,8 +813,6 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
                             : undefined
                         }
                         alt={preview.alt}
-                        // Sizing lives in SessionImage, which reserves a matching
-                        // box so the bubble's height is settled before bytes land.
                         className="rounded-md object-contain"
                       />
                     );
@@ -772,44 +870,88 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
             )}
             {/* Render user text as markdown, matching the assistant bubble.
               `breaks` keeps single newlines as line breaks. Empty text renders
-              nothing rather than an empty markdown block. */}
+              nothing rather than an empty markdown block.
+              For long prompts, only the visible slice is passed to the renderer
+              so the Markdown parser never processes hidden text. */}
             {text && (
-              <FilePathAwareMessageResponse
-                breaks
-                mode="static"
-                remarkRehypeOptions={USER_MESSAGE_REMARK_REHYPE_OPTIONS}
-              >
-                {text}
-              </FilePathAwareMessageResponse>
+              <>
+                <div className={cn("relative", isCollapsed && "max-h-64 overflow-hidden")}>
+                  {isShellCommand ? (
+                    <pre className="whitespace-pre-wrap break-words font-mono text-sm">
+                      <code>{visibleText}</code>
+                    </pre>
+                  ) : (
+                    <FilePathAwareMessageResponse
+                      breaks
+                      mode="static"
+                      remarkRehypeOptions={USER_MESSAGE_REMARK_REHYPE_OPTIONS}
+                    >
+                      {visibleText}
+                    </FilePathAwareMessageResponse>
+                  )}
+                  {/* Gradient fade at the bottom of collapsed prompts to signal
+                      there is more content below. */}
+                  {isCollapsed && isLong && (
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-muted to-transparent" />
+                  )}
+                </div>
+                {isLong && (
+                  <button
+                    type="button"
+                    onClick={() => setIsCollapsed((c) => !c)}
+                    className="mt-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {isCollapsed
+                      ? `Show full prompt (${text.length.toLocaleString()} chars)`
+                      : "Collapse prompt"}
+                  </button>
+                )}
+              </>
             )}
           </MessageContent>
         </div>
-        {/* Skip an empty row when there is neither a timestamp nor a copy
-            action. 40%-visible on touch, hover/focus-reveal on desktop. */}
-        {(ts || text) && (
-          <div className="flex items-center justify-end gap-3 py-1 opacity-40 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
-            {ts && (
-              <span
-                className="select-none text-[11px] leading-4 text-foreground/56"
-                data-testid="message-timestamp"
-              >
-                {ts}
-              </span>
-            )}
-            {text && (
-              <MessageActions>
-                <MessageAction
-                  tooltip="Copy"
-                  size="icon-xxs"
-                  onClick={handleCopy}
-                  componentId="chat.message.copy_user"
-                >
-                  {isCopied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
-                </MessageAction>
-              </MessageActions>
-            )}
+        {/* Always visible: a mid-turn message can wait minutes behind a long tool call. */}
+        {bubble.pending && bubble.awaitingAgent && (
+          <div
+            className="flex items-center gap-1 pt-1 text-[11px] leading-4 text-muted-foreground"
+            data-testid="message-awaiting-agent"
+          >
+            <ClockIcon size={12} aria-hidden />
+            The agent will read this after its current step
           </div>
         )}
+        {/* 40%-visible on touch, hover/focus-reveal on desktop. */}
+        <div className="flex items-center justify-end gap-3 py-1 opacity-40 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
+          {ts && (
+            <span
+              className="select-none text-[11px] leading-4 text-foreground/56"
+              data-testid="message-timestamp"
+            >
+              {ts}
+            </span>
+          )}
+          <MessageActions>
+            {text && (
+              <MessageAction
+                tooltip="Copy"
+                size="icon-xxs"
+                onClick={handleCopy}
+                componentId="chat.message.copy_user"
+              >
+                {isCopied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+              </MessageAction>
+            )}
+            <MessageAction
+              tooltip={isLinkCopied ? "Copied!" : "Copy link"}
+              size="icon-xxs"
+              data-testid="copy-message-link"
+              disabled={bubble.pending}
+              onClick={handleCopyLink}
+            >
+              {isLinkCopied ? <CheckIcon size={14} /> : <Link2Icon size={14} />}
+            </MessageAction>
+          </MessageActions>
+        </div>
       </div>
     </Message>
   );
@@ -820,32 +962,59 @@ function AssistantBubble({
   isLastAssistant = false,
   showsWorking = false,
   actionsPersistent = false,
+  recoveryDisabled = false,
 }: {
   bubble: Extract<Bubble, { kind: "assistant" }>;
   isLastAssistant?: boolean;
   showsWorking?: boolean;
   actionsPersistent?: boolean;
+  recoveryDisabled?: boolean;
 }) {
   // The walker only emits an assistant bubble when at least one assistant-side
   // block exists. The "Working…" shimmer for the empty-items / streaming gap
   // is rendered at the page level, not inside this component.
-  const sessionStatus = useChatStore((s) => s.sessionStatus);
-  const conversationId = useChatStore((s) => s.conversationId);
-  // A pending elicitation means the turn is parked awaiting the user — still in
-  // flight even when its lifecycle or the session status reads settled.
-  const hasPendingElicitation = useChatStore((s) =>
+  //
+  // Scoped so a side-chat bubble reads the CHILD's status and targets the child
+  // for retry — not whatever the root store currently projects. Unscoped (the
+  // main transcript) reads the root store exactly as before; `useConversationEntryState(null)`
+  // is inert (no subscription, stable empty snapshot).
+  const scopedConversationId = useContext(ConversationScopeContext);
+  const scopedState = useConversationEntryState(scopedConversationId);
+  const activeConversationId = useChatStore((s) => s.conversationId);
+  const conversationId = scopedConversationId ?? activeConversationId;
+  const rootSessionStatus = useChatStore((s) => s.sessionStatus);
+  const rootHasPendingElicitation = useChatStore((s) =>
     s.blocks.some((b) => b.type === "elicitation" && b.status === "pending"),
   );
+  const sessionStatus = scopedConversationId ? scopedState.sessionStatus : rootSessionStatus;
+  // A pending elicitation means the turn is parked awaiting the user — still in
+  // flight even when its lifecycle or the session status reads settled.
+  const hasPendingElicitation = scopedConversationId
+    ? scopedState.blocks.some((b) => b.type === "elicitation" && b.status === "pending")
+    : rootHasPendingElicitation;
   // Getter computes the markdown lazily at click time.
-  const { isCopied, handleCopy } = useCopyMessage(() => collectBubbleMarkdown(bubble.items));
+  const { isCopied, handleCopy } = useCopyMessage(
+    () => collectBubbleMarkdown(bubble.items),
+    copyMarkdown,
+  );
+  const { isLinkCopied, handleCopyLink } = useCopyMessageLink(bubble.responseId);
+  const flashing = useChatStore((s) => s.flashItemId === bubble.responseId);
   // null outside AppShell's provider (isolated tests) → hide the action.
   const forkDialog = useForkDialog();
+  const queryClient = useContext(QueryClientContext);
   const handleRetryError = useCallback(
     async (item: Extract<RenderItem, { kind: "error" }>) => {
       if (!conversationId) throw new Error("Session is not available");
-      if (item.code === "rate_limit_exceeded") {
-        const current = useChatStore.getState();
-        if (current.conversationId !== conversationId) {
+      if (CONTINUE_TURN_ERROR_CODES.has(item.code)) {
+        // Read a FRESH snapshot of the target conversation at click time: the
+        // scoped child's own entry in a side chat, else the root store. The
+        // child tab is fixed, so only the main chat guards against the user
+        // switching the active conversation out from under a queued retry.
+        const current = scopedConversationId
+          ? conversationRegistry.peek(scopedConversationId)?.getState()
+          : useChatStore.getState();
+        if (!current) throw new Error("The selected session has changed");
+        if (!scopedConversationId && useChatStore.getState().conversationId !== conversationId) {
           throw new Error("The selected session has changed");
         }
         if (!isLastAssistant) throw new Error("Only the latest failed turn can be retried");
@@ -859,15 +1028,23 @@ function AssistantBubble({
         ) {
           throw new Error("Wait for the current turn to finish before retrying");
         }
-        await retryRateLimitedTurn(conversationId);
+        await continueFailedTurn(conversationId);
         return;
       }
-      const result = await retrySession(conversationId);
-      if (!result.recovered) {
-        throw new Error("The session is already connected; no recovery was performed");
+      try {
+        const result = await retrySession(conversationId);
+        if (!result.recovered) {
+          throw new Error("The session is already connected; no recovery was performed");
+        }
+      } catch (error) {
+        // Resume can seal a lost side chat; refresh its read-only state immediately.
+        if (error instanceof ApiError && error.code === "conflict") {
+          void queryClient?.invalidateQueries({ queryKey: ["session", conversationId] });
+        }
+        throw error;
       }
     },
-    [conversationId, isLastAssistant],
+    [conversationId, scopedConversationId, isLastAssistant, queryClient],
   );
 
   if (bubble.items.length === 0) return null;
@@ -891,7 +1068,10 @@ function AssistantBubble({
   // Elicitation cards want full chat-column width to match the composer.
   const hasElicitation = bubble.items.some((it) => it.kind === "elicitation");
   const isWide =
-    hasElicitation || containsMarkdownTable(bubble.items) || containsDisplayMath(bubble.items);
+    hasElicitation ||
+    containsMarkdownTable(bubble.items) ||
+    containsDisplayMath(bubble.items) ||
+    containsMermaidDiagram(bubble.items);
   // An error banner's dashed rule spans the full chat column.
   const hasError = bubble.items.some((it) => it.kind === "error");
   // A bubble carrying an error but no prose stands alone as a thread-level
@@ -906,13 +1086,16 @@ function AssistantBubble({
         data-testid="message-bubble"
         data-role="assistant"
         data-response-stable-id={bubble.stableId}
-        className={
-          spansFullColumn ? "max-w-full" : "max-w-3xl min-[2561px]:max-w-[clamp(56rem,30vw,64rem)]"
-        }
+        data-message-id={bubble.responseId}
+        className={spansFullColumn ? "max-w-full" : "max-w-[var(--chat-prose-width)]"}
       >
-        {/* A fold-only bubble takes w-full at the ordinary max-w-3xl cap rather
-            than shrink-wrapping to the summary row's ~110px. */}
-        <MessageContent className={spansFullColumn || foldOnly ? "w-full" : undefined}>
+        {/* Fold-only rows fill the prose width so their hairlines remain visible. */}
+        <MessageContent
+          className={cn(
+            (spansFullColumn || foldOnly) && "w-full",
+            flashing && "animate-message-highlight rounded-lg",
+          )}
+        >
           <BlockRenderer
             items={bubble.items}
             sessionStatus={sessionStatus}
@@ -924,7 +1107,7 @@ function AssistantBubble({
             lastActivityAtS={bubble.lastActivityAtS}
             showsWorking={showsWorking}
             defaultExpanded={bubble.defaultExpanded}
-            onRetryError={handleRetryError}
+            onRetryError={recoveryDisabled ? undefined : handleRetryError}
           />
         </MessageContent>
         {bubble.lifecycle === "cancelled" && (
@@ -936,17 +1119,18 @@ function AssistantBubble({
             <span>Interrupted</span>
           </p>
         )}
-        {/* Skipped on a fold-only bubble, when there is neither a timestamp nor
-            actions, and on an error-only bubble. Order: actions, then timestamp. */}
-        {!foldOnly && !errorOnly && (ts || markdownText) && (
+        {/* Skip fold-only and error-only bubbles. Order: actions, then timestamp. */}
+        {!foldOnly && !errorOnly && (
           <div
             className={cn(
-              "flex items-center gap-3 py-1 opacity-40 transition-opacity md:group-hover:opacity-100 md:group-focus-within:opacity-100",
-              !actionsPersistent && "md:opacity-0",
+              "flex items-center gap-3 py-1",
+              actionsPersistent
+                ? "opacity-100"
+                : "opacity-40 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100",
             )}
           >
-            {markdownText && (
-              <MessageActions>
+            <MessageActions>
+              {markdownText && (
                 <MessageAction
                   tooltip="Copy"
                   size="icon-xxs"
@@ -955,22 +1139,39 @@ function AssistantBubble({
                 >
                   {isCopied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
                 </MessageAction>
-                {/* Fork from this response: clone the session with history
+              )}
+              {/* Fork from this response: clone the session with history
                     truncated after this turn. Hidden while streaming and when
                     the session can't be forked. */}
-                {forkDialog?.canFork && bubble.lifecycle !== "streaming" && (
+              {forkDialog?.canFork && bubble.lifecycle !== "streaming" && (
+                <DisabledActionTooltip reason={forkDialog.disabledReason} label="Fork from here">
                   <MessageAction
-                    tooltip="Fork from here"
+                    tooltip={forkDialog.disabledReason ? undefined : "Fork from here"}
+                    label="Fork from here"
+                    disabled={!!forkDialog.disabledReason}
                     size="icon-xxs"
                     data-testid="fork-from-response"
-                    onClick={() => forkDialog.openForkDialog({ upToResponseId: bubble.responseId })}
+                    onClick={() =>
+                      forkDialog.openForkDialog({
+                        sourceSessionId: scopedConversationId ?? undefined,
+                        upToResponseId: bubble.responseId,
+                      })
+                    }
                     componentId="chat.message.fork"
                   >
-                    <GitForkIcon size={14} />
+                    <SplitIcon size={14} />
                   </MessageAction>
-                )}
-              </MessageActions>
-            )}
+                </DisabledActionTooltip>
+              )}
+              <MessageAction
+                tooltip={isLinkCopied ? "Copied!" : "Copy link"}
+                size="icon-xxs"
+                data-testid="copy-message-link"
+                onClick={handleCopyLink}
+              >
+                {isLinkCopied ? <CheckIcon size={14} /> : <Link2Icon size={14} />}
+              </MessageAction>
+            </MessageActions>
             {ts && (
               <span
                 className="select-none text-[11px] leading-4 text-foreground/56"
@@ -995,18 +1196,6 @@ function AssistantBubble({
 // ---------------------------------------------------------------------------
 // Scroll helpers — rendered inside <Conversation> / as its siblings.
 // ---------------------------------------------------------------------------
-
-export function UserMessageNavConnected(props: React.ComponentProps<typeof UserMessageNav>) {
-  const { isAtBottom } = useStickToBottomContext();
-  return (
-    <UserMessageNav
-      {...props}
-      // Mobile-only: the TurnRail replaces these buttons on desktop. Hidden at
-      // the bottom on mobile too. Keyboard ⌘⌥↑↓ still works on all sizes.
-      className={cn(props.className, "md:hidden", isAtBottom && "max-md:hidden")}
-    />
-  );
-}
 
 /**
  * Forces the conversation back to the bottom when this client submits a new
@@ -1866,7 +2055,7 @@ export function JumpToTopButton({
       // the safe-area inset, so add --omnigent-inset-top (0px off-shell).
       style={{ top: "calc(50px + var(--omnigent-inset-top))" }}
       className={cn(
-        "pointer-events-none absolute inset-x-0 z-40 flex justify-center transition-opacity duration-150",
+        "pointer-events-none absolute inset-x-0 z-40 flex justify-center transition-opacity duration-150 max-md:hidden",
         visible ? "opacity-100" : "opacity-0",
       )}
     >
