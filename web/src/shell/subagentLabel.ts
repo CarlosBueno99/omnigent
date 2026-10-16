@@ -5,6 +5,30 @@
 import type { ChildSessionInfo } from "@/hooks/useChildSessions";
 import { nativeCodingAgentForSubagentWrapper, WRAPPER_LABEL_KEY } from "@/lib/nativeCodingAgents";
 
+// User-added rows use this reserved title sentinel (``"ui:<agent>:<name>"``);
+// LLM-spawned titles cannot start with it because the spec validator rejects
+// "ui" as a sub-agent name.
+const USER_ADDED_PREFIX = "ui:";
+
+/** A sub-agent title without the reserved user-added sentinel. */
+export function titleWithoutSentinel(title: string | null | undefined): string | null {
+  if (title == null) return null;
+  return title.startsWith(USER_ADDED_PREFIX) ? title.slice(USER_ADDED_PREFIX.length) : title;
+}
+
+/**
+ * The handle a ``"{tool}:{name}"`` sub-agent title carries after its first
+ * colon, shared by the Agents rail and the composer tray.
+ *
+ * @param title - The child's title, e.g. ``"worker:deploy-profile-page"``.
+ * @returns The handle, or ``null`` when the title has no suffix.
+ */
+export function titleHandle(title: string | null | undefined): string | null {
+  const source = titleWithoutSentinel(title);
+  if (!source?.includes(":")) return null;
+  return source.split(":").slice(1).join(":") || null;
+}
+
 /**
  * Pick the primary label for a child-session row.
  *
@@ -18,10 +42,7 @@ import { nativeCodingAgentForSubagentWrapper, WRAPPER_LABEL_KEY } from "@/lib/na
  */
 export function childPrimaryLabel(child: ChildSessionInfo, fallback: string = child.id): string {
   const trimmed = (value: string | null | undefined) => value?.trim() || null;
-  // User-added rows use the reserved "ui:<agent>:<name>" title sentinel;
-  // LLM-spawned titles cannot start with "ui:" because the spec validator
-  // rejects "ui" as a sub-agent name.
-  const isUserAdded = child.title?.startsWith("ui:") ?? false;
+  const isUserAdded = child.title?.startsWith(USER_ADDED_PREFIX) ?? false;
   // Native sub-agent titles are ``"<role>:<opaque id>"``: the generic path
   // below would show that id, so every registered native wrapper uses ``tool``.
   const isNativeSubagent =
@@ -29,16 +50,14 @@ export function childPrimaryLabel(child: ChildSessionInfo, fallback: string = ch
   if (isNativeSubagent && !isUserAdded) {
     return trimmed(child.tool) ?? trimmed(child.title) ?? fallback;
   }
-  // Strip the "ui:" sentinel first so the suffix is the human name, as the
-  // composer tray does.
-  const titleSource = isUserAdded ? child.title?.slice(3) : child.title;
-  let titleTask: string | null = null;
-  if (titleSource?.includes(":")) {
-    const titleSuffix = titleSource.split(":").slice(1).join(":");
-    if (titleSuffix) titleTask = titleSuffix;
-  }
-  const handle = trimmed(child.session_name) ?? trimmed(titleTask);
+  const handle = trimmed(child.session_name) ?? trimmed(titleHandle(child.title));
   const summary = trimmed(child.task_summary);
   if (summary && handle && handle !== summary) return `${summary} · ${handle}`;
-  return summary ?? handle ?? trimmed(child.title) ?? trimmed(child.tool) ?? fallback;
+  return (
+    summary ??
+    handle ??
+    trimmed(titleWithoutSentinel(child.title)) ??
+    trimmed(child.tool) ??
+    fallback
+  );
 }

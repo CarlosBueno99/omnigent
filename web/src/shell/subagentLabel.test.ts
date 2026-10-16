@@ -2,11 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChildSessionInfo } from "@/hooks/useChildSessions";
 
-import { childPrimaryLabel } from "./subagentLabel";
-
-// An orchestrator names a worker via sys_session_send(title=...), so the child
-// carries that handle (session_name and the title suffix) beside a generated
-// task_summary; the shared label must show both so every surface names it alike.
+import { childPrimaryLabel, titleHandle } from "./subagentLabel";
 
 const HANDLE = "deploy-profile-page";
 const SUMMARY = "Deploy PR41 via web ops";
@@ -28,6 +24,20 @@ function child(overrides: Partial<ChildSessionInfo> = {}): ChildSessionInfo {
     ...overrides,
   };
 }
+
+describe("titleHandle", () => {
+  it("returns the suffix after the tool prefix", () => {
+    expect(titleHandle("worker:deploy-profile-page")).toBe("deploy-profile-page");
+    expect(titleHandle("ui:claude:my-agent")).toBe("my-agent");
+    expect(titleHandle("claude_code:check:account")).toBe("check:account");
+  });
+
+  it("is null without a suffix", () => {
+    expect(titleHandle("plain")).toBeNull();
+    expect(titleHandle("worker:")).toBeNull();
+    expect(titleHandle(null)).toBeNull();
+  });
+});
 
 describe("childPrimaryLabel", () => {
   it("leads with the summary and follows it with the handle", () => {
@@ -84,6 +94,11 @@ describe("childPrimaryLabel", () => {
 
   it("strips the user-added sentinel before taking the handle from the title", () => {
     const added = child({ title: "ui:claude:my-agent", session_name: null, task_summary: null });
+    expect(childPrimaryLabel(added)).toBe("my-agent");
+  });
+
+  it("never leaks the user-added sentinel when the title has no handle", () => {
+    const added = child({ title: "ui:my-agent", session_name: null, task_summary: null });
     expect(childPrimaryLabel(added)).toBe("my-agent");
   });
 

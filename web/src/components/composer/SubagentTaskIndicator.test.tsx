@@ -89,7 +89,14 @@ describe("SubagentTaskIndicator", () => {
 
   it("shows state labels and honest navigation targets in the popover", () => {
     setChildren([
-      child({ id: "working", busy: true, task_summary: "Investigate auth", tool: "researcher" }),
+      child({
+        id: "working",
+        busy: true,
+        title: "researcher:auth-sweep",
+        session_name: "auth-sweep",
+        task_summary: "Investigate auth",
+        tool: "researcher",
+      }),
       child({ id: "parked", pending_elicitations_count: 1, session_name: "docs" }),
       child({
         id: "failed",
@@ -118,8 +125,10 @@ describe("SubagentTaskIndicator", () => {
     expect(screen.getAllByRole("status").some((status) => status.textContent === "Failed")).toBe(
       true,
     );
+    // The row names the worker by its summary and its handle, matching the
+    // open-worker composer tray and the Agents rail.
     expect(
-      screen.getByRole("link", { name: /Investigate auth.*Working.*researcher/ }),
+      screen.getByRole("link", { name: /Investigate auth · auth-sweep.*Working.*researcher/ }),
     ).toHaveAttribute("href", "/c/working?debug=1");
   });
 
@@ -153,23 +162,5 @@ describe("SubagentTaskIndicator", () => {
     expect(pill).toHaveAttribute("data-state", "parked");
     expect(pill).toHaveClass("text-warning");
     expect(pill).toHaveAccessibleName("1 sub-agent: 1 awaiting input");
-  });
-
-  // An active worker carrying both a handle and a generated task_summary must
-  // name the handle in the popover too, matching the open-worker composer tray.
-  it("names an active worker by its handle, not only its task summary", () => {
-    setChildren([
-      child({
-        id: "worker",
-        busy: true,
-        title: "worker:deploy-profile-page",
-        session_name: "deploy-profile-page",
-        task_summary: "Deploy PR41 via web ops",
-        tool: "worker",
-      }),
-    ]);
-    renderIndicator();
-    fireEvent.click(screen.getByTestId("subagent-task-pill"));
-    expect(screen.getByRole("link", { name: /deploy-profile-page/ })).toBeInTheDocument();
   });
 });
