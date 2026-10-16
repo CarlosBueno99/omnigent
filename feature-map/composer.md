@@ -334,6 +334,11 @@ Other connection providers alone do not enable the managed MCP picker.
   enables. Repeat with a phone viewport and touch input. Component coverage:
   `web/src/shell/NewChatDialog.test.tsx`.
 - **Reusable sandbox hosts:**
+  A provider with create-or-get support can resolve the user's existing box
+  through **New static sandbox**. Select that option in two new sessions;
+  verify both sessions bind to one host and keep their separate runners.
+  `tests/server/integration/test_host_session_binding.py::test_managed_session_create_end_to_end`
+  covers controller-selected registration/workspace and ordinary fresh creation.
   `tests/e2e_ui/start_session/test_start_session.py::test_attached_sandbox_wakes_and_remains_a_reusable_picker_target`
   checks the static-provider creation option, wake action and reuse across two
   create requests; ad hoc sandbox hosts stay hidden. The browser stubs provider
