@@ -1001,10 +1001,14 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
         )
         host_futures.append(asyncio.wrap_future(future, loop=loop))
 
-    fake = FakeSandboxLauncher(provision_gate=gate, on_host_start=_start_fake_sandbox_host)
-    install_fake_modal_launcher(monkeypatch, fake)
+    default_launcher = FakeSandboxLauncher(
+        provision_gate=gate, on_host_start=_start_fake_sandbox_host
+    )
+    install_fake_modal_launcher(monkeypatch, default_launcher)
+    fake = default_launcher
     if provider is not None:
         # Offer a second provider so an explicit selection cannot silently use the default.
+        fake = FakeSandboxLauncher(provision_gate=gate, on_host_start=_start_fake_sandbox_host)
         monkeypatch.setattr(fake, "provider", provider)
         default = env.app.state.sandbox_config.default
         env.app.state.sandbox_config = ManagedSandboxDeployment(
@@ -1085,6 +1089,9 @@ async def test_managed_launch_progress_surfaces_on_snapshot_and_stream(
     snapshot_after = await env.client.get(f"/v1/sessions/{session_id}")
     assert snapshot_after.status_code == 200, snapshot_after.text
     assert snapshot_after.json()["sandbox_status"] is None
+    assert len(fake.provisioned_names) == 1
+    if provider is not None:
+        assert default_launcher.provisioned_names == []
     del tunnels
 
 
@@ -1159,9 +1166,11 @@ async def test_subagent_session_reuses_managed_sandbox_runner(
     del tunnels
 
 
+@pytest.mark.parametrize("provider", [None, "arclet"])
 async def test_message_relaunches_dead_managed_sandbox(
     managed_session_env: ManagedSessionEnv,
     monkeypatch: pytest.MonkeyPatch,
+    provider: str | None,
 ) -> None:
     """
     A message to a session whose managed sandbox died provisions a new
@@ -1176,6 +1185,8 @@ async def test_message_relaunches_dead_managed_sandbox(
     session's runner. Without the relaunch path, the message simply
     503s and none of the generation-2 effects below happen.
     """
+    from omnigent.runtime import session_stream
+
     env = managed_session_env
     monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
     # Let the initial create settle successfully; after that this test switches
@@ -1205,11 +1216,18 @@ async def test_message_relaunches_dead_managed_sandbox(
 
     fake = FakeSandboxLauncher(on_host_start=_start_fake_sandbox_host)
     install_fake_modal_launcher(monkeypatch, fake)
+    if provider is not None:
+        fake = FakeSandboxLauncher(on_host_start=_start_fake_sandbox_host)
+        monkeypatch.setattr(fake, "provider", provider)
+        default = env.app.state.sandbox_config.default
+        env.app.state.sandbox_config = ManagedSandboxDeployment(
+            configs=(default, replace(default, provider=provider, launcher_factory=lambda: fake))
+        )
 
     agent = await create_test_agent(env.client, name="managed-relaunch-agent")
     resp = await env.client.post(
         "/v1/sessions",
-        json={"agent_id": agent["id"], "host_type": "managed"},
+        json={"agent_id": agent["id"], "host_type": "managed", "sandbox_provider": provider},
     )
     assert resp.status_code == 201, resp.text
     session_id = resp.json()["id"]
@@ -1248,6 +1266,8 @@ async def test_message_relaunches_dead_managed_sandbox(
     assert host_registry.get(conv.host_id) is None
     assert env.host_store.is_online(conv.host_id) is False
 
+    published = Mock(wraps=session_stream.publish)
+    monkeypatch.setattr(session_stream, "publish", published)
     message_resp = await env.client.post(
         f"/v1/sessions/{session_id}/events",
         json={
@@ -1266,6 +1286,15 @@ async def test_message_relaunches_dead_managed_sandbox(
     # are the assertions that matter (with a real sandbox the runner
     # connects and the message forwards; covered by live verification).
     assert message_resp.status_code == 503, message_resp.text
+    progress = [
+        call.args[1]
+        for call in published.call_args_list
+        if call.args[0] == session_id and call.args[1].get("type") == "session.sandbox_status"
+    ]
+    assert [(event["stage"], event["provider"]) for event in progress] == [
+        (stage, provider or "modal")
+        for stage in ("provisioning", "starting", "connecting", "failed")
+    ]
 
     # Generation 2 was provisioned and the old generation terminated.
     assert len(fake.provisioned_names) == 2, (
@@ -1279,6 +1308,7 @@ async def test_message_relaunches_dead_managed_sandbox(
     host = env.host_store.get_host(conv.host_id)
     assert host is not None
     assert host.sandbox_id == "sb-fake-2"
+    assert host.sandbox_provider == (provider or "modal")
     # The relaunched host registered over the tunnel with its NEW
     # token (the second start invocation), proving the re-armed
     # credential authenticates.
