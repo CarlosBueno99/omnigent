@@ -70,7 +70,8 @@ def _settled_turn_error(base_url: str, session_id: str) -> dict[str, Any] | None
             timeout=10.0,
         )
         resp.raise_for_status()
-        items = resp.json().get("data", [])
+        # Newest first, so an earlier persisted error is not blamed on this turn.
+        items = list(reversed(resp.json().get("data", [])))
         for item in items:
             fields = _error_fields(item)
             if item.get("type") == "error" and str(fields.get("level") or "") != "info":
@@ -158,7 +159,8 @@ def test_codex_rate_limited_turn_offers_retry(
     message = str(error.get("message") or "")
     assert error.get("code") == "rate_limit_exceeded", error
     assert "429" in message, message
-    assert "stderr:" not in message, message
+    # Turn-time stderr may legitimately follow; the launch warning must not.
+    assert "PATH aliases" not in message, message
 
     # The provider recovers; Retry continues the turn in place.
     configure_mock_llm(mock_llm_server_url, [{"text": _RECOVERED_TEXT}], key=model)

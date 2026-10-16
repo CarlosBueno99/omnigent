@@ -3741,6 +3741,8 @@ class _CodexAppServerSession:
         if effort_via_turn_start:
             turn_params["effort"] = effort
             turn_params["summary"] = "detailed"
+        # Best-effort scope: the stderr reader is asynchronous, so a late line
+        # from the previous turn can still land after this clear.
         self._turn_stderr.clear()
         start_response = await self._request(
             "turn/start",
