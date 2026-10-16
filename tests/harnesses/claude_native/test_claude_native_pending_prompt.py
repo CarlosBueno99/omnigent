@@ -418,7 +418,7 @@ def test_message_backs_out_of_the_permissions_rule_editor_then_delivers(
     def send(*args: str) -> None:
         sent.append(args)
         if args[-1] == "Escape":
-            closing = tui["pane"] is _PERMISSIONS_LIST_ROW_FOCUSED
+            closing = tui["pane"] == _PERMISSIONS_LIST_ROW_FOCUSED
             tui["pane"] = _COMPOSER if closing else _PERMISSIONS_LIST_ROW_FOCUSED
         elif "paste-buffer" in args:
             tui["pane"] = _COMPOSER.replace("❯", "❯ Deliver once the dialog is gone")
@@ -435,6 +435,22 @@ def test_message_backs_out_of_the_permissions_rule_editor_then_delivers(
     assert tails[:3] == ["Escape", "Escape", "Space"]
     assert any("paste-buffer" in args for args in sent)
     assert tails[-1] == "Enter"
+
+
+def test_a_framed_transcript_snippet_above_a_boxless_screen_does_not_hide_the_dialog(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Question chrome quoted after the transcript's last frame is not the dialog's footer."""
+    pane = (
+        "  ╭──────────────────────────────╮\n"
+        "  │ settings.local.json          │\n"
+        "  ╰──────────────────────────────╯\n"
+        "⏺ A question's footer would read: Enter to select · ↑/↓ to navigate · Esc to cancel.\n"
+        + _PERMISSIONS_SAVE_LOCATION
+    )
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: pane)
+    assert not bridge.has_pending_user_prompt(native_bridge)
+    assert bridge._occupying_surface(pane) == "the /permissions dialog"
 
 
 def test_permissions_dialog_chrome_above_a_ready_composer_keeps_it_ready() -> None:

@@ -6021,8 +6021,10 @@ def _permissions_dialog_visible(pane: str) -> bool:
     into: its rule lists end in the decision prompts' "Enter to select · Esc
     to cancel" footer, and their framed search box puts a ``❯``-led row under
     a rule exactly like the composer. The tab footer is read from the region
-    below the last box rule (the pane tail when none is drawn), where a free
-    composer shows only its mode footer; the rule editor and save-location
+    below the last box rule, clamped to the last :data:`_PROMPT_SCAN_TAIL_LINES`
+    rows so a framed snippet quoted in the transcript above a box-less screen
+    cannot widen it; a free composer shows only its mode footer there. The
+    rule editor and save-location
     screens, which lack tab hints, are read from their headline within the
     last :data:`_DIALOG_SCAN_TAIL_LINES` rows, and only under their own
     "Enter to submit/confirm" footer with no navigation hint, which a question
@@ -6038,10 +6040,10 @@ def _permissions_dialog_visible(pane: str) -> bool:
     if not lines:
         return False
     last_rule = max((i for i, line in enumerate(lines) if _is_box_rule(line)), default=None)
-    footer_rows = (
-        lines[last_rule + 1 :] if last_rule is not None else lines[-_PROMPT_SCAN_TAIL_LINES:]
+    footer_start = max(
+        last_rule + 1 if last_rule is not None else 0, len(lines) - _PROMPT_SCAN_TAIL_LINES
     )
-    footer = " ".join(" ".join(footer_rows).split()).lower()
+    footer = " ".join(" ".join(lines[footer_start:]).split()).lower()
     if not _ESCAPE_DISMISS_HINT.search(footer):
         return False
     if all(hint in footer for hint in _PERMISSIONS_DIALOG_TAB_FOOTER_HINTS):

@@ -41,12 +41,19 @@ _log = logging.getLogger(__name__)
 # The add-rule field's title and footer on this Claude Code build.
 _RULE_EDITOR_TITLE = "permission rule"
 _RULE_EDITOR_FOOTER = ("Enter to submit", "Esc to cancel")
+_ADD_RULE_ROW = "❯ 1. Add a new rule"
+# The rule list's footer offers tab switching; transcript text only ever says "/model to switch".
+_LIST_FOOTER = "←/→ to switch"
 _DIALOG_TIMEOUT_S = 40.0
 _ALLOW_RULE = "Bash(echo:*)"
 
 
 def _rule_editor_open(pane: str) -> bool:
     return _RULE_EDITOR_TITLE in pane and all(hint in pane for hint in _RULE_EDITOR_FOOTER)
+
+
+def _permissions_dialog_open(pane: str) -> bool:
+    return _rule_editor_open(pane) or _LIST_FOOTER in pane
 
 
 def _wait_for_pane(
@@ -73,21 +80,32 @@ def _open_add_rule_field(page: Page, base_url: str, session_id: str) -> None:
     _wait_terminal_connected(page)
     _focus_tui(page)
     page.keyboard.type("/permissions", delay=40)
-    page.wait_for_timeout(800)
+    _wait_for_pane(
+        base_url, session_id, lambda pane: "/permissions" in pane, what="the typed command"
+    )
     page.keyboard.press("Enter")
     _wait_for_pane(
         base_url,
         session_id,
-        lambda pane: "to switch" in pane and "Esc to cancel" in pane,
+        lambda pane: _LIST_FOOTER in pane and "Esc to cancel" in pane,
         what="the /permissions dialog",
     )
     _log.info("permissions dialog open")
     page.keyboard.press("ArrowDown")
-    page.wait_for_timeout(800)
+    _wait_for_pane(
+        base_url, session_id, lambda pane: _ADD_RULE_ROW in pane, what="the add-rule row"
+    )
     page.keyboard.press("Enter")
-    page.wait_for_timeout(800)
+    _wait_for_pane(
+        base_url, session_id, lambda pane: _RULE_EDITOR_TITLE in pane, what="the rule editor"
+    )
     page.keyboard.type(_ALLOW_RULE, delay=40)
-    _wait_for_pane(base_url, session_id, _rule_editor_open, what="the add-rule field")
+    _wait_for_pane(
+        base_url,
+        session_id,
+        lambda pane: _rule_editor_open(pane) and _ALLOW_RULE in pane,
+        what="the typed rule",
+    )
     _log.info("add-rule field open with %s typed", _ALLOW_RULE)
 
 
@@ -143,7 +161,7 @@ def test_web_message_is_delivered_past_an_open_permissions_dialog(
     _log.info("message delivered and answered")
 
     pane = _pane_text(base_url, session_id)
-    assert not _rule_editor_open(pane), (
+    assert not _permissions_dialog_open(pane), (
         f"the reply arrived but the /permissions dialog is still open:\n{pane}"
     )
     # Hold the reply, then end on the terminal the runner backed out of, so a
