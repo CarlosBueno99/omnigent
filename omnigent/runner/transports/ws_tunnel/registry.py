@@ -420,6 +420,25 @@ class TunnelRegistry:
         with self._lock:
             return self._sessions.get(runner_id)
 
+    def run_if_current(
+        self,
+        runner_id: str,
+        session: RunnerSession,
+        action: Callable[[], None],
+    ) -> bool:
+        """Run a short synchronous action while this session owns the runner.
+
+        :param runner_id: Runner whose connection must still be current.
+        :param session: Expected connection, compared by identity.
+        :param action: Callback run under the registry lock when current.
+        :returns: Whether the session was current and the action ran.
+        """
+        with self._lock:
+            if self._sessions.get(runner_id) is not session:
+                return False
+            action()
+            return True
+
     def is_runner_telemetry_opted_out(self, runner_id: str) -> bool:
         """Return whether the runner's host has opted out of telemetry.
 

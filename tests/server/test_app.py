@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from io import BytesIO
@@ -2293,16 +2294,19 @@ def _bind_sessions(db_uri: str, runner_id: str, count: int = 1) -> list[str]:
 def _attach_live_connection(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch, runner_id: str
 ) -> object:
-    """Make the tunnel registry report a live connection and stub relay helpers."""
-    import types
-
+    """Register a live connection and stub relay helpers."""
     import omnigent.server.routes.sessions as sessions_routes
+    from omnigent.runner.transports.ws_tunnel.frames import HelloFrame
+    from tests.server.test_host_registry import FakeWebSocket
 
     async def _noop_async(*_a: object, **_k: object) -> None:
         return None
 
-    connection = types.SimpleNamespace(generation=1)
-    monkeypatch.setattr(app.state.tunnel_registry, "get", lambda _rid: connection)
+    connection = app.state.tunnel_registry.register(
+        runner_id,
+        FakeWebSocket(),
+        HelloFrame(runner_version="test", frame_protocol_version=1),
+    )
     monkeypatch.setattr(sessions_routes, "_ensure_runner_relay", lambda *a, **k: None)
     monkeypatch.setattr(sessions_routes, "prefetch_session_routing_catalogs", lambda *a, **k: None)
     monkeypatch.setattr(sessions_routes, "_publish_runner_recovered_status", _noop_async)
@@ -2310,6 +2314,81 @@ def _attach_live_connection(
         app.state.runner_session_initializer, "require_generation", lambda *a, **k: None
     )
     return connection
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retirement_during", ["connect_log", "handoff_clear"])
+async def test_on_runner_connect_does_not_erase_a_newer_retirement(
+    db_uri: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retirement_during: str,
+) -> None:
+    """A retirement after the connect ownership check keeps its handoff marker."""
+    from concurrent.futures import Future
+
+    from omnigent.runner.transports.ws_tunnel.frames import HelloFrame
+    from omnigent.server import shutdown_state
+    from tests.budgets import budget
+    from tests.server.test_host_registry import FakeWebSocket
+
+    shutdown_state.reset_for_tests()
+    app, captured = _build_minimal_app(db_uri, tmp_path, monkeypatch)
+    registry = app.state.tunnel_registry
+    runner_id = "runner_retired_during_connect"
+    connection = registry.register(
+        runner_id,
+        FakeWebSocket(),
+        HelloFrame(runner_version="test", frame_protocol_version=1),
+    )
+    retire_requested = threading.Event()
+    retire_attempted = threading.Event()
+    retired = threading.Event()
+    retirement: Future[object] = Future()
+
+    def retire() -> None:
+        try:
+            assert retire_requested.wait(timeout=budget(2.0))
+            retire_attempted.set()
+            retirement.set_result(registry.deregister(runner_id, connection))
+        except BaseException as exc:
+            retirement.set_exception(exc)
+        finally:
+            retired.set()
+
+    original_info = server_app._logger.info
+
+    def pause_connect_log(message: object, *args: object, **kwargs: object) -> None:
+        if message == "Runner connected" and retirement_during == "connect_log":
+            retire_requested.set()
+            assert retired.wait(timeout=budget(2.0))
+        original_info(message, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(server_app._logger, "info", pause_connect_log)
+    if retirement_during == "handoff_clear":
+        original_clear = shutdown_state.clear_runner_handoff
+
+        def pause_clear(rid: str) -> None:
+            retire_requested.set()
+            assert retire_attempted.wait(timeout=budget(2.0))
+            # Retirement waits for this action's registry lock before marking.
+            retired.wait(timeout=budget(0.2))
+            original_clear(rid)
+
+        monkeypatch.setattr(shutdown_state, "clear_runner_handoff", pause_clear)
+    retire_thread = threading.Thread(target=retire, daemon=True)
+    retire_thread.start()
+    try:
+        await captured["callback"](runner_id, connection)  # type: ignore[operator]
+        assert retirement.result(timeout=budget(2.0)) is connection
+        assert registry.get(runner_id) is None
+        assert shutdown_state.runner_handoff_reason(runner_id) == "tunnel_retired"
+    finally:
+        retire_requested.set()
+        retire_thread.join(timeout=budget(2.0))
+        registry.deregister(runner_id, retire=False)
+        shutdown_state.reset_for_tests()
+    assert not retire_thread.is_alive()
 
 
 @pytest.mark.asyncio
@@ -2458,9 +2537,6 @@ async def test_on_runner_connect_defers_idle_tree_initialization_until_demand(
     )
     store.set_session_live_status(orphan.id, "running")
     connection = _attach_live_connection(app, monkeypatch, runner_id)
-    monkeypatch.setattr(
-        app.state.tunnel_registry, "get", lambda rid: connection if rid == runner_id else None
-    )
     routed = RoutedRunner(runner_id=runner_id, client=object())  # type: ignore[arg-type]
     app.state.runner_router.client_for_session_resources = lambda *_a, **_k: routed  # type: ignore[assignment]
     initialized: list[tuple[str, bool]] = []

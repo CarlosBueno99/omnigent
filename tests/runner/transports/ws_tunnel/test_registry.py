@@ -86,6 +86,26 @@ async def test_register_then_get_returns_session() -> None:
     assert fetched.ws is ws
 
 
+@pytest.mark.asyncio
+async def test_run_if_current_guards_the_action_and_allows_reentrant_reads() -> None:
+    reg = TunnelRegistry()
+    stale = reg.register("r1", _NoopWS(), _hello())
+    current = reg.register("r1", _NoopWS(), _hello())
+    observed = []
+
+    def action() -> None:
+        observed.append(reg.get("r1"))
+
+    assert not reg.run_if_current("missing", current, action)
+    assert not reg.run_if_current("r1", stale, action)
+    assert observed == []
+    assert reg.run_if_current("r1", current, action)
+    assert observed == [current]
+    reg.deregister("r1", current, retire=False)
+    assert not reg.run_if_current("r1", current, action)
+    assert observed == [current]
+
+
 def test_get_returns_none_for_unknown() -> None:
     reg = TunnelRegistry()
     assert reg.get("ghost") is None

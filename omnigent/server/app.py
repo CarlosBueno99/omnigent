@@ -3830,14 +3830,15 @@ def create_app(
             prefetch_session_routing_catalogs,
         )
 
-        if tunnel_registry.get(runner_id) is not connection:
+        # A reconnect clears only handoffs that precede this connection's ownership.
+        if not tunnel_registry.run_if_current(
+            runner_id, connection, lambda: shutdown_state.clear_runner_handoff(runner_id)
+        ):
             return
         _logger.info(
             "Runner connected",
             extra=debug_event("runner_connected", runner_id=runner_id),
         )
-        # A runner back on this replica is this replica's to reconcile again.
-        shutdown_state.clear_runner_handoff(runner_id)
         # Other replicas must see the runner online before the first liveness sweep.
         session_live_state.touch_runner_liveness([runner_id])
         # The by-runner lookup is read-after-write consistent and includes archived
