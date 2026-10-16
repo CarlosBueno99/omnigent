@@ -38,6 +38,7 @@ import type { AvailableAgent } from "@/hooks/useAvailableAgents";
 import { partitionAgentsByKind } from "@/lib/agentGrouping";
 import { useSessionAgent } from "@/hooks/useAgents";
 import { useSession } from "@/hooks/useSession";
+import { childSessionsQueryKey, useChildSessions } from "@/hooks/useChildSessions";
 import type { Session } from "@/lib/types";
 import { useHosts, useHostModelOptions, type Host } from "@/hooks/useHosts";
 import {
@@ -1188,6 +1189,15 @@ function SupportedForkSessionForm({
   const showConflictHint =
     (branchName.trim() === "" || usingSourceWorktree) && conflictingSessions.length > 0;
 
+  // Sub-agents the source still has in flight stay with it — a clone never
+  // adopts them — so say up front where their results will land. The cached
+  // child list may predate a child's turn start, so refetch it on open.
+  useEffect(() => {
+    void queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(sourceSessionId) });
+  }, [queryClient, sourceSessionId]);
+  const { children: sourceChildren } = useChildSessions(sourceSessionId);
+  const runningSubagentCount = sourceChildren.filter((child) => child.busy).length;
+
   // On a DIFFERENT host than the source nothing prefills the directory, so it
   // must be picked: show it at the top level instead of inside Advanced. On
   // the source host it stays under Advanced (the prefill needs no input).
@@ -1709,6 +1719,20 @@ function SupportedForkSessionForm({
                   Advanced settings to work in an isolated copy.
                 </>
               )}
+            </span>
+          </p>
+        )}
+
+        {runningSubagentCount > 0 && (
+          <p
+            className="flex items-start gap-1.5 text-sm text-warning"
+            data-testid="fork-session-subagent-hint"
+          >
+            <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+            <span>
+              {runningSubagentCount === 1
+                ? "1 sub-agent is still running. It stays with the original session, so its result will arrive there, not in the clone."
+                : `${runningSubagentCount} sub-agents are still running. They stay with the original session, so their results will arrive there, not in the clone.`}
             </span>
           </p>
         )}

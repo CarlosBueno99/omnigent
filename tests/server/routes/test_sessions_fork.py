@@ -20,7 +20,9 @@ from omnigent.entities import (
     Agent,
     Conversation,
     ConversationItem,
+    ErrorData,
     MessageData,
+    NewConversationItem,
     PagedList,
     StoredFile,
 )
@@ -33,6 +35,7 @@ from omnigent.server.managed_hosts import (
     resolve_managed_agent_label,
 )
 from omnigent.server.routes import _session_create_validation as create_validation
+from omnigent.server.routes._sessions.orchestration import FORK_SOURCE_SUBAGENTS_RUNNING_CODE
 from omnigent.server.routes.sessions import create_sessions_router, routes_core
 from omnigent.stores.conversation_store import (
     _FORK_ONLY_DROPPED_LABEL_KEYS,
@@ -136,6 +139,7 @@ class _ConversationStore:
         self._items = items_by_conv or {}
         self.fork_calls: list[dict[str, Any]] = []
         self.label_writes: list[tuple[str, dict[str, str]]] = []
+        self.append_calls: list[tuple[str, list[NewConversationItem]]] = []
 
     def set_labels(
         self,
@@ -350,6 +354,85 @@ class _ConversationStore:
             has_more=has_more,
         )
 
+    def list_conversations(
+        self,
+        limit: int = 20,
+        after: str | None = None,
+        before: str | None = None,
+        kind: str | None = "default",
+        parent_conversation_id: str | None = None,
+        order: str = "desc",
+        sort_by: str = "created_at",
+        **filters: Any,
+    ) -> PagedList[Conversation]:
+        """
+        Return conversations filtered by kind and parent, like the real store.
+
+        Only the filters the fork route uses (``kind`` and
+        ``parent_conversation_id``) are modelled; other keyword filters are
+        accepted and ignored.
+
+        :param limit: Max conversations per page.
+        :param after: Cursor conversation id.
+        :param before: Cursor (unused by the stub).
+        :param kind: Conversation kind to keep, or ``None`` for all.
+        :param parent_conversation_id: Parent to keep children of.
+        :param order: Sort direction on ``created_at``.
+        :param sort_by: Sort column (the stub always sorts by ``created_at``).
+        :param filters: Remaining store filters, ignored.
+        :returns: A PagedList of matching conversations.
+        """
+        del before, sort_by, filters
+        rows = [
+            conv
+            for conv in self._convs.values()
+            if (kind is None or conv.kind == kind)
+            and (
+                parent_conversation_id is None
+                or conv.parent_conversation_id == parent_conversation_id
+            )
+        ]
+        rows.sort(key=lambda conv: conv.created_at, reverse=order == "desc")
+        if after is not None:
+            rows = rows[next(i for i, conv in enumerate(rows) if conv.id == after) + 1 :]
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        return PagedList(
+            data=rows,
+            first_id=rows[0].id if rows else None,
+            last_id=rows[-1].id if rows else None,
+            has_more=has_more,
+        )
+
+    def append(
+        self,
+        conversation_id: str,
+        items: list[NewConversationItem],
+    ) -> list[ConversationItem]:
+        """
+        Persist items onto a conversation, recording the call.
+
+        :param conversation_id: Conversation the items land on.
+        :param items: Items to persist.
+        :returns: The persisted items with stub-assigned ids.
+        """
+        self.append_calls.append((conversation_id, list(items)))
+        existing = self._items.setdefault(conversation_id, [])
+        persisted = [
+            ConversationItem(
+                id=f"appended_{conversation_id}_{len(existing) + offset}",
+                type=new_item.type,
+                status="completed",
+                response_id=new_item.response_id,
+                created_at=200,
+                data=new_item.data,
+                created_by=new_item.created_by,
+            )
+            for offset, new_item in enumerate(items)
+        ]
+        existing.extend(persisted)
+        return persisted
+
 
 class _FileStore:
     """In-memory file store stub scoped like the real one.
@@ -499,6 +582,8 @@ def _make_conversation(
     title: str = "Source Chat",
     kind: str = "default",
     labels: dict[str, str] | None = None,
+    parent_conversation_id: str | None = None,
+    live_status: str | None = None,
 ) -> Conversation:
     """
     Build a minimal Conversation entity for testing.
@@ -510,16 +595,22 @@ def _make_conversation(
         ``"sub_agent"``.
     :param labels: Session labels, e.g. the sandbox repository a managed
         source recorded. Empty when omitted.
+    :param parent_conversation_id: Parent of a ``"sub_agent"`` row, or
+        ``None`` for a top-level session.
+    :param live_status: Persisted relay status, e.g. ``"running"`` for a
+        child whose turn is in flight; ``None`` when never reported.
     :returns: A Conversation.
     """
     return Conversation(
         id=conv_id,
         created_at=1,
         updated_at=1,
-        root_conversation_id=conv_id,
+        root_conversation_id=parent_conversation_id or conv_id,
         agent_id=agent_id,
         title=title,
         kind=kind,
+        parent_conversation_id=parent_conversation_id,
+        live_status=live_status,
         labels=dict(labels or {}),
     )
 
@@ -1159,6 +1250,116 @@ async def test_fork_session_sub_agent_replaces_presentation_labels() -> None:
         "Promoting a sub-agent must replace its UI-mode labels, got "
         f"{store.fork_calls[0]['presentation_labels']!r}"
     )
+
+
+def _make_child(conv_id: str, title: str, live_status: str) -> Conversation:
+    """
+    Build a sub-agent child of the default source conversation.
+
+    :param conv_id: Child conversation id.
+    :param title: Sub-agent title, ``"{agent}:{session_name}"``.
+    :param live_status: Relay status, e.g. ``"running"`` or ``"idle"``.
+    :returns: A ``kind="sub_agent"`` Conversation parented to the source.
+    """
+    return _make_conversation(
+        conv_id=conv_id,
+        title=title,
+        kind="sub_agent",
+        parent_conversation_id="e9f8f58523cec9a57d3bdf93be543e8c",
+        live_status=live_status,
+    )
+
+
+@pytest.mark.asyncio
+async def test_fork_notes_sub_agents_still_running_under_the_source() -> None:
+    """A fork of a session with in-flight sub-agents ends with a notice naming them.
+
+    A fork never adopts the source's children, so their results and wake
+    notices keep landing in the source's inbox while the fork's copied
+    dispatch receipts still promise them here. The fork's history must
+    therefore tell both readers which sub-agents stayed behind and where
+    their results go: a hidden ``is_meta`` user message the agent replays,
+    then a visible info notice. The notice must come last — a history that
+    ends on a user message is resumed by the runner as an unanswered turn.
+    """
+    source = _make_conversation()
+    running = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f801", "worker:long-task", "running")
+    waiting = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f802", "reviewer:approval", "waiting")
+    finished = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f803", "worker:done", "idle")
+    store = _ConversationStore(
+        conversations={conv.id: conv for conv in (source, running, waiting, finished)},
+        items_by_conv={source.id: [_make_item("msg_a", "send the worker its task")]},
+    )
+    client = TestClient(_build_app(store))
+
+    resp = client.post(f"/v1/sessions/{source.id}/fork", json={})
+
+    assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
+    fork_id = resp.json()["id"]
+    assert [conv_id for conv_id, _ in store.append_calls] == [fork_id], (
+        f"Expected one append onto the fork, got {store.append_calls}"
+    )
+    copied, agent_note, notice = store._items[fork_id]
+    assert copied.id == "msg_a", "the copied history must precede the notices"
+
+    assert agent_note.type == "message" and isinstance(agent_note.data, MessageData)
+    assert agent_note.data.role == "user" and agent_note.data.is_meta
+    assert agent_note.created_by is None
+    agent_text = agent_note.data.content[0]["text"]
+    assert agent_text.startswith(
+        "[System: forked while 2 sub-agents were still running — "
+        "they stay with the original session]\n"
+    ), agent_text
+
+    assert notice.type == "error" and isinstance(notice.data, ErrorData)
+    assert notice.data.level == "info"
+    assert notice.data.code == FORK_SOURCE_SUBAGENTS_RUNNING_CODE
+    assert notice.data.title == "2 sub-agents stayed with the original session"
+    assert notice.data.remediation is not None and source.id in notice.data.remediation
+    assert notice.response_id == agent_note.response_id
+
+    for text in (agent_text, notice.data.cause or ""):
+        for expected in (
+            source.id,
+            running.id,
+            waiting.id,
+            "worker:long-task",
+            "reviewer:approval",
+        ):
+            assert expected in text, f"must mention {expected!r}: {text}"
+        assert finished.id not in text and "worker:done" not in text, (
+            f"a finished child must not be reported as running: {text}"
+        )
+    # The response snapshot already carries both, so the client that navigates
+    # into the fork sees the notice without a refetch.
+    snapshot_items = resp.json()["items"]
+    assert snapshot_items[-2]["data"]["content"][0]["text"] == agent_text
+    assert snapshot_items[-1]["data"]["code"] == FORK_SOURCE_SUBAGENTS_RUNNING_CODE
+    assert snapshot_items[-1]["data"]["level"] == "info"
+
+
+@pytest.mark.asyncio
+async def test_fork_adds_no_sub_agent_note_when_none_is_running() -> None:
+    """Children that already finished leave the fork's copied history untouched."""
+    source = _make_conversation()
+    finished = _make_child("1a2b3c4d5e6f708192a3b4c5d6e7f803", "worker:done", "idle")
+    never_reported = _make_conversation(
+        conv_id="1a2b3c4d5e6f708192a3b4c5d6e7f804",
+        title="worker:stale",
+        kind="sub_agent",
+        parent_conversation_id=source.id,
+    )
+    store = _ConversationStore(
+        conversations={conv.id: conv for conv in (source, finished, never_reported)},
+        items_by_conv={source.id: [_make_item("msg_a", "hello")]},
+    )
+    client = TestClient(_build_app(store))
+
+    resp = client.post(f"/v1/sessions/{source.id}/fork", json={})
+
+    assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
+    assert store.append_calls == [], f"Expected no note, got {store.append_calls}"
+    assert [item.id for item in store._items[resp.json()["id"]]] == ["msg_a"]
 
 
 @pytest.mark.asyncio

@@ -2202,6 +2202,171 @@ async def _persist_model_change_note(
     _publish_external_conversation_item(session_id, persisted_items[0])
 
 
+# Live statuses under which a child's turn is still in flight; the same pair
+# ``_child_session_summary_from_conversation`` reports as ``busy``.
+_IN_FLIGHT_CHILD_STATUSES: frozenset[str] = frozenset({"running", "waiting"})
+
+
+def _running_child_conversations(
+    session_id: str,
+    conversation_store: ConversationStore,
+) -> list[Conversation]:
+    """
+    Return the sub-agent children of *session_id* whose turn is still in flight.
+
+    Status comes from the relay-fed cache first, then the persisted
+    ``live_status`` mirror, so a replica without the runner tunnel agrees.
+
+    :param session_id: Parent session id, e.g. ``"conv_parent987"``.
+    :param conversation_store: Store the children are read from.
+    :returns: The ``running``/``waiting`` children, oldest first.
+    """
+    running: list[Conversation] = []
+    after: str | None = None
+    while True:
+        page = conversation_store.list_conversations(
+            limit=1000,
+            after=after,
+            kind="sub_agent",
+            parent_conversation_id=session_id,
+            order="asc",
+        )
+        for child in page.data:
+            status = _session_status_cache.get(child.id, child.live_status)
+            if status in _IN_FLIGHT_CHILD_STATUSES:
+                running.append(child)
+        if not page.has_more or page.last_id is None:
+            return running
+        after = page.last_id
+
+
+# Error-item classifier for the info notice a fork opens with when its source
+# still had sub-agents in flight.
+FORK_SOURCE_SUBAGENTS_RUNNING_CODE = "fork_source_subagents_running"
+
+
+def _fork_running_subagent_labels(children: list[Conversation]) -> list[str]:
+    """
+    Name each in-flight child as ``"<title> (session <id>)"`` for the fork notices.
+
+    :param children: The source's in-flight children.
+    :returns: One label per child, in input order.
+    """
+    labels: list[str] = []
+    for child in children:
+        title = title_without_closed_marker(child.title) or child.sub_agent_name or child.id
+        labels.append(f"{title} (session {child.id})")
+    return labels
+
+
+def _fork_running_subagents_agent_note(source_id: str, children: list[Conversation]) -> str:
+    """
+    Build the hidden ``[System: ...]`` context the fork's agent replays on its first turn.
+
+    :param source_id: The forked session's id, e.g. ``"conv_src456"``.
+    :param children: The source's in-flight children; must be non-empty.
+    :returns: The multi-line note text.
+    """
+    count = len(children)
+    header = (
+        "[System: forked while 1 sub-agent was still running — it stays with the original session]"
+        if count == 1
+        else (
+            f"[System: forked while {count} sub-agents were still running — "
+            "they stay with the original session]"
+        )
+    )
+    lines = [
+        header,
+        f"This session was forked from {source_id} while these sub-agents were still running:",
+        *(f"- {label}" for label in _fork_running_subagent_labels(children)),
+        f"They keep running under the original session {source_id}: their results and wake "
+        "notices arrive in that session's inbox, not this one, and sys_cancel_task cannot stop "
+        'them from here. Dispatch receipts copied into this history ("Result will appear in '
+        "your inbox\") refer to the original's inbox. Read a sub-agent's progress with "
+        "sys_session_get_history on its session id; to collect its result or stop it, use the "
+        "original session.",
+    ]
+    return "\n".join(lines)
+
+
+def _fork_running_subagents_notice(source_id: str, children: list[Conversation]) -> ErrorData:
+    """
+    Build the info notice the fork's transcript shows for sub-agents left with the source.
+
+    :param source_id: The forked session's id, e.g. ``"conv_src456"``.
+    :param children: The source's in-flight children; must be non-empty.
+    :returns: An info-level :class:`ErrorData` naming the children and the source.
+    """
+    labels = ", ".join(_fork_running_subagent_labels(children))
+    if len(children) == 1:
+        noun, was, keeps, results, them = "1 sub-agent", "was", "It keeps", "its result", "it"
+    else:
+        noun = f"{len(children)} sub-agents"
+        was, keeps, results, them = "were", "They keep", "their results", "them"
+    return ErrorData(
+        source="execution",
+        code=FORK_SOURCE_SUBAGENTS_RUNNING_CODE,
+        level="info",
+        title=f"{noun} stayed with the original session",
+        message=f"Forked from {source_id} while still running: {labels}.",
+        cause=(
+            f"This session was cloned from {source_id} while {labels} {was} still running. "
+            f"{keeps} running under the original session, so {results} and wake notices go "
+            f"there, not here, and this session cannot stop {them}. Dispatch receipts copied "
+            "into this history refer to the original session's inbox."
+        ),
+        remediation=f"Open the original session {source_id} to collect {results} or stop {them}.",
+    )
+
+
+async def _persist_fork_running_subagents_note(
+    fork_id: str,
+    source_id: str,
+    children: list[Conversation],
+    conversation_store: ConversationStore,
+) -> None:
+    """
+    Append the running-sub-agents notice to a freshly forked session.
+
+    A fork never adopts its source's children, so its copied dispatch
+    receipts promise inbox results that only reach the source. One append
+    adds a hidden ``is_meta`` user-role ``[System: ...]`` note the fork's
+    agent replays, then an info-level error item the UI renders as a notice
+    card. The notice must stay last: the runner resumes a history that ends
+    on a user message as an unanswered turn, which would start a model turn
+    as soon as the fork binds a runner.
+
+    :param fork_id: The fork's session id, e.g. ``"conv_fork123"``.
+    :param source_id: The forked session's id, e.g. ``"conv_src456"``.
+    :param children: The source's in-flight children; must be non-empty.
+    :param conversation_store: Store used to append the items.
+    """
+    response_id = generate_task_id()
+    items = [
+        NewConversationItem(
+            type="message",
+            response_id=response_id,
+            data=MessageData(
+                role="user",
+                is_meta=True,
+                content=[
+                    {
+                        "type": "input_text",
+                        "text": _fork_running_subagents_agent_note(source_id, children),
+                    }
+                ],
+            ),
+        ),
+        NewConversationItem(
+            type="error",
+            response_id=response_id,
+            data=_fork_running_subagents_notice(source_id, children),
+        ),
+    ]
+    await asyncio.to_thread(conversation_store.append, fork_id, items)
+
+
 async def _resolve_elicitation(
     session_id: str,
     data: dict[str, Any],
@@ -12945,6 +13110,7 @@ async def _get_session_snapshot(
 
 
 __all__ = [
+    "FORK_SOURCE_SUBAGENTS_RUNNING_CODE",
     "_accumulate_session_usage",
     "_archive_stop",
     "_best_effort_stop",
@@ -12967,6 +13133,9 @@ __all__ = [
     "_evaluate_input_policy",
     "_evaluate_tool_call_policy",
     "_fetch_model_options",
+    "_fork_running_subagent_labels",
+    "_fork_running_subagents_agent_note",
+    "_fork_running_subagents_notice",
     "_forward_event_to_runner",
     "_forward_native_subagent_terminal_failure",
     "_forward_native_terminal_message",
@@ -12989,6 +13158,7 @@ __all__ = [
     "_persist_external_conversation_items",
     "_persist_external_devin_subagent_start",
     "_persist_external_session_usage",
+    "_persist_fork_running_subagents_note",
     "_persist_host_launch_failure_turn",
     "_persist_model_change_note",
     "_persist_native_cumulative_usage",
@@ -13004,6 +13174,7 @@ __all__ = [
     "_run_managed_launch",
     "_run_managed_wake",
     "_runner_reject_detail",
+    "_running_child_conversations",
     "_schedule_deferred_elicitation_clear",
     "_spawn_archive_stop",
     "_spawn_gateway_backed",

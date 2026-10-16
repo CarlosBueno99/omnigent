@@ -1240,6 +1240,19 @@ shape as `GET /v1/sessions/{id}` — with status `"idle"` and all
 copied items in chronological order. Clients must bind a runner
 before opening the fork's SSE stream or posting events.
 
+A fork never adopts the source's sub-agent (child) sessions. Children
+whose turn is still in flight when the source is forked keep running
+under the source: their results and wake notices land in the source's
+inbox, and the fork's `sys_cancel_task` cannot stop them. The fork's
+copied history then ends with two items that say so: a hidden
+`is_meta` user-role `[System: forked while N sub-agents were still
+running — …]` note the fork's agent replays on its first turn, and an
+info-level `error` item (`code: "fork_source_subagents_running"`,
+`level: "info"`) whose title, cause and remediation name those children
+and the source session id for the user. The notice is the last item so
+the fork does not look like an unanswered turn when it binds a runner.
+A source with no in-flight children gets neither item.
+
 ### Stream Session
 
 ```

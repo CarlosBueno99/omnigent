@@ -180,9 +180,11 @@ from omnigent.server.routes._sessions.orchestration import (
     _get_session_snapshot,
     _is_native_terminal_session,
     _labels_for_viewer,
+    _persist_fork_running_subagents_note,
     _persist_model_change_note,
     _publish_runner_recovered_status,
     _run_managed_launch,
+    _running_child_conversations,
     _spawn_archive_stop,
     _validate_session_model_selection,
     ensure_runner_connected,
@@ -3287,7 +3289,13 @@ def register_core_routes(
         top-level conversation (no parent, its own spawn-tree root, its
         own owner grant), so it appears in the sidebar and outlives the
         parent. The source keeps running under its parent untouched,
-        and the fork does not adopt the source's own children.
+        and the fork does not adopt the source's own children. Children
+        still in flight when the source is forked therefore keep
+        reporting to the source; the fork's copied history then ends
+        with a hidden agent note and a visible info notice naming them
+        and the source, so neither the user nor the fork's agent waits
+        on results that go to the source's inbox (see
+        :func:`_persist_fork_running_subagents_note`).
 
         ``body.host_type: "managed"`` gives the fork its own
         server-provisioned sandbox instead of leaving it unbound for the
@@ -3811,6 +3819,25 @@ def register_core_routes(
                         source_id,
                         exc_info=True,
                     )
+
+        # Sub-agents still in flight stay with the source (a fork never adopts
+        # them); say so in the fork before announcing it. Best-effort like the
+        # file rows above: the fork exists, so a failed note must not orphan it.
+        try:
+            running_children = await asyncio.to_thread(
+                _running_child_conversations, source_id, conversation_store
+            )
+            if running_children:
+                await _persist_fork_running_subagents_note(
+                    new_conv.id, source_id, running_children, conversation_store
+                )
+        except Exception:
+            _logger.warning(
+                "failed to note the running sub-agents of session %s in fork %s",
+                source_id,
+                new_conv.id,
+                exc_info=True,
+            )
 
         # Grant ownership BEFORE scheduling the managed launch, mirroring
         # both create paths: a managed-guard failure (misconfigured server,

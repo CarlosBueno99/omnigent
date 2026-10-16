@@ -23,6 +23,7 @@ import { useSessionAgent } from "@/hooks/useAgents";
 import { useSession } from "@/hooks/useSession";
 import { useHosts, useHostModelOptions, type Host } from "@/hooks/useHosts";
 import { useDirectorySessions } from "@/hooks/useDirectorySessions";
+import { useChildSessions } from "@/hooks/useChildSessions";
 import { useRunnerHealthRegistration } from "@/hooks/RunnerHealthProvider";
 import {
   checkHostDirectory,
@@ -44,6 +45,10 @@ vi.mock("@/hooks/useAgents", () => ({ useSessionAgent: vi.fn() }));
 vi.mock("@/hooks/useSession", () => ({ useSession: vi.fn() }));
 vi.mock("@/hooks/useHosts", () => ({ useHosts: vi.fn(), useHostModelOptions: vi.fn() }));
 vi.mock("@/hooks/useDirectorySessions", () => ({ useDirectorySessions: vi.fn() }));
+vi.mock("@/hooks/useChildSessions", () => ({
+  useChildSessions: vi.fn(),
+  childSessionsQueryKey: (id: string) => ["conversation", id, "child_sessions"],
+}));
 vi.mock("@/hooks/RunnerHealthProvider", () => ({ useRunnerHealthRegistration: vi.fn() }));
 vi.mock("@/hooks/useHostFilesystem", () => ({
   useHostFilesystem: vi.fn(),
@@ -78,6 +83,7 @@ const useHostsMock = vi.mocked(useHosts);
 const useHostModelOptionsMock = vi.mocked(useHostModelOptions);
 const useSessionMock = vi.mocked(useSession);
 const useDirectorySessionsMock = vi.mocked(useDirectorySessions);
+const useChildSessionsMock = vi.mocked(useChildSessions);
 const useRunnerHealthMock = vi.mocked(useRunnerHealthRegistration);
 const useHostFilesystemMock = vi.mocked(useHostFilesystem);
 const checkHostDirectoryMock = vi.mocked(checkHostDirectory);
@@ -222,6 +228,8 @@ beforeEach(() => {
     typeof useDirectorySessions
   >);
   useRunnerHealthMock.mockReturnValue(new Map());
+  // The source has no sub-agents unless a test says otherwise.
+  useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
   useHostFilesystemMock.mockReturnValue({
     data: undefined,
     isLoading: false,
@@ -721,6 +729,56 @@ describe("ForkSessionDialog", () => {
     const sameOption = screen.getByTestId("fork-session-agent-option-same");
     expect(sameOption).toHaveTextContent("Claude");
     expect(sameOption).toHaveTextContent("(same as original session)");
+  });
+
+  it("warns up front when the source still has sub-agents running", () => {
+    // Running children stay with the original, so the user must learn before
+    // cloning that their results will not reach the clone.
+    useChildSessionsMock.mockReturnValue({
+      children: [
+        { id: "conv_worker", title: "worker:long-task", busy: true },
+        { id: "conv_done", title: "worker:done", busy: false },
+      ],
+      isLoading: false,
+      error: null,
+    } as unknown as ReturnType<typeof useChildSessions>);
+    const { invalidateSpy } = renderDialog({ sourceTitle: "My session" });
+
+    expect(useChildSessionsMock).toHaveBeenCalledWith("conv_src");
+    // A cached list can predate a child's turn start, so opening refetches it.
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ["conversation", "conv_src", "child_sessions"],
+    });
+    const hint = screen.getByTestId("fork-session-subagent-hint");
+    expect(hint).toHaveTextContent("1 sub-agent is still running");
+    expect(hint).toHaveTextContent("stays with the original session");
+  });
+
+  it("counts several running sub-agents in the warning", () => {
+    useChildSessionsMock.mockReturnValue({
+      children: [
+        { id: "conv_a", title: "worker:a", busy: true },
+        { id: "conv_b", title: "worker:b", busy: true },
+      ],
+      isLoading: false,
+      error: null,
+    } as unknown as ReturnType<typeof useChildSessions>);
+    renderDialog({ sourceTitle: "My session" });
+
+    expect(screen.getByTestId("fork-session-subagent-hint")).toHaveTextContent(
+      "2 sub-agents are still running",
+    );
+  });
+
+  it("shows no sub-agent warning when every child has finished", () => {
+    useChildSessionsMock.mockReturnValue({
+      children: [{ id: "conv_done", title: "worker:done", busy: false }],
+      isLoading: false,
+      error: null,
+    } as unknown as ReturnType<typeof useChildSessions>);
+    renderDialog({ sourceTitle: "My session" });
+
+    expect(screen.queryByTestId("fork-session-subagent-hint")).not.toBeInTheDocument();
   });
 
   describe("missing workspace recovery", () => {
