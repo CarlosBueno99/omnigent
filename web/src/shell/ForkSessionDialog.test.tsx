@@ -130,6 +130,7 @@ function renderDialog(
     sourceHostId?: string | null;
     sourceGitBranch?: string | null;
     upToResponseId?: string | null;
+    workspaceRecovery?: boolean;
     // Server capabilities the dialog reads. Omitted leaves the context on
     // "loading", which fails the sandbox gate closed — the world every
     // pre-sandbox case here was written against.
@@ -146,6 +147,7 @@ function renderDialog(
       sourceHostId={props.sourceHostId}
       sourceGitBranch={props.sourceGitBranch}
       upToResponseId={props.upToResponseId}
+      workspaceRecovery={props.workspaceRecovery}
       open
       onOpenChange={vi.fn()}
     />
@@ -721,6 +723,137 @@ describe("ForkSessionDialog", () => {
     expect(sameOption).toHaveTextContent("(same as original session)");
   });
 
+  describe("missing workspace recovery", () => {
+    const RECOVERY = {
+      sourceTitle: "My session",
+      sourceWorkspace: "/Users/a/repo-worktrees/deleted-branch",
+      sourceGitBranch: "deleted-branch",
+      sourceHostId: "host_1",
+      workspaceRecovery: true,
+    };
+
+    it.each([
+      ["plain directory", "/Users/a/repo", null],
+      ["worktree", RECOVERY.sourceWorkspace, RECOVERY.sourceGitBranch],
+      ["worktree without a recorded branch", RECOVERY.sourceWorkspace, null],
+    ])("requires a directory instead of prefilling the missing %s", (_name, workspace, branch) => {
+      renderDialog({ ...RECOVERY, sourceWorkspace: workspace, sourceGitBranch: branch });
+
+      expect(screen.getByRole("heading", { name: "Continue in another directory" })).toBeVisible();
+      expect(
+        screen.getByText(
+          "Choose an existing directory to continue this conversation in a new session. Files from the missing workspace won’t be restored.",
+        ),
+      ).toBeVisible();
+      expect(screen.getByTestId("fork-session-host-select")).toHaveTextContent("serena-laptop");
+      expect(screen.getByTestId("workspace-path-input")).toBeVisible();
+      expect(screen.getByTestId("workspace-path-input")).toHaveValue("");
+      expect(screen.queryByTestId("fork-session-branch-input")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("fork-session-reuse-dir-hint")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Continue" })).toHaveAttribute(
+        "aria-disabled",
+        "true",
+      );
+      expect(forkSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a missing chosen path without recreating its worktree or creating a session", async () => {
+      checkHostDirectoryMock.mockResolvedValue("The working directory doesn't exist on this host.");
+      hostDirectoryMissingMock.mockResolvedValue(true);
+      renderDialog(RECOVERY);
+
+      fireEvent.change(screen.getByTestId("workspace-path-input"), {
+        target: { value: RECOVERY.sourceWorkspace },
+      });
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+      await waitFor(() =>
+        expect(screen.getByTestId("fork-session-error")).toHaveTextContent("doesn't exist"),
+      );
+      expect(checkHostDirectoryMock).toHaveBeenCalledExactlyOnceWith(
+        "host_1",
+        RECOVERY.sourceWorkspace,
+      );
+      expect(hostDirectoryMissingMock).not.toHaveBeenCalled();
+      expect(forkSessionMock).not.toHaveBeenCalled();
+      expect(launchRunnerMock).not.toHaveBeenCalled();
+      expect(navigateMock).not.toHaveBeenCalled();
+    });
+
+    it("waits for validation, then starts the full conversation in the chosen existing repository", async () => {
+      let finishPreflight!: (problem: string | null) => void;
+      checkHostDirectoryMock.mockReturnValue(
+        new Promise((resolve) => {
+          finishPreflight = resolve;
+        }),
+      );
+      forkSessionMock.mockResolvedValue({
+        id: "conv_fork",
+      } as Awaited<ReturnType<typeof forkSession>>);
+      launchRunnerMock.mockResolvedValue({ runnerId: "r1" });
+      renderDialog(RECOVERY);
+
+      fireEvent.change(screen.getByTestId("workspace-path-input"), {
+        target: { value: "/Users/a/repo" },
+      });
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+      expect(checkHostDirectoryMock).toHaveBeenCalledWith("host_1", "/Users/a/repo");
+      expect(forkSessionMock).not.toHaveBeenCalled();
+      expect(launchRunnerMock).not.toHaveBeenCalled();
+      finishPreflight(null);
+
+      await waitFor(() => expect(launchRunnerMock).toHaveBeenCalledTimes(1));
+      expect(forkSessionMock).toHaveBeenCalledWith("conv_src", {
+        title: undefined,
+        agentId: undefined,
+        upToResponseId: undefined,
+        config: {},
+        sandbox: undefined,
+      });
+      expect(launchRunnerMock).toHaveBeenCalledWith(
+        "host_1",
+        "conv_fork",
+        "/Users/a/repo",
+        undefined,
+      );
+      expect(navigateMock).toHaveBeenCalledWith("/c/conv_fork");
+    });
+
+    it("accepts a folder from the directory browser", async () => {
+      forkSessionMock.mockResolvedValue({
+        id: "conv_fork",
+      } as Awaited<ReturnType<typeof forkSession>>);
+      launchRunnerMock.mockResolvedValue({ runnerId: "r1" });
+      renderDialog(RECOVERY);
+
+      fireEvent.click(screen.getByTestId("workspace-browse-toggle"));
+      fireEvent.click(screen.getByTestId("mock-pick-workspace"));
+      expect(screen.getByTestId("workspace-path-input")).toHaveValue("/Users/a/git/omnigent");
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+      await waitFor(() => expect(launchRunnerMock).toHaveBeenCalledTimes(1));
+      expect(launchRunnerMock).toHaveBeenCalledWith(
+        "host_1",
+        "conv_fork",
+        "/Users/a/git/omnigent",
+        undefined,
+      );
+    });
+
+    it("requires an online host instead of falling back to a fresh sandbox", () => {
+      setHosts([host({ status: "offline" })]);
+      renderDialog({
+        ...RECOVERY,
+        info: { managed_sandboxes_enabled: true, sandbox_provider: "arclet" },
+      });
+
+      expect(screen.getByTestId("fork-session-submit")).toHaveAttribute("aria-disabled", "true");
+      expect(screen.getByTestId("connect-host-command")).toBeVisible();
+      expect(screen.queryByTestId("fork-session-sandbox-hint")).not.toBeInTheDocument();
+    });
+  });
+
   describe("coding source (fork + start)", () => {
     const CODING = {
       sourceTitle: "My session",
@@ -756,7 +889,7 @@ describe("ForkSessionDialog", () => {
       expect(screen.getByTestId("fork-session-branch-input")).toBeInTheDocument();
     });
 
-    it("on a different host (e.g. non-owner), defaults to the caller's host, warns, and needs a directory", () => {
+    it("on a different host (e.g. non-owner), defaults to the caller's host, warns, and asks for a directory up front", () => {
       // Source ran on a host the caller doesn't have (their useHosts only
       // returns host_1) — the cross-host / non-owner case.
       renderDialog({
@@ -773,10 +906,41 @@ describe("ForkSessionDialog", () => {
       // A different machine → no "reuses the working directory" hint, and the
       // source path isn't prefilled (it's on someone else's box).
       expect(screen.queryByTestId("fork-session-reuse-dir-hint")).not.toBeInTheDocument();
-      // Advanced auto-expands so the caller can pick a directory here.
-      expect(screen.getByTestId("fork-session-advanced-content")).toBeInTheDocument();
+      // The required directory sits at the top level, outside collapsed Advanced.
+      expect(screen.queryByTestId("fork-session-advanced-content")).not.toBeInTheDocument();
+      expect(screen.getByTestId("workspace-path-input")).toHaveValue("");
+      expect(screen.getByTestId("fork-session-pick-dir-hint")).toBeInTheDocument();
       // Can't start until a directory on this host is chosen.
-      expect(screen.getByTestId("fork-session-submit")).toBeDisabled();
+      const submit = screen.getByTestId("fork-session-submit");
+      expect(submit).toHaveAttribute("aria-disabled", "true");
+
+      // A blocked click names the missing field and focuses it.
+      fireEvent.click(submit);
+      expect(screen.getByTestId("fork-session-field-error")).toHaveTextContent(
+        "Pick a working directory.",
+      );
+      expect(screen.getByTestId("workspace-path-input")).toHaveFocus();
+      expect(screen.getByTestId("workspace-path-input")).toHaveAttribute("aria-invalid", "true");
+      expect(forkSessionMock).not.toHaveBeenCalled();
+
+      // Fixing the field clears the error.
+      fireEvent.change(screen.getByTestId("workspace-path-input"), {
+        target: { value: "/mine/repo" },
+      });
+      expect(screen.queryByTestId("fork-session-field-error")).not.toBeInTheDocument();
+      expect(submit).not.toHaveAttribute("aria-disabled");
+    });
+
+    it("opens Advanced and focuses a cleared source-host directory on submit", () => {
+      renderDialog(CODING);
+      openAdvanced();
+      fireEvent.change(screen.getByTestId("workspace-path-input"), { target: { value: "" } });
+      openAdvanced(); // collapse again: the blocked click must re-reveal it
+
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+      expect(screen.getByTestId("workspace-path-input")).toHaveFocus();
+      expect(screen.getByTestId("fork-session-field-error")).toBeInTheDocument();
+      expect(forkSessionMock).not.toHaveBeenCalled();
     });
 
     it("surfaces a directory conflict inline WITHOUT auto-expanding on the source host", () => {
@@ -858,6 +1022,18 @@ describe("ForkSessionDialog", () => {
       sourceHostId: "host_1",
       sourceGitBranch: "fix-1",
     };
+
+    it("lets the user clear the prefilled directory without re-seeding it", () => {
+      renderDialog(WORKTREE_CODING);
+      openAdvanced();
+      fireEvent.change(screen.getByTestId("fork-session-branch-input"), {
+        target: { value: "edited" },
+      });
+      fireEvent.change(screen.getByTestId("workspace-path-input"), { target: { value: "" } });
+      // Neither the directory nor the edited branch springs back to the source's.
+      expect(screen.getByTestId("workspace-path-input")).toHaveValue("");
+      expect(screen.getByTestId("fork-session-branch-input")).toHaveValue("edited");
+    });
 
     it("prefills a worktree-backed source as original repo + source branch", () => {
       renderDialog(WORKTREE_CODING);
@@ -1039,7 +1215,9 @@ describe("ForkSessionDialog", () => {
 
       // No Enter, no browser — the submit enables purely from the ~-resolve.
       expect(screen.queryByTestId("mock-workspace-picker")).not.toBeInTheDocument();
-      await waitFor(() => expect(screen.getByTestId("fork-session-submit")).toBeEnabled());
+      await waitFor(() =>
+        expect(screen.getByTestId("fork-session-submit")).not.toHaveAttribute("aria-disabled"),
+      );
       // Same host, different directory: the soft file-references note applies,
       // not the cross-host warning.
       expect(screen.getByTestId("fork-session-mismatch-warning")).toBeInTheDocument();
@@ -1071,7 +1249,7 @@ describe("ForkSessionDialog", () => {
       const input = screen.getByTestId("workspace-path-input");
       // A tilde value alone is not submittable (the server never expands ~).
       fireEvent.change(input, { target: { value: "~/git/omnigent" } });
-      expect(screen.getByTestId("fork-session-submit")).toBeDisabled();
+      expect(screen.getByTestId("fork-session-submit")).toHaveAttribute("aria-disabled", "true");
 
       // Enter commits the typed path and opens the tree browser at it.
       fireEvent.keyDown(input, { key: "Enter" });
@@ -1080,7 +1258,7 @@ describe("ForkSessionDialog", () => {
       // "Select" commits the browser's absolute path into the form.
       fireEvent.click(screen.getByTestId("mock-pick-workspace"));
       expect(screen.getByTestId("workspace-path-input")).toHaveValue("/Users/a/git/omnigent");
-      expect(screen.getByTestId("fork-session-submit")).toBeEnabled();
+      expect(screen.getByTestId("fork-session-submit")).not.toHaveAttribute("aria-disabled");
 
       fireEvent.click(screen.getByTestId("fork-session-submit"));
       await waitFor(() => expect(launchRunnerMock).toHaveBeenCalledTimes(1));
@@ -1116,7 +1294,7 @@ describe("ForkSessionDialog", () => {
 
       // Can't start with nothing to run on, and (mirroring NewChatDialog) the
       // CLI reconnect command is surfaced so the user can unblock.
-      expect(screen.getByTestId("fork-session-submit")).toBeDisabled();
+      expect(screen.getByTestId("fork-session-submit")).toHaveAttribute("aria-disabled", "true");
       expect(screen.queryByTestId("fork-session-host-select")).not.toBeInTheDocument();
       expect(screen.getByTestId("connect-host-command")).toBeInTheDocument();
     });
@@ -1143,14 +1321,14 @@ describe("ForkSessionDialog", () => {
         </QueryClientProvider>
       );
       const { rerender } = render(tree());
-      expect(screen.getByTestId("fork-session-submit")).not.toBeDisabled();
+      expect(screen.getByTestId("fork-session-submit")).not.toHaveAttribute("aria-disabled");
 
       // useHosts refetches and the still-selected host flips offline. canSubmit
       // checks online-ness (not just "a host is selected"), so submit re-greys
       // rather than attempting a launchRunner that would fail server-side.
       setHosts([host({ host_id: "host_1", status: "offline" })]);
       rerender(tree());
-      expect(screen.getByTestId("fork-session-submit")).toBeDisabled();
+      expect(screen.getByTestId("fork-session-submit")).toHaveAttribute("aria-disabled", "true");
     });
 
     it("leaves the host unpicked with a reconnect hint when the source host is offline, then warns on an explicit pick", () => {
@@ -1165,7 +1343,7 @@ describe("ForkSessionDialog", () => {
       expect(hint).toHaveTextContent("arca");
       expect(hint).toHaveTextContent(/isn't supported/);
       expect(screen.getByTestId("fork-session-host-select")).toHaveTextContent("Select a host");
-      expect(screen.getByTestId("fork-session-submit")).toBeDisabled();
+      expect(screen.getByTestId("fork-session-submit")).toHaveAttribute("aria-disabled", "true");
 
       // Explicitly picking a different machine is still allowed (the user
       // may want the history there regardless), but the dialog must say the
@@ -1177,11 +1355,11 @@ describe("ForkSessionDialog", () => {
       expect(warning).toHaveTextContent(/isn't supported/);
       expect(screen.queryByTestId("fork-session-source-host-offline-hint")).toBeNull();
       // Warned, not blocked: submit now waits only for a directory on that host.
-      expect(screen.getByTestId("fork-session-submit")).toBeDisabled();
+      expect(screen.getByTestId("fork-session-submit")).toHaveAttribute("aria-disabled", "true");
       fireEvent.change(screen.getByTestId("workspace-path-input"), {
         target: { value: "/elsewhere" },
       });
-      expect(screen.getByTestId("fork-session-submit")).toBeEnabled();
+      expect(screen.getByTestId("fork-session-submit")).not.toHaveAttribute("aria-disabled");
       expect(screen.queryByTestId("fork-session-mismatch-warning")).toBeNull();
     });
 
@@ -1459,7 +1637,13 @@ describe("ForkSessionDialog", () => {
       // The read-only list warns the destination can't take them, and submit
       // is blocked rather than deferring to a server-side 422.
       expect(screen.getByTestId("fork-session-repos-unsupported")).toBeInTheDocument();
-      expect((screen.getByTestId("fork-session-submit") as HTMLButtonElement).disabled).toBe(true);
+      const submit = screen.getByTestId("fork-session-submit");
+      expect(submit).toHaveAttribute("aria-disabled", "true");
+      fireEvent.click(submit);
+      expect(screen.getByTestId("fork-session-field-error")).toHaveTextContent(
+        "This provider clones only one repository",
+      );
+      expect(forkSessionMock).not.toHaveBeenCalled();
     });
 
     it("sends an explicit null workspace when the repository is cleared", async () => {
@@ -1497,11 +1681,20 @@ describe("ForkSessionDialog", () => {
       openAdvanced();
       // A blank repository is legal (empty sandbox); a bare "org/repo" is UI
       // sugar the server rejects, so catch it here instead of on a 422.
-      expect(screen.getByTestId("fork-session-submit")).not.toBeDisabled();
+      expect(screen.getByTestId("fork-session-submit")).not.toHaveAttribute("aria-disabled");
       fireEvent.change(screen.getByTestId("fork-session-sandbox-repo-input"), {
         target: { value: "org/repo" },
       });
-      expect(screen.getByTestId("fork-session-submit")).toBeDisabled();
+      expect(screen.getByTestId("fork-session-submit")).toHaveAttribute("aria-disabled", "true");
+
+      // Collapsed Advanced must not hide the reason: a blocked click reopens it.
+      openAdvanced();
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+      expect(screen.getByTestId("fork-session-sandbox-repo-input")).toHaveFocus();
+      expect(screen.getByTestId("fork-session-field-error")).toHaveTextContent(
+        "Enter a repository URL",
+      );
+      expect(forkSessionMock).not.toHaveBeenCalled();
     });
   });
 });
