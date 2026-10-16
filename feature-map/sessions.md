@@ -64,6 +64,10 @@ the header menu), and each place is a separate entry point.
 - `message-recovery`: a message racing initial runner binding or replacement
   reaches the available runner without a false failed turn. Native sessions
   initialize before delivery; SDK sub-agents reuse their loaded session state.
+- `import-progress`: import recent sessions or one session by ID from an online
+  machine. Settings shows a spinner and count; the sidebar heading retains
+  progress after leaving Settings. Results stay compact, with expandable failure
+  details and retry of the original selection.
 - `resume-imported`: an imported session can be resumed onto a chosen local host.
 - `recent-switcher`: the desktop app opens the five most recent sessions with
   Control+Tab; Tab and Shift+Tab cycle, releasing Control switches, and Escape cancels.
@@ -84,7 +88,7 @@ the header menu), and each place is a separate entry point.
 - `canvas-session-health`: an opened Canvas session receives host health and
   live updates even before it appears in the loaded sidebar pages.
 - `view-options`: the one filter menu, on the Projects header, with Grouping
-  (Default / Created / Updated), Display (All / My / Shared / Archived), Ordering
+  (Default / Status / Created / Updated), Display (All / My / Shared / Archived), Ordering
   (Updated / Created) and Show (Updated / Environment / Repo / Branch) submenus,
   saved per device. Created ordering keeps sessions newest-created first as messages
   arrive;
@@ -92,16 +96,30 @@ the header menu), and each place is a separate entry point.
   clears the cached rows and shows loading while session timestamps refresh,
   including project folders, pins, and Archived. With the flag off,
   sessions always use Updated regardless of the saved preference. Shared sessions
-  get their own section above Sessions. Status grouping is hidden until
-  working/idle detection is reliable; saved Status selections fall back to Default.
+  get their own section above Sessions. Status groups are Needs attention, Unread,
+  Working, Draft, and Done. Working stays visible with muted “No sessions” text
+  when empty. Starting or running sessions enter Working immediately; idle must
+  last 10 seconds before they leave it. Errors and approvals bypass that delay.
+  This only affects grouping, and existing hover/rename holds still apply.
   Created and Updated group by their respective date, independently of ordering,
-  with headings such as “Created today” and “Updated yesterday”. Both replace
+  with the Created/Updated prefix only on the first date section, followed by
+  headings such as “Yesterday” and “Earlier”. Environment metadata shows an icon
+  with its label available to screen readers. Branch also resolves the workspace's
+  checked-out branch when none was recorded at session creation, without hovering.
+  All groupings replace
   Projects, Shared and Sessions with titled groups; the first group's header takes
   the Projects header's place. Select sessions sits beside the filter and selects every list below it at once. Behind
   the `sidebar_grouping_ui` release flag; with it off, the Sessions header keeps
   a flat Display filter and the tooltip keeps its plain layout.
 
 ## How to get to it (user POV)
+
+**Import:** open Settings → Import sessions, or choose **Import your recent
+sessions** on the empty landing. Choose a machine, harness, and recent count
+or session ID. After starting, go Back to the session list; its heading shows
+progress and links back to Settings. Imported sessions appear in the normal list.
+On phones, the progress link opens the Import panel directly; its header arrow
+returns to the Settings menu.
 
 **Sidebar row:** hover a row and open its menu, or right-click the row. Both
 offer pin, fork, rename, mark as unread or read, add to project (or move
@@ -143,7 +161,7 @@ menu, then filter by project.
 
 **Sidebar filter menu:** with `sidebar_grouping_ui` on, the funnel on the
 Projects header holds Grouping, Display, Ordering and Show. In
-Created or Updated grouping, Projects is hidden and the funnel sits in the same spot on the
+Status, Created or Updated grouping, Projects is hidden and the funnel sits in the same spot on the
 first group's header. The Select sessions button sits beside it and selects
 project, Shared and Sessions rows together; the Sessions header keeps only New
 session. Hovering a row opens
@@ -495,6 +513,20 @@ plain `uv run pytest`, which starts a private server for the test.
   `tests/server/integration/test_sessions_child_sessions.py::test_sdk_subagent_recovery_skips_session_init`
   covers recovery during ancestor healing and during the final binding refresh,
   without initializing the SDK child's already-loaded session again.
+- **`import-progress`:** run
+  `tests/e2e_ui/sessions/test_import_sessions.py` for Settings recent imports,
+  exact-ID imports, and the empty-landing entry point (mocked import responses).
+  Run `tests/e2e_ui/sessions/test_import_progress_in_session_list.py` for a real
+  isolated host reading transcripts, streaming to the server, leaving Settings,
+  progress beside the sidebar heading, and clearing it on completion. Desktop
+  and mobile cases follow the indicator back to the panel and verify that the
+  content can receive clicks, including behind the mobile drawer boundary.
+  `tests/e2e_ui/sessions/test_import_oversized_session.py` verifies recent and
+  exact-ID imports through a real host when a transcript exceeds the tunnel's
+  message cap; the batch summary links to all three sessions in the sidebar.
+  Component coverage checks compact large batches, failure expansion, retry
+  after navigation, and collapsed headings.
+
 - **`resume-imported` (own environment):**
   `tests/e2e_ui/sessions/test_imported_session_resume.py::test_imported_session_resumes_onto_chosen_local_host`
 - **`recent-switcher` (manual Electron):** open at least six sessions, hold
@@ -570,7 +602,7 @@ plain `uv run pytest`, which starts a private server for the test.
   ordinary sessions still return to the new-session page in
   `tests/e2e_ui/sessions/test_canvas_creation.py::test_stale_regular_creation_url_returns_to_new_session`.
 - **`view-options`:**
-  `tests/e2e_ui/sessions/test_sidebar_view_options.py::test_date_grouping_and_show_toggles_persist_across_reload`,
+  `tests/e2e_ui/sessions/test_sidebar_view_options.py::test_grouping_and_show_toggles_persist_across_reload`,
   `tests/e2e_ui/sessions/test_sidebar_view_options.py::test_tooltip_fetches_repo_and_pr_only_when_opened`,
   `tests/e2e_ui/sessions/test_sidebar_view_options.py::test_created_ordering_persists_and_flag_off_uses_updated`
   (enable the flag by patching `GET /v1/info`). Unit tests in
