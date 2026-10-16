@@ -18,6 +18,10 @@ import omnigent.harnesses.claude_native.forwarder as forwarder
 from omnigent.harnesses.claude_native.bridge import (
     record_hook_event,
 )
+from omnigent.runner.transports.ws_tunnel.event_delivery import (
+    RunnerEventDispatcher,
+    TunnelEventClient,
+)
 
 from ._support import _get_recorded_request, _start_recording_server
 
@@ -725,3 +729,67 @@ async def test_missing_transcript_notice_retries_then_still_posts_the_idle_edge(
         if "Failed to post Claude missing-transcript notice" in record.getMessage()
     ]
     assert len(dropped) == (0 if notice_delivered else 1)
+
+
+@pytest.mark.asyncio
+async def test_missing_transcript_notice_deadline_frees_the_idle_edge_during_a_tunnel_outage(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tunnel that stops acknowledging cannot hold the confirmed idle edge behind the notice.
+
+    Source-keyed items ride the tunnel and wait for its next connection, while
+    the status edge uses HTTP. Once the notice deadline passes, the edge still
+    posts with its diagnostic output.
+    """
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    transcript_path = tmp_path / "never-written.jsonl"
+    _record_turn(bridge_dir, transcript_path)
+    monkeypatch.setattr(forwarder, "_MISSING_TRANSCRIPT_NOTICE_DEADLINE_S", 0.3)
+    caplog.set_level(logging.WARNING, logger=forwarder.__name__)
+
+    async def _send(_frame: str) -> None:
+        return None
+
+    dispatcher = RunnerEventDispatcher()
+    dispatcher.ready(_send)
+    dispatcher.disconnected()
+    requests: list[dict[str, Any]] = []
+
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(202, json={})
+
+    started = asyncio.get_running_loop().time()
+    async with TunnelEventClient(
+        event_dispatcher=dispatcher,
+        transport=httpx.MockTransport(_handle_request),
+        base_url="http://test",
+    ) as client:
+        await forwarder._forward_available_status_events(
+            client=client,
+            session_id="conv_tunnel_outage",
+            bridge_dir=bridge_dir,
+            state=forwarder.HookForwardState(event_cursor=0, byte_offset=0),
+            retry_tracker=forwarder._PostRetryTracker(),
+            dedupe=forwarder._ForwardDedupeState(),
+            task_subjects={},
+            task_statuses={},
+            task_order=[],
+        )
+    elapsed = asyncio.get_running_loop().time() - started
+
+    # The notice waited on the tunnel and never reached HTTP; the edge did.
+    assert [request["type"] for request in requests] == ["external_session_status"]
+    assert requests[0]["data"]["turn_completed"] is True
+    assert str(transcript_path) in requests[0]["data"]["output"]
+    assert 0.3 <= elapsed < 5.0
+    dropped = [
+        record
+        for record in caplog.records
+        if "Failed to post Claude missing-transcript notice" in record.getMessage()
+    ]
+    assert len(dropped) == 1
+    assert "outcome=deadline" in dropped[0].getMessage()

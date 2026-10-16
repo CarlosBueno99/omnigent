@@ -340,10 +340,12 @@ def _observe_transcript_discovery(
 
 
 _MISSING_TRANSCRIPT_ERROR_CODE = "claude_transcript_missing"
-# The chat notice is posted once per turn ahead of the idle edge; its retry is
-# short and bounded (under a second in total), so the edge waits at most briefly.
+# The chat notice is posted once per turn ahead of the idle edge. Bounded
+# retries plus a wall-clock deadline cap how long the edge waits, including
+# when the tunnel that carries source-keyed items is down.
 _MISSING_TRANSCRIPT_NOTICE_ATTEMPTS = 3
 _MISSING_TRANSCRIPT_NOTICE_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_MISSING_TRANSCRIPT_NOTICE_DEADLINE_S = 10.0
 
 
 def _transcript_write_blocker(transcript_path: Path) -> str:
@@ -449,47 +451,62 @@ async def _surface_missing_transcript(
             session_id,
             extra={"session_id": session_id},
         )
-    response = await post_session_event_with_retry(
-        client=client,
-        url=f"/v1/sessions/{url_component(session_id)}/events",
-        payload={
-            "type": "external_conversation_item",
-            "data": {
-                # Stable per hook record, so a retried or re-seen Stop cannot
-                # duplicate the notice.
-                "source_id": f"missing-transcript:{record.event_cursor}:{record.byte_offset}",
-                "item_type": "error",
-                "item_data": {
-                    "source": "harness",
-                    "code": _MISSING_TRANSCRIPT_ERROR_CODE,
-                    "title": "Claude Code's transcript was never written",
-                    "message": (
-                        f"Claude Code reported its transcript at {transcript_path}, but the "
-                        "file never appeared, so this turn's prompt and replies were not "
-                        "mirrored into this session."
-                    ),
-                    "cause": f"{blocker}.",
-                    "remediation": (
-                        "Make that directory writable by the session user so Claude Code "
-                        "can write its transcript."
-                    ),
-                },
+    payload: dict[str, object] = {
+        "type": "external_conversation_item",
+        "data": {
+            # Stable per hook record, so a retried or re-seen Stop cannot
+            # duplicate the notice.
+            "source_id": f"missing-transcript:{record.event_cursor}:{record.byte_offset}",
+            "item_type": "error",
+            "item_data": {
+                "source": "harness",
+                "code": _MISSING_TRANSCRIPT_ERROR_CODE,
+                "title": "Claude Code's transcript was never written",
+                "message": (
+                    f"Claude Code reported its transcript at {transcript_path}, but the "
+                    "file never appeared, so this turn's prompt and replies were not "
+                    "mirrored into this session."
+                ),
+                "cause": f"{blocker}.",
+                "remediation": (
+                    "Make that directory writable by the session user so Claude Code "
+                    "can write its transcript."
+                ),
             },
         },
-        event_type="external_conversation_item",
-        max_attempts=_MISSING_TRANSCRIPT_NOTICE_ATTEMPTS,
-        retry_status_codes=_MISSING_TRANSCRIPT_NOTICE_RETRY_STATUSES,
-        sleep=asyncio.sleep,
-        retry_delay=lambda attempt: 0.25 * attempt,
-        logger_name=__name__,
-    )
-    if response is None or response.status_code >= 400:
+    }
+    outcome: str | None = None
+    try:
+        # Source-keyed items ride the tunnel and wait for its acknowledgement, so a
+        # wall-clock deadline keeps a tunnel outage from holding the idle edge.
+        response = await asyncio.wait_for(
+            post_session_event_with_retry(
+                client=client,
+                url=f"/v1/sessions/{url_component(session_id)}/events",
+                payload=payload,
+                event_type="external_conversation_item",
+                max_attempts=_MISSING_TRANSCRIPT_NOTICE_ATTEMPTS,
+                retry_status_codes=_MISSING_TRANSCRIPT_NOTICE_RETRY_STATUSES,
+                sleep=asyncio.sleep,
+                retry_delay=lambda attempt: 0.25 * attempt,
+                logger_name=__name__,
+            ),
+            timeout=_MISSING_TRANSCRIPT_NOTICE_DEADLINE_S,
+        )
+    except TimeoutError:
+        outcome = "deadline"
+    else:
+        if response is None:
+            outcome = "transport"
+        elif response.status_code >= 400:
+            outcome = str(response.status_code)
+    if outcome is not None:
         _logger.warning(
             "Failed to post Claude missing-transcript notice; "
-            "session=%s event_cursor=%s http_status=%s",
+            "session=%s event_cursor=%s outcome=%s",
             session_id,
             record.event_cursor,
-            response.status_code if response is not None else "transport",
+            outcome,
             extra={"session_id": session_id},
         )
     return (
