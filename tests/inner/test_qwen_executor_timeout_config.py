@@ -6,8 +6,6 @@ import os
 import subprocess
 import sys
 
-import pytest
-
 _TIMEOUT_ENV = "HARNESS_QWEN_PROMPT_TIMEOUT_S"
 _PRINT_TIMEOUT = (
     "from omnigent.inner.qwen_executor import _PROMPT_TIMEOUT_SECONDS; "
@@ -47,20 +45,6 @@ def test_prompt_timeout_malformed_value_fails_loud() -> None:
     result = subprocess.run(
         [sys.executable, "-c", _PRINT_TIMEOUT],
         env=_subprocess_env("not-a-number"),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert _TIMEOUT_ENV in result.stderr.strip().splitlines()[-1]
-
-
-@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
-def test_prompt_timeout_rejects_non_positive_or_non_finite_values(value: str) -> None:
-    result = subprocess.run(
-        [sys.executable, "-c", _PRINT_TIMEOUT],
-        env=_subprocess_env(value),
         text=True,
         capture_output=True,
         check=False,

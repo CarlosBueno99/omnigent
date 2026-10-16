@@ -131,8 +131,7 @@ _TOOL_STATUS_FAILED = "failed"
 
 # Idle (time-without-progress) timeout for a prompt turn, in seconds. A slow
 # self-hosted model can emit nothing for minutes while it writes one large tool
-# call, so this is configurable. Parsing is import-time and fail-loud: a
-# malformed, non-positive, or non-finite value aborts the qwen child at startup.
+# call, so this is env-configurable (validation lives in timeout_seconds_from_env).
 _PROMPT_TIMEOUT_ENV = "HARNESS_QWEN_PROMPT_TIMEOUT_S"
 _PROMPT_TIMEOUT_SECONDS = timeout_seconds_from_env(_PROMPT_TIMEOUT_ENV, 300.0)
 

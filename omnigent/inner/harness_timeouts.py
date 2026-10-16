@@ -1,8 +1,8 @@
 """Operator-configurable idle timeouts shared by the harness executors.
 
-Each executor reads its ``HARNESS_<NAME>_PROMPT_TIMEOUT_S`` override at import
-time, so a bad value aborts the harness child at startup instead of surfacing
-mid-turn as a mysterious deadline.
+The ACP and Qwen executors read their ``HARNESS_<NAME>_PROMPT_TIMEOUT_S``
+override at import time, so a bad value aborts the harness child at startup
+instead of surfacing mid-turn as a mysterious deadline.
 """
 
 from __future__ import annotations
