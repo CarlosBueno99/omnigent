@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from fastapi.responses import Response
 
+from omnigent.runner.native import interrupt as interrupt_mod
 from omnigent.runner.native import orchestration
 from omnigent.runner.native.interrupt import NativeInterruptRunner
 
@@ -129,7 +130,8 @@ async def register_parked_forwarder() -> AsyncIterator[Callable[[str], asyncio.T
 
     yield _register
     for session_id, task in registered:
-        orchestration._AUTO_FORWARDER_TASKS.pop(session_id, None)
+        if orchestration._AUTO_FORWARDER_TASKS.get(session_id) is task:
+            del orchestration._AUTO_FORWARDER_TASKS[session_id]
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -602,9 +604,7 @@ async def test_claude_interrupt_resolves_bridge_id_and_injects(
     assert runner.take_pending_interrupt("conv_cl")[0] is True
 
 
-@pytest.mark.parametrize(
-    "agent_key", ["claude", "cursor", "goose", "kiro", "kimi", "hermes", "qwen", "devin"]
-)
+@pytest.mark.parametrize("agent_key", ["claude", *interrupt_mod._UNIFORM_STOP])
 @pytest.mark.asyncio
 async def test_stop_cancels_registered_transcript_forwarder(
     monkeypatch: pytest.MonkeyPatch,
@@ -613,8 +613,6 @@ async def test_stop_cancels_registered_transcript_forwarder(
 ) -> None:
     """Every stop handler releases the session's forwarder task, not just the uniform ones."""
     import importlib
-
-    from omnigent.runner.native import interrupt as interrupt_mod
 
     session_id = f"conv_stop_{agent_key}"
     if agent_key == "claude":
