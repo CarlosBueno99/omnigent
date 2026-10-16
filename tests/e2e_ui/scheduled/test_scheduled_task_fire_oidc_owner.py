@@ -10,6 +10,7 @@ suite's fake IdP and drives the real sign-in redirect and Automations page.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from collections.abc import Iterator
@@ -28,6 +29,7 @@ from tests.e2e_ui.auth._oidc_server import OIDCServer, spawn_oidc_server
 
 _TASK_NAME = "Morning digest"
 _RUN_RECORDED_TIMEOUT_S = 20.0
+_RECORDING = bool(os.environ.get("OMNIGENT_E2E_RECORD_DIR"))
 
 
 @pytest.fixture(scope="module")
@@ -55,6 +57,12 @@ def owner_with_generation(oidc_server: OIDCServer, oidc_server_tmp: Path) -> str
     owner = permission_store.get_user(FAKE_IDP_EMAIL)
     assert generation and owner is not None and owner.account_generation == generation
     return generation
+
+
+def _pause_for_recording(page: Page, ms: int) -> None:
+    """Hold the frame only while filming; CI runs the journey at full speed."""
+    if _RECORDING:
+        page.wait_for_timeout(ms)
 
 
 def _session_cookie_header(page: Page) -> dict[str, str]:
@@ -101,13 +109,12 @@ def test_oidc_owner_with_account_generation_run_now_fires(
     expect(page.locator('[data-testid="sidebar-brand"]')).to_be_visible(timeout=15_000)
     mark("signed in")
 
-    # Short pauses keep the recorded journey legible; they do not affect the outcome.
     page.goto(f"{public_url}/tasks")
-    page.wait_for_timeout(1_500)
+    _pause_for_recording(page, 1_500)
     page.get_by_test_id("new-task-button").click()
     expect(page.get_by_test_id("create-scheduled-task-dialog")).to_be_visible(timeout=30_000)
     mark("New task dialog open")
-    page.wait_for_timeout(1_500)
+    _pause_for_recording(page, 1_500)
     page.get_by_test_id("task-name-input").fill(_TASK_NAME)
     page.get_by_test_id("task-prompt-input").fill("Summarize yesterday's activity.")
     agent_trigger = page.get_by_test_id("task-agent-picker").get_by_test_id(
@@ -120,7 +127,7 @@ def test_oidc_owner_with_account_generation_run_now_fires(
     expect(row).to_be_visible(timeout=30_000)
     expect(row.get_by_test_id("task-next-run")).to_contain_text("Next run in", timeout=30_000)
     mark("task row listed with a next run")
-    page.wait_for_timeout(2_000)
+    _pause_for_recording(page, 2_000)
     tasks = _api_get(page, api_url, "/v1/scheduled-tasks")["scheduled_tasks"]
     created = next(t for t in tasks if t["name"] == _TASK_NAME)
     task_id = created["id"]
@@ -130,12 +137,12 @@ def test_oidc_owner_with_account_generation_run_now_fires(
     row.get_by_test_id("task-row-menu").click()
     expect(page.get_by_test_id("task-run-now")).to_be_visible()
     mark("row menu open")
-    page.wait_for_timeout(1_500)
+    _pause_for_recording(page, 1_500)
     page.get_by_test_id("task-run-now").click()
     mark("Run now clicked")
     run = _wait_for_run(page, api_url, task_id)
     mark("run recorded server-side")
-    page.wait_for_timeout(2_500)
+    _pause_for_recording(page, 2_500)
 
     page.reload()
     expect(row).to_be_visible(timeout=30_000)
@@ -146,7 +153,7 @@ def test_oidc_owner_with_account_generation_run_now_fires(
         "data_state": row.get_attribute("data-state"),
     }
     mark("Automations page reloaded")
-    page.wait_for_timeout(4_000)
+    _pause_for_recording(page, 4_000)
 
     task = _api_get(page, api_url, f"/v1/scheduled-tasks/{task_id}")
     sessions = _api_get(page, api_url, "/v1/sessions?visibility=all")["data"]
