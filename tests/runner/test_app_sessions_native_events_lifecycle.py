@@ -1610,7 +1610,8 @@ async def _stored_codex_catalog(fingerprint: str) -> list[dict[str, Any]] | None
     """Read the shared catalog once the runner's background write-back has persisted it."""
     from omnigent.models import model_catalog_store
 
-    for _ in range(200):
+    deadline = asyncio.get_running_loop().time() + 10.0
+    while asyncio.get_running_loop().time() < deadline:
         rows = model_catalog_store.read_catalog("codex-native", fingerprint)
         if rows is not None:
             return rows
@@ -1787,18 +1788,22 @@ async def test_codex_model_catalog_writeback_uses_session_provider(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("launch_model", "configured", "expected_default"),
+    ("launch_model", "launch_profile", "configured", "expected_default"),
     [
-        pytest.param(None, "second-picker", "second-picker", id="configured-model"),
-        pytest.param(None, "hidden-picker", None, id="hidden-configured-model"),
-        pytest.param(None, None, CODEX_DEFAULT_MODEL, id="nothing-configured"),
-        pytest.param("second-picker", CODEX_DEFAULT_MODEL, "second-picker", id="provider-default"),
+        pytest.param(None, None, "second-picker", "second-picker", id="configured-model"),
+        pytest.param(None, None, "hidden-picker", None, id="hidden-configured-model"),
+        pytest.param(None, None, None, CODEX_DEFAULT_MODEL, id="nothing-configured"),
+        pytest.param(
+            "second-picker", None, CODEX_DEFAULT_MODEL, "second-picker", id="provider-default"
+        ),
+        pytest.param(None, "work", "second-picker", CODEX_DEFAULT_MODEL, id="profile-shape"),
     ],
 )
 async def test_codex_model_catalog_writeback_miss_pins_the_shapes_default(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     launch_model: str | None,
+    launch_profile: str | None,
     configured: str | None,
     expected_default: str | None,
 ) -> None:
@@ -1807,7 +1812,8 @@ async def test_codex_model_catalog_writeback_miss_pins_the_shapes_default(
     The next no-model launch pins the fresh catalog's default row, so a cold store
     must name the configured (or provider) model rather than Omnigent's default; a
     configured model no visible row names marks no default, like the probe's
-    hidden-default shaping.
+    hidden-default shaping. A Databricks-profile shape keeps today's shaping: its
+    real default needs workspace discovery the write-back never runs.
     """
     from omnigent.harnesses.codex_native import app_server as codex
     from omnigent.models import model_catalog_store
@@ -1819,7 +1825,10 @@ async def test_codex_model_catalog_writeback_miss_pins_the_shapes_default(
     monkeypatch.setattr(codex, "_codex_home_config_source_from_env", lambda: source_home)
     monkeypatch.setattr(codex, "_find_codex_cli", lambda: sys.executable)
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "bridges")
-    shape = codex.NativeCodexLaunch([], launch_model, None)
+    cfg = tmp_path / "databrickscfg"
+    cfg.write_text("[work]\nhost = https://w.example\n")
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+    shape = codex.NativeCodexLaunch([], launch_model, launch_profile)
     monkeypatch.setattr(
         codex,
         "resolve_native_codex_launch",
