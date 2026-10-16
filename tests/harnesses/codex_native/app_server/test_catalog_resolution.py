@@ -228,6 +228,89 @@ def test_resolve_databricks_codex_model_matches_servable_ids(
         )
 
 
+def test_resolve_databricks_codex_model_empty_catalog_stops_implicit_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An authoritative empty workspace catalog never falls back to the bundled default.
+
+    The listing answered and exposes no codex model, so there is nothing the
+    gateway will serve; pinning the bundled MLflow catalog's ``databricks-`` id
+    launches Codex on a model the gateway rejects. The failure carries the
+    setup code the runner shows verbatim, and an explicit model still passes
+    through for the gateway to judge.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.harnesses.codex_native.app_server import _resolve_databricks_codex_model
+
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(tmp_path / "databrickscfg"))
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    bundled = Mock(return_value=SimpleNamespace(model_id="databricks-gpt-5-4"))
+    with (
+        patch(
+            "omnigent.runtime.credentials.databricks.resolve_databricks_workspace",
+            return_value=SimpleNamespace(token="tok"),
+        ),
+        patch(
+            "omnigent.models.databricks_model_discovery.discover_databricks_codex_models",
+            return_value=(),
+        ),
+        patch("omnigent.models.model_catalog.resolve_catalog_model", bundled),
+    ):
+        with pytest.raises(OSError, match="prof") as excinfo:
+            _resolve_databricks_codex_model("https://h.example.com", "prof", None)
+        assert isinstance(excinfo.value, OmnigentError)
+        assert excinfo.value.code == ErrorCode.HARNESS_NOT_CONFIGURED
+        assert (
+            _resolve_databricks_codex_model("https://h.example.com", "prof", "databricks-gpt-9-9")
+            == "databricks-gpt-9-9"
+        )
+
+    bundled.assert_not_called()
+
+
+@pytest.mark.parametrize("cached_codex_models", [None, []], ids=["no-ucode-state", "empty"])
+def test_resolve_databricks_codex_model_unreadable_listing_keeps_bundled_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cached_codex_models: list[str] | None
+) -> None:
+    """Only an answered listing is authoritative; an unreadable one keeps the last resort.
+
+    When discovery fails and ucode state is missing or caches no codex model,
+    an implicit launch still resolves through the bundled catalog.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from omnigent.harnesses.codex_native.app_server import _resolve_databricks_codex_model
+
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(tmp_path / "databrickscfg"))
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    workspace_state = (
+        None if cached_codex_models is None else SimpleNamespace(codex_models=cached_codex_models)
+    )
+    bundled = Mock(return_value=SimpleNamespace(model_id="databricks-gpt-5-4"))
+    with (
+        patch(
+            "omnigent.runtime.credentials.databricks.resolve_databricks_workspace",
+            return_value=SimpleNamespace(token="tok"),
+        ),
+        patch(
+            "omnigent.models.databricks_model_discovery.discover_databricks_codex_models",
+            side_effect=RuntimeError("listing unreachable"),
+        ),
+        patch("omnigent.onboarding.ucode_state.read_ucode_state", return_value=workspace_state),
+        patch("omnigent.models.model_catalog.resolve_catalog_model", bundled),
+    ):
+        assert (
+            _resolve_databricks_codex_model("https://h.example.com", "prof", None)
+            == "databricks-gpt-5-4"
+        )
+
+    bundled.assert_called_once_with("databricks", family="openai")
+
+
 def test_resolve_databricks_codex_model_discovery_failure_warns_without_traceback(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,

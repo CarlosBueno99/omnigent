@@ -5,10 +5,12 @@ from __future__ import annotations
 import logging
 import re
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 import httpx
+
+from omnigent.models.model_metadata import ModelWireAPI
 
 _logger = logging.getLogger(__name__)
 
@@ -23,6 +25,11 @@ _MODEL_SERVICES_PARENT = "schemas/system.ai"
 _PAGE_SIZE = 100
 _MAX_PAGES = 100
 _HTTP_TIMEOUT_S = 10.0
+
+#: The ``supported_api_types`` entry for the Responses API, which is what the
+#: ``/ai-gateway/codex/v1`` route serves. The MLflow gateway's own
+#: ``mlflow/v1/responses`` is a different surface and does not count.
+_RESPONSES_API_TYPE = "openai/v1/responses"
 
 
 #: Catalog spellings the same endpoint can be served under. Ordered by
@@ -150,13 +157,57 @@ def preferred_served_claude_model(
     return _models_by_claude_family(claude_ids, marker="claude-").get(preferred_family)
 
 
-def _list_model_service_ids(
+def model_service_wire_apis(service: Mapping[str, object]) -> frozenset[ModelWireAPI] | None:
+    """Normalize a model service's advertised ``supported_api_types``.
+
+    Shared by every reader of the Unity Catalog model-services listing so the
+    worker catalog, pi-native and codex discovery agree on which route a
+    service can be reached through.
+
+    :param service: One ``model_services`` entry, e.g.
+        ``{"name": "model-services/system.ai.gpt-5-5",
+        "supported_api_types": ["openai/v1/responses"]}``.
+    :returns: The recognized wire protocols — empty when the entry advertises
+        routes but none is recognized — or ``None`` when it carries no usable
+        route metadata: ``supported_api_types`` missing, not a list, or
+        without a single string entry.
+    """
+    api_types = service.get("supported_api_types")
+    if not isinstance(api_types, list):
+        return None
+    normalized = {api_type.lower() for api_type in api_types if isinstance(api_type, str)}
+    if api_types and not normalized:
+        return None
+    wire_apis: set[ModelWireAPI] = set()
+    if any("chat/completions" in api_type for api_type in normalized):
+        wire_apis.add(ModelWireAPI.OPENAI_CHAT)
+    if _RESPONSES_API_TYPE in normalized:
+        wire_apis.add(ModelWireAPI.OPENAI_RESPONSES)
+    if any("anthropic" in api_type and "messages" in api_type for api_type in normalized):
+        wire_apis.add(ModelWireAPI.ANTHROPIC_MESSAGES)
+    return frozenset(wire_apis)
+
+
+@dataclass(frozen=True)
+class _ModelService:
+    """One ``system.ai`` model service from the Unity Catalog listing.
+
+    :param model_id: Served id, e.g. ``"system.ai.gpt-5-5"``.
+    :param wire_apis: Advertised routes per :func:`model_service_wire_apis`;
+        ``None`` when the entry carries no usable route metadata.
+    """
+
+    model_id: str
+    wire_apis: frozenset[ModelWireAPI] | None
+
+
+def _list_model_services(
     client: httpx.Client,
     workspace_url: str,
     headers: dict[str, str],
-) -> list[str]:
-    """List Databricks-managed ``system.ai`` model-service identifiers."""
-    model_ids: list[str] = []
+) -> list[_ModelService]:
+    """List Databricks-managed ``system.ai`` model services with their routes."""
+    services: list[_ModelService] = []
     page_token: str | None = None
     seen_tokens: set[str] = set()
     for _ in range(_MAX_PAGES):
@@ -175,17 +226,19 @@ def _list_model_service_ids(
         payload: object = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Databricks model-services response must be an object")
-        services = payload.get("model_services")
-        if isinstance(services, list):
-            for service in services:
-                raw_name = service.get("name") if isinstance(service, dict) else None
+        page = payload.get("model_services")
+        if isinstance(page, list):
+            for service in page:
+                if not isinstance(service, dict):
+                    continue
+                raw_name = service.get("name")
                 if not isinstance(raw_name, str):
                     continue
                 model_id = raw_name.strip()
                 if model_id.startswith(_MODEL_SERVICE_PREFIX):
                     model_id = model_id[len(_MODEL_SERVICE_PREFIX) :]
                 if model_id.startswith(_SYSTEM_MODEL_PREFIX):
-                    model_ids.append(model_id)
+                    services.append(_ModelService(model_id, model_service_wire_apis(service)))
         raw_next = payload.get("next_page_token")
         if not isinstance(raw_next, str) or not raw_next:
             break
@@ -201,7 +254,17 @@ def _list_model_service_ids(
             "discovery may miss newer models",
             _MAX_PAGES,
         )
-    return sorted(set(model_ids))
+    return services
+
+
+def _list_model_service_ids(
+    client: httpx.Client,
+    workspace_url: str,
+    headers: dict[str, str],
+) -> list[str]:
+    """List Databricks-managed ``system.ai`` model-service identifiers."""
+    services = _list_model_services(client, workspace_url, headers)
+    return sorted({service.model_id for service in services})
 
 
 def _list_anthropic_gateway_ids(
@@ -363,7 +426,11 @@ def discover_databricks_codex_models(
     Unity Catalog model services is the only listing that reports what the
     codex Responses route will serve, so ids are ``system.ai.`` by
     construction — unlike the Claude catalog above, which also has a legacy
-    gateway listing to merge in.
+    gateway listing to merge in. A service counts only when its name is a
+    codex family *and* its advertised routes include the Responses API: a
+    GPT-named service that advertises only chat-completions cannot be served
+    on the codex route whatever it is called. A service without route
+    metadata keeps the name-based rule.
 
     :param workspace_url: Workspace origin, e.g. ``"https://example.com"``.
     :param token: Workspace bearer token.
@@ -378,9 +445,18 @@ def discover_databricks_codex_models(
 
     headers = {"Authorization": f"Bearer {token}"}
     with httpx.Client(transport=transport, timeout=_HTTP_TIMEOUT_S) as client:
-        model_ids = _list_model_service_ids(client, workspace_url, headers)
-    codex_ids = [model_id for model_id in model_ids if is_codex_compatible_model(model_id)]
+        services = _list_model_services(client, workspace_url, headers)
+    codex_ids = {
+        service.model_id
+        for service in services
+        if is_codex_compatible_model(service.model_id) and _serves_codex_route(service)
+    }
     return tuple(sorted(codex_ids, key=_codex_preference_rank, reverse=True))
+
+
+def _serves_codex_route(service: _ModelService) -> bool:
+    """Whether the codex Responses route can serve *service*."""
+    return service.wire_apis is None or ModelWireAPI.OPENAI_RESPONSES in service.wire_apis
 
 
 def _codex_preference_rank(model_id: str) -> tuple[int, int, int, int, str]:
