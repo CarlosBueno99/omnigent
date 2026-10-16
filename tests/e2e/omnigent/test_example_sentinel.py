@@ -114,35 +114,30 @@ def test_sentinel_findings_template_present(sentinel_spec: AgentSpec) -> None:  
 
 
 def test_sentinel_scopes_self_authored_skills_outside_the_omnigent_repo() -> None:
-    """
-    Self-authored skills must be scoped by workspace: ``examples/sentinel/skills/``
-    only when the workspace is an Omnigent checkout, otherwise a user-owned
-    location. Fails on a prompt that directs them unconditionally into
-    ``examples/sentinel/skills/<dir>/SKILL.md``, which would write a private skill
-    into a package user's Omnigent clone.
+    """Self-authored skills must target the active Omnigent checkout or a
+    user-owned location, never an unconditional in-repo path. An unconditional
+    ``examples/sentinel/skills/<dir>/SKILL.md`` directive would write private
+    skills into a package user's Omnigent clone.
     """
     config = (_SENTINEL_BUNDLE / "config.yaml").read_text(encoding="utf-8")
     compact = " ".join(config.split())
 
+    lowered = compact.lower()
+    describes_checkout_condition = (
+        "omnigent checkout" in lowered or "git checkout root" in lowered
+    )
+    describes_user_owned_alternative = "user-owned" in lowered
     unconditional_repo_rule = (
         "skills directory (`examples/sentinel/skills/<dir>/SKILL.md`)" in compact
     )
-    # Require both: a checkout or user-owned destination, and no unconditional directive.
-    scoped_to_checkout_or_user_location = any(
-        marker in compact.lower()
-        for marker in (
-            "omnigent checkout",
-            "git checkout root",
-            "user-owned",
-            "a user location",
-            "not an omnigent checkout",
-        )
+
+    assert describes_checkout_condition and describes_user_owned_alternative, (
+        "self-authored skills must be scoped to an Omnigent checkout and offer a "
+        "user-owned location when the workspace is not a checkout"
     )
-    assert scoped_to_checkout_or_user_location and not unconditional_repo_rule, (
-        "self-authored skills must be scoped to an Omnigent checkout or a "
-        "user-owned location, and the unconditional "
-        "examples/sentinel/skills/<dir>/SKILL.md directive must be gone; "
-        "otherwise a user's Omnigent clone receives them"
+    assert not unconditional_repo_rule, (
+        "the unconditional examples/sentinel/skills/<dir>/SKILL.md directive must "
+        "be gone; otherwise a package user's Omnigent clone receives them"
     )
 
 
@@ -159,7 +154,10 @@ def test_sentinel_does_not_open_unsolicited_prs_on_the_upstream_repo() -> None:
         "an explicit user request"
     )
     lowered = compact.lower()
-    assert "never open a pull request" in lowered and "explicitly asks" in lowered, (
-        "omnigent-ai/omnigent is named, but the prohibition on opening PRs or "
-        "issues there without an explicit user request is missing"
+    assert (
+        "never open a pull request or issue" in lowered
+        and "explicitly asks" in lowered
+    ), (
+        "omnigent-ai/omnigent is named, but the prohibition on opening both PRs "
+        "and issues there without an explicit user request is missing"
     )

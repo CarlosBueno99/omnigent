@@ -467,38 +467,30 @@ def test_function_policies_have_nonempty_arguments(polly_spec: AgentSpec) -> Non
 
 
 def test_builtin_polly_scopes_self_authored_skills_outside_the_omnigent_repo() -> None:
-    """
-    Built-in Polly ships in the installed package and is frequently run from a
-    workspace that is not an Omnigent checkout, with a user's Omnigent clone
-    elsewhere on the host. Its prompt must then keep self-authored skills in a
-    user-owned place, or scope ``examples/polly/skills/`` to an Omnigent-checkout
-    workspace. Otherwise a "remember this workflow" request writes a private
-    skill into the user's clone, which Polly can then commit and push.
-
-    Fails on a prompt that directs self-authored skills unconditionally into
-    ``examples/polly/skills/<dir>/SKILL.md`` "in this repo" with no checkout or
-    user-owned scoping.
+    """Self-authored skills must target the active Omnigent checkout or a
+    user-owned location, never an unconditional in-repo path. Built-in Polly
+    often runs outside a checkout with the user's clone elsewhere, so an
+    unconditional ``examples/polly/skills/<dir>/SKILL.md`` directive would write
+    private skills into that clone for Polly to commit and push.
     """
     config = (_POLLY_BUNDLE / "config.yaml").read_text(encoding="utf-8")
     compact = " ".join(config.split())
 
-    unconditional_repo_rule = "examples/polly/skills/<dir>/SKILL.md` in this repo" in compact
-    # Require both: a checkout or user-owned destination, and no unconditional directive.
-    scoped_to_checkout_or_user_location = any(
-        marker in compact.lower()
-        for marker in (
-            "omnigent checkout",
-            "git checkout root",
-            "user-owned",
-            "a user location",
-            "not an omnigent checkout",
-        )
+    lowered = compact.lower()
+    describes_checkout_condition = (
+        "omnigent checkout" in lowered or "git checkout root" in lowered
     )
-    assert scoped_to_checkout_or_user_location and not unconditional_repo_rule, (
-        "self-authored skills must be scoped to an Omnigent checkout or a "
-        "user-owned location, and the unconditional "
-        "examples/polly/skills/<dir>/SKILL.md 'in this repo' directive must be "
-        "gone; otherwise a package user's Omnigent clone receives them"
+    describes_user_owned_alternative = "user-owned" in lowered
+    unconditional_repo_rule = "examples/polly/skills/<dir>/SKILL.md` in this repo" in compact
+
+    assert describes_checkout_condition and describes_user_owned_alternative, (
+        "self-authored skills must be scoped to an Omnigent checkout and offer a "
+        "user-owned location when the workspace is not a checkout"
+    )
+    assert not unconditional_repo_rule, (
+        "the unconditional examples/polly/skills/<dir>/SKILL.md 'in this repo' "
+        "directive must be gone; otherwise a package user's Omnigent clone "
+        "receives them"
     )
 
 
@@ -520,7 +512,10 @@ def test_builtin_polly_does_not_open_unsolicited_prs_on_the_upstream_repo() -> N
         "an explicit user request"
     )
     lowered = compact.lower()
-    assert "never open a pull request" in lowered and "explicitly asks" in lowered, (
-        "omnigent-ai/omnigent is named, but the prohibition on opening PRs or "
-        "issues there without an explicit user request is missing"
+    assert (
+        "never open a pull request or an issue" in lowered
+        and "explicitly asks" in lowered
+    ), (
+        "omnigent-ai/omnigent is named, but the prohibition on opening both PRs "
+        "and issues there without an explicit user request is missing"
     )
