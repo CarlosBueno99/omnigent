@@ -23,10 +23,15 @@ import {
   shouldShowWorkingIndicator,
   stripGatedSubagentRoutingChips,
 } from "@/components/chat/chatBubbleParts";
-import { ChatComposer, ComposerSendButton } from "@/components/composer/ChatComposer";
+import {
+  ChatComposer,
+  ComposerFeedbackRow,
+  ComposerSendButton,
+} from "@/components/composer/ChatComposer";
 import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
 import { ComposerMicButton } from "@/components/ComposerMicButton";
 import {
+  BUILTIN_SLASH_COMMANDS,
   SlashCommandMenu,
   isSlashCommandText,
   matchSlashCommandInvocation,
@@ -52,6 +57,7 @@ import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { skillInvocationPrefix } from "@/lib/harnessSetup";
 import { isNativeTerminalSession } from "@/lib/nativeCodingAgents";
 import { usesNativeSideChatFork } from "@/lib/sideChat";
+import { parentIdFromLabels } from "@/lib/sessionHost";
 import { serializeReplyDraft } from "@/lib/replyDraft";
 import { interrupt } from "@/lib/sessionsApi";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
@@ -453,30 +459,32 @@ function SideChatComposer({
 
   const ready = pending ? !starting : agentId !== null;
   const canSend = text.trim().length > 0 || (!pending && files.length > 0);
-  // Slash-command suggestions, mirroring the main composer: the child
-  // session's skills from the same host-backed catalog. Built-ins (/model,
-  // /compact, …) act on the main session and are deliberately left out.
+  // Slash suggestions mirror the main composer: the session's skills plus /help.
+  // Other built-ins (/model, /compact, …) act on the main session and stay out.
   const isMobile = useIsMobileViewport();
   const [inputFocused, setInputFocused] = useState(false);
+  const [commandNotice, setCommandNotice] = useState<string | null>(null);
   const nativeSession = isNativeTerminalSession({ harness, labels: session?.labels });
-  // Discover only once the child has a host and workspace (as the in-session
-  // composer does); before that the hook reports "unavailable" rather than
-  // hitting the catalog with an unresolvable scope. Forks inherit both.
+  // A generic side chat has no host/workspace of its own: it forks the parent and
+  // runs in the parent's workspace. Discover skills against the parent (the same
+  // catalog the main composer shows); the hostless child always reads unavailable.
+  const parentId = nativeSession ? null : parentIdFromLabels(session?.labels);
+  const { session: parentSession } = useSession(parentId);
   const {
     skills,
     skillsStatus,
     refetch: refreshSkills,
   } = useSkills({
     target:
-      !pending && session?.hostId && session.workspace
+      !pending && parentId !== null && parentSession?.hostId && parentSession.workspace
         ? {
-            sessionId: childId,
+            sessionId: parentId,
             scope: {
-              hostId: session.hostId,
-              harness: session.harness,
-              workspace: session.workspace,
-              agentId: session.agentId,
-              subAgentName: session.subAgentName,
+              hostId: parentSession.hostId,
+              harness: parentSession.harness,
+              workspace: parentSession.workspace,
+              agentId: parentSession.agentId,
+              subAgentName: parentSession.subAgentName,
             },
           }
         : null,
@@ -492,11 +500,34 @@ function SideChatComposer({
     [skills, skillPrefix],
   );
   const skillLabels = useMemo(() => skillDisplayNames(skills, skillPrefix), [skills, skillPrefix]);
-  // Insert the chosen skill at the caret, keeping any surrounding text.
-  const applyMenuSelection = (cmd: string) => setText(slashCompletion.complete(cmd).text);
+  const sideChatBuiltins = useMemo<Record<string, string>>(() => {
+    const builtins: Record<string, string> = {};
+    if (!nativeSession) builtins["/help"] = BUILTIN_SLASH_COMMANDS["/help"];
+    return builtins;
+  }, [nativeSession]);
+  const menuCommands = useMemo(
+    () => ({ ...sideChatBuiltins, ...skillCommands }),
+    [sideChatBuiltins, skillCommands],
+  );
+  // /help lists what this side chat offers; shown locally, never sent as a turn.
+  const showHelp = useCallback(() => {
+    const lines = Object.entries({ ...sideChatBuiltins, ...skillCommands }).map(
+      ([name, desc]) => `${name} — ${desc}`,
+    );
+    setCommandNotice(lines.join("\n"));
+  }, [sideChatBuiltins, skillCommands]);
+  // Insert a chosen skill at the caret; a built-in runs immediately (no args).
+  const applyMenuSelection = (cmd: string) => {
+    if (Object.hasOwn(sideChatBuiltins, cmd)) {
+      setText("");
+      if (cmd === "/help") showHelp();
+      return;
+    }
+    setText(slashCompletion.complete(cmd).text);
+  };
   const slashCompletion = useSlashCompletion({
     text,
-    commands: skillCommands,
+    commands: menuCommands,
     skills: skillCommands,
     labels: skillLabels,
     textareaRef,
@@ -531,6 +562,17 @@ function SideChatComposer({
     if (busy || (trimmed.length === 0 && files.length === 0) || agentId === null) return;
     // A lone command token with skill discovery in flight has nothing to run yet.
     if (slashCompletion.pendingCompletion) return;
+    // Applicable built-ins (currently /help) are handled locally and never
+    // forwarded to the agent as a turn.
+    const builtin =
+      nativeSession || quotes.length > 0 || files.length > 0
+        ? null
+        : matchSlashCommandInvocation(trimmed, Object.keys(sideChatBuiltins));
+    if (builtin !== null) {
+      setText("");
+      if (builtin.command === "/help") showHelp();
+      return;
+    }
     // A known skill takes the server's slash_command path on in-process
     // harnesses; native TUIs (claude-native, codex-native) read the text itself.
     const skill =
@@ -573,12 +615,14 @@ function SideChatComposer({
           }}
         />
       )}
+      {commandNotice !== null && <ComposerFeedbackRow>{commandNotice}</ComposerFeedbackRow>}
       <ChatComposer
         keyboard={{ submitWithModEnter: false, preventsKeyboardSubmit: false }}
         input={{
           ref: textareaRef,
           value: text,
           onChange: (event) => {
+            if (commandNotice !== null) setCommandNotice(null);
             slashCompletion.onSelectionChange(event.target);
             setText(event.target.value);
           },

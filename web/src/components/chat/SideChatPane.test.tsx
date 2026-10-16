@@ -653,6 +653,42 @@ describe("side-chat slash commands", () => {
     expect(sendSlashCommand).not.toHaveBeenCalled();
   });
 
+  it("offers /help alongside the session's skills in a live side chat", () => {
+    conversationRegistry.acquire(childId).setState({ sessionHarness: "claude-sdk" });
+    skillsFixture.current = { skills: [review], skillsStatus: "ready" };
+    renderPane(<SideChatPane childId={childId} />);
+    typeSlash("/");
+    expect(screen.getByTestId("slash-menu-item-help")).toBeVisible();
+    expect(screen.getByTestId("slash-menu-item-review")).toBeVisible();
+  });
+
+  it("handles /help locally instead of forwarding it to the agent", () => {
+    conversationRegistry
+      .acquire(childId)
+      .setState({ sessionHarness: "claude-sdk", sessionStatus: "idle" });
+    skillsFixture.current = { skills: [review], skillsStatus: "ready" };
+    renderPane(<SideChatPane childId={childId} />);
+    typeSlash("/help");
+    fireEvent.click(screen.getByTestId("side-chat-send"));
+    expect(send).not.toHaveBeenCalled();
+    expect(sendSlashCommand).not.toHaveBeenCalled();
+    expect(screen.getByText(/Show available slash commands/)).toBeInTheDocument();
+  });
+
+  it("sends /help as plaintext on a native terminal harness", () => {
+    // beforeEach binds the child to codex-native: built-ins stay out, so the
+    // vendor TUI receives the typed text itself.
+    conversationRegistry.acquire(childId).setState({ sessionStatus: "idle" });
+    skillsFixture.current = { skills: [review], skillsStatus: "ready" };
+    renderPane(<SideChatPane childId={childId} />);
+    typeSlash("/help");
+    fireEvent.click(screen.getByTestId("side-chat-send"));
+    expect(send).toHaveBeenCalledExactlyOnceWith("/help", "agent_side", undefined, {
+      pinnedConversationId: childId,
+    });
+    expect(sendSlashCommand).not.toHaveBeenCalled();
+  });
+
   it("keeps the menu closed on a pending tab that has no session yet", () => {
     skillsFixture.current = { skills: [review], skillsStatus: "ready" };
     renderPane(
