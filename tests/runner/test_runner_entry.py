@@ -1773,9 +1773,7 @@ async def test_runner_databricks_auth_end_to_end_through_mock_transport(
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
         if repaired:
             token_cache = "repaired-token"
-        headers = (
-            {"Location": f"{server_url}/oidc/oauth2/v2.0/authorize"} if status == 302 else {}
-        )
+        headers = {"Location": f"{server_url}/oidc/oauth2/v2.0/authorize"} if status == 302 else {}
         return httpx.Response(status, headers=headers)
 
     async with httpx.AsyncClient(
