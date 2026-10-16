@@ -427,6 +427,14 @@ async def _observe_terminal_interactive(
             if not slow_logged and loop.time() >= started_at + slow_after_s:
                 slow_logged = True
                 tail, sign_in_prompt = await _stalled_pane_diagnostics(instance)
+                slow_event = debug_event("terminal_interactive_slow", session_id=session_id)
+                slow_event["attributes"] = {
+                    "harness": harness,
+                    "terminal_id": terminal_id,
+                    "terminal_instance_id": instance.diagnostic_id,
+                    "readiness_signal": readiness_signal,
+                    **_pane_attributes(tail, sign_in_prompt),
+                }
                 # Most slow starts still succeed, so this stays below the deadline's WARNING.
                 _logger.info(
                     "Native terminal is not interactive yet: session=%s harness=%s "
@@ -436,15 +444,7 @@ async def _observe_terminal_interactive(
                     terminal_id,
                     loop.time() - started_at,
                     _pane_tail_message(tail),
-                    extra=debug_event(
-                        "terminal_interactive_slow",
-                        session_id=session_id,
-                        harness=harness,
-                        terminal_id=terminal_id,
-                        terminal_instance_id=instance.diagnostic_id,
-                        readiness_signal=readiness_signal,
-                        **_pane_attributes(tail, sign_in_prompt),
-                    ),
+                    extra=slow_event,
                 )
             await asyncio.sleep(poll_interval_s)
     except asyncio.CancelledError:
@@ -456,6 +456,15 @@ async def _observe_terminal_interactive(
             if isinstance(exc, TimeoutError)
             else (None, None)
         )
+        unobserved_event = debug_event("terminal_interactive_unobserved", session_id=session_id)
+        unobserved_event["attributes"] = {
+            "harness": harness,
+            "terminal_id": terminal_id,
+            "terminal_instance_id": instance.diagnostic_id,
+            "readiness_signal": readiness_signal,
+            "reason": type(exc).__name__,
+            **_pane_attributes(tail, sign_in_prompt),
+        }
         _logger.warning(
             "Native terminal interactivity was not observed: session=%s harness=%s "
             "terminal_id=%s reason=%s%s",
@@ -464,16 +473,7 @@ async def _observe_terminal_interactive(
             terminal_id,
             str(exc),
             _pane_tail_message(tail),
-            extra=debug_event(
-                "terminal_interactive_unobserved",
-                session_id=session_id,
-                harness=harness,
-                terminal_id=terminal_id,
-                terminal_instance_id=instance.diagnostic_id,
-                readiness_signal=readiness_signal,
-                reason=type(exc).__name__,
-                **_pane_attributes(tail, sign_in_prompt),
-            ),
+            extra=unobserved_event,
         )
 
 
