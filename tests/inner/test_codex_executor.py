@@ -1791,37 +1791,13 @@ class TestCodexExecutor(unittest.TestCase):
 
             async def _inject_events() -> None:
                 await asyncio.sleep(0.01)
+                counters = {"inputTokens": 100, "outputTokens": 25, "totalTokens": 125}
                 session._events.put_nowait(
-                    {
-                        "method": "thread/tokenUsage/updated",
-                        "params": {
-                            "threadId": "thread-1",
-                            "turnId": "turn-1",
-                            "tokenUsage": {
-                                "last": {
-                                    "inputTokens": 100,
-                                    "outputTokens": 25,
-                                    "totalTokens": 125,
-                                    "cachedInputTokens": 0,
-                                    "reasoningOutputTokens": 0,
-                                },
-                                "total": {
-                                    "inputTokens": 100,
-                                    "outputTokens": 25,
-                                    "totalTokens": 125,
-                                    "cachedInputTokens": 0,
-                                    "reasoningOutputTokens": 0,
-                                },
-                            },
-                        },
-                    }
+                    self._usage_update_event("turn-1", last=counters, total=counters)
                 )
                 await asyncio.sleep(0.01)
                 session._events.put_nowait(
-                    {
-                        "method": "turn/completed",
-                        "params": {"turn": {"id": "turn-1"}},
-                    }
+                    {"method": "turn/completed", "params": {"turn": {"id": "turn-1"}}}
                 )
 
             inject_task = asyncio.create_task(_inject_events())

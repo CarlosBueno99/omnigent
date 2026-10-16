@@ -304,16 +304,10 @@ def _extract_codex_last_turn_usage(params: object, model: str | None) -> dict[st
     ``input_tokens`` — otherwise cached tokens are billed at the full input
     rate. Mirrors the codex-native forwarder split.
 
-    :param model: The resolved model this turn ran with, e.g.
-        ``"gpt-5.4-mini"`` — the ``run_turn`` argument or, when the caller
-        passed none (a subscription / cli-config session lets Codex pick),
-        the model Codex reported on ``thread/start``. Stamped into the
-        returned usage as ``"model"`` so the
-        server's per-model cost/token attribution (``session_usage.by_model``)
-        can key on it instead of silently falling back to an unresolvable
-        spec model and dropping the turn from the per-model breakdown
-        (mirrors ``claude_sdk_executor``'s ``observed_model`` and every
-        other relay executor, all of which already report ``usage.model``).
+    :param model: The caller's model, or the model reported by
+        ``thread/start`` when unpinned. Stamped onto usage as ``"model"``
+        for per-model cost/token attribution (``session_usage.by_model``),
+        like every other relay executor's ``usage.model``.
     """
     if not isinstance(params, dict):
         return None
