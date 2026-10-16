@@ -1,8 +1,7 @@
 """A Pi fork on a Gemini model must replay earlier tool results with their tool names.
 
-Real server, runner and ``pi`` CLI. Pi runs on its own Google login whose
-``baseUrl`` points at a local Gemini stand-in that enforces Google's
-``function_response.name`` validation (see ``_pi_native_gemini_stand_in``).
+Real server, runner and ``pi`` CLI on Pi's own Google login, routed to the local
+Gemini stand-in in ``_pi_native_gemini_stand_in``.
 """
 
 from __future__ import annotations

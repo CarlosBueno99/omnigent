@@ -1,11 +1,8 @@
 """Local stand-in for Google's Gemini ``generateContent`` API used by Pi's ``google`` provider.
 
-Pi's Google provider (``pi-ai`` ``google-generative-ai``) honours a provider
-``baseUrl`` from ``models.json`` and POSTs ``/models/{model}:streamGenerateContent?alt=sse``.
-This server streams scripted Gemini-shaped SSE replies, records every request
-body, and applies Google's documented ``function_response.name`` validation:
-a request whose ``functionResponse.name`` is empty is rejected with HTTP 400
-``INVALID_ARGUMENT``.
+Pi honours the provider ``baseUrl`` in ``models.json``. The stand-in streams
+scripted SSE replies, records every request body, and rejects a request whose
+``functionResponse.name`` is empty with Google's HTTP 400 ``INVALID_ARGUMENT``.
 """
 
 from __future__ import annotations
@@ -119,12 +116,10 @@ def serve_gemini_stand_in(stand_in: GeminiStandIn) -> Iterator[str]:
 
 
 def write_pi_own_login(home: Path, base_url: str, *, api_key: str = "stand-in-google-key") -> Path:
-    """Write Pi's own-login files so ``google/gemini-4-argon`` resolves to the stand-in.
+    """Write Pi's own-login files (API key, provider overlay, model list) under *home*.
 
-    Mirrors a user who logged Pi into Google with an API key: ``auth.json`` holds
-    the credential, ``models.json`` overlays the built-in ``google`` provider
-    with the stand-in ``baseUrl`` and the model, and ``models-store.json`` lists
-    the model so Omnigent's own-login picker offers it.
+    Mirrors a user who logged Pi into Google with an API key, with the built-in
+    ``google`` provider routed to the stand-in ``baseUrl``.
     """
     agent_dir = home / ".pi" / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
