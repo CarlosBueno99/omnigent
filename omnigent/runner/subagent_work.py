@@ -347,7 +347,8 @@ def mark_subagent_work_waiting(child_session_id: str) -> _SubagentWorkEntry | No
     ``running`` or terminal edge arrives.
 
     :param child_session_id: Child session id, e.g. ``"conv_child456"``.
-    :returns: The updated work entry, or ``None`` if the child is untracked.
+    :returns: The work entry (left unchanged if already terminal), or
+        ``None`` if the child is untracked.
     """
     entry = _subagent_work_by_child.get(child_session_id)
     if entry is None:
