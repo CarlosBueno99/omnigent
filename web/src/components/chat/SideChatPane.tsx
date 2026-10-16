@@ -469,7 +469,7 @@ function SideChatComposer({
   // runs in the parent's workspace. Discover skills against the parent (the same
   // catalog the main composer shows); the hostless child always reads unavailable.
   const parentId = nativeSession ? null : parentIdFromLabels(session?.labels);
-  const { session: parentSession } = useSession(parentId);
+  const { session: parentSession, isLoading: parentLoading } = useSession(parentId);
   const {
     skills,
     skillsStatus,
@@ -489,22 +489,33 @@ function SideChatComposer({
           }
         : null,
     enabled: !pending && ready,
-    starting,
+    // A still-loading parent lookup has no target yet; treat it as discovery in
+    // flight so a quickly typed /skill is held, not sent to the agent as plaintext.
+    starting: starting || (parentId !== null && parentLoading),
   });
   const skillPrefix = skillInvocationPrefix(harness);
-  const skillCommands = useMemo(
-    () =>
-      Object.fromEntries(
-        skills.map((skill) => [`${skillPrefix}${skill.name}`, skillMenuDescription(skill)]),
-      ),
-    [skills, skillPrefix],
-  );
-  const skillLabels = useMemo(() => skillDisplayNames(skills, skillPrefix), [skills, skillPrefix]);
   const sideChatBuiltins = useMemo<Record<string, string>>(() => {
     const builtins: Record<string, string> = {};
     if (!nativeSession) builtins["/help"] = BUILTIN_SLASH_COMMANDS["/help"];
     return builtins;
   }, [nativeSession]);
+  // A skill whose command exactly matches a built-in can never run (the built-in
+  // wins), so drop it to keep the menu's labels aligned with what submitting runs.
+  const routableSkills = useMemo(
+    () => skills.filter((skill) => !Object.hasOwn(sideChatBuiltins, `${skillPrefix}${skill.name}`)),
+    [skills, skillPrefix, sideChatBuiltins],
+  );
+  const skillCommands = useMemo(
+    () =>
+      Object.fromEntries(
+        routableSkills.map((skill) => [`${skillPrefix}${skill.name}`, skillMenuDescription(skill)]),
+      ),
+    [routableSkills, skillPrefix],
+  );
+  const skillLabels = useMemo(
+    () => skillDisplayNames(routableSkills, skillPrefix),
+    [routableSkills, skillPrefix],
+  );
   const menuCommands = useMemo(
     () => ({ ...sideChatBuiltins, ...skillCommands }),
     [sideChatBuiltins, skillCommands],

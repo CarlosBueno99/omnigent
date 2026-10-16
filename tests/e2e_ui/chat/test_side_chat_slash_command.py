@@ -1,18 +1,14 @@
 """Side-chat composer slash-command menu and skill invocation.
 
-The side-chat composer offers the same slash experience as the main composer:
-typing ``/`` opens the suggestions menu, submitting ``/<skill>`` routes through
-the server's ``slash_command`` event so the skill runs on an in-process harness,
-and a built-in such as ``/help`` is handled locally instead of being sent to the
-agent as a turn.
-
-The session runs on a real ``omnigent host`` launched by the test, so skill
-discovery (``GET /v1/skills``) and the server's skill resolution exercise the
-real backend; only the model is the shared mock.
+Typing ``/`` opens the suggestions menu, submitting ``/<skill>`` routes through
+the server's ``slash_command`` event, and a built-in such as ``/help`` is handled
+locally. The session runs on a real ``omnigent host`` so skill discovery and
+resolution exercise the real backend; only the model is mocked.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -109,6 +105,8 @@ def side_chat_host_session(
                 break
             time.sleep(1)
         else:
+            with contextlib.suppress(httpx.HTTPError):
+                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
             pytest.fail("host-launched runner never came online for the session")
         try:
             yield (live_server, session_id)
@@ -156,7 +154,8 @@ def _poll(predicate: Callable[[], bool], timeout_s: float = 20.0, interval: floa
 def _delete_forks(base_url: str, child_ids: list[str]) -> None:
     """Remove the side-chat forks a test created from the fixture-owned server."""
     for child_id in child_ids:
-        httpx.delete(f"{base_url}/v1/sessions/{child_id}", timeout=10.0)
+        with contextlib.suppress(httpx.HTTPError):
+            httpx.delete(f"{base_url}/v1/sessions/{child_id}", timeout=10.0)
 
 
 def test_side_chat_slash_menu_and_skill_invocation(
@@ -248,5 +247,4 @@ def test_side_chat_slash_menu_and_skill_invocation(
     if _poll(lambda: _user_said(base_url, child_id, "/help"), timeout_s=20):
         problems.append("facet C: /help was sent to the agent instead of handled locally")
 
-    page.wait_for_timeout(1_500)
     assert not problems, "; ".join(problems)
