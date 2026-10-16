@@ -5612,21 +5612,22 @@ def _user_prompt_visible(pane: str) -> bool:
         return False
     lines = [line for line in pane.splitlines() if line.strip()]
     rules = [i for i, line in enumerate(lines) if _is_box_rule(line)]
-    # A narrow pane wraps a dialog's text ("Esc to" / "cancel"), so match the
-    # rule-bounded dialog region with line breaks collapsed. Without a framing
-    # rule this is bare transcript; keep its line breaks, or wrapped output
-    # could cross-match a dialog phrase and wrongly refuse the message.
+    # The body stays newline-joined so transcript below the box cannot cross-
+    # match a dialog phrase; only the footer tail below the last rule is
+    # collapsed, since a narrow pane wraps "Enter to … · Esc to …" across rows.
     if len(rules) >= 2:
-        text = _collapse_whitespace(lines[rules[-2] + 1 :])
+        body = "\n".join(lines[rules[-2] + 1 : rules[-1]])
+        footer = _collapse_whitespace(lines[rules[-1] + 1 :])
     else:
-        text = "\n".join(lines)
+        body = "\n".join(lines)
+        footer = ""
     return (
         _auto_mode_billing_prompt_matches(pane, _AUTO_MODE_BILLING_CONSENT)
-        or "Do you want to " in text
-        or "Yes, and don't ask again" in text
+        or "Do you want to " in body
+        or "Yes, and don't ask again" in body
         or (
-            any(hint in text for hint in ("Enter to select", "Enter to submit"))
-            and "Esc to cancel" in text
+            any(hint in footer for hint in ("Enter to select", "Enter to submit"))
+            and "Esc to cancel" in footer
         )
         or _plan_approval_dialog_visible(lines, rules)
     )
@@ -5636,7 +5637,7 @@ def _plan_approval_dialog_visible(lines: list[str], rules: list[int]) -> bool:
     """Recognize the plan-approval dialog, which has no "Enter to …" footer.
 
     It is drawn below the last rule: one of the :data:`_PLAN_APPROVAL_HINTS`
-    headlines and a numbered option list led by the ``❯`` selector.
+    headlines on its own line, then a numbered option list led by ``❯``.
 
     :param lines: The pane's non-blank lines.
     :param rules: Indices into *lines* of the box rules.
@@ -5645,10 +5646,23 @@ def _plan_approval_dialog_visible(lines: list[str], rules: list[int]) -> bool:
     if not rules:
         return False
     region = lines[rules[-1] + 1 :]
-    text = _collapse_whitespace(region)
-    if not any(hint in text for hint in _PLAN_APPROVAL_HINTS):
+    # Match the headline within one pane line and require the numbered options
+    # below it; collapsing the whole region would let a wrapped transcript
+    # phrase above a stray numbered row look like the dialog.
+    headline = next(
+        (
+            index
+            for index, line in enumerate(region)
+            if any(hint in _collapse_whitespace([line]) for hint in _PLAN_APPROVAL_HINTS)
+        ),
+        None,
+    )
+    if headline is None:
         return False
-    return any(_NUMBERED_SELECTOR_ROW_RE.match(line.strip().lstrip("│ ")) for line in region)
+    return any(
+        _NUMBERED_SELECTOR_ROW_RE.match(line.strip().lstrip("│ "))
+        for line in region[headline + 1 :]
+    )
 
 
 def _has_approval_wait(bridge_dir: Path) -> bool:
@@ -6185,14 +6199,12 @@ def _terminal_dialog_headline(pane: str) -> str | None:
     lines = [line for line in pane.splitlines() if line.strip()]
     last_rule = max((i for i, line in enumerate(lines) if _is_box_rule(line)), default=None)
     if last_rule is not None:
-        # Within the rule-bounded dialog region a narrow pane wraps the footer,
-        # so collapse line breaks before matching. Keeping the text past the
-        # hint lets the selector-less "press enter" check below read a wrapped
-        # notice.
+        # A narrow pane wraps the footer below the last rule, so collapse line
+        # breaks and keep only the matched footer phrase: a trailing "press
+        # enter" elsewhere in the region must not loosen the check below.
         region = lines[last_rule + 1 :]
-        text = _collapse_whitespace(region)
-        footer_match = _DIALOG_FOOTER_RE.search(text)
-        footer = text[footer_match.start() :] if footer_match is not None else None
+        footer_match = _DIALOG_FOOTER_RE.search(_collapse_whitespace(region))
+        footer = footer_match.group(0) if footer_match is not None else None
     else:
         # No framing rule: this is the bare transcript tail. Match the footer
         # within a single line, or wrapped output quoting a footer phrase could

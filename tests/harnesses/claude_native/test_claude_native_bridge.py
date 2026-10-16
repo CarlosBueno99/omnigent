@@ -11366,6 +11366,25 @@ for you to press enter to
 continue past the summary screen.
 """
 
+# A selector-less notice below a rule whose footer is "Esc to cancel", with an
+# unrelated "press enter" later in the same region. The dialog qualifies only
+# when its own footer phrase is a keypress hint, not when one trails elsewhere.
+_SELECTORLESS_CANCEL_THEN_PRESS_ENTER_PANE = """\
+────────────────────────────────────────────────────────────
+Something finished. Press Esc to cancel the
+remaining steps, or press enter when ready.
+"""
+
+
+def _wrap_phrase(pane: str, phrase: str, wrapped: str) -> str:
+    """Return *pane* with *phrase* split as *wrapped*, failing if it is absent.
+
+    A silent ``str.replace`` no-op would turn a wrapped-footer case into a
+    duplicate of the unwrapped one if the pane's wording ever changed.
+    """
+    assert phrase in pane, f"{phrase!r} not found; wrapped-footer case is stale"
+    return pane.replace(phrase, wrapped)
+
 
 @pytest.mark.parametrize(
     ("pane", "headline"),
@@ -11374,14 +11393,14 @@ continue past the summary screen.
         (_MCP_APPROVAL_CHECKLIST_PANE, "2 new MCP servers found in this project"),
         # A narrow pane wraps the footer across rows.
         (
-            _MCP_APPROVAL_CHECKLIST_PANE.replace("Esc to reject all", "Esc to\n reject all"),
+            _wrap_phrase(_MCP_APPROVAL_CHECKLIST_PANE, "Esc to reject all", "Esc to\n reject all"),
             "2 new MCP servers found in this project",
         ),
         (_API_KEY_DIALOG_PANE, "Detected a custom API key in your environment"),
         (_TRUST_DIALOG_PANE, "Accessing workspace:"),
         (_PRESS_ENTER_NOTICE_PANE, "Welcome to Claude Code 2.1"),
         (
-            _PRESS_ENTER_NOTICE_PANE.replace("Esc to cancel", "Esc to\n  cancel"),
+            _wrap_phrase(_PRESS_ENTER_NOTICE_PANE, "Esc to cancel", "Esc to\n  cancel"),
             "Welcome to Claude Code 2.1",
         ),
     ],
@@ -11421,6 +11440,7 @@ def test_terminal_dialog_headline_names_startup_dialogs(pane: str, headline: str
         _PERMISSION_PROMPT_PANE,
         _DIALOG_ECHO_ABOVE_COMPOSER_PANE,
         _WRAPPED_FOOTER_IN_TRANSCRIPT_PANE,
+        _SELECTORLESS_CANCEL_THEN_PRESS_ENTER_PANE,
     ],
     ids=[
         "ready",
@@ -11432,6 +11452,7 @@ def test_terminal_dialog_headline_names_startup_dialogs(pane: str, headline: str
         "permission-prompt",
         "dialog-echo-above-composer",
         "wrapped-footer-in-transcript",
+        "selectorless-cancel-then-press-enter",
     ],
 )
 def test_terminal_dialog_headline_ignores_other_panes(pane: str) -> None:
@@ -11442,7 +11463,9 @@ def test_terminal_dialog_headline_ignores_other_panes(pane: str) -> None:
     pane has no footer; the settings panel's "Esc to clear" is not a confirm
     footer; and a boxed tool permission prompt has no footer at all, so it
     stays on its own PermissionRequest path. Without a framing rule, a footer
-    phrase that only wraps across transcript rows is not a dialog either.
+    phrase that only wraps across transcript rows is not a dialog either. A
+    selector-less "Esc to cancel" notice does not qualify just because an
+    unrelated "press enter" trails later in the region.
     """
     assert claude_native_bridge._terminal_dialog_headline(pane) is None
 

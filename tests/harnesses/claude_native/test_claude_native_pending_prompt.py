@@ -87,12 +87,16 @@ change?
 Enter to select · ↑/↓ to navigate · Esc to
 cancel
 """
-# Transcript text that borrows a plan dialog's words: no rule above the echoed
-# option list, or a rule with no selected numbered row below it.
+# Transcript text that borrows a plan dialog's words but is not a live dialog:
+# no rule above the echoed option list; a rule with no numbered row below it;
+# or a rule and a numbered row, but the headline only wraps across two rows.
 _PLAN_WORDS_IN_TRANSCRIPT = (
     "❯ 1. try the parser first\n● I drafted both steps. Would you like to proceed?\n",
     "──────────────────────────────\n"
     "● Exit plan mode? Not yet. Would you like to proceed with the parser first?\n",
+    "──────────────────────────────\n"
+    "● I drafted the plan. Would you like to\nproceed?\n"
+    "❯ 1. keep the overlay\n",
 )
 _PERMISSION = """\
 ╭──────────────────────────────────────────────────────────╮
@@ -153,7 +157,9 @@ def test_terminal_fallback_prompt_receives_no_injected_keystrokes(
 ) -> None:
     """A hook may have timed out; its still-visible native prompt remains protected."""
     sent = []
-    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: pane)
+    # Accept keyword arguments so a recognition regression that reaches a
+    # join_wrapped capture fails on the refusal assertion, not a stub TypeError.
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_a, **_k: pane)
     monkeypatch.setattr(bridge, "_run_tmux", lambda *args: sent.append(args))
     assert bridge.has_pending_user_prompt(native_bridge)
     with pytest.raises(bridge.ClaudeUserPromptPending):
@@ -176,7 +182,11 @@ def test_decision_text_above_a_ready_composer_does_not_block_delivery(
     assert not bridge.has_pending_user_prompt(native_bridge)
 
 
-@pytest.mark.parametrize("transcript", _PLAN_WORDS_IN_TRANSCRIPT, ids=["no-rule", "no-selector"])
+@pytest.mark.parametrize(
+    "transcript",
+    _PLAN_WORDS_IN_TRANSCRIPT,
+    ids=["no-rule", "no-selector", "wrapped-headline"],
+)
 def test_plan_dialog_words_in_the_transcript_are_not_a_plan_dialog(
     native_bridge: Path, monkeypatch: pytest.MonkeyPatch, transcript: str
 ) -> None:
@@ -203,6 +213,26 @@ def test_decision_phrase_wrapping_in_the_transcript_is_not_a_prompt(
 ) -> None:
     """Without a dialog frame, a phrase that only wraps across rows is not a prompt."""
     monkeypatch.setattr(bridge, "_capture_pane", lambda *_: transcript)
+    assert not bridge.has_pending_user_prompt(native_bridge)
+
+
+# A finished tool-output box (two rules) with assistant text wrapping a decision
+# phrase below it. The phrase sits past the closing rule, so framing rules above
+# must not let it read as a live dialog.
+_WRAPPED_DECISION_BELOW_TOOL_BOX = (
+    "╭──────────────────────────────╮\n"
+    "│ Running pytest -q             │\n"
+    "╰──────────────────────────────╯\n"
+    "● Next I will set things up. Do you want\n"
+    "to configure the deploy target now?\n"
+)
+
+
+def test_wrapped_decision_phrase_below_a_tool_box_is_not_a_prompt(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A phrase wrapping below a framed tool box is transcript, not a dialog."""
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: _WRAPPED_DECISION_BELOW_TOOL_BOX)
     assert not bridge.has_pending_user_prompt(native_bridge)
 
 
