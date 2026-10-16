@@ -700,11 +700,10 @@ async def test_subagent_watcher_preserves_parked_sentinel_across_restart(
     assert starts == [], f"forwarder retried a parked sub-agent after restart: {starts!r}"
 
 
-def _inherited_spawn_record(tool_use_id: str, description: str) -> dict[str, Any]:
-    """A fork's own transcript row: a sidechain copy of the Agent record that
-    spawned it, inherited when the fork cloned the parent conversation."""
+def _spawn_record(tool_use_id: str, description: str, *, sidechain: bool) -> dict[str, Any]:
+    """An assistant transcript row carrying one Agent spawn ``tool_use`` block."""
     return {
-        "isSidechain": True,
+        "isSidechain": sidechain,
         "type": "assistant",
         "uuid": f"inherited-spawn-{tool_use_id}",
         "message": {
@@ -719,6 +718,12 @@ def _inherited_spawn_record(tool_use_id: str, description: str) -> dict[str, Any
             ],
         },
     }
+
+
+def _inherited_spawn_record(tool_use_id: str, description: str) -> dict[str, Any]:
+    """A fork's own transcript row: a sidechain copy of the Agent record that
+    spawned it, inherited when the fork cloned the parent conversation."""
+    return _spawn_record(tool_use_id, description, sidechain=True)
 
 
 def test_fork_inherited_spawn_record_resolves_to_the_real_parent(
@@ -805,3 +810,167 @@ async def test_fork_subagent_inheriting_its_own_spawn_record_registers(
     assert start_paths == {"a-fork": "/v1/sessions/conv_root/events"}
     assert state.subagents["a-fork"].child_conversation_id == "conv_a-fork"
     assert state.subagents["a-fork"].parent_subagent_id is None
+
+
+def _process_read_bytes() -> int | None:
+    """Bytes this process has read so far, from Linux ``/proc`` accounting."""
+    try:
+        text = Path("/proc/self/io").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("rchar:"):
+            return int(line.partition(":")[2])
+    return None
+
+
+async def test_unresolved_meta_does_not_rescan_unchanged_transcripts_every_poll(
+    tmp_path: Path,
+) -> None:
+    """A meta whose spawn never resolves must not make every poll re-read all transcripts.
+
+    Correlation reads the root transcript and each ``agent-*.jsonl`` in full. While
+    one ``.meta.json`` stays unregistered, an idle session repeated that full read
+    on every poll, so runner CPU and read volume grew with files that had not
+    changed since the previous poll.
+    """
+    if _process_read_bytes() is None:
+        pytest.skip("requires /proc/self/io read accounting")
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    helper_path = _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="a-finished",
+        agent_type="general-purpose",
+        description="finished helper",
+        tool_use_id="toolu_finished",
+    )
+    filler = json.dumps({"type": "file-history-snapshot", "snapshot": {"content": "x" * 4096}})
+    for path in (transcript_path, helper_path):
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write((filler + "\n") * 256)
+    subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
+    (subagents_dir / "agent-a-unresolved.meta.json").write_text(
+        json.dumps(
+            {
+                "agentType": "general-purpose",
+                "description": "spawn record never written",
+                "toolUseId": "toolu_never_resolved",
+            }
+        ),
+        encoding="utf-8",
+    )
+    transcript_bytes = transcript_path.stat().st_size + helper_path.stat().st_size
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content).get("type") == "external_subagent_start":
+            return httpx.Response(202, json={"queued": False, "child_session_id": "conv_finished"})
+        return httpx.Response(202, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://ap",
+    ) as client:
+        poll_kwargs: dict[str, Any] = {
+            "client": client,
+            "parent_session_id": "conv_root",
+            "bridge_dir": bridge_dir,
+            "transcript_path": transcript_path,
+            "agent_name": "claude-native-ui",
+            "start_retry_tracker": forwarder._PostRetryTracker(base_delay_s=0.0),
+            "item_retry_tracker": forwarder._PostRetryTracker(base_delay_s=0.0),
+            "status_retry_tracker": forwarder._PostRetryTracker(base_delay_s=0.0),
+        }
+        state = await forwarder._forward_available_subagents(
+            state=forwarder.SubagentForwardState(subagents={}), **poll_kwargs
+        )
+        assert state.subagents["a-finished"].child_conversation_id == "conv_finished"
+        assert "a-unresolved" not in state.subagents
+
+        read_before = _process_read_bytes()
+        state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
+        reread_bytes = _process_read_bytes() - read_before  # type: ignore[operator]
+
+    assert "a-unresolved" not in state.subagents
+    assert reread_bytes < transcript_bytes // 4, (
+        f"an idle poll with unchanged files read {reread_bytes} bytes "
+        f"(transcripts total {transcript_bytes} bytes)"
+    )
+
+
+@pytest.mark.parametrize("spawn_owner", ["root", "helper"])
+async def test_spawn_record_landing_after_idle_polls_registers_the_subagent(
+    tmp_path: Path,
+    spawn_owner: str,
+) -> None:
+    """A spawn record appended after idle polls still resolves its waiting meta.
+
+    Idle polls skip transcripts that have not changed since the previous scan, so
+    the poll after the record lands must re-read the grown file, whether that is
+    the root transcript or a helper's sidechain transcript, and register the
+    sub-agent under the owner that issued the spawn.
+    """
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    helper_path = _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="a-finished",
+        agent_type="general-purpose",
+        description="finished helper",
+        tool_use_id="toolu_finished",
+    )
+    subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
+    (subagents_dir / "agent-a-late.meta.json").write_text(
+        json.dumps(
+            {
+                "agentType": "general-purpose",
+                "description": "spawn record lands later",
+                "toolUseId": "toolu_late",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("type") != "external_subagent_start":
+            return httpx.Response(202, json={})
+        subagent_id = body["data"]["subagent_id"]
+        return httpx.Response(
+            202,
+            json={"queued": False, "child_session_id": f"conv_{subagent_id}"},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://ap",
+    ) as client:
+        poll_kwargs: dict[str, Any] = {
+            "client": client,
+            "parent_session_id": "conv_root",
+            "bridge_dir": bridge_dir,
+            "transcript_path": transcript_path,
+            "agent_name": "claude-native-ui",
+            "start_retry_tracker": forwarder._PostRetryTracker(base_delay_s=0.0),
+            "item_retry_tracker": forwarder._PostRetryTracker(base_delay_s=0.0),
+            "status_retry_tracker": forwarder._PostRetryTracker(base_delay_s=0.0),
+        }
+        state = await forwarder._forward_available_subagents(
+            state=forwarder.SubagentForwardState(subagents={}), **poll_kwargs
+        )
+        state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
+        assert set(state.subagents) == {"a-finished"}
+
+        spawn_path = transcript_path if spawn_owner == "root" else helper_path
+        with spawn_path.open("a", encoding="utf-8") as handle:
+            record = _spawn_record(
+                "toolu_late", "spawn record lands later", sidechain=spawn_owner == "helper"
+            )
+            handle.write(json.dumps(record) + "\n")
+        state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
+
+    late = state.subagents["a-late"]
+    assert late.child_conversation_id == "conv_a-late"
+    assert late.parent_subagent_id == (None if spawn_owner == "root" else "a-finished")

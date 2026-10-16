@@ -2557,6 +2557,68 @@ def _tool_use_ids_in_transcript(
     return tool_use_ids
 
 
+@dataclass(frozen=True)
+class _TranscriptSpawnIdCacheEntry:
+    """
+    Spawn tool-use ids scanned from one transcript at a given size and mtime.
+
+    :param size: File size in bytes when the ids were scanned.
+    :param mtime_ns: File modification time in nanoseconds at that scan.
+    :param include_sidechains: The ``include_sidechains`` the scan used.
+    :param tool_use_ids: Spawn tool-use ids the transcript owned at that scan.
+    """
+
+    size: int
+    mtime_ns: int
+    include_sidechains: bool
+    tool_use_ids: frozenset[str]
+
+
+# Spawn-id correlation memo keyed by transcript path. An unregistered meta
+# re-runs correlation every poll, so unchanged transcripts must not be
+# re-parsed each time; one small entry is kept per transcript correlated.
+_SPAWN_TOOL_USE_ID_CACHE: dict[Path, _TranscriptSpawnIdCacheEntry] = {}
+
+
+def _spawn_tool_use_ids_cached(
+    transcript_path: Path,
+    *,
+    include_sidechains: bool,
+) -> frozenset[str]:
+    """
+    :func:`_tool_use_ids_in_transcript`, rescanning only when the file changed.
+
+    :param transcript_path: Claude JSONL transcript to inspect.
+    :param include_sidechains: Forwarded to :func:`_tool_use_ids_in_transcript`.
+    :returns: Spawn tool-use ids owned by this transcript; empty when it
+        cannot be read.
+    """
+    try:
+        stat = transcript_path.stat()
+    except OSError:
+        return frozenset()
+    cached = _SPAWN_TOOL_USE_ID_CACHE.get(transcript_path)
+    if (
+        cached is not None
+        and cached.size == stat.st_size
+        and cached.mtime_ns == stat.st_mtime_ns
+        and cached.include_sidechains == include_sidechains
+    ):
+        return cached.tool_use_ids
+    # Stat before read: a write landing in between is filed under the older
+    # stat, so the next poll sees a changed file and rescans.
+    tool_use_ids = frozenset(
+        _tool_use_ids_in_transcript(transcript_path, include_sidechains=include_sidechains)
+    )
+    _SPAWN_TOOL_USE_ID_CACHE[transcript_path] = _TranscriptSpawnIdCacheEntry(
+        size=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+        include_sidechains=include_sidechains,
+        tool_use_ids=tool_use_ids,
+    )
+    return tool_use_ids
+
+
 def _subagent_own_spawn_tool_use_id(agent_jsonl_path: Path) -> str | None:
     """Return the spawn tool-use id that created the sub-agent owning
     *agent_jsonl_path*, read from its sibling ``agent-<id>.meta.json``.
@@ -2578,11 +2640,11 @@ def _subagent_parents_by_tool_use(
 ) -> dict[str, str | None]:
     """Correlate Claude spawn tool ids to their immediate transcript owner.
 
-    Reads the root transcript and every ``agent-*.jsonl`` in full. The caller
-    only invokes this when unregistered meta files exist, so idle sessions pay
-    nothing. The common case is a transient spawn burst; the exception is an
-    orphan meta whose spawn record never lands, which keeps the transcripts
-    re-read on every poll until it appears (or the process restarts).
+    Scans the root transcript and every ``agent-*.jsonl``, re-reading a file
+    only when its size or mtime changed since the previous scan. The caller
+    only invokes this while unregistered meta files exist; an orphan meta whose
+    spawn record never lands therefore costs one ``stat`` per transcript per
+    poll rather than a full re-parse of every file.
     """
     owners: dict[str, str | None] = {}
     ambiguous: set[str] = set()
@@ -2603,7 +2665,7 @@ def _subagent_parents_by_tool_use(
         own_spawn_tool_use_id = (
             _subagent_own_spawn_tool_use_id(path) if owner_id is not None else None
         )
-        for tool_use_id in _tool_use_ids_in_transcript(
+        for tool_use_id in _spawn_tool_use_ids_cached(
             path,
             include_sidechains=owner_id is not None,
         ):
