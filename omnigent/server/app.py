@@ -102,6 +102,7 @@ from omnigent.server.performance_metrics import (
     set_request_session_id_for_access_log,
     set_request_user_agent_for_access_log,
 )
+from omnigent.server.validation_audit import validation_audit_attrs
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
 from omnigent.server.routes.default_policies import create_default_policies_router
@@ -2369,15 +2370,20 @@ def create_app(
     @app.exception_handler(StarletteHTTPException)
     async def _handle_http_exception(request: Request, exc: StarletteHTTPException) -> Response:
         if exc.status_code == 422 and isinstance(exc.detail, list):
-            from omnigent.server.validation_audit import validation_audit_attrs
-
             errors = [
                 error
                 for error in exc.detail
                 if isinstance(error, dict) and "type" in error and "loc" in error
             ]
             if errors:
-                add_audit_attrs(**validation_audit_attrs(errors))
+                add_audit_attrs(
+                    code=str(ErrorCode.INVALID_INPUT),
+                    http_status="422",
+                    error_category=ErrorCategory.USER.value,
+                    error_impact=ErrorImpact.BENIGN.value,
+                    error_phase=ErrorPhase.REQUEST.value,
+                    **validation_audit_attrs(errors),
+                )
         return await http_exception_handler(request, exc)
 
     @app.exception_handler(RequestValidationError)
@@ -2403,8 +2409,6 @@ def create_app(
             error_impact=ErrorImpact.BENIGN.value,
             error_phase=ErrorPhase.REQUEST.value,
         )
-        from omnigent.server.validation_audit import validation_audit_attrs
-
         add_audit_attrs(**validation_audit_attrs(exc.errors()))
         return await request_validation_exception_handler(request, exc)
 

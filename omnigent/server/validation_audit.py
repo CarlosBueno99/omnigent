@@ -43,7 +43,14 @@ _LOCATION_FIELDS = frozenset(
 
 
 def validation_audit_attrs(errors: Sequence[Mapping[str, object]]) -> dict[str, str]:
-    """Keep built-in error types and schema fields; discard values and dynamic keys."""
+    """Keep built-in error types and schema fields; discard values and dynamic keys.
+
+    Location tuples are filtered through _LOCATION_FIELDS: any string matching a
+    known field name is retained, others become a generic "field" marker. Caller-
+    controlled keys (e.g. in dict fields) survive if they happen to match an
+    allowlisted field name, but all values are omitted. This bounds the logged
+    output to a fixed vocabulary without attempting a schema introspection.
+    """
     samples = errors[:_MAX_ERROR_SAMPLES]
     types: set[str] = set()
     locations: list[list[str]] = []
@@ -57,7 +64,7 @@ def validation_audit_attrs(errors: Sequence[Mapping[str, object]]) -> dict[str, 
                 part
                 if isinstance(part, str) and part in _LOCATION_FIELDS
                 else "[]"
-                if isinstance(part, int)
+                if isinstance(part, int) and not isinstance(part, bool)
                 else "field"
                 for part in parts
             ]
