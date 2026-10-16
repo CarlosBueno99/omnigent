@@ -389,9 +389,10 @@ async def _observe_terminal_interactive(
 ) -> None:
     """Emit one semantic event when a native TUI can accept a message.
 
-    A pane still not interactive at *slow_after_s* (``_TERMINAL_INTERACTIVE_SLOW_S``
-    or a third of *timeout_s*, whichever is shorter) is described once with its
+    A pane still not interactive at the slow mark is described once with its
     redacted tail, so a runner lost before the deadline still leaves a record.
+    By default the mark is ``_TERMINAL_INTERACTIVE_SLOW_S`` or a third of
+    *timeout_s*, whichever is shorter; an explicit *slow_after_s* is used as given.
     """
     loop = asyncio.get_running_loop()
     started_at = loop.time()
@@ -5674,13 +5675,12 @@ def _pane_tail_message(tail: str | None) -> str:
 
 def _startup_terminal_output(instance: TerminalInstance) -> str | None:
     """Apply the same capture gate and bounds to both startup-error paths."""
-    from omnigent.harnesses.diagnostics import sanitize_diagnostic_text
     from omnigent.process_logging import harness_stderr_capture_enabled
-    from omnigent.runner.resource_registry import trim_terminal_output
 
+    # Read the exit text only when it may be exported.
     if not harness_stderr_capture_enabled():
         return None
-    return trim_terminal_output(sanitize_diagnostic_text(instance.last_exit_text() or ""))
+    return _redacted_terminal_text(instance.last_exit_text() or "")
 
 
 async def _stalled_pane_diagnostics(instance: TerminalInstance) -> tuple[str | None, bool]:
@@ -5692,11 +5692,17 @@ async def _stalled_pane_diagnostics(instance: TerminalInstance) -> tuple[str | N
     """
     from omnigent.harnesses.diagnostics import contains_sign_in_material, detect_sign_in_prompt
 
-    screen = await _read_pane_screen(instance)
-    prompt = detect_sign_in_prompt(screen) is not None
-    if contains_sign_in_material(screen):
-        return None, prompt
-    return _redacted_terminal_text(screen), False
+    try:
+        screen = await _read_pane_screen(instance)
+        prompt = detect_sign_in_prompt(screen) is not None
+        if contains_sign_in_material(screen):
+            return None, prompt
+        return _redacted_terminal_text(screen), False
+    except Exception:  # noqa: BLE001 — a diagnostics failure costs the tail, not the observation
+        _logger.debug(
+            "Stalled pane diagnostics failed for %s", instance.diagnostic_id, exc_info=True
+        )
+        return None, False
 
 
 class _CodexTerminalExited(RuntimeError):

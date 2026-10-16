@@ -8,6 +8,7 @@ from collections import deque
 
 import pytest
 
+from omnigent.runner.native import orchestration
 from omnigent.runner.native.orchestration import _observe_terminal_interactive
 
 
@@ -207,6 +208,40 @@ async def test_observer_cancelled_after_the_slow_mark_keeps_its_record(
         in {"terminal_interactive", "terminal_interactive_unobserved"}
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_observer_outlives_a_diagnostics_failure(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken pane diagnostic costs the tail; the observer still reports readiness."""
+    monkeypatch.setenv("OMNIGENT_HARNESS_STDERR_ENABLED", "1")
+    monkeypatch.setattr(
+        orchestration,
+        "_redacted_terminal_text",
+        lambda _text: (_ for _ in ()).throw(RuntimeError("sanitizer broke")),
+    )
+    terminal = _FakeTerminal([_STALLED_SCREEN, _STALLED_SCREEN, "composer ready"])
+
+    with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
+        await _observe_terminal_interactive(
+            session_id="conv_recovers",
+            terminal_id="terminal_claude_main",
+            harness="claude-native",
+            readiness_signal="claude_composer",
+            instance=terminal,  # type: ignore[arg-type]
+            is_interactive=lambda pane: pane == "composer ready",
+            timeout_s=5.0,
+            slow_after_s=0.0,
+            poll_interval_s=0.0,
+        )
+
+    events = [r.event_name for r in caplog.records if getattr(r, "event_name", None)]
+    assert events == ["terminal_interactive_slow", "terminal_interactive"]
+    assert "terminal_last_output" not in {
+        k for r in caplog.records for k, v in getattr(r, "attributes", {}).items() if v
+    }
 
 
 @pytest.mark.asyncio
