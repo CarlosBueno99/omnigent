@@ -22,7 +22,7 @@ from omnigent.db.db_models import (
     SqlSessionPermission,
     SqlUser,
     current_workspace_id,
-    normalize_uuid,
+    spellings_by_normalized_uuid,
 )
 from omnigent.db.utils import (
     get_or_create_engine,
@@ -403,14 +403,12 @@ class SqlAlchemyPermissionStore(PermissionStore):
                 .all()
             ]
         result: dict[str, list[SessionPermission]] = {cid: [] for cid in conversation_ids}
-        # A Uuid16 column accepts dashed and legacy-prefixed ids on the way in
-        # but always reads back bare hex, so entity.conversation_id need not be
-        # spelled the way the caller asked. Re-key to the caller's spelling —
-        # they look grants up by the id they passed. Every entity came from the
-        # ``IN`` above, so its canonical form is always one of theirs.
-        caller_spelling = {normalize_uuid(cid): cid for cid in conversation_ids}
+        # Uuid16 reads back bare hex; file each grant under every spelling the
+        # caller used for its session.
+        spellings = spellings_by_normalized_uuid(conversation_ids)
         for entity in entities:
-            result[caller_spelling[entity.conversation_id]].append(entity)
+            for conversation_id in spellings[entity.conversation_id]:
+                result[conversation_id].append(entity)
         return result
 
     def list_for_user(self, user_id: str, *, limit: int = 1000) -> list[SessionPermission]:

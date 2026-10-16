@@ -888,22 +888,40 @@ def test_projects_changed_event_forwards_to_client(
         assert frame["type"] == "projects_changed"
 
 
-def test_conv_prefixed_watch_streams_grant_fields(app: FastAPI, stores) -> None:
-    """A watch by the legacy ``conv_``-prefixed spelling streams the same
-    ``permission_level`` / ``owner`` a bare-hex watch does.
+@pytest.mark.parametrize(
+    ("templates", "admin"),
+    [
+        pytest.param(["conv_{hex}"], False, id="prefixed"),
+        pytest.param(["{hex}", "conv_{hex}"], False, id="bare_then_prefixed"),
+        pytest.param(["conv_{hex}", "{hex}"], True, id="admin_prefixed_then_bare"),
+        pytest.param(["{hex}", "conv_{hex}"], True, id="admin_bare_then_prefixed"),
+    ],
+)
+def test_conv_prefixed_watch_streams_grant_fields(
+    app: FastAPI, stores, templates: list[str], admin: bool
+) -> None:
+    """A watch by the legacy ``conv_``-prefixed spelling — alone, or alongside
+    the bare id as the sidebar sends when the opened session is on its loaded
+    page — streams one item with the ``permission_level`` / ``owner`` a
+    bare-hex watch does.
 
-    Grants are batched under the watched spelling, but each item is built
-    from an entity whose id reads back as bare hex; indexing the grant map
-    with the entity id drops the grants, presenting an owned session as
-    ownerless over the stream while ``GET /v1/sessions`` reports it owned.
+    Grants are batched under the watched spellings while each item is built
+    from an entity whose id reads back bare hex. Looking grants up by the
+    entity id, or filing them under only one of two spellings, presented an
+    owned session as ownerless over the stream; admins see every watched id
+    regardless of grants, so they hit the second case.
     """
+    _, _, permission_store = stores
     s1 = _seed_session(stores, owner=ALICE, title="prefixed")
+    if admin:
+        permission_store.set_admin(ALICE, True)
+    watched = [template.format(hex=s1) for template in templates]
     with TestClient(app).websocket_connect(
         "/v1/sessions/updates", headers={"X-Forwarded-Email": ALICE}
     ) as ws:
-        ws.send_text(json.dumps({"type": "watch", "session_ids": [f"conv_{s1}"]}))
+        ws.send_text(json.dumps({"type": "watch", "session_ids": watched}))
         snapshot = _recv_until(ws, {"snapshot"})
-        items = {item["id"]: item for item in snapshot["items"]}  # type: ignore[index]
-        assert set(items) == {s1}
-        assert items[s1]["permission_level"] == LEVEL_OWNER
-        assert items[s1]["owner"] == ALICE
+        items = snapshot["items"]
+        assert [item["id"] for item in items] == [s1]  # type: ignore[index]
+        assert items[0]["permission_level"] == LEVEL_OWNER  # type: ignore[index]
+        assert items[0]["owner"] == ALICE  # type: ignore[index]

@@ -1800,16 +1800,20 @@ def register_core_routes(
         def _load_sessions(ids: list[str]) -> list[tuple[str, Conversation]]:
             """Bulk-load the accessible conversations that are sessions
             (non-null ``agent_id``) in one batched store call, preserving
-            the caller's id order for deterministic output. Each row is
-            paired with the watched spelling that found it: entity ids read
-            back bare hex, while ``perms_by_conv`` is keyed by the watched
-            spelling, so grants must be looked up by the latter."""
+            the caller's id order for deterministic output. Each session is
+            paired with the first watched spelling that found it: entity ids
+            read back bare hex, while ``perms_by_conv`` is keyed by the
+            watched spelling, so grants must be looked up by the latter."""
             by_id = conversation_store.get_conversations(ids)
-            return [
-                (cid, conv)
-                for cid in ids
-                if (conv := by_id.get(cid)) is not None and conv.agent_id is not None
-            ]
+            sessions: list[tuple[str, Conversation]] = []
+            loaded: set[str] = set()
+            for cid in ids:
+                conv = by_id.get(cid)
+                if conv is None or conv.agent_id is None or conv.id in loaded:
+                    continue
+                loaded.add(conv.id)
+                sessions.append((cid, conv))
+            return sessions
 
         watched_convs = await asyncio.to_thread(_load_sessions, accessible)
         if not watched_convs:
@@ -2138,9 +2142,7 @@ def register_core_routes(
                 # A client disconnect is the normal terminal condition; any
                 # other exception is a real bug worth surfacing in logs.
                 if exc is not None and not isinstance(exc, WebSocketDisconnect):
-                    # exc_info: a bare repr names the exception but not the
-                    # frame that raised it, which is the only thing that makes
-                    # a crash here actionable.
+                    # The repr alone does not name the frame that raised.
                     _logger.warning(
                         "session-updates stream task crashed: %r",
                         exc,

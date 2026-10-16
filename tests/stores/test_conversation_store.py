@@ -314,27 +314,68 @@ def test_get_conversations_empty_input_skips_query(
     assert conversation_store.get_conversations([]) == {}
 
 
-@pytest.mark.parametrize("spelling", ["dashed", "legacy_prefix"])
-def test_get_conversations_keys_by_caller_spelling(
-    conversation_store: SqlAlchemyConversationStore, spelling: str
+@pytest.mark.parametrize(
+    "templates",
+    [
+        pytest.param(["{dashed}"], id="dashed"),
+        pytest.param(["conv_{hex}"], id="legacy_prefix"),
+        pytest.param(["{hex}", "conv_{hex}"], id="bare_then_prefixed"),
+        pytest.param(["conv_{hex}", "{hex}"], id="prefixed_then_bare"),
+        pytest.param(["{dashed}", "conv_{hex}"], id="dashed_then_prefixed"),
+    ],
+)
+def test_bulk_readers_key_rows_under_every_caller_spelling(
+    conversation_store: SqlAlchemyConversationStore, templates: list[str]
 ) -> None:
     """
-    Rows come back under the id spelling the caller passed.
+    ``get_conversations``, ``list_child_conversation_ids_by_parent`` and
+    ``list_latest_message_items_for_conversations`` file rows under every id
+    spelling the caller passed, including two spellings of one id.
 
     A ``Uuid16`` column resolves a dashed or ``conv_``-prefixed id on the way
-    in, so the row is found either way — but keying the result by the bare hex
-    read back leaves a caller indexing on its own id seeing an existing
-    conversation as absent. ``WS /v1/sessions/updates`` hits this: the
-    watch-set carries whatever spelling the client sent, and a dropped row
-    silently vanishes from the sidebar.
+    in but reads back bare hex. ``WS /v1/sessions/updates`` passes whatever
+    spellings the client watches — both the sidebar's bare id and the route's
+    ``conv_`` id when the open session is on the loaded page — and indexes
+    each result with the id it asked for, so a row filed under another
+    spelling silently vanishes from the sidebar.
     """
-    conv = conversation_store.create_conversation(title="alpha")
-    asked = str(uuid.UUID(conv.id)) if spelling == "dashed" else f"conv_{conv.id}"
+    parent = conversation_store.create_conversation(title="parent")
+    other = conversation_store.create_conversation(title="other")
+    child = conversation_store.create_conversation(
+        kind="sub_agent", title="child", parent_conversation_id=parent.id
+    )
+    conversation_store.append(
+        parent.id,
+        [
+            NewConversationItem(
+                type="message",
+                response_id="resp_parent",
+                data=MessageData(
+                    role="assistant",
+                    content=[{"type": "output_text", "text": "hello"}],
+                    agent="worker",
+                ),
+            )
+        ],
+    )
+    dashed = str(uuid.UUID(parent.id))
+    asked = [template.format(hex=parent.id, dashed=dashed) for template in templates]
 
-    result = conversation_store.get_conversations([asked])
+    conversations = conversation_store.get_conversations([*asked, other.id])
+    assert set(conversations) == {*asked, other.id}
+    assert [conversations[key].title for key in asked] == ["parent"] * len(asked)
+    assert conversations[other.id].title == "other"
 
-    assert set(result) == {asked}
-    assert result[asked].title == "alpha"
+    children = conversation_store.list_child_conversation_ids_by_parent([*asked, other.id])
+    assert children == {**{key: [child.id] for key in asked}, other.id: []}
+
+    latest = conversation_store.list_latest_message_items_for_conversations(
+        [*asked, other.id], per_conversation_limit=1
+    )
+    assert set(latest) == {*asked, other.id}
+    for key in asked:
+        assert [item.data.content[0]["text"] for item in latest[key]] == ["hello"]  # type: ignore[union-attr]
+    assert latest[other.id] == []
 
 
 def test_list_latest_message_items_for_conversations(

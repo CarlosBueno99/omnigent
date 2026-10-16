@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextvars import ContextVar
 from typing import Any
 
@@ -59,6 +59,26 @@ def normalize_uuid(value: str | None) -> str | None:
         return uuid_to_bytes(value).hex()
     except InvalidUuidError:
         return value
+
+
+def spellings_by_normalized_uuid(values: Iterable[str]) -> dict[str, list[str]]:
+    """Group caller-supplied id spellings by their bare 32-char hex form.
+
+    Bulk store readers seed their result with the ids the caller passed but
+    read rows back as bare hex. This maps each row id to every spelling the
+    caller used for it, so ``["<hex>", "conv_<hex>"]`` fills both keys.
+
+    :param values: Caller-supplied id strings in any accepted spelling,
+        e.g. ``["conv_0123…", "0123…"]``. Duplicates are tolerated.
+    :returns: Mapping from each distinct normalized id to its distinct
+        spellings in first-seen order; a malformed id maps to itself.
+    """
+    spellings: dict[str, list[str]] = {}
+    for value in values:
+        group = spellings.setdefault(normalize_uuid(value) or value, [])
+        if value not in group:
+            group.append(value)
+    return spellings
 
 
 class Uuid16(TypeDecorator[str]):

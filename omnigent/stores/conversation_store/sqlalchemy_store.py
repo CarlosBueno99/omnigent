@@ -48,7 +48,7 @@ from omnigent.db.db_models import (
     SqlUser,
     SqlUserDailyCost,
     current_workspace_id,
-    normalize_uuid,
+    spellings_by_normalized_uuid,
     uuid_to_bytes,
 )
 from omnigent.db.enum_codecs import (
@@ -1369,7 +1369,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         """
         if not conversation_ids:
             return {}
-        unique_ids = list(set(conversation_ids))
+        unique_ids = list(dict.fromkeys(conversation_ids))
         with self._conv_session("get_conversations") as session:
             rows = list(
                 session.execute(
@@ -1402,20 +1402,17 @@ class SqlAlchemyConversationStore(ConversationStore):
                     .all()
                 )
         meta_by_id = {m.id: m for m in meta_rows}
-        # Key by the caller's spelling, not the bare hex the column reads back.
-        # A Uuid16 column resolves a dashed or legacy ``conv_``-prefixed id on
-        # the way in, so the row is found either way — but a caller indexing the
-        # result with the id it passed would miss, and silently treat an
-        # existing conversation as absent.
-        caller_spelling = {normalize_uuid(cid): cid for cid in unique_ids}
-        return {
-            caller_spelling[row.id]: _to_conversation(
-                row,
-                meta_by_id.get(row.id),
-                labels_by_conv.get(row.id, {}),
+        # Uuid16 reads back bare hex; return each row under every spelling the
+        # caller used for it.
+        spellings = spellings_by_normalized_uuid(unique_ids)
+        result: dict[str, Conversation] = {}
+        for row in rows:
+            conversation = _to_conversation(
+                row, meta_by_id.get(row.id), labels_by_conv.get(row.id, {})
             )
-            for row in rows
-        }
+            for conversation_id in spellings[row.id]:
+                result[conversation_id] = conversation
+        return result
 
     def list_child_conversation_ids_by_parent(
         self,
@@ -1455,13 +1452,13 @@ class SqlAlchemyConversationStore(ConversationStore):
                     desc(self._tiebreaker_col),
                 )
             ).all()
-        # Re-key to the caller's spelling: a Uuid16 column takes dashed and
-        # legacy-prefixed ids but always reads back bare hex, so a caller that
-        # passed ``conv_<hex>`` would otherwise miss its own key.
-        caller_spelling = {normalize_uuid(pid): pid for pid in unique_ids}
+        # Uuid16 reads back bare hex; file each child under every spelling the
+        # caller used for its parent.
+        spellings = spellings_by_normalized_uuid(unique_ids)
         for parent_id, child_id in rows:
             if parent_id is not None:
-                result[caller_spelling[parent_id]].append(child_id)
+                for requested_parent_id in spellings[parent_id]:
+                    result[requested_parent_id].append(child_id)
         return result
 
     def list_child_conversation_ids_page(
@@ -2356,11 +2353,13 @@ class SqlAlchemyConversationStore(ConversationStore):
                 .order_by(ranked.c.conversation_id, ranked.c.position.desc())
             ).all()
             decoded = self._decode_item_data_batch([row.data for row in rows])
-            # Re-key to the caller's spelling; see the Uuid16 note in
-            # ``list_child_conversation_ids_by_parent``.
-            caller_spelling = {normalize_uuid(cid): cid for cid in unique_ids}
+            # Uuid16 reads back bare hex; file each item under every spelling the
+            # caller used for its conversation.
+            spellings = spellings_by_normalized_uuid(unique_ids)
             for row, data_json in zip(rows, decoded, strict=True):
-                result[caller_spelling[row.conversation_id]].append(_to_item(row, data_json))  # type: ignore[arg-type]
+                item = _to_item(row, data_json)  # type: ignore[arg-type]
+                for conversation_id in spellings[row.conversation_id]:
+                    result[conversation_id].append(item)
         return result
 
     def _encode_item_data(self, data_json: str) -> str:
