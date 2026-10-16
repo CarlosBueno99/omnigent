@@ -39,7 +39,7 @@ import pytest
 from playwright.sync_api import Browser, Page, Request, WebSocket, expect
 
 from tests._helpers.session import bind_session_runner, post_session_bundle
-from tests.e2e_ui.conftest import _build_hello_world_bundle
+from tests.e2e_ui.conftest import _build_hello_world_bundle, _recording_requested
 
 # The sidebar watches its loaded first page plus the route id, so a session must
 # lie beyond that page for its bare id to be absent from the watch-set.
@@ -297,8 +297,9 @@ def _watch_updates_socket(page: Page) -> dict[str, Any]:
     return events
 
 
-@pytest.mark.compat_smoke
+# Not a compat_smoke test: an old server without this fix crash-loops the stream.
 def test_conv_prefixed_link_keeps_sidebar_updates_live(
+    request: pytest.FixtureRequest,
     browser: Browser,
     off_list_session: tuple[str, str, str],
 ) -> None:
@@ -353,7 +354,8 @@ def test_conv_prefixed_link_keeps_sidebar_updates_live(
         assert any(link_id in frame.get("session_ids", []) for frame in events["watch_frames"]), (
             f"the SPA never watched the conv_-prefixed id; {_summary()}"
         )
-        # Hold the delivered title so a recording of this journey shows it.
-        page.wait_for_timeout(1_500)
+        if _recording_requested(request.node):
+            # Hold the delivered title so the recording ends on it.
+            page.wait_for_timeout(1_500)
     finally:
         context.close()
