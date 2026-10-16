@@ -7802,9 +7802,8 @@ def create_runner_app(
             )
 
         async def _reap_native_pane(pane: PaneRef) -> None:
-            # Snapshot the sidecars this pane owns before closing it: close drops
-            # the pane before awaiting shutdown, so a message that recreates the
-            # session during that await keeps its own newer forwarder and servers.
+            # Capture the pane's sidecars before closing it: close drops the pane
+            # before awaiting shutdown, so a recreate during that await keeps its own.
             reaped_sidecars = _native_runtime.capture_native_sidecars(pane.conversation_id)
             try:
                 await resource_registry.close_terminal(pane.conversation_id, pane.terminal_id)

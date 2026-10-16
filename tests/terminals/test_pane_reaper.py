@@ -19,6 +19,7 @@ from omnigent.runner.resource_registry import SessionResourceRegistry
 from omnigent.terminals.pane_reaper import (
     _DEFAULT_IDLE_TIMEOUT_S,
     _IDLE_TIMEOUT_ENV,
+    NATIVE_PANE_TERMINAL_NAMES,
     PANE_OUTPUT_BUSY_WINDOW_S,
     NativePaneReaper,
     PaneRef,
@@ -202,8 +203,6 @@ async def test_loop_disabled_when_timeout_non_positive() -> None:
 def test_kimi_is_exempt_from_pane_reaping() -> None:
     # kimi records no resumable chat id, so a reaped pane cannot be re-created
     # with its context; the name filter must never offer kimi panes to the reaper.
-    from omnigent.terminals.pane_reaper import NATIVE_PANE_TERMINAL_NAMES
-
     assert "kimi" not in NATIVE_PANE_TERMINAL_NAMES
     assert "claude" in NATIVE_PANE_TERMINAL_NAMES
 
@@ -212,11 +211,12 @@ def test_every_native_harness_pane_is_offered_to_the_reaper() -> None:
     # A native harness missing from the hand-kept name filter leaks every one of
     # its finished panes; only kimi may be absent (see the exemption test above).
     from omnigent.harness_aliases import NATIVE_HARNESSES, native_terminal_name
-    from omnigent.terminals.pane_reaper import NATIVE_PANE_TERMINAL_NAMES
 
     pane_names = {native_terminal_name(harness) for harness in NATIVE_HARNESSES}
     uncovered = pane_names - NATIVE_PANE_TERMINAL_NAMES
     assert uncovered <= {"kimi"}, f"native panes invisible to the reaper: {sorted(uncovered)}"
+    stale = NATIVE_PANE_TERMINAL_NAMES - pane_names
+    assert not stale, f"reaper names with no native harness: {sorted(stale)}"
 
 
 async def test_runner_busy_check_spares_a_pane_parked_on_an_approval(
@@ -349,8 +349,8 @@ async def test_runner_reap_releases_the_sessions_sidecars(
         asyncio.Event().wait(), name=f"{terminal_name}-forwarder-{conv}"
     )
     native_runtime._register_auto_forwarder_task(conv, forwarder)
-    server = _FakeSidecarServer()
     if server_registry is not None:
+        server = _FakeSidecarServer()
         server_registry[conv] = server  # type: ignore[index]
     pane = PaneRef(
         conv, terminal_resource_id(terminal_name, "main"), terminal_name, instance.socket_path
