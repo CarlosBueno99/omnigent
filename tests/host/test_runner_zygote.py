@@ -9,15 +9,18 @@ daemon's Popen fallback are all covered.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -89,6 +92,72 @@ def _wait_exit(proc: ZygoteRunnerProc, timeout: float = 10.0) -> int:
             return code
         time.sleep(0.05)
     raise AssertionError("forked runner did not exit in time")
+
+
+@pytest.mark.parametrize("pong", [True, False], ids=["ready", "failed-start"])
+def test_concurrent_start_waits_for_initial_ping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pong: bool
+) -> None:
+    """Prewarming and launching must agree on whether startup actually succeeded."""
+    # A scripted subprocess covers a refused ping without importing the runner.
+    executable = tmp_path / "delayed-zygote"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import os, socket\n"
+        "sock = socket.socket(fileno=int(os.environ['OMNIGENT_RUNNER_ZYGOTE_CONTROL_FD']))\n"
+        "sock.recv(4096)\n"
+        f"sock.sendall({(json.dumps({'pong': pong}) + chr(10)).encode()!r})\n"
+        "while sock.recv(4096):\n"
+        "    pass\n"
+    )
+    executable.chmod(0o700)
+    manager = ZygoteManager(python_executable=str(executable), log_path=tmp_path / "zygote.log")
+    first_unlock = threading.Event()
+    continue_start = threading.Event()
+    control_lock = manager._lock
+
+    class PauseFirstUnlock:
+        """Force the competing start into the first control-lock release window."""
+
+        paused = False
+
+        def __enter__(self):
+            control_lock.acquire()
+
+        def __exit__(self, *_exc):
+            pause = not self.paused
+            self.paused = True
+            control_lock.release()
+            if pause:
+                first_unlock.set()
+                assert continue_start.wait(timeout=10)
+
+    monkeypatch.setattr(manager, "_lock", PauseFirstUnlock())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(manager.start)
+        try:
+            assert first_unlock.wait(timeout=5)
+            second_entered = threading.Event()
+
+            def start_again() -> None:
+                second_entered.set()
+                manager.start()
+
+            second = pool.submit(start_again)
+            assert second_entered.wait(timeout=5)
+            with pytest.raises(TimeoutError):
+                second.result(timeout=0.05)
+            continue_start.set()
+            for started in (first, second):
+                if pong:
+                    started.result(timeout=5)
+                else:
+                    with pytest.raises(ZygoteUnavailable, match="did not answer ping"):
+                        started.result(timeout=5)
+            assert manager.is_running() is pong
+        finally:
+            continue_start.set()
+            manager.stop()
 
 
 def test_import_graph_is_single_threaded() -> None:
@@ -219,6 +288,98 @@ def test_failed_deferred_preload_does_not_stop_the_zygote(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", _failing_import)
 
     _zygote._import_deferred_graph()  # must not raise
+
+
+def test_threaded_deferred_preload_preserves_children_and_refuses_new_forks(
+    tmp_path: Path,
+) -> None:
+    """Optional preload must not orphan existing runners when it becomes unsafe to fork."""
+    marker = tmp_path / "preloaded"
+    script = "\n".join(
+        [
+            "import os, socket, threading",
+            "from pathlib import Path",
+            "from omnigent.runner import _zygote as z",
+            "z._import_runner_graph()",
+            "z._exit_unless_single_threaded()",
+            "def preload_with_thread():",
+            "    stop = threading.Event()",
+            "    threading.Thread(target=stop.wait, name='optional-preload-worker', "
+            "daemon=True).start()",
+            f"    Path({str(marker)!r}).write_text(str(next(iter(server._live))))",
+            # The real server is the subject; the optional import is the fault boundary.
+            "z._import_deferred_graph = preload_with_thread",
+            "sock = socket.socket(fileno=int(os.environ[z.ZYGOTE_CONTROL_FD_ENV_VAR]))",
+            "server = z._ZygoteServer(sock)",
+            "server.serve()",
+        ]
+    )
+    client, server = socket.socketpair()
+    client.settimeout(10)
+    requests = [
+        {"cmd": "ping"},
+        {
+            "cmd": "fork",
+            "env": _sleep_env(60),
+            "cwd": str(tmp_path),
+            "log_path": str(tmp_path / "runner.log"),
+        },
+    ]
+    # Queue both requests before startup so a child exists before deferred loading.
+    client.sendall(b"".join(json.dumps(r).encode() + b"\n" for r in requests))
+    parent = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env={**os.environ, _zygote.ZYGOTE_CONTROL_FD_ENV_VAR: str(server.fileno())},
+        pass_fds=(server.fileno(),),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    server.close()
+    replies = client.makefile("rb")
+    child_pid = None
+    child_reaped = False
+
+    def exchange(request: dict) -> dict:
+        client.sendall(json.dumps(request).encode() + b"\n")
+        line = replies.readline()
+        assert line, "forkserver exited while an existing runner still depended on it"
+        return json.loads(line)
+
+    try:
+        assert json.loads(replies.readline()) == {"pong": True}
+        child_pid = json.loads(replies.readline())["pid"]
+        deadline = time.monotonic() + 10
+        while not marker.exists():
+            assert time.monotonic() < deadline, "optional preload did not run"
+            time.sleep(0.01)
+        assert exchange({"cmd": "ping"}) == {"pong": True}
+        assert parent.poll() is None
+        assert exchange({"cmd": "poll", "pid": child_pid}) == {"returncode": None}
+        for command in ["fork", "fork_harness"]:
+            reply = exchange({"cmd": command, "env": _fork_env(0), "cwd": str(tmp_path)})
+            assert "single-threaded" in reply["error"]
+            assert "pid" not in reply
+        os.kill(child_pid, signal.SIGKILL)
+        deadline = time.monotonic() + 10
+        while (reply := exchange({"cmd": "poll", "pid": child_pid}))["returncode"] is None:
+            assert time.monotonic() < deadline, "existing child was not reaped"
+            time.sleep(0.01)
+        child_reaped = True
+        assert reply == {"returncode": -signal.SIGKILL}
+    finally:
+        if not child_reaped and child_pid is None and marker.exists():
+            child_pid = int(marker.read_text())
+        if not child_reaped and child_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+        replies.close()
+        client.close()
+        try:
+            parent.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            parent.kill()
+            parent.wait(timeout=5)
 
 
 def test_manager_starts_and_pings(manager: ZygoteManager) -> None:
