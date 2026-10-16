@@ -3232,10 +3232,9 @@ class CodexDatabricksProfileMissingError(OmnigentError, OSError):
 class CodexDatabricksNoCodexModelsError(OmnigentError, OSError):
     """The workspace listing answered but serves nothing on the codex route.
 
-    Coded ``HARNESS_NOT_CONFIGURED`` like the missing-profile error above: a
-    workspace admin has to enable a model, and the message says so, so a
-    terminal start failure shows it verbatim. Subclasses :class:`OSError`, the
-    documented error of this launch step.
+    Coded ``HARNESS_NOT_CONFIGURED`` like the missing-profile error above, so a
+    terminal start failure shows the remedy verbatim. Subclasses
+    :class:`OSError`, the documented error of this launch step.
     """
 
     def __init__(self, profile: str) -> None:

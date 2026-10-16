@@ -160,17 +160,15 @@ def preferred_served_claude_model(
 def model_service_wire_apis(service: Mapping[str, object]) -> frozenset[ModelWireAPI] | None:
     """Normalize a model service's advertised ``supported_api_types``.
 
-    Shared by every reader of the Unity Catalog model-services listing so the
-    worker catalog, pi-native and codex discovery agree on which route a
-    service can be reached through.
+    One rule for every reader of the Unity Catalog listing (worker catalog,
+    pi-native, codex discovery), so they agree on which route serves a model.
 
     :param service: One ``model_services`` entry, e.g.
         ``{"name": "model-services/system.ai.gpt-5-5",
         "supported_api_types": ["openai/v1/responses"]}``.
-    :returns: The recognized wire protocols — empty when the entry advertises
-        routes but none is recognized — or ``None`` when it carries no usable
-        route metadata: ``supported_api_types`` missing, not a list, or
-        without a single string entry.
+    :returns: The recognized wire protocols (empty when routes are advertised
+        but none is recognized), or ``None`` when the entry carries no usable
+        route metadata: the field is missing, not a list, or has no string entry.
     """
     api_types = service.get("supported_api_types")
     if not isinstance(api_types, list):
@@ -192,9 +190,8 @@ def model_service_wire_apis(service: Mapping[str, object]) -> frozenset[ModelWir
 class _ModelService:
     """One ``system.ai`` model service from the Unity Catalog listing.
 
-    :param model_id: Served id, e.g. ``"system.ai.gpt-5-5"``.
-    :param wire_apis: Advertised routes per :func:`model_service_wire_apis`;
-        ``None`` when the entry carries no usable route metadata.
+    ``wire_apis`` follows :func:`model_service_wire_apis`: ``None`` means the
+    entry carried no usable route metadata.
     """
 
     model_id: str

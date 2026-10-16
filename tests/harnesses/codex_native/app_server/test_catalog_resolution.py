@@ -233,11 +233,10 @@ def test_resolve_databricks_codex_model_empty_catalog_stops_implicit_launch(
 ) -> None:
     """An authoritative empty workspace catalog never falls back to the bundled default.
 
-    The listing answered and exposes no codex model, so there is nothing the
-    gateway will serve; pinning the bundled MLflow catalog's ``databricks-`` id
-    launches Codex on a model the gateway rejects. The failure carries the
-    setup code the runner shows verbatim, and an explicit model still passes
-    through for the gateway to judge.
+    The listing answered and exposes no codex model, so pinning the bundled
+    MLflow catalog's ``databricks-`` id would launch Codex on a model the
+    gateway rejects. The error carries the setup code the runner shows
+    verbatim, and an explicit model still passes through.
     """
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -275,10 +274,9 @@ def test_resolve_databricks_codex_model_empty_catalog_stops_implicit_launch(
 def test_resolve_databricks_codex_model_unreadable_listing_keeps_bundled_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cached_codex_models: list[str] | None
 ) -> None:
-    """Only an answered listing is authoritative; an unreadable one keeps the last resort.
+    """An unreadable listing is not authoritative: the bundled last resort stays.
 
-    When discovery fails and ucode state is missing or caches no codex model,
-    an implicit launch still resolves through the bundled catalog.
+    Discovery failed and ucode state is missing or caches no codex model.
     """
     from types import SimpleNamespace
     from unittest.mock import patch
