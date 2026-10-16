@@ -8,6 +8,7 @@ root resolution, or removal ordering fails loud here.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -740,6 +741,8 @@ def test_failed_pinned_checkout_rolls_back_without_hiding_original_error(
 
 def test_create_worktree_add_failure_leaves_no_branch(git_repo: Path) -> None:
     """A failed ``git worktree add`` must not keep its branch; otherwise a retry can't succeed."""
+    if os.name != "posix" or os.geteuid() == 0:
+        pytest.skip("a read-only directory only blocks a non-root POSIX user")
     worktrees_parent = git_repo.parent / "myrepo-worktrees"
     worktrees_parent.mkdir()
     worktrees_parent.chmod(0o500)
@@ -754,42 +757,85 @@ def test_create_worktree_add_failure_leaves_no_branch(git_repo: Path) -> None:
     assert _current_branch(Path(created.worktree_path)) == "feature/retry"
 
 
-def test_create_worktree_existing_branch_add_failure_keeps_branch(git_repo: Path) -> None:
-    """Rollback after a failed add never deletes a branch the request did not create."""
-    _git(git_repo, "branch", "keep")
-    worktrees_parent = git_repo.parent / "myrepo-worktrees"
-    worktrees_parent.mkdir()
-    worktrees_parent.chmod(0o500)
-    try:
-        with pytest.raises(WorktreeError, match="git worktree add failed"):
-            create_worktree(repo_path=str(git_repo), branch_name="keep", existing_branch=True)
-    finally:
-        worktrees_parent.chmod(0o755)
-    assert _branch_exists(git_repo, "keep")
-    assert _worktree_count(git_repo) == 1
-
-
-def test_create_worktree_timed_out_add_rolls_back_registered_worktree(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("existing_branch", [False, True])
+@pytest.mark.parametrize("failure", ["exit", "interrupted", "timeout"])
+def test_create_worktree_failed_add_rolls_back_only_its_own_branch(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, existing_branch: bool, failure: str
 ) -> None:
-    """A timeout after git registered the worktree still frees the branch for a retry."""
+    """A failed add leaves no worktree behind and deletes only a branch the request created."""
+    if existing_branch:
+        _git(git_repo, "branch", "feature/slow")
     real_run = git_worktree_module._run_git
-    timed_out = False
+    failed = False
 
-    def time_out_after_add(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
-        nonlocal timed_out
-        result = real_run(args, cwd=cwd)
-        if args[:2] == ["worktree", "add"] and not timed_out:
-            timed_out = True
-            raise WorktreeError("git command timed out after 120s")
-        return result
+    def fail_add(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
+        nonlocal failed
+        if args[:2] != ["worktree", "add"] or failed:
+            return real_run(args, cwd=cwd)
+        failed = True
+        if failure == "exit":
+            return subprocess.CompletedProcess(args, 128, "", "fatal: disk full")
+        if failure == "interrupted":
+            # The timeout killed git after registering the worktree, before the checkout.
+            real_run([*args[:2], "--no-checkout", *args[2:]], cwd=cwd)
+        else:
+            # The timeout killed git after the worktree was registered and checked out.
+            real_run(args, cwd=cwd)
+        raise WorktreeError("git command timed out after 120s")
 
-    monkeypatch.setattr(git_worktree_module, "_run_git", time_out_after_add)
-    with pytest.raises(WorktreeError, match="timed out"):
-        create_worktree(repo_path=str(git_repo), branch_name="feature/slow")
-    assert timed_out
-    assert not _branch_exists(git_repo, "feature/slow")
+    monkeypatch.setattr(git_worktree_module, "_run_git", fail_add)
+    with pytest.raises(WorktreeError, match="disk full" if failure == "exit" else "timed out"):
+        create_worktree(
+            repo_path=str(git_repo), branch_name="feature/slow", existing_branch=existing_branch
+        )
+    assert failed
+    assert _branch_exists(git_repo, "feature/slow") is existing_branch
     assert _worktree_count(git_repo) == 1
     assert not (git_repo.parent / "myrepo-worktrees" / "feature-slow").exists()
-    created = create_worktree(repo_path=str(git_repo), branch_name="feature/slow")
+    created = create_worktree(
+        repo_path=str(git_repo), branch_name="feature/slow", existing_branch=existing_branch
+    )
     assert _current_branch(Path(created.worktree_path)) == "feature/slow"
+
+
+def test_failed_add_rollback_failure_keeps_original_error(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The add's own error stays visible when removing the half-built worktree fails."""
+    real_run = git_worktree_module._run_git
+
+    def fail_add_and_rollback(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["worktree", "add"]:
+            real_run(args, cwd=cwd)
+            raise WorktreeError("git command timed out after 120s")
+        if args[:2] == ["worktree", "remove"]:
+            return subprocess.CompletedProcess(args, 1, "", "rollback failed")
+        return real_run(args, cwd=cwd)
+
+    monkeypatch.setattr(git_worktree_module, "_run_git", fail_add_and_rollback)
+    with pytest.raises(WorktreeError, match="timed out"):
+        create_worktree(repo_path=str(git_repo), branch_name="feature/stuck")
+    # The branch is still checked out in the registered worktree, so it is kept too.
+    assert _branch_exists(git_repo, "feature/stuck")
+    assert _worktree_count(git_repo) == 2
+
+
+def test_failed_add_rollback_keeps_another_requests_worktree(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rollback never removes a worktree another request created at the colliding path."""
+    winner = create_worktree(repo_path=str(git_repo), branch_name="feature/x")
+    (Path(winner.worktree_path) / "wip.txt").write_text("uncommitted")
+    # feature/x and feature-x share a directory name; both requests picked it before it existed.
+    monkeypatch.setattr(
+        git_worktree_module,
+        "_resolve_worktree_path",
+        lambda repo_root, branch_name: Path(winner.worktree_path),
+    )
+    with pytest.raises(WorktreeError, match="git worktree add failed"):
+        create_worktree(repo_path=str(git_repo), branch_name="feature-x")
+    assert (Path(winner.worktree_path) / "wip.txt").read_text() == "uncommitted"
+    linked = [wt.branch for wt in list_worktrees(repo_path=str(git_repo)) if not wt.is_main]
+    assert linked == ["feature/x"]
+    assert _branch_exists(git_repo, "feature/x")
+    assert not _branch_exists(git_repo, "feature-x")

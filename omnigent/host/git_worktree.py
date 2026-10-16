@@ -383,28 +383,46 @@ def _ensure_base_resolvable(repo_root: str, base_branch: str) -> None:
         raise WorktreeError(f"base branch does not exist: {base_branch}")
 
 
-def _discard_failed_worktree_add(repo_root: str, branch_name: str, worktree_path: Path) -> None:
-    """Best-effort rollback of the branch created for a failed ``git worktree add``.
+def _discard_failed_worktree_add(
+    repo_root: str, branch_name: str, worktree_path: Path, *, delete_branch: bool
+) -> None:
+    """Best-effort rollback after ``git worktree add`` failed for ``worktree_path``.
 
-    Git keeps the new branch when the add fails, so a retry would hit "branch
-    already exists"; a git killed by the timeout can also leave the worktree
-    registered and locked, so that is removed before the branch.
+    A git killed by the timeout can leave the worktree registered (and locked),
+    which would block every retry, so that registration goes first. The branch
+    is deleted only when this request created it: git keeps it when the add
+    fails, and a retry would otherwise hit "branch already exists".
 
     :param repo_root: Absolute main work-tree root, e.g. ``"/Users/alice/myrepo"``.
-    :param branch_name: Branch this request created, e.g. ``"feature/login"``.
+    :param branch_name: Branch the failed add checked out, e.g. ``"feature/login"``.
     :param worktree_path: Directory the failed add targeted.
+    :param delete_branch: ``True`` when this request created ``branch_name``.
     """
     try:
-        if worktree_path.exists():
-            _run_git(
-                ["worktree", "remove", "--force", "--force", str(worktree_path)], cwd=repo_root
+        target = os.path.normcase(os.path.realpath(worktree_path))
+        registered = next(
+            (
+                worktree
+                for worktree in list_worktrees(repo_path=repo_root)
+                if os.path.normcase(os.path.realpath(worktree.path)) == target
+            ),
+            None,
+        )
+        # Only this request's half-built worktree: another request may have
+        # created a worktree at the same sanitized directory name.
+        if registered is not None and registered.branch == branch_name:
+            removed = _run_git(
+                ["worktree", "remove", "--force", "--force", registered.path], cwd=repo_root
             )
-        deleted = _run_git(["branch", "-D", branch_name], cwd=repo_root)
-        if deleted.returncode != 0:
-            raise _git_error("git branch -D failed", deleted)
+            if removed.returncode != 0:
+                raise _git_error("git worktree remove failed", removed)
+        if delete_branch:
+            deleted = _run_git(["branch", "-D", branch_name], cwd=repo_root)
+            if deleted.returncode != 0:
+                raise _git_error("git branch -D failed", deleted)
     except WorktreeError:
         _logger.warning(
-            "Could not roll back branch %s after a failed worktree add", branch_name, exc_info=True
+            "Could not roll back the failed worktree add at %s", worktree_path, exc_info=True
         )
 
 
@@ -550,8 +568,9 @@ def create_worktree(
         if result.returncode != 0:
             raise _git_error("git worktree add failed", result)
     except WorktreeError:
-        if not existing_branch:
-            _discard_failed_worktree_add(repo_root, branch_name, worktree_path)
+        _discard_failed_worktree_add(
+            repo_root, branch_name, worktree_path, delete_branch=not existing_branch
+        )
         raise
     if validated_commit is not None:
         try:
