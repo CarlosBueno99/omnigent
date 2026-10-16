@@ -1200,7 +1200,7 @@ def build_native_controls(
                 auto_confirm=True,
                 confirm_hint=EFFORT_DIALOG_HINT,
             )
-        except (RuntimeError, ValueError) as exc:
+        except (RuntimeError, ValueError, OSError) as exc:
             return JSONResponse(
                 status_code=503,
                 content={
@@ -1264,6 +1264,7 @@ def build_native_controls(
     ) -> Response:
         from omnigent.harnesses.claude_native.bridge import (
             SWITCH_MODEL_DIALOG_HINT,
+            ClaudeInjectionCancelled,
             ClaudePromptTimeout,
             bridge_dir_for_bridge_id,
             confirm_dialog_if_open,
@@ -1408,7 +1409,7 @@ def build_native_controls(
                 auto_confirm=True,
                 confirm_hint=SWITCH_MODEL_DIALOG_HINT,
             )
-        except (RuntimeError, ValueError) as exc:
+        except (RuntimeError, ValueError, OSError) as exc:
             return _model_failed(exc)
         # Verify against the statusLine snapshot the forwarder already polls:
         # Claude rewrites it on every render, including right after ``/model``.
@@ -1453,10 +1454,14 @@ def build_native_controls(
                 return Response(status_code=204)
             # The confirm dialog can render well after the injection's own
             # short watch (a warm repaint, or a queued command surfacing) —
-            # answer it whenever it shows inside the window.
-            await _drive_claude_pane(
-                deadline, confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
-            )
+            # answer it whenever it shows inside the window. A budget that
+            # lapses inside the check ends the window like a timeout.
+            if deadline.is_set():
+                break
+            with contextlib.suppress(ClaudeInjectionCancelled):
+                await _drive_claude_pane(
+                    deadline, confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
+                )
             if time.monotonic() >= confirm_deadline:
                 break
             await asyncio.sleep(_CLAUDE_MODEL_CONFIRM_POLL_S)
@@ -1707,7 +1712,7 @@ def build_native_controls(
                 timeout_s=1.0,
                 ready_timeout_s=min(_CLAUDE_CONTROL_PROMPT_WAIT_S, deadline.remaining_s()),
             )
-        except (RuntimeError, ValueError) as exc:
+        except (RuntimeError, ValueError, OSError) as exc:
             return JSONResponse(
                 status_code=503,
                 content={

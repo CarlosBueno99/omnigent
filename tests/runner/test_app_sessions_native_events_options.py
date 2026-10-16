@@ -2194,6 +2194,7 @@ async def _post_model_change_through_a_boot(
     status: Callable[[Any], str | None],
     clock: _VirtualClock | None = None,
     dialog_deadlines: list[float | None] | None = None,
+    dialog: Callable[..., bool] | None = None,
 ) -> httpx.Response:
     """Run one claude-native ``model_change`` against a scripted terminal boot.
 
@@ -2206,6 +2207,7 @@ async def _post_model_change_through_a_boot(
     holds exactly on a loaded machine. The stand-ins advance it for the time
     they would take. ``dialog_deadlines`` collects the instant each in-request
     dialog check stops sending keys at (``None`` when it runs unbounded).
+    ``dialog`` replaces the stand-in for ``confirm_dialog_if_open``.
 
     :returns: The ``/events`` response.
     """
@@ -2226,7 +2228,7 @@ async def _post_model_change_through_a_boot(
             clock.sleep(_VIRTUAL_CONFIRM_POLL_S)
         return False
 
-    monkeypatch.setattr(claude_native_bridge, "confirm_dialog_if_open", _no_dialog)
+    monkeypatch.setattr(claude_native_bridge, "confirm_dialog_if_open", dialog or _no_dialog)
     monkeypatch.setattr(native_controls, "_CLAUDE_MODEL_CONFIRM_POLL_S", 0.01)
     app, _ = await _build_app_for_spec(_harness_spec("claude-native"))
     async with _runner_client(app) as client:
@@ -2409,26 +2411,56 @@ async def test_events_model_change_keeps_a_short_injection_wait_after_a_long_boo
 
 
 @pytest.mark.asyncio
-async def test_events_model_change_reports_a_tmux_failure_during_the_wait_as_503(
+@pytest.mark.parametrize("stage", ["wait", "inject"])
+async def test_events_model_change_reports_a_tmux_failure_as_503(
     monkeypatch: pytest.MonkeyPatch,
+    stage: str,
 ) -> None:
-    """A tmux failure while waiting for the prompt is a 503, not an unhandled error."""
+    """A tmux failure while waiting for the prompt or typing is a 503, not an unhandled error."""
     typed: list[str] = []
 
     def _wait(bridge_dir: Any, *, ready_timeout_s: float, timeout_s: float = 1.0) -> None:
         del bridge_dir, ready_timeout_s, timeout_s
+        if stage == "wait":
+            raise OSError("tmux: command not found")
+
+    def _inject(bridge_dir: Any, *, command: str, **_kwargs: Any) -> None:
+        del bridge_dir
+        typed.append(command)
         raise OSError("tmux: command not found")
 
     resp = await _post_model_change_through_a_boot(
-        monkeypatch,
-        wait=_wait,
-        inject=lambda _bridge_dir, *, command, **_kwargs: typed.append(command),
-        status=lambda _bridge_dir: None,
+        monkeypatch, wait=_wait, inject=_inject, status=lambda _bridge_dir: None
     )
 
     assert resp.status_code == 503, resp.text
     assert resp.json()["error"] == "claude_native_model_failed"
-    assert typed == []
+    assert typed == ([] if stage == "wait" else ["/model claude-opus-4-7"])
+
+
+@pytest.mark.asyncio
+async def test_events_model_change_treats_a_cancelled_dialog_check_as_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A budget that lapses inside the dialog check ends the window with a 503, not a 500."""
+    monkeypatch.setattr(native_controls, "_CLAUDE_MODEL_CONFIRM_TIMEOUT_S", 0.2)
+
+    def _cancelled_dialog(_bridge_dir: Any, *, hint: str) -> bool:
+        del hint
+        raise claude_native_bridge.ClaudeInjectionCancelled(
+            "Claude Code message delivery was cancelled"
+        )
+
+    resp = await _post_model_change_through_a_boot(
+        monkeypatch,
+        wait=lambda *_args, **_kwargs: None,
+        inject=lambda _bridge_dir, *, command, **_kwargs: None,
+        status=lambda _bridge_dir: "claude-opus-4-6",
+        dialog=_cancelled_dialog,
+    )
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["error"] == "claude_native_model_unconfirmed"
 
 
 def test_claude_control_deadline_wait_returns_once_the_budget_lapses(

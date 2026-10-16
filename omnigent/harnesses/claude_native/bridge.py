@@ -6420,10 +6420,12 @@ def _reclaim_and_wait_for_prompt(
     :param tmux_target: tmux pane target string, e.g. ``"main"``.
     :param timeout_s: Base readiness budget when *ready_timeout_s* is
         ``None``, e.g. ``30.0``.
-    :param ready_timeout_s: Hard cap, in seconds, on the whole step, reclaim
-        included, e.g. ``9.0``. ``None`` waits like a message delivery:
-        *timeout_s* as the base budget, extended while a live pane is still
-        booting.
+    :param ready_timeout_s: Cap, in seconds, on the whole step, reclaim
+        included, e.g. ``9.0``. The reclaim keeps at least two polls to
+        confirm a surface, so a cap below that is exceeded by the difference;
+        the caller's cancellation flag is the strict deadline. ``None`` waits
+        like a message delivery: *timeout_s* as the base budget, extended
+        while a live pane is still booting.
     :returns: None.
     :raises ClaudeTerminalDialog: If shell mode, the prompt-history search or a
         footer-less dialog still covers the input box after the restore; no
