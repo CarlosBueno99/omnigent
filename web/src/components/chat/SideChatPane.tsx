@@ -26,7 +26,13 @@ import {
 import { ChatComposer, ComposerSendButton } from "@/components/composer/ChatComposer";
 import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
 import { ComposerMicButton } from "@/components/ComposerMicButton";
-import { isSlashCommandText } from "@/components/SlashCommandMenu";
+import {
+  SlashCommandMenu,
+  isSlashCommandText,
+  matchSlashCommandInvocation,
+  skillDisplayNames,
+  skillMenuDescription,
+} from "@/components/SlashCommandMenu";
 import { ComposerAttachments } from "@/components/ComposerAttachments";
 import { ReplyDraftBlocks } from "@/components/composer/ReplyDraftBlocks";
 import { Button } from "@/components/ui/button";
@@ -39,6 +45,11 @@ import { useConversationEntryState } from "@/hooks/useConversationEntryState";
 import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 import { useDictationInsert } from "@/hooks/useDictationInsert";
 import { useSession } from "@/hooks/useSession";
+import { useSkills } from "@/hooks/useSkills";
+import { useSlashCompletion } from "@/hooks/useSlashCompletion";
+import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
+import { skillInvocationPrefix } from "@/lib/harnessSetup";
+import { isNativeTerminalSession } from "@/lib/nativeCodingAgents";
 import { usesNativeSideChatFork } from "@/lib/sideChat";
 import { serializeReplyDraft } from "@/lib/replyDraft";
 import { interrupt } from "@/lib/sessionsApi";
@@ -326,6 +337,8 @@ export function SideChatPane({
           ) : (
             <SideChatComposer
               childId={childId}
+              harness={sessionHarness}
+              labels={session?.labels}
               agentId={boundAgentId}
               responseId={activeResponse?.responseId}
               interruptReady={interruptReady}
@@ -350,6 +363,8 @@ export function SideChatPane({
  */
 function SideChatComposer({
   childId,
+  harness,
+  labels,
   agentId,
   responseId,
   interruptReady,
@@ -359,6 +374,8 @@ function SideChatComposer({
   onStart,
 }: {
   childId: string;
+  harness: string | null | undefined;
+  labels: Record<string, string> | undefined;
   agentId: string | null;
   responseId: string | undefined;
   interruptReady: boolean;
@@ -368,6 +385,7 @@ function SideChatComposer({
   onStart?: (text: string) => Promise<void>;
 }) {
   const send = useChatStore((s) => s.send);
+  const sendSlashCommand = useChatStore((s) => s.sendSlashCommand);
   const queryClient = useQueryClient();
   const clearSideChatDraft = useChatStore((s) => s.clearSideChatDraft);
   // Unsent text + attachments live in the store, keyed by child id, NOT in
@@ -434,6 +452,48 @@ function SideChatComposer({
 
   const ready = pending ? !starting : agentId !== null;
   const canSend = text.trim().length > 0 || (!pending && files.length > 0);
+  // Slash-command suggestions, mirroring the main composer: the child
+  // session's skills from the same host-backed catalog. Built-ins (/model,
+  // /compact, …) act on the main session and are deliberately left out.
+  const isMobile = useIsMobileViewport();
+  const [inputFocused, setInputFocused] = useState(false);
+  const nativeSession = isNativeTerminalSession({ harness, labels });
+  const {
+    skills,
+    skillsStatus,
+    refetch: refreshSkills,
+  } = useSkills({
+    target: pending ? null : { sessionId: childId },
+    enabled: !pending && ready,
+    starting,
+  });
+  const skillPrefix = skillInvocationPrefix(harness);
+  const skillCommands = useMemo(
+    () =>
+      Object.fromEntries(
+        skills.map((skill) => [`${skillPrefix}${skill.name}`, skillMenuDescription(skill)]),
+      ),
+    [skills, skillPrefix],
+  );
+  const skillLabels = useMemo(() => skillDisplayNames(skills, skillPrefix), [skills, skillPrefix]);
+  // Insert the chosen skill at the caret, keeping any surrounding text.
+  const applyMenuSelection = (cmd: string) => setText(slashCompletion.complete(cmd).text);
+  const slashCompletion = useSlashCompletion({
+    text,
+    commands: skillCommands,
+    skills: skillCommands,
+    labels: skillLabels,
+    textareaRef,
+    prefix: skillPrefix,
+    status: skillsStatus,
+    mobile: isMobile,
+    mobileEnterCompletes: false,
+    escapeClearsOnlyWithContent: true,
+    // A pending tab has no session to discover skills for yet.
+    allowOpen: inputFocused && !pending && quotes.length === 0 && files.length === 0,
+    onSelect: applyMenuSelection,
+    clearText: () => setText(""),
+  });
   const showInterrupt = !pending && busy;
 
   const interruptSideChat = () => {
@@ -453,6 +513,21 @@ function SideChatComposer({
       return;
     }
     if (busy || (trimmed.length === 0 && files.length === 0) || agentId === null) return;
+    // A lone command token with skill discovery in flight has nothing to run yet.
+    if (slashCompletion.pendingCompletion) return;
+    // A known skill takes the server's slash_command path on in-process
+    // harnesses; native TUIs (claude-native, codex-native) read the text itself.
+    const skill =
+      nativeSession || quotes.length > 0 || files.length > 0
+        ? null
+        : matchSlashCommandInvocation(trimmed, Object.keys(skillCommands));
+    if (skill !== null) {
+      clearComposer(childId);
+      void sendSlashCommand(skill.command.slice(1), skill.args, agentId, {
+        pinnedConversationId: childId,
+      }).finally(refreshLabels);
+      return;
+    }
     const outgoing = files;
     clearComposer(childId);
     void send(
@@ -487,11 +562,19 @@ function SideChatComposer({
         input={{
           ref: textareaRef,
           value: text,
-          onChange: (event) => setText(event.target.value),
+          onChange: (event) => {
+            slashCompletion.onSelectionChange(event.target);
+            setText(event.target.value);
+          },
+          onSelect: (event) => slashCompletion.onSelectionChange(event.currentTarget),
+          onFocus: () => setInputFocused(true),
+          // Menu rows preventDefault on mousedown so selecting one keeps focus.
+          onBlur: () => setInputFocused(false),
           placeholder: "Ask a side question...",
           disabled: !ready,
           "data-testid": "side-chat-input",
           onKeyDown: (event, intent) => {
+            if (slashCompletion.handleKey(event, intent)) return;
             if (intent.shouldSubmitFromKeyboard) {
               event.preventDefault();
               submit();
@@ -499,6 +582,18 @@ function SideChatComposer({
           },
         }}
         slots={{
+          beforeInput: slashCompletion.open ? (
+            <SlashCommandMenu
+              query={slashCompletion.query}
+              activeIndex={slashCompletion.index}
+              onSelect={applyMenuSelection}
+              commands={slashCompletion.commands}
+              builtinNames={slashCompletion.builtinNames}
+              labels={slashCompletion.labels}
+              skillsStatus={skillsStatus}
+              onRetrySkills={() => void refreshSkills()}
+            />
+          ) : undefined,
           inputPrefix:
             quotes.length === 0 ? undefined : (
               <ReplyDraftBlocks
