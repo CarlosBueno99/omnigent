@@ -558,7 +558,12 @@ class _InitialAuthTokenFactory:
                 self._exchange_in_progress = False
             raise
         with self._lock:
-            return self._finish_exchange_locked(mint, minted) or token
+            installed = self._finish_exchange_locked(mint, minted)
+            if installed is not None:
+                return installed
+            # A rejection may have invalidated the bearer captured in ``token``
+            # while the mint was in flight; never hand out that stale snapshot.
+            return token if self._initial_token is not None else self._call_locked()
 
     def _call_locked(self) -> str | None:
         """Body of :meth:`__call__`, run under :attr:`_lock`.

@@ -10,6 +10,7 @@ import os
 import signal
 import sys
 import tarfile
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -1490,6 +1491,8 @@ def _delegated_host_launched_runner_env(
 
 def _host_launched_runner_behind_validating_edge(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    hold_first_mint: tuple[threading.Event, threading.Event] | None = None,
 ) -> tuple[set[str], list[str | None], list[int]]:
     """Put the process in the host-launched posture with no runner-local credential.
 
@@ -1499,6 +1502,9 @@ def _host_launched_runner_behind_validating_edge(
     JWT it minted. SDK/OIDC discovery finds nothing in the runner process.
 
     :param monkeypatch: Pytest environment patch fixture.
+    :param hold_first_mint: Optional ``(entered, release)`` events; the first
+        mint signals ``entered`` and blocks until ``release`` so a test can
+        interleave other lookups with an in-flight exchange.
     :returns: ``(accepted_bearers, mint_bearers, sdk_resolve_calls)`` — the
         edge's live set, the proxy bearer seen by each mint, and SDK probes.
     """
@@ -1513,12 +1519,18 @@ def _host_launched_runner_behind_validating_edge(
     ) -> tuple[str, float]:
         del server_url, binding_token
         mint_bearers.append(proxy_bearer)
-        if proxy_bearer not in accepted:
+        index = len(mint_bearers)
+        accepted_now = proxy_bearer in accepted
+        if hold_first_mint is not None and index == 1:
+            entered, release = hold_first_mint
+            entered.set()
+            assert release.wait(timeout=10.0)
+        if not accepted_now:
             request = httpx.Request("POST", mint_url)
             raise httpx.HTTPStatusError(
                 "Invalid Token", request=request, response=httpx.Response(403, request=request)
             )
-        jwt = f"owner-jwt-{len(mint_bearers)}"
+        jwt = f"owner-jwt-{index}"
         accepted.add(jwt)
         return jwt, time.time() + 1800
 
@@ -1555,7 +1567,7 @@ def test_host_launched_runner_exchanges_bootstrap_bearer_before_it_lapses(
 
     # The next ordinary call past the exchange delay swaps credentials.
     factory._exchange_due_at = 0.0
-    factory()
+    assert factory() == "owner-jwt-1"
     # The host bearer lapses: the edge rejects it on every request, mint included.
     accepted.discard("host-bootstrap-token")
 
@@ -1585,7 +1597,7 @@ def test_bootstrap_exchange_waits_for_the_configured_delay(
     monkeypatch.setattr(
         entry_mod,
         "time",
-        types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time, sleep=time.sleep),
+        types.SimpleNamespace(**{**vars(time), "monotonic": lambda: clock["now"]}),
     )
     _accepted, mint_bearers, _resolve_calls = _host_launched_runner_behind_validating_edge(
         monkeypatch
@@ -1624,7 +1636,7 @@ async def test_credential_keepalive_first_call_waits_only_the_initial_delay(
     monkeypatch.setattr(
         entry_mod,
         "asyncio",
-        types.SimpleNamespace(sleep=_recording_sleep, to_thread=asyncio.to_thread),
+        types.SimpleNamespace(**{**vars(asyncio), "sleep": _recording_sleep}),
     )
     calls: list[int] = []
     task = asyncio.create_task(
@@ -1675,21 +1687,11 @@ def test_concurrent_lookups_get_the_bearer_while_the_exchange_is_in_flight(
     :param monkeypatch: Pytest environment patch fixture.
     :returns: None.
     """
-    import threading
-
     entered = threading.Event()
     release = threading.Event()
-    mint_calls: list[int] = []
-
-    def _slow_mint(*args: Any, **kwargs: Any) -> tuple[str, float]:
-        del args, kwargs
-        mint_calls.append(1)
-        entered.set()
-        assert release.wait(timeout=10.0)
-        return "owner-jwt", time.time() + 1800
-
-    _delegated_host_launched_runner_env(monkeypatch)
-    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", _slow_mint)
+    _accepted, mint_bearers, _resolve_calls = _host_launched_runner_behind_validating_edge(
+        monkeypatch, hold_first_mint=(entered, release)
+    )
 
     factory = _make_auth_token_factory()
     assert isinstance(factory, _InitialAuthTokenFactory)
@@ -1702,12 +1704,13 @@ def test_concurrent_lookups_get_the_bearer_while_the_exchange_is_in_flight(
         # The mint is in flight: these must return the bearer at once, not block.
         assert factory() == "host-bootstrap-token"
         assert factory.call_with_declined() == ("host-bootstrap-token", False)
-        assert mint_calls == [1]
+        assert mint_bearers == ["host-bootstrap-token"]
     finally:
         release.set()
         exchanger.join(timeout=10.0)
-    assert results == ["owner-jwt"]
-    assert factory() == "owner-jwt"
+    assert not exchanger.is_alive()
+    assert results == ["owner-jwt-1"]
+    assert factory() == "owner-jwt-1"
 
 
 def test_unexpected_mint_error_does_not_wedge_the_bootstrap_exchange(
@@ -1755,41 +1758,11 @@ def test_rejection_during_an_in_flight_exchange_keeps_the_minted_token(
     :param monkeypatch: Pytest environment patch fixture.
     :returns: None.
     """
-    import threading
-
-    from omnigent.inner.databricks_executor import DatabricksAuthError
-
     entered = threading.Event()
     release = threading.Event()
-    mint_bearers: list[str | None] = []
-    resolve_calls: list[int] = []
-
-    def _edge_mint(
-        mint_url: str, server_url: str, binding_token: str, *, proxy_bearer: str | None = None
-    ) -> tuple[str, float]:
-        del server_url, binding_token
-        mint_bearers.append(proxy_bearer)
-        if len(mint_bearers) == 1:
-            # The exchange's mint, sent while the bearer was still accepted.
-            entered.set()
-            assert release.wait(timeout=10.0)
-            return "owner-jwt", time.time() + 1800
-        # Rejection-time probes present the dead bearer (or none): the edge refuses.
-        request = httpx.Request("POST", mint_url)
-        raise httpx.HTTPStatusError(
-            "Invalid Token", request=request, response=httpx.Response(403, request=request)
-        )
-
-    def _no_sdk(*args: Any, **kwargs: Any) -> tuple[Any, str]:
-        del args, kwargs
-        resolve_calls.append(1)
-        raise DatabricksAuthError("no credential configured")
-
-    _delegated_host_launched_runner_env(monkeypatch)
-    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url, **_kw: None)
-    monkeypatch.setattr("omnigent.cli_auth.refresh_stored_token", lambda _url, **_kw: None)
-    monkeypatch.setattr("omnigent.inner.databricks_executor._resolve_databricks_auth", _no_sdk)
-    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", _edge_mint)
+    accepted, mint_bearers, resolve_calls = _host_launched_runner_behind_validating_edge(
+        monkeypatch, hold_first_mint=(entered, release)
+    )
 
     factory = _make_auth_token_factory()
     assert isinstance(factory, _InitialAuthTokenFactory)
@@ -1799,24 +1772,77 @@ def test_rejection_during_an_in_flight_exchange_keeps_the_minted_token(
     exchanger.start()
     try:
         assert entered.wait(timeout=10.0)
-        # The server rejects the host bearer while the mint is still in flight,
-        # and the callback's retry looks up a credential at once: the dead bearer
-        # cannot mint and there is no SDK/OIDC credential, so it finds nothing yet.
+        # The host bearer expires while the mint is in flight: the edge now
+        # rejects it, a callback is refused, and that callback's retry looks up
+        # a credential at once. The dead bearer cannot mint and there is no
+        # SDK/OIDC credential, so it finds nothing yet.
+        accepted.discard("host-bootstrap-token")
         assert factory.invalidate() is True
         assert factory.call_with_declined() == (None, False)
         assert resolve_calls == [1]
     finally:
         release.set()
         exchanger.join(timeout=10.0)
+    assert not exchanger.is_alive()
 
     # The exchange completes afterwards and its token serves every later lookup,
     # including inside the discovery backoff window.
-    assert results == ["owner-jwt"]
+    assert results == ["owner-jwt-1"]
     assert isinstance(factory._fallback_factory, _ManagedMintTokenFactory)
-    assert factory.call_with_declined() == ("owner-jwt", False)
-    assert factory() == "owner-jwt"
+    assert factory.call_with_declined() == ("owner-jwt-1", False)
+    assert factory() == "owner-jwt-1"
     assert mint_bearers[0] == "host-bootstrap-token"
     assert resolve_calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_credential_keepalive_keeps_ticking_after_factory_errors(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Factory exceptions never stop the keepalive; the third in a row is a WARNING.
+
+    :param monkeypatch: Pytest environment patch fixture.
+    :param caplog: Pytest log capture fixture.
+    :returns: None.
+    """
+    import types
+
+    import omnigent.runner._entry as entry_mod
+
+    real_sleep = asyncio.sleep
+
+    async def _quick_sleep(delay: float) -> None:
+        del delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        entry_mod, "asyncio", types.SimpleNamespace(**{**vars(asyncio), "sleep": _quick_sleep})
+    )
+    calls: list[int] = []
+
+    def _flaky_factory() -> str:
+        calls.append(1)
+        if len(calls) <= 3:
+            raise RuntimeError("credential store unavailable")
+        return "tok"
+
+    caplog.set_level(logging.DEBUG, logger="omnigent.runner._entry")
+    task = asyncio.create_task(
+        entry_mod._run_credential_keepalive(_flaky_factory, interval_s=60.0)
+    )
+    try:
+        deadline = time.monotonic() + 10.0
+        while len(calls) < 5:
+            assert time.monotonic() < deadline, f"keepalive stopped after {len(calls)} calls"
+            await real_sleep(0.01)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    failures = [
+        r for r in caplog.records if r.getMessage() == "runner credential keepalive failed"
+    ]
+    assert [r.levelno for r in failures] == [logging.DEBUG, logging.DEBUG, logging.WARNING]
 
 
 @pytest.mark.asyncio
@@ -1842,8 +1868,10 @@ async def test_credential_keepalive_remints_owner_jwt_before_it_lapses(
     assert factory() == "owner-jwt-1"
     mint_factory = factory._fallback_factory
     assert isinstance(mint_factory, _ManagedMintTokenFactory)
+    from omnigent.runner._entry import _MANAGED_MINT_REFRESH_SKEW_S
+
     # Inside the refresh skew: still valid at the edge, due for a re-mint.
-    mint_factory._cached_expires_at = time.time() + 60.0
+    mint_factory._cached_expires_at = time.time() + _MANAGED_MINT_REFRESH_SKEW_S / 2
 
     task = asyncio.create_task(_run_credential_keepalive(factory, interval_s=0.001))
     try:
@@ -2916,8 +2944,6 @@ def test_run_parent_death_killer_stands_down_when_adopted() -> None:
 
     :returns: None.
     """
-    import threading
-
     events: list[str] = []
     adopted = threading.Event()
     adopted.set()
