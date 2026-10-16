@@ -3,10 +3,9 @@
 A session on the ``codex`` (SDK) harness drives a Codex app-server through
 ``CodexExecutor``. Codex's own multi-agent tools stay enabled there, so the
 model can start a helper with ``spawn_agent``; the helper runs as a second
-Codex thread inside the same app-server process. The codex-native wrapper
-turns such helpers into Omnigent child sessions (Agents rail rows); the SDK
-executor drops every event of the helper's turn, so the helper runs with no
-child session, no Agents rail row and no completion state.
+Codex thread inside the same app-server process. The executor surfaces that
+helper as an Omnigent child session (an Agents rail row) and tracks its
+activity and completion, the same way the codex-native wrapper does.
 
 Journey (real web SPA, prepared live server + runner, real ``codex`` CLI
 app-server pointed at the mock ``/v1/responses``):
@@ -16,13 +15,12 @@ app-server pointed at the mock ``/v1/responses``):
    calls ``spawn_agent`` and only answers after a delay, so the helper's
    child turn (a real shell command, then a final text) runs while the
    parent turn is still active
-3. observable failure: after the helper ran and the parent answered, the
-   Agents tab shows no child row and ``child_sessions`` lists none
+3. verify: after the helper ran and the parent answered, the Agents tab shows
+   the helper's child row and ``child_sessions`` lists it
 
-The assertions that the helper really ran (its own model requests reached
-the mock) and that Codex accepted the spawn pass before and after a fix,
-pinning the failure to invisibility rather than to a spawn that never
-happened.
+The test also asserts the helper really ran (its own model requests reached
+the mock) and that Codex accepted the spawn, so a failure pins invisibility
+rather than a spawn that never happened.
 """
 
 from __future__ import annotations
@@ -190,10 +188,9 @@ def test_codex_spawn_agent_helper_appears_in_agents_rail(
     """A Codex-spawned helper must show up as a child session in the Agents rail.
 
     The parent's scripted turn calls ``spawn_agent`` and the helper's scripted
-    child turn runs a shell command before answering. On the current build the
-    helper runs to completion (its model requests reach the mock) while the
-    Agents tab stays empty and ``child_sessions`` is empty - the final
-    assertions fail. They pass once the executor surfaces the helper.
+    child turn runs a shell command before answering. The helper's model
+    requests reach the mock while its turn is active, so the Agents tab must
+    show its child row and ``child_sessions`` must list it.
     """
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     try:
@@ -285,9 +282,7 @@ def test_codex_spawn_agent_helper_appears_in_agents_rail(
         helper_requests = _wait_for_model_requests(
             mock_llm_server_url, helper_token, 2, timeout_s=180
         )
-        # The helper is still running its turn: its row must already be visible.
-        # This is exactly what the bug removed - the SDK executor dropped the
-        # helper's events, so no row ever appeared while it ran.
+        # The helper's row must be visible while its turn is still running.
         expect(child_rows).to_have_count(1, timeout=60_000)
         rows_while_helper_ran = child_rows.count()
         mark(f"helper's shell command finished; child rows: {rows_while_helper_ran}")

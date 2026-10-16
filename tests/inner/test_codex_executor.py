@@ -6358,3 +6358,100 @@ def test_run_turn_answers_helper_dynamic_tool_call() -> None:
         assert "72F and sunny" in payload["contentItems"][0]["text"]
 
     _run(_t())
+
+
+def test_run_turn_defers_helper_events_during_completed_tail_drain() -> None:
+    """Helper events landing in the post-``turn/completed`` drain survive to the next turn.
+
+    The parent ends its turn with no final message, so the executor drains a
+    short tail window looking for a trailing final answer. A helper's blocking
+    tool request and its completion that arrive during that window must not be
+    consumed there: dropping the request would leave the helper waiting on a
+    response that never comes. They are delivered on the next parent turn.
+    """
+
+    async def _t():
+        session = _spawn_helper_session()
+        tool_calls: list[tuple[str, dict]] = []
+
+        def _executor(name: str, args: dict):
+            tool_calls.append((name, dict(args)))
+            return {"result": "72F and sunny"}
+
+        session._tool_executor = _executor
+
+        first = await _run_turn_with_events(
+            session,
+            [
+                _spawn_completed_event(),
+                # The parent reports its turn complete with no final message,
+                # so the executor enters the trailing-final-answer drain ...
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-parent",
+                        "turnId": "turn-1",
+                        "turn": {"id": "turn-1", "status": "completed"},
+                    },
+                },
+                # ... and the helper's blocking tool call and completion land in it.
+                {
+                    "id": 778,
+                    "method": "item/tool/call",
+                    "params": {
+                        "threadId": "thread-child",
+                        "callId": "call_dyn_1",
+                        "tool": "search_web",
+                        "arguments": {"query": "weather in SF"},
+                    },
+                },
+                _child_event(
+                    "item/completed",
+                    {
+                        "turnId": "turn-child",
+                        "item": {
+                            "id": "msg-child",
+                            "type": "agentMessage",
+                            "phase": None,
+                            "text": "Helper task finished.",
+                        },
+                    },
+                ),
+                _child_event(
+                    "turn/completed", {"turn": {"id": "turn-child", "status": "completed"}}
+                ),
+            ],
+        )
+
+        # Turn one closes with only the helper's start; the drained events are
+        # neither lost nor delivered yet, so the tool has not run.
+        assert [e for e in first if isinstance(e, _SUBAGENT_EVENT_TYPES)] == [
+            SubAgentStarted(child_key="thread-child", title="Volta", task=_HELPER_PROMPT)
+        ]
+        assert tool_calls == []
+        assert isinstance(first[-1], TurnComplete)
+
+        second = await _run_turn_with_events(
+            session,
+            [_parent_final_answer("All done.", turn_id="turn-2", item_id="msg-parent-2")],
+        )
+
+        # The next turn delivers the deferred request and completion in order.
+        assert [e for e in second if isinstance(e, _SUBAGENT_EVENT_TYPES)] == [
+            SubAgentStarted(child_key="thread-child", title="Volta", task=""),
+            SubAgentToolCall(
+                child_key="thread-child",
+                call_id="call_dyn_1",
+                name="search_web",
+                args={"query": "weather in SF"},
+            ),
+            SubAgentCompleted(child_key="thread-child", ok=True, summary="Helper task finished."),
+        ]
+        # The deferred request was answered, so the helper never hangs waiting.
+        assert tool_calls == [("search_web", {"query": "weather in SF"})]
+        responses = [json.loads(write.decode("utf-8")) for write in session._proc.stdin.writes]
+        answers = [r for r in responses if r.get("id") == 778 and "result" in r]
+        assert len(answers) == 1, responses
+        assert "72F and sunny" in answers[0]["result"]["contentItems"][0]["text"]
+
+    _run(_t())

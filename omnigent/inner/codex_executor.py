@@ -2835,7 +2835,9 @@ class _CodexChildThread:
     The helper runs as its own thread inside the same app-server process, so
     its notifications interleave with the parent turn's on one connection.
     Tracked for the whole app-server session because a helper can outlive the
-    turn that spawned it.
+    turn that spawned it. The event queue is only serviced while a parent turn
+    runs, so a helper event or blocking tool request that arrives between turns
+    stays queued and is delivered (and answered) when the next parent turn runs.
 
     :param thread_id: Codex thread id of the helper; doubles as the child key.
     :param title: Row label (the Codex nickname when readable).
@@ -3647,52 +3649,84 @@ class _CodexAppServerSession:
         :returns: The best final response observed during the drain window.
         """
         deadline = time.monotonic() + _TURN_COMPLETED_DRAIN_SECONDS
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return final_response
-            try:
-                message = await asyncio.wait_for(self._events.get(), timeout=remaining)
-            except asyncio.TimeoutError:
-                return final_response
-            if isinstance(message, HarnessTransportClosedError):
-                # A completed turn remains successful when its process exits.
-                return final_response
-            self._record_event(message)
-            params = message.get("params", {})
-            if not isinstance(params, dict):
-                continue
-            event_turn_id = params.get("turnId")
-            if (
-                isinstance(event_turn_id, str)
-                and event_turn_id
-                and event_turn_id != active_turn_id
-            ):
-                continue
-            if message.get("method") == "item/agentMessage/delta":
-                item_id = params.get("itemId")
-                delta = params.get("delta")
-                if isinstance(item_id, str) and isinstance(delta, str) and delta:
-                    prior = message_buffers.get(item_id, "")
-                    message_buffers[item_id] = f"{prior}{delta}"
-                    if not final_response:
-                        final_response = message_buffers[item_id]
-                continue
-            if message.get("method") != "item/completed":
-                continue
-            item = params.get("item", {})
-            if not isinstance(item, dict) or item.get("type") != "agentMessage":
-                continue
-            phase, completed_text = _completed_agent_message_text(item, message_buffers)
-            if phase == "commentary":
-                item_id = item.get("id")
-                if isinstance(item_id, str):
-                    message_buffers.pop(item_id, None)
-                continue
-            if phase == "final_answer" or phase is None:
-                final_response = completed_text
-            if phase == "final_answer":
-                return final_response
+        # A helper outlives the turn that spawned it, so its notifications and
+        # blocking tool requests can land in this tail window. Set them aside and
+        # restore them for the next turn; consuming a tool request here would
+        # leave the helper waiting on a response that never comes.
+        deferred: list[CodexMessage | HarnessTransportClosedError] = []
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return final_response
+                try:
+                    message = await asyncio.wait_for(self._events.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    return final_response
+                if isinstance(message, HarnessTransportClosedError):
+                    # A completed turn remains successful when its process exits.
+                    return final_response
+                params = message.get("params", {})
+                if not isinstance(params, dict):
+                    self._record_event(message)
+                    continue
+                event_thread_id = _event_thread_id(params)
+                if event_thread_id is not None and event_thread_id in self._child_threads:
+                    deferred.append(message)
+                    continue
+                self._record_event(message)
+                event_turn_id = params.get("turnId")
+                if (
+                    isinstance(event_turn_id, str)
+                    and event_turn_id
+                    and event_turn_id != active_turn_id
+                ):
+                    continue
+                if message.get("method") == "item/agentMessage/delta":
+                    item_id = params.get("itemId")
+                    delta = params.get("delta")
+                    if isinstance(item_id, str) and isinstance(delta, str) and delta:
+                        prior = message_buffers.get(item_id, "")
+                        message_buffers[item_id] = f"{prior}{delta}"
+                        if not final_response:
+                            final_response = message_buffers[item_id]
+                    continue
+                if message.get("method") != "item/completed":
+                    continue
+                item = params.get("item", {})
+                if not isinstance(item, dict) or item.get("type") != "agentMessage":
+                    continue
+                phase, completed_text = _completed_agent_message_text(item, message_buffers)
+                if phase == "commentary":
+                    item_id = item.get("id")
+                    if isinstance(item_id, str):
+                        message_buffers.pop(item_id, None)
+                    continue
+                if phase == "final_answer" or phase is None:
+                    final_response = completed_text
+                if phase == "final_answer":
+                    return final_response
+        finally:
+            self._requeue_deferred_events(deferred)
+
+    def _requeue_deferred_events(
+        self, deferred: list[CodexMessage | HarnessTransportClosedError]
+    ) -> None:
+        """Put drained helper events back ahead of later arrivals, in order.
+
+        The tail drain reads from the shared queue, so helper messages it set
+        aside must return before any that arrived afterwards; the next turn then
+        delivers them in their original order.
+        """
+        if not deferred:
+            return
+        tail: list[CodexMessage | HarnessTransportClosedError] = []
+        while not self._events.empty():
+            tail.append(self._events.get_nowait())
+        for message in deferred:
+            self._events.put_nowait(message)
+        for message in tail:
+            self._events.put_nowait(message)
 
     async def _resolve_default_effort(self) -> str:
         """Resolve the thread's original configured or model-default effort."""
@@ -3946,7 +3980,10 @@ class _CodexAppServerSession:
                     )
                 result = await self._execute_dynamic_tool(raw_tool_name, tool_args)
         else:
-            result = {"error": f"Codex helper request {method!r} is not supported"}
+            await self._send_error_response(
+                int(message["id"]), f"Codex helper request {method!r} is not supported"
+            )
+            return
         await self._send_response(int(message["id"]), _dynamic_tool_result_payload(result))
 
     async def run_turn(
@@ -4702,6 +4739,15 @@ class _CodexAppServerSession:
                 "result": result,
             }
         )
+
+    async def _send_error_response(self, request_id: int, message: str) -> None:
+        """Refuse a server-initiated request with a JSON-RPC error.
+
+        A tool-result payload can read as a successful result for a non-tool
+        request, so an unsupported request gets an explicit refusal instead.
+        """
+        # -32601 is the JSON-RPC "method not found" code.
+        await self._send_message({"id": request_id, "error": {"code": -32601, "message": message}})
 
     async def _send_message(self, payload: CodexMessage) -> None:
         assert self._proc is not None and self._proc.stdin is not None
