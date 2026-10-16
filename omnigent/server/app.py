@@ -3544,9 +3544,18 @@ def create_app(
                 runner_id,
             )
             return
-        # The same holds for one runner handed to another replica, which now
-        # owns the turn. Drop this replica's live state so a cached "running"
-        # cannot shadow the owner's status; a failed read just expires.
+        # A reconnect to THIS replica takes precedence over any stale handoff
+        # mark: we own the turn again, and dropping its live state here would
+        # strip the active-response id the session stream reopens from.
+        if reconnected is not None:
+            _logger.info(
+                "Runner %s reconnected within the liveness lease; skipping offline-marking",
+                runner_id,
+            )
+            return
+        # A runner handed to another replica owns the turn there; drop this
+        # replica's stale "running" cache so it can't shadow the owner. A
+        # reconnect here during the lookup re-takes ownership, so recheck it.
         handoff_reason = shutdown_state.runner_handoff_reason(runner_id)
         if handoff_reason is not None:
             try:
@@ -3554,20 +3563,21 @@ def create_app(
                     conversation_store.list_conversations_by_runner_id, runner_id
                 )
             except Exception:  # noqa: BLE001 — a stale cache is safe; it expires on its own
+                _logger.warning(
+                    "Listing sessions for handed-off runner %s failed; "
+                    "leaving its caches to expire",
+                    runner_id,
+                    exc_info=True,
+                )
                 handed_off = []
-            for conv in handed_off:
-                _relinquish_session_live_state(conv.id)
+            if tunnel_registry.get(runner_id) is None:
+                for conv in handed_off:
+                    _relinquish_session_live_state(conv.id)
             _logger.info(
                 "Runner %s dropped because this server handed it off (%s); "
                 "skipping offline-marking",
                 runner_id,
                 handoff_reason,
-            )
-            return
-        if reconnected is not None:
-            _logger.info(
-                "Runner %s reconnected within the liveness lease; skipping offline-marking",
-                runner_id,
             )
             return
         # Direct by-runner lookup: read-after-write consistent (the

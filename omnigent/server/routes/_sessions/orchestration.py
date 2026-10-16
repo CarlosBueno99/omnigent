@@ -7925,9 +7925,9 @@ async def _runner_disconnect_requires_failure(
         # A Stop can arrive while the sweep refreshes its row.
         decision = "intentional_stop"
     elif shutdown_state.runner_handoff_reason(runner_id) is not None:
-        # This replica moved the runner's tunnel to another replica, which now
-        # owns the turn and reconciles its real outcome; even an authoritative
-        # exit report here must not fail a turn the new replica still drives.
+        # The runner moved to another replica that now owns the turn and reports
+        # its real outcome; we defer even an authoritative exit here, since
+        # failing a turn the new owner still drives is worse than a deferred one.
         decision = "handed_off"
     elif live in _MID_TURN_STATUSES and source != "cache" and _owned_by_parent_runtime(conv):
         decision = "subagent_unobserved"

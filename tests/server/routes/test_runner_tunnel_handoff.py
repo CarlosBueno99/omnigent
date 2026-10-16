@@ -126,12 +126,14 @@ async def test_disconnect_decision_leaves_a_handed_off_turn_to_its_new_replica(
     assert decision["server_shutting_down"] is False
 
 
-@pytest.mark.parametrize("fail_idle_top_level", [True, False])
 async def test_handoff_suppresses_even_an_authoritative_exit_report(
     caplog: pytest.LogCaptureFixture,
-    fail_idle_top_level: bool,
 ) -> None:
-    """A reported runner exit on this replica still leaves a handed-off turn to its new one."""
+    """A reported runner exit on this replica still leaves a handed-off turn to its new one.
+
+    The handoff decision short-circuits ahead of the idle-failure policy, so even
+    the strictest ``fail_idle_top_level`` setting must not fail the moved turn.
+    """
     caplog.set_level(logging.INFO)
     session_id = "handoff-exit"
     snapshot = Conversation(
@@ -150,7 +152,7 @@ async def test_handoff_suppresses_even_an_authoritative_exit_report(
             cast(ConversationStore, _UnavailableStore()),
             origin="runner_offline_sweep",
             snapshot=snapshot,
-            fail_idle_top_level=fail_idle_top_level,
+            fail_idle_top_level=True,
             error_code="runner_failed_to_start",
         )
     finally:

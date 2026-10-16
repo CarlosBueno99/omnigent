@@ -61,13 +61,9 @@ _FAILURE_SIGNATURE = re.compile(
 )
 _HEALTH_TIMEOUT_S = 90.0
 
-# Only replica A uses this bootstrap. The fault file arms its store outage after
-# the real runner has reconnected to B: scope "conversation" fails every query on
-# the conversation engine (the metadata database stays readable); scope "reads"
-# fails SELECTs on both engines, as on a draining replica. The retire file names a
-# runner whose tunnel A retires through its own registry (close 1001), standing
-# in for a deployment that rebalances runner tunnels across replicas. Debug
-# events (name + attributes) are mirrored to a JSONL file for assertions.
+# Replica A's bootstrap arms a store-outage fault file, retires a named runner's
+# tunnel through its own registry (close 1001) to stand in for tunnel rebalancing,
+# and mirrors debug events to a JSONL file for assertions.
 _REPLICA_A_BOOTSTRAP = """
 import json
 import logging
@@ -935,8 +931,19 @@ def test_server_retired_tunnel_handoff_does_not_fail_the_turn_when_store_reads_f
             timeout=RUNNER_DISCONNECT_GRACE_S + 30.0,
             what="replica A to resolve the disconnect while the turn is still running on B",
         )
-        # The failed edge is published right after the decision row.
-        time.sleep(1.0)
+        # Wait for A's structured give-up row rather than a blind sleep: it is
+        # written when the relay commits its decision, which is terminal, so a
+        # handed-off outcome never goes on to publish a failed edge below.
+        events_log = stack.events_log
+        assert events_log is not None
+        _poll_until(
+            lambda: any(
+                row["session_id"] == session_id and row["event"] == "runner_stream_disconnected"
+                for row in map(json.loads, events_log.read_text().splitlines())
+            ),
+            timeout=30.0,
+            what="replica A to publish its runner_stream_disconnected give-up row",
+        )
         server_a_log = stack.process_log.read_text()
         decision = stack.relay_decision(session_id)
         failed_edges = _FAILURE_SIGNATURE.findall(server_a_log)

@@ -2110,6 +2110,199 @@ async def test_server_retired_tunnel_never_fails_the_turn(
         sessions_module._session_status_cache.pop(session_id, None)
 
 
+class _PresenceWS:
+    """Minimal ``WebSocketLike`` used to re-register a runner for presence.
+
+    Registering it marks the runner present in the tunnel registry without
+    driving the real connect hook, so a test exercises the grace timer's
+    ownership checks in isolation from reconnect recovery.
+    """
+
+    async def send_text(self, data: str) -> None:
+        return None
+
+
+def _presence_hello() -> HelloFrame:
+    return HelloFrame(runner_version="0.0.0-test", frame_protocol_version=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_session_status_cache")
+async def test_retired_tunnel_keeps_live_state_when_runner_reconnects_before_grace(
+    tunnel_three_layer_stack: _TunnelStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner back on THIS replica before the grace keeps its live state.
+
+    The retire marks a handoff, but the runner re-registers here while the
+    grace timer still waits. This replica owns the turn again, so the timer
+    takes the reconnect path and leaves the running status and the active
+    response id (the session stream reopens from it) untouched.
+    """
+    from omnigent.runtime import get_conversation_store
+    from omnigent.server import session_live_state, shutdown_state
+    from omnigent.server.routes import sessions as sessions_module
+
+    ap_client = tunnel_three_layer_stack.ap_client
+    ap_app = tunnel_three_layer_stack.ap_app
+
+    grace = 1.0
+    monkeypatch.setattr("omnigent.server.routes.sessions.RUNNER_DISCONNECT_GRACE_S", grace)
+    _stub_connect_hook_for_pumpless_ws(ap_app, monkeypatch)
+
+    create_resp = await ap_client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({})},
+        files={
+            "bundle": (
+                "agent.tar.gz",
+                _build_harness_agent_bundle(),
+                "application/gzip",
+            ),
+        },
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    session_id = create_resp.json()["session_id"]
+    runner_id = "runner-reconnect-before-grace"
+    store = get_conversation_store()
+    store.replace_runner_id(session_id, runner_id)
+    touched_runners: list[str] = []
+    monkeypatch.setattr(session_live_state, "touch_runner_liveness", touched_runners.extend)
+
+    communicator = await _connect_runner_tunnel(ap_app, runner_id)
+    await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
+    sessions_module._session_status_cache[session_id] = "running"
+    sessions_module._session_active_response_cache[session_id] = "response-still-here"
+    touched_runners.clear()
+    try:
+        assert ap_app.state.tunnel_registry.deregister(runner_id) is not None
+
+        async def _disconnect_hook_ran() -> None:
+            while runner_id not in touched_runners:
+                await asyncio.sleep(0.02)
+
+        await asyncio.wait_for(_disconnect_hook_ran(), timeout=budget(2.0))
+        assert shutdown_state.runner_handoff_reason(runner_id) == "tunnel_retired"
+
+        # Re-register here while the grace timer still waits: its wait resolves
+        # and the reconnect path must win over the stale handoff mark.
+        ap_app.state.tunnel_registry.register(runner_id, _PresenceWS(), _presence_hello())
+
+        # Well past the grace: the timer has fired and taken the reconnect path.
+        await asyncio.sleep(grace * 2)
+        assert sessions_module._session_status_cache.get(session_id) == "running"
+        assert (
+            sessions_module._session_active_response_cache.get(session_id) == "response-still-here"
+        )
+        conv = store.get_conversation(session_id)
+        assert conv is not None
+        assert sessions_module._last_task_error_from_labels(conv.labels) is None
+    finally:
+        shutdown_state.reset_for_tests()
+        ap_app.state.tunnel_registry.deregister(runner_id, retire=False)
+        with contextlib.suppress(asyncio.TimeoutError, Exception):
+            await communicator.wait(timeout=budget(2.0))
+        sessions_module._session_status_cache.pop(session_id, None)
+        sessions_module._session_active_response_cache.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_session_status_cache")
+async def test_retired_tunnel_keeps_live_state_when_runner_reconnects_during_lookup(
+    tunnel_three_layer_stack: _TunnelStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reconnect while the handoff lookup runs keeps this replica's live state.
+
+    The grace runs out with the runner still gone, so the timer enters the
+    handoff branch and lists the runner's sessions. The runner re-registers
+    here during that lookup; the post-lookup ownership recheck then sees us as
+    the owner and skips relinquishing the running status and the response id.
+    """
+    from omnigent.runtime import get_conversation_store
+    from omnigent.server import session_live_state, shutdown_state
+    from omnigent.server.routes import sessions as sessions_module
+
+    ap_client = tunnel_three_layer_stack.ap_client
+    ap_app = tunnel_three_layer_stack.ap_app
+
+    grace = 0.4
+    monkeypatch.setattr("omnigent.server.routes.sessions.RUNNER_DISCONNECT_GRACE_S", grace)
+    _stub_connect_hook_for_pumpless_ws(ap_app, monkeypatch)
+
+    create_resp = await ap_client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({})},
+        files={
+            "bundle": (
+                "agent.tar.gz",
+                _build_harness_agent_bundle(),
+                "application/gzip",
+            ),
+        },
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    session_id = create_resp.json()["session_id"]
+    runner_id = "runner-reconnect-during-lookup"
+    store = get_conversation_store()
+    store.replace_runner_id(session_id, runner_id)
+    touched_runners: list[str] = []
+    monkeypatch.setattr(session_live_state, "touch_runner_liveness", touched_runners.extend)
+
+    communicator = await _connect_runner_tunnel(ap_app, runner_id)
+    await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
+    sessions_module._session_status_cache[session_id] = "running"
+    sessions_module._session_active_response_cache[session_id] = "response-still-here"
+    touched_runners.clear()
+
+    loop = asyncio.get_running_loop()
+    real_list = store.list_conversations_by_runner_id
+    reconnected_mid_lookup = threading.Event()
+
+    def _list_and_reconnect(rid: str) -> Any:
+        result = real_list(rid)
+        # Simulate a reconnect that lands here while the handoff lookup is
+        # still running in the worker thread, by re-registering on the loop.
+        if rid == runner_id and not reconnected_mid_lookup.is_set():
+            reconnected_mid_lookup.set()
+            registered = threading.Event()
+
+            def _register_here() -> None:
+                ap_app.state.tunnel_registry.register(runner_id, _PresenceWS(), _presence_hello())
+                registered.set()
+
+            loop.call_soon_threadsafe(_register_here)
+            assert registered.wait(timeout=budget(2.0)), "mid-lookup reconnect did not land"
+        return result
+
+    monkeypatch.setattr(store, "list_conversations_by_runner_id", _list_and_reconnect)
+
+    try:
+        assert ap_app.state.tunnel_registry.deregister(runner_id) is not None
+
+        async def _handoff_lookup_reconnected() -> None:
+            while not reconnected_mid_lookup.is_set():
+                await asyncio.sleep(0.02)
+
+        await asyncio.wait_for(_handoff_lookup_reconnected(), timeout=budget(5.0))
+        # Let the grace timer finish its ownership recheck after the lookup.
+        await asyncio.sleep(grace * 2)
+        assert sessions_module._session_status_cache.get(session_id) == "running"
+        assert (
+            sessions_module._session_active_response_cache.get(session_id) == "response-still-here"
+        )
+        conv = store.get_conversation(session_id)
+        assert conv is not None
+        assert sessions_module._last_task_error_from_labels(conv.labels) is None
+    finally:
+        shutdown_state.reset_for_tests()
+        ap_app.state.tunnel_registry.deregister(runner_id, retire=False)
+        with contextlib.suppress(asyncio.TimeoutError, Exception):
+            await communicator.wait(timeout=budget(2.0))
+        sessions_module._session_status_cache.pop(session_id, None)
+        sessions_module._session_active_response_cache.pop(session_id, None)
+
+
 # TODO: factor ``FakeProcessManager`` and ``_build_harness_agent_bundle``
 # out of ``test_sessions_three_layer.py`` + this file into a shared
 # ``_three_layer_helpers.py`` module once a third caller arrives. Kept
