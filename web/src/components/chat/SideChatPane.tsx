@@ -45,6 +45,7 @@ import { useConversationEntryState } from "@/hooks/useConversationEntryState";
 import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 import { useDictationInsert } from "@/hooks/useDictationInsert";
 import { useSession } from "@/hooks/useSession";
+import type { Session } from "@/lib/types";
 import { useSkills } from "@/hooks/useSkills";
 import { useSlashCompletion } from "@/hooks/useSlashCompletion";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
@@ -338,7 +339,7 @@ export function SideChatPane({
             <SideChatComposer
               childId={childId}
               harness={sessionHarness}
-              labels={session?.labels}
+              session={session}
               agentId={boundAgentId}
               responseId={activeResponse?.responseId}
               interruptReady={interruptReady}
@@ -364,7 +365,7 @@ export function SideChatPane({
 function SideChatComposer({
   childId,
   harness,
-  labels,
+  session,
   agentId,
   responseId,
   interruptReady,
@@ -375,7 +376,7 @@ function SideChatComposer({
 }: {
   childId: string;
   harness: string | null | undefined;
-  labels: Record<string, string> | undefined;
+  session: Session | null | undefined;
   agentId: string | null;
   responseId: string | undefined;
   interruptReady: boolean;
@@ -457,13 +458,28 @@ function SideChatComposer({
   // /compact, …) act on the main session and are deliberately left out.
   const isMobile = useIsMobileViewport();
   const [inputFocused, setInputFocused] = useState(false);
-  const nativeSession = isNativeTerminalSession({ harness, labels });
+  const nativeSession = isNativeTerminalSession({ harness, labels: session?.labels });
+  // Discover only once the child has a host and workspace (as the in-session
+  // composer does); before that the hook reports "unavailable" rather than
+  // hitting the catalog with an unresolvable scope. Forks inherit both.
   const {
     skills,
     skillsStatus,
     refetch: refreshSkills,
   } = useSkills({
-    target: pending ? null : { sessionId: childId },
+    target:
+      !pending && session?.hostId && session.workspace
+        ? {
+            sessionId: childId,
+            scope: {
+              hostId: session.hostId,
+              harness: session.harness,
+              workspace: session.workspace,
+              agentId: session.agentId,
+              subAgentName: session.subAgentName,
+            },
+          }
+        : null,
     enabled: !pending && ready,
     starting,
   });
