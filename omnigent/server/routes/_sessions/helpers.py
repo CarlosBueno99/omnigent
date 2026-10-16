@@ -5050,10 +5050,18 @@ def _publish_status(
     session_stream.publish(session_id, payload)
 
 
+def runner_disconnected_error() -> ErrorDetail:
+    """The cause a runner that vanished mid-turn leaves on its sessions."""
+    return ErrorDetail(code="runner_disconnected", message="Runner disconnected unexpectedly.")
+
+
 def reconcile_orphaned_running_status(
     session_id: str,
     conversation_store: ConversationStore,
     stale_before: int,
+    *,
+    error: ErrorDetail | None = None,
+    owner_runner_id: str | None = None,
 ) -> bool:
     """
     Settle a session that reads ``running`` but whose runner is
@@ -5074,18 +5082,45 @@ def reconcile_orphaned_running_status(
     the local cache and stream without issuing a second status write, and
     classifies any associated scheduled run as failed/incomplete.
 
+    With *error*, the row settles to ``failed`` carrying that cause as the
+    durable ``last_task_error`` labels — the state the disconnect sweep leaves
+    on a turn its runner interrupted — so reconnect recovery can still tell
+    the turn was cut off. Without it the row settles to ``idle``.
+
     :param session_id: Session/conversation identifier to settle.
     :param conversation_store: Store performing the conditional transition.
     :param stale_before: Runner stamps at or after this epoch are fresh.
+    :param error: Interruption cause to persist and publish, or ``None`` to
+        settle the turn as simply over.
+    :param owner_runner_id: Runner the interruption is attributed to.
     :returns: Whether this call performed the transition.
     """
-    if not conversation_store.settle_orphaned_live_status(session_id, stale_before):
+    resting_status: Literal["idle", "failed"] = "idle" if error is None else "failed"
+    if not conversation_store.settle_orphaned_live_status(
+        session_id, stale_before, resting_status=resting_status
+    ):
         return False
+    if error is not None:
+        # Persist before publishing so a client reloading on the failed edge
+        # already reads the cause.
+        try:
+            conversation_store.set_labels(
+                session_id,
+                _session_status_error_labels(error, owner_runner_id=owner_runner_id),
+            )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "Failed to persist session status error labels for %s",
+                session_id,
+                extra={"session_id": session_id},
+            )
     _publish_status(
         session_id,
-        "idle",
+        resting_status,
+        error,
         persist_live_status=False,
         scheduled_run_outcome="failed",
+        failure_origin="runner_disconnected_orphaned" if error is not None else None,
     )
     return True
 
@@ -5138,32 +5173,8 @@ async def _persist_session_status_error_labels(
     :param item_id: Persisted item a ``runner_rejected_event`` failure refers to, so
         a client whose POST answer was lost can match the refusal to its own send.
     """
-    # Structured fields are optional (present only when the runner classified
-    # the failure). Always write all keys — empty when absent — because the
-    # label store is upsert-only and a stale title/cause from a prior failure
-    # must not leak onto a later, unclassified one.
-    updates = (
-        {
-            _LAST_TASK_ERROR_CODE_LABEL_KEY: _truncate_label(error.code),
-            _LAST_TASK_ERROR_MESSAGE_LABEL_KEY: _truncate_label(error.message),
-            _LAST_TASK_ERROR_AGENT_NAME_LABEL_KEY: _truncate_label(agent_name or ""),
-            _LAST_TASK_ERROR_TITLE_LABEL_KEY: _truncate_label(error.title or ""),
-            _LAST_TASK_ERROR_CAUSE_LABEL_KEY: _truncate_label(error.cause or ""),
-            _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY: _truncate_label(error.remediation or ""),
-            _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY: _truncate_label(item_id or ""),
-            _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY: _truncate_label(owner_runner_id or ""),
-        }
-        if error is not None
-        else {
-            _LAST_TASK_ERROR_CODE_LABEL_KEY: "",
-            _LAST_TASK_ERROR_MESSAGE_LABEL_KEY: "",
-            _LAST_TASK_ERROR_AGENT_NAME_LABEL_KEY: "",
-            _LAST_TASK_ERROR_TITLE_LABEL_KEY: "",
-            _LAST_TASK_ERROR_CAUSE_LABEL_KEY: "",
-            _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY: "",
-            _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY: "",
-            _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY: "",
-        }
+    updates = _session_status_error_labels(
+        error, owner_runner_id=owner_runner_id, agent_name=agent_name, item_id=item_id
     )
     try:
         await asyncio.to_thread(conversation_store.set_labels, session_id, updates)
@@ -5173,6 +5184,50 @@ async def _persist_session_status_error_labels(
             session_id,
             extra={"session_id": session_id},
         )
+
+
+def _session_status_error_labels(
+    error: ErrorDetail | None,
+    *,
+    owner_runner_id: str | None = None,
+    agent_name: str | None = None,
+    item_id: str | None = None,
+) -> dict[str, str]:
+    """
+    Label updates projecting *error* as the session's ``last_task_error``.
+
+    :param error: Failure detail to record, or ``None`` for the updates that
+        clear a previous failure.
+    :param owner_runner_id: Runner this failure belongs to.
+    :param agent_name: Agent responsible for this failure.
+    :param item_id: Persisted item the failure refers to.
+    :returns: The label upserts for :meth:`ConversationStore.set_labels`.
+    """
+    # Structured fields are optional (present only when the runner classified
+    # the failure). Always write all keys — empty when absent — because the
+    # label store is upsert-only and a stale title/cause from a prior failure
+    # must not leak onto a later, unclassified one.
+    if error is None:
+        return {
+            _LAST_TASK_ERROR_CODE_LABEL_KEY: "",
+            _LAST_TASK_ERROR_MESSAGE_LABEL_KEY: "",
+            _LAST_TASK_ERROR_AGENT_NAME_LABEL_KEY: "",
+            _LAST_TASK_ERROR_TITLE_LABEL_KEY: "",
+            _LAST_TASK_ERROR_CAUSE_LABEL_KEY: "",
+            _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY: "",
+            _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY: "",
+            _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY: "",
+        }
+    return {
+        _LAST_TASK_ERROR_CODE_LABEL_KEY: _truncate_label(error.code),
+        _LAST_TASK_ERROR_MESSAGE_LABEL_KEY: _truncate_label(error.message),
+        _LAST_TASK_ERROR_AGENT_NAME_LABEL_KEY: _truncate_label(agent_name or ""),
+        _LAST_TASK_ERROR_TITLE_LABEL_KEY: _truncate_label(error.title or ""),
+        _LAST_TASK_ERROR_CAUSE_LABEL_KEY: _truncate_label(error.cause or ""),
+        _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY: _truncate_label(error.remediation or ""),
+        _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY: _truncate_label(item_id or ""),
+        _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY: _truncate_label(owner_runner_id or ""),
+    }
 
 
 def _last_task_error_from_labels(labels: Mapping[str, str]) -> dict[str, str] | None:

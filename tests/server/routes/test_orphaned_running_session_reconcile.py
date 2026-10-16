@@ -4,13 +4,15 @@ Targeted, fast coverage for the two route-layer fixes that keep a
 runner-less session from being stuck as "running" forever:
 
 * ``GET /v1/sessions`` (``routes_core.list_sessions``) settles a row that
-  still reads running/waiting but whose runner is confirmed gone.
+  still reads running/waiting but whose runner is confirmed gone to the same
+  ``failed`` / ``runner_disconnected`` state the disconnect sweep leaves, so
+  reconnect recovery can still resume the interrupted turn.
 * ``POST /v1/sessions/{id}/events`` with ``stop_session``
-  (``routes_events``) settles the same orphaned row instead of returning a
-  false success over a still-"running" row.
+  (``routes_events``) settles the same orphaned row to idle instead of
+  returning a false success over a still-"running" row.
 
 Both route through :func:`reconcile_orphaned_running_status`, whose own
-``failed``-sticky invariant is unit-tested directly.
+conditional transition and resting states are unit-tested directly.
 
 The reconciliation only fires when the runner is confirmed gone from every
 replica (no live tunnel here AND ``runner_last_seen`` stale past the TTL);
@@ -28,6 +30,7 @@ import pytest_asyncio
 
 from omnigent.db.utils import generate_agent_id
 from omnigent.server.routes._sessions.helpers import (
+    _last_task_error_from_labels,
     _session_status_cache,
     reconcile_orphaned_running_status,
 )
@@ -84,8 +87,9 @@ def test_reconcile_is_conditional_and_marks_scheduled_run_incomplete(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only a stale running row settles, and a scheduled fire fails."""
+    """Only a stale running row settles, to idle or to a disconnect failure."""
     from omnigent.server import session_live_state
+    from omnigent.server.routes._sessions.helpers import runner_disconnected_error
 
     sid = _seed_running_session(db_uri, runner_fresh=False)
     store = SqlAlchemyConversationStore(db_uri)
@@ -109,6 +113,29 @@ def test_reconcile_is_conditional_and_marks_scheduled_run_incomplete(
     assert completions == [(sid, "failed", "incomplete")]
     assert not reconcile_orphaned_running_status(sid, store, int(time.time()) - 90)
 
+    # With a cause, the row keeps the evidence that its runner cut the turn off.
+    interrupted_sid = _seed_running_session(db_uri, runner_fresh=False)
+    assert reconcile_orphaned_running_status(
+        interrupted_sid,
+        store,
+        int(time.time()) - 90,
+        error=runner_disconnected_error(),
+        owner_runner_id=f"runner_{interrupted_sid}",
+    )
+    interrupted = store.get_conversation(interrupted_sid)
+    assert interrupted is not None
+    assert interrupted.live_status == "failed"
+    assert _session_status_cache[interrupted_sid] == "failed"
+    assert _last_task_error_from_labels(interrupted.labels) == {
+        "code": "runner_disconnected",
+        "message": "Runner disconnected unexpectedly.",
+    }
+    assert interrupted.labels["omnigent.last_task_error_runner_id"] == f"runner_{interrupted_sid}"
+    assert completions[-1] == (interrupted_sid, "failed", "incomplete")
+    assert not reconcile_orphaned_running_status(
+        interrupted_sid, store, int(time.time()) - 90, error=runner_disconnected_error()
+    )
+
     fresh_sid = _seed_running_session(db_uri, runner_fresh=True)
     assert not reconcile_orphaned_running_status(fresh_sid, store, int(time.time()) - 90)
     fresh = store.get_conversation(fresh_sid)
@@ -123,14 +150,22 @@ async def test_list_reconciles_orphaned_running_session(
     client: httpx.AsyncClient,
     db_uri: str,
 ) -> None:
-    """A persisted-running session whose runner is confirmed gone reads
-    "idle" in the list, not a phantom "running"."""
+    """A persisted-running session whose runner is confirmed gone reads as a
+    disconnected failure in the list — the state the disconnect sweep leaves —
+    not a phantom "running" or an idle row that forgot the interruption."""
     session_id = _seed_running_session(db_uri, runner_fresh=False)
 
     resp = await client.get("/v1/sessions")
     assert resp.status_code == 200
     item = next(s for s in resp.json()["data"] if s["id"] == session_id)
-    assert item["status"] == "idle"
+    assert item["status"] == "failed"
+    settled = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)
+    assert settled is not None
+    assert settled.live_status == "failed"
+    assert _last_task_error_from_labels(settled.labels) == {
+        "code": "runner_disconnected",
+        "message": "Runner disconnected unexpectedly.",
+    }
 
 
 async def test_list_leaves_running_session_with_fresh_runner(

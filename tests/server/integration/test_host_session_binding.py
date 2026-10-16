@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -2248,3 +2249,147 @@ async def test_session_response_keeps_existing_failure_cause_while_exit_report_i
     assert _persisted_task_error(conv_store, session_id) == original_error
     assert after["status"] == "failed"
     assert after["last_task_error"] == original_error
+
+
+# ── Managed host reconnect wakes interrupted sessions ─────────
+
+
+async def _reconnected_sandbox_host_receives_launch(
+    app: FastAPI,
+    *,
+    host_id: str,
+    host_name: str,
+    token: str,
+    timeout_s: float,
+) -> tuple[ApplicationCommunicator, HostLaunchRunnerFrame]:
+    """Reconnect a managed host with no runners and wait for a runner launch.
+
+    Answers the server's runner-liveness query with ``unknown`` — what a
+    freshly restarted host says about a runner it never spawned — so the
+    launch is not held back by the connect grace, then confirms the launch.
+
+    :param app: The app whose tunnel to dial.
+    :param host_id: The pre-registered managed host's id.
+    :param host_name: Its registered name (the hello must match it).
+    :param token: Its raw launch token.
+    :param timeout_s: How long to wait for the launch frame.
+    :returns: The live tunnel communicator and the launch frame it received.
+    """
+    from omnigent.host.frames import HostRunnerStatusFrame, HostRunnerStatusResultFrame
+    from omnigent.runner.identity import token_bound_runner_id
+
+    scope = _websocket_scope(f"/v1/hosts/{host_id}/tunnel")
+    scope["headers"] = [(b"x-omnigent-host-token", token.encode("ascii"))]
+    comm = ApplicationCommunicator(app, scope)
+    await comm.send_input({"type": "websocket.connect"})
+    accepted = await comm.receive_output(timeout=5.0)
+    assert accepted["type"] == "websocket.accept", f"tunnel refused: {accepted!r}"
+    await comm.send_input({"type": "websocket.receive", "text": _make_hello(name=host_name)})
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while True:
+        remaining = deadline - loop.time()
+        try:
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            output = await comm.receive_output(timeout=remaining)
+        except asyncio.TimeoutError:
+            raise AssertionError(
+                f"the reconnected managed host received no runner launch within {timeout_s}s"
+            ) from None
+        if output["type"] != "websocket.send":
+            continue
+        try:
+            frame = decode_host_frame(output["text"])
+        except ValueError:
+            continue
+        if isinstance(frame, HostRunnerStatusFrame):
+            await comm.send_input(
+                {
+                    "type": "websocket.receive",
+                    "text": encode_host_frame(
+                        HostRunnerStatusResultFrame(request_id=frame.request_id, status="unknown")
+                    ),
+                }
+            )
+        elif isinstance(frame, HostLaunchRunnerFrame):
+            await comm.send_input(
+                {
+                    "type": "websocket.receive",
+                    "text": encode_host_frame(
+                        HostLaunchRunnerResultFrame(
+                            request_id=frame.request_id,
+                            status="launched",
+                            runner_id=token_bound_runner_id(frame.binding_token),
+                        )
+                    ),
+                }
+            )
+            return comm, frame
+
+
+async def test_managed_host_reconnect_relaunches_runner_for_interrupted_session(
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A managed host coming back online wakes the session it interrupted.
+
+    The session was mid-turn on a runner that died with its sandbox and is
+    bound to a registered managed host. When that host dials the real tunnel
+    again reporting no runners, the server launches a replacement runner for
+    the session by itself — no message or other user action — and rebinds the
+    row to it, so the runner's connect hook can continue the turn.
+    """
+    from omnigent.db.utils import now_epoch
+    from omnigent.runner.identity import token_bound_runner_id
+    from omnigent.server.routes import sessions as sessions_module
+
+    env = managed_session_env
+    # No runner tunnel ever connects in this harness; keep the launch's
+    # connect wait short so the background wake settles inside the test.
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S", 0.2
+    )
+    install_fake_modal_launcher(monkeypatch, FakeSandboxLauncher())
+    host_id = "5d2c8a1f9b3e4c7d8e6f0a1b2c3d4e5f"
+    host_name = "managed-relaunch"
+    token = "relaunch-token"
+    env.host_store.register_managed_host(
+        host_id=host_id,
+        name=host_name,
+        user_id=RESERVED_USER_LOCAL,
+        token=token,
+        provider="modal",
+        sandbox_id="sb-fake-1",
+        token_expires_at=now_epoch() + 3600,
+    )
+    agent = await create_test_agent(env.client, name="managed-relaunch-agent")
+    resp = await env.client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    assert resp.status_code == 201, resp.text
+    session_id = resp.json()["id"]
+    env.conv_store.set_host_id(session_id, host_id, workspace="/root/workspace")
+    assert env.conv_store.set_runner_id(session_id, "runner_token_died_with_sandbox")
+    env.conv_store.set_session_live_status(session_id, "running")
+    # The interruption is known only from the persisted row, as on a replica
+    # that never relayed this session.
+    sessions_module._session_status_cache.pop(session_id, None)
+
+    tunnel, launch = await _reconnected_sandbox_host_receives_launch(
+        env.app, host_id=host_id, host_name=host_name, token=token, timeout_s=10.0
+    )
+    try:
+        assert launch.session_id == session_id
+        assert launch.workspace == "/root/workspace"
+        expected_runner_id = token_bound_runner_id(launch.binding_token)
+        async with asyncio.timeout(5.0):
+            while True:
+                rebound = env.conv_store.get_conversation(session_id)
+                assert rebound is not None
+                if rebound.runner_id == expected_runner_id:
+                    break
+                await asyncio.sleep(0.05)
+    finally:
+        sessions_module._session_status_cache.pop(session_id, None)
+        await tunnel.send_input({"type": "websocket.disconnect", "code": 1000})
+        with contextlib.suppress(Exception):
+            await tunnel.wait(timeout=2.0)

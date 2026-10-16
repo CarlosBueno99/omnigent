@@ -7,7 +7,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import PureWindowsPath
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from sqlalchemy import (
     ColumnElement,
@@ -3865,7 +3865,13 @@ class SqlAlchemyConversationStore(ConversationStore):
             self._session_immediate, "settle_intentionally_stopped_session", write
         )
 
-    def settle_orphaned_live_status(self, conversation_id: str, stale_before: int) -> bool:
+    def settle_orphaned_live_status(
+        self,
+        conversation_id: str,
+        stale_before: int,
+        *,
+        resting_status: Literal["idle", "failed"] = "idle",
+    ) -> bool:
         """Settle a stale running row with one conditional update."""
 
         def write(session: Session) -> bool:
@@ -3888,7 +3894,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                             SqlConversationMetadata.runner_last_seen < stale_before,
                         ),
                     )
-                    .values(live_status=encode_session_live_status("idle"))
+                    .values(live_status=encode_session_live_status(resting_status))
                 ),
             )
             return result.rowcount == 1
@@ -4078,12 +4084,34 @@ class SqlAlchemyConversationStore(ConversationStore):
             ``"runner_token_a1b2c3d4..."``.
         :returns: List of :class:`Conversation` entities.
         """
-        with self._session("list_conversations_by_runner_id") as session:
+        return self._list_conversations_bound_to(
+            SqlConversationMetadata.runner_id == runner_id, "list_conversations_by_runner_id"
+        )
+
+    def list_conversations_by_host_id(
+        self,
+        host_id: str,
+    ) -> list[Conversation]:
+        """
+        Return all conversations bound to the given ``host_id``.
+
+        :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
+        :returns: List of :class:`Conversation` entities.
+        """
+        return self._list_conversations_bound_to(
+            SqlConversationMetadata.host_id == host_id, "list_conversations_by_host_id"
+        )
+
+    def _list_conversations_bound_to(
+        self, binding: ColumnElement[bool], query_name: str
+    ) -> list[Conversation]:
+        """Return the conversations whose metadata row matches *binding*, with labels."""
+        with self._session(query_name) as session:
             meta_rows = (
                 session.execute(
                     select(SqlConversationMetadata).where(
                         SqlConversationMetadata.workspace_id == current_workspace_id(),
-                        SqlConversationMetadata.runner_id == runner_id,
+                        binding,
                     )
                 )
                 .scalars()
@@ -4093,7 +4121,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             return []
         conv_ids = [m.id for m in meta_rows]
         meta_by_id = {m.id: m for m in meta_rows}
-        with self._conv_session("list_conversations_by_runner_id") as ap_sess:
+        with self._conv_session(query_name) as ap_sess:
             ap_rows = (
                 ap_sess.execute(
                     select(SqlConversation).where(

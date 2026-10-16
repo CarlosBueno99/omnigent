@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -3602,6 +3603,79 @@ def test_list_conversations_by_runner_id_hydrates_labels(
         "omnigent.fork.carry_history": "1",
         "omnigent.fork.source_external_session_id": "src-claude-sid",
     }
+
+
+def test_list_conversations_by_host_id_filters(
+    conversation_store: SqlAlchemyConversationStore,
+    db_uri: str,
+) -> None:
+    """Only conversations bound to the queried host are returned, with labels.
+
+    A reconnecting managed host sources the sessions to resume here, so a
+    superset or label-less result would wake the wrong sessions or hand the
+    runner an empty init envelope.
+    """
+    host_id = "4f64b6ee625f4e8259185c35c6e63f3d"
+    other_host_id = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    _register_host(db_uri, host_id)
+    _register_host(db_uri, other_host_id)
+    bound = conversation_store.create_conversation()
+    conversation_store.set_host_id(bound.id, host_id, workspace="/home/user/project")
+    conversation_store.set_labels(bound.id, {"omnigent.fork.carry_history": "1"})
+    elsewhere = conversation_store.create_conversation()
+    conversation_store.set_host_id(elsewhere.id, other_host_id, workspace="/home/user/other")
+    conversation_store.create_conversation()  # unbound
+
+    result = conversation_store.list_conversations_by_host_id(host_id)
+
+    assert [c.id for c in result] == [bound.id]
+    assert result[0].host_id == host_id
+    assert result[0].labels == {"omnigent.fork.carry_history": "1"}
+
+
+@pytest.mark.parametrize("resting_status", ["idle", "failed"])
+def test_settle_orphaned_live_status_resting_status(
+    conversation_store: SqlAlchemyConversationStore,
+    resting_status: str,
+) -> None:
+    """A stale running row settles to the requested resting status, once.
+
+    Rows whose runner is fresh or that were never mid-turn are left alone.
+    """
+    stale = conversation_store.create_conversation(runner_id="runner_token_stale")
+    conversation_store.set_session_live_status(stale.id, "running")
+    fresh = conversation_store.create_conversation(runner_id="runner_token_fresh")
+    conversation_store.set_session_live_status(fresh.id, "waiting")
+    now = int(time.time())
+    conversation_store.touch_runner_liveness(["runner_token_fresh"], now)
+    idle = conversation_store.create_conversation(runner_id="runner_token_idle")
+
+    assert conversation_store.settle_orphaned_live_status(
+        stale.id,
+        now - 90,
+        resting_status=resting_status,  # type: ignore[arg-type]
+    )
+    settled = conversation_store.get_conversation(stale.id)
+    assert settled is not None
+    assert settled.live_status == resting_status
+    assert not conversation_store.settle_orphaned_live_status(
+        stale.id,
+        now - 90,
+        resting_status=resting_status,  # type: ignore[arg-type]
+    )
+    assert not conversation_store.settle_orphaned_live_status(
+        fresh.id,
+        now - 90,
+        resting_status=resting_status,  # type: ignore[arg-type]
+    )
+    untouched = conversation_store.get_conversation(fresh.id)
+    assert untouched is not None
+    assert untouched.live_status == "waiting"
+    assert not conversation_store.settle_orphaned_live_status(
+        idle.id,
+        now - 90,
+        resting_status=resting_status,  # type: ignore[arg-type]
+    )
 
 
 # ── Host id ─────────────────────────────────────────

@@ -166,6 +166,7 @@ from omnigent.server.routes._sessions.helpers import (
     _validated_cost_control_mode_override,
     _validated_subagent_routing_override,
     reconcile_orphaned_running_status,
+    runner_disconnected_error,
 )
 from omnigent.server.routes._sessions.orchestration import (
     _best_effort_stop,
@@ -1682,12 +1683,17 @@ def register_core_routes(
                     # every replica (no tunnel anywhere AND runner_last_seen
                     # stale past the TTL), so this fires for a genuinely
                     # orphaned runner, never one mid-reconnect within grace.
+                    # The runner interrupted this turn, so the row settles the
+                    # way the disconnect sweep settles one: failed with the
+                    # disconnect cause, which reconnect recovery resumes.
                     if result is not None and not result.runner_online:
                         await asyncio.to_thread(
                             reconcile_orphaned_running_status,
                             conv.id,
                             conversation_store,
                             int(time.time()) - RUNNER_LIVENESS_TTL_S,
+                            error=runner_disconnected_error(),
+                            owner_runner_id=conv.runner_id,
                         )
         # Build items after reconciliation so each settled row reads its new
         # status straight from the (now-updated) cache.

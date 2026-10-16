@@ -36,6 +36,25 @@ def runner_inference_verified(conversation: Conversation, response: httpx.Respon
     return isinstance(payload, dict) and payload.get("inference_config_verified") is True
 
 
+def session_init_started_turn(response: httpx.Response) -> bool:
+    """
+    Whether the runner reported a turn executing when it finished initializing.
+
+    The runner answers ``status: "running"`` when it continued an interrupted
+    turn or found one already active, so the server must not publish an idle
+    edge over it.
+
+    :param response: A successful response from
+        :meth:`RunnerSessionInitializer.initialize`.
+    :returns: ``True`` when the runner reported a running turn.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("status") == "running"
+
+
 _BODY_SNIPPET_MAX = 500
 
 # Rejections that mean the runner or session is transiently gone, not a server bug.

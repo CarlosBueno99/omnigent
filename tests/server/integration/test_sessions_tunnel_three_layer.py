@@ -1344,22 +1344,32 @@ async def test_on_runner_connect_retains_idle_child_status_for_disconnect(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_isolated_session_status_cache")
-async def test_on_runner_connect_clears_disconnect_failure_on_idle_reconnect(
+@pytest.mark.parametrize(
+    ("runner_reports_turn", "dispatch_in_flight"),
+    [(True, False), (False, False), (False, True)],
+    ids=["turn_continued", "nothing_to_continue", "message_in_flight"],
+)
+async def test_on_runner_connect_resumes_interrupted_root(
     tunnel_three_layer_stack: _TunnelStack,
+    monkeypatch: pytest.MonkeyPatch,
+    runner_reports_turn: bool,
+    dispatch_in_flight: bool,
 ) -> None:
-    """Reconnect-to-idle clears a persisted ``runner_disconnected`` failure.
+    """A reconnect continues a root's interrupted turn instead of settling it idle.
 
-    A transient WS blip drops and reconnects a runner whose process
-    survived, with no new turn. The disconnect left the session marked
-    ``failed`` with persisted ``runner_disconnected`` labels; before this
-    wiring nothing cleared them until the next user message, so the
-    Subagents panel kept the grey "Disconnected" dot forever. Drives a
-    real tunnel reconnect (which fires ``_on_runner_connect``) and asserts
-    the session leaves ``failed`` and the disconnect labels are cleared —
-    WITHOUT sending any message.
+    The disconnect left the session ``failed`` with persisted
+    ``runner_disconnected`` labels. Drives a real tunnel reconnect (which
+    fires ``_on_runner_connect``) WITHOUT sending any message and asserts the
+    root is initialized with ``resume_interrupted_turn`` — the continuation a
+    restored child gets. When the runner answers that the turn is running, the
+    failure clears to ``running`` rather than to an idle edge that would hide
+    the live turn; when it found nothing to continue, the stale failure clears
+    to idle as before. While a message is already being dispatched to the
+    session, that message drives the runner: no continuation is requested.
     """
     from omnigent.runtime import get_conversation_store
     from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions.orchestration import _mark_dispatch_in_flight
 
     ap_client = tunnel_three_layer_stack.ap_client
     ap_app = tunnel_three_layer_stack.ap_app
@@ -1381,17 +1391,38 @@ async def test_on_runner_connect_clears_disconnect_failure_on_idle_reconnect(
     }
     assert sessions_module._session_status_cache.get(session_id) == "failed"
 
+    initializer = ap_app.state.runner_session_initializer
+    initialize = initializer.initialize
+    init_calls: list[tuple[str, bool]] = []
+
+    async def record_init(conv: Any, client: Any, **kwargs: Any) -> Any:
+        init_calls.append((conv.id, bool(kwargs.get("resume_interrupted_turn"))))
+        response = await initialize(conv, client, **kwargs)
+        if runner_reports_turn:
+            # The hook reaches a stub runner here; answer as a runner that
+            # started the continuation does.
+            return httpx.Response(
+                201,
+                json={"status": "running"},
+                request=httpx.Request("POST", "http://runner/v1/sessions"),
+            )
+        return response
+
+    monkeypatch.setattr(initializer, "initialize", record_init)
+    expected_status = "running" if runner_reports_turn else "idle"
     try:
-        # Assert INSIDE the block: the context manager's teardown closes
-        # the tunnel, which re-fires ``_on_runner_disconnect`` and would
-        # re-mark the session failed. We want the reconnect-recovery state.
-        async with _reconnect_fires_connect_hook(ap_app, fake_pm, wait_for_recover=session_id):
-            # No message was sent — the reconnect alone cleared the stale
-            # disconnect failure.
-            assert sessions_module._session_status_cache.get(session_id) != "failed"
-            cleared = store.get_conversation(session_id)
-            assert cleared is not None
-            assert sessions_module._last_task_error_from_labels(cleared.labels) is None
+        with contextlib.ExitStack() as in_flight:
+            if dispatch_in_flight:
+                in_flight.enter_context(_mark_dispatch_in_flight(session_id))
+            # Assert INSIDE the block: the context manager's teardown closes
+            # the tunnel, which re-fires ``_on_runner_disconnect`` and would
+            # re-mark the session failed. We want the reconnect-recovery state.
+            async with _reconnect_fires_connect_hook(ap_app, fake_pm, wait_for_recover=session_id):
+                assert init_calls == [(session_id, not dispatch_in_flight)]
+                assert sessions_module._session_status_cache.get(session_id) == expected_status
+                cleared = store.get_conversation(session_id)
+                assert cleared is not None
+                assert sessions_module._last_task_error_from_labels(cleared.labels) is None
     finally:
         sessions_module._session_status_cache.pop(session_id, None)
 

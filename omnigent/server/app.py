@@ -131,6 +131,7 @@ from omnigent.server.runner_session_init import (
     RunnerSessionInitializer,
     is_session_agent_removed,
     runner_response_error_body,
+    session_init_started_turn,
 )
 from omnigent.server.scheduled import ScheduledTaskScheduler
 from omnigent.server.ws_origin import WebSocketOriginMiddleware
@@ -3514,13 +3515,13 @@ def create_app(
             the clear — the reference the cross-replica check compares
             against.
         """
+        from omnigent.server.routes._sessions.helpers import runner_disconnected_error
         from omnigent.server.routes.sessions import (
             RUNNER_DISCONNECT_GRACE_S,
             _mark_runner_sessions_offline,
             _relinquish_session_live_state,
             _runner_live_on_another_replica_from_conversations,
         )
-        from omnigent.server.schemas import ErrorDetail
 
         # Event-driven: `register` resolves the wait the instant the runner
         # reconnects here. A non-positive grace collapses to an immediate
@@ -3574,10 +3575,7 @@ def create_app(
         )
         await _mark_runner_sessions_offline(
             affected,
-            ErrorDetail(
-                code="runner_disconnected",
-                message="Runner disconnected unexpectedly.",
-            ),
+            runner_disconnected_error(),
             conversation_store,
         )
 
@@ -3728,6 +3726,7 @@ def create_app(
             _session_status_cache,
         )
         from omnigent.server.routes._sessions.helpers import _last_task_error_from_labels
+        from omnigent.server.routes._sessions.orchestration import _session_is_starting
         from omnigent.server.routes.sessions import (
             _ensure_runner_relay,
             _publish_runner_recovered_status,
@@ -3945,11 +3944,20 @@ def create_app(
                         and (conv.id in eager_root_ids or needs_eager_recovery(conv))
                     )
                     # Idle trees reinitialize on demand; active trees recover now.
+                    # An interrupted root continues its turn like a restored child,
+                    # unless a message already in flight will drive the runner.
+                    resume_turn = (
+                        initialize_runtime
+                        and _interrupted(conv)
+                        and not _session_is_starting(conv.id)
+                    )
+                    turn_running = False
                     if initialize_runtime:
                         response = await runner_session_initializer.initialize(
                             conv,
                             client,
                             timeout=10.0,
+                            resume_interrupted_turn=resume_turn,
                             generation=connection.generation,
                             store_slots=store_slots,
                         )
@@ -3957,12 +3965,18 @@ def create_app(
                         if is_session_agent_removed(response):
                             return
                         response.raise_for_status()
+                        turn_running = session_init_started_turn(response)
                     prefetch_session_routing_catalogs(conv.id, conv, client)
                     # Clear only a root's disconnect failure, after successful init.
                     # Children retain interruption evidence until continuation runs.
+                    # A continued turn is published as running so a late idle edge
+                    # cannot hide it.
                     async with store_slots:
                         await _publish_runner_recovered_status(
-                            conv.id, conversation_store, require_disconnect_code=True
+                            conv.id,
+                            conversation_store,
+                            require_disconnect_code=True,
+                            status="running" if turn_running else "idle",
                         )
                     if initialize_runtime:
                         await restore_active_children(
@@ -4084,6 +4098,18 @@ def create_app(
         async def _on_hosts_changed(_host_id: str, owner: str | None) -> None:
             announce_hosts_changed(owner)
 
+        async def _on_host_connect(host_id: str, owner: str | None) -> None:
+            from omnigent.server.host_session_recovery import schedule_host_session_recovery
+
+            announce_hosts_changed(owner)
+            schedule_host_session_recovery(
+                host_id,
+                conversation_store=conversation_store,
+                host_store=host_store,
+                app_state=app.state,
+                runner_router=runner_router,
+            )
+
         app.include_router(
             create_host_tunnel_router(
                 host_registry,
@@ -4091,7 +4117,7 @@ def create_app(
                 auth_provider=auth_provider,
                 runner_exit_reports=runner_exit_reports,
                 on_runner_exited=_on_runner_exited,
-                on_host_connect=_on_hosts_changed,
+                on_host_connect=_on_host_connect,
                 on_host_disconnect=_on_hosts_changed,
                 on_host_update=_on_hosts_changed,
             ),

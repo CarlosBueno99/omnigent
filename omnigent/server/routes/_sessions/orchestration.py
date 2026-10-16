@@ -3751,6 +3751,7 @@ async def _publish_runner_recovered_status_impl(
     conversation_store: ConversationStore,
     *,
     require_disconnect_code: bool = False,
+    status: Literal["idle", "running"] = "idle",
 ) -> None:
     """
     Clear a stale failed session status after runner recovery.
@@ -3788,6 +3789,10 @@ async def _publish_runner_recovered_status_impl(
         ``runner_disconnected``; when ``False`` (default, explicit
         rebind/handshake), clear any stale ``failed`` state. Labels are
         cleared in both cases.
+    :param status: The state the recovered session is actually in:
+        ``"idle"`` when nothing is executing, or ``"running"`` when the
+        runner reported that it continued the interrupted turn, so the
+        clear does not publish an idle edge over a live turn.
     :returns: None.
     """
     if _session_status_cache.get(session_id) != "failed":
@@ -3803,12 +3808,12 @@ async def _publish_runner_recovered_status_impl(
         last_error = _last_task_error_from_labels(conv.labels) if conv is not None else None
         if last_error is None or last_error.get("code") != "runner_disconnected":
             return
-    _session_status_cache[session_id] = "idle"
-    session_live_state.persist_live_status(session_id, "idle")
+    _session_status_cache[session_id] = status
+    session_live_state.persist_live_status(session_id, status)
     event = SessionStatusEvent(
         type="session.status",
         conversation_id=session_id,
-        status="idle",
+        status=status,
         error=None,
     )
     session_stream.publish(session_id, event.model_dump())

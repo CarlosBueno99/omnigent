@@ -6,7 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from omnigent.entities import (
     Agent,
@@ -1551,8 +1551,14 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
-    def settle_orphaned_live_status(self, conversation_id: str, stale_before: int) -> bool:
-        """Atomically settle a stale running session to idle.
+    def settle_orphaned_live_status(
+        self,
+        conversation_id: str,
+        stale_before: int,
+        *,
+        resting_status: Literal["idle", "failed"] = "idle",
+    ) -> bool:
+        """Atomically settle a stale running session to a resting status.
 
         The update must require a bound runner, ``running``/``waiting`` live
         status, and a missing or older ``runner_last_seen`` stamp. It must not
@@ -1560,6 +1566,8 @@ class ConversationStore(ABC):
 
         :param conversation_id: Session/conversation identifier.
         :param stale_before: Runner stamps at or after this epoch are fresh.
+        :param resting_status: ``"idle"`` when the turn is simply over, or
+            ``"failed"`` to keep the evidence that its runner interrupted it.
         :returns: Whether this call performed the transition.
         """
         ...
@@ -1694,6 +1702,24 @@ class ConversationStore(ABC):
             ``"runner_token_a1b2c3d4..."``.
         :returns: List of :class:`Conversation` entities with
             ``runner_id`` matching the given value.
+        """
+        ...
+
+    @abstractmethod
+    def list_conversations_by_host_id(
+        self,
+        host_id: str,
+    ) -> list[Conversation]:
+        """
+        Return all conversations bound to the given ``host_id``.
+
+        Used when a managed host reconnects to find the sessions whose
+        interrupted turns it should resume, with the same read-after-write
+        consistency requirement as :meth:`list_conversations_by_runner_id`.
+
+        :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
+        :returns: List of :class:`Conversation` entities with ``host_id``
+            matching the given value.
         """
         ...
 
