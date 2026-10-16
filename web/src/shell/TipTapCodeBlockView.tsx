@@ -15,6 +15,9 @@ import { CODE_BLOCK_LANGUAGE_EDIT_META } from "./codeBlockLanguageEdit";
  * the move, and that read forces the browser to lay out the whole document —
  * once per code block while a large file opens. A caret only needs preserving
  * while the editor has focus, so an unfocused editor moves the content directly.
+ * The direct move mirrors the ref `ReactNodeView.mount` wires in @tiptap/react
+ * 3.30.5 (the content element waits as the `.react-renderer` host's
+ * `[data-node-view-content-react]` child); re-check it on upgrades.
  */
 function CodeBlockContent({ editor }: { editor: NodeViewProps["editor"] }) {
   const { nodeViewContentRef } = useReactNodeView();

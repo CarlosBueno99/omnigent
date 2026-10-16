@@ -79,16 +79,25 @@ export function taskListPrefix(src: string): string | null {
   return src;
 }
 
+// Upstream's table detection: the second line must be a delimiter row with a pipe.
+const TABLE_DELIMITER_ROW = /^[ \t|:]*-[ \t|:-]*$/;
+
 /** The first two lines of `src`: all the upstream table `start` inspects. */
 export function tableStartPrefix(src: string): string {
   return src.slice(0, lineEnd(src, lineEnd(src, 0) + 1));
 }
 
 /**
- * The prefix the upstream table tokenizer can consume: it reads up to the
- * first blank line, then re-splits the source to take at most one line more.
+ * The prefix the upstream table tokenizer can consume. It declines unless the
+ * second line is a delimiter row, so any other block gets just those two
+ * lines; a table candidate runs to the first empty line plus the one line
+ * upstream re-splits past it.
  */
 export function tableTokenizePrefix(src: string): string {
+  const firstEnd = lineEnd(src, 0);
+  const secondEnd = lineEnd(src, firstEnd + 1);
+  const second = src.slice(firstEnd + 1, secondEnd);
+  if (!TABLE_DELIMITER_ROW.test(second) || !second.includes("|")) return src.slice(0, secondEnd);
   const blankLine = src.indexOf("\n\n");
   return blankLine === -1 ? src : src.slice(0, lineEnd(src, blankLine + 2));
 }
@@ -101,14 +110,9 @@ interface Bounds {
 }
 
 /**
- * Re-create `extension` with its markdown tokenizer reading bounded prefixes.
- *
- * marked tries each block tokenizer at every block boundary with the remaining
- * document and asks each `start` callback for a paragraph cut position. The
- * upstream tokenizers split that whole remainder into lines before deciding,
- * which froze the tab for minutes on a 1 MiB file. The wrapped tokenizer hands
- * upstream a prefix that ends where its grammar must stop, so the parsed
- * document is unchanged while the work stays proportional to the document.
+ * Re-create `extension` with its markdown tokenizer reading bounded prefixes:
+ * upstream's `tokenize`/`start` see only a grammar-compatible prefix of the
+ * remaining document instead of splitting all of it, so tokens are unchanged.
  */
 function withBoundedTokenizer<T extends Node>(extension: T, bounds: Bounds): T {
   const upstream = extension.config.markdownTokenizer;

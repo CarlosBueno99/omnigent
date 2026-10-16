@@ -2,8 +2,9 @@
 
 Counterpart to ``test_markdown_editor_comments.py`` (comment flow): this
 covers the *rendering* half — a GFM fixture must render as styled HTML in the
-rich editor, and the source toggle must flip to raw markdown. Seeded via the
-filesystem PUT endpoint (no agent run).
+rich editor, the source toggle must flip to raw markdown, and a code fence
+typed into the live editor must keep the caret. Seeded via the filesystem PUT
+endpoint (no agent run).
 """
 
 from __future__ import annotations
@@ -217,3 +218,49 @@ def test_markdown_renders_rich_constructs_and_source_toggle(
     editor = file_viewer.locator("[contenteditable='true']")
     expect(editor).to_be_visible(timeout=10_000)
     expect(editor.locator("h1")).to_contain_text("Rich Design Document")
+
+
+@pytest.mark.browser_context_args(viewport={"width": 1600, "height": 900})
+def test_code_fence_typed_into_the_editor_keeps_the_caret_inside(
+    page: Page,
+    seeded_rich_markdown_session: tuple[str, str, str],
+) -> None:
+    """Fences keep the caret: one mounted unfocused on load, one created while typing."""
+    base_url, session_id, file_path = seeded_rich_markdown_session
+    page.goto(f"{base_url}/c/{session_id}?view=explore")
+    open_right_rail(page)
+    file_button = page.get_by_role("button", name=re.compile(rf"^{re.escape(file_path)}\b"))
+    expect(file_button).to_be_visible(timeout=30_000)
+    file_button.click()
+
+    editor = page.locator('[data-testid="file-viewer"]:visible [contenteditable="true"]')
+    expect(editor.locator("h1")).to_contain_text("Rich Design Document", timeout=10_000)
+    expect(editor.locator("pre")).to_have_count(1)
+
+    # The seeded fence mounted while the editor was unfocused; edits land in it.
+    seeded_fence = editor.locator("pre").first
+    seeded_fence.click()
+    page.keyboard.press("End")
+    page.keyboard.type("  # edited")
+    expect(seeded_fence).to_contain_text("# edited")
+
+    # A new paragraph after the heading becomes a code block through the
+    # ``` input rule, so its node view mounts while the editor has focus.
+    editor.locator("h1").click()
+    page.keyboard.press("End")
+    page.keyboard.press("Enter")
+    page.keyboard.type("``` ")
+    expect(editor.locator("pre")).to_have_count(2)
+    page.keyboard.type("fenced text")
+
+    fence = editor.locator("pre").filter(has_text="fenced text")
+    expect(fence).to_be_visible()
+    expect(editor.locator("p").filter(has_text="fenced text")).to_have_count(0)
+    caret_in_fence = editor.evaluate(
+        """() => {
+            const node = document.getSelection()?.anchorNode;
+            const element = node?.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+            return !!element?.closest("pre");
+        }"""
+    )
+    assert caret_in_fence, "the caret left the code block after its node view mounted"

@@ -70,6 +70,15 @@ describe("table prefixes", () => {
     );
     expect(tableTokenizePrefix("| a |\n| - |")).toBe("| a |\n| - |");
   });
+
+  it("gives tokenize only two lines when the second is not a delimiter row", () => {
+    // Blank lines with trailing whitespace never match "\n\n", so this keeps
+    // non-table blocks from handing over the rest of such a document.
+    expect(tableTokenizePrefix("para one\npara two\n \nmore\n \n| a |\n| - |")).toBe(
+      "para one\npara two",
+    );
+    expect(tableTokenizePrefix("single line")).toBe("single line");
+  });
 });
 
 const SECTION = `## Section
@@ -201,6 +210,11 @@ describe("bounded tokenizers tokenize like upstream", () => {
     "\t- [ ] tab item\n\tcontent\nText",
     "para one\npara two\n| a | b |\n| - | - |\n| 1 | 2 |",
     "para\n| a | b |\n| - | - |\n| 1 | 2 |\n\nafter",
+    "para\n \n| a | b |\n| - | - |\n| 1 | 2 |\n \nafter",
+    "| a | b |\n| - | - |\n| 1 | 2 |\n \nparagraph",
+    "  - [ ] item\n\tcontent\nText",
+    "  1. item\n\tcontent\n\nText",
+    "\t- [ ] tab item\n  - [ ] space child\nText",
     largeMarkdown(4 * 1024),
   ];
 
@@ -235,19 +249,29 @@ describe("bounded tokenizers tokenize like upstream", () => {
 });
 
 describe("prefixes stay proportional to the document", () => {
-  it("hands upstream a bounded multiple of the document across all line starts", () => {
-    // marked calls the tokenizers at block starts, a subset of these line starts;
-    // an unbounded prefix would hand over the whole remainder each time.
-    const md = largeMarkdown(256 * 1024);
+  // marked calls the tokenizers at block starts, a subset of these line starts;
+  // an unbounded prefix would hand over the whole remainder each time.
+  const DOCUMENTS: [string, string][] = [
+    ["blank lines", largeMarkdown(256 * 1024)],
+    // Blank lines with trailing whitespace never match a literal "\n\n".
+    ["whitespace-only blank lines", largeMarkdown(256 * 1024).replaceAll("\n\n", "\n \n")],
+  ];
+
+  it.each(DOCUMENTS)("hands upstream a bounded multiple of a document with %s", (_name, md) => {
     let handed = 0;
     let start = 0;
     while (start < md.length) {
       const src = md.slice(start);
+      // A table candidate (header plus delimiter row) still receives upstream's
+      // own candidate, which runs to the next empty line; every other block
+      // must be cut short, so count candidates by their two-line start prefix.
+      const second = src.split("\n", 2)[1] ?? "";
+      const tableCandidate = /^[ \t|:]*-[ \t|:-]*$/.test(second) && second.includes("|");
       handed +=
         (orderedListPrefix(src)?.length ?? 0) +
         (taskListPrefix(src)?.length ?? 0) +
         tableStartPrefix(src).length +
-        tableTokenizePrefix(src).length;
+        (tableCandidate ? tableStartPrefix(src) : tableTokenizePrefix(src)).length;
       const newline = md.indexOf("\n", start);
       start = newline === -1 ? md.length : newline + 1;
     }

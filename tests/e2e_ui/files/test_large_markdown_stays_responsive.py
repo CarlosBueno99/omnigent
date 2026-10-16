@@ -3,9 +3,10 @@
 The server ships every byte under its read cap to the browser, and the viewer
 parses the whole document into the rich-text editor on the main thread. A
 ~1 MiB file leaves the tab unresponsive for more than a minute, so this test
-asserts responsiveness while the file opens rather than the rendered content:
-any fix that keeps the page interactive (lazy render, size notice, worker
-parse) passes without the test prescribing the UI.
+asserts responsiveness while the file opens and that the editor still renders
+within the window: any fix that keeps the page interactive and opens the
+document in Edit mode (lazy render, worker parse) passes without the test
+prescribing the UI.
 """
 
 from __future__ import annotations
@@ -87,14 +88,13 @@ def test_opening_large_markdown_keeps_page_responsive(
             )
             rendered = True
         except PlaywrightError:
-            probe_started = time.monotonic()
             try:
                 page.wait_for_function("() => true", timeout=_PROBE_TIMEOUT_MS)
             except PlaywrightError:
                 pytest.fail(
-                    f"page stopped responding for {time.monotonic() - probe_started:.0f}s "
+                    f"page stopped responding to a {_PROBE_TIMEOUT_MS} ms probe "
                     f"while opening {file_path}"
                 )
 
-    expect(page.get_by_role("button", name=f"Close {file_path}", exact=True).first).to_be_visible()
     assert rendered, f"{file_path} did not render within {_WATCH_SECONDS}s"
+    expect(page.get_by_role("button", name=f"Close {file_path}", exact=True).first).to_be_visible()
