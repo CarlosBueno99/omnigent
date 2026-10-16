@@ -702,7 +702,16 @@ requests, which carry the session's host context; the URL bar supplies none, so
 it cannot open loopback addresses even on an eligible Arca session. Other
 internal sites must be opened in a separate browser. The registry gates every
 navigation unless a main-process caller opts out with `mainOwned: true`; only
-the desktop E2E fixture driver does.
+the desktop E2E fixture driver does. Fresh views are locked before their first
+URL, and an empty-URL mount reestablishes the policy and current host context.
+
+Address checks parse IPv6 groups and classify mapped IPv4, unique-local IPv6,
+shared IPv4 (CGNAT), and trailing-dot localhost names. The literal policy
+conservatively excludes reserved/documentation ranges, including all of
+`192.0.0.0/24` and `2001::/23` even where individual addresses have global
+assignments. The Arca exception remains limited to the three exact loopback
+hosts above. This URL check does not resolve arbitrary DNS names or inspect
+subresource connections.
 
 **JS trust boundary (important):** `omnigent:browser-execute` runs
 arbitrary JS in the child view via `executeJavaScript(js, true)`. It is exposed

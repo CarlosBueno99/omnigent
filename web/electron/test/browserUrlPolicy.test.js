@@ -125,4 +125,86 @@ describe("browserUrlPolicy — agent navigation allowlist", () => {
       assert.equal(v.ok, false);
     }
   });
+  it("blocks IPv6 spellings of loopback, private, and metadata addresses", () => {
+    for (const url of [
+      "http://[::ffff:127.0.0.1]:8080/", // serialized as [::ffff:7f00:1]
+      "http://[::ffff:7f00:1]/",
+      "http://[::ffff:10.0.0.1]/",
+      "http://[::ffff:192.168.1.1]/",
+      "http://[::ffff:169.254.169.254]/latest/meta-data/",
+      "http://[::ffff:100.100.100.200]/", // CGNAT-range metadata
+      "http://[::127.0.0.1]/", // IPv4-compatible, serialized as [::7f00:1]
+      "http://[::]/",
+      "http://[0:0:0:0:0:0:0:1]/",
+      "http://[64:ff9b::127.0.0.1]/", // NAT64
+      "http://[2002:7f00:1::]/", // 6to4
+      "http://[2001::1]/", // Teredo
+      "http://[fc00::1]/", // unique-local
+      "http://[fd12::1]/",
+      "http://[fe80::1]/",
+      "http://[febf::1]/", // top of fe80::/10
+      "http://[fec0::1]/", // site-local
+      "http://[ff02::1]/", // multicast
+      "http://[2001:db8::1]/",
+      "http://[2001:3::1]/", // conservative protocol-assignment exclusions
+      "http://[2001:4:112::1]/",
+      "http://[2001:1ff:ffff::1]/", // top of 2001::/23
+      "http://[3fff::1]/", // documentation; global to ssrf.py, blocked here on purpose
+      "http://[3fff:fff:ffff::1]/",
+    ]) {
+      assert.equal(isAgentNavigationAllowed(url).ok, false, `expected reject: ${url}`);
+    }
+  });
+
+  it("blocks shared, reserved, multicast and documentation IPv4 ranges", () => {
+    for (const url of [
+      "http://100.64.0.1/",
+      "http://100.100.100.200/",
+      "http://100.127.255.255/",
+      "http://192.0.0.1/",
+      "http://192.0.0.9/", // anycast; global to ssrf.py, blocked here on purpose
+      "http://192.0.0.255/",
+      "http://192.0.2.1/",
+      "http://198.18.0.1/",
+      "http://198.51.100.1/",
+      "http://203.0.113.1/",
+      "http://224.0.0.1/",
+      "http://240.0.0.1/",
+      "http://255.255.255.255/",
+    ]) {
+      assert.equal(isAgentNavigationAllowed(url).ok, false, `expected reject: ${url}`);
+    }
+  });
+
+  it("allows public IPv4 and IPv6 literals next to the blocked ranges", () => {
+    for (const url of [
+      "http://8.8.8.8/",
+      "http://100.63.255.255/",
+      "http://100.128.0.1/",
+      "http://169.253.0.1/",
+      "http://192.0.1.1/",
+      "http://198.20.0.1/",
+      "http://223.255.255.254/",
+      "http://[2606:4700:4700::1111]/",
+      "https://[2001:4860:4860::8888]/",
+      "http://[2001:200::1]/", // first address past 2001::/23
+      "http://[3fff:1000::1]/", // first address past 3fff::/20
+      "http://[::ffff:8.8.8.8]/",
+      "http://[64:ff9b::8.8.8.8]/", // NAT64 to a public IPv4
+    ]) {
+      assert.equal(isAgentNavigationAllowed(url).ok, true, `expected allow: ${url}`);
+    }
+  });
+
+  it("blocks localhost names written with a trailing dot", () => {
+    for (const url of ["http://localhost./", "http://app.localhost./"]) {
+      assert.equal(isAgentNavigationAllowed(url).ok, false, url);
+    }
+  });
+
+  it("keeps the Arca loopback exception to its exact hosts", () => {
+    for (const url of ["http://[::ffff:127.0.0.1]:5173/", "http://[::127.0.0.1]/"]) {
+      assert.equal(isAgentNavigationAllowed(url, { allowLocalhost: true }).ok, false, url);
+    }
+  });
 });

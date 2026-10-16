@@ -437,6 +437,34 @@ function makeEventCapturingRegistry(extra = {}) {
 }
 
 describe("browserViewRegistry — redirect/nav guard (SSRF: allowlist on every hop)", () => {
+  for (const setup of ["created", "fresh", "main-owned", "arca"]) {
+    it(`guards an empty-URL mount after ${setup} setup`, () => {
+      const context = {};
+      const { registry, fire, windowOpen, loaded } = makeEventCapturingRegistry({
+        isArcaAgentContext: (ctx) => ctx === context,
+      });
+      if (setup === "main-owned") {
+        registry.openOrNavigate("conv_1", "https://example.com", undefined, { mainOwned: true });
+      } else if (setup === "arca") {
+        registry.openOrNavigate("conv_1", "http://localhost", undefined, { agentContext: context });
+      }
+      const result =
+        setup === "created"
+          ? registry.getOrCreate("conv_1")
+          : registry.openOrNavigate("conv_1", "");
+      assert.equal(result.ok, true);
+      for (const event of ["will-navigate", "will-redirect", "will-frame-navigate"]) {
+        assert.equal(fire(event, "http://localhost").prevented, true);
+        assert.equal(fire(event, "https://example.com").prevented, false);
+      }
+      const before = loaded.length;
+      windowOpen("http://localhost");
+      assert.equal(loaded.length, before);
+      windowOpen("https://example.com");
+      assert.equal(loaded.length, before + 1);
+    });
+  }
+
   it("uses the same live Arca context for initial URL, redirect, frame and popup", () => {
     let eligible = true;
     const context = { serverTarget: "selected-server", sourceHostId: "actual-host" };

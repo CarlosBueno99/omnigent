@@ -133,7 +133,7 @@ function createBrowserViewRegistry({
       // Whether the CURRENT navigation is policy-gated (all but a `mainOwned`
       // opt-out). Read by the will-navigate/will-redirect guard so the allowlist
       // covers the whole nav chain, not just the first hop (SSRF).
-      agentNavLocked: false,
+      agentNavLocked: true,
       agentContext: null,
       // Design-mode listeners + webContents, set by browserIpc's enable handler
       // and cleared on disable/close (console-message forwarder + native-gesture
@@ -374,13 +374,10 @@ function createBrowserViewRegistry({
     const result = getOrCreate(conversationId);
     if (!result.ok) return result;
     const { entry, created } = result;
-    // Latch whether THIS navigation is gated so the will-navigate/will-redirect
-    // guard enforces the allowlist on its whole redirect chain. Set only when a
-    // url is actually issued.
-    if (url) {
-      entry.agentNavLocked = gated;
-      entry.agentContext = gated ? (opts?.agentContext ?? null) : null;
-    }
+    // Empty-URL mounts must establish the same policy as navigations: the
+    // view can still receive redirects, frame navigations and window opens.
+    entry.agentNavLocked = gated;
+    entry.agentContext = gated ? (opts?.agentContext ?? null) : null;
     if (bounds) entry.boundsController.setRendererBounds(bounds);
     // Only attach immediately when this is the active conversation; otherwise
     // create-detached and let `setActive(conversationId)` attach on user switch.
