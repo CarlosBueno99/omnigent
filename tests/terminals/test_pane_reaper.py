@@ -426,3 +426,52 @@ async def test_runner_reap_leaves_a_recreated_sessions_sidecars_untouched(
         await asyncio.gather(old_forwarder, new_forwarder, return_exceptions=True)
         native_runtime._AUTO_FORWARDER_TASKS.pop(conv, None)
         native_runtime._AUTO_OPENCODE_SERVERS.pop(conv, None)
+
+
+async def test_runner_reap_releases_sidecars_even_when_the_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed terminal close must still release the pane's forwarder and server
+    (the ``finally`` guards the leak) and must not swallow the close error."""
+    conv = "conv_reap_close_fails"
+    registry = TerminalRegistry()
+    instance = make_test_terminal_instance("opencode", "main", tmp_path)
+    registry._by_conversation[conv] = {("opencode", "main"): instance}
+    resource_registry = SessionResourceRegistry(terminal_registry=registry)
+    app = create_runner_app(
+        terminal_registry=registry,
+        resource_registry=resource_registry,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    reaper = app.state.native_pane_reaper
+    assert reaper is not None
+
+    forwarder = asyncio.create_task(asyncio.Event().wait(), name=f"forwarder-{conv}")
+    native_runtime._register_auto_forwarder_task(conv, forwarder)
+    server = _FakeSidecarServer()
+    native_runtime._AUTO_OPENCODE_SERVERS[conv] = server
+
+    class _CloseFailed(RuntimeError):
+        pass
+
+    async def close_raises(*args: object, **kwargs: object) -> bool:
+        raise _CloseFailed("pane close failed")
+
+    monkeypatch.setattr(resource_registry, "close_terminal", close_raises)
+    pane = PaneRef(
+        conv, terminal_resource_id("opencode", "main"), "opencode", instance.socket_path
+    )
+    try:
+        with pytest.raises(_CloseFailed):
+            await reaper._reap(pane)
+
+        assert forwarder.done(), "forwarder not released when the pane close failed"
+        assert conv not in native_runtime._AUTO_FORWARDER_TASKS
+        assert server.closed, "server not released when the pane close failed"
+        assert conv not in native_runtime._AUTO_OPENCODE_SERVERS
+    finally:
+        forwarder.cancel()
+        await asyncio.gather(forwarder, return_exceptions=True)
+        native_runtime._AUTO_FORWARDER_TASKS.pop(conv, None)
+        native_runtime._AUTO_OPENCODE_SERVERS.pop(conv, None)
