@@ -636,6 +636,53 @@ class ClaudeMessageNotAccepted(RuntimeError):
     """The submitted draft remained in Claude's input box until the deadline."""
 
 
+class ClaudeSessionInactive(RuntimeError):
+    """A native reset changed the pane's owner before user-input handoff."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Claude native session is no longer active after /clear; "
+            "open the latest conversation and retry."
+        )
+
+
+def _require_input_session(bridge_dir: Path, expected_session_id: str | None) -> None:
+    if expected_session_id is not None:
+        active = read_active_session_id(bridge_dir)
+        if active is not None and active != expected_session_id:
+            raise ClaudeSessionInactive()
+
+
+@contextlib.contextmanager
+def _pending_framework_context(
+    bridge_dir: Path, notices: list[str] | None, expected_session_id: str | None
+) -> Iterator[None]:
+    """Stage context at handoff and remove only this delivery's file on failure."""
+    _require_input_session(bridge_dir, expected_session_id)
+    path = bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
+    identity: tuple[int, int, int, int] | None = None
+    if notices:
+        identity = _write_text_file(
+            path, "\n\n".join(notices), expected_session_id=expected_session_id
+        )
+    elif notices is not None:
+        path.unlink(missing_ok=True)
+    try:
+        yield
+    except BaseException:
+        if identity is not None:
+            with contextlib.suppress(FileNotFoundError):
+                current = path.lstat()
+                if (
+                    current.st_dev,
+                    current.st_ino,
+                    current.st_mtime_ns,
+                    current.st_ctime_ns,
+                ) == identity:
+                    path.unlink()
+        raise
+
+
 @contextlib.contextmanager
 def cancellable_injection(cancel_event: threading.Event) -> Iterator[None]:
     """Bind a cancellation flag inherited by this delivery's ``asyncio.to_thread`` worker."""
@@ -4139,6 +4186,8 @@ def inject_user_message(
     *,
     content: str,
     timeout_s: float = _TMUX_READY_TIMEOUT_S,
+    expected_session_id: str | None = None,
+    framework_notices: list[str] | None = None,
 ) -> None:
     r"""
     Deliver a user message into the Claude terminal via tmux send-keys.
@@ -4192,6 +4241,9 @@ def inject_user_message(
         terminal's process is verifiably alive but still booting (see
         :func:`_wait_for_claude_prompt_ready`), so a slow host connect
         delivers the message late instead of dropping it.
+    :param expected_session_id: Refuse stale conversation input before its first paste.
+    :param framework_notices: One-shot hook context staged with this input; ``None``
+        leaves legacy callers' context unchanged.
     :returns: None.
     :raises RuntimeError: If the tmux target is not advertised in time,
         if Claude's input prompt never renders, if a ``tmux send-keys``
@@ -4200,6 +4252,7 @@ def inject_user_message(
     :raises ClaudeTerminalDialog: If the input box stays in shell mode or the
         prompt-history search after the reclaim; nothing was typed.
     """
+    _require_input_session(bridge_dir, expected_session_id)
     delivery_diagnostics.set_stage("waiting_for_tmux")
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     delivery_diagnostics.set_stage("restoring_input")
@@ -4250,32 +4303,47 @@ def inject_user_message(
         rejection_baseline = _count_unknown_command_rejections(
             _capture_pane(socket_path, tmux_target), rejection_needle
         )
-    _paste_and_submit(bridge_dir, socket_path, tmux_target, text=injected_text, needle=needle)
-    if rejection_needle is None:
-        return
-    if not _unknown_command_rejection_appeared(
-        socket_path,
-        tmux_target,
-        needle=rejection_needle,
-        baseline=rejection_baseline,
-    ):
-        # No rejection: Claude Code accepted the command (a real skill or
-        # custom command) and the turn is underway.
-        return
-    # Claude Code dropped the message. Re-deliver it escaped so the text
-    # reaches the model as a regular user message instead of vanishing.
-    _logger.info(
-        "claude-native: Claude Code rejected unknown command /%s; "
-        "re-delivering the message escaped as plain text",
-        unknown_name,
-    )
-    _paste_and_submit(
-        bridge_dir,
-        socket_path,
-        tmux_target,
-        text=_escape_slash_command_text(content),
-        needle=needle,
-    )
+    with _pending_framework_context(bridge_dir, framework_notices, expected_session_id):
+        _paste_and_submit(
+            bridge_dir,
+            socket_path,
+            tmux_target,
+            text=injected_text,
+            needle=needle,
+            expected_session_id=expected_session_id,
+        )
+        if rejection_needle is None:
+            return
+        if not _unknown_command_rejection_appeared(
+            socket_path,
+            tmux_target,
+            needle=rejection_needle,
+            baseline=rejection_baseline,
+        ):
+            # No rejection: Claude Code accepted the command (a real skill or
+            # custom command) and the turn is underway.
+            return
+        # Claude Code dropped the message. Re-deliver it escaped so the text
+        # reaches the model as a regular user message instead of vanishing.
+        _logger.info(
+            "claude-native: Claude Code rejected unknown command /%s; "
+            "re-delivering the message escaped as plain text",
+            unknown_name,
+        )
+        try:
+            _paste_and_submit(
+                bridge_dir,
+                socket_path,
+                tmux_target,
+                text=_escape_slash_command_text(content),
+                needle=needle,
+                expected_session_id=expected_session_id,
+            )
+        except ClaudeSessionInactive as exc:
+            raise RuntimeError(
+                "The native session changed after the initial submit; "
+                "the command fallback was not sent. Open the latest conversation."
+            ) from exc
 
 
 def _paste_and_submit(
@@ -4285,6 +4353,7 @@ def _paste_and_submit(
     *,
     text: str,
     needle: str,
+    expected_session_id: str | None = None,
 ) -> None:
     r"""
     Deliver *text* into Claude's input box as one paste plus a verified Enter.
@@ -4308,6 +4377,7 @@ def _paste_and_submit(
         never leaves the input box after repeated submit Enters, or if a
         prompt appears after the submit Enter.
     """
+    _require_input_session(bridge_dir, expected_session_id)
     delivery_diagnostics.start_attempt()
     delivery_diagnostics.set_stage("checking_pending_prompt")
     if has_pending_user_prompt(bridge_dir):
@@ -4337,6 +4407,7 @@ def _paste_and_submit(
         paste_path = paste_file.name
     try:
         _run_tmux(socket_path, "load-buffer", "-b", "omnigent-paste", paste_path)
+        _require_input_session(bridge_dir, expected_session_id)
         _run_tmux(
             socket_path,
             "paste-buffer",
@@ -9594,6 +9665,13 @@ def _write_json_file(path: Path, payload: _JsonObject) -> None:
     :param payload: JSON-compatible object.
     :returns: None.
     """
+    _write_text_file(path, json.dumps(payload, separators=(",", ":")))
+
+
+def _write_text_file(
+    path: Path, text: str, *, expected_session_id: str | None = None
+) -> tuple[int, int, int, int] | None:
+    """Atomically write owner-only bridge text and return the file's identity."""
     _ensure_secure_dir(path.parent)
     tmp_path: Path | None = None
     try:
@@ -9606,11 +9684,22 @@ def _write_json_file(path: Path, payload: _JsonObject) -> None:
             delete=False,
         ) as handle:
             tmp_path = Path(handle.name)
-            handle.write(json.dumps(payload, separators=(",", ":")))
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+            before = os.fstat(handle.fileno())
         os.chmod(tmp_path, 0o600)
+        _require_input_session(path.parent, expected_session_id)
         os.replace(tmp_path, path)
+        with contextlib.suppress(OSError):
+            after = path.lstat()
+            if (after.st_dev, after.st_ino, after.st_mtime_ns) == (
+                before.st_dev,
+                before.st_ino,
+                before.st_mtime_ns,
+            ):
+                return after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns
+        return None
     finally:
         if tmp_path is not None:
             with contextlib.suppress(FileNotFoundError):
