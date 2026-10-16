@@ -517,3 +517,40 @@ async def test_sys_read_inbox_keeps_server_mcp_round_trip(
     assert policy_calls == [], (
         "a proxied built-in enforces policy on the /mcp path, not /policies/evaluate"
     )
+
+
+async def test_ungranted_builtin_refused_locally_with_proxy_manager() -> None:
+    """An ungranted built-in is refused on the local arm, before any round trip.
+
+    The /mcp manager used to resolve the granted surface. A locally dispatched
+    built-in is now gated by ``execute_tool`` itself, so an ungranted built-in
+    with a ``ProxyMcpManager`` present must be refused without a /mcp dispatch
+    or a TOOL_CALL policy round trip.
+    """
+    mcp_paths: list[str] = []
+    policy_calls: list[tuple[str, str]] = []
+    proxy_client = _recording_proxy_client(mcp_paths)
+    policy_client = _recording_policy_client(policy_calls)
+    proxy = ProxyMcpManager(_SESSION_ID, proxy_client)
+    try:
+        output = await execute_tool(
+            tool_name="sys_session_share",
+            arguments=json.dumps({"session_id": _SESSION_ID}),
+            agent_spec=_claude_sdk_spec(),
+            conversation_id=_SESSION_ID,
+            server_client=policy_client,
+            mcp_manager=cast(RunnerMcpManager, proxy),
+            effective_harness="claude-sdk",
+        )
+    finally:
+        await proxy_client.aclose()
+        await policy_client.aclose()
+
+    error = json.loads(output).get("error", "")
+    assert "sys_session_share" in error and "not enabled" in error, (
+        f"an ungranted built-in must be refused locally; got {output!r}"
+    )
+    assert mcp_paths == [], "the grant refusal must not fall back to the /mcp round trip"
+    assert policy_calls == [], (
+        "the grant check must short-circuit before TOOL_CALL policy evaluation"
+    )
