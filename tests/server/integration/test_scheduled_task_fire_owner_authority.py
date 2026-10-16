@@ -132,7 +132,10 @@ async def test_live_owner_with_account_generation_is_not_deleted(
     run = await _run_now_and_wait(oidc_client, task_id, owner)
     task = (await oidc_client.get(f"/v1/scheduled-tasks/{task_id}", headers=_bearer(owner))).json()
     assert run["error_code"] != "owner_deleted", (run, task)
+    # The owner check passed; with no host connected the fire fails at host resolution.
+    assert (run["status"], run["error_code"]) == ("failed", "no_online_host"), run
     assert task["state"] == "active", task
+    assert task["next_run_at"] is not None, task
 
 
 async def test_disabling_fire_drops_the_scheduler_timer(

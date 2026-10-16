@@ -24,6 +24,7 @@ from playwright.sync_api import Page, expect
 from omnigent.server.accounts_store import SqlAlchemyAccountStore
 from omnigent.server.passwords import hash_password
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
 from tests.e2e_ui.auth._fake_idp import FAKE_IDP_EMAIL
 from tests.e2e_ui.auth._oidc_server import OIDCServer, spawn_oidc_server
 
@@ -88,7 +89,10 @@ def _wait_for_run(page: Page, base_url: str, task_id: str) -> dict[str, Any]:
 
 
 def test_oidc_owner_with_account_generation_run_now_fires(
-    request: pytest.FixtureRequest, oidc_server: OIDCServer, owner_with_generation: str
+    request: pytest.FixtureRequest,
+    oidc_server: OIDCServer,
+    oidc_server_tmp: Path,
+    owner_with_generation: str,
 ) -> None:
     """Run now keeps the task active; with no host connected the run fails for a host reason."""
     page: Page = request.getfixturevalue("page")
@@ -132,6 +136,9 @@ def test_oidc_owner_with_account_generation_run_now_fires(
     created = next(t for t in tasks if t["name"] == _TASK_NAME)
     task_id = created["id"]
     assert created["owner_user_id"] == FAKE_IDP_EMAIL
+    # The reported precondition: external auth saved the task without a generation.
+    stored = SqlAlchemyScheduledTaskStore(f"sqlite:///{oidc_server_tmp / 'test.db'}").get(task_id)
+    assert stored is not None and stored.account_generation is None, stored
 
     row.hover()
     row.get_by_test_id("task-row-menu").click()
