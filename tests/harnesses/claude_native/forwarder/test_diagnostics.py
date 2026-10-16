@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import queue
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -419,11 +420,40 @@ def _record_turn(bridge_dir: Path, transcript_path: Path) -> None:
         )
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def _recording_transport(
+    requests: list[dict[str, Any]],
+    respond: Callable[[dict[str, Any]], httpx.Response] | None = None,
+) -> httpx.MockTransport:
+    """Record every JSON request body; answer 202 unless ``respond`` decides otherwise."""
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        requests.append(payload)
+        return respond(payload) if respond is not None else httpx.Response(202, json={})
+
+    return httpx.MockTransport(_handle)
+
+
+async def _forward_stop_edge(client: httpx.AsyncClient, bridge_dir: Path, session_id: str) -> None:
+    """Run one hook-phase pass from the first record, as the forwarder loop would."""
+    await forwarder._forward_available_status_events(
+        client=client,
+        session_id=session_id,
+        bridge_dir=bridge_dir,
+        state=forwarder.HookForwardState(event_cursor=0, byte_offset=0),
+        retry_tracker=forwarder._PostRetryTracker(),
+        dedupe=forwarder._ForwardDedupeState(),
+        task_subjects={},
+        task_statuses={},
+        task_order=[],
+    )
+
+
 @pytest.mark.asyncio
 async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A hook-reported transcript whose file never exists must not settle as a quiet turn.
 
@@ -431,15 +461,18 @@ async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
     create the file (an unwritable ``~/.claude/projects``) and still ends each turn with
     ``Stop``. The forwarder must keep posting the confirmed idle edge, but name the
     unread transcript on that edge, in the session history, and in the runner log.
+    The blocker text is injected so the scenario does not depend on filesystem
+    privileges; the probes themselves are covered by the focused tests below.
     """
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
     (bridge_dir / "claude-settings.json").write_text("{}", encoding="utf-8")
     projects = tmp_path / "projects"
     projects.mkdir()
-    projects.chmod(0o555)
     transcript_path = projects / "-home-user-workspace" / "claude-session.jsonl"
     moved_transcript_path = projects / "-home-user-worktree" / "claude-session.jsonl"
+    blocker = f"{projects} is not writable (EACCES)"
+    monkeypatch.setattr(forwarder, "_transcript_write_blocker", lambda path: blocker)
     record_hook_event(
         bridge_dir,
         {
@@ -477,14 +510,12 @@ async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5.0)
-        projects.chmod(0o755)
     while True:
         try:
             posts.append(server.requests.get_nowait())
         except queue.Empty:
             break
     assert not transcript_path.exists()
-    blocker = f"{projects} is not writable (EACCES)"
 
     # Every turn still settles as a confirmed completion, but each edge tells the
     # parent the result could not be read instead of "produced no output".
@@ -520,8 +551,9 @@ async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
     for item in error_items:
         assert item["item_data"]["source"] == "harness"
         assert item["item_data"]["code"] == "claude_transcript_missing"
+        assert item["item_data"]["title"] == "Claude Code's transcript was never written"
         assert blocker in item["item_data"]["cause"]
-        assert item["item_data"]["remediation"]
+        assert "writable" in item["item_data"]["remediation"]
     assert str(transcript_path) in error_items[0]["item_data"]["message"]
     assert str(moved_transcript_path) in error_items[2]["item_data"]["message"]
 
@@ -536,25 +568,35 @@ async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
 
 
 @pytest.mark.parametrize(
-    ("relative_path", "expected"),
+    ("relative_path", "file_in_the_way", "expected"),
     [
         pytest.param(
             Path("projects") / "missing-slug" / "claude-session.jsonl",
+            None,
             "{parent} does not exist (ENOENT); {root}/projects is writable",
             id="missing-parent-under-writable-dir",
         ),
         pytest.param(
             Path("projects") / "claude-session.jsonl",
+            None,
             "{parent} is writable but the file was never created",
             id="writable-parent-file-never-created",
+        ),
+        pytest.param(
+            Path("projects") / "slug" / "claude-session.jsonl",
+            Path("projects") / "slug",
+            "{parent} is not a directory (ENOTDIR)",
+            id="regular-file-where-the-parent-should-be",
         ),
     ],
 )
 def test_transcript_write_blocker_names_the_missing_or_writable_directory(
-    tmp_path: Path, relative_path: Path, expected: str
+    tmp_path: Path, relative_path: Path, file_in_the_way: Path | None, expected: str
 ) -> None:
     """Without a permission problem the diagnostic still says which directory is missing."""
     (tmp_path / "projects").mkdir()
+    if file_in_the_way is not None:
+        (tmp_path / file_in_the_way).write_text("", encoding="utf-8")
     transcript_path = tmp_path / relative_path
     assert forwarder._transcript_write_blocker(transcript_path) == expected.format(
         parent=transcript_path.parent, root=tmp_path
@@ -569,6 +611,19 @@ def test_unwritable_directory_errno_names_a_read_only_mount(tmp_path: Path) -> N
     )
     assert (read_only, writable_mount) == ("EROFS", "EACCES")
     assert forwarder._unwritable_directory_errno(tmp_path) == "EACCES"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_transcript_write_blocker_names_an_unwritable_directory(tmp_path: Path) -> None:
+    """The real permission probe names the first existing ancestor that refuses writes."""
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    projects.chmod(0o555)
+    try:
+        blocker = forwarder._transcript_write_blocker(projects / "slug" / "claude-session.jsonl")
+    finally:
+        projects.chmod(0o755)
+    assert blocker == f"{projects} is not writable (EACCES)"
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
@@ -591,7 +646,7 @@ def test_missing_transcript_blocker_treats_an_unsearchable_directory_as_unreadab
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
 def test_missing_transcript_blocker_reports_an_unreadable_existing_file(tmp_path: Path) -> None:
-    """A transcript that exists but cannot be read is surfaced instead of passing silently."""
+    """A transcript that exists but cannot be read is classified instead of passing silently."""
     transcript_path = tmp_path / "claude-session.jsonl"
     transcript_path.write_text("", encoding="utf-8")
     transcript_path.chmod(0o000)
@@ -622,25 +677,10 @@ async def test_failed_missing_transcript_diagnostic_does_not_block_the_idle_edge
     monkeypatch.setattr(forwarder, "_missing_transcript_blocker", exploding_probe)
     caplog.set_level(logging.INFO, logger=forwarder.__name__)
     requests: list[dict[str, Any]] = []
-
-    def _handle_request(request: httpx.Request) -> httpx.Response:
-        requests.append(json.loads(request.content.decode("utf-8")))
-        return httpx.Response(202, json={})
-
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(_handle_request), base_url="http://test"
+        transport=_recording_transport(requests), base_url="http://test"
     ) as client:
-        await forwarder._forward_available_status_events(
-            client=client,
-            session_id="conv_probe_failed",
-            bridge_dir=bridge_dir,
-            state=forwarder.HookForwardState(event_cursor=0, byte_offset=0),
-            retry_tracker=forwarder._PostRetryTracker(),
-            dedupe=forwarder._ForwardDedupeState(),
-            task_subjects={},
-            task_statuses={},
-            task_order=[],
-        )
+        await _forward_stop_edge(client, bridge_dir, "conv_probe_failed")
 
     assert requests == [
         {
@@ -682,29 +722,17 @@ async def test_missing_transcript_notice_retries_then_still_posts_the_idle_edge(
     requests: list[dict[str, Any]] = []
     remaining_rejections = rejections
 
-    def _handle_request(request: httpx.Request) -> httpx.Response:
+    def _reject_notices(payload: dict[str, Any]) -> httpx.Response:
         nonlocal remaining_rejections
-        payload = json.loads(request.content.decode("utf-8"))
-        requests.append(payload)
         if payload["type"] == "external_conversation_item" and remaining_rejections > 0:
             remaining_rejections -= 1
             return httpx.Response(503, json={"error": "busy"})
         return httpx.Response(202, json={})
 
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(_handle_request), base_url="http://test"
+        transport=_recording_transport(requests, _reject_notices), base_url="http://test"
     ) as client:
-        await forwarder._forward_available_status_events(
-            client=client,
-            session_id="conv_retry",
-            bridge_dir=bridge_dir,
-            state=forwarder.HookForwardState(event_cursor=0, byte_offset=0),
-            retry_tracker=forwarder._PostRetryTracker(),
-            dedupe=forwarder._ForwardDedupeState(),
-            task_subjects={},
-            task_statuses={},
-            task_order=[],
-        )
+        await _forward_stop_edge(client, bridge_dir, "conv_retry")
 
     notices = [
         request["data"] for request in requests if request["type"] == "external_conversation_item"
@@ -754,28 +782,13 @@ async def test_missing_transcript_notice_deadline_frees_the_idle_edge_during_a_t
     dispatcher.ready(_send)
     dispatcher.disconnected()
     requests: list[dict[str, Any]] = []
-
-    def _handle_request(request: httpx.Request) -> httpx.Response:
-        requests.append(json.loads(request.content.decode("utf-8")))
-        return httpx.Response(202, json={})
-
     started = asyncio.get_running_loop().time()
     async with TunnelEventClient(
         event_dispatcher=dispatcher,
-        transport=httpx.MockTransport(_handle_request),
+        transport=_recording_transport(requests),
         base_url="http://test",
     ) as client:
-        await forwarder._forward_available_status_events(
-            client=client,
-            session_id="conv_tunnel_outage",
-            bridge_dir=bridge_dir,
-            state=forwarder.HookForwardState(event_cursor=0, byte_offset=0),
-            retry_tracker=forwarder._PostRetryTracker(),
-            dedupe=forwarder._ForwardDedupeState(),
-            task_subjects={},
-            task_statuses={},
-            task_order=[],
-        )
+        await _forward_stop_edge(client, bridge_dir, "conv_tunnel_outage")
     elapsed = asyncio.get_running_loop().time() - started
 
     # The notice waited on the tunnel and never reached HTTP; the edge did.
@@ -792,42 +805,27 @@ async def test_missing_transcript_notice_deadline_frees_the_idle_edge_during_a_t
     assert "outcome=deadline" in dropped[0].getMessage()
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
 @pytest.mark.asyncio
 async def test_unreadable_existing_transcript_gets_its_own_wording(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A transcript that exists but cannot be read is explained as unreadable, not unwritten."""
+    """A transcript classified as unreadable is explained as such, not as never written."""
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
     transcript_path = tmp_path / "claude-session.jsonl"
-    transcript_path.write_text("", encoding="utf-8")
-    transcript_path.chmod(0o000)
     _record_turn(bridge_dir, transcript_path)
+    unread = forwarder._UnreadTranscript(
+        transcript_path, f"{transcript_path} is not readable (EACCES)", exists=True
+    )
+    monkeypatch.setattr(forwarder, "_missing_transcript_blocker", lambda bridge_dir, path: unread)
     caplog.set_level(logging.WARNING, logger=forwarder.__name__)
     requests: list[dict[str, Any]] = []
-
-    def _handle_request(request: httpx.Request) -> httpx.Response:
-        requests.append(json.loads(request.content.decode("utf-8")))
-        return httpx.Response(202, json={})
-
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(_handle_request), base_url="http://test"
-        ) as client:
-            await forwarder._forward_available_status_events(
-                client=client,
-                session_id="conv_unreadable",
-                bridge_dir=bridge_dir,
-                state=forwarder.HookForwardState(event_cursor=0, byte_offset=0),
-                retry_tracker=forwarder._PostRetryTracker(),
-                dedupe=forwarder._ForwardDedupeState(),
-                task_subjects={},
-                task_statuses={},
-                task_order=[],
-            )
-    finally:
-        transcript_path.chmod(0o644)
+    async with httpx.AsyncClient(
+        transport=_recording_transport(requests), base_url="http://test"
+    ) as client:
+        await _forward_stop_edge(client, bridge_dir, "conv_unreadable")
 
     [notice] = [r["data"] for r in requests if r["type"] == "external_conversation_item"]
     [status] = [r["data"] for r in requests if r["type"] == "external_session_status"]

@@ -368,6 +368,8 @@ def _transcript_write_blocker(transcript_path: Path) -> str:
         except OSError as exc:
             code = errno.errorcode.get(exc.errno or 0, type(exc).__name__)
             return f"{ancestor} is not accessible ({code})"
+        if not ancestor.is_dir():
+            return f"{ancestor} is not a directory (ENOTDIR)"
         if not os.access(ancestor, os.W_OK | os.X_OK):
             return f"{ancestor} is not writable ({_unwritable_directory_errno(ancestor)})"
         if ancestor != transcript_path.parent:
