@@ -684,7 +684,7 @@ export function composerWorktreeHeaderState({
   };
 }
 
-/** Only known-idle sessions are excluded; missing status errs toward warning. */
+/** Idle is the only status that frees a directory; running, waiting and failed still occupy it. */
 export function isWorkingStatus(status: Conversation["status"]): boolean {
   return status !== "idle";
 }

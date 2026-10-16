@@ -671,7 +671,8 @@ describe("sessionsSharingDirectory", () => {
       expected: ["f"],
     },
     {
-      // Older rows without status err toward warning.
+      // Not idle, so the raw predicate counts it; useConversations maps a missing
+      // wire status to idle before rows reach the dialogs.
       name: "counts a session with no status field",
       sessions: [conv({ id: "u", host_id: "host_1", workspace: "/repo", status: undefined })],
       hostId: "host_1",
@@ -6731,13 +6732,20 @@ describe("NewChatLandingScreen", () => {
 
   it("suppresses the conflict banner once a git branch is named", async () => {
     useDirectorySessionsMock.mockReturnValue({
-      data: [conv({ id: "s1", host_id: "host_1", workspace: "/Users/corey/repo" })],
+      data: [
+        conv({ id: "s1", host_id: "host_1", workspace: "/Users/corey/repo", status: "running" }),
+      ],
     } as unknown as ReturnType<typeof useDirectorySessions>);
     useRunnerHealthMock.mockReturnValue(new Map([["s1", true]]));
     renderLanding();
     await waitFor(() =>
       expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("repo"),
     );
+    // Without a branch the running session occupies the directory and the picker warns.
+    fireEvent.click(screen.getByTestId("new-chat-landing-workspace-chip"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-workspace-open-folder"));
+    expect(screen.getByTestId("workspace-picker-conflict")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("workspace-picker-cancel"));
     // Name a git branch: that starts an isolated worktree, so the picked
     // directory is no longer shared and the picker must not warn.
     fireEvent.click(screen.getByTestId("new-chat-landing-branch-chip"));
@@ -6745,6 +6753,8 @@ describe("NewChatLandingScreen", () => {
       target: { value: "feature/x" },
     });
     fireEvent.click(screen.getByTestId("new-chat-landing-workspace-chip"));
+    fireEvent.click(screen.getByTestId("new-chat-landing-workspace-open-folder"));
+    expect(screen.getByTestId("workspace-picker-listing")).toBeInTheDocument();
     expect(screen.queryByTestId("workspace-picker-conflict")).toBeNull();
   });
 
