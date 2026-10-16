@@ -46,3 +46,47 @@ def test_only_a_server_initiated_close_code_marks_shutdown(
 ) -> None:
     assert shutdown_state.note_tunnel_close_code(code) is expected
     assert shutdown_state.server_shutting_down() is expected
+
+
+def test_runner_handoff_is_scoped_to_one_runner_and_expires() -> None:
+    shutdown_state.mark_runner_handed_off("runner-a", reason="rebalance")
+
+    assert shutdown_state.runner_handoff_reason("runner-a") == "rebalance"
+    assert shutdown_state.runner_handoff_reason("runner-b") is None
+    assert shutdown_state.runner_handoff_reason(None) is None
+    assert shutdown_state.server_shutting_down() is False
+    expired = time.monotonic() + shutdown_state.SHUTDOWN_WINDOW_S
+    assert shutdown_state.runner_handoff_reason("runner-a", now=expired) is None
+
+
+def test_runner_handoff_clears_when_the_runner_reconnects_here() -> None:
+    shutdown_state.mark_runner_handed_off("runner-a", reason="rebalance")
+    shutdown_state.clear_runner_handoff("runner-a")
+    assert shutdown_state.runner_handoff_reason("runner-a") is None
+
+
+def test_handoff_and_shutdown_marks_are_logged_for_attribution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger=shutdown_state.__name__)
+
+    shutdown_state.mark_runner_handed_off("runner-a", reason="rebalance", slice_key="ws-1")
+    shutdown_state.mark_server_shutting_down()
+    shutdown_state.note_tunnel_close_code(1012)
+
+    events = {
+        getattr(record, "event_name", None): getattr(record, "attributes", None)
+        for record in caplog.records
+    }
+    assert events["runner_tunnel_handed_off"] == {
+        "runner_id": "runner-a",
+        "handoff_reason": "rebalance",
+        "slice_key": "ws-1",
+    }
+    assert [r.event_name for r in caplog.records if hasattr(r, "event_name")].count(
+        "server_shutdown_marked"
+    ) == 1
+    assert shutdown_state.disconnect_attributes("runner-a") == {
+        "server_shutting_down": True,
+        "runner_handoff_reason": "rebalance",
+    }

@@ -3534,6 +3534,16 @@ def create_app(
                 runner_id,
             )
             return
+        # The same holds for one runner this replica handed to another replica.
+        handoff_reason = shutdown_state.runner_handoff_reason(runner_id)
+        if handoff_reason is not None:
+            _logger.info(
+                "Runner %s dropped because this server handed it off (%s); "
+                "skipping offline-marking",
+                runner_id,
+                handoff_reason,
+            )
+            return
         if reconnected is not None:
             _logger.info(
                 "Runner %s reconnected within the liveness lease; skipping offline-marking",
@@ -3629,7 +3639,11 @@ def create_app(
             return
         _logger.info(
             "Runner disconnected",
-            extra=debug_event("runner_disconnected", runner_id=runner_id),
+            extra=debug_event(
+                "runner_disconnected",
+                runner_id=runner_id,
+                **shutdown_state.disconnect_attributes(runner_id),
+            ),
         )
         # Capture this replica's own last stamp before clearing, so the grace
         # timer can tell a fresher stamp another replica writes later from
@@ -3638,7 +3652,11 @@ def create_app(
         # Graceful disconnect: clear the persisted liveness stamp so other replicas
         # flip offline at once. Not on our own shutdown: the runner is alive and
         # re-tunnels to the replacement, which must not settle its turns to idle.
-        if shutdown_state.server_shutting_down():
+        # A handed-off runner is alive too.
+        if (
+            shutdown_state.server_shutting_down()
+            or shutdown_state.runner_handoff_reason(runner_id) is not None
+        ):
             session_live_state.touch_runner_liveness([runner_id])
         else:
             session_live_state.clear_runner_liveness(runner_id)
@@ -3741,6 +3759,8 @@ def create_app(
             "Runner connected",
             extra=debug_event("runner_connected", runner_id=runner_id),
         )
+        # A runner back on this replica is this replica's to reconcile again.
+        shutdown_state.clear_runner_handoff(runner_id)
         # Other replicas must see the runner online before the first liveness sweep.
         session_live_state.touch_runner_liveness([runner_id])
         # The by-runner lookup is read-after-write consistent and includes archived

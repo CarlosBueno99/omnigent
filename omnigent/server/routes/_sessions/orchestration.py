@@ -7873,6 +7873,7 @@ async def _runner_disconnect_requires_failure(
         live, source = None, "unknown"
 
     conv = persisted if persisted is not None else fallback
+    runner_id = handle.runner_id if handle is not None else conv.runner_id if conv else None
     if (
         snapshot is not None
         and snapshot.runner_id is not None
@@ -7880,6 +7881,11 @@ async def _runner_disconnect_requires_failure(
     ):
         # A Stop can arrive while the sweep refreshes its row.
         decision = "intentional_stop"
+    elif shutdown_state.runner_handoff_reason(runner_id) is not None:
+        # This replica moved the runner's tunnel to another replica, which now
+        # owns the turn. A failed or stale local read must not fail a turn that
+        # is still running there.
+        decision = "handed_off"
     elif live in _MID_TURN_STATUSES and source != "cache" and _owned_by_parent_runtime(conv):
         decision = "subagent_unobserved"
     elif live in _MID_TURN_STATUSES:
@@ -7952,10 +7958,11 @@ async def _runner_disconnect_requires_failure(
             status_lookup=lookup,
             session_kind=conv.kind if conv is not None else None,
             parent_session_id=conv.parent_conversation_id if conv is not None else None,
-            runner_id=handle.runner_id if handle is not None else conv.runner_id if conv else None,
+            runner_id=runner_id,
             host_id=conv.host_id if conv is not None else None,
             conversation_updated_at=conv.updated_at if conv is not None else None,
             fail_idle_top_level=fail_idle_top_level,
+            **shutdown_state.disconnect_attributes(runner_id),
         ),
     )
     return decision in ("failed_mid_turn", "failed_before_start")
@@ -8144,6 +8151,9 @@ async def _relay_runner_stream(
                 decision = "intentional_stop"
             elif shutdown_state.server_shutting_down():
                 decision = "server_shutdown"
+            elif shutdown_state.runner_handoff_reason(outage_runner_id) is not None:
+                # See _runner_disconnect_requires_failure.
+                decision = "handed_off"
             elif await _relay_runner_live_elsewhere(session_id, conversation_store):
                 decision = "live_elsewhere"
             elif await _runner_disconnect_requires_failure(
@@ -8174,6 +8184,7 @@ async def _relay_runner_stream(
                     ),
                     retries=retries,
                     telemetry_schema=_RELAY_TELEMETRY_SCHEMA,
+                    **shutdown_state.disconnect_attributes(outage_runner_id),
                 ),
             )
             if decision == "intentional_stop":
@@ -8196,7 +8207,7 @@ async def _relay_runner_stream(
                     session_id,
                     extra={"session_id": session_id},
                 )
-            elif decision == "live_elsewhere":
+            elif decision in ("live_elsewhere", "handed_off"):
                 # The runner re-tunnelled to another replica before this one
                 # noticed the drop; that replica now owns the turn.
                 _relinquish_session_live_state(session_id)
