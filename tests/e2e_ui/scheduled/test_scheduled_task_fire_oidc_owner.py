@@ -122,8 +122,9 @@ def test_oidc_owner_with_account_generation_run_now_fires(
     mark("task row listed with a next run")
     page.wait_for_timeout(2_000)
     tasks = _api_get(page, api_url, "/v1/scheduled-tasks")["scheduled_tasks"]
-    task_id = next(t["id"] for t in tasks if t["name"] == _TASK_NAME)
-    assert tasks[0]["owner_user_id"] == FAKE_IDP_EMAIL
+    created = next(t for t in tasks if t["name"] == _TASK_NAME)
+    task_id = created["id"]
+    assert created["owner_user_id"] == FAKE_IDP_EMAIL
 
     row.hover()
     row.get_by_test_id("task-row-menu").click()
@@ -148,7 +149,7 @@ def test_oidc_owner_with_account_generation_run_now_fires(
     page.wait_for_timeout(4_000)
 
     task = _api_get(page, api_url, f"/v1/scheduled-tasks/{task_id}")
-    sessions = _api_get(page, api_url, "/v1/sessions")["data"]
+    sessions = _api_get(page, api_url, "/v1/sessions?visibility=all")["data"]
     observed = {
         "owner_generation_set": bool(owner_with_generation),
         "task": {k: task[k] for k in ("state", "last_run_status", "next_run_at")},
