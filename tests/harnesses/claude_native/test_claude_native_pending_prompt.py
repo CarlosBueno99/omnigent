@@ -22,8 +22,6 @@ Which bridge should we use?
   4. Chat about this
 Enter to select · ↑/↓ to navigate · Esc to cancel
 """
-# A narrow pane wraps the question's footer across two rows.
-_QUESTION_WRAPPED_FOOTER = _QUESTION.replace("Esc to cancel", "Esc to\ncancel")
 # The plan-approval dialog has no "Enter to …" footer.
 _PLAN_APPROVAL = """\
    - Read the new field in the parser
@@ -36,9 +34,7 @@ _PLAN_APPROVAL = """\
         shift+tab to approve with this feedback
    ctrl+g to edit in Vim · ~/.claude/plans/example-plan.md
 """
-# The same dialog as Claude Code 2.1.283 draws it, captured from the product's
-# terminal (session id, cwd and prompt text normalized): a new headline, still
-# no footer.
+# The plan dialog as Claude Code 2.1.283 draws it: a new headline, still no footer.
 _PLAN_APPROVAL_EXIT_PLAN_MODE = """\
  ▐▛███▛█   Claude Code v2.1.283
 ▝▜██████▀  Sonnet 4 · API Usage Billing
@@ -60,8 +56,8 @@ _PLAN_APPROVAL_EXIT_PLAN_MODE = """\
     ❯ 1. Yes, and switch to default (ask each time) for this session
       2. No
 """
-# An AskUserQuestion on a 47-column pane, captured from Claude Code 2.1.283 the
-# same way: the banner and the footer ("Esc to" / "cancel") both wrap.
+# An AskUserQuestion on a 47-column pane: the banner and the footer
+# ("Esc to" / "cancel") both wrap.
 _QUESTION_NARROW_PANE = """\
  ▐▛███▛█   Claude Code v2.1.283
 ▝▜██████▀  Sonnet 4 · API Usage Billing
@@ -145,7 +141,6 @@ def test_live_hook_protects_a_prompt_even_during_a_torn_capture(
     [
         _QUESTION,
         _QUESTION.replace("Enter to select", "Space to select · Enter to submit"),
-        _QUESTION_WRAPPED_FOOTER,
         _QUESTION_NARROW_PANE,
         _PERMISSION,
         _PLAN_APPROVAL,
@@ -229,7 +224,6 @@ def test_question_appearing_after_readiness_prevents_paste(
     "pane",
     [
         _QUESTION,
-        _QUESTION_WRAPPED_FOOTER,
         _QUESTION_NARROW_PANE,
         _PLAN_APPROVAL,
         _PLAN_APPROVAL_EXIT_PLAN_MODE,
@@ -240,6 +234,10 @@ def test_question_appearing_during_readiness_does_not_become_a_terminal_timeout(
 ) -> None:
     """Refused at once, so the executor keeps the pane instead of reaping it at the cap."""
     monkeypatch.setattr(bridge, "_capture_pane", lambda *_: pane)
+    # A recognition regression would otherwise poll to the slow-boot hard cap; bound
+    # it so the regression fails in one poll instead of the 180-second wait.
+    monkeypatch.setattr(bridge, "_TMUX_READY_SLOW_BOOT_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(bridge, "_claude_pane_state", lambda *_: bridge._ClaudePaneState(True))
     with pytest.raises(bridge.ClaudeUserPromptPending):
         bridge._wait_for_claude_prompt_ready(
             "/tmp/example.sock", "main", timeout_s=0, bridge_dir=native_bridge
