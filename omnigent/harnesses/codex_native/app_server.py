@@ -2278,39 +2278,23 @@ class CodexNativeAppServer:
             try:
                 startup_client = await self._wait_until_ready()
             except CodexAppServerSilentStartTimeout as silent:
-                # A loaded host can leave a fresh app-server silent; a second spawn listens.
+                # A loaded host can leave a fresh app-server silent; a second spawn
+                # listens. It must reuse the transport: callers captured the listen
+                # URL before start() and hand it to the TUI, forwarder and bridge.
                 _logger.warning(
                     "Codex app-server never listened and is still running (stderr_bytes=%d); "
-                    "respawning it once on a fresh port",
+                    "respawning it once on the same transport",
                     silent.stderr_bytes,
+                    extra=debug_event(
+                        "codex_app_server_silent_start_respawn", session_id=self.session_id
+                    ),
                 )
-                silent_proc = self.proc
-                if silent_proc is not None:
-                    _terminate_process_tree(silent_proc)
-                    try:
-                        await asyncio.wait_for(silent_proc.wait(), timeout=2.0)
-                    except asyncio.TimeoutError:
-                        _kill_process_tree(silent_proc)
-                        await silent_proc.wait()
-                if self.process_registry_tag is not None:
-                    unregister_codex_native_process(self.process_registry_tag)
-                if self.process_owner_lock is not None:
-                    self.process_owner_lock.close()
-                    self.process_owner_lock = None
-                if self.stderr_task is not None:
-                    self.stderr_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self.stderr_task
-                if self.listen_url and self.listen_url.startswith("ws://"):
-                    port = _allocate_loopback_port()
-                    resolved_listen = f"ws://127.0.0.1:{port}"
-                    self.listen_url = resolved_listen
-                else:
+                await self.close()
+                if resolved_listen.startswith("unix://"):
                     with contextlib.suppress(FileNotFoundError):
                         self.socket_path.unlink()
-                    resolved_listen = f"unix://{self.socket_path}"
-                # The second spawn gets its own full readiness budget.
                 await self._spawn_app_server_process(resolved_listen)
+                # The second spawn gets its own full readiness budget.
                 startup_client = await self._wait_until_ready()
             try:
                 # Standalone CLI launches may have no shared catalog snapshot.

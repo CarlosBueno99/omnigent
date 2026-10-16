@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +27,9 @@ from omnigent.harnesses.codex_native.bridge import (
 from omnigent.process_logging import HARNESS_STDERR_ENABLED_ENV_VAR
 from tests.harnesses.codex_native.app_server._support import (
     _disable_codex_startup_rpc,
+    _fake_trust_policy_hooks,
     _FakeStartupClient,
+    _set_codex_version,
     _test_app_server,
 )
 
@@ -158,13 +161,17 @@ async def test_start_respawns_on_silent_startup_timeout(
         "omnigent.harnesses.codex_native.app_server.unregister_codex_native_process",
         lambda *args: None,
     )
+    listen_url = "ws://127.0.0.1:43121"
+    server.listen_url = listen_url
 
     await server.start()
     try:
-        # Verify: spawn called twice (initial + respawn), readiness called twice.
-        assert len(spawn_calls) == 2
+        # Callers hand the pre-start URL to the TUI and forwarder, so the
+        # respawn must reuse it.
+        assert spawn_calls == [listen_url, listen_url]
+        assert server.listen_url == listen_url
         assert len(readiness_calls) == 2
-        assert len(kill_calls) == 1  # First proc killed once.
+        assert len(kill_calls) == 1
     finally:
         await server.close()
 
@@ -235,6 +242,96 @@ async def test_start_fails_on_second_silent_timeout(
     # Second timeout should raise CodexAppServerSilentStartTimeout (same message), not retry again.
     with pytest.raises(codex_native_app_server.CodexAppServerSilentStartTimeout):
         await server.start()
+
+
+_SILENT_THEN_LISTENING_APP_SERVER = '''\
+"""Fake ``codex app-server``: alive but silent on spawn 1, listening on spawn 2."""
+import asyncio
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+from websockets.asyncio.server import serve
+
+state_dir = Path(os.environ["FAKE_APP_SERVER_STATE_DIR"])
+attempt = len(list(state_dir.glob("attempt-*"))) + 1
+(state_dir / f"attempt-{attempt}").write_text(str(os.getpid()))
+if attempt == 1:
+    time.sleep(3600)
+host, port = sys.argv[sys.argv.index("--listen") + 1].removeprefix("ws://").split(":")
+
+
+async def handle(connection):
+    async for raw in connection:
+        message = json.loads(raw)
+        if "id" in message:
+            await connection.send(json.dumps({"id": message["id"], "result": {}}))
+
+
+async def main():
+    async with serve(handle, host, int(port)):
+        await asyncio.Future()
+
+
+asyncio.run(main())
+'''
+
+
+async def test_start_respawns_a_silent_app_server_on_the_same_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real app-server that never listens is replaced on the URL callers already hold."""
+    from omnigent.harnesses.codex_native import app_server as codex_native_app_server
+
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    monkeypatch.setattr(codex_native_app_server, "_APP_SERVER_READY_TIMEOUT_SECONDS", 3.0)
+    _set_codex_version(monkeypatch, (0, 147, 0))
+    monkeypatch.setattr(CodexNativeAppServer, "_trust_policy_hooks", _fake_trust_policy_hooks)
+
+    state_dir = tmp_path / "app-server-state"
+    state_dir.mkdir()
+    script = tmp_path / "fake_app_server.py"
+    script.write_text(_SILENT_THEN_LISTENING_APP_SERVER)
+    codex = tmp_path / "codex"
+    codex.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+    codex.chmod(0o755)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        listen_url = f"ws://127.0.0.1:{probe.getsockname()[1]}"
+
+    server = _test_app_server(
+        tmp_path,
+        tmp_path / "codex-home",
+        tmp_path / "bridge",
+        workspace,
+        env={"FAKE_APP_SERVER_STATE_DIR": str(state_dir)},
+    )
+    server.codex_path = str(codex)
+    server.listen_url = listen_url
+
+    await server.start()
+    try:
+        assert sorted(path.name for path in state_dir.iterdir()) == ["attempt-1", "attempt-2"]
+        assert server.listen_url == listen_url
+        silent_pid = int((state_dir / "attempt-1").read_text())
+        assert (
+            not psutil.pid_exists(silent_pid)
+            or psutil.Process(silent_pid).status() == psutil.STATUS_ZOMBIE
+        )
+        assert server.proc is not None and server.proc.returncode is None
+        # The runner and ``omnigent codex`` connect with the URL they captured
+        # before start(); the replacement must answer there.
+        client = CodexAppServerClient(ws_url=listen_url, client_name="omnigent-test")
+        await client.connect()
+        await client.close()
+    finally:
+        await server.close()
 
 
 async def test_start_cancellation_closes_reused_client_and_app_server(
