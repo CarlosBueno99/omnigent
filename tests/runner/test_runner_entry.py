@@ -47,8 +47,10 @@ from omnigent.runner._entry import (
     main,
 )
 from omnigent.runner.identity import (
+    RUNNER_DELEGATED_AUTH_ENV_VAR,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
     RUNNER_INTERACTIVE_SHELLS_ENV_VAR,
+    RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
     RUNNER_TUNNEL_TOKEN_HEADER,
 )
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
@@ -1750,8 +1752,8 @@ async def test_runner_databricks_auth_end_to_end_through_mock_transport(
     monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url, **_kw: None)
     monkeypatch.setattr("omnigent.cli_auth.refresh_stored_token", lambda _url: None)
     monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda _url: None)
-    monkeypatch.delenv("OMNIGENT_RUNNER_DELEGATED_AUTH", raising=False)
-    monkeypatch.delenv("OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN", raising=False)
+    monkeypatch.delenv(RUNNER_DELEGATED_AUTH_ENV_VAR, raising=False)
+    monkeypatch.delenv(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR, raising=False)
     monkeypatch.delenv(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, raising=False)
     if bootstrap:
         monkeypatch.setenv(RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR, "bootstrap-token")
@@ -1771,9 +1773,10 @@ async def test_runner_databricks_auth_end_to_end_through_mock_transport(
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
         if repaired:
             token_cache = "repaired-token"
-        return httpx.Response(
-            status, headers={"Location": f"{server_url}/oidc/oauth2/v2.0/authorize"}
+        headers = (
+            {"Location": f"{server_url}/oidc/oauth2/v2.0/authorize"} if status == 302 else {}
         )
+        return httpx.Response(status, headers=headers)
 
     async with httpx.AsyncClient(
         base_url=server_url,
@@ -1790,7 +1793,8 @@ async def test_runner_databricks_auth_end_to_end_through_mock_transport(
     assert seen_authz == ["Bearer stale-token", f"Bearer {expected_token}"]
     assert resolutions == ["stale-token", expected_token]
     assert factory() == expected_token
-    assert len(resolutions) == 2
+    # The post-flow call must serve the cached credential, not re-resolve.
+    assert resolutions == ["stale-token", expected_token]
 
 
 def test_runner_tunnel_binding_token_from_env_returns_none_without_token(
