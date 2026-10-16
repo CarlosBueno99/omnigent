@@ -385,10 +385,10 @@ def test_detect_sign_in_prompt_does_not_treat_an_auth_shaped_hostname_as_the_end
         "See https://docs.example.com/oauth/troubleshooting\n",
         "Open the following URL to sign in:\nhttps://dbcert.example.com/x\n"
         "Signed in as someone@example.com.\nAgent ready.\n",
-        "code: HQ7M-2KPD",
+        "Sign in to continue:\n  code: HQ7M-2KPD\n",
         "https://signin.example.com/device",
     ],
-    ids=["moved-past-prompt", "completed-prompt", "bare-code", "bare-endpoint"],
+    ids=["moved-past-prompt", "completed-prompt", "cued-code", "bare-endpoint"],
 )
 def test_contains_sign_in_material_outlives_an_actionable_prompt(screen: str) -> None:
     """Material a stale or partial prompt leaves on screen still counts as sign-in material."""
@@ -404,8 +404,19 @@ def test_contains_sign_in_material_outlives_an_actionable_prompt(screen: str) ->
         "Loading configuration...\nLauncher: update check before starting Codex...\n",
         "Opened https://github.com/omnigent-ai/omnigent/pull/123 for review\n",
         "exit code 1\n",
+        "Launcher: update check before starting Claude Code... OMNI-STALL-e532148b\n",
+        "code: HQ7M-2KPD",
     ],
-    ids=["none", "empty", "startup", "launcher-status", "ordinary-link", "exit-code"],
+    ids=[
+        "none",
+        "empty",
+        "startup",
+        "launcher-status",
+        "ordinary-link",
+        "exit-code",
+        "claude-code-with-marker",
+        "uncued-code",
+    ],
 )
 def test_contains_sign_in_material_ignores_ordinary_output(screen: str | None) -> None:
     """Ordinary startup text, plain links and exit codes may still be exported."""

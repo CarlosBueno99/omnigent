@@ -146,24 +146,14 @@ def _sign_in_addresses(lines: list[str]) -> tuple[list[tuple[int, str]], list[tu
     return endpoints, cued
 
 
-def _sign_in_code(lines: list[str]) -> str | None:
-    """Return the first device-code-shaped token on a line that mentions "code"."""
-    for line in lines:
-        if not _SIGN_IN_CODE_LINE.search(line):
-            continue
-        candidates = _SIGN_IN_CODE.findall(_SIGN_IN_URL.sub(" ", line))
-        if candidates:
-            return candidates[0]
-    return None
-
-
 def contains_sign_in_material(screen: str | None) -> bool:
     """Whether a sign-in address or device code is on screen, actionable or not.
 
     :func:`detect_sign_in_prompt` rejects a prompt the launcher has moved past,
     but the address and one-time code it printed are still on screen and still
     secret. Diagnostics that export pane text use this broader check to decide
-    whether the text may be logged at all.
+    whether the text may be logged at all. A code-shaped token counts only
+    beside sign-in wording: "Claude Code" is on most launcher lines.
 
     :param screen: ANSI-stripped terminal screen text, or ``None``.
     :returns: ``True`` when any sign-in material is on screen.
@@ -172,7 +162,14 @@ def contains_sign_in_material(screen: str | None) -> bool:
         return False
     lines = screen.splitlines()
     endpoints, cued = _sign_in_addresses(lines)
-    return bool(endpoints or cued) or _sign_in_code(lines) is not None
+    if endpoints or cued:
+        return True
+    return any(
+        _SIGN_IN_CODE_LINE.search(line)
+        and _SIGN_IN_CUE.search(_nearby(lines, index))
+        and _SIGN_IN_CODE.search(_SIGN_IN_URL.sub(" ", line))
+        for index, line in enumerate(lines)
+    )
 
 
 def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
@@ -217,7 +214,15 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
         for line in lines[first + 1 :]
     ):
         return None
-    return SignInPrompt(url=url, code=_sign_in_code(lines))
+    code: str | None = None
+    for line in lines:
+        if not _SIGN_IN_CODE_LINE.search(line):
+            continue
+        candidates = _SIGN_IN_CODE.findall(_SIGN_IN_URL.sub(" ", line))
+        if candidates:
+            code = candidates[0]
+            break
+    return SignInPrompt(url=url, code=code)
 
 
 # A launcher that runs one sign-in at a time prints this while another
