@@ -246,7 +246,8 @@ class TunnelRegistry:
             overflow path as the per-runner cap.
         :param on_retire: Called with the runner id whenever this server
             retires a live tunnel on purpose (:meth:`deregister` with
-            ``retire=True``), before the close reaches the runner.
+            ``retire=True``), before aborting requests or allowing a replacement
+            to register. Runs synchronously under the registry lock.
         :raises ValueError: If either waiter limit is less than one.
         """
         if max_connect_waiters_per_runner < 1:
@@ -356,6 +357,13 @@ class TunnelRegistry:
                 return None
             removed = self._sessions.pop(runner_id)
             self.record_close(removed, code=1001, reason="tunnel retired by server; reconnect")
+            # A replacement must clear the handoff after this notification.
+            # Notify before aborted consumers can reconcile the disconnect.
+            if retire and self._on_retire is not None:
+                try:
+                    self._on_retire(runner_id)
+                except Exception:  # notification is advisory; always close
+                    _logger.exception("on_retire notification failed for runner %s", runner_id)
             in_flight_count = len(removed.in_flight)
             if in_flight_count:
                 _logger.warning(
@@ -374,14 +382,6 @@ class TunnelRegistry:
                 removed,
                 ConnectionError("tunnel closed before request completed"),
             )
-        # Report the deliberate retire before the close reaches the route's
-        # disconnect hook, which reads it when deciding what the loss means.
-        # Best-effort: a failing notification must not skip the close below.
-        if retire and self._on_retire is not None:
-            try:
-                self._on_retire(runner_id)
-            except Exception:  # notification is advisory; always close
-                _logger.exception("on_retire notification failed for runner %s", runner_id)
         # 1001 ("going away"), not 4003: it lands in the runner's existing
         # tunnel-recycle path (serve.py's ``_TUNNEL_RECYCLE_CLOSE_CODES``) for a
         # prompt, spread reconnect instead of an escalating backoff. Avoid 1012

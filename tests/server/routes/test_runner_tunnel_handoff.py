@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
 from collections.abc import AsyncIterator, Iterator
 from types import TracebackType
 from typing import Any, cast
@@ -12,11 +13,15 @@ from typing import Any, cast
 import pytest
 
 from omnigent.entities import Conversation
+from omnigent.runner.transports.ws_tunnel.frames import HelloFrame
+from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
 from omnigent.runtime import session_stream
 from omnigent.server import shutdown_state
 from omnigent.server.routes import sessions
 from omnigent.server.routes._sessions import orchestration
 from omnigent.stores.conversation_store import ConversationStore
+from tests.budgets import budget
+from tests.server.test_host_registry import FakeWebSocket
 
 _TASK_TIMEOUT_S = 10.0
 _RUNNER = "runner_0123456789abcdef"
@@ -124,6 +129,81 @@ async def test_disconnect_decision_leaves_a_handed_off_turn_to_its_new_replica(
     assert decision["decision"] == ("handed_off" if handed_off else "failed_mid_turn")
     assert decision["runner_handoff_reason"] == ("rebalance" if handed_off else None)
     assert decision["server_shutting_down"] is False
+
+
+async def test_reconnect_clears_a_concurrent_retirement_before_the_next_disconnect(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An older retirement cannot hide a later real failure on this replica."""
+    caplog.set_level(logging.INFO)
+    retirement_started = threading.Event()
+    retirement_noted = threading.Event()
+    reconnect_started = threading.Event()
+    reconnected = threading.Event()
+
+    def note_retirement(runner_id: str) -> None:
+        retirement_started.set()
+        assert reconnect_started.wait(timeout=budget(2.0))
+        # Give a reconnect that can overtake this callback time to clear the
+        # marker; a correctly ordered registration waits until we return.
+        reconnected.wait(timeout=budget(1.0))
+        shutdown_state.note_runner_tunnel_retired(runner_id)
+        retirement_noted.set()
+
+    registry = TunnelRegistry(on_retire=note_retirement)
+    hello = HelloFrame(runner_version="test", frame_protocol_version=1)
+    original = registry.register(_RUNNER, FakeWebSocket(), hello)
+
+    def reconnect() -> None:
+        assert retirement_started.wait(timeout=budget(2.0))
+
+        async def register() -> None:
+            reconnect_started.set()
+            registry.register(_RUNNER, FakeWebSocket(), hello)
+            shutdown_state.clear_runner_handoff(_RUNNER)
+            reconnected.set()
+
+        asyncio.run(register())
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(registry.deregister, _RUNNER, original),
+                asyncio.to_thread(reconnect),
+            ),
+            timeout=budget(5.0),
+        )
+    finally:
+        reconnect_started.set()
+        reconnected.set()
+    assert retirement_noted.is_set()
+    assert registry.deregister(_RUNNER, original, retire=False) is None
+    assert registry.deregister(_RUNNER, retire=False) is not None
+
+    session_id = "reconnected-runner-failure"
+    snapshot = Conversation(
+        id=session_id,
+        root_conversation_id=session_id,
+        created_at=0,
+        updated_at=0,
+        runner_id=_RUNNER,
+        live_status="running",
+    )
+    sessions._session_status_cache[session_id] = "running"
+    try:
+        requires_failure = await orchestration._runner_disconnect_requires_failure(
+            session_id,
+            cast(ConversationStore, _UnavailableStore()),
+            origin="runner_offline_sweep",
+            snapshot=snapshot,
+        )
+    finally:
+        sessions._session_status_cache.pop(session_id, None)
+
+    assert requires_failure
+    assert shutdown_state.runner_handoff_reason(_RUNNER) is None
+    [decision] = _event_attributes(caplog, "runner_disconnect_decision")
+    assert decision["decision"] == "failed_mid_turn"
 
 
 @pytest.mark.parametrize("handed_off", [True, False])

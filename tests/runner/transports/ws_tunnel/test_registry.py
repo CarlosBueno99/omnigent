@@ -273,6 +273,23 @@ async def test_deregister_survives_a_failing_on_retire_callback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deregister_callback_can_register_a_replacement() -> None:
+    """Retire callbacks can reenter the registry without disturbing newest-wins."""
+
+    def reconnect(runner_id: str) -> None:
+        assert reg.get(runner_id) is None
+        reg.register(runner_id, _NoopWS(), _hello())
+
+    reg = TunnelRegistry(on_retire=reconnect)
+    original = reg.register("r1", _NoopWS(), _hello())
+
+    assert reg.deregister("r1", original) is original
+    replacement = reg.get("r1")
+    assert replacement is not None and replacement is not original
+    assert replacement.close_code is None
+
+
+@pytest.mark.asyncio
 async def test_register_replacing_existing_session_aborts_inflight() -> None:
     """Newest-wins (RUNNER.md §2): old session's in-flight requests get
     a ConnectionError so awaiters don't hang."""
