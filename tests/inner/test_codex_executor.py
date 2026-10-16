@@ -1623,6 +1623,14 @@ class TestCodexExecutor(unittest.TestCase):
         _run(_t())
 
     def test_app_server_run_turn_finishes_on_final_answer_item_without_turn_completed(self):
+        """A ``final_answer`` item completes the turn and carries its usage.
+
+        Like the ``turn/completed`` branch, this early completion stamps the
+        model Codex resolved for an unpinned turn and the reported window on
+        the usage, and notifies the observer with that model.
+        """
+        from omnigent.llms import _usage_observer
+
         async def _t():
             session = _CodexAppServerSession(
                 codex_path="/bin/echo",
@@ -1632,9 +1640,20 @@ class TestCodexExecutor(unittest.TestCase):
             )
             session.start = AsyncMock()
             session._proc = _FakeProcess()
-            session.thread_id = "thread-1"
-            session._request = AsyncMock(return_value={"result": {"turn": {"id": "turn-1"}}})
+            session.thread_id = None  # fresh thread so thread/start resolves a model
+            session._request = AsyncMock(
+                side_effect=[
+                    {"result": {"thread": {"id": "thread-1"}, "model": "gpt-6-astra"}},
+                    {"result": {"turn": {"id": "turn-1"}}},
+                ]
+            )
 
+            counters = {"inputTokens": 100, "outputTokens": 25, "totalTokens": 125}
+            await session._events.put(
+                self._usage_update_event(
+                    "turn-1", last=counters, total=counters, model_context_window=258400
+                )
+            )
             await session._events.put(
                 {
                     "method": "item/completed",
@@ -1650,17 +1669,22 @@ class TestCodexExecutor(unittest.TestCase):
                 }
             )
 
-            events = [
-                event
-                async for event in session.run_turn(
-                    messages=[{"role": "user", "content": "hi"}],
-                    tools=[],
-                    system_prompt="",
-                    model="gpt-5.4-mini",
-                    cwd=".",
-                    sandbox="workspace-write",
-                )
-            ]
+            seen: list[dict[str, object]] = []
+            remove = _usage_observer.add_observer(lambda **kw: seen.append(kw))
+            try:
+                events = [
+                    event
+                    async for event in session.run_turn(
+                        messages=[{"role": "user", "content": "hi"}],
+                        tools=[],
+                        system_prompt="",
+                        model=None,
+                        cwd=".",
+                        sandbox="workspace-write",
+                    )
+                ]
+            finally:
+                remove()
 
             self.assertEqual(len(events), 2)
             self.assertIsInstance(events[0], TextChunk)
@@ -1668,6 +1692,18 @@ class TestCodexExecutor(unittest.TestCase):
             self.assertIsInstance(events[1], TurnComplete)
             self.assertEqual(events[1].response, "done")
             self.assertIsNone(session.active_turn_id)
+            self.assertEqual(
+                events[1].usage,
+                {
+                    "input_tokens": 100,
+                    "output_tokens": 25,
+                    "total_tokens": 125,
+                    "context_tokens": 125,
+                    "context_window": 258400,
+                    "model": "gpt-6-astra",
+                },
+            )
+            self.assertEqual([entry["model"] for entry in seen], ["gpt-6-astra"])
 
         _run(_t())
 
