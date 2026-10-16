@@ -34,6 +34,8 @@ from omnigent.inner.native_attachments import reject_authored_framework_notices
 
 # ── Shared ──────────────────────────────────────────────────────
 
+McpRegistryServiceId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,39}$")]
+
 
 class PaginatedList(BaseModel):
     """
@@ -111,7 +113,7 @@ class UpsertMCPServerRequest(BaseModel):
     """
 
     name: str = Field(min_length=1, max_length=128, pattern=_MCP_SERVER_NAME_RE)
-    transport: Literal["http", "stdio"]
+    transport: Literal["http", "stdio", "registry"]
     description: str | None = Field(default=None, max_length=512)
     url: str | None = None
     headers: dict[str, str] | None = None
@@ -135,6 +137,10 @@ class UpsertMCPServerRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_transport_fields(self) -> UpsertMCPServerRequest:
         """Enforce the same transport shape as the agent spec parser."""
+        if self.transport == "registry":
+            if self.url or self.headers or self.command or self.args:
+                raise ValueError("Registry services cannot override server connection settings")
+            return self
         if self.transport == "http":
             if not self.url:
                 raise ValueError("url is required when transport is 'http'")
@@ -152,6 +158,80 @@ class UpsertMCPServerRequest(BaseModel):
         return self
 
 
+class MCPServerPatch(BaseModel):
+    """Partial MCP declaration; omitted fields and credential keys are preserved."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    transport: Literal["http", "stdio"] | None = None
+    description: str | None = Field(default=None, max_length=512)
+    url: str | None = None
+    command: str | None = None
+    args: list[str] | None = Field(default=None, max_length=64)
+    headers: dict[str, str | None] | None = None
+    env: dict[str, str | None] | None = None
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> Self:
+        for key in ("transport", "url", "command", "args"):
+            if key in self.model_fields_set and getattr(self, key) is None:
+                raise ValueError(f"{key} cannot be null")
+        for values in (self.headers, self.env):
+            if values and "[REDACTED]" in values.values():
+                raise ValueError("Omit unchanged credentials instead of sending placeholders")
+        return self
+
+
+class AgentConfigPatch(BaseModel):
+    """Merge-style update of an owned agent, with immutable identity."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    description: str | None = Field(default=None, max_length=4096)
+    instructions: str | None = None
+    model: str | None = Field(default=None, min_length=1)
+    harness: str | None = Field(default=None, min_length=1)
+    mcp_servers: (
+        dict[Annotated[str, Field(pattern=_MCP_SERVER_NAME_RE)], MCPServerPatch | None] | None
+    ) = None
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> Self:
+        for key in ("model", "harness", "mcp_servers"):
+            if key in self.model_fields_set and getattr(self, key) is None:
+                raise ValueError(f"{key} cannot be null")
+        for value in (self.model, self.harness):
+            if value is not None and not value.strip():
+                raise ValueError("Model and harness must be nonempty")
+        return self
+
+
+class AgentMCPConfig(BaseModel):
+    """Editable MCP projection without credential values."""
+
+    transport: str
+    description: str | None = None
+    url: str | None = None
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    configured_header_names: list[str] = Field(default_factory=list)
+    configured_env_names: list[str] = Field(default_factory=list)
+    editable: bool = True
+
+
+class AgentConfigObject(BaseModel):
+    """Owner-only configuration read and PATCH result."""
+
+    id: str
+    name: str
+    version: int
+    description: str | None = None
+    harness: str | None = None
+    model: str | None = None
+    instructions: str | None = None
+    mcp_servers: dict[str, AgentMCPConfig] = Field(default_factory=dict)
+
+
 class SkillSummary(BaseModel):
     """
     Safe subset of a discovered skill for API exposure.
@@ -162,16 +242,19 @@ class SkillSummary(BaseModel):
     is intentionally omitted — it's only loaded server-side when
     the harness invokes the skill, and it can be large.
 
-    :param name: Skill identifier as parsed from the SKILL.md
-        frontmatter, e.g. ``"triage-issues"``. Lowercase
-        kebab-case.
+    :param name: Invocation identifier (the skill's directory name),
+        e.g. ``"triage-issues"``, typed as ``/triage-issues``.
     :param description: One-line summary from the SKILL.md
         frontmatter, e.g. ``"Triage open GitHub issues in the
         repo."``.
+    :param display_name: Human-facing label from the SKILL.md
+        frontmatter ``name``, e.g. ``"Triage Issues"``. ``None`` when
+        it equals ``name`` or the source has no label.
     """
 
     name: str
     description: str
+    display_name: str | None = None
 
 
 class NativeReasoningEffortOption(BaseModel):
@@ -256,6 +339,8 @@ class AgentObject(BaseModel):
         through the session UI by the authenticated caller. This requires
         ownership of both the effective session and its session-scoped agent;
         built-in template and native agents are read-only.
+    :param mcp_registry_editable: Whether this caller owns the session and can
+        select managed MCP services independently of agent ownership.
     :param policies: Guardrails policies declared on the agent.
         Each entry summarises the policy name, type, and
         phases. Empty list when the spec declares no policies
@@ -297,10 +382,17 @@ class AgentObject(BaseModel):
     harness: str | None = None
     mcp_servers: list[MCPServerSummary] = Field(default_factory=list)
     mcp_servers_editable: bool = False
+    mcp_registry_editable: bool = False
     policies: list[PolicySummary] = Field(default_factory=list)
     skills: list[SkillSummary] = Field(default_factory=list)
     terminals: list[str] = Field(default_factory=list)
     builtin: bool = False
+
+
+class AgentDetailObject(AgentObject):
+    """Agent summary with caller ownership for management actions."""
+
+    user_owned: bool
 
 
 # ── Session Policies ───────────────────────────────────────────
@@ -1048,6 +1140,11 @@ class CreateResponseRequest(BaseModel):
     # the message, so the runner can drop the buffered copy and not
     # re-deliver it in a continuation turn. ``None`` for fresh turns.
     injection_id: str | None = None
+    # Server-side identity of the native web input, independent of native transcript matching.
+    input_stable_id: str | None = None
+    pending_id: str | None = None
+    delivery_attempt_id: str | None = None
+    input_enqueued_at_ms: int | None = None
     conversation: ConversationRef | None = None
     # Reasoning config, e.g. {"effort": "low"|"medium"|"high"}
     reasoning: dict[str, str] | None = None
@@ -1523,6 +1620,7 @@ class _SessionCreateRequestBase(BaseModel):
     agent_id: Any
     project_id: str | None = None
     initial_items: list[SessionEventInput] = Field(default_factory=list)
+    mcp_registry_services: list[McpRegistryServiceId] = Field(default_factory=list, max_length=40)
     title: str | None = Field(default=None, max_length=USER_SESSION_TITLE_MAX_CHARS)
     labels: dict[str, str] = Field(default_factory=dict)
     parent_session_id: str | None = None
@@ -1723,6 +1821,8 @@ class SessionCreateMetadata(BaseModel):
     """
 
     inference_configuration_revision: str | None = None
+
+    mcp_registry_services: list[McpRegistryServiceId] = Field(default_factory=list, max_length=40)
 
     title: str | None = Field(default=None, max_length=USER_SESSION_TITLE_MAX_CHARS)
     project_id: str | None = None
@@ -2612,7 +2712,7 @@ class SessionForkRequest(BaseModel):
     workspace: str | None = None
     # Marks the fork as a side chat: it is stamped with the side-chat label so
     # it is hidden from the left sidebar (it surfaces only as a Workspace-rail
-    # side-chat tab). The fork otherwise behaves normally (its own runner).
+    # side-chat tab). It may share its parent's runner.
     side_chat: bool = False
 
     model_config = ConfigDict(extra="forbid")
@@ -2935,7 +3035,7 @@ class GrantPermissionRequest(BaseModel):
 
     :param user_id: The user to grant access to, e.g.
         ``"alice@example.com"`` or ``"__public__"`` for public
-        read access.
+        access subject to the server's public permission ceiling.
     :param level: Numeric permission level: ``1`` = read,
         ``2`` = edit, ``3`` = manage.
     """
