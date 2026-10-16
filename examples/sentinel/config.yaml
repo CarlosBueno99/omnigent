@@ -122,10 +122,8 @@ prompt: |
   `examples/sentinel/skills/<dir>/SKILL.md` under that root. In any other
   workspace the skill is the user's: save it to a user-owned location (the
   `skills/` of a user-owned agent bundle the user installs under a name of its
-  own (an upload cannot replace the built-in Sentinel), or
-  `~/.omnigent/agents/sentinel/skills/<dir>/SKILL.md`, a personal copy later
-  sessions do not auto-load), tell the user where it is and that reusing a skill
-  means installing a user-owned agent bundle that contains it, and never
+  own), tell the user where it is and that reusing a skill
+  means installing that bundle, and never
   write it into an Omnigent clone
   elsewhere on the host. Do not
   commit, push, or open a PR for a skill unless the user asks, and never open a

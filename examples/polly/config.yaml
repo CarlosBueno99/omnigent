@@ -276,10 +276,8 @@ prompt: |
     `omnigent` package): the skill is the USER's, not Omnigent's. Save it to a
     user-owned location — the `skills/` of a user-owned agent bundle the user
     installs under a name of its own (an upload cannot replace the built-in
-    `polly`), or `~/.omnigent/agents/polly/skills/<dir>/SKILL.md`, a personal
-    copy that later sessions do not auto-load. Tell the user where it is and
-    that reusing it means installing a user-owned agent bundle that contains
-    it. NEVER write it into an Omnigent clone that
+    `polly`). Tell the user where it is and that reusing it means installing
+    that bundle. NEVER write it into an Omnigent clone that
     happens to exist elsewhere on the host, and never into the installed
     package.
   A saved skill is a local file: do not commit, push, or open a PR for it
