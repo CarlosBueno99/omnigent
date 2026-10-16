@@ -243,6 +243,12 @@ def _build_event(ctx: EvaluationContext) -> PolicyEvent:
             # The conversation this event belongs to, injected by
             # the engine.
             "conversation_id": ctx.conversation_id,
+            # The conversation's readable title. None when untitled.
+            "conversation_title": ctx.conversation_title,
+            # RESPONSE phase only: whether this text ends a successful
+            # turn. None on other phases and on callers
+            # that don't distinguish segments.
+            "turn_final": ctx.turn_final,
         },
         # Mutable per-conversation state readable by the callable.
         # Empty dict when no policy has written state yet; the engine

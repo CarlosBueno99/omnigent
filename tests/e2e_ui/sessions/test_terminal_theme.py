@@ -19,10 +19,10 @@ terminal regardless of the app theme.
 Painting the canvas is only half of it: the program inside the pane picks its
 own ANSI colors, so a TUI that assumes a light background paints near-black text
 that vanishes on a dark pane unless the process is told what it is rendered on.
-The conventional hint is ``COLORFGBG`` (``<fg>;<bg>``, ``15;0`` for a dark
-background, ``0;15`` for a light one). The shell tests below read the hint back
-from the pane output the browser receives on the terminal-attach WebSocket,
-because xterm's glyphs never reach the DOM.
+The conventional hint is ``COLORFGBG`` (``<fg>;<bg>``: background ``0`` for a
+dark pane, ``15`` for a light one). The shell tests below read the hint back from
+the pane bytes the browser receives on the terminal-attach WebSocket, because
+xterm's glyphs never reach the DOM.
 
 The shell is user-launched (no LLM turn) via the tab strip's "+" → Shell menu,
 mirroring ``shells/test_new_shell.py``.
@@ -41,19 +41,19 @@ from tests.e2e_ui.conftest import open_right_rail
 
 TERMINAL_THEME_KEY = "omnigent:terminal-theme"
 APP_THEME_KEY = "web-theme"
-# The e2e conftest films the journey when this is set; only then is the probe
-# result held on screen long enough to read.
+# The e2e conftest films the journey when this is set; hold the probe result on
+# screen long enough to read before the clip ends.
 _RECORDING = bool(os.environ.get("OMNIGENT_E2E_RECORD_DIR"))
 
-# What a TUI that assumes a light background emits (ANSI black text), followed
-# by the background hint the shell actually received. The marker is split in
-# the typed command so the shell's echo of the command line never contains it.
+# What a light-background TUI emits (ANSI black text), then the background hint
+# the shell actually received. "PTY''BG" keeps the marker out of the shell's
+# echo of the typed command line.
 _PANE_BACKGROUND_PROBE = (
     "printf '\\e[30m  LIGHT-TUI DEMO: a light-background TUI paints this near-black  \\e[0m\\n'; "
     "printf 'PTY''BG=%s\\n' \"${COLORFGBG-UNSET}\""
 )
-# The trailing newline keeps the match atomic when the PTY output arrives
-# split across WebSocket frames.
+# The trailing newline keeps the match atomic when the output arrives split
+# across WebSocket frames.
 _PANE_HINT_RE = re.compile(r"PTYBG=([0-9A-Za-z;]+)\r?\n")
 _ANSI_RE = re.compile(
     r"\x1b\[[0-9;?]*[ -/]*[@-~]"  # CSI sequences (colors, cursor moves, modes)
@@ -118,16 +118,18 @@ def _connected_main_terminal(page: Page):
 
 
 def _capture_pane_output(page: Page) -> list[bytes]:
-    """Collect the pane bytes the page receives on every terminal-attach socket.
+    """Collect the pane bytes every terminal-attach socket delivers to the page.
 
-    Register before navigating: the attach socket opens asynchronously once a
-    shell's xterm mounts, and the client may re-dial onto the runner's direct
-    loopback socket, so every ``/attach`` URL is tracked.
+    Register before navigating: the attach socket opens once a shell's xterm
+    mounts, and the client may re-dial onto the runner's loopback socket, so
+    every ``/attach`` URL is tracked. Binary frames are pane output; text
+    frames are control messages and are skipped.
     """
     frames: list[bytes] = []
 
     def _on_frame(payload: str | bytes) -> None:
-        frames.append(payload if isinstance(payload, bytes) else payload.encode())
+        if isinstance(payload, bytes):
+            frames.append(payload)
 
     def _on_ws(ws: WebSocket) -> None:
         if "/attach" in ws.url:
@@ -161,9 +163,8 @@ def _pane_background_hint(page: Page, terminal_view: Locator, frames: list[bytes
 def _journey_page(request: pytest.FixtureRequest) -> Page:
     """Open the browser page only now, after ``terminal_session`` is set up.
 
-    Taking ``page`` as a test parameter would create it (and start filming
-    it) before the server, agent and session fixtures run, so a recording
-    would open on setup instead of on the journey.
+    Taking ``page`` as a test parameter would create it (and start filming it)
+    before the server, agent and session fixtures run.
     """
     return request.getfixturevalue("page")
 

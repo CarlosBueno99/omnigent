@@ -82,6 +82,14 @@ _ASK_ON_ADD_POLICY_SPEC = FunctionPolicySpec(
     ),
 )
 
+_ASK_ON_SCHEDULED_TASK_CHANGE_SPEC = FunctionPolicySpec(
+    name="__ask_on_scheduled_task_change",
+    on=None,
+    function=FunctionRef(path="omnigent.policies.builtins.safety.ask_on_scheduled_task_change"),
+)
+
+_REQUIRED_APPROVAL_SPECS = [_ASK_ON_ADD_POLICY_SPEC, _ASK_ON_SCHEDULED_TASK_CHANGE_SPEC]
+
 # Bounded cache of ``conversation_id -> session owner``. The owner
 # (``LEVEL_OWNER`` grantee) is immutable for a session's lifetime, so
 # caching it avoids a ``session_permissions`` lookup on every
@@ -416,10 +424,13 @@ def any_policies_apply(
     :returns: ``False`` when the engine would have an empty policy list and
         ``evaluate()`` would unconditionally return ALLOW/UNSPECIFIED.
     """
-    # The engine unconditionally injects _ASK_ON_ADD_POLICY_SPEC so agents
-    # cannot silently install session policies. Never fast-path sys_add_policy
-    # TOOL_CALL events — they must always reach the engine for that gate.
-    if phase == Phase.TOOL_CALL and tool_name == "sys_add_policy":
+    # Persistent policy and schedule changes always require approval, even
+    # when no user-defined policy would otherwise build an engine.
+    if phase == Phase.TOOL_CALL and tool_name in {
+        "sys_add_policy",
+        "sys_scheduled_task_create",
+        "sys_scheduled_task_update",
+    }:
         return True
     if spec.guardrails and spec.guardrails.policies:
         return True
@@ -540,9 +551,8 @@ def build_policy_engine(
         that rebuild an engine specifically to observe concurrent writes
         (the native ASK gate's post-lock re-evaluation) pass ``None``.
     :param expected_agent_id: The ``agent_id`` the caller resolved *spec*
-        from. ``agent_id`` is mutable (switch-agent) but selects the spec,
-        so it must be read before the engine exists and cannot be
-        re-derived here. Passing it lets the builder confirm it against
+        from. ``agent_id`` selects the spec, so it must be read before the
+        engine exists and cannot be re-derived here. Passing it lets the builder confirm it against
         the fresh row and fail closed on a mismatch, instead of
         authorizing an evaluation under the previous agent's guardrails.
         ``None`` skips the check (callers with no spec/agent coupling).
@@ -619,7 +629,7 @@ def build_policy_engine(
     # Appended unconditionally so the guard is present even when
     # no other guardrails are declared (the noop-engine path below
     # is no longer reachable since all_policy_specs is never empty).
-    all_policy_specs.append(_ASK_ON_ADD_POLICY_SPEC)
+    all_policy_specs.extend(_REQUIRED_APPROVAL_SPECS)
 
     label_defs = dict((guardrails.labels or {}) if guardrails else {})
     # One conversation read (``conv``, resolved above for policy
@@ -662,12 +672,9 @@ def build_policy_engine(
                 code=ErrorCode.CONFLICT,
             )
         conv = fresh_self
-    # Agent/spec confirmation — deliberately AFTER the refresh above, and
-    # nowhere else. Comparing against the earlier row (as a previous revision
-    # did) validated the very snapshot whose staleness is the hazard, so a
-    # switch-agent in the window was accepted. Exact equality: a fresh row
-    # whose binding is ``None``, or no fresh row at all, is a mismatch too —
-    # not a reason to skip the check.
+    # Must run AFTER the refresh: comparing the earlier (stale) row would accept
+    # a rebind in the window. Exact equality: a fresh row bound to ``None``, or no
+    # fresh row at all, is a mismatch too.
     if expected_agent_id is not None:
         fresh_agent_id = conv.agent_id if conv is not None else None
         if fresh_agent_id != expected_agent_id:
@@ -717,7 +724,7 @@ def build_policy_engine(
             session_policy_specs
             + agent_policy_specs
             + admin_policy_specs
-            + [_ASK_ON_ADD_POLICY_SPEC]
+            + _REQUIRED_APPROVAL_SPECS
         )
         if child_guardrails.labels:
             # Child label schemas ADD keys; the parent's schema wins on a
@@ -739,7 +746,7 @@ def build_policy_engine(
             session_policy_specs
             + agent_policy_specs
             + admin_policy_specs
-            + [_ASK_ON_ADD_POLICY_SPEC]
+            + _REQUIRED_APPROVAL_SPECS
         )
     root_conv = (
         conv
@@ -868,6 +875,7 @@ def build_policy_engine(
             else (guardrails.ask_timeout if guardrails else DEFAULT_ASK_TIMEOUT)
         ),
         conversation_id=conversation_id,
+        conversation_title=conv.title if conv is not None else None,
         initial_labels=initial_labels,
         initial_session_state=initial_session_state,
         initial_usage=initial_usage,
