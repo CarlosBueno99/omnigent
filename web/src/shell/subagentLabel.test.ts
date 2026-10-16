@@ -56,10 +56,15 @@ describe("childPrimaryLabel", () => {
     expect(childPrimaryLabel(child({ session_name: null, title: null }))).toBe(SUMMARY);
   });
 
-  it("does not repeat a handle the summary already contains", () => {
+  it("does not repeat a handle that equals the summary", () => {
     expect(childPrimaryLabel(child({ task_summary: HANDLE }))).toBe(HANDLE);
+  });
+
+  it("keeps the handle when the summary merely contains it", () => {
+    const partial = child({ task_summary: "Capitalize headings", session_name: "api" });
+    expect(childPrimaryLabel(partial)).toBe("Capitalize headings · api");
     expect(childPrimaryLabel(child({ task_summary: `Deploy via ${HANDLE}` }))).toBe(
-      `Deploy via ${HANDLE}`,
+      `Deploy via ${HANDLE} · ${HANDLE}`,
     );
   });
 

@@ -49,7 +49,9 @@ export function childPrimaryLabel(child: ChildSessionInfo, fallback: string = ch
   }
   const handle = trimmed(child.session_name) ?? trimmed(titleHandle(child.title));
   const summary = trimmed(child.task_summary);
-  if (summary && handle && !summary.includes(handle)) return `${summary} · ${handle}`;
+  // Only an identical summary suppresses the handle: substring matching would
+  // hide valid handles such as "api" inside "Capitalize".
+  if (summary && handle && handle !== summary) return `${summary} · ${handle}`;
   return (
     summary ??
     handle ??
