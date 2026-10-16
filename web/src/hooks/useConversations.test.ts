@@ -2091,10 +2091,10 @@ describe("useStopSession invalidation", () => {
 describe("useStopSession pending bubbles", () => {
   // The server settles web messages queued before a stop with no consumed
   // receipt, so the stopped session's optimistic bubbles must go with it.
-  const bubble = (tempId: string): PendingUserMessage => ({
+  const bubble = (tempId: string, posted = true): PendingUserMessage => ({
     tempId,
     content: [{ type: "input_text", text: `message ${tempId}` }],
-    posted: true,
+    posted,
   });
   const bubbleIds = (id: string) =>
     conversationRegistry
@@ -2191,6 +2191,28 @@ describe("useStopSession pending bubbles", () => {
     // Only the pre-stop bubble is dropped; the in-flight send keeps its bubble.
     expect(bubbleIds("conv_fg")).toEqual(["pend_live"]);
     expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual(["pend_live"]);
+  });
+
+  it("keeps an unposted send that is still in flight when the stop begins", async () => {
+    // A send whose POST is not yet acked (posted: false) can reach the server
+    // after its pre-stop snapshot, so the stop never settles it; its bubble
+    // must survive even though it was present when Stop began.
+    act(() => {
+      conversationRegistry.peek("conv_fg")!.setState((s) => ({
+        pendingUserMessages: [...s.pendingUserMessages, bubble("pend_unposted", false)],
+      }));
+    });
+    fetchMock.mockResolvedValueOnce(mockResponse({ queued: false }));
+    const { result } = renderStop();
+
+    result.current.mutate("conv_fg");
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    // The acked bubble is dropped with the stop; the unposted one stays live.
+    expect(bubbleIds("conv_fg")).toEqual(["pend_unposted"]);
+    expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual([
+      "pend_unposted",
+    ]);
   });
 });
 

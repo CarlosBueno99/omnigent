@@ -1293,14 +1293,15 @@ export function useStopSession() {
   return useMutation({
     mutationFn: (id: string) => stopSession(id),
     onMutate: (id: string) => {
-      // Snapshot the bubbles present when Stop begins. The server settles only
-      // these; a message sent while the stop is in flight stays live, so its
-      // bubble must survive onSuccess.
+      // Snapshot only the posted bubbles present when Stop begins. An unposted
+      // in-flight send can land after the server's pre-stop snapshot and stay
+      // live, and a send during the stop is added later; both survive onSuccess.
       const stoppedTempIds =
         conversationRegistry
           .peek(id)
           ?.getState()
-          .pendingUserMessages.map((p) => p.tempId) ?? [];
+          .pendingUserMessages.filter((p) => p.posted === true)
+          .map((p) => p.tempId) ?? [];
       return { stoppedTempIds };
     },
     onSuccess: (_data, id, context) => {
