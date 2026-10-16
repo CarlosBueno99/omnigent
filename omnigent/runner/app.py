@@ -7809,10 +7809,9 @@ def create_runner_app(
             try:
                 await resource_registry.close_terminal(pane.conversation_id, pane.terminal_id)
             finally:
-                # Release only that generation. The codex-only teardown left every
-                # other harness's restart-forever forwarder (and any ``opencode
-                # serve``) running past the pane; this reclaims them like the
-                # ``DELETE /v1/sessions`` teardown without clobbering a recreate.
+                # Release only the reaped generation (not a session recreated
+                # during close): the codex-only teardown leaked every other
+                # harness's restart-forever forwarder and any ``opencode serve``.
                 await _native_runtime.release_reaped_native_sidecars(
                     pane.conversation_id, reaped_sidecars
                 )
