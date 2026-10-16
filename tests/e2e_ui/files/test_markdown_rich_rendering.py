@@ -243,9 +243,13 @@ def _file_saved_and_reread(file_path: str, containing: str) -> Callable[[Respons
         nonlocal saw_put
         if not response.url.split("?")[0].endswith(f"/filesystem/{file_path}"):
             return False
-        if response.request.method == "PUT" and containing in (response.request.post_data or ""):
+        if (
+            response.ok
+            and response.request.method == "PUT"
+            and containing in (response.request.post_data or "")
+        ):
             saw_put = True
-        return saw_put and response.request.method == "GET"
+        return saw_put and response.ok and response.request.method == "GET"
 
     return match
 

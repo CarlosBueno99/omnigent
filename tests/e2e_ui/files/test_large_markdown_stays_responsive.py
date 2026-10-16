@@ -28,6 +28,9 @@ _FILE_PATH = "large_design.md"
 _FILE_BYTES = 1024 * 1024
 # A healthy open answers in well under a second; the frozen tab takes minutes.
 _PROBE_TIMEOUT_MS = 10_000
+# Short, so a stall is measured by the heartbeat probe rather than hidden in a
+# long wait for the rendered heading.
+_RENDER_POLL_MS = 1_000
 _WATCH_SECONDS = 60
 _RENDERED_HEADING = "[data-testid='file-viewer'] [contenteditable='true'] h1"
 
@@ -70,7 +73,8 @@ def test_opening_large_markdown_keeps_page_responsive(
     # Anchor the watch on the content response so the probes cover the render.
     with page.expect_response(
         lambda response: (
-            response.request.method == "GET"
+            response.ok
+            and response.request.method == "GET"
             and response.url.split("?")[0].endswith(f"/filesystem/{file_path}")
         )
     ):
@@ -84,7 +88,7 @@ def test_opening_large_markdown_keeps_page_responsive(
         try:
             page.wait_for_function(
                 f"() => !!document.querySelector({_RENDERED_HEADING!r})",
-                timeout=min(_PROBE_TIMEOUT_MS, remaining * 1000),
+                timeout=min(_RENDER_POLL_MS, remaining * 1000),
             )
             rendered = True
         except PlaywrightTimeoutError:

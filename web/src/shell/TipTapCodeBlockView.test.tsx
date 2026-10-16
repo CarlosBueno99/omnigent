@@ -155,17 +155,23 @@ describe("fence body", () => {
     // @tiptap/react's ref would first read the DOM selection, which lays out
     // the whole document; unfocused there is no caret to preserve.
     const { content, body, cleanup } = renderInHost(false);
-    expect(body?.firstChild).toBe(content);
-    expect(content.hasAttribute("data-node-view-wrapper")).toBe(false);
-    expect(reactNodeView.nodeViewContentRef).not.toHaveBeenCalled();
-    cleanup();
+    try {
+      expect(body?.firstChild).toBe(content);
+      expect(content.hasAttribute("data-node-view-wrapper")).toBe(false);
+      expect(reactNodeView.nodeViewContentRef).not.toHaveBeenCalled();
+    } finally {
+      cleanup();
+    }
   });
 
   it("lets @tiptap/react place the content while the editor has focus", () => {
     const { host, content, body, cleanup } = renderInHost(true);
-    expect(reactNodeView.nodeViewContentRef).toHaveBeenCalledWith(body);
-    expect(content.parentElement).toBe(host);
-    cleanup();
+    try {
+      expect(reactNodeView.nodeViewContentRef).toHaveBeenCalledWith(body);
+      expect(content.parentElement).toBe(host);
+    } finally {
+      cleanup();
+    }
   });
 
   it("falls back to @tiptap/react when the host markup is not recognised", () => {
