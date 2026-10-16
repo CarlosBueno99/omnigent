@@ -1677,8 +1677,9 @@ class TestCodexExecutor(unittest.TestCase):
         Without forwarding the codex token-usage notification, harness-backed
         codex tests produce empty token-usage artifacts even though the
         provider counted real tokens. This test asserts the inner executor
-        captures the latest ``tokenUsage.last`` breakdown and attaches it
-        to the next ``TurnComplete`` it yields.
+        captures the latest ``tokenUsage.last`` breakdown, plus the window
+        Codex reports as ``modelContextWindow``, and attaches them to the
+        next ``TurnComplete`` it yields.
         """
 
         async def _t():
@@ -1695,30 +1696,11 @@ class TestCodexExecutor(unittest.TestCase):
 
             async def _inject_events() -> None:
                 await asyncio.sleep(0.01)
+                counters = {"inputTokens": 100, "outputTokens": 25, "totalTokens": 125}
                 session._events.put_nowait(
-                    {
-                        "method": "thread/tokenUsage/updated",
-                        "params": {
-                            "threadId": "thread-1",
-                            "turnId": "turn-1",
-                            "tokenUsage": {
-                                "last": {
-                                    "inputTokens": 100,
-                                    "outputTokens": 25,
-                                    "totalTokens": 125,
-                                    "cachedInputTokens": 0,
-                                    "reasoningOutputTokens": 0,
-                                },
-                                "total": {
-                                    "inputTokens": 100,
-                                    "outputTokens": 25,
-                                    "totalTokens": 125,
-                                    "cachedInputTokens": 0,
-                                    "reasoningOutputTokens": 0,
-                                },
-                            },
-                        },
-                    }
+                    self._usage_update_event(
+                        "turn-1", last=counters, total=counters, model_context_window=258400
+                    )
                 )
                 await asyncio.sleep(0.01)
                 session._events.put_nowait(
@@ -1751,6 +1733,7 @@ class TestCodexExecutor(unittest.TestCase):
                     "output_tokens": 25,
                     "total_tokens": 125,
                     "context_tokens": 125,
+                    "context_window": 258400,
                     "model": "gpt-5.4-mini",
                 },
             )
@@ -1766,11 +1749,12 @@ class TestCodexExecutor(unittest.TestCase):
         Subscription / cli-config sessions let Codex pick the model and
         ``thread/start`` reports it. Usage must carry that model so per-model
         cost/token attribution keeps the turn, and the usage observer must be
-        told the same model.
+        told the same model. Covers both the cumulative-``total`` accounting
+        and the ``last``-only fallback.
         """
         from omnigent.llms import _usage_observer
 
-        async def _t():
+        async def _t(include_total: bool):
             session = _CodexAppServerSession(
                 codex_path="/bin/echo",
                 cwd="/tmp/workspace",
@@ -1793,7 +1777,9 @@ class TestCodexExecutor(unittest.TestCase):
                 await asyncio.sleep(0.01)
                 counters = {"inputTokens": 100, "outputTokens": 25, "totalTokens": 125}
                 session._events.put_nowait(
-                    self._usage_update_event("turn-1", last=counters, total=counters)
+                    self._usage_update_event(
+                        "turn-1", last=counters, total=counters if include_total else None
+                    )
                 )
                 await asyncio.sleep(0.01)
                 session._events.put_nowait(
@@ -1826,78 +1812,21 @@ class TestCodexExecutor(unittest.TestCase):
             self.assertEqual(usage["model"], "gpt-6-astra")
             self.assertEqual([entry["model"] for entry in seen], ["gpt-6-astra"])
 
-        _run(_t())
-
-    def test_app_server_run_turn_forwards_codex_context_window(self):
-        """``tokenUsage.modelContextWindow`` rides on usage as ``context_window``.
-
-        The server sizes the context ring from the window Codex serves instead
-        of a catalog lookup that lacks Codex-only models.
-        """
-
-        async def _t():
-            session = _CodexAppServerSession(
-                codex_path="/bin/echo",
-                cwd="/tmp/workspace",
-                env={},
-                tool_executor=None,
-            )
-            session.start = AsyncMock()
-            session._proc = _FakeProcess()
-            session.thread_id = "thread-1"
-            session._request = AsyncMock(return_value={"result": {"turn": {"id": "turn-1"}}})
-
-            async def _inject_events() -> None:
-                await asyncio.sleep(0.01)
-                counters = {"inputTokens": 100, "outputTokens": 25, "totalTokens": 125}
-                session._events.put_nowait(
-                    self._usage_update_event(
-                        "turn-1", last=counters, total=counters, model_context_window=258400
-                    )
-                )
-                session._events.put_nowait(
-                    {"method": "turn/completed", "params": {"turn": {"id": "turn-1"}}}
-                )
-
-            inject_task = asyncio.create_task(_inject_events())
-            events = [
-                event
-                async for event in session.run_turn(
-                    messages=[{"role": "user", "content": "hi"}],
-                    tools=[],
-                    system_prompt="",
-                    model="gpt-5.4-mini",
-                    cwd=".",
-                    sandbox="workspace-write",
-                )
-            ]
-            await inject_task
-
-            self.assertEqual(len(events), 1)
-            self.assertIsInstance(events[0], TurnComplete)
-            self.assertEqual(
-                events[0].usage,
-                {
-                    "input_tokens": 100,
-                    "output_tokens": 25,
-                    "total_tokens": 125,
-                    "context_tokens": 125,
-                    "context_window": 258400,
-                    "model": "gpt-5.4-mini",
-                },
-            )
-
-        _run(_t())
+        for include_total in (True, False):
+            with self.subTest(include_total=include_total):
+                _run(_t(include_total))
 
     @staticmethod
     def _usage_update_event(
         turn_id: str,
         last: dict[str, int],
-        total: dict[str, int],
+        total: dict[str, int] | None,
         *,
         model_context_window: int | None = None,
     ) -> dict[str, object]:
-        token_usage: dict[str, object] = {"last": last, "total": total}
+        token_usage: dict[str, object] = {"last": last}
+        if total is not None:
+            token_usage["total"] = total
         if model_context_window is not None:
             token_usage["modelContextWindow"] = model_context_window
         return {
