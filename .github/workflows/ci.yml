@@ -183,7 +183,7 @@ jobs:
 
       - name: Set up Node.js for local relay tests
         if: matrix.group == 'misc'
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
 
@@ -458,7 +458,7 @@ jobs:
           cache: ""
 
       - name: Install codex CLI
-        uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@aa5736c38f5c1258ee29452c6825d75033b952d7
+        uses: omnigent-ai/omnigent/.github/actions/setup-harness-cli@4f403d71435055cf820984e829cb630cbc73da53
         with:
           harness: codex
 
