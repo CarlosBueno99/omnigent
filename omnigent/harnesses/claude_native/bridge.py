@@ -449,15 +449,18 @@ _AUTO_MODE_BILLING_CONSENT = re.compile(
 # casing has already drifted across releases ("Search prompts" →
 # "search prompts:").
 _HISTORY_SEARCH_FOOTER_PREFIXES = ("search prompts:", "no matching prompt:")
-# Claude Code's ``/permissions`` dialog: a terminal-opened settings surface whose
-# screens reuse the decision prompts' "Enter to select/submit · Esc to cancel"
-# footer and frame a search box like the composer. Its tells are the tab footer
-# (a question never offers tab switching) and the rule editor's headlines.
-_PERMISSIONS_DIALOG_TAB_FOOTER_HINTS = ("←/→ to switch", "Esc to cancel")
+# Claude Code's ``/permissions`` dialog reuses the decision prompts' footers and
+# the composer's framed search box. Its tells: the tab footer (questions never
+# offer tab switching) and the rule editor's headlines over an editor footer.
+_PERMISSIONS_DIALOG_TAB_FOOTER_HINTS = ("←/→ to switch", "esc to cancel")
+_PERMISSIONS_DIALOG_EDITOR_FOOTER_HINTS = ("enter to submit", "enter to confirm")
+# Every question footer offers navigation or selection; the rule editor's never does.
+_QUESTION_FOOTER_HINTS = ("to navigate", "to select")
 _PERMISSIONS_DIALOG_HEADLINE_RE = re.compile(
-    r"Add (?:allow|ask|deny) permission rule"
-    r"|Permission rules are a tool name"
-    r"|Where should (?:this rule|these rules) be saved\?"
+    r"add (?:allow|ask|deny) permission rule"
+    r"|permission rules are a tool name"
+    r"|where should (?:this rule|these rules) be saved\?",
+    re.IGNORECASE,
 )
 _PERMISSIONS_DIALOG_SURFACE = "the /permissions dialog"
 # Surfaces a confirm Enter must never land on: they are never a slash command's
@@ -6021,10 +6024,12 @@ def _permissions_dialog_visible(pane: str) -> bool:
     below the last box rule (the pane tail when none is drawn), where a free
     composer shows only its mode footer; the rule editor and save-location
     screens, which lack tab hints, are read from their headline within the
-    last :data:`_DIALOG_SCAN_TAIL_LINES` rows. Both reads require an Escape
-    hint in that footer region, so dialog chrome quoted in a transcript above
-    a free composer never qualifies. Rows are joined before matching because
-    a narrow pane wraps the footer.
+    last :data:`_DIALOG_SCAN_TAIL_LINES` rows, and only under their own
+    "Enter to submit/confirm" footer with no navigation hint, which a question
+    echoing those words still carries. Both reads require an Escape hint in
+    that footer region, so dialog chrome quoted in a transcript above a free
+    composer never qualifies. Rows are joined and lowercased before matching,
+    since a narrow pane wraps the footer and Claude Code's casing drifts.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: ``True`` when any ``/permissions`` screen holds the terminal.
@@ -6036,11 +6041,15 @@ def _permissions_dialog_visible(pane: str) -> bool:
     footer_rows = (
         lines[last_rule + 1 :] if last_rule is not None else lines[-_PROMPT_SCAN_TAIL_LINES:]
     )
-    footer = " ".join(" ".join(footer_rows).split())
+    footer = " ".join(" ".join(footer_rows).split()).lower()
     if not _ESCAPE_DISMISS_HINT.search(footer):
         return False
     if all(hint in footer for hint in _PERMISSIONS_DIALOG_TAB_FOOTER_HINTS):
         return True
+    if not any(hint in footer for hint in _PERMISSIONS_DIALOG_EDITOR_FOOTER_HINTS) or any(
+        hint in footer for hint in _QUESTION_FOOTER_HINTS
+    ):
+        return False
     tail = " ".join(" ".join(lines[-_DIALOG_SCAN_TAIL_LINES:]).split())
     return _PERMISSIONS_DIALOG_HEADLINE_RE.search(tail) is not None
 
