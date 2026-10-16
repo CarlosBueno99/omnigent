@@ -38,10 +38,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import HostHelloFrame
 from omnigent.llms.context_window import ModelPricing
 from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
-from omnigent.runner.launch_failure import (
-    codex_previous_model_budget_hint,
-    diagnose_codex_previous_model_budget,
-)
+from omnigent.runner.launch_failure import codex_previous_model_budget_hint
 from omnigent.runner.transports.ws_tunnel.frames import EventAckFrame, EventBatchFrame
 from omnigent.runtime import inflight_text
 from omnigent.runtime.tool_output import MAX_TOOL_OUTPUT_BYTES
@@ -5709,20 +5706,28 @@ _CODEX_PREVIOUS_MODEL_BUDGET_CARD = {
     ),
 }
 
-# A gateway id far past the persisted-label width: the card must still persist whole.
+# A gateway id far past the persisted-label width: the hint elides it to 48
+# characters so the persisted cause and remediation stay whole.
+_CODEX_LONG_MODEL_ID = "system.ai." + "x" * 300
+_CODEX_CLIPPED_MODEL_ID = "system.ai." + "x" * 37 + "…"
 _CODEX_LONG_MODEL_BUDGET_DETAIL = (
     f"{_BUDGET_REFUSAL_DETAIL}\n\n"
-    f"{codex_previous_model_budget_hint('system.ai.' + 'x' * 300, 'gpt-5.6-sol')}"
+    f"{codex_previous_model_budget_hint(_CODEX_LONG_MODEL_ID, 'gpt-5.6-sol')}"
 )
-_CODEX_LONG_MODEL_BUDGET_DIAGNOSIS = diagnose_codex_previous_model_budget(
-    _CODEX_LONG_MODEL_BUDGET_DETAIL
-)
-assert _CODEX_LONG_MODEL_BUDGET_DIAGNOSIS is not None
 _CODEX_LONG_MODEL_BUDGET_CARD = {
     "title": "Codex is blocked on the previous model's budget",
-    "cause": _CODEX_LONG_MODEL_BUDGET_DIAGNOSIS.cause,
-    "remediation": _CODEX_LONG_MODEL_BUDGET_DIAGNOSIS.remediation,
+    "cause": (
+        f"Codex compacted this conversation on `{_CODEX_CLIPPED_MODEL_ID}`, the model of its "
+        "last completed turn, before switching to `gpt-5.6-sol`, and that model's budget is "
+        "exhausted."
+    ),
+    "remediation": (
+        "Switching models again will not help; fork this session to continue on `gpt-5.6-sol`. "
+        "The fork keeps the conversation history but starts without Codex's "
+        f"`{_CODEX_CLIPPED_MODEL_ID}` turn context."
+    ),
 }
+assert all(len(value) < 255 for value in _CODEX_LONG_MODEL_BUDGET_CARD.values())
 
 
 @pytest.mark.parametrize("wire_output", [False, True])
