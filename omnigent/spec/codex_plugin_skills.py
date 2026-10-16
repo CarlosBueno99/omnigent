@@ -79,11 +79,7 @@ def _inventory_plugins(codex_home: Path, cwd: Path | None) -> list[object] | Non
 
 
 def _cached_plugins(codex_home: Path, cache: Path) -> list[object]:
-    """
-    Read the plugins Codex loads without consulting any marketplace: every
-    ``config.toml`` ``[plugins."<name>@<marketplace>"]`` table not marked
-    ``enabled = false``, at the highest version present in the cache.
-    """
+    """Enabled ``config.toml`` plugin tables at their highest cached version, as Codex loads them."""
     try:
         with (codex_home / "config.toml").open("rb") as handle:
             config = tomllib.load(handle)
@@ -119,12 +115,7 @@ def _cached_plugins(codex_home: Path, cache: Path) -> list[object]:
 def discover_codex_plugin_skills(
     codex_home: Path, skills_filter: str | list[str], *, cwd: Path | None = None
 ) -> list[SkillSpec]:
-    """
-    Ask Codex which plugin versions are installed, then parse their skills.
-
-    ``codex plugin list`` fails whenever a configured marketplace cannot load,
-    while Codex still runs the installed plugins; then read that local state.
-    """
+    """Ask Codex which plugin versions are installed, then parse their skills."""
     if skills_filter == "none" or skills_filter == []:
         return []
     cache = codex_home / "plugins" / "cache"
@@ -132,6 +123,7 @@ def discover_codex_plugin_skills(
         return []
     plugins = _inventory_plugins(codex_home, cwd)
     if plugins is None:
+        # A marketplace that cannot load fails the inventory while Codex still runs the plugins.
         plugins = _cached_plugins(codex_home, cache)
     filter_names = set(skills_filter) if isinstance(skills_filter, list) else None
     out: list[SkillSpec] = []
