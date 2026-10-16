@@ -3,13 +3,7 @@
 // names the sub-agent exactly as the rail lists it.
 
 import type { ChildSessionInfo } from "@/hooks/useChildSessions";
-import {
-  ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER,
-  CLAUDE_NATIVE_SUBAGENT_WRAPPER,
-  CODEX_NATIVE_SUBAGENT_WRAPPER,
-  OPENCODE_NATIVE_SUBAGENT_WRAPPER,
-  WRAPPER_LABEL_KEY,
-} from "@/lib/nativeCodingAgents";
+import { nativeCodingAgentForSubagentWrapper, WRAPPER_LABEL_KEY } from "@/lib/nativeCodingAgents";
 
 /**
  * Pick the primary label for a child-session row.
@@ -23,25 +17,24 @@ import {
  * @returns The label shown beside the child icon.
  */
 export function childPrimaryLabel(child: ChildSessionInfo, fallback: string = child.id): string {
+  const trimmed = (value: string | null | undefined) => value?.trim() || null;
   // User-added rows use the reserved "ui:<agent>:<name>" title sentinel;
   // LLM-spawned titles cannot start with "ui:" because the spec validator
   // rejects "ui" as a sub-agent name.
   const isUserAdded = child.title?.startsWith("ui:") ?? false;
-  const childWrapper = child.labels?.[WRAPPER_LABEL_KEY];
-  // agy child titles are ``"<role>:<cascade id>"``: the generic path below
-  // would show the cascade UUID, so native sub-agents use ``tool`` instead.
+  // Native sub-agent titles are ``"<role>:<opaque id>"``: the generic path
+  // below would show that id, so every registered native wrapper uses ``tool``.
   const isNativeSubagent =
-    childWrapper === CODEX_NATIVE_SUBAGENT_WRAPPER ||
-    childWrapper === OPENCODE_NATIVE_SUBAGENT_WRAPPER ||
-    childWrapper === ANTIGRAVITY_NATIVE_SUBAGENT_WRAPPER ||
-    childWrapper === CLAUDE_NATIVE_SUBAGENT_WRAPPER;
+    nativeCodingAgentForSubagentWrapper(child.labels?.[WRAPPER_LABEL_KEY]) !== undefined;
   if (isNativeSubagent && !isUserAdded) {
-    return child.tool ?? child.title ?? fallback;
+    return trimmed(child.tool) ?? trimmed(child.title) ?? fallback;
   }
-  const trimmed = (value: string | null | undefined) => value?.trim() || null;
+  // Strip the "ui:" sentinel first so the suffix is the human name, as the
+  // composer tray does.
+  const titleSource = isUserAdded ? child.title?.slice(3) : child.title;
   let titleTask: string | null = null;
-  if (child.title?.includes(":")) {
-    const titleSuffix = child.title.split(":").slice(1).join(":");
+  if (titleSource?.includes(":")) {
+    const titleSuffix = titleSource.split(":").slice(1).join(":");
     if (titleSuffix) titleTask = titleSuffix;
   }
   const handle = trimmed(child.session_name) ?? trimmed(titleTask);

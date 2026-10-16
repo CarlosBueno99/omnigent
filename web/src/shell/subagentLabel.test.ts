@@ -61,6 +61,32 @@ describe("childPrimaryLabel", () => {
     expect(childPrimaryLabel(nameless, "Sub-agent")).toBe("Sub-agent");
   });
 
+  it("labels a Devin sub-agent by its resolved tool like the other native wrappers", () => {
+    const devin = child({
+      title: "devin-native-ui-subagent:690d786b",
+      session_name: "690d786b",
+      tool: "Write alpha.txt",
+      task_summary: null,
+      labels: { "omnigent.wrapper": "devin-native-ui-subagent" },
+    });
+    expect(childPrimaryLabel(devin)).toBe("Write alpha.txt");
+  });
+
+  it("labels a native sub-agent by its title when the resolved tool is blank", () => {
+    const native = child({
+      title: "general-purpose:a09d1dd1d8dbc0151",
+      session_name: "a09d1dd1d8dbc0151",
+      tool: "  ",
+      labels: { "omnigent.wrapper": "claude-code-native-ui-subagent" },
+    });
+    expect(childPrimaryLabel(native)).toBe("general-purpose:a09d1dd1d8dbc0151");
+  });
+
+  it("strips the user-added sentinel before taking the handle from the title", () => {
+    const added = child({ title: "ui:claude:my-agent", session_name: null, task_summary: null });
+    expect(childPrimaryLabel(added)).toBe("my-agent");
+  });
+
   it("labels native sub-agents by their resolved tool, not the correlation id", () => {
     const native = child({
       title: "general-purpose:a09d1dd1d8dbc0151",

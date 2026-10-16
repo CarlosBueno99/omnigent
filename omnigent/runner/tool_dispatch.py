@@ -6040,6 +6040,8 @@ async def _collect_sub_agents(
     # If the caller is itself a child, surface main + siblings too.
     parent_id = await _session_parent_id(conversation_id, server_client)
     if parent_id is not None:
+        # ``main`` is addressed by that handle; a parent that is itself a
+        # sub-agent exposes its own summary through ``sys_session_get_info``.
         result.append(
             {"agent": "main", "title": None, "conversation_id": parent_id, "task_summary": None}
         )
