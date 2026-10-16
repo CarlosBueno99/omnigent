@@ -154,6 +154,7 @@ from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 
 _logger = logging.getLogger(__name__)
 _RECONNECT_BINDING_BATCH_SIZE = 128
+_HANDOFF_STATUS_BATCH_SIZE = 200
 
 
 class SmartRoutingSourcesInfo(BaseModel):
@@ -3558,26 +3559,41 @@ def create_app(
         # reconnect here during the lookup re-takes ownership, so recheck it.
         handoff_reason = shutdown_state.runner_handoff_reason(runner_id)
         if handoff_reason is not None:
+            handed_off_ids: list[str] = []
+            after: str | None = None
             try:
-                handed_off = await asyncio.to_thread(
-                    conversation_store.list_conversations_by_runner_id, runner_id
-                )
-            except Exception:  # noqa: BLE001 — a stale cache is safe; it expires on its own
+                while True:
+                    batch = await asyncio.to_thread(
+                        conversation_store.list_runner_session_statuses,
+                        runner_id,
+                        after=after,
+                        limit=_HANDOFF_STATUS_BATCH_SIZE,
+                    )
+                    # A reconnect here re-takes ownership; stop before dropping
+                    # any live state so the owner keeps the active-response id.
+                    if tunnel_registry.get(runner_id) is not None:
+                        _logger.info(
+                            "Runner %s reconnected during the handoff lookup; "
+                            "skipping offline-marking",
+                            runner_id,
+                        )
+                        return
+                    handed_off_ids.extend(session_id for session_id, _ in batch)
+                    if len(batch) < _HANDOFF_STATUS_BATCH_SIZE:
+                        break
+                    after = batch[-1][0]
+            except Exception:  # noqa: BLE001
+                # Best-effort cleanup: a store outage leaves the stale cache for
+                # a later lifecycle event to clear, and never fails the turn.
                 _logger.warning(
                     "Listing sessions for handed-off runner %s failed; "
-                    "leaving its caches to expire",
+                    "leaving its caches for a later lifecycle event",
                     runner_id,
                     exc_info=True,
                 )
-                handed_off = []
-            if tunnel_registry.get(runner_id) is not None:
-                _logger.info(
-                    "Runner %s reconnected during the handoff lookup; skipping offline-marking",
-                    runner_id,
-                )
                 return
-            for conv in handed_off:
-                _relinquish_session_live_state(conv.id)
+            for relinquished_id in handed_off_ids:
+                _relinquish_session_live_state(relinquished_id)
             _logger.info(
                 "Runner %s dropped because this server handed it off (%s); "
                 "skipping offline-marking",

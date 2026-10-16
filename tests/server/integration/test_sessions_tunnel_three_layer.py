@@ -2256,11 +2256,13 @@ async def test_retired_tunnel_keeps_live_state_when_runner_reconnects_during_loo
     touched_runners.clear()
 
     loop = asyncio.get_running_loop()
-    real_list = store.list_conversations_by_runner_id
+    real_list = store.list_runner_session_statuses
     reconnected_mid_lookup = threading.Event()
 
-    def _list_and_reconnect(rid: str) -> Any:
-        result = real_list(rid)
+    def _list_and_reconnect(
+        rid: str, *, after: str | None = None, limit: int = 200
+    ) -> list[tuple[str, str | None]]:
+        result = real_list(rid, after=after, limit=limit)
         # Simulate a reconnect that lands here while the handoff lookup is
         # still running in the worker thread, by re-registering on the loop.
         if rid == runner_id and not reconnected_mid_lookup.is_set():
@@ -2275,7 +2277,7 @@ async def test_retired_tunnel_keeps_live_state_when_runner_reconnects_during_loo
             assert registered.wait(timeout=budget(2.0)), "mid-lookup reconnect did not land"
         return result
 
-    monkeypatch.setattr(store, "list_conversations_by_runner_id", _list_and_reconnect)
+    monkeypatch.setattr(store, "list_runner_session_statuses", _list_and_reconnect)
 
     try:
         assert ap_app.state.tunnel_registry.deregister(runner_id) is not None
@@ -2301,6 +2303,76 @@ async def test_retired_tunnel_keeps_live_state_when_runner_reconnects_during_loo
             await communicator.wait(timeout=budget(2.0))
         sessions_module._session_status_cache.pop(session_id, None)
         sessions_module._session_active_response_cache.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_session_status_cache")
+async def test_handoff_cleanup_pages_through_every_bound_session(
+    tunnel_three_layer_stack: _TunnelStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handoff branch relinquishes every bound session over bounded pages.
+
+    A runner this replica handed off can own far more sessions than one query
+    should scan, so the cleanup keyset-paginates. The grace timer must walk
+    every page -- advancing the cursor by the last ID of each full page and
+    stopping on a short one -- and relinquish each session exactly once.
+    """
+    from omnigent.runtime import get_conversation_store
+    from omnigent.server import app as app_module
+    from omnigent.server import shutdown_state
+    from omnigent.server.routes import sessions as sessions_module
+
+    ap_app = tunnel_three_layer_stack.ap_app
+
+    grace = 0.3
+    monkeypatch.setattr("omnigent.server.routes.sessions.RUNNER_DISCONNECT_GRACE_S", grace)
+    _stub_connect_hook_for_pumpless_ws(ap_app, monkeypatch)
+
+    runner_id = "runner-handoff-multipage"
+    store = get_conversation_store()
+    page_size = app_module._HANDOFF_STATUS_BATCH_SIZE
+    # Two full pages plus a short one proves the loop advances and then stops.
+    bound_ids = [f"sess-{index:06d}" for index in range(page_size * 2 + 5)]
+
+    seen_cursors: list[str | None] = []
+
+    def _paged_statuses(
+        rid: str, *, after: str | None = None, limit: int = 200
+    ) -> list[tuple[str, str | None]]:
+        assert rid == runner_id
+        seen_cursors.append(after)
+        start = 0 if after is None else bound_ids.index(after) + 1
+        return [(session_id, "running") for session_id in bound_ids[start : start + limit]]
+
+    monkeypatch.setattr(store, "list_runner_session_statuses", _paged_statuses)
+
+    relinquished: list[str] = []
+    monkeypatch.setattr(sessions_module, "_relinquish_session_live_state", relinquished.append)
+
+    communicator = await _connect_runner_tunnel(ap_app, runner_id)
+    await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
+    try:
+        assert ap_app.state.tunnel_registry.deregister(runner_id) is not None
+
+        async def _every_session_relinquished() -> None:
+            while len(relinquished) < len(bound_ids):
+                await asyncio.sleep(0.02)
+
+        await asyncio.wait_for(_every_session_relinquished(), timeout=budget(5.0))
+        # Every bound session is dropped once, in page order.
+        assert relinquished == bound_ids
+        # Keyset cursor advances by the last ID of each full page, then stops.
+        assert seen_cursors == [
+            None,
+            bound_ids[page_size - 1],
+            bound_ids[2 * page_size - 1],
+        ]
+    finally:
+        shutdown_state.reset_for_tests()
+        ap_app.state.tunnel_registry.deregister(runner_id, retire=False)
+        with contextlib.suppress(asyncio.TimeoutError, Exception):
+            await communicator.wait(timeout=budget(2.0))
 
 
 # TODO: factor ``FakeProcessManager`` and ``_build_harness_agent_bundle``
