@@ -100,7 +100,7 @@ def test_composer_add_tray_offers_a_side_chat(
     runner_id: str,
     mock_llm_server_url: str,
 ) -> None:
-    """The composer ``+`` tray starts a working chat on the parent's runner."""
+    """The ``+`` tray starts a working side chat whose composer also opens the slash menu."""
     base_url, session_id = seeded_session
     question = f"tray-side-{session_id}: answer in the side chat"
     reply = "The add tray started a side chat."
@@ -119,6 +119,13 @@ def test_composer_add_tray_offers_a_side_chat(
     response = httpx.get(f"{base_url}/v1/sessions/{side_chat_forks[0]}", timeout=10.0)
     response.raise_for_status()
     assert response.json()["runner_id"] == runner_id
+
+    # The live side chat shares the main composer's slash menu; /help is the
+    # built-in offered on every non-native harness, so it proves the menu opened.
+    side_input = page.get_by_test_id("side-chat-input")
+    expect(side_input).to_be_enabled(timeout=30_000)
+    side_input.fill("/")
+    expect(page.get_by_test_id("slash-menu-item-help")).to_be_visible(timeout=10_000)
 
 
 def test_rail_new_tab_menu_offers_a_side_chat(page: Page, seeded_session: tuple[str, str]) -> None:
@@ -645,40 +652,3 @@ def test_fork_from_side_chat_uses_child_and_creates_visible_session(
     finally:
         if fork_id is not None:
             httpx.delete(f"{base_url}/v1/sessions/{fork_id}", timeout=10.0).raise_for_status()
-
-
-def test_side_chat_composer_offers_slash_suggestions(
-    page: Page,
-    seeded_session: tuple[str, str],
-    side_chat_forks: list[str],
-    runner_id: str,
-    mock_llm_server_url: str,
-) -> None:
-    """Typing ``/`` in a live side chat opens the suggestions menu, as the main composer does."""
-    base_url, session_id = seeded_session
-    question = f"slash-side-{session_id}: answer in the side chat"
-    reply = "The side chat is live."
-    configure_mock_llm(mock_llm_server_url, [{"text": reply}], match=question)
-
-    page.goto(f"{base_url}/c/{session_id}")
-    expect(page.get_by_placeholder("Send a message…")).to_be_visible()
-    page.get_by_test_id("composer-attach").click()
-    page.get_by_role("menuitem", name="Start a new side chat").click()
-    page.get_by_test_id("side-chat-input").fill(question)
-    page.get_by_test_id("side-chat-send").click()
-    expect(page.locator(".side-chat-backdrop").get_by_text(reply, exact=True)).to_be_visible(
-        timeout=30_000
-    )
-    assert len(side_chat_forks) == 1
-    child = httpx.get(f"{base_url}/v1/sessions/{side_chat_forks[0]}", timeout=10.0)
-    child.raise_for_status()
-    assert child.json()["runner_id"] == runner_id
-
-    side_input = page.get_by_test_id("side-chat-input")
-    expect(side_input).to_be_enabled(timeout=30_000)
-    side_input.fill("/")
-    # The menu lists the child's skills, or says why there are none; either way
-    # it opened, which the side-chat composer never did before.
-    menu_row = page.locator('[data-testid^="slash-menu-item-"]')
-    skills_status = page.get_by_role("status").filter(has_text=re.compile("skills", re.IGNORECASE))
-    expect(menu_row.or_(skills_status).first).to_be_visible(timeout=10_000)

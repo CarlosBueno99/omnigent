@@ -40,7 +40,11 @@ and steers messages while the agent is busy.
 - `managed-mcp-sign-in`: selecting an unconnected service opens inline sign-in;
   selection and launch wait for success. States: connected, pending, cancelled,
   failed, popup blocked, Databricks workspace prompt, bearer token needed.
-- `slash-menu`: typing `/` opens commands and skills with keyboard navigation.
+- `slash-menu`: typing `/` opens commands and skills with keyboard navigation,
+  in the main composer and in a live side chat. A built-in such as `/help` is
+  handled locally; a recognised skill routes through `slash_command` so it runs
+  on an in-process harness. A native terminal side chat shows no menu and sends
+  slash text to the vendor TUI.
 - `new-command`: `/new` opens a blank new-session composer in the same project;
   working-directory selection follows the project's defaults, not the old session.
 - `attachments`: attach button, paste, and drop onto the transcript; chips can
@@ -272,7 +276,8 @@ Other connection providers alone do not enable the managed MCP picker.
   covers deleted projects with dangling session membership.
   No running agent is needed.
 - **`slash-menu`:**
-  `tests/browser_ui/chat/test_slash_menu.py::test_slash_menu_tracks_real_focus_and_wrapping_keyboard_navigation`
+  `tests/browser_ui/chat/test_slash_menu.py::test_slash_menu_tracks_real_focus_and_wrapping_keyboard_navigation`,
+  `tests/e2e_ui/chat/test_side_chat_slash_command.py::test_side_chat_slash_menu_and_skill_invocation`
 - **`attachments`:**
   `tests/browser_ui/chat/test_composer_attachments.py::test_attach_supported_files_and_remove`,
   `tests/browser_ui/chat/test_composer_attachments.py::test_file_dropped_on_the_transcript_attaches`,

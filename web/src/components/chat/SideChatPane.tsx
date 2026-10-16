@@ -511,11 +511,13 @@ function SideChatComposer({
   );
   // /help lists what this side chat offers; shown locally, never sent as a turn.
   const showHelp = useCallback(() => {
-    const lines = Object.entries({ ...sideChatBuiltins, ...skillCommands }).map(
-      ([name, desc]) => `${name} — ${desc}`,
-    );
+    const lines = Object.entries(menuCommands).map(([name, desc]) => `${name} — ${desc}`);
     setCommandNotice(lines.join("\n"));
-  }, [sideChatBuiltins, skillCommands]);
+  }, [menuCommands]);
+  // Tab fills the draft with the chosen command; Enter or click runs a built-in.
+  const completeMenuSelection = (cmd: string) => {
+    setText(slashCompletion.complete(cmd).text);
+  };
   // Insert a chosen skill at the caret; a built-in runs immediately (no args).
   const applyMenuSelection = (cmd: string) => {
     if (Object.hasOwn(sideChatBuiltins, cmd)) {
@@ -523,7 +525,7 @@ function SideChatComposer({
       if (cmd === "/help") showHelp();
       return;
     }
-    setText(slashCompletion.complete(cmd).text);
+    completeMenuSelection(cmd);
   };
   const slashCompletion = useSlashCompletion({
     text,
@@ -536,9 +538,11 @@ function SideChatComposer({
     mobile: isMobile,
     mobileEnterCompletes: false,
     escapeClearsOnlyWithContent: true,
-    // A pending tab has no session to discover skills for yet.
-    allowOpen: inputFocused && !pending && quotes.length === 0 && files.length === 0,
+    // A pending tab has no session yet; a native TUI reads slash text itself.
+    allowOpen:
+      inputFocused && !pending && !nativeSession && quotes.length === 0 && files.length === 0,
     onSelect: applyMenuSelection,
+    onTabComplete: completeMenuSelection,
     clearText: () => setText(""),
   });
   const showInterrupt = !pending && busy;

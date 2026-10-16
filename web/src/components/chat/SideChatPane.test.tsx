@@ -646,6 +646,8 @@ describe("side-chat slash commands", () => {
     skillsFixture.current = { skills: [review], skillsStatus: "ready" };
     renderPane(<SideChatPane childId={childId} />);
     typeSlash("/review 123");
+    // No menu: a disconnected skill list would be misleading when the TUI owns slashes.
+    expect(screen.queryByTestId("slash-menu-item-review")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Send side question" }));
     expect(send).toHaveBeenCalledExactlyOnceWith("/review 123", "agent_side", undefined, {
       pinnedConversationId: childId,
@@ -675,6 +677,36 @@ describe("side-chat slash commands", () => {
     expect(screen.getByText(/Show available slash commands/)).toBeInTheDocument();
   });
 
+  it("runs /help locally when its menu row is chosen, without sending", () => {
+    conversationRegistry
+      .acquire(childId)
+      .setState({ sessionHarness: "claude-sdk", sessionStatus: "idle" });
+    skillsFixture.current = { skills: [review], skillsStatus: "ready" };
+    renderPane(<SideChatPane childId={childId} />);
+    typeSlash("/help");
+    fireEvent.click(screen.getByTestId("slash-menu-item-help"));
+    // Choosing the built-in row runs it in place: the menu closes to the local
+    // notice and neither send path is used.
+    expect(screen.queryByTestId("slash-menu-item-help")).toBeNull();
+    expect(screen.getByText(/Show available slash commands/)).toBeInTheDocument();
+    expect(send).not.toHaveBeenCalled();
+    expect(sendSlashCommand).not.toHaveBeenCalled();
+  });
+
+  it("fills the draft with a built-in on Tab instead of running it", () => {
+    conversationRegistry.acquire(childId).setState({ sessionHarness: "claude-sdk" });
+    skillsFixture.current = { skills: [review], skillsStatus: "ready" };
+    renderPane(<SideChatPane childId={childId} />);
+    const input = typeSlash("/help");
+    expect(screen.getByTestId("slash-menu-item-help")).toBeVisible();
+    fireEvent.keyDown(input, { key: "Tab" });
+    // Running /help would clear the draft; Tab instead leaves the completed
+    // command text so the user can edit it before sending.
+    expect(input.value.startsWith("/help")).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+    expect(sendSlashCommand).not.toHaveBeenCalled();
+  });
+
   it("sends /help as plaintext on a native terminal harness", () => {
     // beforeEach binds the child to codex-native: built-ins stay out, so the
     // vendor TUI receives the typed text itself.
@@ -682,6 +714,7 @@ describe("side-chat slash commands", () => {
     skillsFixture.current = { skills: [review], skillsStatus: "ready" };
     renderPane(<SideChatPane childId={childId} />);
     typeSlash("/help");
+    expect(screen.queryByTestId("slash-menu-item-help")).toBeNull();
     fireEvent.click(screen.getByTestId("side-chat-send"));
     expect(send).toHaveBeenCalledExactlyOnceWith("/help", "agent_side", undefined, {
       pinnedConversationId: childId,

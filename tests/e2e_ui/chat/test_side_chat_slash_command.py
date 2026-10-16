@@ -1,10 +1,10 @@
-"""Side-chat composer slash-command menu and skill invocation (OMNI-12807).
+"""Side-chat composer slash-command menu and skill invocation.
 
-The main composer opens a slash suggestions menu and routes a recognised skill
-through the server's ``slash_command`` event. The side-chat composer in
-``web/src/components/chat/SideChatPane.tsx`` wires none of that, so typing ``/``
-there shows no menu and submitting ``/<skill>`` reaches the agent as plaintext —
-the skill never runs on an in-process harness.
+The side-chat composer offers the same slash experience as the main composer:
+typing ``/`` opens the suggestions menu, submitting ``/<skill>`` routes through
+the server's ``slash_command`` event so the skill runs on an in-process harness,
+and a built-in such as ``/help`` is handled locally instead of being sent to the
+agent as a turn.
 
 The session runs on a real ``omnigent host`` launched by the test, so skill
 discovery (``GET /v1/skills``) and the server's skill resolution exercise the
@@ -13,11 +13,8 @@ real backend; only the model is the shared mock.
 
 from __future__ import annotations
 
-import gzip
-import io
 import json
 import os
-import tarfile
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -30,7 +27,7 @@ from playwright.sync_api import Route, expect
 
 from tests._helpers.compat import runner_executable
 from tests._helpers.host import isolated_host
-from tests._helpers.session import post_session_bundle
+from tests._helpers.session import bundle_files, post_session_bundle
 from tests.e2e_ui.conftest import set_fallback_mock_llm
 
 _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
@@ -52,19 +49,6 @@ os_env:
   sandbox:
     type: none
 """
-
-
-def _bundle() -> bytes:
-    buf = io.BytesIO()
-    with (
-        gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
-        tarfile.open(fileobj=gz, mode="w") as tar,
-    ):
-        data = _AGENT_YAML.encode()
-        info = tarfile.TarInfo(name="side_chat_skills.yaml")
-        info.size = len(data)
-        tar.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
 
 
 @pytest.fixture
@@ -112,7 +96,7 @@ def side_chat_host_session(
         create = post_session_bundle(
             client.post,
             "/v1/sessions",
-            _bundle(),
+            bundle_files({"side_chat_skills.yaml": _AGENT_YAML.encode()}),
             metadata={"workspace": str(workspace), "host_id": host.host_id},
             timeout=120.0,
         )
@@ -169,6 +153,12 @@ def _poll(predicate: Callable[[], bool], timeout_s: float = 20.0, interval: floa
     return predicate()
 
 
+def _delete_forks(base_url: str, child_ids: list[str]) -> None:
+    """Remove the side-chat forks a test created from the fixture-owned server."""
+    for child_id in child_ids:
+        httpx.delete(f"{base_url}/v1/sessions/{child_id}", timeout=10.0)
+
+
 def test_side_chat_slash_menu_and_skill_invocation(
     request: pytest.FixtureRequest,
     side_chat_host_session: tuple[str, str],
@@ -191,6 +181,7 @@ def test_side_chat_slash_menu_and_skill_invocation(
         route.fulfill(response=response)
 
     page.route(f"**/v1/sessions/{session_id}/fork", _track_fork)
+    request.addfinalizer(lambda: _delete_forks(base_url, child_ids))
 
     page.goto(f"{base_url}/c/{session_id}")
     composer = page.get_by_placeholder("Send a message…")
@@ -251,79 +242,3 @@ def test_side_chat_slash_menu_and_skill_invocation(
 
     page.wait_for_timeout(1_500)
     assert not problems, "; ".join(problems)
-
-
-@pytest.mark.skipif(
-    not os.environ.get("OMNIGENT_REPRO_RECORD"),
-    reason="before-fix recording driver (OMNI-12807); set OMNIGENT_REPRO_RECORD to run",
-)
-def test_record_side_chat_slash_bug_before(
-    browser: Any,
-    side_chat_host_session: tuple[str, str],
-    mock_llm_server_url: str,
-) -> None:
-    """Paced before-fix capture: main composer menu works, side-chat composer does not.
-
-    A temporary driver (not regression coverage) that holds each state long
-    enough to read and ends on the observed bug.
-    """
-    base_url, session_id = side_chat_host_session
-    side_token = f"sidechat-{session_id}"
-    skill_row = f"slash-menu-item-{_SKILL_NAME}"
-    set_fallback_mock_llm(mock_llm_server_url, _MODEL, "Acknowledged.")
-
-    out_dir = Path("recordings/12807/raw")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    context = browser.new_context(
-        viewport={"width": 1280, "height": 800},
-        record_video_dir=str(out_dir),
-        record_video_size={"width": 1280, "height": 800},
-    )
-    page = context.new_page()
-    child_ids: list[str] = []
-
-    def _track_fork(route: Route) -> None:
-        response = route.fetch()
-        if response.ok:
-            child_ids.append(str(response.json()["id"]))
-        route.fulfill(response=response)
-
-    page.route(f"**/v1/sessions/{session_id}/fork", _track_fork)
-    try:
-        page.goto(f"{base_url}/c/{session_id}")
-        composer = page.get_by_placeholder("Send a message…")
-        expect(composer).to_be_visible(timeout=30_000)
-        page.wait_for_timeout(1_000)
-
-        # Main composer: "/" opens the slash menu listing the skill.
-        composer.fill("/")
-        expect(page.get_by_test_id(skill_row)).to_be_visible(timeout=20_000)
-        page.wait_for_timeout(3_000)
-        composer.fill("")
-        page.wait_for_timeout(500)
-
-        # Open a side chat and wait for its first reply.
-        composer.fill(f"/side {side_token}: open a side chat")
-        page.get_by_role("button", name="Send", exact=True).click()
-        pane = page.locator(".side-chat-backdrop")
-        side_input = page.get_by_test_id("side-chat-input")
-        expect(side_input).to_be_visible(timeout=30_000)
-        expect(pane.locator(_ASSISTANT).first).to_be_visible(timeout=60_000)
-        page.wait_for_timeout(1_500)
-
-        # Side composer: typing "/" opens no menu (the bug).
-        side_input.click()
-        page.keyboard.type("/")
-        page.wait_for_timeout(3_500)
-        side_input.fill("")
-
-        # Side composer: "/<skill>" is sent as a plain message, not invoked.
-        side_input.fill(f"/{_SKILL_NAME} {side_token}-invoke")
-        page.wait_for_timeout(1_000)
-        page.get_by_test_id("side-chat-send").click()
-        expect(
-            pane.locator('[data-testid="message-bubble"]').filter(has_text=f"/{_SKILL_NAME}")
-        ).to_be_visible(timeout=30_000)
-        page.wait_for_timeout(3_500)
-    finally:
-        context.close()
