@@ -30,6 +30,7 @@ from tests.e2e_ui.conftest import reset_mock_llm
 from .test_message_render_parity import _ensure_chat_view
 from .test_native_claude_render_parity import (
     _focus_tui,
+    _marker_rendered,
     _open_terminal_view,
     _pane_text,
     _send_composer_turn,
@@ -49,11 +50,13 @@ _ALLOW_RULE = "Bash(echo:*)"
 
 
 def _rule_editor_open(pane: str) -> bool:
-    return _RULE_EDITOR_TITLE in pane and all(hint in pane for hint in _RULE_EDITOR_FOOTER)
+    return _marker_rendered(pane, _RULE_EDITOR_TITLE) and all(
+        _marker_rendered(pane, hint) for hint in _RULE_EDITOR_FOOTER
+    )
 
 
 def _permissions_dialog_open(pane: str) -> bool:
-    return _rule_editor_open(pane) or _LIST_FOOTER in pane
+    return _rule_editor_open(pane) or _marker_rendered(pane, _LIST_FOOTER)
 
 
 def _wait_for_pane(
@@ -81,29 +84,40 @@ def _open_add_rule_field(page: Page, base_url: str, session_id: str) -> None:
     _focus_tui(page)
     page.keyboard.type("/permissions", delay=40)
     _wait_for_pane(
-        base_url, session_id, lambda pane: "/permissions" in pane, what="the typed command"
+        base_url,
+        session_id,
+        lambda pane: _marker_rendered(pane, "/permissions"),
+        what="the typed command",
     )
     page.keyboard.press("Enter")
     _wait_for_pane(
         base_url,
         session_id,
-        lambda pane: _LIST_FOOTER in pane and "Esc to cancel" in pane,
+        lambda pane: (
+            _marker_rendered(pane, _LIST_FOOTER) and _marker_rendered(pane, "Esc to cancel")
+        ),
         what="the /permissions dialog",
     )
     _log.info("permissions dialog open")
     page.keyboard.press("ArrowDown")
     _wait_for_pane(
-        base_url, session_id, lambda pane: _ADD_RULE_ROW in pane, what="the add-rule row"
+        base_url,
+        session_id,
+        lambda pane: _marker_rendered(pane, _ADD_RULE_ROW),
+        what="the add-rule row",
     )
     page.keyboard.press("Enter")
     _wait_for_pane(
-        base_url, session_id, lambda pane: _RULE_EDITOR_TITLE in pane, what="the rule editor"
+        base_url,
+        session_id,
+        lambda pane: _marker_rendered(pane, _RULE_EDITOR_TITLE),
+        what="the rule editor",
     )
     page.keyboard.type(_ALLOW_RULE, delay=40)
     _wait_for_pane(
         base_url,
         session_id,
-        lambda pane: _rule_editor_open(pane) and _ALLOW_RULE in pane,
+        lambda pane: _rule_editor_open(pane) and _marker_rendered(pane, _ALLOW_RULE),
         what="the typed rule",
     )
     _log.info("add-rule field open with %s typed", _ALLOW_RULE)

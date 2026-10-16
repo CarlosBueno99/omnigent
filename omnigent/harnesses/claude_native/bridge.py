@@ -5888,9 +5888,8 @@ def _occupying_surface(pane: str) -> str | None:
     filter field, so the frame and ``❯`` glyph look exactly like a free
     input box while every keystroke filters history and Enter replays an
     old prompt; its footer (:func:`_history_search_footer_shown`) is the
-    only tell. The ``/permissions`` dialog's rule lists frame a search box
-    above a ``❯``-led row the same way (:func:`_permissions_dialog_visible`).
-    Both are read from the footer region.
+    only tell. The ``/permissions`` dialog is excluded the same way, before
+    the composer row is read (:func:`_permissions_dialog_visible`).
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: A short description for the log, e.g. ``"shell mode"``, or
@@ -5973,10 +5972,8 @@ def _claude_prompt_rendered(pane: str) -> bool:
     Since Claude Code 2.1.212 the ctrl+r history search rides the framed
     composer as its filter field, so the frame and glyph alone would read
     it as ready while a typed message filters history instead of sending;
-    its footer (:func:`_history_search_footer_shown`) rules it out. The
-    ``/permissions`` dialog's rule lists frame a search box above a
-    ``❯``-led row the same way; :func:`_permissions_dialog_visible` rules
-    them out too.
+    its footer (:func:`_history_search_footer_shown`) rules it out, as does
+    :func:`_permissions_dialog_visible` for the ``/permissions`` dialog.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: ``True`` when the chat input box appears mounted.

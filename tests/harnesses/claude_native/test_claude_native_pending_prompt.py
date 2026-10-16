@@ -453,6 +453,19 @@ def test_a_framed_transcript_snippet_above_a_boxless_screen_does_not_hide_the_di
     assert bridge._occupying_surface(pane) == "the /permissions dialog"
 
 
+def test_an_editor_footer_without_a_permissions_headline_is_still_a_prompt(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The editor footer alone names nothing; without a headline the screen stays protected."""
+    pane = (
+        "   Apply the change below?\n   ❯ 1. Apply\n     2. Discard\n\n"
+        "   Enter to submit · Esc to cancel\n"
+    )
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: pane)
+    assert not bridge._permissions_dialog_visible(pane)
+    assert bridge.has_pending_user_prompt(native_bridge)
+
+
 def test_permissions_dialog_chrome_above_a_ready_composer_keeps_it_ready() -> None:
     """Transcript quoting the dialog neither stalls the readiness gate nor draws an Escape."""
     pane = (
