@@ -35,7 +35,11 @@ deliberately hands one runner's tunnel to another replica, e.g. a deployment
 that rebalances runner tunnels across replicas during a rollout. The same
 reasoning applies to just that runner: this replica caused the loss, the
 runner re-tunnels to its new replica, and that replica — not this one —
-decides whether its turn failed.
+decides whether its turn failed. A caller can set it explicitly with
+:func:`mark_runner_handed_off`; the tunnel registry also reports every live
+tunnel it retires on this server's behalf (the 1001 "tunnel retired by
+server" close) through :func:`note_runner_tunnel_retired`, so a retire path
+that never marks first is still covered.
 """
 
 from __future__ import annotations
@@ -148,6 +152,22 @@ def clear_runner_handoff(runner_id: str) -> None:
     :param runner_id: Runner that just connected, e.g. ``"runner_0123456789abcdef"``.
     """
     _handed_off.pop(runner_id, None)
+
+
+def note_runner_tunnel_retired(runner_id: str) -> None:
+    """
+    Record a handoff for a live tunnel this server retired so the runner reconnects.
+
+    The in-band counterpart of :func:`mark_runner_handed_off`: the tunnel
+    registry calls it for every deliberate retire, so the disconnect it causes
+    is never read as the runner dying. A caller that already recorded a more
+    specific reason keeps it.
+
+    :param runner_id: Runner whose tunnel was retired, e.g.
+        ``"runner_0123456789abcdef"``.
+    """
+    if runner_handoff_reason(runner_id) is None:
+        mark_runner_handed_off(runner_id, reason="tunnel_retired")
 
 
 def runner_handoff_reason(runner_id: str | None, now: float | None = None) -> str | None:

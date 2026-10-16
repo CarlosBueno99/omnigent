@@ -1560,7 +1560,8 @@ def create_app(
     from omnigent.server.routes._host_launch import configure_host_sharding
 
     configure_host_sharding(host_sharded)
-    tunnel_registry = TunnelRegistry()
+    # A tunnel this replica retires on purpose is a handoff, not a lost runner.
+    tunnel_registry = TunnelRegistry(on_retire=shutdown_state.note_runner_tunnel_retired)
     host_registry = HostRegistry()
     runner_router = RunnerRouter(
         registry=tunnel_registry,
