@@ -1,7 +1,8 @@
 # Recording lanes — how to film a bug's journey on each surface
 
-Shared reference for **repro-agent** and **resolve-agent**. Both film the same
-kinds of journeys on the same surfaces; only *which* clip they produce differs:
+Shared reference for **repro-agent**, **resolve-agent**, and **feature-agent**.
+They film the same kinds of journeys on the same surfaces; only *which* clip
+they produce differs:
 
 - **repro-agent** films the product journey — a `reproduced` facet yields a
   **`before`** clip showing the live bug; an `already_fixed` facet yields a
@@ -10,9 +11,12 @@ kinds of journeys on the same surfaces; only *which* clip they produce differs:
   clip (the human-visible half of the fail→pass proof). The recovered test
   verifies the result separately. On the review path it films the reviewed PR
   head.
+- **feature-agent** films each covered CUJ as a **`demo`** clip, with the CUJ ID
+  as the facet. Its demo is required, not best-effort; its `feature-demo` skill
+  replaces "Internal/API-only results" and "If recording is blocked" below.
 
 Everything else below — which surface to drive, how to stand the recorder up, and
-the per-surface mechanics — is identical for both. Each agent's own AGENTS.md says
+the per-surface mechanics — is identical for all of them. Each agent's own AGENTS.md says
 which clip `kind` it produces and where it goes; this file is the how.
 
 The recording driver may be an existing test or a temporary journey script,
