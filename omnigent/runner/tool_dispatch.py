@@ -8436,7 +8436,10 @@ async def _evaluate_builtin_tool_call_policy(
             extra={"session_id": conversation_id},
         )
         return _BuiltinToolCallDecision(False, "policy evaluation unavailable", None)
-    verdict = _string_object_dict(resp.json())
+    try:
+        verdict = _string_object_dict(resp.json())
+    except (json.JSONDecodeError, ValueError):
+        verdict = None
     if verdict is None:
         return _BuiltinToolCallDecision(False, "policy evaluation returned no verdict", None)
     action = verdict.get("result")
@@ -8493,7 +8496,10 @@ async def _apply_builtin_tool_result_policy(
             extra={"session_id": conversation_id},
         )
         return output
-    verdict = _string_object_dict(resp.json())
+    try:
+        verdict = _string_object_dict(resp.json())
+    except (json.JSONDecodeError, ValueError):
+        return output
     if verdict is None:
         return output
     action = verdict.get("result")
@@ -8501,8 +8507,15 @@ async def _apply_builtin_tool_result_policy(
         reason = _optional_string(verdict.get("reason")) or "no reason given"
         return f"[Result suppressed by policy: {reason}]"
     transformed = verdict.get("data")
-    if isinstance(transformed, str):
-        return transformed
+    if transformed is not None:
+        if not isinstance(transformed, str):
+            _logger.warning(
+                "built-in %s TOOL_RESULT policy data must be str; got %s — coercing via str()",
+                tool_name,
+                type(transformed).__name__,
+                extra={"session_id": conversation_id},
+            )
+        return transformed if isinstance(transformed, str) else str(transformed)
     return output
 
 

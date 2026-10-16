@@ -111,11 +111,15 @@ def _recording_policy_client(
     *,
     tool_call: dict[str, Any] | None = None,
     tool_result: dict[str, Any] | None = None,
+    tool_call_body: str | None = None,
+    tool_result_body: str | None = None,
 ) -> httpx.AsyncClient:
     """Server client that records ``/policies/evaluate`` calls by phase.
 
     ``calls`` receives ``(path, phase)`` per request. ``tool_call`` and
     ``tool_result`` override the verdict for that phase; both default to ALLOW.
+    ``tool_call_body``/``tool_result_body`` return a raw 200 body for that phase,
+    used to exercise a malformed, non-JSON policy response.
     """
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -123,8 +127,12 @@ def _recording_policy_client(
         phase = body["event"]["type"]
         calls.append((request.url.path, phase))
         if phase == "PHASE_TOOL_CALL":
+            if tool_call_body is not None:
+                return httpx.Response(200, content=tool_call_body)
             verdict = tool_call or {"result": "POLICY_ACTION_ALLOW"}
         else:
+            if tool_result_body is not None:
+                return httpx.Response(200, content=tool_result_body)
             verdict = tool_result or {"result": "POLICY_ACTION_ALLOW"}
         return httpx.Response(200, json=verdict)
 
@@ -212,7 +220,7 @@ async def test_builtin_tool_call_policy_deny_blocks_local_execution(
         await policy_client.aclose()
 
     assert executed == [], "a denied built-in must not execute locally"
-    assert output == json.dumps({"error": "Denied by policy: blocked by test policy"})
+    assert json.loads(output) == {"error": "Denied by policy: blocked by test policy"}
     assert mcp_paths == []
     assert [phase for _path, phase in policy_calls] == ["PHASE_TOOL_CALL"], (
         "a TOOL_CALL deny must short-circuit before TOOL_RESULT"
@@ -249,3 +257,122 @@ async def test_server_intercepted_builtin_still_round_trips_through_mcp(
     assert policy_calls == [], (
         "a proxied built-in enforces policy on the /mcp path, not /policies/evaluate"
     )
+
+
+async def test_builtin_tool_call_policy_non_json_body_denies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed (non-JSON) TOOL_CALL policy body is fail-closed: deny."""
+    executed: list[str] = []
+
+    async def _fake_os_env(name: str, *_a: Any, **_kw: Any) -> str:
+        executed.append(name)
+        return _LOCAL_OUTPUT
+
+    monkeypatch.setattr(tool_dispatch, "_execute_os_env_tool", _fake_os_env)
+
+    mcp_paths: list[str] = []
+    policy_calls: list[tuple[str, str]] = []
+    proxy_client = _recording_proxy_client(mcp_paths)
+    policy_client = _recording_policy_client(policy_calls, tool_call_body="<html>502</html>")
+    proxy = ProxyMcpManager(_SESSION_ID, proxy_client)
+    try:
+        output = await execute_tool(
+            tool_name="sys_os_read",
+            arguments=json.dumps({"path": "secret.txt"}),
+            agent_spec=_claude_sdk_spec(),
+            conversation_id=_SESSION_ID,
+            server_client=policy_client,
+            mcp_manager=cast(RunnerMcpManager, proxy),
+            effective_harness="claude-sdk",
+        )
+    finally:
+        await proxy_client.aclose()
+        await policy_client.aclose()
+
+    assert executed == [], "a malformed TOOL_CALL verdict must not execute the built-in"
+    assert json.loads(output) == {
+        "error": "Denied by policy: policy evaluation returned no verdict"
+    }
+    assert mcp_paths == []
+    assert [phase for _path, phase in policy_calls] == ["PHASE_TOOL_CALL"]
+
+
+async def test_builtin_tool_result_policy_non_json_body_keeps_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed (non-JSON) TOOL_RESULT policy body is fail-open: keep output."""
+    executed: list[str] = []
+
+    async def _fake_os_env(name: str, *_a: Any, **_kw: Any) -> str:
+        executed.append(name)
+        return _LOCAL_OUTPUT
+
+    monkeypatch.setattr(tool_dispatch, "_execute_os_env_tool", _fake_os_env)
+
+    mcp_paths: list[str] = []
+    policy_calls: list[tuple[str, str]] = []
+    proxy_client = _recording_proxy_client(mcp_paths)
+    policy_client = _recording_policy_client(policy_calls, tool_result_body="<html>502</html>")
+    proxy = ProxyMcpManager(_SESSION_ID, proxy_client)
+    try:
+        output = await execute_tool(
+            tool_name="sys_os_read",
+            arguments=json.dumps({"path": "notes.txt"}),
+            agent_spec=_claude_sdk_spec(),
+            conversation_id=_SESSION_ID,
+            server_client=policy_client,
+            mcp_manager=cast(RunnerMcpManager, proxy),
+            effective_harness="claude-sdk",
+        )
+    finally:
+        await proxy_client.aclose()
+        await policy_client.aclose()
+
+    assert executed == ["sys_os_read"], "the built-in runs before the TOOL_RESULT gate"
+    assert output == _LOCAL_OUTPUT, "a malformed TOOL_RESULT verdict must keep the result"
+    assert mcp_paths == []
+    assert [phase for _path, phase in policy_calls] == [
+        "PHASE_TOOL_CALL",
+        "PHASE_TOOL_RESULT",
+    ]
+
+
+async def test_builtin_tool_result_policy_coerces_non_str_transform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-str TOOL_RESULT transform is coerced via ``str()``, mirroring /mcp."""
+
+    async def _fake_os_env(name: str, *_a: Any, **_kw: Any) -> str:
+        del name
+        return _LOCAL_OUTPUT
+
+    monkeypatch.setattr(tool_dispatch, "_execute_os_env_tool", _fake_os_env)
+
+    transform = {"redacted": True}
+    mcp_paths: list[str] = []
+    policy_calls: list[tuple[str, str]] = []
+    proxy_client = _recording_proxy_client(mcp_paths)
+    policy_client = _recording_policy_client(
+        policy_calls,
+        tool_result={"result": "POLICY_ACTION_ALLOW", "data": transform},
+    )
+    proxy = ProxyMcpManager(_SESSION_ID, proxy_client)
+    try:
+        output = await execute_tool(
+            tool_name="sys_os_read",
+            arguments=json.dumps({"path": "notes.txt"}),
+            agent_spec=_claude_sdk_spec(),
+            conversation_id=_SESSION_ID,
+            server_client=policy_client,
+            mcp_manager=cast(RunnerMcpManager, proxy),
+            effective_harness="claude-sdk",
+        )
+    finally:
+        await proxy_client.aclose()
+        await policy_client.aclose()
+
+    assert output == str(transform), (
+        "a non-str TOOL_RESULT transform must be coerced via str(), not dropped"
+    )
+    assert mcp_paths == []
