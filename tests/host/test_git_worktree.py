@@ -704,6 +704,11 @@ def test_subdirectory_creation_preserves_remote_tracking(git_repo: Path, auto_tr
     root_upstream = _rev_parse(Path(root_created.worktree_path), "@{upstream}")
     nested_upstream = _rev_parse(Path(nested_created.worktree_path), "@{upstream}")
     assert nested_upstream == root_upstream
+    # Only these modes track a remote-tracking start point; the rest leave no upstream.
+    expected_upstream = (
+        _rev_parse(git_repo, "origin/main") if auto_track in ("true", "always") else ""
+    )
+    assert root_upstream == expected_upstream
     assert Path(nested_created.workspace).is_dir()
 
 
@@ -731,3 +736,60 @@ def test_failed_pinned_checkout_rolls_back_without_hiding_original_error(
         create_worktree(repo_path=str(source), branch_name="new")
     assert _branch_exists(git_repo, "new") is rollback_fails
     assert len(list_worktrees(repo_path=str(git_repo))) == (2 if rollback_fails else 1)
+
+
+def test_create_worktree_add_failure_leaves_no_branch(git_repo: Path) -> None:
+    """A failed ``git worktree add`` must not keep its branch; otherwise a retry can't succeed."""
+    worktrees_parent = git_repo.parent / "myrepo-worktrees"
+    worktrees_parent.mkdir()
+    worktrees_parent.chmod(0o500)
+    try:
+        with pytest.raises(WorktreeError, match="git worktree add failed"):
+            create_worktree(repo_path=str(git_repo), branch_name="feature/retry")
+    finally:
+        worktrees_parent.chmod(0o755)
+    assert not _branch_exists(git_repo, "feature/retry")
+    assert len(list_worktrees(repo_path=str(git_repo))) == 1
+    created = create_worktree(repo_path=str(git_repo), branch_name="feature/retry")
+    assert _current_branch(Path(created.worktree_path)) == "feature/retry"
+
+
+def test_create_worktree_existing_branch_add_failure_keeps_branch(git_repo: Path) -> None:
+    """Rollback after a failed add never deletes a branch the request did not create."""
+    _git(git_repo, "branch", "keep")
+    worktrees_parent = git_repo.parent / "myrepo-worktrees"
+    worktrees_parent.mkdir()
+    worktrees_parent.chmod(0o500)
+    try:
+        with pytest.raises(WorktreeError, match="git worktree add failed"):
+            create_worktree(repo_path=str(git_repo), branch_name="keep", existing_branch=True)
+    finally:
+        worktrees_parent.chmod(0o755)
+    assert _branch_exists(git_repo, "keep")
+    assert _worktree_count(git_repo) == 1
+
+
+def test_create_worktree_timed_out_add_rolls_back_registered_worktree(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timeout after git registered the worktree still frees the branch for a retry."""
+    real_run = git_worktree_module._run_git
+    timed_out = False
+
+    def time_out_after_add(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
+        nonlocal timed_out
+        result = real_run(args, cwd=cwd)
+        if args[:2] == ["worktree", "add"] and not timed_out:
+            timed_out = True
+            raise WorktreeError("git command timed out after 120s")
+        return result
+
+    monkeypatch.setattr(git_worktree_module, "_run_git", time_out_after_add)
+    with pytest.raises(WorktreeError, match="timed out"):
+        create_worktree(repo_path=str(git_repo), branch_name="feature/slow")
+    assert timed_out
+    assert not _branch_exists(git_repo, "feature/slow")
+    assert _worktree_count(git_repo) == 1
+    assert not (git_repo.parent / "myrepo-worktrees" / "feature-slow").exists()
+    created = create_worktree(repo_path=str(git_repo), branch_name="feature/slow")
+    assert _current_branch(Path(created.worktree_path)) == "feature/slow"

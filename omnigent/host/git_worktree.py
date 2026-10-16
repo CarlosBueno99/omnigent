@@ -383,6 +383,31 @@ def _ensure_base_resolvable(repo_root: str, base_branch: str) -> None:
         raise WorktreeError(f"base branch does not exist: {base_branch}")
 
 
+def _discard_failed_worktree_add(repo_root: str, branch_name: str, worktree_path: Path) -> None:
+    """Best-effort rollback of the branch created for a failed ``git worktree add``.
+
+    Git keeps the new branch when the add fails, so a retry would hit "branch
+    already exists"; a git killed by the timeout can also leave the worktree
+    registered and locked, so that is removed before the branch.
+
+    :param repo_root: Absolute main work-tree root, e.g. ``"/Users/alice/myrepo"``.
+    :param branch_name: Branch this request created, e.g. ``"feature/login"``.
+    :param worktree_path: Directory the failed add targeted.
+    """
+    try:
+        if worktree_path.exists():
+            _run_git(
+                ["worktree", "remove", "--force", "--force", str(worktree_path)], cwd=repo_root
+            )
+        deleted = _run_git(["branch", "-D", branch_name], cwd=repo_root)
+        if deleted.returncode != 0:
+            raise _git_error("git branch -D failed", deleted)
+    except WorktreeError:
+        _logger.warning(
+            "Could not roll back branch %s after a failed worktree add", branch_name, exc_info=True
+        )
+
+
 @dataclass
 class CreatedWorktree:
     """Result of a successful worktree creation.
@@ -410,11 +435,13 @@ def create_worktree(
     """Create a git worktree with a new — or existing — branch checked out.
 
     Resolves the repo root, picks a collision-free sibling directory,
-    and runs ``git worktree add -b`` (fetching once if ``base_branch``
-    isn't locally resolvable). With ``existing_branch`` the branch must
-    already exist and not be checked out in any live worktree; stale
-    registrations (a worktree whose directory was deleted from disk)
-    are pruned first, and the branch is checked out without ``-b`` —
+    creates the branch (fetching once if ``base_branch`` isn't locally
+    resolvable) and runs ``git worktree add``. If the add fails, the
+    branch created for it is deleted again so the same request can be
+    retried. With ``existing_branch`` the branch must already exist and
+    not be checked out in any live worktree; stale registrations (a
+    worktree whose directory was deleted from disk) are pruned first,
+    the existing branch is checked out, and a failure leaves it intact —
     the recreate path for a deleted worktree.
 
     :param repo_path: Absolute path inside the source repo — the
@@ -503,20 +530,29 @@ def create_worktree(
     worktree_path = _resolve_worktree_path(repo_root, branch_name)
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if existing_branch:
-        # --end-of-options: treat the branch as a rev, never a git flag
-        # (argv-only, no shell). No ``-b`` — the branch already exists.
-        add_args = ["worktree", "add", str(worktree_path), "--end-of-options", branch_name]
-    else:
-        add_args = ["worktree", "add", "-b", branch_name, str(worktree_path)]
-        if validated_commit is not None:
-            # Let Git set up tracking from the requested ref before checking out the pinned commit.
-            add_args.insert(2, "--no-checkout")
+    if not existing_branch:
+        # Create the branch in its own step rather than with ``worktree add -b``:
+        # git keeps the branch when the add fails, and only a branch this
+        # request created may be rolled back below.
+        branch_args = ["branch", branch_name]
         if base_branch is not None:
-            add_args += ["--end-of-options", base_branch]
-    result = _run_git(add_args, cwd=repo_root)
-    if result.returncode != 0:
-        raise _git_error("git worktree add failed", result)
+            branch_args += ["--end-of-options", base_branch]
+        created_branch = _run_git(branch_args, cwd=repo_root)
+        if created_branch.returncode != 0:
+            raise _git_error("could not create branch", created_branch)
+    # --end-of-options: treat the branch as a rev, never a git flag (argv-only, no shell).
+    add_args = ["worktree", "add", str(worktree_path), "--end-of-options", branch_name]
+    if validated_commit is not None and not existing_branch:
+        # Tracking already follows the requested ref; the pinned commit is checked out below.
+        add_args.insert(2, "--no-checkout")
+    try:
+        result = _run_git(add_args, cwd=repo_root)
+        if result.returncode != 0:
+            raise _git_error("git worktree add failed", result)
+    except WorktreeError:
+        if not existing_branch:
+            _discard_failed_worktree_add(repo_root, branch_name, worktree_path)
+        raise
     if validated_commit is not None:
         try:
             if existing_branch:
