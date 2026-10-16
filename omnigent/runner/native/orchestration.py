@@ -7421,11 +7421,8 @@ def _leads_with_claude_prompt(terminal_launch_args: list[str] | None) -> bool:
     """
     Return whether persisted launch args start with Claude's positional prompt.
 
-    ``omni claude -p`` forwards the prompt as the leading positional ahead of
-    the pass-through flags, so a first entry that is not an option is that
-    one-shot prompt; an option's value never leads the list. The runner
-    delivers it on the launch that finds it and then removes it from the
-    stored args, so a later relaunch cannot submit it again.
+    The CLI stores the one-shot prompt as the leading positional; flag-only
+    launch args start with a dash, and an option's value never leads the list.
 
     :param terminal_launch_args: Persisted pass-through args, e.g.
         ``["review the last commit", "--verbose"]``.
@@ -8292,10 +8289,11 @@ async def _consume_claude_initial_prompt(
 
     Consumed on launch, not on Claude's submission: a startup failure after
     this point leaves the next relaunch without the prompt. The server removes
-    the entry only while it still leads the stored list; an older server
-    without that operation gets a re-read and write-back, where a write landing
-    in between is still lost. Best-effort: a failed write may let a relaunch
-    submit the prompt once more.
+    the entry only while it still leads the stored list. An older server
+    without that operation leaves the prompt stored, because an unconditional
+    write-back could lose a concurrent update; a relaunch there may submit the
+    prompt again until the server is upgraded. Best-effort: a failed request
+    only logs a warning.
 
     :param session_id: Session/conversation identifier.
     :param server_client: Runner Omnigent server client.
@@ -8309,22 +8307,14 @@ async def _consume_claude_initial_prompt(
             timeout=10.0,
         )
         if resp.status_code == 404:
-            # Older server without the conditional operation.
-            current = await server_client.get(
-                session_path, params=_SESSION_METADATA_PARAMS, timeout=10.0
+            _logger.warning(
+                "native terminal: the server has no launch-arg consume operation; the initial "
+                "prompt of session %s stays stored and a relaunch may submit it again",
+                session_id,
             )
-            current.raise_for_status()
-            stored = current.json().get("terminal_launch_args")
-            if not (isinstance(stored, list) and stored and stored[0] == prompt):
-                return
-            resp = await server_client.patch(
-                session_path,
-                json={"terminal_launch_args": stored[1:]},
-                params={"include_usage": "false"},
-                timeout=10.0,
-            )
+            return
         resp.raise_for_status()
-    except (httpx.HTTPError, RuntimeError, ValueError):
+    except (httpx.HTTPError, RuntimeError):
         _logger.warning(
             "native terminal: could not clear the delivered initial prompt from the "
             "launch args of session %s; a relaunch may submit it again",

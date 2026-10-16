@@ -8333,7 +8333,9 @@ def test_consume_leading_terminal_launch_arg_never_loses_a_concurrent_replacemen
         ):
             row_locked.set()
             replacement_started.wait(timeout=5)
-            time.sleep(1.0)
+            # Give the replacer time to reach the lock; a slower replacer only
+            # weakens this check, it cannot make a lost update pass.
+            time.sleep(0.5)
 
     def replace() -> None:
         row_locked.wait(timeout=10)

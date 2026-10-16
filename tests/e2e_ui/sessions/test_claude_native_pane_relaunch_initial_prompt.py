@@ -106,7 +106,8 @@ def _short_idle_window_s() -> float | None:
     try:
         window = float(raw)
     except ValueError:
-        return None
+        pytest.fail(f"{_IDLE_TIMEOUT_ENV}={raw!r} is not a number of seconds")
+    # Reaping is disabled at 0 and the default hour is too slow to wait for.
     return window if 0 < window <= 60 else None
 
 

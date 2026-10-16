@@ -1194,18 +1194,10 @@ async def test_auto_create_claude_terminal_passes_session_effort(
         # Another client replaced the stored list while Claude launched: the
         # server reports no match and the newer prompt stays pending.
         (["review the last commit"], None, ["new request"], "conditional", None, False),
-        # An older server without the conditional operation gets a re-read and
-        # a write-back that keeps flags merged meanwhile ...
-        (
-            ["review the last commit"],
-            None,
-            ["review the last commit", "--permission-mode", "plan"],
-            "legacy-server",
-            ["--permission-mode", "plan"],
-            False,
-        ),
-        # ... and leaves a list another client replaced before the re-read alone.
-        (["review the last commit"], None, ["new request"], "legacy-server", None, False),
+        # An older server without the conditional operation: no write-back
+        # (it could lose a concurrent update); the prompt stays stored and the
+        # launch warns.
+        (["review the last commit"], None, None, "legacy-server", None, True),
         # The write is best-effort: a rejected or unreachable server leaves
         # the launch intact and only logs a warning.
         (["review the last commit"], None, None, "http-500", None, True),
@@ -1218,8 +1210,7 @@ async def test_auto_create_claude_terminal_passes_session_effort(
         "relaunch-consumed",
         "older-client-resume-prompt",
         "replaced-while-launching",
-        "older-server-write-back-keeps-merged-flags",
-        "older-server-keeps-replaced-prompt",
+        "older-server-leaves-prompt-stored",
         "consume-rejected",
         "consume-unreachable",
         "blank-entry-not-a-prompt",
@@ -1251,9 +1242,9 @@ async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
     :param server_args: Stored list on the server when the runner consumes,
         when another client changed it after the envelope was built.
     :param server: How the server answers the consume request.
-    :param expected_patch: ``terminal_launch_args`` written back by the
-        older-server fallback, or ``None``.
-    :param warns: Whether the launch logs the best-effort cleanup warning.
+    :param expected_patch: ``terminal_launch_args`` written back through the
+        session PATCH, or ``None`` (the runner never writes the list back).
+    :param warns: Whether the launch logs a cleanup warning.
     :param tmp_path: Pytest-provided temporary directory.
     :param monkeypatch: Pytest monkeypatch fixture.
     :param caplog: Pytest log capture fixture.
@@ -1361,7 +1352,10 @@ async def test_auto_create_claude_terminal_delivers_stored_prompt_once(
     )
     assert consumes == ([pending_prompt] if pending_prompt is not None else [])
     assert patches == ([expected_patch] if expected_patch is not None else [])
-    cleanup_warned = "could not clear the delivered initial prompt" in caplog.text
+    cleanup_warned = (
+        "could not clear the delivered initial prompt" in caplog.text
+        or "no launch-arg consume operation" in caplog.text
+    )
     assert cleanup_warned == warns
 
 

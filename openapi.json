@@ -1310,7 +1310,6 @@
         "description": "Remove a delivered one-shot launch arg only while it still leads the stored list.",
         "properties": {
           "expected_leading_arg": {
-            "maxLength": 4096,
             "minLength": 1,
             "title": "Expected Leading Arg",
             "type": "string"

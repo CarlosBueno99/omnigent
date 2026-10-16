@@ -2444,7 +2444,7 @@ class ResetSessionModelOverrideResponse(BaseModel):
 class ConsumeTerminalLaunchArgRequest(BaseModel):
     """Remove a delivered one-shot launch arg only while it still leads the stored list."""
 
-    expected_leading_arg: str = Field(min_length=1, max_length=4096)
+    expected_leading_arg: str = Field(min_length=1)
 
     model_config = ConfigDict(extra="forbid")
 
