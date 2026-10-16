@@ -8,6 +8,7 @@ import logging
 import os
 import queue
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -403,6 +404,18 @@ def _is_error_item_post(post: dict[str, Any]) -> bool:
     )
 
 
+def _record_turn(bridge_dir: Path, transcript_path: Path) -> None:
+    for event_name in ("UserPromptSubmit", "Stop"):
+        record_hook_event(
+            bridge_dir,
+            {
+                "hook_event_name": event_name,
+                "session_id": "claude-session",
+                "transcript_path": str(transcript_path),
+            },
+        )
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
 @pytest.mark.asyncio
 async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
@@ -423,15 +436,19 @@ async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
     projects.mkdir()
     projects.chmod(0o555)
     transcript_path = projects / "-home-user-workspace" / "claude-session.jsonl"
-    for event_name in ("SessionStart", "UserPromptSubmit", "Stop", "UserPromptSubmit", "Stop"):
-        record_hook_event(
-            bridge_dir,
-            {
-                "hook_event_name": event_name,
-                "session_id": "claude-session",
-                "transcript_path": str(transcript_path),
-            },
-        )
+    moved_transcript_path = projects / "-home-user-worktree" / "claude-session.jsonl"
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": "claude-session",
+            "transcript_path": str(transcript_path),
+        },
+    )
+    # Four turns; the transcript moves with a worktree and back, so the same
+    # path recurs after a different one.
+    for turn_path in (transcript_path, transcript_path, moved_transcript_path, transcript_path):
+        _record_turn(bridge_dir, turn_path)
     caplog.set_level(logging.INFO, logger=forwarder.__name__)
 
     server, thread, base_url = _start_recording_server()
@@ -448,7 +465,7 @@ async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
     )
     posts: list[dict[str, Any]] = []
     try:
-        while len(_idle_edges(posts)) < 2:
+        while len(_idle_edges(posts)) < 4:
             posts.append(await _get_recorded_request(server, timeout_s=10.0))
     finally:
         task.cancel()
@@ -466,15 +483,16 @@ async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
     assert not transcript_path.exists()
     blocker = f"{projects} is not writable (EACCES)"
 
-    # Both turns still settle as confirmed completions, but each edge tells the
+    # Every turn still settles as a confirmed completion, but each edge tells the
     # parent the result could not be read instead of "produced no output".
     idle_edges = _idle_edges(posts)
-    assert len(idle_edges) == 2
+    assert len(idle_edges) == 4
     for edge in idle_edges:
         assert edge["turn_completed"] is True
         assert edge["output"].startswith("Omnigent could not read this turn's output")
-        assert str(transcript_path) in edge["output"]
         assert blocker in edge["output"]
+    assert str(moved_transcript_path) in idle_edges[2]["output"]
+    assert str(transcript_path) in idle_edges[3]["output"]
 
     # One error item per lost turn, each landing before its own idle edge so the
     # parent wake already finds it in the child's history.
@@ -485,23 +503,32 @@ async def test_known_transcript_path_that_never_appears_is_surfaced_after_stop(
         if post["body"].get("type") == "external_session_status"
         and post["body"]["data"].get("status") == "idle"
     ]
-    assert len(error_indices) == 2
-    assert error_indices[0] < idle_indices[0] < error_indices[1] < idle_indices[1]
+    assert len(error_indices) == 4
+    assert all(
+        error_index < idle_index
+        for error_index, idle_index in zip(error_indices, idle_indices, strict=True)
+    )
+    assert all(
+        idle_index < next_error_index
+        for idle_index, next_error_index in zip(idle_indices, error_indices[1:], strict=False)
+    )
     error_items = [posts[index]["body"]["data"] for index in error_indices]
-    assert len({item["source_id"] for item in error_items}) == 2
+    assert len({item["source_id"] for item in error_items}) == 4
     for item in error_items:
         assert item["item_data"]["source"] == "harness"
         assert item["item_data"]["code"] == "claude_transcript_missing"
-        assert str(transcript_path) in item["item_data"]["message"]
         assert blocker in item["item_data"]["cause"]
         assert item["item_data"]["remediation"]
+    assert str(transcript_path) in error_items[0]["item_data"]["message"]
+    assert str(moved_transcript_path) in error_items[2]["item_data"]["message"]
 
-    # The runner log names the path and the directory's errno once, not per turn.
+    # The runner log names each path and the directory's errno once, even when a
+    # path recurs after the transcript moved elsewhere.
     warnings = [record for record in caplog.records if record.levelno >= logging.WARNING]
-    assert len(warnings) == 1
-    assert warnings[0].levelno == logging.WARNING
+    assert [record.levelno for record in warnings] == [logging.WARNING, logging.WARNING]
     assert str(transcript_path) in warnings[0].getMessage()
-    assert blocker in warnings[0].getMessage()
+    assert str(moved_transcript_path) in warnings[1].getMessage()
+    assert all(blocker in record.getMessage() for record in warnings)
     assert warnings[0].session_id == "conv_missing_transcript"
 
 
@@ -532,6 +559,22 @@ def test_transcript_write_blocker_names_the_missing_or_writable_directory(
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_transcript_write_blocker_names_a_read_only_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unwritable directory on a read-only mount is reported as EROFS, not EACCES."""
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    projects.chmod(0o555)
+    monkeypatch.setattr(forwarder.os, "statvfs", lambda path: SimpleNamespace(f_flag=os.ST_RDONLY))
+    try:
+        blocker = forwarder._transcript_write_blocker(projects / "slug" / "claude-session.jsonl")
+    finally:
+        projects.chmod(0o755)
+    assert blocker == f"{projects} is not writable (EROFS)"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
 def test_missing_transcript_blocker_treats_an_unsearchable_directory_as_unreadable(
     tmp_path: Path,
 ) -> None:
@@ -547,6 +590,20 @@ def test_missing_transcript_blocker_treats_an_unsearchable_directory_as_unreadab
     assert probe == (transcript_path, f"{transcript_path.parent} is not accessible (EACCES)")
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_missing_transcript_blocker_reports_an_unreadable_existing_file(tmp_path: Path) -> None:
+    """A transcript that exists but cannot be read is surfaced instead of passing silently."""
+    transcript_path = tmp_path / "claude-session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    transcript_path.chmod(0o000)
+    try:
+        probe = forwarder._missing_transcript_blocker(tmp_path / "bridge", transcript_path)
+    finally:
+        transcript_path.chmod(0o644)
+    assert probe == (transcript_path, f"{transcript_path} exists but is not readable (EACCES)")
+    assert forwarder._missing_transcript_blocker(tmp_path / "bridge", transcript_path) is None
+
+
 @pytest.mark.asyncio
 async def test_failed_missing_transcript_diagnostic_does_not_block_the_idle_edge(
     tmp_path: Path,
@@ -556,50 +613,40 @@ async def test_failed_missing_transcript_diagnostic_does_not_block_the_idle_edge
     """A probe that raises is logged; the turn's confirmed idle edge still posts."""
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
-    (bridge_dir / "claude-settings.json").write_text("{}", encoding="utf-8")
-    transcript_path = tmp_path / "claude-session.jsonl"
-    for event_name in ("SessionStart", "UserPromptSubmit", "Stop"):
-        record_hook_event(
-            bridge_dir,
-            {
-                "hook_event_name": event_name,
-                "session_id": "claude-session",
-                "transcript_path": str(transcript_path),
-            },
-        )
+    _record_turn(bridge_dir, tmp_path / "claude-session.jsonl")
 
     def exploding_probe(bridge_dir: Path, hook_transcript_path: Path | None) -> None:
         raise PermissionError("probe denied")
 
     monkeypatch.setattr(forwarder, "_missing_transcript_blocker", exploding_probe)
     caplog.set_level(logging.INFO, logger=forwarder.__name__)
+    requests: list[dict[str, Any]] = []
 
-    server, thread, base_url = _start_recording_server()
-    task = asyncio.create_task(
-        forwarder.forward_claude_transcript_to_session(
-            base_url=base_url,
-            headers={},
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(202, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_handle_request), base_url="http://test"
+    ) as client:
+        await forwarder._forward_available_status_events(
+            client=client,
             session_id="conv_probe_failed",
             bridge_dir=bridge_dir,
-            agent_name="claude-native-ui",
-            start_at_end=False,
-            poll_interval_s=0.01,
+            state=forwarder.HookForwardState(event_cursor=0, byte_offset=0),
+            retry_tracker=forwarder._PostRetryTracker(),
+            dedupe=forwarder._ForwardDedupeState(),
+            task_subjects={},
+            task_statuses={},
+            task_order=[],
         )
-    )
-    try:
-        request = await _get_recorded_request(server, timeout_s=10.0)
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5.0)
 
-    assert request["body"] == {
-        "type": "external_session_status",
-        "data": {"status": "idle", "background_task_count": 0, "turn_completed": True},
-    }
+    assert requests == [
+        {
+            "type": "external_session_status",
+            "data": {"status": "idle", "background_task_count": 0, "turn_completed": True},
+        }
+    ]
     failures = [
         record
         for record in caplog.records
@@ -621,19 +668,15 @@ async def test_missing_transcript_notice_retries_then_still_posts_the_idle_edge(
     rejections: int,
     notice_delivered: bool,
 ) -> None:
-    """A rejected chat notice is retried with its stable id; the idle edge never waits on it."""
+    """A rejected chat notice is retried under its stable id before the idle edge.
+
+    The retries are bounded, so completion is delayed at most briefly and the
+    idle edge posts whether or not the notice landed.
+    """
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
     transcript_path = tmp_path / "never-written.jsonl"
-    for event_name in ("SessionStart", "Stop"):
-        record_hook_event(
-            bridge_dir,
-            {
-                "hook_event_name": event_name,
-                "session_id": "claude-session",
-                "transcript_path": str(transcript_path),
-            },
-        )
+    _record_turn(bridge_dir, transcript_path)
     caplog.set_level(logging.WARNING, logger=forwarder.__name__)
     requests: list[dict[str, Any]] = []
     remaining_rejections = rejections

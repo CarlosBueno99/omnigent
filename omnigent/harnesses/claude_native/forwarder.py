@@ -340,8 +340,8 @@ def _observe_transcript_discovery(
 
 
 _MISSING_TRANSCRIPT_ERROR_CODE = "claude_transcript_missing"
-# The chat notice is posted once per turn ahead of the idle edge; a short
-# bounded retry rides out a transient rejection without delaying the edge.
+# The chat notice is posted once per turn ahead of the idle edge; its retry is
+# short and bounded (under a second in total), so the edge waits at most briefly.
 _MISSING_TRANSCRIPT_NOTICE_ATTEMPTS = 3
 _MISSING_TRANSCRIPT_NOTICE_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
@@ -367,11 +367,21 @@ def _transcript_write_blocker(transcript_path: Path) -> str:
             code = errno.errorcode.get(exc.errno or 0, type(exc).__name__)
             return f"{ancestor} is not accessible ({code})"
         if not os.access(ancestor, os.W_OK | os.X_OK):
-            return f"{ancestor} is not writable (EACCES)"
+            return f"{ancestor} is not writable ({_unwritable_directory_errno(ancestor)})"
         if ancestor != transcript_path.parent:
             return f"{transcript_path.parent} does not exist (ENOENT); {ancestor} is writable"
         return f"{ancestor} is writable but the file was never created"
     return f"no ancestor of {transcript_path} exists (ENOENT)"
+
+
+def _unwritable_directory_errno(directory: Path) -> str:
+    """Name the errno a writer hits in a directory ``os.access`` reports unwritable."""
+    try:
+        read_only = bool(os.statvfs(directory).f_flag & os.ST_RDONLY)
+    except OSError:
+        read_only = False
+    # access(2) carries no errno; a read-only mount is the other common cause.
+    return "EROFS" if read_only else "EACCES"
 
 
 def _missing_transcript_blocker(
@@ -389,7 +399,9 @@ def _missing_transcript_blocker(
         return None
     try:
         if transcript_path.exists():
-            return None
+            if os.access(transcript_path, os.R_OK):
+                return None
+            return transcript_path, f"{transcript_path} exists but is not readable (EACCES)"
     except OSError:
         # An unsearchable ancestor hides the file as surely as a missing one.
         pass
@@ -427,8 +439,8 @@ async def _surface_missing_transcript(
     if probe is None:
         return None
     transcript_path, blocker = probe
-    if dedupe.missing_transcript_logged_for != transcript_path:
-        dedupe.missing_transcript_logged_for = transcript_path
+    if transcript_path not in dedupe.missing_transcript_warned_paths:
+        dedupe.missing_transcript_warned_paths.add(transcript_path)
         _logger.warning(
             "Claude transcript %s reported by hooks never appeared before the turn's Stop "
             "(%s); the turn's prompt and replies were not mirrored; session=%s",
@@ -1074,9 +1086,9 @@ class _ForwardDedupeState:
     # Session already logged as moved off this runner, so the notice is not
     # repeated for every item dropped afterwards.
     session_not_bound_logged_for: str | None = None
-    # Transcript path whose never-created file was already logged, so the
+    # Transcript paths whose never-created file was already logged, so the
     # warning fires once per path while the per-turn notices keep posting.
-    missing_transcript_logged_for: Path | None = None
+    missing_transcript_warned_paths: set[Path] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
