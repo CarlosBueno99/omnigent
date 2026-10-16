@@ -100,6 +100,10 @@ class _ClaudeControlDeadline(threading.Event):
     def is_set(self) -> bool:
         return super().is_set() or time.monotonic() >= self.at
 
+    def wait(self, timeout: float | None = None) -> bool:
+        budget = self.remaining_s()
+        return super().wait(budget if timeout is None else min(timeout, budget)) or self.is_set()
+
 
 async def _drive_claude_pane(
     deadline: _ClaudeControlDeadline, function: Callable[..., Any], /, *args: Any, **kwargs: Any
@@ -1398,7 +1402,9 @@ def build_native_controls(
                 bridge_dir,
                 command=command,
                 timeout_s=1.0,
-                ready_timeout_s=max(0.0, prompt_budget_s - waited_s),
+                # A boot that used the prompt budget still leaves the injection a
+                # short wait for a torn capture right after the prompt rendered.
+                ready_timeout_s=min(deadline.remaining_s(), max(1.0, prompt_budget_s - waited_s)),
                 auto_confirm=True,
                 confirm_hint=SWITCH_MODEL_DIALOG_HINT,
             )

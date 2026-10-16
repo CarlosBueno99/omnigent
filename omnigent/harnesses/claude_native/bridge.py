@@ -414,6 +414,10 @@ _ESCAPE_DISMISS_HINT = re.compile(r"\b(?:\w+/)*Esc(?:/\w+)* to \w", re.IGNORECAS
 SWITCH_MODEL_DIALOG_HINT = "Switch model?"
 EFFORT_DIALOG_HINT = "Change effort level?"
 _CONFIRM_DIALOG_HINTS = (SWITCH_MODEL_DIALOG_HINT, EFFORT_DIALOG_HINT)
+# Boxed prompts without the "Enter to … · Esc to …" footer, which
+# ``_terminal_dialog_headline`` cannot name: the confirmations above and tool
+# permission prompts.
+_UNNAMED_DIALOG_HINTS = (*_CONFIRM_DIALOG_HINTS, "Do you want to ")
 # Only this informational notice is acknowledged automatically. The gateway
 # varies; all decision text and the continuation footer must match exactly.
 _AUTO_MODE_BILLING_BODY_PATTERN = (
@@ -4735,10 +4739,10 @@ def inject_slash_command(
     :raises ValueError: If *command* is empty, does not start with
         ``/``, contains a newline, or *auto_confirm* is set without a
         *confirm_hint*.
-    :raises ClaudeTerminalDialog: If shell mode or the prompt-history search
-        still covers the input box after the restore, or the readiness gate
-        finds a dialog holding it; no keystroke was sent. The person clears it
-        from the embedded terminal and retries.
+    :raises ClaudeTerminalDialog: If shell mode, the prompt-history search or a
+        footer-less dialog still covers the input box after the restore, or
+        the readiness gate finds a dialog holding it; no keystroke was sent.
+        The person clears it from the embedded terminal and retries.
     :raises RuntimeError: If the tmux target is not advertised in
         time, if the input box never renders (:class:`ClaudePromptTimeout`),
         if a ``tmux send-keys`` invocation fails, if the typed
@@ -6411,10 +6415,12 @@ def _reclaim_and_wait_for_prompt(
 
     Shell mode or the prompt-history search left on screen is refused at once:
     typing there would run the text as bash or filter history, and the wait
-    could only end in a readiness timeout. Any other leftover (launcher output
-    before the input box mounts, or a dialog with no Escape dismissal) goes to
-    the readiness gate and its own outcome stands. Nothing is typed until the
-    prompt renders, so the submit Enter cannot answer a dialog.
+    could only end in a readiness timeout. So is a boxed dialog without the
+    footer the readiness gate names (a ``/model`` or ``/effort`` confirmation,
+    a tool permission prompt): the gate would only wait out its budget on it.
+    Launcher output before the input box mounts goes to the readiness gate and
+    its own outcome stands. Nothing is typed until the prompt renders, so the
+    submit Enter cannot answer a dialog.
 
     :param bridge_dir: Bridge directory path.
     :param socket_path: Absolute path to the tmux socket.
@@ -6426,8 +6432,9 @@ def _reclaim_and_wait_for_prompt(
         *timeout_s* as the base budget, extended while a live pane is still
         booting.
     :returns: None.
-    :raises ClaudeTerminalDialog: If shell mode or the prompt-history search
-        still covers the input box after the restore; no keystroke was sent.
+    :raises ClaudeTerminalDialog: If shell mode, the prompt-history search or a
+        footer-less dialog still covers the input box after the restore; no
+        keystroke was sent.
     :raises RuntimeError: As :func:`_wait_for_claude_prompt_ready` and
         :func:`_restore_occupied_input` raise.
     """
@@ -6442,13 +6449,22 @@ def _reclaim_and_wait_for_prompt(
             else min(_OCCUPIED_INPUT_DISMISS_TIMEOUT_S, ready_timeout_s)
         ),
     )
-    if surface is not None and surface != _OVERLAY_SURFACE:
-        # Typing into these would run bash or filter history, and the wait below
-        # could only poll out its whole budget on them.
-        raise ClaudeTerminalDialog(
-            f"Claude Code's input box is occupied by {surface}, so the command was "
-            "not sent. Open the terminal, dismiss it, then retry."
-        )
+    if surface is not None:
+        if surface != _OVERLAY_SURFACE:
+            # Typing into these would run bash or filter history, and the wait
+            # below could only poll out its whole budget on them.
+            raise ClaudeTerminalDialog(
+                f"Claude Code's input box is occupied by {surface}, so the command was "
+                "not sent. Open the terminal, dismiss it, then retry."
+            )
+        # Launcher output is waited out below; a footer-less dialog would only be
+        # waited on until the budget lapses, then the pane reaped.
+        dialog = _unnamed_dialog_hint(_capture_pane(socket_path, tmux_target))
+        if dialog is not None:
+            raise ClaudeTerminalDialog(
+                f"Claude Code's input box is occupied by a dialog ({dialog.strip()!r}), so "
+                "the command was not sent. Open the terminal, answer it, then retry."
+            )
     if ready_timeout_s is None:
         _wait_for_claude_prompt_ready(
             socket_path, tmux_target, timeout_s=timeout_s, bridge_dir=bridge_dir
@@ -6461,6 +6477,11 @@ def _reclaim_and_wait_for_prompt(
         bridge_dir=bridge_dir,
         extend_for_slow_boot=False,
     )
+
+
+def _unnamed_dialog_hint(pane: str) -> str | None:
+    """Return the text of a known footer-less dialog on *pane*, or ``None``."""
+    return next((hint for hint in _UNNAMED_DIALOG_HINTS if hint in pane), None)
 
 
 def _paste_payload_bytes(text: str) -> bytes:

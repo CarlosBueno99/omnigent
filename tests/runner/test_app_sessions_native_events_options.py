@@ -2368,6 +2368,59 @@ async def test_events_model_change_spends_its_budget_on_the_boot(
     assert clock.now - started_at <= 1.5 + _VIRTUAL_CONFIRM_POLL_S
 
 
+@pytest.mark.asyncio
+async def test_events_model_change_keeps_a_short_injection_wait_after_a_long_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A boot that uses up the prompt budget still leaves the injection a 1 s wait.
+
+    The injection re-checks readiness itself, and one torn capture right after
+    the prompt rendered must not fail the switch while the request still has
+    budget. The floor stays clipped by the request deadline.
+    """
+    clock = _VirtualClock()
+    monkeypatch.setattr(native_controls, "_CLAUDE_CONTROL_PROMPT_WAIT_S", 1.0)
+    monkeypatch.setattr(native_controls, "_CLAUDE_CONTROL_BUDGET_S", 3.0)
+    budgets: dict[str, float] = {}
+
+    def _wait(bridge_dir: Any, *, ready_timeout_s: float, timeout_s: float = 1.0) -> None:
+        del bridge_dir, timeout_s
+        budgets["wait"] = ready_timeout_s
+        clock.sleep(0.95)
+
+    def _inject(
+        bridge_dir: Any, *, command: str, ready_timeout_s: float | None = None, **_kwargs: Any
+    ) -> None:
+        del bridge_dir, command
+        assert ready_timeout_s is not None
+        budgets["inject"] = ready_timeout_s
+
+    resp = await _post_model_change_through_a_boot(
+        monkeypatch,
+        wait=_wait,
+        inject=_inject,
+        status=lambda _bridge_dir: "claude-opus-4-6",
+        clock=clock,
+    )
+
+    assert resp.status_code == 503, resp.text
+    assert budgets["wait"] == pytest.approx(1.0)
+    assert budgets["inject"] == pytest.approx(1.0)
+
+
+def test_claude_control_deadline_wait_returns_once_the_budget_lapses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``wait`` cannot block past the budget, so a blocked waiter sees the deadline too."""
+    monkeypatch.setattr(native_controls, "_CLAUDE_CONTROL_BUDGET_S", 0.2)
+    deadline = native_controls._ClaudeControlDeadline()
+
+    started = time.monotonic()
+    assert deadline.wait() is True
+    assert deadline.wait(5.0) is True
+    assert time.monotonic() - started < 2.0
+
+
 def _tui_composer(draft: str = "") -> str:
     """A Claude input box holding ``draft``, framed the way the bridge locates it."""
     return (

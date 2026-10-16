@@ -11832,22 +11832,35 @@ class _BootingClaudePane:
         return list(self.sends)
 
 
+@pytest.mark.parametrize(
+    ("boot_pane", "boot_s"),
+    [
+        pytest.param(
+            _BOOTING_PANE,
+            claude_native_bridge._OCCUPIED_INPUT_DISMISS_TIMEOUT_S + 2.0,
+            id="booting-screen",
+        ),
+        pytest.param(_LAUNCHER_OUTPUT_PANE, 2.0, id="launcher-output"),
+    ],
+)
 def test_inject_slash_command_waits_for_a_booting_prompt_before_typing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    boot_pane: str,
+    boot_s: float,
 ) -> None:
     """
     Nothing touches the composer until Claude Code's input box has rendered.
 
     A model change forwarded right after a session wake lands while the TUI is
     still starting, and a starting TUI drops typed keys: the command never ran
-    while the picker claimed the switch. The boot here outlasts the
-    occupied-input reclaim's own give-up, so only the readiness gate can hold
-    the keystrokes back.
+    while the picker claimed the switch. A boot that outlasts the occupied-input
+    reclaim's own give-up shows only the readiness gate holds the keys back;
+    launcher output (no composer, no Escape hint) is waited out rather than
+    refused as an overlay, and gets no Escape either.
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
-    boot_s = claude_native_bridge._OCCUPIED_INPUT_DISMISS_TIMEOUT_S + 2.0
-    pane = _BootingClaudePane(monkeypatch, boot_s=boot_s)
+    pane = _BootingClaudePane(monkeypatch, boot_s=boot_s, boot_pane=boot_pane)
 
     claude_native_bridge.inject_slash_command(
         bridge_dir, command="/effort high", ready_timeout_s=boot_s + 5.0
@@ -11870,11 +11883,6 @@ def test_inject_slash_command_without_a_cap_waits_out_a_slow_boot_like_a_message
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
     pane = _BootingClaudePane(monkeypatch, boot_s=20.0)
-    monkeypatch.setattr(
-        claude_native_bridge,
-        "_claude_pane_state",
-        lambda _socket, _target: claude_native_bridge._ClaudePaneState(True),
-    )
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high", timeout_s=1.0)
 
@@ -11896,11 +11904,6 @@ def test_inject_slash_command_gives_up_within_its_ready_budget(
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
     pane = _BootingClaudePane(monkeypatch, boot_s=1000.0)
-    monkeypatch.setattr(
-        claude_native_bridge,
-        "_claude_pane_state",
-        lambda _socket, _target: claude_native_bridge._ClaudePaneState(True),
-    )
 
     with pytest.raises(claude_native_bridge.ClaudePromptTimeout, match="did not become ready"):
         claude_native_bridge.inject_slash_command(
@@ -11950,13 +11953,7 @@ def test_wait_for_input_ready_reports_a_dead_pane_within_its_cap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    A terminal that exited fails the capped wait at a liveness check, not at the cap.
-
-    The cap used to be the first probe's due time and the deadline check runs
-    first, so no probe ever ran: a dead pane burned the whole cap and came back
-    as a generic readiness timeout instead of the exit it was.
-    """
+    """A dead pane fails the capped wait at its first liveness probe, not at the cap."""
     bridge_dir = _picker_bridge_dir(tmp_path)
     pane = _BootingClaudePane(monkeypatch, boot_s=1000.0)
     pane.state = claude_native_bridge._ClaudePaneState(False, exited=True, exit_status="1")
@@ -12002,33 +11999,31 @@ def test_inject_slash_command_fails_loud_at_a_surface_escape_cannot_clear(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    A composer-less dialog with no Escape hint gets no keystrokes at all.
+    A composer-less dialog with no Escape hint is refused at once, untouched.
 
     The restore leaves such a surface alone (an Escape would not clear it,
-    and one spent on launcher output reaches the composer later). The
-    readiness gate then waits for an input box that never mounts, so the call
-    ends with the readiness timeout and nothing typed: a blind submit Enter
-    would accept the dialog's highlighted option instead of running the
-    command, while the call reported success. The ``/effort`` confirmation
-    shows the shape — the pending-user-prompt guard does not recognize it as
-    a decision prompt either.
+    and one spent on launcher output reaches the composer later), and the
+    readiness gate cannot name a boxed dialog without an Enter/Esc footer, so
+    an uncapped command would otherwise wait out the whole slow-boot budget
+    and reap the pane. The ``/effort`` confirmation shows the shape — the
+    pending-user-prompt guard does not recognize it as a decision prompt
+    either, and a blind submit Enter would accept its highlighted option.
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
     sends = _fake_tmux(monkeypatch, [_EFFORT_DIALOG_PANE])
-    monkeypatch.setattr(
-        claude_native_bridge,
-        "_claude_pane_state",
-        lambda _socket, _target: claude_native_bridge._ClaudePaneState(True),
-    )
+    clock = claude_native_bridge.time
 
-    with pytest.raises(claude_native_bridge.ClaudePromptTimeout, match="did not become ready"):
-        claude_native_bridge.inject_slash_command(
-            bridge_dir, command="/compact", ready_timeout_s=2.0
-        )
+    with pytest.raises(claude_native_bridge.ClaudeTerminalDialog, match="Change effort level"):
+        claude_native_bridge.inject_slash_command(bridge_dir, command="/compact")
 
     # No Escape either: the dialog advertises none. Never a C-u, command text or Enter.
     tails = [args[-1] for args in sends]
     assert tails == [], f"Nothing may be typed into the dialog; got {tails}."
+    # Refused once the reclaim gave the dialog up, not after a prompt wait.
+    assert clock.monotonic() <= (
+        claude_native_bridge._OCCUPIED_INPUT_DISMISS_TIMEOUT_S
+        + claude_native_bridge._CLAUDE_READY_POLL_INTERVAL_S * 2
+    )
 
 
 def test_inject_slash_command_fails_loud_when_dismissal_is_exhausted(
@@ -12103,29 +12098,6 @@ def test_a_lowercase_escape_hint_still_marks_a_surface_dismissible(
     claude_native_bridge.inject_slash_command(bridge_dir, command="/compact")
 
     assert [args[-1] for args in sends] == ["Escape", "Space", "C-u", "/compact", "Enter"]
-
-
-def test_inject_slash_command_waits_out_launcher_output_instead_of_refusing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    Launcher output before the input box mounts is waited out, not refused.
-
-    The screen has no composer and no Escape hint, so the reclaim hands it
-    back as an overlay. A booting terminal is not a dialog: the command must
-    neither fail loud nor spend an Escape on it, and goes in once the box
-    mounts.
-    """
-    bridge_dir = _picker_bridge_dir(tmp_path)
-    pane = _BootingClaudePane(monkeypatch, boot_s=2.0, boot_pane=_LAUNCHER_OUTPUT_PANE)
-
-    claude_native_bridge.inject_slash_command(
-        bridge_dir, command="/effort high", ready_timeout_s=9.0
-    )
-
-    assert [key for _, key in pane.sends] == ["Space", "C-u", "/effort high", "Enter"]
-    assert all(at >= pane.boot_s for at, _ in pane.sends), pane.sends
 
 
 @pytest.mark.parametrize(
