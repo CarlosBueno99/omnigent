@@ -36,6 +36,68 @@ _PLAN_APPROVAL = """\
         shift+tab to approve with this feedback
    ctrl+g to edit in Vim · ~/.claude/plans/example-plan.md
 """
+# The same dialog as Claude Code 2.1.283 draws it, captured from the product's
+# terminal (session id, cwd and prompt text normalized): a new headline, still
+# no footer.
+_PLAN_APPROVAL_EXIT_PLAN_MODE = """\
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Sonnet 4 · API Usage Billing
+ ▝▝   ▝▝   ~/…/omnigent-src-worktrees/plan-session
+
+⚠ Claude Sonnet 4 retired June 15, 2026 · /model to switch
+  ⎿  SessionStart:startup says: Open this session in Omnigent:
+     http://127.0.0.1:40417/c/<session>
+
+❯ Add a maintained-by footer to README.md
+
+▔▔▔ ⚠ Claude Sonnet 4 was retired on June 15, 2026. Consider switching to a newer model. ▔
+
+  ──────────────────────────────────────────────────────────────────────────────────────
+   Exit plan mode?
+
+    Claude wants to exit plan mode
+
+    ❯ 1. Yes, and switch to default (ask each time) for this session
+      2. No
+"""
+# An AskUserQuestion on a 47-column pane, captured from Claude Code 2.1.283 the
+# same way: the banner and the footer ("Esc to" / "cancel") both wrap.
+_QUESTION_NARROW_PANE = """\
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Sonnet 4 · API Usage Billing
+ ▝▝   ▝▝   ~/…/plan-session
+
+⚠ Claude Sonnet 4 retired June 15, 2026 ·
+  /model to switch
+  ⎿  SessionStart:startup says: Open this
+     session in Omnigent: http://127.0.0.1:4041
+     7/c/<session>
+
+❯ Pick a deployment target
+───────────────────────────────────────────────
+ ☐ Target
+
+Which deployment target should I use for this
+change?
+
+❯ 1. Staging
+     Deploy to the staging environment first.
+  2. Production
+     Deploy straight to production.
+  3. Type something.
+───────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to
+cancel
+"""
+# Transcript text that borrows a plan dialog's words: no rule above the echoed
+# option list, or a rule with no selected numbered row below it.
+_PLAN_WORDS_IN_TRANSCRIPT = (
+    "❯ 1. try the parser first\n● I drafted both steps. Would you like to proceed?\n",
+    "──────────────────────────────\n"
+    "● Exit plan mode? Not yet. Would you like to proceed with the parser first?\n",
+)
 _PERMISSION = """\
 ╭──────────────────────────────────────────────────────────╮
 │ Bash command                                             │
@@ -84,8 +146,10 @@ def test_live_hook_protects_a_prompt_even_during_a_torn_capture(
         _QUESTION,
         _QUESTION.replace("Enter to select", "Space to select · Enter to submit"),
         _QUESTION_WRAPPED_FOOTER,
+        _QUESTION_NARROW_PANE,
         _PERMISSION,
         _PLAN_APPROVAL,
+        _PLAN_APPROVAL_EXIT_PLAN_MODE,
     ],
 )
 @pytest.mark.parametrize("operation", ["message", "settings"])
@@ -107,7 +171,9 @@ def test_terminal_fallback_prompt_receives_no_injected_keystrokes(
     assert sent == []
 
 
-@pytest.mark.parametrize("pane", [_QUESTION, _PERMISSION, _PLAN_APPROVAL])
+@pytest.mark.parametrize(
+    "pane", [_QUESTION, _PERMISSION, _PLAN_APPROVAL, _PLAN_APPROVAL_EXIT_PLAN_MODE]
+)
 def test_decision_text_above_a_ready_composer_does_not_block_delivery(
     native_bridge: Path, monkeypatch: pytest.MonkeyPatch, pane: str
 ) -> None:
@@ -115,11 +181,11 @@ def test_decision_text_above_a_ready_composer_does_not_block_delivery(
     assert not bridge.has_pending_user_prompt(native_bridge)
 
 
-def test_a_proceed_question_in_the_transcript_is_not_a_plan_dialog(
-    native_bridge: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("transcript", _PLAN_WORDS_IN_TRANSCRIPT, ids=["no-rule", "no-selector"])
+def test_plan_dialog_words_in_the_transcript_are_not_a_plan_dialog(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch, transcript: str
 ) -> None:
-    """Without a rule above it, an echoed option list is transcript, not a dialog."""
-    transcript = "❯ 1. try the parser first\n● I drafted both steps. Would you like to proceed?\n"
+    """Only a selected numbered row under a rule makes the words a live dialog."""
     monkeypatch.setattr(bridge, "_capture_pane", lambda *_: transcript)
     assert not bridge.has_pending_user_prompt(native_bridge)
 
@@ -159,7 +225,16 @@ def test_question_appearing_after_readiness_prevents_paste(
     assert sent == []
 
 
-@pytest.mark.parametrize("pane", [_QUESTION, _QUESTION_WRAPPED_FOOTER, _PLAN_APPROVAL])
+@pytest.mark.parametrize(
+    "pane",
+    [
+        _QUESTION,
+        _QUESTION_WRAPPED_FOOTER,
+        _QUESTION_NARROW_PANE,
+        _PLAN_APPROVAL,
+        _PLAN_APPROVAL_EXIT_PLAN_MODE,
+    ],
+)
 def test_question_appearing_during_readiness_does_not_become_a_terminal_timeout(
     native_bridge: Path, monkeypatch: pytest.MonkeyPatch, pane: str
 ) -> None:

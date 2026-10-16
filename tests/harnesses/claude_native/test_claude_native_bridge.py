@@ -11346,6 +11346,15 @@ _TRUST_DIALOG_PANE = """\
  Enter to confirm · Esc to cancel
 """
 
+# A keypress notice with no ❯ row (constructed around the "Press Enter to
+# continue" footer the gate accepts): the footer alone tells it from output.
+_PRESS_ENTER_NOTICE_PANE = """\
+────────────────────────────────────────────────────────────────────────────────
+  Welcome to Claude Code 2.1
+  What's new: faster boot, new /model picker.
+  Press Enter to continue · Esc to cancel
+"""
+
 # The same dialog text scrolled into the transcript above a live input box.
 _DIALOG_ECHO_ABOVE_COMPOSER_PANE = _MCP_APPROVAL_DIALOG_PANE + _READY_PANE
 
@@ -11362,17 +11371,31 @@ _DIALOG_ECHO_ABOVE_COMPOSER_PANE = _MCP_APPROVAL_DIALOG_PANE + _READY_PANE
         ),
         (_API_KEY_DIALOG_PANE, "Detected a custom API key in your environment"),
         (_TRUST_DIALOG_PANE, "Accessing workspace:"),
+        (_PRESS_ENTER_NOTICE_PANE, "Welcome to Claude Code 2.1"),
+        (
+            _PRESS_ENTER_NOTICE_PANE.replace("Esc to cancel", "Esc to\n  cancel"),
+            "Welcome to Claude Code 2.1",
+        ),
     ],
-    ids=["mcp-single", "mcp-checklist", "mcp-checklist-wrapped-footer", "api-key", "folder-trust"],
+    ids=[
+        "mcp-single",
+        "mcp-checklist",
+        "mcp-checklist-wrapped-footer",
+        "api-key",
+        "folder-trust",
+        "press-enter",
+        "press-enter-wrapped-footer",
+    ],
 )
 def test_terminal_dialog_headline_names_startup_dialogs(pane: str, headline: str) -> None:
     """
-    Each real startup dialog is recognised by shape and named by its headline.
+    Each startup dialog is recognised by shape and named by its headline.
 
-    All four captures come from Claude Code 2.1.269. None of them is a mounted
-    input box, and each replaces the box with an option list under a
-    "Enter to … · Esc to …" footer, so the headline is what the web error
-    can show the person who has to answer it.
+    The four dialog captures come from Claude Code 2.1.269; the wrapped-footer
+    and keypress-notice variants are built from the same shapes. None of them is
+    a mounted input box, and each replaces the box with a "Enter to … · Esc to
+    …" footer, so the headline is what the web error can show the person who
+    has to answer it.
     """
     assert claude_native_bridge._terminal_dialog_headline(pane) == headline
     assert _claude_prompt_rendered(pane) is False
