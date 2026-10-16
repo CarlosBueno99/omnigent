@@ -32,6 +32,9 @@ _FIRST_TURN_TIMEOUT_MS = 180_000
 _PANE_CLOSE_TIMEOUT_S = 30.0
 # 30 s pane re-create wait + 180 s readiness cap + attach latency.
 _RELAUNCH_OUTCOME_TIMEOUT_MS = 330_000
+# Narrowest size a laid-out browser terminal reports; the bridge drops smaller ones.
+_USABLE_COLS = 20
+_REVEAL_RESIZE_TIMEOUT_S = 15.0
 
 
 def _running_terminal_ids(base_url: str, session_id: str) -> list[str]:
@@ -83,6 +86,26 @@ def _record_terminal_frames(page: Page) -> list[dict[str, object]]:
     return frames
 
 
+def _wait_for_usable_resize(
+    page: Page, frames: list[dict[str, object]], start: int
+) -> dict[str, object]:
+    """Wait for a resize frame of at least ``_USABLE_COLS`` columns sent after ``start``."""
+    deadline = time.monotonic() + _REVEAL_RESIZE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        for frame in frames[start:]:
+            try:
+                control = json.loads(str(frame["sent"]))
+            except ValueError:
+                continue
+            if control.get("type") == "resize" and int(control["cols"]) >= _USABLE_COLS:
+                return control
+        page.wait_for_timeout(250)
+    raise AssertionError(
+        f"no usable resize frame within {_REVEAL_RESIZE_TIMEOUT_S:.0f}s of revealing the "
+        f"terminal view; frames: {frames[start:]}"
+    )
+
+
 def _expanded_error_pill_texts(page: Page) -> list[str]:
     pills = page.locator(_ERROR_PILL)
     texts: list[str] = []
@@ -123,8 +146,9 @@ def test_message_after_pane_relaunch_is_delivered(
     )
     _log.info("first turn answered; terminal frames so far: %s", json.dumps(frames))
 
+    hide_style = None
     if hide_terminal_view:
-        page.add_style_tag(content=_HIDE_TERMINAL_VIEW_CSS)
+        hide_style = page.add_style_tag(content=_HIDE_TERMINAL_VIEW_CSS)
         display = page.evaluate(
             "getComputedStyle(document.querySelector('[data-testid=\"main-terminal-view\"]')).display"
         )
@@ -161,3 +185,11 @@ def test_message_after_pane_relaunch_is_delivered(
         f"browser resize frames after the relaunch: {resize_frames}; error: {pill_texts}"
     )
     expect(page.locator(_ASSISTANT, has_text=_RELAUNCH_TOKEN).first).to_be_visible(timeout=30_000)
+
+    if hide_style is not None:
+        # Revealing the view lays the terminal out again, so its real size must
+        # now reach the pane.
+        revealed_at = len(frames)
+        hide_style.evaluate("style => style.remove()")
+        control = _wait_for_usable_resize(page, frames, revealed_at)
+        _log.info("resize after revealing the terminal view: %s", json.dumps(control))
