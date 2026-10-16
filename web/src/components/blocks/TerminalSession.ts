@@ -27,7 +27,7 @@ import { TerminalLinkProvider } from "./TerminalLinkProvider";
 const CARD_LIGHT = "#ffffff";
 const CARD_DARK = "#131517";
 const TERMINAL_BOLD_WEIGHT_OFFSET = 300;
-// Smallest grid the tmux bridge forwards (control_bridge._MIN_FORWARDED_COLS/ROWS).
+// Smallest grid the tmux bridge forwards (control_bridge.MIN_FORWARDED_COLS/ROWS).
 // The rendered grid is kept at least this large so it cannot diverge from the pane.
 const MIN_FORWARDED_COLS = 20;
 const MIN_FORWARDED_ROWS = 5;
@@ -1081,10 +1081,13 @@ export class TerminalSession {
   /**
    * Whether the container is laid out. Under a `display:none` ancestor it has no
    * box and the fit addon measures its `100%` width as 100px — a few bogus columns.
-   * Browsers without `checkVisibility` (and jsdom) are treated as laid out.
+   * Browsers without `checkVisibility` fall back to the element's client rects.
    */
   private hasLayoutBox(): boolean {
-    return typeof this.container.checkVisibility !== "function" || this.container.checkVisibility();
+    if (typeof this.container.checkVisibility === "function") {
+      return this.container.checkVisibility();
+    }
+    return this.container.getClientRects().length > 0;
   }
 
   private sendResize(): void {

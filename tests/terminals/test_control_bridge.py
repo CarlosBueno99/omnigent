@@ -28,13 +28,9 @@ from fastapi import WebSocketDisconnect
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec, TerminalEnvSpec
 from omnigent.inner.terminal import create_terminal_instance
 from omnigent.terminals.control_bridge import (
-    _MIN_FORWARDED_COLS as _RESIZE_FLOOR_COLS,
-)
-from omnigent.terminals.control_bridge import (
-    _MIN_FORWARDED_ROWS as _RESIZE_FLOOR_ROWS,
-)
-from omnigent.terminals.control_bridge import (
     _SEND_KEYS_HEX_BYTES_PER_CALL,
+    MIN_FORWARDED_COLS,
+    MIN_FORWARDED_ROWS,
     _clipboard_buffer_name,
     _hex_send_keys_commands,
     _read_tmux_buffer,
@@ -1245,8 +1241,8 @@ async def test_control_bridge_keeps_pane_size_on_resize_below_floor() -> None:
     sizes = [
         (6, 4),
         (10, 5),
-        (_RESIZE_FLOOR_COLS - 1, _RESIZE_FLOOR_ROWS),
-        (_RESIZE_FLOOR_COLS, _RESIZE_FLOOR_ROWS - 1),
+        (MIN_FORWARDED_COLS - 1, MIN_FORWARDED_ROWS),
+        (MIN_FORWARDED_COLS, MIN_FORWARDED_ROWS - 1),
     ]
     try:
         for index, (cols, rows) in enumerate(sizes):
@@ -1277,7 +1273,7 @@ async def test_control_bridge_forwards_resize_at_floor() -> None:
             {
                 "type": "websocket.receive",
                 "text": json.dumps(
-                    {"type": "resize", "cols": _RESIZE_FLOOR_COLS, "rows": _RESIZE_FLOOR_ROWS}
+                    {"type": "resize", "cols": MIN_FORWARDED_COLS, "rows": MIN_FORWARDED_ROWS}
                 ),
             }
         ]
@@ -1288,6 +1284,6 @@ async def test_control_bridge_forwards_resize_at_floor() -> None:
         )
     )
     try:
-        await _wait_for_window_size(sock, target, (_RESIZE_FLOOR_COLS, _RESIZE_FLOOR_ROWS))
+        await _wait_for_window_size(sock, target, (MIN_FORWARDED_COLS, MIN_FORWARDED_ROWS))
     finally:
         await _kill_and_join(sock, task)

@@ -14,8 +14,7 @@ import httpx
 import pytest
 from playwright.sync_api import Page, WebSocket, expect
 
-from omnigent.terminals.control_bridge import _MIN_FORWARDED_COLS as _USABLE_COLS
-from omnigent.terminals.control_bridge import _MIN_FORWARDED_ROWS as _USABLE_ROWS
+from omnigent.terminals.control_bridge import MIN_FORWARDED_COLS, MIN_FORWARDED_ROWS
 from tests.e2e_ui.conftest import set_fallback_mock_llm
 from tests.e2e_ui.messages.test_message_render_parity import _ensure_chat_view, _send
 
@@ -110,7 +109,11 @@ def _wait_for_usable_resize(
     while time.monotonic() < deadline:
         for frame in frames[start:]:
             size = _resize_size(frame)
-            if size is not None and size[0] >= _USABLE_COLS and size[1] >= _USABLE_ROWS:
+            if (
+                size is not None
+                and size[0] >= MIN_FORWARDED_COLS
+                and size[1] >= MIN_FORWARDED_ROWS
+            ):
                 return frame
         page.wait_for_timeout(250)
     raise AssertionError(
