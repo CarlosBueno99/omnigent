@@ -369,15 +369,21 @@ def test_no_change_emits_no_changed_frame(app: FastAPI, stores, fast_rescan: Non
             )
 
 
-def test_delete_pushes_removed_frame(app: FastAPI, stores, fast_rescan: None) -> None:
-    """Deleting a watched session makes the server push a ``removed``
-    frame for its id (the row no longer resolves)."""
+@pytest.mark.parametrize(
+    "template", [pytest.param("{hex}", id="bare"), pytest.param("conv_{hex}", id="prefixed")]
+)
+def test_delete_pushes_removed_frame(
+    app: FastAPI, stores, fast_rescan: None, template: str
+) -> None:
+    """Deleting a watched session makes the server push a ``removed`` frame
+    naming its bare id (the row no longer resolves), whichever spelling the
+    client watched it by."""
     permission_store = stores[2]
     s1 = _seed_session(stores, owner=ALICE, title="doomed")
     with TestClient(app).websocket_connect(
         "/v1/sessions/updates", headers={"X-Forwarded-Email": ALICE}
     ) as ws:
-        ws.send_text(json.dumps({"type": "watch", "session_ids": [s1]}))
+        ws.send_text(json.dumps({"type": "watch", "session_ids": [template.format(hex=s1)]}))
         _recv_until(ws, {"snapshot"})
         # Drop access so the next rescan can no longer resolve the id for
         # this user — the list-stream's definition of "removed".
@@ -900,16 +906,11 @@ def test_projects_changed_event_forwards_to_client(
 def test_conv_prefixed_watch_streams_grant_fields(
     app: FastAPI, stores, templates: list[str], admin: bool
 ) -> None:
-    """A watch by the legacy ``conv_``-prefixed spelling — alone, or alongside
-    the bare id as the sidebar sends when the opened session is on its loaded
-    page — streams one item with the ``permission_level`` / ``owner`` a
-    bare-hex watch does.
-
-    Grants are batched under the watched spellings while each item is built
-    from an entity whose id reads back bare hex. Looking grants up by the
-    entity id, or filing them under only one of two spellings, presented an
-    owned session as ownerless over the stream; admins see every watched id
-    regardless of grants, so they hit the second case.
+    """A ``conv_``-prefixed watch, alone or alongside the bare id (the sidebar
+    sends both when the opened session is on its loaded page), streams one
+    item with the ``permission_level`` / ``owner`` a bare-hex watch does.
+    Grants are keyed by the watched spellings while items carry bare ids, so
+    a mismatched lookup presented an owned session as ownerless.
     """
     _, _, permission_store = stores
     s1 = _seed_session(stores, owner=ALICE, title="prefixed")

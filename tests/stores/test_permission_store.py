@@ -1363,12 +1363,10 @@ def test_resolve_access_cache_evicts_least_recently_used_over_cap(
 def test_list_for_sessions_keys_by_caller_spelling(
     store: SqlAlchemyPermissionStore, db_uri: str, templates: list[str]
 ) -> None:
-    """Grants come back under every id spelling the caller passed.
-
-    A ``Uuid16`` column accepts dashed and ``conv_``-prefixed ids but always
-    reads back bare hex. Grouping by the value read back raised ``KeyError``
-    for any non-bare caller, and keying by one spelling per session left the
-    other alias empty when a watch-set carried both.
+    """Grants come back under every id spelling the caller passed: ``Uuid16``
+    reads back bare hex, so grouping by the stored value raised ``KeyError``
+    for non-bare callers, and keying one spelling per session left the other
+    alias empty when a watch-set carried both.
     """
     _ensure_user(store, "alice")
     _ensure_user(store, "bob")

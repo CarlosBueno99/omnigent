@@ -330,14 +330,9 @@ def test_bulk_readers_key_rows_under_every_caller_spelling(
     """
     ``get_conversations``, ``list_child_conversation_ids_by_parent`` and
     ``list_latest_message_items_for_conversations`` file rows under every id
-    spelling the caller passed, including two spellings of one id.
-
-    A ``Uuid16`` column resolves a dashed or ``conv_``-prefixed id on the way
-    in but reads back bare hex. ``WS /v1/sessions/updates`` passes whatever
-    spellings the client watches — both the sidebar's bare id and the route's
-    ``conv_`` id when the open session is on the loaded page — and indexes
-    each result with the id it asked for, so a row filed under another
-    spelling silently vanishes from the sidebar.
+    spelling the caller passed, including two spellings of one id: ``Uuid16``
+    reads back bare hex, and the updates stream indexes each result with the
+    spelling the client watched.
     """
     parent = conversation_store.create_conversation(title="parent")
     other = conversation_store.create_conversation(title="other")

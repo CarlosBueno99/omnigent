@@ -62,16 +62,13 @@ def normalize_uuid(value: str | None) -> str | None:
 
 
 def spellings_by_normalized_uuid(values: Iterable[str]) -> dict[str, list[str]]:
-    """Group caller-supplied id spellings by their bare 32-char hex form.
+    """Group caller-supplied id spellings by their bare 32-char hex form, so a
+    bulk reader can file a row read back as bare hex under every spelling the
+    caller passed for it (``["<hex>", "conv_<hex>"]`` fills both keys).
 
-    Bulk store readers seed their result with the ids the caller passed but
-    read rows back as bare hex. This maps each row id to every spelling the
-    caller used for it, so ``["<hex>", "conv_<hex>"]`` fills both keys.
-
-    :param values: Caller-supplied id strings in any accepted spelling,
-        e.g. ``["conv_0123…", "0123…"]``. Duplicates are tolerated.
-    :returns: Mapping from each distinct normalized id to its distinct
-        spellings in first-seen order; a malformed id maps to itself.
+    :param values: Id strings in any accepted spelling; duplicates tolerated.
+    :returns: Each distinct normalized id to its distinct spellings in
+        first-seen order; a malformed id maps to itself.
     """
     spellings: dict[str, list[str]] = {}
     for value in values:

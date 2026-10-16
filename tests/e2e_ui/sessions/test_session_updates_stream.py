@@ -326,22 +326,34 @@ def test_conv_prefixed_link_keeps_sidebar_updates_live(
         # Let a crash-looping stream show itself before the rename.
         page.wait_for_timeout(5_000)
 
-        httpx.patch(
-            f"{base_url}/v1/sessions/{visible}", json={"title": marker}, timeout=10.0
-        ).raise_for_status()
-
-        def _summary() -> str:
-            watched = [
+        def _watched_sets() -> list[set[str]]:
+            return [
                 set(frame.get("session_ids", []))
                 for frame in events["watch_frames"]
                 if frame.get("type") == "watch"
             ]
+
+        def _summary() -> str:
+            watched = _watched_sets()
             in_every_watch = bool(watched) and all(link_id in ids for ids in watched)
             return (
                 f"opens={events['opens']} closes={events['closes']} "
                 f"received={events['received_types']} watch_frames={len(watched)} "
                 f"link_id_in_every_watch={in_every_watch}"
             )
+
+        # Precondition: the first watch-set carried the prefixed id without its
+        # bare twin, and the server answered it with a snapshot. Later frames may
+        # add the bare id once the SPA has cached the streamed row.
+        first_watch = next(iter(_watched_sets()), set())
+        assert link_id in first_watch and target not in first_watch, (
+            f"the SPA did not watch only the conv_-prefixed id first; {_summary()}"
+        )
+        assert "snapshot" in events["received_types"], _summary()
+
+        httpx.patch(
+            f"{base_url}/v1/sessions/{visible}", json={"title": marker}, timeout=10.0
+        ).raise_for_status()
 
         try:
             expect(page.locator(row)).to_contain_text(marker, timeout=PUSH_DELIVERY_TIMEOUT_MS)

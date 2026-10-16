@@ -30,6 +30,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from omnigent.codex_approval_modes import (
     CODEX_NATIVE_PERMISSION_VALUES,
 )
+from omnigent.db.db_models import normalize_uuid
 from omnigent.db.utils import generate_agent_id, generate_file_id
 from omnigent.debug_logging import add_audit_attrs, debug_event, set_current_runner_id
 from omnigent.entities import (
@@ -1961,9 +1962,10 @@ def register_core_routes(
                 current = {item["id"]: item for item in items}
                 changed = [dump for cid, dump in current.items() if last_sent.get(cid) != dump]
                 # Removed = a still-watched id that no longer resolves (lost
-                # access or deleted). De-watched ids are pruned silently
-                # below, not reported as removed.
-                removed = [cid for cid in watched if cid not in current and cid in last_sent]
+                # access or deleted); de-watched ids are pruned below instead.
+                # Items are keyed by bare id, so match the watch-set canonically.
+                watched_ids = {normalize_uuid(cid) for cid in watched}
+                removed = [cid for cid in last_sent if cid not in current and cid in watched_ids]
                 last_sent.clear()
                 last_sent.update(current)
                 if changed:
@@ -2015,9 +2017,9 @@ def register_core_routes(
                         user_id,
                     )
                     deduped = deduped[: _sf._SESSION_UPDATES_MAX_WATCHED]
-                # The watched set after capping — used to prune baselines for ids
-                # the client no longer watches (including any just truncated).
-                watched_set = set(deduped)
+                # The watched set after capping, as bare ids like the baseline's
+                # keys — used to prune baselines the client no longer watches.
+                watched_set = {normalize_uuid(cid) for cid in deduped}
                 # Handle the watch under a span parented on any trace
                 # context the browser stamped into the frame, so the
                 # snapshot read (and its DB spans) nest under the
