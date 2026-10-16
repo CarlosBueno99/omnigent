@@ -1255,8 +1255,8 @@ function parseOutputItem(data: Record<string, unknown>): StreamEvent | null {
   }
 
   if (itemType === "error") {
-    // Same fields the history path keeps, so a live notice shows its title
-    // instead of the generic headline until the page reloads.
+    // Same parse as `response.error`, so a classified item's title / cause /
+    // remediation render live exactly as they do after a reload.
     return {
       type: "error",
       source: String(rec.source ?? ""),
