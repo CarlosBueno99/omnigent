@@ -114,10 +114,10 @@ import { CommentsPanel, type ActiveSelection } from "./CommentsPanel";
 import { useScrollRestore } from "./useScrollRestore";
 import { isPdfAnchor } from "./pdfCommentHelpers";
 
-// Monaco diff is heavy (~MBs + worker); load it only when the diff view is
-// actually shown.
+// Load the editor on diff intent, in parallel with the file requests.
+const loadMonacoDiffViewer = () => import("./MonacoDiffViewer");
 const MonacoDiffViewer = lazy(() =>
-  import("./MonacoDiffViewer").then((m) => ({ default: m.MonacoDiffViewer })),
+  loadMonacoDiffViewer().then((m) => ({ default: m.MonacoDiffViewer })),
 );
 
 // ---------------------------------------------------------------------------
@@ -375,6 +375,7 @@ function FileViewerBody({
   // Capture URL params once on open — we don't want re-renders caused by our own
   // param writes to re-run the initialization logic.
   const initialDiffRef = useRef(searchParams.get("diff") === "1");
+  const linkedFileRef = useRef(initialDiffRef.current ? { conversationId, path } : null);
   const initialCommentIdRef = useRef(searchParams.get("comment"));
   // Seeded from the parent's persisted state on remount (e.g. returning to a
   // tab); defaults closed on a fresh open. The linked-comment / fresh-open
@@ -401,7 +402,6 @@ function FileViewerBody({
   // (embedded in the desktop aside, never a fixed overlay).
   const keyboardInset = useIOSNativeKeyboardInset(!frameless && open);
   const fileQuery = useFileContent(conversationId, path);
-  const diffQuery = useFileDiff(conversationId, path);
   const changedFiles = useWorkspaceChangedFiles(conversationId);
 
   // Build the navigable file list from all changed files (including deleted),
@@ -718,6 +718,24 @@ function FileViewerBody({
   const [diffActive, setDiffActive] = useState(
     () => initialDiffRef.current || persistedPrefsRef.current.diffActive,
   );
+  const requestedDiff = open && isActiveViewport && diffActive && !isImage && !isPdf && !isModel;
+  // A saved preference also applies to unchanged files; only explicit links skip discovery.
+  const linkedDiff =
+    requestedDiff &&
+    linkedFileRef.current?.conversationId === conversationId &&
+    linkedFileRef.current?.path === path;
+  const diffQuery = useFileDiff(conversationId, path, { requested: linkedDiff });
+  const prepareDiff =
+    requestedDiff &&
+    (isDiffAvailable || (linkedDiff && changedFiles.data === undefined && !changedFiles.isError));
+  useEffect(() => {
+    if (!prepareDiff) return;
+    void loadMonacoDiffViewer()
+      .then((m) => m.prepareDiffEditor(lang))
+      .catch(() => {
+        // The mounted viewer retries initialization and surfaces load errors.
+      });
+  }, [prepareDiff, lang]);
   const [diffLayout, setDiffLayout] = useState<"unified" | "split">(
     () => persistedPrefsRef.current.diffLayout,
   );
