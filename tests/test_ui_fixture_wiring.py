@@ -42,8 +42,7 @@ def test_mock_session_uses_owned_config(monkeypatch, tmp_path, harness, owned):
     )
     try:
         assert next(journey) == ("http://server", "session")
-        create.assert_called_once()
-        assert create.call_args.args == ("http://server", "runner")
+        create.assert_called_once_with("http://server", "runner")
         if owned:
             assert config.read_text() == "original"
         else:

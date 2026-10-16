@@ -367,14 +367,19 @@ _PERMISSION_MODE_FOOTERS: dict[str, str] = {
     "acceptEdits": "accept edits on",
     "plan": "plan mode on",
     "auto": "auto mode on",
-    # Launch-only, but readable: a pane launched into bypass must report
-    # its own mode so the cycler has a starting point to leave it from.
+    # Launch-only, but readable: a pane launched into bypass or don't-ask
+    # must report its own mode so the cycler has a starting point to leave
+    # it from.
     "bypassPermissions": "bypass permissions on",
+    "dontAsk": "don't ask on",
 }
 # Modes shift+tab can reach from any session. ``dontAsk`` is never in the
 # cycle and ``bypassPermissions`` only joins it when launched into, so
 # neither is a switch target.
-CYCLEABLE_PERMISSION_MODES = frozenset(_PERMISSION_MODE_FOOTERS) - {"bypassPermissions"}
+CYCLEABLE_PERMISSION_MODES = frozenset(_PERMISSION_MODE_FOOTERS) - {
+    "bypassPermissions",
+    "dontAsk",
+}
 # Cap on shift+tab presses. The cycle is 3-5 modes wide depending on which
 # optional modes are enabled, so a full lap plus slack proves the target is
 # unreachable rather than slow.
@@ -400,10 +405,12 @@ _OCCUPIED_INPUT_DISMISS_RETRY_INTERVAL_S = 1.5
 # What :func:`_occupying_surface` reports when no input box is drawn.
 _OVERLAY_SURFACE = "an overlay"
 # The dismissal every surface drawn over the input box advertises in its
-# footer ("Esc to cancel", "Esc to clear"). A screen without a composer that
-# lacks it is not such a surface — e.g. a launch wrapper's output before
-# Claude Code has drawn its input box — and an Escape cannot clear it.
-_ESCAPE_DISMISS_HINT = re.compile(r"\bEsc to \w", re.IGNORECASE)
+# footer ("Esc to cancel", "Esc to clear"). Claude Code joins keys that share
+# an action with "/", so the task details panels print "Esc/Enter/Space to
+# close". A screen without a composer that lacks it is not such a surface —
+# e.g. a launch wrapper's output before Claude Code has drawn its input box —
+# and an Escape cannot clear it.
+_ESCAPE_DISMISS_HINT = re.compile(r"\b(?:\w+/)*Esc(?:/\w+)* to \w", re.IGNORECASE)
 # Titles of the confirmation dialog Claude Code pops when a switch invalidates
 # the prompt cache — one component, titled for what is being switched. It only
 # appears on a session with history, and it took ~1.9s to render on a warm
@@ -5756,8 +5763,9 @@ def _restore_occupied_input(
     in two shapes, both reported by :func:`_occupying_surface`: an overlay
     drawn where the input box was (the ctrl+r prompt-history search, a
     hand-opened ``/model`` picker, the double-Escape rewind dialog, a
-    ``/config`` or ``/resume`` panel), or the box itself switched to
-    another input mode (``!`` shell mode). Keystrokes injected into either
+    ``/config`` or ``/resume`` panel, a background task's details panel),
+    or the box itself switched to another input mode (``!`` shell mode).
+    Keystrokes injected into either
     do not become a chat message: the history search filters on the pasted
     text and its Enter replays an old prompt, the rewind dialog's Enter
     restores a checkpoint, and shell mode runs the message as a bash

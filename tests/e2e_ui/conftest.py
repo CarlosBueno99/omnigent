@@ -2822,27 +2822,34 @@ def native_codex_session(
 
 
 @contextlib.contextmanager
-def native_claude_mock_session_scope(
+def native_claude_mock_session_context(
     live_server: str,
     mock_llm_server_url: str,
     tmp_path_factory: pytest.TempPathFactory,
     *,
+    terminal_launch_args: list[str] | None = None,
     workspace: str | None = None,
 ) -> Iterator[tuple[str, str]]:
     """A real Claude CLI using an explicitly configured mock provider.
 
     Workflow-owned runners are already configured. Standalone tests temporarily
     install a mock provider regardless of ambient credential placeholders.
-
-    :param workspace: Session workspace for :func:`_create_native_claude_session`;
-        tests that seed project settings (hooks) pass their prepared directory.
+    ``terminal_launch_args`` are persisted on the session and passed to ``claude``.
+    ``workspace`` is the session's cwd, e.g. a directory whose project settings
+    (hooks) the test seeded.
     """
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
     with _temp_omnigent_mock_config(
         mock_llm_server_url, "claude", workflow_owned=bool(_server_state.get("workflow_owned"))
     ):
-        session_id = _create_native_claude_session(live_server, runner_id, workspace=workspace)
+        # Keep the default create call unchanged; tests/test_ui_fixture_wiring.py pins it.
+        create_kwargs: dict[str, Any] = {}
+        if terminal_launch_args is not None:
+            create_kwargs["terminal_launch_args"] = terminal_launch_args
+        if workspace is not None:
+            create_kwargs["workspace"] = workspace
+        session_id = _create_native_claude_session(live_server, runner_id, **create_kwargs)
         try:
             yield (live_server, session_id)
         finally:
@@ -2862,8 +2869,8 @@ def native_claude_mock_session(
     mock_llm_server_url: str,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[tuple[str, str]]:
-    """A real Claude CLI using an explicitly configured mock provider in the runner's cwd."""
-    with native_claude_mock_session_scope(
+    """A real Claude CLI using an explicitly configured mock provider."""
+    with native_claude_mock_session_context(
         live_server, mock_llm_server_url, tmp_path_factory
     ) as session:
         yield session

@@ -5910,6 +5910,22 @@ def test_cycleable_permission_modes_match_the_server_patch_vocabulary() -> None:
     ), "Bridge cycleable modes and the Sessions API's accepted modes must match."
 
 
+def test_readable_permission_modes_match_the_server_read_back_vocabulary() -> None:
+    """
+    Every footer the bridge can read is a mode the Sessions API accepts back.
+
+    The forwarder posts the parsed footer as ``external_permission_mode_change``;
+    a mode readable here but unknown there is rejected on every poll.
+    """
+    from omnigent.server.routes._sessions.common import (
+        _CLAUDE_NATIVE_READABLE_PERMISSION_MODES,
+    )
+
+    assert set(claude_native_bridge._PERMISSION_MODE_FOOTERS) == set(
+        _CLAUDE_NATIVE_READABLE_PERMISSION_MODES
+    ), "Bridge readable footers and the Sessions API's read-back modes must match."
+
+
 class _FakeModeCycleTmux:
     """
     Stand-in tmux whose pane renders Claude's permission-mode footer.
@@ -5942,6 +5958,7 @@ class _FakeModeCycleTmux:
         "plan": "⏸ plan mode on (shift+tab to cycle)",
         "auto": "⏵⏵ auto mode on (shift+tab to cycle)",
         "bypassPermissions": "⏵⏵ bypass permissions on (shift+tab to cycle)",
+        "dontAsk": "⏵⏵ don't ask on (shift+tab to cycle)",
     }
 
     def run(self, cmd: list[str], **kwargs: object) -> object:
@@ -6126,6 +6143,39 @@ def test_set_permission_mode_leaves_a_bypass_launched_pane(
     assert fake.presses == presses, f"Expected {presses} presses, got {fake.presses}."
 
 
+@pytest.mark.parametrize(
+    ("target", "presses"),
+    [("default", 1), ("acceptEdits", 2), ("plan", 3)],
+)
+def test_set_permission_mode_leaves_a_dont_ask_launched_pane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    presses: int,
+) -> None:
+    """
+    A session launched into don't-ask can still be switched to a cycle mode.
+
+    Like bypass, don't-ask is launch-only and not a switch target, but its
+    ``don't ask on`` footer must read as the current mode so the cycler has
+    a starting point. From don't-ask the TUI cycles don't ask → manual →
+    accept edits → plan and never returns to don't-ask.
+    """
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    fake = _FakeModeCycleTmux(["dontAsk", "default", "acceptEdits", "plan"], start="dontAsk")
+    monkeypatch.setattr("subprocess.run", fake.run)
+
+    got = claude_native_bridge.set_permission_mode(bridge_dir, mode=target, timeout_s=5.0)
+
+    assert got == target
+    assert fake.presses == presses, f"Expected {presses} presses, got {fake.presses}."
+
+
 @pytest.mark.parametrize("bad_mode", ["dontAsk", "bypassPermissions", "", "nonsense"])
 def test_set_permission_mode_rejects_non_cycleable_modes(
     tmp_path: Path,
@@ -6246,6 +6296,18 @@ def test_permission_mode_from_pane_ignores_a_mode_named_in_the_transcript() -> N
     )
 
     assert claude_native_bridge._permission_mode_from_pane(pane) == "default"
+
+
+def test_permission_mode_from_pane_reads_a_dont_ask_footer() -> None:
+    """The launch-only don't-ask footer reads as the current mode, like bypass."""
+    pane = (
+        "────────────────────────────────────────\n"
+        "❯ \n"
+        "────────────────────────────────────────\n"
+        "  ⏵⏵ don't ask on (shift+tab to cycle)\n"
+    )
+
+    assert claude_native_bridge._permission_mode_from_pane(pane) == "dontAsk"
 
 
 def test_permission_mode_from_pane_returns_none_without_a_footer() -> None:
@@ -10746,6 +10808,21 @@ _SETTINGS_PANEL_PANE = """\
    Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear
 """
 
+# The details panel of a background shell, opened from the task indicator
+# below the input box. It replaces the input box, and its footer joins the
+# keys that close it into one hint: "Esc/Enter/Space to close".
+_TASK_DETAILS_PANE = """\
+⏺ Started the build in the background.
+──────────────────────────────
+  Shell details
+  Status:   running
+  Runtime:  4m 12s
+  Command:  make test
+  Output:
+  No output available
+  ← to go back · Esc/Enter/Space to close · x to stop
+"""
+
 # A sliver-height pane holding a multi-line draft: Claude Code renders the
 # box's opening rule and the draft's first row, then runs out of screen —
 # the closing rule never makes it on. The composer is live, so requiring
@@ -11365,6 +11442,7 @@ def test_an_effort_injection_with_no_dialog_completes_without_hanging(
         _SHELL_MODE_PANE,
         _REWIND_PANE,
         _SETTINGS_PANEL_PANE,
+        _TASK_DETAILS_PANE,
     ],
     ids=[
         "reverse-search",
@@ -11373,6 +11451,7 @@ def test_an_effort_injection_with_no_dialog_completes_without_hanging(
         "shell-mode",
         "rewind",
         "settings-panel",
+        "task-details-panel",
     ],
 )
 def test_inject_user_message_restores_an_occupied_input_box_first(

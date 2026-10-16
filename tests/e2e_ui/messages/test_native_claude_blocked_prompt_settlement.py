@@ -27,7 +27,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from tests.e2e_ui.conftest import (
     _REPO_ROOT,
-    native_claude_mock_session_scope,
+    native_claude_mock_session_context,
     reset_mock_llm,
     set_fallback_mock_llm,
 )
@@ -104,7 +104,7 @@ def hook_blocked_claude_session(
         (workspace / ".claude" / "settings.json").write_text(
             json.dumps(settings), encoding="utf-8"
         )
-        with native_claude_mock_session_scope(
+        with native_claude_mock_session_context(
             live_server, mock_llm_server_url, tmp_path_factory, workspace=str(workspace)
         ) as session:
             yield session
