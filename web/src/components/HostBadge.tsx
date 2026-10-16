@@ -112,29 +112,34 @@ export function HostBadge({
   const activeLaunch = session?.sandboxStatus?.stage !== "ready" ? session?.sandboxStatus : null;
   // Ready precedes the binding and host-list refreshes. Keep launch identity
   // through that handoff, scoped to this session and its first bound host.
-  const launchIdentityRef = useRef<{
+  // State keeps a discarded concurrent render from changing the visible session.
+  const [launchIdentity, setLaunchIdentity] = useState<{
     sessionId: string;
     hostId: string | null;
     provider: string | null | undefined;
   } | null>(null);
-  if (activeLaunch) {
-    launchIdentityRef.current = {
-      sessionId,
-      hostId,
-      provider: activeLaunch.provider ?? host?.sandbox_provider,
-    };
-  } else if (launchIdentityRef.current) {
+  if (activeLaunch && activeLaunch.stage !== "failed") {
+    const launchProvider = activeLaunch.provider ?? host?.sandbox_provider;
     if (
-      launchIdentityRef.current.sessionId !== sessionId ||
-      host ||
-      (launchIdentityRef.current.hostId !== null && launchIdentityRef.current.hostId !== hostId)
+      !launchIdentity ||
+      launchIdentity.sessionId !== sessionId ||
+      launchIdentity.hostId !== hostId ||
+      launchIdentity.provider !== launchProvider
     ) {
-      launchIdentityRef.current = null;
-    } else {
-      launchIdentityRef.current.hostId = hostId;
+      setLaunchIdentity({ sessionId, hostId, provider: launchProvider });
+    }
+  } else if (launchIdentity) {
+    if (
+      activeLaunch?.stage === "failed" ||
+      launchIdentity.sessionId !== sessionId ||
+      host ||
+      (launchIdentity.hostId !== null && launchIdentity.hostId !== hostId)
+    ) {
+      setLaunchIdentity(null);
+    } else if (launchIdentity.hostId !== hostId) {
+      setLaunchIdentity({ ...launchIdentity, hostId });
     }
   }
-  const launchIdentity = launchIdentityRef.current;
 
   // Host liveness is keyed by SESSION, not by host, and comes from a ~10s
   // poll. A host switch repoints `hostId` as soon as the session snapshot
@@ -179,6 +184,7 @@ export function HostBadge({
     const launch: SandboxStatus | null =
       activeLaunch ?? (!hostId && launchIdentity ? { stage: "connecting" } : null);
     const provider = launch?.provider ?? host?.sandbox_provider ?? launchIdentity?.provider;
+    const sandboxLabel = provider ? sandboxOptionLabel(provider) : "Sandbox";
     const isSandbox = !!launch || !!host?.sandbox_provider || !!launchIdentity;
     const launchStatus = launch ? (SANDBOX_STAGE_LABELS[launch.stage] ?? "Launching sandbox") : "";
     const reconnectable =
@@ -189,7 +195,7 @@ export function HostBadge({
     let label = hostLabel;
     let tooltipRows = [{ label: "Host", value: "None" }];
     if (launch) {
-      hostLabel = provider ? sandboxOptionLabel(provider) : "Sandbox";
+      hostLabel = sandboxLabel;
       label = `Host ${hostLabel}, ${launchStatus}`;
       tooltipRows = [
         { label: "Host", value: hostLabel },
@@ -197,12 +203,7 @@ export function HostBadge({
         ...(launch.error ? [{ label: "Error", value: launch.error }] : []),
       ];
     } else if (badge) {
-      hostLabel =
-        !host && launchIdentity
-          ? provider
-            ? sandboxOptionLabel(provider)
-            : "Sandbox"
-          : badge.label;
+      hostLabel = !host && launchIdentity ? sandboxLabel : badge.label;
       label = `Host ${hostLabel}, ${STATUS_WORD[badge.status]}`;
       tooltipRows = [
         { label: "Host", value: hostLabel },

@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { startTransition, Suspense } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { HostBadge, resolveHostBadge } from "./HostBadge";
@@ -216,6 +217,72 @@ describe("HostBadge", () => {
     );
     expect(screen.getByTestId("composer-host-status")).toBeInTheDocument();
     expect(screen.getByTestId("composer-host-icon")).toHaveClass("lucide-monitor-cloud");
+  });
+
+  it("retains launch identity when a concurrent session navigation is discarded", async () => {
+    let launching = true;
+    useSessionMock.mockImplementation((id: string) => ({
+      session: {
+        hostId: null,
+        sandboxStatus:
+          id === "conv_1" && launching ? { provider: "arclet", stage: "connecting" } : null,
+      },
+    }));
+    useHostsMock.mockReturnValue({ data: [] });
+    const pending = new Promise<never>(() => {});
+    function PendingSession(): never {
+      throw pending;
+    }
+    const { rerender } = render(
+      <Suspense fallback="Loading session">
+        <HostBadge sessionId="conv_1" appearance="composer" />
+      </Suspense>,
+    );
+    act(() => {
+      startTransition(() => {
+        rerender(
+          <Suspense fallback="Loading session">
+            <HostBadge sessionId="conv_2" appearance="composer" />
+            <PendingSession />
+          </Suspense>,
+        );
+      });
+    });
+    await waitFor(() => expect(useSessionMock).toHaveBeenCalledWith("conv_2"));
+    expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
+      "Host Arclet Sandbox, Starting agent",
+    );
+
+    // The user stays in the original session as its ready event arrives.
+    launching = false;
+    rerender(
+      <Suspense fallback="Loading session">
+        <HostBadge sessionId="conv_1" appearance="composer" />
+      </Suspense>,
+    );
+    expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
+      "Host Arclet Sandbox, Starting agent",
+    );
+    expect(screen.getByTestId("composer-host-icon")).toHaveClass("lucide-monitor-cloud");
+  });
+
+  it("does not restart a failed launch when its status is cleared without a binding", () => {
+    useSessionMock.mockReturnValue({
+      session: { hostId: null, sandboxStatus: { provider: "arclet", stage: "connecting" } },
+    });
+    useHostsMock.mockReturnValue({ data: [] });
+    const { rerender } = render(<HostBadge sessionId="conv_1" appearance="composer" />);
+    useSessionMock.mockReturnValue({
+      session: { hostId: null, sandboxStatus: { provider: "arclet", stage: "failed" } },
+    });
+    rerender(<HostBadge sessionId="conv_1" appearance="composer" />);
+    expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
+      "Host Arclet Sandbox, Sandbox launch failed",
+    );
+    useSessionMock.mockReturnValue({ session: { hostId: null, sandboxStatus: null } });
+    rerender(<HostBadge sessionId="conv_1" appearance="composer" />);
+    expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName("No host bound");
+    expect(screen.getByTestId("composer-host-icon")).not.toHaveClass("lucide-monitor-cloud");
   });
 
   it.each(["session change", "host change", "ordinary host recovery"])(
