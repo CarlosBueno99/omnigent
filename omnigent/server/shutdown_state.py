@@ -108,11 +108,9 @@ def server_shutting_down(now: float | None = None) -> bool:
     return current - _marked_at < SHUTDOWN_WINDOW_S
 
 
-# runner_id -> (monotonic mark time, reason). Entries older than
-# SHUTDOWN_WINDOW_S are pruned on every mark, so the map stays bounded by the
-# tunnels one window of handoffs can touch. A marker may run outside any
-# workspace scope (a background rebalancing loop) while the readers run in
-# tunnel request scopes, so the key must be the bare runner id.
+# runner_id -> (monotonic mark time, reason), pruned past SHUTDOWN_WINDOW_S on
+# every mark. Keyed by the bare runner id: a marker may run outside any
+# workspace scope (a background rebalance) while readers run in tunnel scopes.
 # custom-lint: disable-next=workspace-scoped-cache -- runner_id is globally unique
 _handed_off: dict[str, tuple[float, str]] = {}
 
@@ -161,13 +159,14 @@ def note_runner_tunnel_retired(runner_id: str) -> None:
     The in-band counterpart of :func:`mark_runner_handed_off`: the tunnel
     registry calls it for every deliberate retire, so the disconnect it causes
     is never read as the runner dying. A caller that already recorded a more
-    specific reason keeps it.
+    specific reason keeps it, but the retire refreshes the window so the grace
+    timer still covers the reconnect even after an earlier mark.
 
     :param runner_id: Runner whose tunnel was retired, e.g.
         ``"runner_0123456789abcdef"``.
     """
-    if runner_handoff_reason(runner_id) is None:
-        mark_runner_handed_off(runner_id, reason="tunnel_retired")
+    reason = runner_handoff_reason(runner_id) or "tunnel_retired"
+    mark_runner_handed_off(runner_id, reason=reason)
 
 
 def runner_handoff_reason(runner_id: str | None, now: float | None = None) -> str | None:

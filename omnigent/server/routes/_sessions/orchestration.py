@@ -7926,8 +7926,8 @@ async def _runner_disconnect_requires_failure(
         decision = "intentional_stop"
     elif shutdown_state.runner_handoff_reason(runner_id) is not None:
         # This replica moved the runner's tunnel to another replica, which now
-        # owns the turn. A failed or stale local read must not fail a turn that
-        # is still running there.
+        # owns the turn and reconciles its real outcome; even an authoritative
+        # exit report here must not fail a turn the new replica still drives.
         decision = "handed_off"
     elif live in _MID_TURN_STATUSES and source != "cache" and _owned_by_parent_runtime(conv):
         decision = "subagent_unobserved"
@@ -8251,11 +8251,12 @@ async def _relay_runner_stream(
                     extra={"session_id": session_id},
                 )
             elif decision in ("live_elsewhere", "handed_off"):
-                # The runner re-tunnelled to another replica before this one
-                # noticed the drop; that replica now owns the turn.
+                # Either the runner re-tunnelled to another replica before this
+                # one noticed the drop, or this replica handed it off; either
+                # way the other replica owns the turn.
                 _relinquish_session_live_state(session_id)
                 _logger.info(
-                    "Relay: runner live on another replica for session=%s; no failure to report",
+                    "Relay: runner owned by another replica for session=%s; no failure to report",
                     session_id,
                     extra={"session_id": session_id},
                 )

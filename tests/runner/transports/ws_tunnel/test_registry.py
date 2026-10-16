@@ -257,6 +257,22 @@ async def test_deregister_reports_only_a_deliberate_retirement() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deregister_survives_a_failing_on_retire_callback() -> None:
+    """A raising retire hook must not skip the socket close/cleanup."""
+
+    def boom(_runner_id: str) -> None:
+        raise RuntimeError("retire hook failed")
+
+    reg = TunnelRegistry(on_retire=boom)
+    ws = _ClosingWS()
+    session = reg.register("r1", ws, _hello())
+
+    assert reg.deregister("r1") is session
+    await _wait_until(lambda: ws.closed is not None)
+    assert ws.closed == (1001, "tunnel retired by server; reconnect")
+
+
+@pytest.mark.asyncio
 async def test_register_replacing_existing_session_aborts_inflight() -> None:
     """Newest-wins (RUNNER.md §2): old session's in-flight requests get
     a ConnectionError so awaiters don't hang."""

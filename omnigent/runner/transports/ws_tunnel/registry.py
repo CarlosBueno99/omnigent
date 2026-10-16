@@ -376,8 +376,12 @@ class TunnelRegistry:
             )
         # Report the deliberate retire before the close reaches the route's
         # disconnect hook, which reads it when deciding what the loss means.
+        # Best-effort: a failing notification must not skip the close below.
         if retire and self._on_retire is not None:
-            self._on_retire(runner_id)
+            try:
+                self._on_retire(runner_id)
+            except Exception:  # notification is advisory; always close
+                _logger.exception("on_retire notification failed for runner %s", runner_id)
         # 1001 ("going away"), not 4003: it lands in the runner's existing
         # tunnel-recycle path (serve.py's ``_TUNNEL_RECYCLE_CLOSE_CODES``) for a
         # prompt, spread reconnect instead of an escalating backoff. Avoid 1012

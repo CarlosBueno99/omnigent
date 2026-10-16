@@ -126,6 +126,41 @@ async def test_disconnect_decision_leaves_a_handed_off_turn_to_its_new_replica(
     assert decision["server_shutting_down"] is False
 
 
+@pytest.mark.parametrize("fail_idle_top_level", [True, False])
+async def test_handoff_suppresses_even_an_authoritative_exit_report(
+    caplog: pytest.LogCaptureFixture,
+    fail_idle_top_level: bool,
+) -> None:
+    """A reported runner exit on this replica still leaves a handed-off turn to its new one."""
+    caplog.set_level(logging.INFO)
+    session_id = "handoff-exit"
+    snapshot = Conversation(
+        id=session_id,
+        root_conversation_id=session_id,
+        created_at=0,
+        updated_at=0,
+        runner_id=_RUNNER,
+        live_status="running",
+    )
+    sessions._session_status_cache[session_id] = "running"
+    shutdown_state.mark_runner_handed_off(_RUNNER, reason="rebalance")
+    try:
+        requires_failure = await orchestration._runner_disconnect_requires_failure(
+            session_id,
+            cast(ConversationStore, _UnavailableStore()),
+            origin="runner_offline_sweep",
+            snapshot=snapshot,
+            fail_idle_top_level=fail_idle_top_level,
+            error_code="runner_failed_to_start",
+        )
+    finally:
+        sessions._session_status_cache.pop(session_id, None)
+
+    assert requires_failure is False
+    [decision] = _event_attributes(caplog, "runner_disconnect_decision")
+    assert decision["decision"] == "handed_off"
+
+
 @pytest.mark.parametrize("handed_off", [True, False])
 async def test_relay_does_not_fail_a_turn_handed_to_another_replica(
     monkeypatch: pytest.MonkeyPatch,

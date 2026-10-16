@@ -82,6 +82,14 @@ def test_retired_tunnel_marks_a_handoff_without_replacing_an_explicit_reason() -
     shutdown_state.note_runner_tunnel_retired("runner-b")
     assert shutdown_state.runner_handoff_reason("runner-b") == "tunnel_retired"
 
+    # The retire refreshes the window so an earlier mark still covers the grace.
+    old = time.monotonic() - (shutdown_state.SHUTDOWN_WINDOW_S - 1)
+    shutdown_state._handed_off["runner-c"] = (old, "rebalance")
+    shutdown_state.note_runner_tunnel_retired("runner-c")
+    refreshed_at, reason = shutdown_state._handed_off["runner-c"]
+    assert reason == "rebalance"
+    assert refreshed_at > old
+
 
 def test_handoff_and_shutdown_marks_are_logged_for_attribution(
     caplog: pytest.LogCaptureFixture,

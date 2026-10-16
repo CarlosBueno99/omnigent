@@ -3544,9 +3544,19 @@ def create_app(
                 runner_id,
             )
             return
-        # The same holds for one runner this replica handed to another replica.
+        # The same holds for one runner handed to another replica, which now
+        # owns the turn. Drop this replica's live state so a cached "running"
+        # cannot shadow the owner's status; a failed read just expires.
         handoff_reason = shutdown_state.runner_handoff_reason(runner_id)
         if handoff_reason is not None:
+            try:
+                handed_off = await asyncio.to_thread(
+                    conversation_store.list_conversations_by_runner_id, runner_id
+                )
+            except Exception:  # noqa: BLE001 — a stale cache is safe; it expires on its own
+                handed_off = []
+            for conv in handed_off:
+                _relinquish_session_live_state(conv.id)
             _logger.info(
                 "Runner %s dropped because this server handed it off (%s); "
                 "skipping offline-marking",
@@ -3682,10 +3692,9 @@ def create_app(
         # timer can tell a fresher stamp another replica writes later from
         # one we wrote ourselves (the clear itself never erases this record).
         reference_stamp = session_live_state.last_liveness_stamp(runner_id)
-        # Graceful disconnect: clear the persisted liveness stamp so other replicas
-        # flip offline at once. Not on our own shutdown: the runner is alive and
-        # re-tunnels to the replacement, which must not settle its turns to idle.
-        # A handed-off runner is alive too.
+        # Graceful disconnect: clear the persisted liveness stamp so other
+        # replicas flip offline at once. Not on our own shutdown or a handoff:
+        # the runner is alive and re-tunnels, so its turns must not settle idle.
         if (
             shutdown_state.server_shutting_down()
             or shutdown_state.runner_handoff_reason(runner_id) is not None

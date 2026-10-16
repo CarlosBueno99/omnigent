@@ -2084,7 +2084,9 @@ async def test_server_retired_tunnel_never_fails_the_turn(
 
         # Well past the grace: the timer has fired and must have skipped the marking.
         await asyncio.sleep(grace * 3)
-        assert sessions_module._session_status_cache.get(session_id) == "running"
+        # The turn is never failed, and this replica relinquishes its stale local
+        # status so the replica that now owns the runner stays authoritative.
+        assert sessions_module._session_status_cache.get(session_id) is None
         conv = store.get_conversation(session_id)
         assert conv is not None
         assert sessions_module._last_task_error_from_labels(conv.labels) is None
