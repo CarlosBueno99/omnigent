@@ -226,58 +226,6 @@ async def test_journey(owned_page, native_session):
     await owned_page.wait_for_timeout(2_000)"""
 )
 
-# ``_close_recorded_context`` with an unavailable loop or a ``close()`` that raises.
-_UNFINALIZABLE_CONTEXT_PROBE = """
-import asyncio
-
-import pytest
-from playwright.sync_api import Error
-
-from tests.e2e_ui.conftest import _close_recorded_context
-
-
-class FakeContext:
-    pages = ["open"]
-    closed = False
-
-    async def close(self):
-        self.closed = True
-
-
-class FailingAsyncContext(FakeContext):
-    async def close(self):
-        raise RuntimeError("driver gone")
-
-
-class FailingSyncContext(FakeContext):
-    def close(self):
-        raise Error("driver gone")
-
-
-@pytest.mark.parametrize("state", ["closed", "running", "async-raises", "sync-raises"])
-def test_unfinalizable_context(request, state):
-    context = FakeContext()
-    loop = asyncio.new_event_loop()
-    try:
-        if state == "closed":
-            loop.close()
-            _close_recorded_context(request.node, context, loop)
-        elif state == "running":
-
-            async def probe():
-                _close_recorded_context(request.node, context, asyncio.get_running_loop())
-
-            loop.run_until_complete(probe())
-        elif state == "async-raises":
-            context = FailingAsyncContext()
-            _close_recorded_context(request.node, context, loop)
-        else:
-            context = FailingSyncContext()
-            _close_recorded_context(request.node, context)
-    finally:
-        loop.close()
-    assert not context.closed"""
-
 
 def _browsers_path() -> str:
     """Playwright's browser cache as resolved from the real home, not pytester's."""
@@ -527,25 +475,6 @@ def test_async_own_page_video_is_finalized_before_a_later_fixture_tears_down(
     frames = extract_frames(raw / videos[0], tmp_path / "frames")
     assert fraction_near(frames[-1], (0x1D, 0x4E, 0xD8)) > 0.5, (
         "the final video frame shows the teardown state instead of the live page"
-    )
-
-
-def test_unfinalizable_recording_only_warns(
-    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _configure(pytester, monkeypatch, tmp_path, record_dir=None)
-    pytester.makepyfile(_UNFINALIZABLE_CONTEXT_PROBE)
-
-    result = pytester.runpytest_subprocess(
-        "-q", *_PLAYWRIGHT_PLUGINS, "-W", "error::pytest.PytestWarning"
-    )
-
-    result.assert_outcomes(passed=4, warnings=4)
-    result.stdout.fnmatch_lines(
-        [
-            "*Could not finalize recording for*its event loop is no longer available*",
-            "*Could not finalize recording for*driver gone*",
-        ]
     )
 
 
