@@ -111,6 +111,29 @@ describe("useChildSessions", () => {
     expect(result.current.children).toEqual([]);
     expect(authenticatedFetch).toHaveBeenCalledTimes(2);
   });
+  it("fails when a page claims more children without a cursor", async () => {
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          object: "list",
+          data: [{ id: "conv_a", title: "worker:a", busy: false }],
+          has_more: true,
+          last_id: null,
+        }),
+      ),
+    );
+    const { result } = renderHook(
+      () => useChildSessions("conv_parent", null, { limit: 1, allPages: true }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.error?.message).toBe(
+      "child_sessions reported more pages without a cursor",
+    );
+    expect(authenticatedFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("fails when the cursor cycles instead of advancing", async () => {
     const page = (last_id: string) =>
       new Response(

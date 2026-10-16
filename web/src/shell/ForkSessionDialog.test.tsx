@@ -820,17 +820,19 @@ describe("ForkSessionDialog", () => {
 
   it("keeps the sub-agent check pending while a cached list refetches", () => {
     // Reopening the dialog refetches the cached list; until that finishes, the
-    // stale list must not read as "nothing running".
+    // stale list is still shown but flagged as being re-checked.
     useChildSessionsMock.mockReturnValue(
       childSessionsResult({
-        children: [childSession({ id: "conv_done", title: "worker:done" })],
+        children: [childSession({ id: "conv_worker", title: "worker:long-task", busy: true })],
         isFetching: true,
       }),
     );
     renderDialog({ sourceTitle: "My session" });
 
     expect(screen.getByTestId("fork-session-subagent-check-pending")).toBeInTheDocument();
-    expect(screen.queryByTestId("fork-session-subagent-hint")).not.toBeInTheDocument();
+    expect(screen.getByTestId("fork-session-subagent-hint")).toHaveTextContent(
+      "1 sub-agent is still running",
+    );
   });
 
   it("says so when the running sub-agent check itself fails", () => {

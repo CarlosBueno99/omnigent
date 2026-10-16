@@ -44,9 +44,9 @@ _DISPATCH_ACK = "Worker dispatched; its result will arrive in my inbox."
 _STATUS_REPLY = "I checked my inbox and sub-agent list; see the tool results above."
 _CANCEL_REPLY = "I asked the runtime to stop the worker; see the tool result above."
 _WAKE_REPLY = "I collected the worker's result from my inbox; see the tool result above."
-# How long the fork is watched for the finished worker's result or a notice
-# after the original session has already shown it.
-_FORK_WATCH_S = 60.0
+# How long the fork is watched for the finished worker's result after the
+# original has already shown it; delivery to both would happen at the same time.
+_FORK_WATCH_S = 20.0
 # Transcript card titles (web/src/lib/toolTitle.ts); sys_session_send has no
 # friendly title and renders its raw name.
 _TOOL_CARD_TITLE = {
@@ -450,11 +450,12 @@ def _run_journey(
         try:
             _wait_reply(page, _WAKE_REPLY, timeout_ms=90_000)
             original_woke = True
+        except AssertionError:
+            pass
+        if original_woke:
             _expand_tool_card(page, "sys_read_inbox")
             _record_on_screen(page, obs, "original_wake_notice", r"finished \(completed\)")
             _record_on_screen(page, obs, "original_result_marker", re.escape(marker))
-        except AssertionError:
-            pass
         obs["original_woke"] = original_woke
         original_items = _items(base_url, original_id)
         obs["original_wake_inbox_output"] = _tool_output(original_items, "call_wake_drain")

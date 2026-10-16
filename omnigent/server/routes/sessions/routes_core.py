@@ -3296,7 +3296,11 @@ def register_core_routes(
         with a hidden agent note and a visible info notice naming them
         and the source, so neither the user nor the fork's agent waits
         on results that go to the source's inbox. Only children created
-        no later than the fork's newest copied item are named.
+        no later than the fork's newest copied item are named; a child
+        dispatched and finished entirely during the copy is not, and a
+        native CLI that first resumes a copy of the source's own
+        transcript sees the hidden note only once its transcript is
+        rebuilt from the fork's items.
 
         ``body.host_type: "managed"`` gives the fork its own
         server-provisioned sandbox instead of leaving it unbound for the

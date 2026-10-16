@@ -125,11 +125,8 @@ function isChildSessionsQueryKey(key: readonly unknown[]): boolean {
 }
 
 /**
- * Query key for one ``useChildSessions`` call: a disabled placeholder for
- * ``null``, the shared list key, or that key extended by non-default fetch
- * options so ``invalidateQueries`` on the prefix still refreshes it. An
- * extended entry is a separate cache entry: the rail's descendant lookups
- * read only the default list, which is what they render.
+ * Extend the base key for non-default options so prefix invalidation still
+ * applies; the rail's descendant lookups read only the default list.
  */
 function childSessionsQueryKeyFor(
   sessionId: string | null,
@@ -239,13 +236,7 @@ interface UseChildSessionsResult {
   error: Error | null;
 }
 
-/**
- * Fetch one page of children and, when ``allPages`` is set and the server
- * reports more, the pages after it. Each cursor comes from the previous
- * response, so the pages are fetched one after another; ``seen`` holds the
- * cursors already followed so a repeating or cycling cursor fails instead
- * of paging forever.
- */
+/** Fetch one page and, when requested, follow continuation cursors; reject repeated cursors. */
 async function fetchChildSessionPages(
   sessionId: string,
   options: ChildSessionsFetchOptions,
@@ -261,7 +252,9 @@ async function fetchChildSessionPages(
   );
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const json = (await res.json()) as ChildSessionsResponse;
-  if (!options.allPages || !json.has_more || !json.last_id) return json.data;
+  if (!options.allPages || !json.has_more) return json.data;
+  // A page that claims more without a cursor would otherwise truncate silently.
+  if (!json.last_id) throw new Error("child_sessions reported more pages without a cursor");
   if (seen.has(json.last_id)) throw new Error("child_sessions cursor did not advance");
   seen.add(json.last_id);
   return [...json.data, ...(await fetchChildSessionPages(sessionId, options, json.last_id, seen))];
