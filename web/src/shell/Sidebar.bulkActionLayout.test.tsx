@@ -16,7 +16,7 @@ vi.mock("@/hooks/useScopeCache", () => import("@/test/mockScopeCache"));
 //   2. The actions render exactly once (no mobile/desktop duplication).
 //   3. Exit / count / actions share the one pill row.
 
-import { cleanup, fireEvent, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 vi.mock("@/hooks/useConversations", async () => {
@@ -134,6 +134,76 @@ describe("bulk-action bar layout", () => {
     await user.hover(trigger);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
   });
+
+  /** Open a Radix menu the way a real click does: pointerdown opens it and the
+   *  matching pointerup ends the tooltip trigger's own pointer-down hold. */
+  async function openMenu(trigger: HTMLElement) {
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.pointerUp(trigger, { button: 0, pointerType: "mouse" });
+    return screen.findByRole("menu");
+  }
+
+  /** Let a tooltip's instant-open on focus flush before asserting it is absent. */
+  const settle = () =>
+    act(
+      () =>
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, 25);
+        }),
+    );
+
+  // Both sidebar triggers wrap a dropdown trigger inside a tooltip trigger, so
+  // focus landing on the button bubbles to the tooltip around it.
+  const menuTooltipCases: [string, string, (menu: HTMLElement) => void][] = [
+    [
+      "session-filter",
+      "Filter sessions",
+      () => fireEvent.click(screen.getByTestId("session-filter-all")),
+    ],
+    [
+      "bulk-move-to-project",
+      "Move to project",
+      (menu) => fireEvent.keyDown(menu, { key: "Escape" }),
+    ],
+  ];
+
+  it.each(menuTooltipCases)(
+    "keeps the %s tooltip hidden after its menu closes",
+    async (testId, label, closeMenu) => {
+      renderSidebar();
+      enterSelectionModeAndSelect();
+      const trigger = screen.getByTestId(testId);
+      const menu = await openMenu(trigger);
+
+      // Closing the menu hands focus back to the button; that programmatic
+      // focus must not pop the tooltip under a pointer that is not hovering it.
+      closeMenu(menu);
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+      fireEvent.focus(trigger);
+      await settle();
+      expect(screen.queryByRole("tooltip")).toBeNull();
+
+      // Fresh hover intent (the pointer re-entering the trigger) shows it again.
+      fireEvent.pointerEnter(trigger.parentElement!);
+      fireEvent.focus(trigger);
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
+    },
+  );
+
+  it.each(menuTooltipCases)(
+    "keeps the %s tooltip hidden while its menu is open",
+    async (testId) => {
+      renderSidebar();
+      enterSelectionModeAndSelect();
+      const trigger = screen.getByTestId(testId);
+      await openMenu(trigger);
+
+      // No tooltip may paint over the open menu.
+      fireEvent.focus(trigger);
+      await settle();
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    },
+  );
 
   it("shows Archive and Delete disabled at zero selection, enabling them once a row is picked", () => {
     renderSidebar();

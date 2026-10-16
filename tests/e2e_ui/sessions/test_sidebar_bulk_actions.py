@@ -100,6 +100,35 @@ def test_session_header_action_visibility(
     expect(page.get_by_test_id("session-filter-all")).to_be_visible()
 
 
+def test_filter_tooltip_stays_hidden_after_choosing_an_option(
+    page: Page,
+    seeded_session: tuple[str, str],
+) -> None:
+    """Choosing a filter option closes the menu without the icon's tooltip appearing."""
+    base_url, session_id = seeded_session
+    title = f"e2e-filter-tooltip-{uuid.uuid4().hex[:8]}"
+    _set_title(base_url, session_id, title)
+
+    page.set_viewport_size({"width": 1280, "height": 800})
+    page.goto(f"{base_url}/c/{session_id}")
+    expect(_row_link(page, title)).to_be_visible()
+
+    filter_sessions = page.get_by_role("button", name="Filter sessions")
+    tooltip = page.locator('[data-slot="tooltip-content"]')
+    filter_sessions.click()
+    all_option = page.get_by_test_id("session-filter-all")
+    expect(all_option).to_be_visible()
+    all_option.click()
+    expect(all_option).to_have_count(0)
+    page.mouse.move(800, 700)
+    # Outlast the hover delay so a late-opening tooltip cannot slip past the check.
+    page.wait_for_timeout(1000)
+    expect(tooltip).to_have_count(0)
+
+    filter_sessions.hover()
+    expect(tooltip).to_have_text("Filter sessions")
+
+
 def test_bulk_archive_moves_session_to_archived(
     page: Page,
     seeded_session: tuple[str, str],
