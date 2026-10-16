@@ -80,7 +80,7 @@ def side_chat_host_session(
             live_server,
             env=host_env,
             base_env=base_env,
-            name=f"repro-12807-{uuid.uuid4().hex[:8]}",
+            name=f"side-chat-slash-{uuid.uuid4().hex[:8]}",
             command=[
                 runner_executable(),
                 "-m",
@@ -213,10 +213,12 @@ def test_side_chat_slash_menu_and_skill_invocation(
     problems: list[str] = []
 
     # Facet A: typing "/" in the side-chat composer should open the same menu.
+    # Poll rather than a fixed sleep so a loaded runner cannot fail it falsely.
     side_input.click()
     page.keyboard.type("/")
-    page.wait_for_timeout(2_000)
-    if pane.get_by_test_id(skill_row).count() == 0:
+    try:
+        expect(pane.get_by_test_id(skill_row)).to_be_visible(timeout=10_000)
+    except AssertionError:
         problems.append("facet A: no slash-command menu opened in the side-chat composer")
     side_input.fill("")
 
@@ -234,9 +236,15 @@ def test_side_chat_slash_menu_and_skill_invocation(
         )
 
     # Facet C: a built-in typed in the side chat should be handled locally, not
-    # forwarded to the agent as a turn.
+    # forwarded to the agent as a turn. Assert the local notice actually rendered
+    # (so the facet cannot pass if the submit were silently dropped), then that
+    # nothing was forwarded to the child session.
     side_input.fill("/help")
     page.get_by_test_id("side-chat-send").click()
+    if not _poll(
+        lambda: pane.get_by_text("Show available slash commands").count() > 0, timeout_s=10
+    ):
+        problems.append("facet C: the local /help notice never rendered in the side chat")
     if _poll(lambda: _user_said(base_url, child_id, "/help"), timeout_s=20):
         problems.append("facet C: /help was sent to the agent instead of handled locally")
 

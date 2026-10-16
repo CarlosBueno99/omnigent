@@ -566,28 +566,36 @@ function SideChatComposer({
     if (busy || (trimmed.length === 0 && files.length === 0) || agentId === null) return;
     // A lone command token with skill discovery in flight has nothing to run yet.
     if (slashCompletion.pendingCompletion) return;
-    // Applicable built-ins (currently /help) are handled locally and never
-    // forwarded to the agent as a turn.
-    const builtin =
-      nativeSession || quotes.length > 0 || files.length > 0
-        ? null
-        : matchSlashCommandInvocation(trimmed, Object.keys(sideChatBuiltins));
+    // On in-process harnesses /help and skills resolve locally; native TUIs
+    // (claude-native, codex-native) read the text themselves, and a quote or
+    // attachment is always an ordinary message.
+    const routeLocally = !nativeSession && quotes.length === 0 && files.length === 0;
+    const builtin = routeLocally
+      ? matchSlashCommandInvocation(trimmed, Object.keys(sideChatBuiltins))
+      : null;
+    const skill = routeLocally
+      ? matchSlashCommandInvocation(trimmed, Object.keys(skillCommands))
+      : null;
+    const runSkill = (match: { command: string; args: string }) => {
+      clearComposer(childId);
+      void sendSlashCommand(match.command.slice(1), match.args, agentId, {
+        pinnedConversationId: childId,
+      }).finally(refreshLabels);
+    };
+    // A multi-word catalog skill outranks a built-in that matches only its first
+    // word ("/help desk ..." runs the skill); an exact-name collision keeps
+    // built-in precedence.
+    if (skill !== null && skill.command !== trimmed.split(/\s+/)[0]) {
+      runSkill(skill);
+      return;
+    }
     if (builtin !== null) {
       setText("");
       if (builtin.command === "/help") showHelp();
       return;
     }
-    // A known skill takes the server's slash_command path on in-process
-    // harnesses; native TUIs (claude-native, codex-native) read the text itself.
-    const skill =
-      nativeSession || quotes.length > 0 || files.length > 0
-        ? null
-        : matchSlashCommandInvocation(trimmed, Object.keys(skillCommands));
     if (skill !== null) {
-      clearComposer(childId);
-      void sendSlashCommand(skill.command.slice(1), skill.args, agentId, {
-        pinnedConversationId: childId,
-      }).finally(refreshLabels);
+      runSkill(skill);
       return;
     }
     const outgoing = files;

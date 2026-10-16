@@ -640,6 +640,27 @@ describe("side-chat slash commands", () => {
     expect(useChatStore.getState().sideChatComposers[childId]).toBeUndefined();
   });
 
+  it("prefers a multi-word skill over a built-in matching only its first word", () => {
+    conversationRegistry
+      .acquire(childId)
+      .setState({ sessionHarness: "claude-sdk", sessionStatus: "idle" });
+    const helpDesk = { name: "help desk", description: "Open a help-desk ticket" };
+    skillsFixture.current = { skills: [helpDesk], skillsStatus: "ready" };
+    renderPane(<SideChatPane childId={childId} />);
+    typeSlash("/help desk summarize");
+    fireEvent.click(screen.getByRole("button", { name: "Send side question" }));
+    // "/help desk" is a catalog skill whose first word collides with the /help
+    // built-in; the multi-word skill wins and dispatches instead of showing help.
+    expect(sendSlashCommand).toHaveBeenCalledExactlyOnceWith(
+      "help desk",
+      "summarize",
+      "agent_side",
+      { pinnedConversationId: childId },
+    );
+    expect(send).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Show available slash commands/)).toBeNull();
+  });
+
   it("sends a typed skill as plaintext on a native terminal harness", () => {
     // beforeEach binds the child to codex-native: the vendor TUI reads "/review" itself.
     conversationRegistry.acquire(childId).setState({ sessionStatus: "idle" });
