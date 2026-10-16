@@ -8,6 +8,7 @@ import { useSessionActionRestrictions } from "@/hooks/useSessionActionRestrictio
 import { useSessionHostOnline } from "@/hooks/RunnerHealthProvider";
 import { sandboxOptionLabel } from "@/lib/capabilities";
 import { SANDBOX_STAGE_LABELS } from "@/lib/sandboxStatus";
+import type { SandboxStatus } from "@/lib/types";
 import { DisabledActionTooltip } from "./DisabledActionTooltip";
 import { SessionActionMenuItem } from "./SessionActionMenuItem";
 import { SwitchHostDialog } from "@/shell/SwitchHostDialog";
@@ -108,6 +109,32 @@ export function HostBadge({
   const liveOnline = useSessionHostOnline(sessionId);
 
   const host = hostId ? hosts?.find((h) => h.host_id === hostId) : undefined;
+  const activeLaunch = session?.sandboxStatus?.stage !== "ready" ? session?.sandboxStatus : null;
+  // Ready precedes the binding and host-list refreshes. Keep launch identity
+  // through that handoff, scoped to this session and its first bound host.
+  const launchIdentityRef = useRef<{
+    sessionId: string;
+    hostId: string | null;
+    provider: string | null | undefined;
+  } | null>(null);
+  if (activeLaunch) {
+    launchIdentityRef.current = {
+      sessionId,
+      hostId,
+      provider: activeLaunch.provider ?? host?.sandbox_provider,
+    };
+  } else if (launchIdentityRef.current) {
+    if (
+      launchIdentityRef.current.sessionId !== sessionId ||
+      host ||
+      (launchIdentityRef.current.hostId !== null && launchIdentityRef.current.hostId !== hostId)
+    ) {
+      launchIdentityRef.current = null;
+    } else {
+      launchIdentityRef.current.hostId = hostId;
+    }
+  }
+  const launchIdentity = launchIdentityRef.current;
 
   // Host liveness is keyed by SESSION, not by host, and comes from a ~10s
   // poll. A host switch repoints `hostId` as soon as the session snapshot
@@ -149,8 +176,10 @@ export function HostBadge({
     if (!canSwitch) setSwitchOpen(false);
   }, [canSwitch]);
   if (appearance === "composer") {
-    const launch = session?.sandboxStatus?.stage !== "ready" ? session?.sandboxStatus : null;
-    const provider = launch?.provider ?? host?.sandbox_provider;
+    const launch: SandboxStatus | null =
+      activeLaunch ?? (!hostId && launchIdentity ? { stage: "connecting" } : null);
+    const provider = launch?.provider ?? host?.sandbox_provider ?? launchIdentity?.provider;
+    const isSandbox = !!launch || !!host?.sandbox_provider || !!launchIdentity;
     const launchStatus = launch ? (SANDBOX_STAGE_LABELS[launch.stage] ?? "Launching sandbox") : "";
     const reconnectable =
       !launch && badge?.status === "offline" && !session?.hostResumable && !!onReconnect;
@@ -168,7 +197,12 @@ export function HostBadge({
         ...(launch.error ? [{ label: "Error", value: launch.error }] : []),
       ];
     } else if (badge) {
-      hostLabel = badge.label;
+      hostLabel =
+        !host && launchIdentity
+          ? provider
+            ? sandboxOptionLabel(provider)
+            : "Sandbox"
+          : badge.label;
       label = `Host ${hostLabel}, ${STATUS_WORD[badge.status]}`;
       tooltipRows = [
         { label: "Host", value: hostLabel },
@@ -191,7 +225,7 @@ export function HostBadge({
               <ComposerHostTrigger
                 label={label}
                 status={launch ? undefined : (badge?.status ?? "unknown")}
-                cloud={!!launch || !!host?.sandbox_provider}
+                cloud={isSandbox}
                 data-testid="composer-host-select"
               />
             </DropdownMenuTrigger>
@@ -204,7 +238,7 @@ export function HostBadge({
             data-testid="composer-host-menu"
           >
             <div className="px-2 py-1 text-xs text-muted-foreground">
-              {launch || host?.sandbox_provider ? "Cloud" : "My machines"}
+              {isSandbox ? "Cloud" : "My machines"}
             </div>
             <DropdownMenuItem disabled className="gap-2" data-selected="true">
               {launch ? (

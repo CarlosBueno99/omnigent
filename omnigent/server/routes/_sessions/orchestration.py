@@ -12912,10 +12912,19 @@ async def _get_session_snapshot(
     # liveness arrives via the poll/stream). One indexed host read, gated to
     # host-bound sessions.
     host_resumable = False
-    if host_store is not None and sandbox_config is not None and conv.host_id is not None:
-        host_for_resume = await asyncio.to_thread(host_store.get_host, conv.host_id)
-        if host_for_resume is not None:
-            host_resumable = host_resume_supported(host_for_resume, sandbox_config)
+    bound_host = None
+    sandbox_status = _session_sandbox_status_cache.get(session_id)
+    if (
+        host_store is not None
+        and conv.host_id is not None
+        and (
+            sandbox_config is not None
+            or (sandbox_status is not None and sandbox_status.stage == "failed")
+        )
+    ):
+        bound_host = await asyncio.to_thread(host_store.get_host, conv.host_id)
+        if bound_host is not None and sandbox_config is not None:
+            host_resumable = host_resume_supported(bound_host, sandbox_config)
     response = _build_session_response(
         conv,
         items,
@@ -12943,6 +12952,15 @@ async def _get_session_snapshot(
         agent_store=agent_store,
         agent_cache=agent_cache,
     )
+    # An ordinary-host binding supersedes a failure retained on another replica.
+    # Keep the cached failure in case the replacement launch rolls its binding back.
+    if (
+        response.sandbox_status is not None
+        and response.sandbox_status.stage == "failed"
+        and bound_host is not None
+        and bound_host.sandbox_provider is None
+    ):
+        response.sandbox_status = None
     response.inference_configured = inference_configured
     response.inference_error = inference_error
     response.usage_included = include_usage

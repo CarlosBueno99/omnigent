@@ -18,6 +18,7 @@ from asgiref.testing import ApplicationCommunicator
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import (
@@ -137,10 +138,12 @@ async def _connect_host(
     return comm
 
 
-@pytest.mark.parametrize("previously_failed", [False, True])
+@pytest.mark.parametrize("failure_replica", [None, "host", "default"])
 async def test_launch_runner_writes_host_id_and_runner_id(
     binding_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
-    previously_failed: bool,
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_replica: str | None,
 ) -> None:
     """
     Verify that POST /hosts/{id}/runners writes both runner_id and
@@ -151,18 +154,26 @@ async def test_launch_runner_writes_host_id_and_runner_id(
     won't be able to find the session on host reconnect.
     """
     app, registry, _hs, conv_store = binding_app
+    default_replica = managed_session_env
+    agent = await create_test_agent(default_replica.client)
     comm = await _connect_host(app, registry)
-    conv = conv_store.create_conversation(agent_id=None)
+    conv = conv_store.create_conversation(agent_id=agent["id"])
     from omnigent.server.routes import sessions as sessions_module
 
-    tracker = ManagedLaunchTracker()
-    app.state.managed_launches = tracker
-    if previously_failed:
+    default_cache = sessions_module._session_sandbox_status_cache
+    tracker = default_replica.app.state.managed_launches
+    app.state.managed_launches = (
+        ManagedLaunchTracker() if failure_replica == "default" else tracker
+    )
+    if failure_replica:
         tracker.begin(conv.id)
         tracker.fail(conv.id, "Sandbox quota exhausted")
         sessions_module._publish_sandbox_status(
             conv.id, "failed", "Sandbox quota exhausted", provider="modal"
         )
+        snapshot = await default_replica.client.get(f"/v1/sessions/{conv.id}")
+        assert snapshot.status_code == 200, snapshot.text
+        assert snapshot.json()["sandbox_status"]["stage"] == "failed"
 
     async def _respond_launched() -> None:
         """Respond to the launch frame from the host."""
@@ -188,23 +199,57 @@ async def test_launch_runner_writes_host_id_and_runner_id(
 
     responder = asyncio.create_task(_respond_launched())
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            f"/v1/hosts/{_HOST_ID}/runners",
-            json={"session_id": conv.id, "workspace": "/tmp"},
+    try:
+        # The host-routed POST can reach a different replica from keyless GETs.
+        # Give its cleanup a separate cache while both apps share the real DB.
+        with monkeypatch.context() as host_replica:
+            if failure_replica == "default":
+                host_replica.setattr(
+                    sessions_module, "_session_sandbox_status_cache", WorkspaceScopedCache()
+                )
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    f"/v1/hosts/{_HOST_ID}/runners",
+                    json={"session_id": conv.id, "workspace": "/tmp"},
+                )
+        await responder
+        assert resp.status_code == 200, resp.text
+
+        updated = conv_store.get_conversation(conv.id)
+        assert updated is not None
+        assert updated.runner_id is not None, "runner_id should be written to session row"
+        assert updated.runner_id.startswith("runner_token_"), (
+            "runner_id should be a token-bound id"
         )
-
-    await responder
-    assert resp.status_code == 200
-
-    updated = conv_store.get_conversation(conv.id)
-    assert updated is not None
-    # Both runner_id and host_id should be set.
-    assert updated.runner_id is not None, "runner_id should be written to session row"
-    assert updated.runner_id.startswith("runner_token_"), "runner_id should be a token-bound id"
-    assert updated.host_id == _HOST_ID, "host_id should be written to session row"
-    assert sessions_module._session_sandbox_status_cache.get(conv.id) is None
-    assert tracker.get(conv.id) is None
+        assert updated.host_id == _HOST_ID, "host_id should be written to session row"
+        if failure_replica == "default":
+            assert default_cache[conv.id].stage == "failed"
+            assert tracker.get(conv.id) is not None
+        else:
+            assert default_cache.get(conv.id) is None
+            assert tracker.get(conv.id) is None
+        snapshot = await default_replica.client.get(f"/v1/sessions/{conv.id}")
+        assert snapshot.status_code == 200, snapshot.text
+        assert snapshot.json()["host_id"] == _HOST_ID
+        assert snapshot.json()["runner_id"] == updated.runner_id
+        assert snapshot.json()["sandbox_status"] is None
+        if failure_replica == "default":
+            default_replica.app.state.sandbox_config = None
+            without_config = await default_replica.client.get(f"/v1/sessions/{conv.id}")
+            assert without_config.status_code == 200, without_config.text
+            assert without_config.json()["sandbox_status"] is None
+            conv_store.clear_host_binding(conv.id)
+            after_rollback = await default_replica.client.get(f"/v1/sessions/{conv.id}")
+            assert after_rollback.status_code == 200, after_rollback.text
+            assert after_rollback.json()["sandbox_status"]["stage"] == "failed"
+    finally:
+        default_cache.pop(conv.id, None)
+        tracker.finish(conv.id)
+        responder.cancel()
+        await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+        await comm.wait(timeout=1.0)
 
 
 async def test_sandbox_fork_cannot_launch_on_ordinary_host(
@@ -340,6 +385,46 @@ class ManagedSessionEnv:
     client: AsyncClient
     host_store: HostStore
     conv_store: SqlAlchemyConversationStore
+
+
+async def test_failed_launch_snapshot_retains_failure_on_its_managed_host(
+    managed_session_env: ManagedSessionEnv,
+) -> None:
+    """A host binding can precede runner startup failure and its rollback."""
+    from omnigent.server.routes import sessions as sessions_module
+
+    env = managed_session_env
+    agent = await create_test_agent(env.client)
+    session_id = agent["_session_id"]
+    env.host_store.register_managed_host(
+        host_id=_HOST_ID,
+        name="managed-test",
+        user_id=RESERVED_USER_LOCAL,
+        token="test-launch-token",
+        provider="modal",
+        sandbox_id="sb-test",
+        token_expires_at=int(time.time()) + 60,
+    )
+    env.conv_store.set_host_id(session_id, _HOST_ID, "/tmp")
+    sessions_module._publish_sandbox_status(
+        session_id, "failed", "Runner did not connect", provider="modal"
+    )
+    try:
+        snapshot = await env.client.get(f"/v1/sessions/{session_id}")
+        assert snapshot.status_code == 200, snapshot.text
+        assert snapshot.json()["host_id"] == _HOST_ID
+        assert snapshot.json()["sandbox_status"] == {
+            "stage": "failed",
+            "error": "Runner did not connect",
+            "provider": "modal",
+        }
+        env.conv_store.clear_host_binding(session_id)
+        after_rollback = await env.client.get(f"/v1/sessions/{session_id}")
+        assert after_rollback.status_code == 200, after_rollback.text
+        assert after_rollback.json()["host_id"] is None
+        assert after_rollback.json()["sandbox_status"] == snapshot.json()["sandbox_status"]
+    finally:
+        sessions_module._session_sandbox_status_cache.pop(session_id, None)
 
 
 async def _fake_sandbox_host(

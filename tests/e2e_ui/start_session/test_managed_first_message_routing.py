@@ -339,7 +339,9 @@ async def _drive(rig: ManagedReplicas, model_url: str) -> None:
             await browser.close()
 
 
-async def _assert_launch_composer(page: Page, evidence: Path, status: str, capture: str) -> None:
+async def _assert_launch_composer(
+    page: Page, evidence: Path, status: str, capture: str, *, error: str | None = None
+) -> None:
     badge = page.get_by_test_id("composer-host-select")
     await expect(badge).to_be_visible()
     await badge.click()
@@ -356,8 +358,8 @@ async def _assert_launch_composer(page: Page, evidence: Path, status: str, captu
     await expect(menu).not_to_contain_text("No host bound")
     await expect(menu).not_to_contain_text("This session has no host binding")
     await expect(menu.get_by_role("menuitem", name="Reconnect host")).to_have_count(0)
-    if status == "Sandbox launch failed":
-        await expect(menu).to_contain_text("Sandbox quota exhausted")
+    if error:
+        await expect(menu).to_contain_text(error)
     await page.keyboard.press("Escape")
     # Closing a composer menu suppresses its tooltip until the pointer leaves.
     await page.mouse.move(0, 0)
@@ -407,14 +409,24 @@ async def _drive_failed_launch(rig: ManagedReplicas) -> None:
             await expect(page.get_by_test_id("sandbox-failed-indicator")).to_be_visible(
                 timeout=20_000
             )
-            await _assert_launch_composer(page, rig.logs, "Sandbox launch failed", "failed")
+            await _assert_launch_composer(
+                page,
+                rig.logs,
+                "Sandbox launch failed",
+                "failed",
+                error="Sandbox quota exhausted",
+            )
             snapshot = (await client.get(session_url)).json()
             assert snapshot["host_id"] is None and snapshot["runner_id"] is None
             assert snapshot["sandbox_status"]["stage"] == "failed"
             (rig.logs / "failed-snapshot.json").write_text(json.dumps(snapshot, indent=2))
             await page.reload()
             await _assert_launch_composer(
-                page, rig.logs, "Sandbox launch failed", "failed-reloaded"
+                page,
+                rig.logs,
+                "Sandbox launch failed",
+                "failed-reloaded",
+                error="Sandbox quota exhausted",
             )
         finally:
             await page.screenshot(path=str(rig.logs / "failure-final.png"))

@@ -174,17 +174,42 @@ describe("HostBadge", () => {
   it("returns to the bound sandbox's normal connection status after launch", () => {
     useSessionMock.mockReturnValue({
       session: {
-        hostId: "host_a1b2",
+        hostId: null,
         sandboxStatus: { provider: "arclet", stage: "connecting" },
       },
     });
-    useHostsMock.mockReturnValue({ data: [host({ sandbox_provider: "arclet" })] });
+    useHostsMock.mockReturnValue({ data: [] });
+    useSessionHostOnlineMock.mockReturnValue(null);
     const { rerender } = render(<HostBadge sessionId="conv_1" appearance="composer" />);
     expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
       "Host Arclet Sandbox, Starting agent",
     );
     expect(screen.queryByTestId("composer-host-status")).not.toBeInTheDocument();
+
+    // Ready arrives before the binding refresh, then the host-list refresh.
+    useSessionMock.mockReturnValue({ session: { hostId: null, sandboxStatus: null } });
+    rerender(<HostBadge sessionId="conv_1" appearance="composer" />);
+    expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
+      "Host Arclet Sandbox, Starting agent",
+    );
+    expect(screen.getByTestId("composer-host-icon")).toHaveClass("lucide-monitor-cloud");
+    expect(screen.queryByTestId("composer-host-status")).not.toBeInTheDocument();
+
     useSessionMock.mockReturnValue({ session: { hostId: "host_a1b2", sandboxStatus: null } });
+    rerender(<HostBadge sessionId="conv_1" appearance="composer" />);
+    expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
+      "Host Arclet Sandbox, status unknown",
+    );
+    expect(screen.getByTestId("composer-host-icon")).toHaveClass("lucide-monitor-cloud");
+
+    // Liveness can arrive even when a shared session's host isn't in /hosts.
+    useSessionHostOnlineMock.mockReturnValue(true);
+    rerender(<HostBadge sessionId="conv_1" appearance="composer" />);
+    expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
+      "Host Arclet Sandbox, online",
+    );
+
+    useHostsMock.mockReturnValue({ data: [host({ sandbox_provider: "arclet" })] });
     rerender(<HostBadge sessionId="conv_1" appearance="composer" />);
     expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
       "Host Arclet Sandbox, online",
@@ -192,6 +217,46 @@ describe("HostBadge", () => {
     expect(screen.getByTestId("composer-host-status")).toBeInTheDocument();
     expect(screen.getByTestId("composer-host-icon")).toHaveClass("lucide-monitor-cloud");
   });
+
+  it.each(["session change", "host change", "ordinary host recovery"])(
+    "forgets the launch identity after %s",
+    (transition) => {
+      useSessionMock.mockReturnValue({
+        session: {
+          hostId: transition === "session change" ? null : "host_sandbox",
+          sandboxStatus: {
+            provider: "arclet",
+            stage: transition === "ordinary host recovery" ? "failed" : "connecting",
+          },
+        },
+      });
+      useHostsMock.mockReturnValue({ data: [] });
+      const { rerender } = render(<HostBadge sessionId="conv_1" appearance="composer" />);
+      expect(screen.getByTestId("composer-host-icon")).toHaveClass("lucide-monitor-cloud");
+
+      const hostId =
+        transition === "session change"
+          ? null
+          : transition === "ordinary host recovery"
+            ? "host_a1b2"
+            : "host_other";
+      useSessionMock.mockReturnValue({ session: { hostId, sandboxStatus: null } });
+      useHostsMock.mockReturnValue({
+        data: transition === "ordinary host recovery" ? [host()] : [],
+      });
+      rerender(
+        <HostBadge
+          sessionId={transition === "session change" ? "conv_2" : "conv_1"}
+          appearance="composer"
+        />,
+      );
+      const expectedLabel = transition === "ordinary host recovery" ? "mac-laptop" : "host_other";
+      expect(screen.getByTestId("composer-host-select")).toHaveAccessibleName(
+        hostId ? expect.stringContaining(`Host ${expectedLabel},`) : "No host bound",
+      );
+      expect(screen.getByTestId("composer-host-icon")).not.toHaveClass("lucide-monitor-cloud");
+    },
+  );
 
   it("keeps a runner-startup failure visible even though its sandbox host is bound", () => {
     useSessionMock.mockReturnValue({
