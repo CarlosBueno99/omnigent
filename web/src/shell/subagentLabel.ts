@@ -17,11 +17,8 @@ export function titleWithoutSentinel(title: string | null | undefined): string |
 }
 
 /**
- * The handle a ``"{tool}:{name}"`` sub-agent title carries after its first
- * colon, shared by the Agents rail and the composer tray.
- *
- * @param title - The child's title, e.g. ``"worker:deploy-profile-page"``.
- * @returns The handle, or ``null`` when the title has no suffix.
+ * The handle after the ``"{tool}:"`` prefix of a sub-agent title such as
+ * ``"worker:deploy-profile-page"``, or ``null`` when the title has no suffix.
  */
 export function titleHandle(title: string | null | undefined): string | null {
   const source = titleWithoutSentinel(title);
@@ -52,7 +49,7 @@ export function childPrimaryLabel(child: ChildSessionInfo, fallback: string = ch
   }
   const handle = trimmed(child.session_name) ?? trimmed(titleHandle(child.title));
   const summary = trimmed(child.task_summary);
-  if (summary && handle && handle !== summary) return `${summary} · ${handle}`;
+  if (summary && handle && !summary.includes(handle)) return `${summary} · ${handle}`;
   return (
     summary ??
     handle ??

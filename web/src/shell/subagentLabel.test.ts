@@ -56,8 +56,11 @@ describe("childPrimaryLabel", () => {
     expect(childPrimaryLabel(child({ session_name: null, title: null }))).toBe(SUMMARY);
   });
 
-  it("does not repeat a handle that equals the summary", () => {
+  it("does not repeat a handle the summary already contains", () => {
     expect(childPrimaryLabel(child({ task_summary: HANDLE }))).toBe(HANDLE);
+    expect(childPrimaryLabel(child({ task_summary: `Deploy via ${HANDLE}` }))).toBe(
+      `Deploy via ${HANDLE}`,
+    );
   });
 
   it("treats whitespace-only fields as missing", () => {

@@ -1391,6 +1391,10 @@ def test_session_list_returns_open_children_and_filters_non_resumable_rows(
         labelled_closed.id,
         {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE},
     )
+    # The surviving child carries the generated label the Subagents panel shows.
+    session_fixture.conv_store.set_task_summary(
+        session_fixture.child_conv_id, "Audit the auth flow"
+    )
 
     payload = json.loads(SysSessionListTool().invoke("{}", session_fixture.ctx))
 
@@ -1400,33 +1404,11 @@ def test_session_list_returns_open_children_and_filters_non_resumable_rows(
                 "agent": "researcher",
                 "title": "auth",
                 "conversation_id": session_fixture.child_conv_id,
-                "task_summary": None,
+                "task_summary": "Audit the auth flow",
             }
         ],
         "sessions": [],
     }
-
-
-def test_session_list_carries_the_label_the_subagents_panel_shows(
-    session_fixture: _Fixture,
-) -> None:
-    """A child's generated ``task_summary`` rides along with its handle, since the
-    Subagents panel leads with that summary and the LLM could otherwise only name
-    the child by a handle the user may not see."""
-    session_fixture.conv_store.set_task_summary(
-        session_fixture.child_conv_id, "Audit the auth flow"
-    )
-
-    payload = json.loads(SysSessionListTool().invoke("{}", session_fixture.ctx))
-
-    assert payload["sub_agents"] == [
-        {
-            "agent": "researcher",
-            "title": "auth",
-            "conversation_id": session_fixture.child_conv_id,
-            "task_summary": "Audit the auth flow",
-        }
-    ]
 
 
 def test_session_list_is_scoped_to_the_calling_parent(
