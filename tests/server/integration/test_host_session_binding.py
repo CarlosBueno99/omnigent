@@ -2264,17 +2264,7 @@ async def _reconnected_sandbox_host_receives_launch(
 ) -> tuple[ApplicationCommunicator, HostLaunchRunnerFrame]:
     """Reconnect a managed host with no runners and wait for a runner launch.
 
-    Answers the server's runner-liveness query with ``unknown`` — what a
-    freshly restarted host says about a runner it never spawned — so the
-    launch is not held back by the connect grace, then confirms the launch.
-
-    :param app: The app whose tunnel to dial.
-    :param host_id: The pre-registered managed host's id.
-    :param host_name: Its registered name (the hello must match it).
-    :param token: Its raw launch token.
-    :param timeout_s: How long to wait for the launch frame.
-    :returns: The live tunnel communicator and the launch frame it received.
-    """
+    Answers the runner-liveness query with ``unknown``, as a restarted host would."""
     from omnigent.host.frames import HostRunnerStatusFrame, HostRunnerStatusResultFrame
     from omnigent.runner.identity import token_bound_runner_id
 
@@ -2334,12 +2324,7 @@ async def test_managed_host_reconnect_relaunches_runner_for_interrupted_session(
 ) -> None:
     """A managed host coming back online wakes the session it interrupted.
 
-    The session was mid-turn on a runner that died with its sandbox and is
-    bound to a registered managed host. When that host dials the real tunnel
-    again reporting no runners, the server launches a replacement runner for
-    the session by itself — no message or other user action — and rebinds the
-    row to it, so the runner's connect hook can continue the turn.
-    """
+    The host dials the tunnel with no runners; the server must launch one without user action."""
     from omnigent.db.utils import now_epoch
     from omnigent.runner.identity import token_bound_runner_id
     from omnigent.server.routes import sessions as sessions_module

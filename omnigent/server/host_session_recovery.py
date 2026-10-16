@@ -31,21 +31,9 @@ def schedule_host_session_recovery(
     app_state: Any,
     runner_router: RunnerRouter | None,
 ) -> asyncio.Task[list[str]] | None:
-    """
-    Resume *host_id*'s interrupted sessions in the background.
+    """Resume *host_id*'s interrupted sessions in a background task, one per host at a time.
 
-    The host tunnel's connect callback is bounded, and a wake waits for runner
-    launches, so the work runs as a task. A host that reconnects again while
-    its previous wake is still running is served by that wake.
-
-    :param host_id: The host that just connected.
-    :param conversation_store: Store holding the host's session bindings.
-    :param host_store: Store holding the host row.
-    :param app_state: ``app.state`` — supplies the registries and launch tracker
-        :func:`ensure_runner_connected` needs.
-    :param runner_router: The ``RunnerRouter``, or ``None`` for in-process.
-    :returns: The scheduled task, or ``None`` when one is already running.
-    """
+    The connect callback is bounded, and a wake waits for runner launches."""
     existing = _recovery_tasks.get(host_id)
     if existing is not None and not existing.done():
         return None
@@ -100,22 +88,9 @@ async def wake_interrupted_sessions_on_host(
     app_state: Any,
     runner_router: RunnerRouter | None,
 ) -> list[str]:
-    """
-    Relaunch runners for the interrupted sessions bound to a managed host.
+    """Relaunch runners for a managed host's interrupted sessions; return the session ids woken.
 
-    Hosts the server launched are the server's to bring back: after the
-    sandbox restarts, nothing relaunches their runners until a user acts on
-    the session, so an interrupted turn waits indefinitely. Each wake goes
-    through :func:`ensure_runner_connected`; the runner's connect hook then
-    asks it to continue the turn. External hosts are left to their users.
-
-    :param host_id: The host that just connected.
-    :param conversation_store: Store holding the host's session bindings.
-    :param host_store: Store holding the host row.
-    :param app_state: ``app.state`` — supplies the registries and launch tracker.
-    :param runner_router: The ``RunnerRouter``, or ``None`` for in-process.
-    :returns: Ids of the sessions whose runner is reachable again.
-    """
+    The server launched these hosts, so it brings them back; external hosts stay their users'."""
     from omnigent.server.routes._sessions.orchestration import ensure_runner_connected
 
     host = await asyncio.to_thread(host_store.get_host, host_id)

@@ -1,18 +1,6 @@
-"""A top-level managed session must continue its interrupted turn after its host restarts.
+"""A top-level managed session continues its interrupted turn after its host restarts.
 
-Real server, a managed-host stand-in (the test-gateway sandbox launcher starts a
-real ``omnigent host`` daemon locally), the host-launched runner and the mock LLM
-all run as separate processes; the SPA is driven in headless Chromium. The turn
-is held open by the mock, the host and runner are killed and kept down past the
-runner liveness window, the host is relaunched with its original identity, and
-the runner is woken without a user message.
-
-Run::
-
-    OMNIGENT_E2E_RECORD_DIR="$PWD/recordings/omni-12806/raw" \\
-        python -m pytest tests/e2e_ui/sessions/test_managed_host_restart_resumes_turn.py \\
-        --ui-skip-build -k same_server
-"""
+Real server, test-gateway managed host, host-launched runner, mock LLM and headless Chromium."""
 
 from __future__ import annotations
 
@@ -170,13 +158,9 @@ def test_top_level_managed_session_resumes_interrupted_turn_after_host_restart(
     built_spa: None,
     server_restarts_during_grace: bool,
 ) -> None:
-    """The interrupted top-level turn continues once its managed host's runner is back.
+    """The interrupted turn continues once the managed host's runner is back, with no user action.
 
-    ``same_server`` keeps one server process (its disconnect grace timer marks the
-    session Disconnected). ``server_recycled_within_grace`` restarts the server on
-    the same database right after the kill, so the replacement replica reaches the
-    stale ``running`` row through the lazy session-list reconcile instead.
-    """
+    ``server_recycled_within_grace`` also restarts the server right after the kill."""
     evidence_root = os.environ.get("OMNI_12806_EVIDENCE_DIR")
     evidence = _Evidence(
         (Path(evidence_root) if evidence_root else tmp_path / "evidence")
@@ -427,10 +411,8 @@ def test_top_level_managed_session_resumes_interrupted_turn_after_host_restart(
                 )
             page.wait_for_timeout(3_000)
             evidence.shot(page, "07-final")
-            # Expected once a top-level managed session resumes like a sub-agent does:
-            # the runner reconnects on its own when the host returns and the blocked
-            # reply lands with no user message. (`continued` alone is unreliable — the
-            # killed turn's original gate stays pending regardless.)
+            # Expected: the runner reconnects on its own when the host returns and the
+            # blocked reply lands with no user message (`continued` alone is unreliable).
             resumed_without_user_action = runner_reconnected_alone and marker_seen
             assert resumed_without_user_action, (
                 f"Session {session_id}: a top-level managed session did not resume its "

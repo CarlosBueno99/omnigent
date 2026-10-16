@@ -37,17 +37,9 @@ def runner_inference_verified(conversation: Conversation, response: httpx.Respon
 
 
 def session_init_started_turn(response: httpx.Response) -> bool:
-    """
-    Whether the runner reported a turn executing when it finished initializing.
+    """Whether the runner reported a turn executing when it finished initializing.
 
-    The runner answers ``status: "running"`` when it continued an interrupted
-    turn or found one already active, so the server must not publish an idle
-    edge over it.
-
-    :param response: A successful response from
-        :meth:`RunnerSessionInitializer.initialize`.
-    :returns: ``True`` when the runner reported a running turn.
-    """
+    It answers ``status: "running"`` for a continued or active turn; no idle edge may hide it."""
     try:
         payload = response.json()
     except ValueError:

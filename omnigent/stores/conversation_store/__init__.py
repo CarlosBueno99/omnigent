@@ -1710,17 +1710,9 @@ class ConversationStore(ABC):
         self,
         host_id: str,
     ) -> list[Conversation]:
-        """
-        Return all conversations bound to the given ``host_id``.
+        """Return all conversations bound to ``host_id``.
 
-        Used when a managed host reconnects to find the sessions whose
-        interrupted turns it should resume, with the same read-after-write
-        consistency requirement as :meth:`list_conversations_by_runner_id`.
-
-        :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
-        :returns: List of :class:`Conversation` entities with ``host_id``
-            matching the given value.
-        """
+        Needs the same read-after-write consistency as :meth:`list_conversations_by_runner_id`."""
         ...
 
     @abstractmethod

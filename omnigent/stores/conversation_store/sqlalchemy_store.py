@@ -4092,12 +4092,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         self,
         host_id: str,
     ) -> list[Conversation]:
-        """
-        Return all conversations bound to the given ``host_id``.
-
-        :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
-        :returns: List of :class:`Conversation` entities.
-        """
+        """Return all conversations bound to ``host_id``."""
         return self._list_conversations_bound_to(
             SqlConversationMetadata.host_id == host_id, "list_conversations_by_host_id"
         )

@@ -3611,10 +3611,7 @@ def test_list_conversations_by_host_id_filters(
 ) -> None:
     """Only conversations bound to the queried host are returned, with labels.
 
-    A reconnecting managed host sources the sessions to resume here, so a
-    superset or label-less result would wake the wrong sessions or hand the
-    runner an empty init envelope.
-    """
+    A reconnecting managed host sources the sessions to resume here."""
     host_id = "4f64b6ee625f4e8259185c35c6e63f3d"
     other_host_id = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
     _register_host(db_uri, host_id)
@@ -3638,10 +3635,7 @@ def test_settle_orphaned_live_status_resting_status(
     conversation_store: SqlAlchemyConversationStore,
     resting_status: str,
 ) -> None:
-    """A stale running row settles to the requested resting status, once.
-
-    Rows whose runner is fresh or that were never mid-turn are left alone.
-    """
+    """A stale running row settles to the requested status once; fresh or idle rows stay."""
     stale = conversation_store.create_conversation(runner_id="runner_token_stale")
     conversation_store.set_session_live_status(stale.id, "running")
     fresh = conversation_store.create_conversation(runner_id="runner_token_fresh")

@@ -1357,16 +1357,7 @@ async def test_on_runner_connect_resumes_interrupted_root(
 ) -> None:
     """A reconnect continues a root's interrupted turn instead of settling it idle.
 
-    The disconnect left the session ``failed`` with persisted
-    ``runner_disconnected`` labels. Drives a real tunnel reconnect (which
-    fires ``_on_runner_connect``) WITHOUT sending any message and asserts the
-    root is initialized with ``resume_interrupted_turn`` — the continuation a
-    restored child gets. When the runner answers that the turn is running, the
-    failure clears to ``running`` rather than to an idle edge that would hide
-    the live turn; when it found nothing to continue, the stale failure clears
-    to idle as before. While a message is already being dispatched to the
-    session, that message drives the runner: no continuation is requested.
-    """
+    A running report clears to running, an idle one to idle; a dispatch in flight skips resume."""
     from omnigent.runtime import get_conversation_store
     from omnigent.server.routes import sessions as sessions_module
     from omnigent.server.routes._sessions.orchestration import _mark_dispatch_in_flight
