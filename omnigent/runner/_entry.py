@@ -42,7 +42,7 @@ from omnigent.util.threaded_auth import ThreadedAuth
 from omnigent.version import VERSION
 
 if TYPE_CHECKING:
-    from types import TracebackType
+    from types import FrameType, TracebackType
 
     from omnigent.inner.databricks_executor import _ReusedDatabricksTokenSource
     from omnigent.runner.native import ResolvedSpec
@@ -1173,6 +1173,7 @@ def _run_parent_death_killer(
     request_idle_shutdown: Callable[[], None] | None = None,
     poll_interval_s: float = 0.5,
     grace_s: float = 2.0,
+    signal_wait_s: float = 2.0,
     idle_grace_s: float = _GRACEFUL_SHUTDOWN_TUNNEL_TIMEOUT_S + 5.0,
     finish_work_max_s: float = 1800.0,
     exit_fn: Callable[[int], None] = os._exit,
@@ -1215,6 +1216,10 @@ def _run_parent_death_killer(
         ``0.5``.
     :param grace_s: Seconds to allow graceful shutdown before the hard
         exit, e.g. ``2.0``.
+    :param signal_wait_s: Seconds to wait for the finish-work signal to
+        become visible after a parent death before falling back to a plain
+        shutdown; kept separate from *grace_s* so the hard-exit backstop and
+        the signal-visibility window tune independently.
     :param idle_grace_s: Grace before the hard exit after an idle close,
         covering the tunnel's graceful-close budget.
     :param finish_work_max_s: Bound on finishing in-flight work, e.g. ``1800``.
@@ -1234,7 +1239,7 @@ def _run_parent_death_killer(
         finish_work is not None
         and has_active_work is not None
         and _work_still_active(has_active_work)
-        and _await_finish_work_signal(finish_work, grace_s, poll_interval_s)
+        and _await_finish_work_signal(finish_work, signal_wait_s)
     ):
         _logger.info(
             "parent process hung up with work in flight; finishing it before exiting",
@@ -1281,22 +1286,15 @@ def _work_still_active(has_active_work: Callable[[], bool]) -> bool:
         return True
 
 
-def _await_finish_work_signal(
-    finish_work: threading.Event, grace_s: float, poll_interval_s: float
-) -> bool:
+def _await_finish_work_signal(finish_work: threading.Event, signal_wait_s: float) -> bool:
     """Wait briefly for the finish-work signal after a parent death.
 
     The signal is delivered through the event loop, which can lag the
     parent-death probe. A busy runner must not be torn down before a
     just-delivered hangup request becomes visible; a plain crash (no signal)
-    only waits out this short grace before the normal shutdown proceeds.
+    only waits out this short window before the normal shutdown proceeds.
     """
-    deadline = time.monotonic() + grace_s
-    while not finish_work.is_set():
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(poll_interval_s)
-    return True
+    return finish_work.wait(timeout=signal_wait_s)
 
 
 def _runner_workspace_from_env() -> Path | None:
@@ -2166,6 +2164,16 @@ def _install_signal_handlers(
         _try_add_handler(RUNNER_ADOPT_SIGNAL, adopted_event.set)
     if finish_work_event is not None and RUNNER_FINISH_WORK_SIGNAL is not None:
         _try_add_handler(RUNNER_FINISH_WORK_SIGNAL, finish_work_event.set)
+        if degraded:
+            # The loop handler never installed, so the boot-time SIG_IGN would
+            # persist and leak into exec'd agent subprocesses, since SIG_IGN
+            # survives exec. A plain handler resets to the default on exec and
+            # still records the hangup for the parent-death backstop to honor.
+            def _record_finish_work(_signum: int, _frame: FrameType | None) -> None:
+                finish_work_event.set()
+
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(RUNNER_FINISH_WORK_SIGNAL, _record_finish_work)
 
 
 def _install_crash_logging() -> None:
@@ -2257,8 +2265,8 @@ def main() -> None:
 
     :returns: None.
     """
-    # A hangup during boot delivers the finish-work signal before the loop
-    # handler exists; ignore it until then so it cannot kill the runner.
+    # Set the boot-time disposition before the slow imports below, so an early
+    # hangup cannot kill the runner while they run.
     _ignore_finish_work_signal_until_handled()
     from omnigent.process_logging import configure_process_logging
 

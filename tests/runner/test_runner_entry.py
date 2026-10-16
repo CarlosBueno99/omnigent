@@ -2485,6 +2485,7 @@ def test_run_parent_death_killer_waits_for_a_late_finish_work_signal() -> None:
         request_idle_shutdown=lambda: events.append("idle_close"),
         poll_interval_s=0.01,
         grace_s=0.5,
+        signal_wait_s=0.5,
         idle_grace_s=0.01,
         finish_work_max_s=5.0,
         exit_fn=lambda code: events.append("exit"),
@@ -2505,12 +2506,10 @@ def test_work_still_active_treats_any_exception_as_active() -> None:
 
 
 def test_await_finish_work_signal_times_out_without_a_signal() -> None:
-    """A crash (no finish-work signal) only waits out the short grace."""
+    """A crash (no finish-work signal) only waits out the short window."""
     import threading
 
-    assert (
-        _await_finish_work_signal(threading.Event(), grace_s=0.02, poll_interval_s=0.01) is False
-    )
+    assert _await_finish_work_signal(threading.Event(), signal_wait_s=0.02) is False
 
 
 def test_ignore_finish_work_signal_until_handled_masks_the_default_kill() -> None:
@@ -2621,6 +2620,49 @@ async def test_install_signal_handlers_finish_work_signal_sets_event() -> None:
 
     assert finish_work.is_set()
     assert not stop_event.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGUSR2") or sys.platform == "win32",
+    reason="POSIX signal delivery required",
+)
+async def test_install_signal_handlers_degraded_finish_work_replaces_sig_ign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A degraded loop installs a plain finish-work handler, never leaving SIG_IGN.
+
+    SIG_IGN survives exec, so a persisted boot-time ignore would silently leak
+    into agent subprocesses. When loop registration fails, a plain handler must
+    take its place: it resets to the default on exec and still records the
+    hangup for the parent-death backstop.
+    """
+    import threading
+
+    from omnigent.runner.identity import RUNNER_FINISH_WORK_SIGNAL
+
+    assert RUNNER_FINISH_WORK_SIGNAL is not None
+    loop = asyncio.get_running_loop()
+
+    def _broken_add_signal_handler(sig: int, *args: Any) -> None:
+        raise RuntimeError("the fd 6 must be in non-blocking mode")
+
+    monkeypatch.setattr(loop, "add_signal_handler", _broken_add_signal_handler)
+    # Boot ignores the signal; the degraded install must swap SIG_IGN out.
+    signal.signal(RUNNER_FINISH_WORK_SIGNAL, signal.SIG_IGN)
+    finish_work = threading.Event()
+    try:
+        _install_signal_handlers(asyncio.Event(), finish_work_event=finish_work)
+        handler = signal.getsignal(RUNNER_FINISH_WORK_SIGNAL)
+        assert handler is not signal.SIG_IGN
+        assert callable(handler)
+        os.kill(os.getpid(), RUNNER_FINISH_WORK_SIGNAL)
+        deadline = time.monotonic() + 2.0
+        while not finish_work.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert finish_work.is_set()
+    finally:
+        signal.signal(RUNNER_FINISH_WORK_SIGNAL, signal.SIG_DFL)
 
 
 @pytest.mark.asyncio

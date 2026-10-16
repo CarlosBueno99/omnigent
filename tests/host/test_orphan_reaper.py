@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,7 @@ from omnigent.host.connect import HostProcess, _RunnerHandle
 from omnigent.host.frames import HostLaunchRunnerFrame
 from omnigent.host.identity import HostIdentity
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc
+from omnigent.runner.identity import RUNNER_FINISH_WORK_SIGNAL
 
 pytestmark = pytest.mark.posix_only
 
@@ -445,10 +447,6 @@ async def test_launch_protects_child_until_spawn_worker_returns(
 def test_hangup_signals_live_runners_but_not_the_zygote(
     host: HostProcess, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from types import SimpleNamespace
-
-    from omnigent.runner.identity import RUNNER_FINISH_WORK_SIGNAL
-
     zygote_pid = 4000
     monkeypatch.setattr(host, "_zygote", SimpleNamespace(unreaped_pid=zygote_pid))
     # Direct handles are polled so an unreaped exit never signals a reused PID.
@@ -468,6 +466,13 @@ def test_hangup_signals_live_runners_but_not_the_zygote(
     )
     forked = ZygoteRunnerProc(4005, manager)
     host._runners["forked_live"] = _RunnerHandle(proc=forked, log_path=tmp_path / "runner.log")
+    # A forked runner the zygote already reaped reports its cached exit code, so
+    # its reused PID is skipped from that cache without a blocking poll.
+    forked_exited = ZygoteRunnerProc(4006, manager)
+    forked_exited.returncode = 1
+    host._runners["forked_exited"] = _RunnerHandle(
+        proc=forked_exited, log_path=tmp_path / "runner.log"
+    )
     sent: list[tuple[int, int]] = []
 
     def kill(pid: int, sig: int) -> None:

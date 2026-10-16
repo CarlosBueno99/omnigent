@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -104,6 +105,7 @@ class _ForegroundHostTerminal:
         """Close the terminal: the kernel sends SIGHUP to the host's foreground group."""
         self._stop.set()
         self._drain.join(timeout=5)
+        assert not self._drain.is_alive(), "pty drain thread did not stop before fd close"
         os.close(self.child.child_fd)
         self.child.child_fd = -1
 
@@ -119,9 +121,11 @@ class _ForegroundHostTerminal:
         if self.child.isalive():
             self.child.kill(9)
             self.wait_exit(timeout=5)
-        if self.child.child_fd != -1:
-            self.child.close(force=True)
-        self.transcript.close()
+        try:
+            if self.child.child_fd != -1:
+                self.child.close(force=True)
+        finally:
+            self.transcript.close()
 
 
 def _pgid_or_none(pid: int | None) -> int | None:
@@ -151,6 +155,7 @@ def _wait_until(predicate: Callable[[], object], timeout: float, interval: float
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="pty hangup semantics; /proc liveness")
+@pytest.mark.min_runner_version("0.19.0")
 @pytest.mark.timeout(420)
 def test_terminal_hangup_lets_in_flight_turn_finish(
     tmp_path: Path, isolated_mock_llm_server_url: str
@@ -232,6 +237,7 @@ def test_terminal_hangup_lets_in_flight_turn_finish(
             assert not terminal.child.isalive(), (
                 f"host survived the terminal hangup (test precondition): {host_exit}"
             )
+            assert host_exit[1] == signal.SIGHUP, f"host should die by SIGHUP, not {host_exit}"
             time.sleep(2.0)
             runner_alive_at_release = _pid_running(runner_pid)
             release_mock_gate(mock_url)
