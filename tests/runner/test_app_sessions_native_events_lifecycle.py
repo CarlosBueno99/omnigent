@@ -24,6 +24,7 @@ from omnigent.harnesses.cursor_native import bridge as cursor_native_bridge
 from omnigent.harnesses.cursor_native import main as cursor_native
 from omnigent.harnesses.kiro_native import bridge as kiro_native_bridge
 from omnigent.harnesses.kiro_native import main as kiro_native
+from omnigent.models.model_fallbacks import CODEX_DEFAULT_MODEL
 from omnigent.runner import create_runner_app, model_option_routes, subagent_work
 from omnigent.runner.resource_registry import (
     KIRO_NATIVE_TERMINAL_ROLE,
@@ -1773,8 +1774,8 @@ async def test_codex_model_catalog_writeback_uses_session_provider(
     [
         pytest.param(None, "second-picker", "second-picker", id="configured-model"),
         pytest.param(None, "hidden-picker", None, id="hidden-configured-model"),
-        pytest.param(None, None, "gpt-5.6-sol", id="nothing-configured"),
-        pytest.param("second-picker", "gpt-5.6-sol", "second-picker", id="provider-default"),
+        pytest.param(None, None, CODEX_DEFAULT_MODEL, id="nothing-configured"),
+        pytest.param("second-picker", CODEX_DEFAULT_MODEL, "second-picker", id="provider-default"),
     ],
 )
 async def test_codex_model_catalog_writeback_miss_pins_the_shapes_default(
@@ -1787,12 +1788,12 @@ async def test_codex_model_catalog_writeback_miss_pins_the_shapes_default(
     """A store miss is shaped like the probe: the shape's own default, never the pane's pin.
 
     The next no-model launch pins the fresh catalog's default row, so a cold store
-    must name the configured (or provider) model rather than Sol; a configured model
-    no visible row names marks no default, like the probe's hidden-default shaping.
+    must name the configured (or provider) model rather than Omnigent's default; a
+    configured model no visible row names marks no default, like the probe's
+    hidden-default shaping.
     """
     from omnigent.harnesses.codex_native import app_server as codex
     from omnigent.models import model_catalog_store
-    from omnigent.models.model_fallbacks import CODEX_DEFAULT_MODEL
 
     source_home = tmp_path / "source-codex-home"
     source_home.mkdir()

@@ -3870,21 +3870,6 @@ def _codex_login_usable() -> bool:
     return codex_auth_has_credential(_codex_home_config_source_from_env() / "auth.json")
 
 
-def _codex_profile_overlay(
-    source_home: Path, config: dict[str, object], config_profile: str
-) -> dict[str, object] | None:
-    """The selected profile's table from ``<profile>.config.toml``, else ``[profiles.<name>]``."""
-    from omnigent.onboarding.codex_auth_readiness import load_codex_config
-
-    overlay = load_codex_config(source_home / f"{config_profile}.config.toml")
-    if overlay is None:
-        # Codex < 0.134 keeps file profiles inline; newer codex fails at start on a
-        # missing file anyway, so the fallback only matters where it is correct.
-        profiles = config.get("profiles")
-        overlay = profiles.get(config_profile) if isinstance(profiles, dict) else None
-    return overlay if isinstance(overlay, dict) else None
-
-
 def codex_configured_launch_model() -> str | None:
     """The model Codex's own config selects for an unpinned launch.
 
@@ -3892,20 +3877,10 @@ def codex_configured_launch_model() -> str | None:
         ``config/read`` reports it; ``None`` when the source config is missing,
         unreadable, or names no model.
     """
-    from omnigent.onboarding.codex_auth_readiness import load_codex_config
+    from omnigent.onboarding.codex_auth_readiness import effective_codex_model, load_codex_config
 
-    source_home = _codex_home_config_source_from_env()
-    config = load_codex_config(source_home / "config.toml")
-    if config is None:
-        return None
-    profile = config.get("profile")
-    if isinstance(profile, str) and profile:
-        overlay = _codex_profile_overlay(source_home, config, profile) or {}
-        model = overlay.get("model")
-        if isinstance(model, str) and model:
-            return model
-    model = config.get("model")
-    return model if isinstance(model, str) and model else None
+    config = load_codex_config(_codex_home_config_source_from_env() / "config.toml")
+    return effective_codex_model(config) if config is not None else None
 
 
 def _ambient_builtin_codex_provider(config_profile: str | None) -> str | None:
@@ -3925,8 +3900,13 @@ def _ambient_builtin_codex_provider(config_profile: str | None) -> str | None:
     if config is None:
         return None
     if config_profile is not None:
-        overlay = _codex_profile_overlay(source_home, config, config_profile)
+        overlay = load_codex_config(source_home / f"{config_profile}.config.toml")
         if overlay is None:
+            # Codex < 0.134 keeps file profiles inline; newer codex fails at start on a
+            # missing file anyway, so the fallback only matters where it is correct.
+            profiles = config.get("profiles")
+            overlay = profiles.get(config_profile) if isinstance(profiles, dict) else None
+        if not isinstance(overlay, dict):
             return None
         _merge_tables(config, copy.deepcopy(overlay))
     return effective_self_sufficient_builtin_provider(config)

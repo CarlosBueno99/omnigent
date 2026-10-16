@@ -390,8 +390,8 @@ def test_mark_launch_default_prefers_omnigent_default_over_codex_default() -> No
         pytest.param(
             'model = "gpt-5.4"\nprofile = "work"\n[profiles.work]\nmodel = "gpt-5.5"\n',
             'model = "gpt-6.1-sol"\n',
-            "gpt-6.1-sol",
-            id="file-profile-beats-inline",
+            "gpt-5.5",
+            id="root-profile-ignores-file-profile",
         ),
         pytest.param(
             'model = "gpt-6.1-sol"\nprofile = "work"\n[profiles.work]\nmodel_provider = "x"\n',
@@ -411,7 +411,10 @@ def test_codex_configured_launch_model_follows_the_active_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The configured launch model is the root profile's ``model``, else the top-level one."""
+    """The root ``profile``'s inline ``model`` wins, else the top-level one.
+
+    A ``<name>.config.toml`` file profile only applies to an explicit ``--profile``.
+    """
     from omnigent.harnesses.codex_native import app_server
 
     source = tmp_path / "codex-home"
