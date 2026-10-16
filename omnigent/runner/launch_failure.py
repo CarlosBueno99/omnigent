@@ -334,9 +334,20 @@ _CODEX_PREVIOUS_MODEL_BUDGET = re.compile(
 )
 
 
-# Both halves stay short enough to survive the persisted-label width with the
-# longest gateway model ids, so the card reads the same after a reload.
+# Gateway model ids can run to hundreds of characters; keep both halves of
+# the card inside the persisted-label width so it reads the same after a reload.
+_MODEL_ID_DISPLAY_MAX_CHARS = 48
+
+
+def _display_model_id(model: str) -> str:
+    if len(model) <= _MODEL_ID_DISPLAY_MAX_CHARS:
+        return model
+    return model[: _MODEL_ID_DISPLAY_MAX_CHARS - 1] + "…"
+
+
 def _codex_previous_model_budget_cause(previous_model: str, selected_model: str) -> str:
+    previous_model = _display_model_id(previous_model)
+    selected_model = _display_model_id(selected_model)
     return (
         f"Codex compacted this conversation on `{previous_model}`, the model of its last "
         f"completed turn, before switching to `{selected_model}`, and that model's budget "
@@ -345,6 +356,8 @@ def _codex_previous_model_budget_cause(previous_model: str, selected_model: str)
 
 
 def _codex_previous_model_budget_remediation(previous_model: str, selected_model: str) -> str:
+    previous_model = _display_model_id(previous_model)
+    selected_model = _display_model_id(selected_model)
     return (
         "Switching models again will not help; fork this session to continue on "
         f"`{selected_model}`. The fork keeps the conversation history but starts without "

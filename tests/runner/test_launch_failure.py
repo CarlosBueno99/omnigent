@@ -488,6 +488,21 @@ def test_codex_previous_model_budget_card_names_both_models(
     assert classify_native_turn_error("codex_turn_error", message) == "budget_exhausted"
 
 
+def test_codex_previous_model_budget_card_clamps_long_model_ids() -> None:
+    """Oversized gateway ids are elided so the guidance survives the persisted-label width."""
+    previous_model = "system.ai." + "x" * 300
+    message = f"{_BUDGET_REFUSAL}\n\n{codex_previous_model_budget_hint(previous_model, 'y' * 300)}"
+
+    diagnosis = diagnose_codex_previous_model_budget(message)
+
+    assert diagnosis is not None
+    assert "system.ai.xxx" in diagnosis.cause
+    assert "…`" in diagnosis.cause
+    assert diagnosis.remediation is not None
+    assert diagnosis.remediation.endswith("turn context.")
+    assert max(len(diagnosis.cause), len(diagnosis.remediation)) < 255
+
+
 @pytest.mark.parametrize(
     "message",
     [

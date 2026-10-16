@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import glob
 import json
+import re
 from pathlib import Path
+
+# A rollout stem is a single path component; anything else cannot name a thread.
+_THREAD_ID_STEM_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def find_thread_rollout(codex_home: Path, thread_id: str) -> Path | None:
@@ -18,13 +22,14 @@ def find_thread_rollout(codex_home: Path, thread_id: str) -> Path | None:
     :param codex_home: A per-session private ``CODEX_HOME``, e.g.
         ``Path("~/.omnigent/codex-native/<hash>/codex-home")``.
     :param thread_id: Codex thread id / rollout stem, e.g.
-        ``"019e96aa-0be2-7343-8d3b-6f914d60936b"``. Matched literally.
+        ``"019e96aa-0be2-7343-8d3b-6f914d60936b"``. Matched literally; an id
+        that is not a single path component matches nothing.
     :returns: Path to the most recently modified matching rollout, or
         ``None`` when none exists on this host.
     :raises OSError: If a candidate rollout cannot be inspected.
     """
     sessions = codex_home / "sessions"
-    if not sessions.is_dir():
+    if not _THREAD_ID_STEM_RE.fullmatch(thread_id) or not sessions.is_dir():
         return None
     pattern = f"**/rollout-*-{glob.escape(thread_id)}.jsonl"
     matches = [p for p in sessions.glob(pattern) if p.is_file()]

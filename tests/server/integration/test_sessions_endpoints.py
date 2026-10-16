@@ -38,7 +38,10 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import HostHelloFrame
 from omnigent.llms.context_window import ModelPricing
 from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
-from omnigent.runner.launch_failure import codex_previous_model_budget_hint
+from omnigent.runner.launch_failure import (
+    codex_previous_model_budget_hint,
+    diagnose_codex_previous_model_budget,
+)
 from omnigent.runner.transports.ws_tunnel.frames import EventAckFrame, EventBatchFrame
 from omnigent.runtime import inflight_text
 from omnigent.runtime.tool_output import MAX_TOOL_OUTPUT_BYTES
@@ -5706,6 +5709,21 @@ _CODEX_PREVIOUS_MODEL_BUDGET_CARD = {
     ),
 }
 
+# A gateway id far past the persisted-label width: the card must still persist whole.
+_CODEX_LONG_MODEL_BUDGET_DETAIL = (
+    f"{_BUDGET_REFUSAL_DETAIL}\n\n"
+    f"{codex_previous_model_budget_hint('system.ai.' + 'x' * 300, 'gpt-5.6-sol')}"
+)
+_CODEX_LONG_MODEL_BUDGET_DIAGNOSIS = diagnose_codex_previous_model_budget(
+    _CODEX_LONG_MODEL_BUDGET_DETAIL
+)
+assert _CODEX_LONG_MODEL_BUDGET_DIAGNOSIS is not None
+_CODEX_LONG_MODEL_BUDGET_CARD = {
+    "title": "Codex is blocked on the previous model's budget",
+    "cause": _CODEX_LONG_MODEL_BUDGET_DIAGNOSIS.cause,
+    "remediation": _CODEX_LONG_MODEL_BUDGET_DIAGNOSIS.remediation,
+}
+
 
 @pytest.mark.parametrize("wire_output", [False, True])
 @pytest.mark.parametrize(
@@ -5735,6 +5753,13 @@ _CODEX_PREVIOUS_MODEL_BUDGET_CARD = {
             "budget_exhausted",
             {},
             "claude-code-native-ui",
+            False,
+        ),
+        (
+            _CODEX_LONG_MODEL_BUDGET_DETAIL,
+            "budget_exhausted",
+            _CODEX_LONG_MODEL_BUDGET_CARD,
+            "codex-native-ui",
             False,
         ),
     ],

@@ -305,6 +305,7 @@ async def test_budget_refusal_after_model_switch_explains_previous_model_compact
     # too deep for the AF_UNIX path limit, so the bridge gets a short root.
     short_root = Path(tempfile.mkdtemp(prefix="cx-switch-"))
     gateway = _BudgetGateway()
+    threading.Thread(target=gateway.serve_forever, daemon=True).start()
     try:
         bridge_dir = short_root / "b"
         codex_home = bridge_dir / "codex-home"
@@ -313,7 +314,6 @@ async def test_budget_refusal_after_model_switch_explains_previous_model_compact
         for path in (codex_home, workspace, child_home):
             path.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", str(workspace)], check=True, capture_output=True)
-        threading.Thread(target=gateway.serve_forever, daemon=True).start()
         frontier_turn = _record_turn_on_over_budget_model(
             codex_home=codex_home,
             workspace=workspace,
