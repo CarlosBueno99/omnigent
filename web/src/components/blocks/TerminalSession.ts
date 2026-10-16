@@ -636,6 +636,7 @@ export function touchScrollPayload(
  * close the WS, dispose the terminal.
  */
 export class TerminalSession {
+  private readonly container: HTMLElement;
   private readonly term: Terminal;
   private readonly fit: FitAddon;
   /** WebGL renderer addon, or ``null`` when WebGL is unavailable. */
@@ -710,6 +711,7 @@ export class TerminalSession {
     adaptCodexPalette = false,
     onFileLink?: TerminalFileLinkListener,
   ) {
+    this.container = container;
     this.codexPalette = adaptCodexPalette ? new CodexTerminalPalette() : null;
     this.clipboardEnabled = clipboardEnabled;
     this.focusOnConnect = focusOnConnect;
@@ -1072,8 +1074,20 @@ export class TerminalSession {
     };
   }
 
+  /**
+   * Whether the container is laid out. Under a `display:none` ancestor it has no
+   * box and the fit addon measures its `100%` width as 100px — a few bogus columns.
+   * Browsers without `checkVisibility` (and jsdom) are treated as laid out.
+   */
+  private hasLayoutBox(): boolean {
+    return typeof this.container.checkVisibility !== "function" || this.container.checkVisibility();
+  }
+
   private sendResize(): void {
     if (this.ws.readyState !== WebSocket.OPEN) return;
+    // Keep the last real size while hidden; the ResizeObserver re-fits once
+    // the surface is laid out again.
+    if (!this.hasLayoutBox()) return;
     try {
       this.fit.fit();
     } catch {

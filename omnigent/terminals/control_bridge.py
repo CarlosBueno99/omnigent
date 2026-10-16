@@ -105,6 +105,12 @@ _CONTROL_STDOUT_BUFFER_LIMIT: Final[int] = 16 * 1024 * 1024
 # client inherits the runner's TERM, which can be a non-interactive ``dumb``.
 _WEB_TERMINAL_TERM: Final[str] = "xterm-256color"
 
+# Resize floor. A browser terminal under a ``display:none`` ancestor has no
+# layout box, so xterm's fit addon measures its ``100%`` width as 100 px (a few
+# columns); forwarding that shrinks the shared pane under a TUI mid-boot.
+_MIN_FORWARDED_COLS: Final[int] = 20
+_MIN_FORWARDED_ROWS: Final[int] = 5
+
 # Closing the socket is best-effort: the browser may already be gone. Starlette
 # raises ``RuntimeError`` once a close frame has been sent and
 # ``WebSocketDisconnect`` when the transport is already dead (it wraps
@@ -765,6 +771,14 @@ async def bridge_tmux_control_to_websocket(
                             cols = int(ctl["cols"])
                             rows = int(ctl["rows"])
                         except (KeyError, TypeError, ValueError):
+                            continue
+                        if cols < _MIN_FORWARDED_COLS or rows < _MIN_FORWARDED_ROWS:
+                            _logger.debug(
+                                "ignoring %dx%d resize below the usable floor target=%s",
+                                cols,
+                                rows,
+                                tmux_target,
+                            )
                             continue
                         await _send_command(f"refresh-client -C {cols}x{rows}\n".encode())
                 elif data is not None and not read_only:

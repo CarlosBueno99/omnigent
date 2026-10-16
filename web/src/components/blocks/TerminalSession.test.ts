@@ -932,6 +932,27 @@ describe("TerminalSession", () => {
     session.dispose();
   });
 
+  it("does not send a resize while the container has no layout box", () => {
+    // WHY: under a display:none ancestor the fit addon measures ~100px and reports a
+    // few columns; forwarding that would shrink the shared tmux pane under a TUI
+    // mid-boot. The send must wait until the surface is laid out, then send once.
+    const { socket, session, container } = makeSession();
+    const observer = FakeResizeObserver.instances[0];
+    let laidOut = false;
+    container.checkVisibility = () => laidOut;
+    const resizeFrames = () =>
+      socket.sent.filter((m) => typeof m === "string" && m.includes('"type":"resize"'));
+
+    socket.open();
+    observer.cb();
+    expect(resizeFrames()).toHaveLength(0);
+
+    laidOut = true;
+    observer.cb();
+    expect(resizeFrames()).toHaveLength(1);
+    session.dispose();
+  });
+
   it("surfaces close code + reason and error transitions", () => {
     // WHY: the closed variant carries the WS code so consumers can tell a
     // deliberate close from a transport drop; the error handler maps to
