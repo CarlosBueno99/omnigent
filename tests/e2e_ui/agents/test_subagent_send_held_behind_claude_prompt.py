@@ -86,8 +86,7 @@ tools:
       harness: claude-native
     prompt: |
       You are a Claude Code worker. Do exactly the one task you are given using
-      your tools.
-"""
+      your tools."""
 
 
 @dataclass
