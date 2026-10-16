@@ -7809,9 +7809,7 @@ def create_runner_app(
             try:
                 await resource_registry.close_terminal(pane.conversation_id, pane.terminal_id)
             finally:
-                # Release in finally so a failed close still frees sidecars, and
-                # only for the captured generation so a session recreated during
-                # the close await keeps its own newer forwarder and servers.
+                # Release captured sidecars even when the terminal close fails.
                 await _native_runtime.release_reaped_native_sidecars(
                     pane.conversation_id, reaped_sidecars
                 )
