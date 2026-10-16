@@ -448,14 +448,9 @@ def _extract_codex_context_window(params: object) -> int | None:
     """Codex's effective context window from a ``thread/tokenUsage/updated``
     payload: ``tokenUsage.modelContextWindow``, else ``total.contextWindow``.
 
-    Reported as ``context_window`` beside ``context_tokens`` so the server
-    sizes the occupancy ring from the window Codex actually serves rather
-    than the model catalog, which lacks or mis-sizes Codex-only models.
-    Mirrors the codex-native forwarder.
-
-    :param params: Codex ``thread/tokenUsage/updated`` params.
-    :returns: The window in tokens, or ``None`` when the payload carries no
-        positive integer window.
+    Forwarded as ``context_window`` so the server sizes the occupancy ring from
+    the window Codex serves instead of the model catalog, which lacks or
+    mis-sizes Codex-only models. Mirrors the codex-native forwarder.
     """
     if not isinstance(params, dict):
         return None

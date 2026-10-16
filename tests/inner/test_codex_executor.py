@@ -1763,12 +1763,10 @@ class TestCodexExecutor(unittest.TestCase):
     def test_app_server_run_turn_without_model_still_reports_resolved_model(self):
         """A ``model=None`` turn still stamps the model Codex resolved.
 
-        Subscription / cli-config codex sessions pass ``model=None`` to
-        ``run_turn`` (the provider owns its model list), yet ``thread/start``
-        reports the model Codex actually ran. The usage must carry that
-        resolved model so per-model cost/token attribution keeps the turn
-        instead of dropping it under an unresolvable spec model, and the
-        usage observer must be told the same model.
+        Subscription / cli-config sessions let Codex pick the model and
+        ``thread/start`` reports it. Usage must carry that model so per-model
+        cost/token attribution keeps the turn, and the usage observer must be
+        told the same model.
         """
         from omnigent.llms import _usage_observer
 
@@ -1857,10 +1855,8 @@ class TestCodexExecutor(unittest.TestCase):
     def test_app_server_run_turn_forwards_codex_context_window(self):
         """``tokenUsage.modelContextWindow`` rides on usage as ``context_window``.
 
-        Codex reports the window it actually serves for the thread's model.
-        Forwarding it lets the server size the context ring from that figure
-        instead of a catalog lookup, which lacks Codex-only models and would
-        fall back to a default window.
+        The server sizes the context ring from the window Codex serves instead
+        of a catalog lookup that lacks Codex-only models.
         """
 
         async def _t():
