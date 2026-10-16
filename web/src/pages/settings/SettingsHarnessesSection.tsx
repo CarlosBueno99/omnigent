@@ -278,13 +278,16 @@ function HostSelect({
 /** Readiness of *harness* on *host*, reduced to what the grid and details show. */
 function harnessStatus(harness: string, host: Host | null) {
   const readiness = harnessReadinessOnHost(harness, host);
+  const reason = harnessUnavailableReasonOnHost(harness, host);
   return {
     ready: readiness.state === "available" && readiness.reason === "ready",
     // Only "setup-required" / "broken" are actionable. A host that reports no
     // readiness (older host → `readiness-unknown`) stays neutral: no badge, no
     // Set-up button, rather than a false "needs setup" on a working harness.
     needsSetup: readiness.state === "setup-required" || readiness.state === "broken",
-    reason: harnessUnavailableReasonOnHost(harness, host),
+    // Shown as the Install button instead of a status label.
+    notInstalled: reason === "binary-missing",
+    reason,
   };
 }
 
@@ -292,7 +295,7 @@ function HarnessStatusText({ status }: { status: ReturnType<typeof harnessStatus
   if (status.ready) {
     return <span className="text-xs text-green-600 dark:text-green-400">Configured</span>;
   }
-  if (status.needsSetup) {
+  if (status.needsSetup && !status.notInstalled) {
     // Sentence case to match "Configured"; the picker keeps the shared lowercase badge.
     const text = harnessWarningBadgeText(status.reason);
     return (
@@ -327,6 +330,40 @@ function SetupButton({ entry, onSetup }: { entry: HarnessEntry; onSetup: () => v
       {/* Set up */}
     </Button>
   );
+}
+
+/** Not-installed action. Always shown: without one-click install, the dialog lists the command. */
+function InstallButton({ entry, onSetup }: { entry: HarnessEntry; onSetup: () => void }) {
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="shrink-0"
+      aria-label={`Install ${entry.name}`}
+      data-testid={`harness-install-${entry.harness}`}
+      componentId="settings.harnesses.install"
+      onClick={onSetup}
+    >
+      <Plus />
+      Install
+    </Button>
+  );
+}
+
+function HarnessAction({
+  entry,
+  status,
+  canSetup,
+  onSetup,
+}: {
+  entry: HarnessEntry;
+  status: ReturnType<typeof harnessStatus>;
+  canSetup: boolean;
+  onSetup: () => void;
+}) {
+  if (status.notInstalled) return <InstallButton entry={entry} onSetup={onSetup} />;
+  if (status.needsSetup && canSetup) return <SetupButton entry={entry} onSetup={onSetup} />;
+  return null;
 }
 
 /** Grid card. An installed harness's card opens its details page. */
@@ -369,7 +406,7 @@ function HarnessCard({
             <SettingsIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
           </Button>
         )}
-        {status.needsSetup && canSetup && <SetupButton entry={entry} onSetup={onSetup} />}
+        <HarnessAction entry={entry} status={status} canSetup={canSetup} onSetup={onSetup} />
       </div>
       <p className="line-clamp-2 text-ui text-muted-foreground">{entry.description}</p>
     </>
@@ -420,7 +457,7 @@ function HarnessDetail({
             <HarnessStatusText status={status} />
           </div>
         </div>
-        {status.needsSetup && canSetup && <SetupButton entry={entry} onSetup={onSetup} />}
+        <HarnessAction entry={entry} status={status} canSetup={canSetup} onSetup={onSetup} />
       </div>
     </>
   );

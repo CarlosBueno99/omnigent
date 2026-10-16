@@ -99,6 +99,13 @@ const QWEN_STEPS: SetupStepWire[] = [
 
 describe("harnessUnavailableReasonOnHost", () => {
   it("classifies structured reasons and generic unconfigured", () => {
+    // Blocking credential gap: shown as sign in, never selectable.
+    const noKey = hostWith({ cursor: "missing-credentials" });
+    expect(harnessUnavailableReasonOnHost("cursor", noKey)).toBe("needs-auth");
+    expect(harnessReadinessOnHost("cursor", noKey)).toMatchObject({
+      reason: "needs-auth",
+      selectable: false,
+    });
     expect(harnessUnavailableReasonOnHost("codex", hostWith({ codex: "binary-missing" }))).toBe(
       "binary-missing",
     );
@@ -112,6 +119,10 @@ describe("harnessUnavailableReasonOnHost", () => {
       ),
     ).toBe("binary-missing");
     expect(harnessUnavailableReasonOnHost("pi", hostWith({ pi: false }))).toBe("unconfigured");
+    // Older hosts sent a bare `false` for a missing Codex CLI.
+    expect(harnessUnavailableReasonOnHost("codex", hostWith({ codex: false }))).toBe(
+      "binary-missing",
+    );
     expect(harnessUnavailableReasonOnHost("codex", hostWith({ codex: "version-too-low" }))).toBe(
       "version-too-low",
     );

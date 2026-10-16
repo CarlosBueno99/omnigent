@@ -280,7 +280,7 @@ vi.mock("@/lib/agentLabels", async (importOriginal) => ({
         title: "Install Codex",
         detail: "We'll install Codex on the host for you.",
         action: "install",
-        command: null,
+        command: "npm install -g @openai/codex",
         status_key: "installed",
       },
       {
@@ -6350,7 +6350,7 @@ describe("NewChatLandingScreen", () => {
       displayName: "Codex",
       harness: "codex-native",
       readiness: "needs-auth",
-      badgeName: "needs auth",
+      badgeName: "needs sign in",
       warning: "Codex needs Codex authentication on machine-1 — run codex login",
     },
     {
@@ -6359,7 +6359,7 @@ describe("NewChatLandingScreen", () => {
       displayName: "Cursor",
       harness: "cursor-native",
       readiness: "binary-missing",
-      badgeName: "binary missing",
+      badgeName: "not installed",
       warning: "Cursor isn't configured on machine-1 — run omni setup",
     },
     {
@@ -6377,7 +6377,7 @@ describe("NewChatLandingScreen", () => {
       displayName: "Polly",
       harness: "codex",
       readiness: "needs-auth",
-      badgeName: "needs auth",
+      badgeName: "needs sign in",
       warning: "Polly needs Codex authentication on machine-1 — run codex login",
     },
   ])(
@@ -6585,8 +6585,7 @@ describe("NewChatLandingScreen", () => {
     // Defence in depth: the server published an install step for codex-native,
     // but the harness is NOT in installable_harnesses (a catalog/allowlist
     // drift). The Install button must not render — offering it would drive a
-    // POST the install route rejects. The step falls back to no control (an
-    // install step carries no copyable command).
+    // POST the install route rejects. The step shows the command to run instead.
     renderLanding({
       harness_install_enabled: true,
       installable_harnesses: [], // step catalog says install; allowlist disagrees
@@ -6595,6 +6594,11 @@ describe("NewChatLandingScreen", () => {
 
     fireEvent.click(screen.getByTestId("new-chat-landing-harness-setup"));
     expect(screen.queryByTestId("harness-setup-install")).toBeNull();
+    const install = screen.getByTestId("harness-setup-step-install");
+    expect(install).toHaveTextContent("Run this on machine-1 to install it.");
+    expect(within(install).getByTestId("harness-setup-command")).toHaveTextContent(
+      "npm install -g @openai/codex",
+    );
   });
 
   it("toast says 'ready' only when the install returns a launchable harness", () => {

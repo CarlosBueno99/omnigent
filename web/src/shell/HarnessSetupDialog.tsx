@@ -240,7 +240,14 @@ function SetupStepRow({
   // The server's detail is future-tense ("We'll install …") — right for a
   // pending step, wrong under a green check. Show a past-tense confirmation
   // once done instead of the stale promise.
-  const detail = done ? doneDetail(step.kind) : step.detail;
+  // No one-click install: the step lists the command, under its text (it can be long).
+  const manualInstallCommand =
+    !done && step.action === "install" && !installable ? step.command : null;
+  const detail = done
+    ? doneDetail(step.kind)
+    : manualInstallCommand
+      ? `Run this on ${host?.name ?? "the host"} to install it.`
+      : step.detail;
 
   return (
     <li className="flex flex-col gap-2" data-testid={`harness-setup-step-${step.kind}`}>
@@ -259,6 +266,11 @@ function SetupStepRow({
             </span>
           ) : (
             detail && <span className="text-sm text-muted-foreground">{detail}</span>
+          )}
+          {manualInstallCommand && (
+            <span className="self-start">
+              <CopyCommand command={manualInstallCommand} />
+            </span>
           )}
         </div>
         {/* Control: one-click Install (when the allowlist accepts it), an
@@ -296,7 +308,7 @@ function SetupStepRow({
           >
             Set up auth
           </Button>
-        ) : step.command ? (
+        ) : step.command && !manualInstallCommand ? (
           <CopyCommand command={step.command} />
         ) : null}
       </div>

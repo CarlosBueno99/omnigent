@@ -40,6 +40,7 @@ from omnigent.harness_aliases import HARNESS_ALIASES, NATIVE_HARNESSES, canonica
 from omnigent.harness_availability import (
     CODEX_CANONICAL_HARNESSES,
     HARNESS_BINARY_MISSING,
+    HARNESS_MISSING_CREDENTIALS,
     HARNESS_NEEDS_AUTH,
     HARNESS_VERSION_TOO_LOW,
     HarnessAvailability,
@@ -253,18 +254,16 @@ def _harness_availability_core(harness: str) -> HarnessAvailability:
         return True
     if canonical in _CURSOR_NATIVE_HARNESSES:
         # Native Cursor (``omni cursor``) wraps the ``cursor-agent`` CLI — gate
-        # on that binary. Keep the missing-binary case as the historical bare
-        # ``False`` sentinel, surfacing an outdated version only as
-        # ``"version-too-low"``.
-        return _installer_only_availability(CURSOR_KEY)
+        # on that binary.
+        return _binary_availability_reason(CURSOR_KEY)
     if canonical in _KIRO_NATIVE_HARNESSES:
-        return _installer_only_availability(KIRO_KEY)
+        return _binary_availability_reason(KIRO_KEY)
     if canonical in _GOOSE_NATIVE_HARNESSES or canonical == GOOSE_KEY:
-        return _installer_only_availability(GOOSE_KEY)
+        return _binary_availability_reason(GOOSE_KEY)
     if canonical in _HERMES_NATIVE_HARNESSES or canonical == HERMES_KEY:
-        return _installer_only_availability(HERMES_KEY)
+        return _binary_availability_reason(HERMES_KEY)
     if canonical in _DEVIN_NATIVE_HARNESSES:
-        return _installer_only_availability(DEVIN_KEY)
+        return _binary_availability_reason(DEVIN_KEY)
     if canonical == CURSOR_KEY:
         # Cursor runs in-process via ``cursor-sdk`` and authenticates with a
         # ``CURSOR_API_KEY`` (a ``cursor-agent login`` does not apply). So,
@@ -281,7 +280,9 @@ def _harness_availability_core(harness: str) -> HarnessAvailability:
         # duplicate that, less actionably. So cursor keeps its single key check.
         from omnigent.onboarding.cursor_auth import cursor_api_key_configured
 
-        return cursor_api_key_configured() or bool(os.environ.get("CURSOR_API_KEY"))
+        if cursor_api_key_configured() or os.environ.get("CURSOR_API_KEY"):
+            return True
+        return HARNESS_MISSING_CREDENTIALS
     if canonical == COPILOT_KEY:
         # Copilot runs in-process via the ``github-copilot-sdk`` package (the
         # SDK bundles the CLI binary it drives, so there is no separate binary to
@@ -303,7 +304,9 @@ def _harness_availability_core(harness: str) -> HarnessAvailability:
             return True
         # A ``gh auth login`` session is a usable Copilot credential, so a
         # logged-in user is ready without pasting a token into setup.
-        return gh_cli_github_token(copilot_github_host()) is not None
+        if gh_cli_github_token(copilot_github_host()) is not None:
+            return True
+        return HARNESS_MISSING_CREDENTIALS
     if (
         canonical not in _HARNESS_FAMILY
         and canonical not in _PI_HARNESSES
@@ -314,13 +317,15 @@ def _harness_availability_core(harness: str) -> HarnessAvailability:
     ):
         required_cli = required_cli_for_harness(canonical) or required_cli_for_harness(harness)
         if required_cli is not None:
-            return resolve_cli_binary(required_cli.binary) is not None
+            if resolve_cli_binary(required_cli.binary) is not None:
+                return True
+            return HARNESS_BINARY_MISSING
         # Unknown harness — the daemon has no install metadata for it, so
         # it can't assess readiness. Fail open (custom/newer harnesses,
         # version skew).
         return True
     install_key = _install_key(canonical)
-    availability = _installer_only_availability(install_key)
+    availability = _binary_availability_reason(install_key)
     # Families that authenticate via file-based credentials (not a CLI login
     # command) require both the binary AND a stored credential. The ``agy`` CLI
     # falls into this category: it has no ``agy login`` subcommand and writes
@@ -328,8 +333,8 @@ def _harness_availability_core(harness: str) -> HarnessAvailability:
     if availability is not True:
         return availability
     credential_check = _FAMILY_CREDENTIAL_CHECK.get(install_key)
-    if credential_check is not None:
-        return credential_check()
+    if credential_check is not None and not credential_check():
+        return HARNESS_MISSING_CREDENTIALS
     return True
 
 
@@ -873,20 +878,6 @@ def _sdk_harness_availability(canonical: str) -> HarnessAvailability:
     if _databricks_workspace_configured():
         return True
     return HARNESS_NEEDS_AUTH
-
-
-def _installer_only_availability(install_key: str) -> HarnessAvailability:
-    """Return availability for a binary-gated harness without login commands.
-
-    Mirrors :func:`_binary_availability_reason` but keeps the historical bare
-    ``False`` shape for a missing binary, so existing web/clients that expect a
-    simple boolean get that and only learn about structured reasons when the
-    binary is present but on an unsupported version.
-    """
-    state = _binary_availability_reason(install_key)
-    if state == HARNESS_BINARY_MISSING:
-        return False
-    return state
 
 
 def _binary_availability_reason(install_key: str) -> HarnessAvailability:

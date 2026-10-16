@@ -221,7 +221,7 @@ describe("Harnesses grid", () => {
     expect(screen.queryByTestId("harness-action-claude-native")).toBeNull();
 
     // codex-native reports needs-auth → warning badge + a Set-up button.
-    expect(screen.getByText("Needs auth")).toBeTruthy();
+    expect(screen.getByText("Needs sign in")).toBeTruthy();
     expect(screen.getByTestId("harness-action-codex-native")).toBeTruthy();
   });
 
@@ -251,14 +251,36 @@ describe("Harnesses grid", () => {
   });
 
   it("hides Set-up (keeps the badge) when harness_install is disabled", () => {
-    // Flag off + binary-missing: the setup dialog would be a dead end (no
-    // runnable install step), so we show status only — matching New Chat.
+    // Flag off: the setup dialog has no one-click step, so a set-up harness shows status only.
     harnessInstall = false;
-    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "binary-missing" } }];
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "needs-auth" } }];
     renderHarnesses();
 
-    expect(screen.getByText("Binary missing")).toBeTruthy();
+    expect(screen.getByText("Needs sign in")).toBeTruthy();
     expect(screen.queryByTestId("harness-action-codex-native")).toBeNull();
+  });
+
+  it.each([true, false])(
+    "shows Install (no status label) for a not-installed harness, flag %s",
+    (flag) => {
+      // Flag off still offers Install: the dialog then lists the command to run.
+      harnessInstall = flag;
+      hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "binary-missing" } }];
+      renderHarnesses();
+
+      expect(screen.queryByText("Not installed")).toBeNull();
+      expect(within(card("codex-native")).queryByText("Needs setup")).toBeNull();
+      fireEvent.click(screen.getByTestId("harness-install-codex-native"));
+      expect(screen.getByTestId("setup-dialog").getAttribute("data-harness")).toBe("codex-native");
+    },
+  );
+
+  it("shows Needs sign in for a blocking missing credential", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "missing-credentials" } }];
+    renderHarnesses();
+
+    expect(within(card("codex-native")).getByText("Needs sign in")).toBeTruthy();
+    expect(screen.queryByTestId("harness-install-codex-native")).toBeNull();
   });
 
   it("shows the no-host notice and no Set-up buttons when no host is online", () => {

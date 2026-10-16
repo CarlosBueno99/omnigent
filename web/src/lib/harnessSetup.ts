@@ -117,6 +117,12 @@ export function harnessReadinessOnHost(
       description: "Install this harness on the selected host before using it.",
     });
   }
+  if (availability === "missing-credentials") {
+    return harnessReadinessResult("setup-required", "needs-auth", true, {
+      label: "Authentication required",
+      description: "Sign in or add credentials on the selected host before using this harness.",
+    });
+  }
   if (availability === "needs-auth") {
     if (isSdkHarness(harness)) {
       // Advisory only for the in-process SDK harnesses: the host daemon
@@ -200,6 +206,7 @@ export function harnessUnavailableReasonOnHost(
   if (!harness || !host?.configured_harnesses) return null;
   const availability = host.configured_harnesses[harness];
   if (availability === false) {
+    // Older hosts report a bare `false` (cause unknown); only Codex's meant "not installed".
     if (isCodexHarness(harness)) return "binary-missing";
     return "unconfigured";
   }
@@ -213,6 +220,8 @@ export function harnessUnavailableReasonOnHost(
   ) {
     return availability;
   }
+  // Blocking counterpart of "needs-auth"; the UI shows both as needs sign in.
+  if (availability === "missing-credentials") return "needs-auth";
   // Any other string from a newer/older server still means "not ready";
   // show a generic warning rather than silently treating it as available.
   if (typeof availability === "string") {
@@ -259,8 +268,8 @@ export function harnessUnconfiguredOnHost(
  */
 export function harnessWarningBadgeText(reason: string | null, collapsed = false): string {
   if (collapsed) return "needs setup";
-  if (reason === "binary-missing") return "binary missing";
-  if (reason === "needs-auth") return "needs auth";
+  if (reason === "binary-missing") return "not installed";
+  if (reason === "needs-auth") return "needs sign in";
   if (reason === "version-too-low") return "outdated";
   return "needs setup";
 }
