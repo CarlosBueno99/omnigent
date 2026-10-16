@@ -746,6 +746,8 @@ def test_create_worktree_add_failure_leaves_no_branch(git_repo: Path) -> None:
     worktrees_parent = git_repo.parent / "myrepo-worktrees"
     worktrees_parent.mkdir()
     worktrees_parent.chmod(0o500)
+    if os.access(worktrees_parent, os.W_OK):
+        pytest.skip("filesystem does not enforce POSIX mode bits")
     try:
         with pytest.raises(WorktreeError, match="git worktree add failed"):
             create_worktree(repo_path=str(git_repo), branch_name="feature/retry")
@@ -757,66 +759,28 @@ def test_create_worktree_add_failure_leaves_no_branch(git_repo: Path) -> None:
     assert _current_branch(Path(created.worktree_path)) == "feature/retry"
 
 
-@pytest.mark.parametrize("failure", ["exit", "interrupted", "timeout"])
-def test_create_worktree_failed_add_rolls_back_branch_and_half_built_worktree(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+def test_create_worktree_failed_add_rolls_back_branch(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed add deletes the new branch and the worktree git left behind, so a retry works."""
+    """A failed add deletes the branch it created, so the same request can be retried."""
     real_run = git_worktree_module._run_git
     failed = False
 
     def fail_add(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
         nonlocal failed
-        if args[:2] != ["worktree", "add"] or failed:
-            return real_run(args, cwd=cwd)
-        failed = True
-        if failure == "exit":
+        if args[:2] == ["worktree", "add"] and not failed:
+            failed = True
             return subprocess.CompletedProcess(args, 128, "", "fatal: disk full")
-        # A killed add leaves the worktree registered and still locked; ``--lock`` keeps
-        # that lock, and "interrupted" also stops before the checkout.
-        extra = ["--lock"] if failure == "timeout" else ["--lock", "--no-checkout"]
-        real_run([*args[:2], *extra, *args[2:]], cwd=cwd)
-        raise WorktreeError("git command timed out after 120s")
+        return real_run(args, cwd=cwd)
 
     monkeypatch.setattr(git_worktree_module, "_run_git", fail_add)
-    with pytest.raises(WorktreeError, match="disk full" if failure == "exit" else "timed out"):
+    with pytest.raises(WorktreeError, match="disk full"):
         create_worktree(repo_path=str(git_repo), branch_name="feature/slow")
     assert failed
     assert not _branch_exists(git_repo, "feature/slow")
     assert _worktree_count(git_repo) == 1
-    assert not (git_repo.parent / "myrepo-worktrees" / "feature-slow").exists()
     created = create_worktree(repo_path=str(git_repo), branch_name="feature/slow")
     assert _current_branch(Path(created.worktree_path)) == "feature/slow"
-
-
-@pytest.mark.parametrize("failure", ["exit", "timeout"])
-def test_create_worktree_existing_branch_add_failure_keeps_branch(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch, failure: str
-) -> None:
-    """Existing-branch mode deletes nothing: neither the branch nor a worktree it may not own."""
-    _git(git_repo, "branch", "feature/keep")
-    real_run = git_worktree_module._run_git
-
-    def fail_add(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
-        if args[:2] != ["worktree", "add"]:
-            return real_run(args, cwd=cwd)
-        if failure == "exit":
-            return subprocess.CompletedProcess(args, 128, "", "fatal: disk full")
-        real_run([*args[:2], "--lock", *args[2:]], cwd=cwd)
-        raise WorktreeError("git command timed out after 120s")
-
-    monkeypatch.setattr(git_worktree_module, "_run_git", fail_add)
-    with pytest.raises(WorktreeError):
-        create_worktree(repo_path=str(git_repo), branch_name="feature/keep", existing_branch=True)
-    assert _branch_exists(git_repo, "feature/keep")
-    # The registration a killed add left is kept: it cannot be told apart from another request's.
-    assert _worktree_count(git_repo) == (1 if failure == "exit" else 2)
-    if failure == "exit":
-        monkeypatch.setattr(git_worktree_module, "_run_git", real_run)
-        created = create_worktree(
-            repo_path=str(git_repo), branch_name="feature/keep", existing_branch=True
-        )
-        assert _current_branch(Path(created.worktree_path)) == "feature/keep"
 
 
 def test_create_worktree_add_start_failure_rolls_back_branch(
@@ -843,26 +807,72 @@ def test_create_worktree_add_start_failure_rolls_back_branch(
     assert _current_branch(Path(created.worktree_path)) == "feature/busy"
 
 
+def test_create_worktree_killed_add_removes_nothing(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killed add leaves its registered worktree, and git keeps the branch checked out there."""
+    real_run = git_worktree_module._run_git
+
+    def time_out_after_add(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["worktree", "add"]:
+            # The lock mimics an add that never reached its cleanup.
+            real_run([*args[:2], "--lock", *args[2:]], cwd=cwd)
+            raise WorktreeError("git command timed out after 120s")
+        return real_run(args, cwd=cwd)
+
+    monkeypatch.setattr(git_worktree_module, "_run_git", time_out_after_add)
+    with pytest.raises(WorktreeError, match="timed out"):
+        create_worktree(repo_path=str(git_repo), branch_name="feature/slow")
+    assert _branch_exists(git_repo, "feature/slow")
+    assert _worktree_count(git_repo) == 2
+
+
+@pytest.mark.parametrize("failure", ["exit", "timeout"])
+def test_create_worktree_existing_branch_add_failure_keeps_branch(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """Existing-branch mode created nothing, so a failed add deletes nothing."""
+    _git(git_repo, "branch", "feature/keep")
+    real_run = git_worktree_module._run_git
+
+    def fail_add(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
+        if args[:2] != ["worktree", "add"]:
+            return real_run(args, cwd=cwd)
+        if failure == "exit":
+            return subprocess.CompletedProcess(args, 128, "", "fatal: disk full")
+        real_run([*args[:2], "--lock", *args[2:]], cwd=cwd)
+        raise WorktreeError("git command timed out after 120s")
+
+    monkeypatch.setattr(git_worktree_module, "_run_git", fail_add)
+    with pytest.raises(WorktreeError):
+        create_worktree(repo_path=str(git_repo), branch_name="feature/keep", existing_branch=True)
+    assert _branch_exists(git_repo, "feature/keep")
+    assert _worktree_count(git_repo) == (1 if failure == "exit" else 2)
+    if failure == "exit":
+        monkeypatch.setattr(git_worktree_module, "_run_git", real_run)
+        created = create_worktree(
+            repo_path=str(git_repo), branch_name="feature/keep", existing_branch=True
+        )
+        assert _current_branch(Path(created.worktree_path)) == "feature/keep"
+
+
 def test_failed_add_rollback_failure_keeps_original_error(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The add's own error stays visible when removing the half-built worktree fails."""
+    """The add's own error stays visible when deleting the branch fails."""
     real_run = git_worktree_module._run_git
 
     def fail_add_and_rollback(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
         if args[:2] == ["worktree", "add"]:
-            real_run([*args[:2], "--lock", *args[2:]], cwd=cwd)
-            raise WorktreeError("git command timed out after 120s")
-        if args[:2] == ["worktree", "remove"]:
+            return subprocess.CompletedProcess(args, 128, "", "fatal: disk full")
+        if args[:2] == ["branch", "-D"]:
             return subprocess.CompletedProcess(args, 1, "", "rollback failed")
         return real_run(args, cwd=cwd)
 
     monkeypatch.setattr(git_worktree_module, "_run_git", fail_add_and_rollback)
-    with pytest.raises(WorktreeError, match="timed out"):
+    with pytest.raises(WorktreeError, match="disk full"):
         create_worktree(repo_path=str(git_repo), branch_name="feature/stuck")
-    # The branch is still checked out in the registered worktree, so it is kept too.
     assert _branch_exists(git_repo, "feature/stuck")
-    assert _worktree_count(git_repo) == 2
 
 
 def test_failed_add_rollback_keeps_another_requests_worktree(
@@ -886,34 +896,61 @@ def test_failed_add_rollback_keeps_another_requests_worktree(
     assert not _branch_exists(git_repo, "feature-x")
 
 
+@pytest.mark.parametrize("peer_locked", [False, True])
 @pytest.mark.parametrize("existing_branch", [False, True])
-def test_failed_add_rollback_keeps_completed_worktree_of_same_branch(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch, existing_branch: bool
+def test_failed_add_rollback_keeps_peer_worktree_of_same_branch(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, existing_branch: bool, peer_locked: bool
 ) -> None:
-    """Losing the race for the path leaves the other request's finished worktree alone."""
+    """Losing the race for the path leaves the peer's worktree, files and branch alone."""
     if existing_branch:
         _git(git_repo, "branch", "feature/x")
-    winner_path = git_repo.parent / "myrepo-worktrees" / "feature-x"
+    peer_path = git_repo.parent / "myrepo-worktrees" / "feature-x"
     real_run = git_worktree_module._run_git
 
-    def other_request_finishes_first(
-        args: list[str], *, cwd: str
-    ) -> subprocess.CompletedProcess[str]:
+    def peer_registers_first(args: list[str], *, cwd: str) -> subprocess.CompletedProcess[str]:
         if args[:2] == ["worktree", "add"]:
-            # Both requests passed the availability checks; the other one registers first.
-            _git(git_repo, "worktree", "add", str(winner_path), "feature/x")
-            (winner_path / "wip.txt").write_text("uncommitted")
+            # Both requests passed the checks; the peer registers first, locked like an
+            # add still initializing or a worktree someone locked on purpose.
+            lock = ["--lock"] if peer_locked else []
+            _git(git_repo, "worktree", "add", *lock, str(peer_path), "feature/x")
+            (peer_path / "wip.txt").write_text("uncommitted")
         return real_run(args, cwd=cwd)
 
-    monkeypatch.setattr(git_worktree_module, "_run_git", other_request_finishes_first)
+    monkeypatch.setattr(git_worktree_module, "_run_git", peer_registers_first)
     with pytest.raises(WorktreeError, match="git worktree add failed"):
         create_worktree(
             repo_path=str(git_repo), branch_name="feature/x", existing_branch=existing_branch
         )
-    assert (winner_path / "wip.txt").read_text() == "uncommitted"
+    assert (peer_path / "wip.txt").read_text() == "uncommitted"
     linked = [wt.branch for wt in list_worktrees(repo_path=str(git_repo)) if not wt.is_main]
     assert linked == ["feature/x"]
     assert _branch_exists(git_repo, "feature/x")
+
+
+def test_failed_add_rollback_keeps_branch_another_operation_advanced(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new branch is deleted only while it still points at its creation commit."""
+    peer_path = git_repo.parent / "peer"
+    real_run = git_worktree_module._run_git
+
+    def advance_branch_then_fail_add(
+        args: list[str], *, cwd: str
+    ) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["worktree", "add"]:
+            # Another operation committed on the branch and released it before this add failed.
+            _git(git_repo, "worktree", "add", str(peer_path), "feature/x")
+            _git(peer_path, "commit", "-q", "--allow-empty", "-m", "peer work")
+            _git(git_repo, "worktree", "remove", str(peer_path))
+            return subprocess.CompletedProcess(args, 128, "", "fatal: disk full")
+        return real_run(args, cwd=cwd)
+
+    monkeypatch.setattr(git_worktree_module, "_run_git", advance_branch_then_fail_add)
+    with pytest.raises(WorktreeError, match="disk full"):
+        create_worktree(repo_path=str(git_repo), branch_name="feature/x")
+    assert _branch_exists(git_repo, "feature/x")
+    assert _rev_parse(git_repo, "feature/x") != _rev_parse(git_repo, "main")
+    assert _worktree_count(git_repo) == 1
 
 
 def test_create_worktree_lands_beside_unregistered_leftover_directory(git_repo: Path) -> None:
@@ -925,11 +962,3 @@ def test_create_worktree_lands_beside_unregistered_leftover_directory(git_repo: 
     assert Path(created.worktree_path) == leftover.with_name("feature-left-2")
     assert (leftover / "stale.txt").read_text() == "from an earlier attempt"
     assert _current_branch(Path(created.worktree_path)) == "feature/left"
-
-
-def test_list_worktrees_reports_locked(git_repo: Path) -> None:
-    """``locked`` follows git's worktree lock, which an unfinished add still holds."""
-    locked_worktree = git_repo.parent / "locked-wt"
-    _git(git_repo, "worktree", "add", "--lock", str(locked_worktree), "-b", "locked-branch")
-    by_path = {wt.path: wt.locked for wt in list_worktrees(repo_path=str(git_repo))}
-    assert by_path == {str(git_repo): False, str(locked_worktree): True}
