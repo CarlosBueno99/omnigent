@@ -4,11 +4,9 @@ import { useEffect, useRef, useState } from "react";
 export const MENU_CLOSE_TOOLTIP_GUARD_MS = 600;
 
 /**
- * Controlled-tooltip state for a trigger that also opens a menu. Radix opens a
- * tooltip on any focus, including the programmatic focus a closing menu hands
- * back to its trigger. The tooltip stays closed while the menu is open and
- * ignores open requests briefly after it closes, unless the pointer re-enters
- * the trigger. Spread `triggerProps` onto the element wrapped by TooltipTrigger.
+ * Tooltip state for a trigger that also opens a menu: closed while the menu is
+ * open and briefly after it closes (Radix opens on the focus handed back to the
+ * trigger), unless the pointer re-enters. Spread `triggerProps` onto the trigger.
  */
 export function useMenuGuardedTooltip(menuOpen: boolean) {
   const [wantsOpen, setWantsOpen] = useState(false);

@@ -1,7 +1,6 @@
 // The guard's contract: a tooltip sharing its trigger with a menu stays closed
-// while the menu is open, swallows the open request that the closing menu's
-// focus handoff produces, and reopens on fresh hover intent or once the guard
-// window has elapsed.
+// while the menu is open, swallows the closing menu's focus handoff, and reopens
+// on fresh hover intent or once the guard window has elapsed.
 
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
