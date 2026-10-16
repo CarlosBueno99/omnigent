@@ -1,10 +1,8 @@
 """A codex (SDK) turn throttled with HTTP 429 must fail as a rate limit and offer Retry.
 
-The real ``codex`` app-server runs against the mock ``/v1/responses`` through
-codex's built-in ``openai`` provider, so its own short retry budget is exhausted
-and it reports ``exceeded retry limit, last status: 429``. That text-only failure
-must reach the web UI as ``rate_limit_exceeded`` without launch-time stderr, and
-the Retry button must continue the turn once the provider recovers.
+The real codex app-server exhausts its own retries against the mock ``/v1/responses`` and
+reports ``exceeded retry limit, last status: 429``: that text-only failure must reach the
+web UI as ``rate_limit_exceeded`` without launch-time stderr, and Retry must then work.
 """
 
 from __future__ import annotations

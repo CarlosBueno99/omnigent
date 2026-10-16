@@ -255,13 +255,8 @@ def _http_status(message: str) -> str | None:
 
 
 def is_rate_limit_error(message: str) -> bool:
-    """Whether a turn error's text reports a model rate limit.
-
-    :param message: Harness or executor error text, e.g. codex's
-        ``"exceeded retry limit, last status: 429 Too Many Requests"``.
-    :returns: ``True`` for an HTTP 429 status or a rate-limit phrase, unless
-        the text reports an auth rejection instead.
-    """
+    """Whether turn error text reports a model rate limit (an HTTP 429 status or a
+    rate-limit phrase) rather than an auth rejection that merely mentions limits."""
     status = _http_status(message)
     if status in _AUTH_REJECTION_STATUSES:
         return False
