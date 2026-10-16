@@ -13,6 +13,9 @@ from omnigent.errors import ErrorCode
 from omnigent.native.failure_telemetry import FailureContext
 
 _BODY_LIMIT = 16384
+# Must stay below the 1024-char clip applied to forwarder_validation_errors in
+# omnigent.native.failure_telemetry.normalize_failure_context, or that clip can
+# truncate the JSON summary mid-token, producing an unparseable value.
 _SUMMARY_LIMIT = 1000
 _ERROR_LIMIT = 8
 _PATH_LIMIT = 8
