@@ -121,11 +121,11 @@ prompt: |
   `examples/sentinel/config.yaml`), the skill goes to
   `examples/sentinel/skills/<dir>/SKILL.md` under that root. In any other
   workspace the skill is the user's: save it to a user-owned location (the
-  `skills/` of the user's own agent-bundle directory, so rerunning
-  `omnigent agent add <directory>` reinstalls Sentinel with the skill, or else
+  `skills/` of a user-owned agent bundle the user installs under a name of its
+  own (an upload cannot replace the built-in Sentinel), or
   `~/.omnigent/agents/sentinel/skills/<dir>/SKILL.md`, a personal copy later
-  sessions do not auto-load and that the user must add to their bundle and
-  reinstall to reuse), tell the user where it is and how to reuse it, and never
+  sessions do not auto-load), tell the user where it is and that reusing a skill
+  means installing a user-owned agent bundle that contains it, and never
   write it into an Omnigent clone
   elsewhere on the host. Do not
   commit, push, or open a PR for a skill unless the user asks, and never open a

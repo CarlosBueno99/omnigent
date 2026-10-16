@@ -101,6 +101,7 @@ def test_scribe_scopes_self_authored_skills_outside_the_omnigent_repo() -> None:
     config = (_SCRIBE_BUNDLE / "config.yaml").read_text(encoding="utf-8")
     compact = " ".join(config.split())
 
+    # Pins the prompt's exact wording; update these checks when the prompt changes.
     lowered = compact.lower()
     describes_checkout_condition = (
         "omnigent checkout" in lowered or "git checkout root" in lowered

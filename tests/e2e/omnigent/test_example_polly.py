@@ -476,6 +476,7 @@ def test_builtin_polly_scopes_self_authored_skills_outside_the_omnigent_repo() -
     config = (_POLLY_BUNDLE / "config.yaml").read_text(encoding="utf-8")
     compact = " ".join(config.split())
 
+    # Pins the prompt's exact wording; update these checks when the prompt changes.
     lowered = compact.lower()
     describes_checkout_condition = (
         "omnigent checkout" in lowered or "git checkout root" in lowered
@@ -495,15 +496,10 @@ def test_builtin_polly_scopes_self_authored_skills_outside_the_omnigent_repo() -
 
 
 def test_builtin_polly_does_not_open_unsolicited_prs_on_the_upstream_repo() -> None:
-    """
-    Built-in Polly must not open PRs/issues on omnigent-ai/omnigent unless the
-    user explicitly asks. Its blast_radius guardrail runs with
-    ``gate_pushes: false`` (an intentional unattended-batch setting), and that
-    policy never gates ``gh pr create`` at all, so the only possible restraint
-    is a prompt-level rule.
-
-    Fails on a prompt that never mentions omnigent-ai/omnigent and carries no
-    rule against opening PRs/issues there without an explicit request.
+    """Require explicit user approval before opening PRs or issues on
+    omnigent-ai/omnigent. The configured guardrails never gate ``gh pr create``
+    (blast_radius runs with ``gate_pushes: false``), so a prompt rule is the
+    only restraint.
     """
     config = (_POLLY_BUNDLE / "config.yaml").read_text(encoding="utf-8")
     compact = " ".join(config.split())
