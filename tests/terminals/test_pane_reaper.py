@@ -373,6 +373,11 @@ async def test_runner_busy_check_spares_a_pane_with_a_running_subagent(
         mark_subagent_work_terminal(child, status="completed", output=None)
         assert get_subagent_work(child).status == "completed"
         assert not await reaper._is_busy(pane)
+
+        # The waiting helper must not un-terminalize a delivered child and so
+        # re-pin a finished pane.
+        assert mark_subagent_work_waiting(child).status == "completed"
+        assert not await reaper._is_busy(pane)
     finally:
         unregister_subagent_work_for_session(parent)
         unregister_child_session(child)

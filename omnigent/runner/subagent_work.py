@@ -352,7 +352,9 @@ def mark_subagent_work_waiting(child_session_id: str) -> _SubagentWorkEntry | No
     entry = _subagent_work_by_child.get(child_session_id)
     if entry is None:
         return None
-    entry.status = "waiting"
+    # Never un-terminalize a delivered child: a terminal edge is final.
+    if entry.status not in _SUBAGENT_TERMINAL_STATUSES:
+        entry.status = "waiting"
     return entry
 
 
