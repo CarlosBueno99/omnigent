@@ -167,3 +167,11 @@ async def test_idle_enrichment_retains_its_existing_behavior() -> None:
         ],
     )
     assert result["output"] == "Completed output"
+
+
+@pytest.mark.asyncio
+async def test_idle_output_from_the_forwarder_survives_an_empty_store() -> None:
+    """A forwarder's own idle-edge text reaches the parent when nothing was mirrored."""
+    notice = "Omnigent could not read this turn's output: the transcript never appeared."
+    result = await _enrich({"status": "idle", "turn_completed": True, "output": notice}, [])
+    assert result["output"] == notice

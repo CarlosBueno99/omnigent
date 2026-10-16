@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import errno
 import hashlib
 import json
 import logging
@@ -335,6 +336,117 @@ def _observe_transcript_discovery(
         extra={"session_id": session_id},
     )
     diagnostics.warning_logged = True
+
+
+_MISSING_TRANSCRIPT_ERROR_CODE = "claude_transcript_missing"
+
+
+def _transcript_write_blocker(transcript_path: Path) -> str:
+    """
+    Explain why a hook-reported transcript file could not be created.
+
+    Walks up from the file to the nearest existing ancestor and names the
+    errno a writer hits there, e.g. ``"/home/u/.claude is not writable
+    (EACCES)"`` for a root-owned config directory.
+
+    :param transcript_path: Transcript path Claude Code reported, e.g.
+        ``"/home/u/.claude/projects/-work/abc.jsonl"``.
+    :returns: One-line description naming the directory and errno.
+    """
+    for ancestor in transcript_path.parents:
+        try:
+            ancestor.stat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            code = errno.errorcode.get(exc.errno or 0, type(exc).__name__)
+            return f"{ancestor} is not accessible ({code})"
+        if not os.access(ancestor, os.W_OK | os.X_OK):
+            return f"{ancestor} is not writable (EACCES)"
+        if ancestor != transcript_path.parent:
+            return f"{transcript_path.parent} does not exist (ENOENT); {ancestor} is writable"
+        return f"{ancestor} is writable but the file was never created"
+    return f"no ancestor of {transcript_path} exists (ENOENT)"
+
+
+async def _surface_missing_transcript(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    bridge_dir: Path,
+    record: ClaudeHookRecord,
+    dedupe: _ForwardDedupeState,
+) -> str | None:
+    """
+    Report a finished turn whose hook-reported transcript file still does not exist.
+
+    Claude Code keeps reporting ``transcript_path`` when it cannot create the
+    file (an unwritable ``~/.claude``) and still ends the turn with ``Stop``,
+    so nothing it mirrored explains the empty history. Logs once per path,
+    posts an error item into the session, and returns the text the idle edge
+    carries as ``output`` so the parent learns the result could not be read.
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session/conversation id.
+    :param bridge_dir: Native Claude bridge directory.
+    :param record: The ``Stop`` hook record ending the turn.
+    :param dedupe: Per-session baseline holding the once-per-path log latch.
+    :returns: Parent-facing notice naming the unread transcript, or ``None``
+        when the transcript exists or no path is known yet.
+    """
+    transcript_path = record.transcript_path or read_transcript_path(bridge_dir)
+    if transcript_path is None or transcript_path.exists():
+        return None
+    blocker = _transcript_write_blocker(transcript_path)
+    if dedupe.missing_transcript_logged_for != transcript_path:
+        dedupe.missing_transcript_logged_for = transcript_path
+        _logger.warning(
+            "Claude transcript %s reported by hooks never appeared before the turn's Stop "
+            "(%s); the turn's prompt and replies were not mirrored; session=%s",
+            transcript_path,
+            blocker,
+            session_id,
+            extra={"session_id": session_id},
+        )
+    try:
+        resp = await client.post(
+            f"/v1/sessions/{url_component(session_id)}/events",
+            json={
+                "type": "external_conversation_item",
+                "data": {
+                    "source_id": f"missing-transcript:{record.event_cursor}:{record.byte_offset}",
+                    "item_type": "error",
+                    "item_data": {
+                        "source": "harness",
+                        "code": _MISSING_TRANSCRIPT_ERROR_CODE,
+                        "title": "Claude Code's transcript was never written",
+                        "message": (
+                            f"Claude Code reported its transcript at {transcript_path}, but the "
+                            "file never appeared, so this turn's prompt and replies were not "
+                            "mirrored into this session."
+                        ),
+                        "cause": f"{blocker}.",
+                        "remediation": (
+                            "Make that directory writable by the session user so Claude Code "
+                            "can write its transcript."
+                        ),
+                    },
+                },
+            },
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        _logger.warning(
+            "Failed to post Claude missing-transcript notice; session=%s event_cursor=%s",
+            session_id,
+            record.event_cursor,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+    return (
+        "Omnigent could not read this turn's output: Claude Code's transcript "
+        f"{transcript_path} never appeared ({blocker})."
+    )
 
 
 def _log_new_observer_hook_stderr(
@@ -925,6 +1037,9 @@ class _ForwardDedupeState:
     # Session already logged as moved off this runner, so the notice is not
     # repeated for every item dropped afterwards.
     session_not_bound_logged_for: str | None = None
+    # Transcript path whose never-created file was already logged, so the
+    # warning fires once per path while the per-turn notices keep posting.
+    missing_transcript_logged_for: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -4414,11 +4529,25 @@ async def _forward_available_status_events(
                 )
             except Exception as exc:  # noqa: BLE001 - telemetry must not prevent status delivery
                 _logger.debug("Claude hook failure telemetry failed: %s", type(exc).__name__)
+        # A finished turn whose hook-reported transcript still does not exist
+        # has nothing mirrored; tell the parent instead of settling a silent idle.
+        unread_transcript_output = (
+            await _surface_missing_transcript(
+                client,
+                session_id=session_id,
+                bridge_dir=bridge_dir,
+                record=record,
+                dedupe=dedupe,
+            )
+            if status == "idle"
+            else None
+        )
         try:
             await post_external_session_status(
                 client,
                 session_id=session_id,
                 status=status,
+                output=unread_transcript_output,
                 response_id=response_id,
                 # The ``Stop`` hook fires exactly once per finished turn and
                 # never on an interrupt, so its ``idle`` edge is a confirmed
