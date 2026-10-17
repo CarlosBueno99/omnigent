@@ -29,7 +29,9 @@ from tests.e2e_ui.messages.test_native_codex_render_parity import (
 _COMPOSER_LABEL = "Message the agent"
 _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 _WORKING = '[data-testid="working-indicator"]'
+_SLASH_MENU = "slash-command-menu"
 _SLASH_ROWS = "[data-testid^='slash-menu-item-']"
+_MENTION_MENU = "file-mention-menu"
 _MENTION_ROWS = "[data-testid^='file-mention-item-']"
 _CODEX_MOCK_MODEL = "gpt-4o"
 _TURN_TIMEOUT_MS = 120_000
@@ -76,19 +78,21 @@ def _seed_workspace_files(page: Page, base_url: str, session_id: str) -> None:
     # seed files through the product's write API for the "@" menu to list.
     fs = f"{base_url}/v1/sessions/{session_id}/resources/environments/default/filesystem"
     for name in ("README.md", "main.py", "config.yaml", "notes.txt", "src/app.ts"):
-        page.request.put(
+        response = page.request.put(
             f"{fs}/{name}",
             data=json.dumps({"content": f"// {name}\n"}),
             headers={"content-type": "application/json"},
         )
+        assert response.ok, f"failed to seed {name}: {response.status} {response.text()}"
 
 
-def _open_menu_panel(composer: Locator, page: Page, trigger: str, rows_selector: str) -> Locator:
+def _open_menu_panel(
+    composer: Locator, page: Page, trigger: str, panel_test_id: str, rows_selector: str
+) -> Locator:
     """Type *trigger* into the composer and return its menu panel once the rows have loaded."""
     composer.fill(trigger)
-    rows = page.locator(rows_selector)
-    expect(rows.first).to_be_visible(timeout=60_000)
-    panel = page.locator("div.bg-popover", has=rows).last
+    expect(page.locator(rows_selector).first).to_be_visible(timeout=60_000)
+    panel = page.get_by_test_id(panel_test_id)
     expect(panel.get_by_text("Loading")).to_have_count(0, timeout=30_000)
     return panel
 
@@ -110,6 +114,7 @@ def _region_diff(
     after = Image.open(io.BytesIO(actual)).convert("L").crop(box)
     histogram = ImageChops.difference(before, after).histogram()
     total = sum(histogram)
+    assert total > 0, f"empty diff region for box {box}"
     return {
         "max_diff": max((level for level, count in enumerate(histogram) if count), default=0),
         "mean_diff": sum(level * count for level, count in enumerate(histogram)) / total,
@@ -129,11 +134,14 @@ def _measure_transcript_leak(page: Page, panel: Locator, label: str) -> dict[str
     box = panel.bounding_box()
     last_reply = page.locator(_ASSISTANT).last.bounding_box()
     assert box is not None and last_reply is not None
-    overlaps_reply = box["y"] < last_reply["y"] + last_reply["height"] < box["y"] + box["height"]
+    overlaps_reply = (
+        box["y"] < last_reply["y"] + last_reply["height"]
+        and last_reply["y"] < box["y"] + box["height"]
+    )
     _set_transcript_text_visibility(page, "hidden")
-    reference = page.screenshot()
+    reference = page.screenshot(animations="disabled")
     _set_transcript_text_visibility(page, "")
-    actual = page.screenshot()
+    actual = page.screenshot(animations="disabled")
     region = (
         int(box["x"]) + 2,
         int(box["y"]) + 2,
@@ -171,7 +179,7 @@ def test_slash_menu_hides_transcript_in_dark_mode(
     _send_and_wait_for_long_reply(page, marker)
 
     composer = _composer(page)
-    panel = _open_menu_panel(composer, page, "/", _SLASH_ROWS)
+    panel = _open_menu_panel(composer, page, "/", _SLASH_MENU, _SLASH_ROWS)
     light = _measure_transcript_leak(page, panel, "light-slash")
     assert light["menu_overlaps_last_reply"], light
     assert light["max_diff"] <= _MAX_LEAK_LEVELS, f"light-mode control leaks: {light}"
@@ -181,7 +189,7 @@ def test_slash_menu_hides_transcript_in_dark_mode(
     page.goto(f"{base_url}/c/{session_id}")
     composer = _composer(page)
     expect(page.locator(_ASSISTANT).last).to_be_visible(timeout=30_000)
-    panel = _open_menu_panel(composer, page, "/", _SLASH_ROWS)
+    panel = _open_menu_panel(composer, page, "/", _SLASH_MENU, _SLASH_ROWS)
     expect(panel.get_by_text("Skills", exact=True)).to_be_visible()
     dark = _measure_transcript_leak(page, panel, "dark-slash")
     assert dark["dark_mode"] and dark["menu_overlaps_last_reply"], dark
@@ -214,7 +222,7 @@ def test_file_mention_menu_hides_transcript_in_dark_mode(
     _seed_workspace_files(page, base_url, session_id)
     _send_and_wait_for_long_reply(page, marker)
 
-    panel = _open_menu_panel(_composer(page), page, "@", _MENTION_ROWS)
+    panel = _open_menu_panel(_composer(page), page, "@", _MENTION_MENU, _MENTION_ROWS)
     dark = _measure_transcript_leak(page, panel, "dark-mention")
     assert dark["dark_mode"] and dark["menu_overlaps_last_reply"], dark
     assert dark["max_diff"] <= _MAX_LEAK_LEVELS, (
