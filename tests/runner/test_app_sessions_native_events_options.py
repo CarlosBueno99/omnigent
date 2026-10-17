@@ -1880,6 +1880,7 @@ async def _post_model_change_with_status_sequence(
     stored_catalog_rows: list[dict[str, object]] | None = None,
     pane_idle_after_polls: int | None = None,
     after_response: Callable[[list[str | None]], Awaitable[None]] | None = None,
+    on_status_read: Callable[[int], None] | None = None,
 ) -> Any:
     """Run one claude-native ``model_change`` with a scripted status file.
 
@@ -1888,6 +1889,8 @@ async def _post_model_change_with_status_sequence(
     the script is exhausted. Injection is stubbed; the confirm pacing is
     tightened so the unconfirmed path stays fast. ``after_response`` gets the
     live status script once the reply is in, to drive a detached watcher.
+    ``on_status_read`` gets the 1-based count of each status read, the first
+    being the baseline.
 
     :returns: The ``/events`` HTTP response.
     """
@@ -1936,8 +1939,13 @@ async def _post_model_change_with_status_sequence(
 
     monkeypatch.setattr("omnigent.harnesses.claude_native.main.claude_launch_catalog", _catalog)
     script = list(status_values)
+    status_reads = 0
 
     def _scripted_status(_bridge_dir: Any) -> str | None:
+        nonlocal status_reads
+        status_reads += 1
+        if on_status_read is not None:
+            on_status_read(status_reads)
         return script.pop(0) if len(script) > 1 else script[0]
 
     monkeypatch.setattr(claude_native_bridge, "read_claude_status_model", _scripted_status)
@@ -2196,6 +2204,42 @@ async def test_a_mid_turn_switch_keeps_the_users_default_model_when_it_lands_lat
     )
 
     assert resp.status_code == 204, resp.text
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_values", "status_code"),
+    [
+        # The pane reports the switch a few polls after the command went in.
+        (["claude-opus-4-6", "claude-opus-4-6", "claude-opus-4-7"], 204),
+        # No statusLine on either side: unverifiable, answered as success.
+        ([None], 204),
+        # The pane never reports the switch.
+        (["claude-opus-4-6"], 503),
+    ],
+)
+async def test_an_idle_switch_keeps_the_users_default_model_when_claude_saves_late(
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+    status_values: list[str | None],
+    status_code: int,
+) -> None:
+    """Claude's save landing only after the command returned is still undone."""
+    settings = _isolate_claude_user_settings
+    settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+
+    def _claude_saves_after_the_command_returned(read_count: int) -> None:
+        if read_count == 2:
+            settings.write_text(json.dumps({"model": "claude-opus-4-7"}), encoding="utf-8")
+
+    resp = await _post_model_change_with_status_sequence(
+        monkeypatch,
+        status_values,
+        on_status_read=_claude_saves_after_the_command_returned,
+    )
+
+    assert resp.status_code == status_code, resp.text
     assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
 
 

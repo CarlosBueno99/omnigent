@@ -4766,6 +4766,8 @@ def inject_slash_command(
 # Claude awaits its own default-model save for at most 3s after ``/model``.
 _DEFAULT_MODEL_SAVE_WAIT_S = 3.0
 _DEFAULT_MODEL_SAVE_POLL_S = 0.05
+# Longer than one switch holds it: tmux wait, submit check, confirm, save wait.
+_DEFAULT_MODEL_LOCK_TIMEOUT_S = 60.0
 _MISSING = object()
 
 
@@ -4774,6 +4776,7 @@ def inject_model_command(
     *,
     model_arg: str,
     timeout_s: float = _TMUX_READY_TIMEOUT_S,
+    defer_restore: bool = False,
 ) -> object:
     """
     Switch the pane to *model_arg* for this session only.
@@ -4782,48 +4785,107 @@ def inject_model_command(
     interactive session it also saves the pick as the user's default model in
     ``settings.json``, so every switch Omnigent typed rewrote the default of
     every future Claude Code session. This types the command, waits for
-    Claude's save, and puts the previous value of the ``model`` key back.
+    Claude's save, and puts the previous value of the ``model`` key back,
+    also when typing fails or is cancelled after the command went in.
     The running session keeps the switched model: Claude holds it in memory
-    and does not re-read the key for the live session.
+    and does not re-read the key for the live session. The snapshot, the
+    command and the restore share one lock across sessions, so a concurrent
+    switch never snapshots this one's unrestored save.
 
     :param bridge_dir: Bridge directory path.
     :param model_arg: ``/model`` argument, e.g. ``"claude-sonnet-5-5"``.
     :param timeout_s: Seconds to wait for ``tmux.json``, e.g. ``30.0``.
+    :param defer_restore: ``True`` for a switch Claude applies later, such as
+        one queued behind a busy turn: the caller calls
+        :func:`restore_default_model` once it lands. The restore still runs
+        here if typing raises.
     :returns: The ``model`` value before the switch, for
-        :func:`restore_default_model` once a switch queued behind a busy turn
-        lands and Claude saves it after this returns.
+        :func:`restore_default_model`.
     :raises ValueError: See :func:`inject_slash_command`.
     :raises RuntimeError: See :func:`inject_slash_command`.
     """
-    before = _read_settings_model(claude_user_settings_path())
-    inject_slash_command(
-        bridge_dir,
-        command=f"/model {model_arg}",
-        timeout_s=timeout_s,
-        auto_confirm=True,
-        confirm_hint=SWITCH_MODEL_DIALOG_HINT,
-    )
-    restore_default_model(before, model_arg)
+    with _default_model_lock(bridge_dir):
+        before = _read_settings_model(claude_user_settings_path())
+        try:
+            inject_slash_command(
+                bridge_dir,
+                command=f"/model {model_arg}",
+                timeout_s=timeout_s,
+                auto_confirm=True,
+                confirm_hint=SWITCH_MODEL_DIALOG_HINT,
+            )
+        except BaseException:
+            _restore_default_model(before, model_arg)
+            raise
+        if not defer_restore:
+            _restore_default_model(before, model_arg)
     return before
 
 
-def restore_default_model(before: object, model_arg: str) -> None:
+def restore_default_model(
+    bridge_dir: Path,
+    before: object,
+    model_arg: str,
+    *,
+    wait_for_save: bool = True,
+) -> None:
     """
     Undo Claude's save of ``/model <model_arg>`` as the user's default model.
 
+    :param bridge_dir: Bridge directory of the switched session.
     :param before: The value :func:`inject_model_command` returned.
     :param model_arg: The typed ``/model`` argument, e.g. ``"sonnet"``.
+    :param wait_for_save: ``False`` to only undo a save already on disk, e.g.
+        a second check after :func:`inject_model_command` restored.
     :returns: None.
     """
-    if isinstance(before, str) and before.strip().lower() == model_arg.strip().lower():
+    with _default_model_lock(bridge_dir):
+        _restore_default_model(before, model_arg, wait_for_save=wait_for_save)
+
+
+@contextlib.contextmanager
+def _default_model_lock(bridge_dir: Path) -> Iterator[None]:
+    """Serialize default-model snapshots and restores across sessions and processes."""
+    lock_dir = bridge_dir.parent / ".locks"
+    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock = FileLock(str(lock_dir / "claude-default-model.lock"), mode=0o600)
+    deadline = time.monotonic() + _DEFAULT_MODEL_LOCK_TIMEOUT_S
+    acquired = False
+    while not acquired:
+        _check_injection_cancelled()
+        try:
+            lock.acquire(timeout=_INJECTION_LOCK_POLL_INTERVAL_S)
+            acquired = True
+        except FileLockTimeout:
+            if time.monotonic() >= deadline:
+                # A stuck holder must not block the switch itself.
+                _logger.warning(
+                    "claude-native: %s still held after %.0fs; switching without it",
+                    lock.lock_file,
+                    _DEFAULT_MODEL_LOCK_TIMEOUT_S,
+                )
+                break
+    try:
+        yield
+    finally:
+        if acquired:
+            lock.release()
+
+
+def _restore_default_model(before: object, model_arg: str, *, wait_for_save: bool = True) -> None:
+    if _same_model(before, model_arg):
         return  # Claude's save would not change the file.
     path = claude_user_settings_path()
     try:
-        _restore_settings_model(path, before, model_arg)
+        _restore_settings_model(path, before, model_arg, wait_for_save=wait_for_save)
     except (OSError, ValueError):
         _logger.warning(
             "claude-native: could not restore the default model in %s", path, exc_info=True
         )
+
+
+def _same_model(value: object, model_arg: str) -> bool:
+    return isinstance(value, str) and value.strip().lower() == model_arg.strip().lower()
 
 
 def claude_user_settings_path() -> Path:
@@ -4854,7 +4916,9 @@ def _read_settings_model(path: Path) -> object:
     return payload.get("model", _MISSING) if isinstance(payload, dict) else _MISSING
 
 
-def _restore_settings_model(path: Path, before: object, model_arg: str) -> None:
+def _restore_settings_model(
+    path: Path, before: object, model_arg: str, *, wait_for_save: bool = True
+) -> None:
     """
     Undo Claude's default-model save, touching only the ``model`` key.
 
@@ -4865,18 +4929,24 @@ def _restore_settings_model(path: Path, before: object, model_arg: str) -> None:
     :param path: Settings file.
     :param before: The key's value before ``/model``, or ``_MISSING``.
     :param model_arg: The typed ``/model`` argument.
+    :param wait_for_save: ``False`` to check the file once instead of waiting.
     :returns: None.
     :raises OSError: If the file cannot be rewritten.
     :raises ValueError: If the file stops being valid JSON mid-restore.
     """
-    deadline = time.monotonic() + _DEFAULT_MODEL_SAVE_WAIT_S
+    deadline = time.monotonic() + (_DEFAULT_MODEL_SAVE_WAIT_S if wait_for_save else 0.0)
     current = _read_settings_model(path)
     while current == before and time.monotonic() < deadline:
         time.sleep(_DEFAULT_MODEL_SAVE_POLL_S)
         current = _read_settings_model(path)
     if current == before:
         return  # No save landed (non-interactive session, or the switch did not take).
-    if not isinstance(current, str) or current.strip().lower() != model_arg.strip().lower():
+    target = path.resolve()
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{target} is not a JSON object")
+    current = payload.get("model", _MISSING)
+    if not _same_model(current, model_arg):
         _logger.info(
             "claude-native: default model in %s changed to %r, not the typed %r; left as is",
             path,
@@ -4884,10 +4954,6 @@ def _restore_settings_model(path: Path, before: object, model_arg: str) -> None:
             model_arg,
         )
         return
-    target = path.resolve()
-    payload = json.loads(target.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"{target} is not a JSON object")
     if before is _MISSING:
         payload.pop("model", None)
     else:

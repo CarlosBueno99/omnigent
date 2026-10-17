@@ -70,6 +70,79 @@ def test_the_users_claude_settings_file_is_only_ever_read() -> None:
     )
 
 
+_FILE_WRITE_CALLS = frozenset(
+    {
+        "write_text",
+        "write_bytes",
+        "open",
+        "replace",
+        "rename",
+        "unlink",
+        "chmod",
+        "touch",
+        "NamedTemporaryFile",
+    }
+)
+
+
+def _functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """
+    Index a module's functions by name.
+
+    :param tree: Parsed module.
+    :returns: Function nodes keyed by name, e.g. ``{"inject_model_command": ...}``.
+    """
+    return {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def _called_names(function: ast.AST) -> set[str]:
+    """
+    Collect the names a function calls, e.g. ``os.replace(...)`` gives ``"replace"``.
+
+    :param function: Function node.
+    :returns: Called function and method names.
+    """
+    names: set[str] = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                names.add(node.func.attr)
+    return names
+
+
+def test_only_the_default_model_restore_writes_the_users_claude_settings() -> None:
+    """
+    The ``settings.json`` Claude saves ``/model`` to is written by one function.
+
+    Callers of ``claude_user_settings_path()`` only snapshot the ``model`` key
+    or hand the path to ``_restore_settings_model``, the one place allowed to
+    rewrite the file.
+    """
+    functions = _functions(_tree("harnesses/claude_native/bridge.py"))
+    path_users = {
+        name
+        for name, node in functions.items()
+        if "claude_user_settings_path" in _called_names(node)
+    }
+    restore_callers = {
+        name
+        for name, node in functions.items()
+        if "_restore_settings_model" in _called_names(node)
+    }
+
+    assert path_users == {"inject_model_command", "_restore_default_model"}
+    assert restore_callers == {"_restore_default_model"}
+    for name in path_users:
+        writes = _called_names(functions[name]) & _FILE_WRITE_CALLS
+        assert writes == set(), f"{name} writes the user's Claude settings via {sorted(writes)}"
+
+
 @pytest.mark.parametrize("name", _SWITCH_PATH_FUNCTIONS)
 def test_the_model_switch_path_polls_and_never_sleeps_a_fixed_interval(name: str) -> None:
     """
@@ -81,12 +154,7 @@ def test_the_model_switch_path_polls_and_never_sleeps_a_fixed_interval(name: str
     """
     from omnigent.harnesses.claude_native import bridge as claude_native_bridge
 
-    tree = _tree("harnesses/claude_native/bridge.py")
-    functions = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-    }
+    functions = _functions(_tree("harnesses/claude_native/bridge.py"))
     assert name in functions, f"{name} is gone — the switch path moved, update this guard"
     literals: list[float] = []
     for node in ast.walk(functions[name]):

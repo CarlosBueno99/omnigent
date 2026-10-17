@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import logging
 import time
 import urllib.parse
@@ -1181,7 +1182,8 @@ def build_native_controls(
         expected spellings, and gives up quietly after its budget — the
         persisted request and the forwarder's verbatim report remain the
         authoritative record either way. Claude saves the late switch as the
-        user's default model, so a confirmed one also restores that default.
+        user's default model, so the watcher restores that default when it
+        stops.
         """
         from omnigent.harnesses.claude_native.bridge import (
             SWITCH_MODEL_DIALOG_HINT,
@@ -1195,7 +1197,9 @@ def build_native_controls(
             try:
                 current = await asyncio.to_thread(read_claude_status_model, bridge_dir)
                 if current and current in expected:
-                    await asyncio.to_thread(restore_default_model, default_model_before, model_arg)
+                    await asyncio.to_thread(
+                        restore_default_model, bridge_dir, default_model_before, model_arg
+                    )
                     return
                 await asyncio.to_thread(
                     confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
@@ -1214,6 +1218,7 @@ def build_native_controls(
             conv_id,
             extra={"session_id": conv_id},
         )
+        await asyncio.to_thread(restore_default_model, bridge_dir, default_model_before, model_arg)
 
     async def _handle_claude_native_model_change(
         conv_id: str,
@@ -1227,6 +1232,7 @@ def build_native_controls(
             read_claude_status_model,
             read_model_env,
             read_model_picker_values,
+            restore_default_model,
         )
         from omnigent.harnesses.claude_native.main import (
             resolve_claude_native_model_selection,
@@ -1299,9 +1305,17 @@ def build_native_controls(
                 },
             )
         baseline = await asyncio.to_thread(read_claude_status_model, bridge_dir)
+        # A switch typed into a busy pane is queued; its turn may settle before the deadline.
+        was_busy = _native_pane_status.get(conv_id) in ("running", "waiting")
+        # Claude saves a queued switch only when the turn settles, so its restore waits.
+        restore_deferred = was_busy
         try:
             default_model_before = await asyncio.to_thread(
-                inject_model_command, bridge_dir, model_arg=model_arg, timeout_s=1.0
+                inject_model_command,
+                bridge_dir,
+                model_arg=model_arg,
+                timeout_s=1.0,
+                defer_restore=restore_deferred,
             )
         except (RuntimeError, ValueError) as exc:
             return JSONResponse(
@@ -1328,8 +1342,13 @@ def build_native_controls(
                 row_model = row.get("model")
                 if isinstance(row_model, str) and row_model:
                     expected.add(row_model)
-        # A switch typed into a busy pane is queued; its turn may settle before the deadline.
-        was_busy = _native_pane_status.get(conv_id) in ("running", "waiting")
+        restore_landed_switch = functools.partial(
+            restore_default_model,
+            bridge_dir,
+            default_model_before,
+            model_arg,
+            wait_for_save=restore_deferred,
+        )
         deadline = time.monotonic() + _CLAUDE_MODEL_CONFIRM_TIMEOUT_S
         while True:
             current = await asyncio.to_thread(read_claude_status_model, bridge_dir)
@@ -1337,6 +1356,7 @@ def build_native_controls(
                 # The pane switched. When it landed somewhere other than the
                 # expected spelling, the forwarder's verbatim report is the
                 # truth the UI will settle on — the command still took effect.
+                await asyncio.to_thread(restore_landed_switch)
                 return Response(status_code=204)
             if baseline is None and current is None:
                 # No statusLine snapshot on either side of the injection: a
@@ -1350,6 +1370,7 @@ def build_native_controls(
                     conv_id,
                     extra={"session_id": conv_id},
                 )
+                await asyncio.to_thread(restore_landed_switch)
                 return Response(status_code=204)
             # The confirm dialog can render well after the injection's own
             # short watch (a warm repaint, or a queued command surfacing) —
@@ -1387,6 +1408,7 @@ def build_native_controls(
                 extra={"session_id": conv_id},
             )
             return Response(status_code=204)
+        await asyncio.to_thread(restore_landed_switch)
         return JSONResponse(
             status_code=503,
             content={

@@ -23,19 +23,25 @@ from tests.helpers.ui_configuration import _CLAUDE_MOCK_MODEL
 pytestmark = pytest.mark.timeout(300)
 
 _PICKER_MODELS = {"default": _CLAUDE_MOCK_MODEL, "haiku": "claude-3-5-haiku-20241022"}
-_SWITCH_SETTLE_S = 20.0
+# Longer than the bridge's 3 s wait for Claude's save before it restores.
+_SWITCH_SETTLE_S = 6.0
 
 
 def _claude_user_settings_path() -> Path:
     # The runner shares this process's Claude config dir (same CLAUDE_CONFIG_DIR when prepared).
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-    return Path(config_dir) / "settings.json"
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    home = Path(configured).expanduser() if configured else Path.home() / ".claude"
+    return home / "settings.json"
 
 
-def _saved_model(settings_path: Path) -> str | None:
-    if not settings_path.exists():
+def _saved_model(settings_path: Path) -> object:
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+    except FileNotFoundError:
         return None
-    return json.loads(settings_path.read_text(encoding="utf-8") or "{}").get("model")
+    except (OSError, ValueError) as exc:
+        return f"<unreadable: {exc}>"  # Claude may be mid-write.
+    return payload.get("model") if isinstance(payload, dict) else None
 
 
 def test_web_model_picker_switch_keeps_the_users_claude_default_model(
@@ -67,6 +73,7 @@ def test_web_model_picker_switch_keeps_the_users_claude_default_model(
                 pytest.skip("the prepared provider offers no second Claude model to switch to")
             target = unchecked.last
             target_id = target.get_attribute("data-testid") or ""
+            target_model_id = target.get_attribute("data-model-id") or ""
             model_before = _saved_model(settings_path)
             print("settings before switch:", settings_path, repr(model_before))
 
@@ -81,10 +88,21 @@ def test_web_model_picker_switch_keeps_the_users_claude_default_model(
             print("switch to", repr(target_id), "PATCH", switching.value.status)
             assert switching.value.ok, switching.value.text()
 
+            # The picker marks the row the pane's statusLine reports.
+            if not page.get_by_test_id("composer-agent-config-menu").is_visible():
+                page.get_by_test_id("composer-config-gear").click()
+                page.get_by_test_id("composer-agent-edit").click()
+            expect(
+                page.locator(f'[role="menuitemcheckbox"][data-model-id="{target_model_id}"]')
+            ).to_have_attribute("aria-checked", "true", timeout=30_000)
+
+            samples = []
             deadline = time.monotonic() + _SWITCH_SETTLE_S
-            while time.monotonic() < deadline and _saved_model(settings_path) == model_before:
-                time.sleep(0.5)
+            while time.monotonic() < deadline:
+                samples.append(_saved_model(settings_path))
+                time.sleep(0.25)
             model_after = _saved_model(settings_path)
+            print("settings while settling:", sorted(set(map(repr, samples))))
             print("settings after switch:", repr(model_after))
             assert model_after == model_before, (
                 f"switching the session to {target_id!r} rewrote the user's Claude default model "
