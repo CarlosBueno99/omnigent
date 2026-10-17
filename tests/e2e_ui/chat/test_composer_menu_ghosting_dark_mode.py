@@ -36,9 +36,10 @@ _MENTION_ROWS = "[data-testid^='file-mention-item-']"
 _CODEX_MOCK_MODEL = "gpt-4o"
 _TURN_TIMEOUT_MS = 120_000
 _PARAGRAPHS = 40
-# Glyphs leaking through an 80 %-opaque panel differ from the panel fill by about
-# 0.2 x the glyph contrast (~40 grey levels); an opaque or blurred panel stays well below.
-_MAX_LEAK_LEVELS = 16
+# Transcript glyphs leaking through an 80 %-opaque panel differ from the panel fill by
+# ~40 grey levels and cover ~5 % of the panel; a blurred or opaque panel leaves ~0 %.
+_LEAK_LEVELS = 8
+_MAX_LEAK_FRACTION = 0.005
 
 
 def _long_reply(marker: str) -> str:
@@ -116,11 +117,11 @@ def _region_diff(
     total = sum(histogram)
     assert total > 0, f"empty diff region for box {box}"
     return {
+        "leak_fraction": (
+            sum(count for level, count in enumerate(histogram) if level > _LEAK_LEVELS) / total
+        ),
         "max_diff": max((level for level, count in enumerate(histogram) if count), default=0),
         "mean_diff": sum(level * count for level, count in enumerate(histogram)) / total,
-        "fraction_over_8": (
-            sum(count for level, count in enumerate(histogram) if level > 8) / total
-        ),
         "pixels": total,
     }
 
@@ -182,7 +183,7 @@ def test_slash_menu_hides_transcript_in_dark_mode(
     panel = _open_menu_panel(composer, page, "/", _SLASH_MENU, _SLASH_ROWS)
     light = _measure_transcript_leak(page, panel, "light-slash")
     assert light["menu_overlaps_last_reply"], light
-    assert light["max_diff"] <= _MAX_LEAK_LEVELS, f"light-mode control leaks: {light}"
+    assert light["leak_fraction"] <= _MAX_LEAK_FRACTION, f"light-mode control leaks: {light}"
     composer.fill("")
 
     _choose_mode(page, base_url, "Dark")
@@ -193,7 +194,7 @@ def test_slash_menu_hides_transcript_in_dark_mode(
     expect(panel.get_by_text("Skills", exact=True)).to_be_visible()
     dark = _measure_transcript_leak(page, panel, "dark-slash")
     assert dark["dark_mode"] and dark["menu_overlaps_last_reply"], dark
-    assert dark["max_diff"] <= _MAX_LEAK_LEVELS, (
+    assert dark["leak_fraction"] <= _MAX_LEAK_FRACTION, (
         f"transcript text shows through the slash menu: {dark}"
     )
 
@@ -225,6 +226,6 @@ def test_file_mention_menu_hides_transcript_in_dark_mode(
     panel = _open_menu_panel(_composer(page), page, "@", _MENTION_MENU, _MENTION_ROWS)
     dark = _measure_transcript_leak(page, panel, "dark-mention")
     assert dark["dark_mode"] and dark["menu_overlaps_last_reply"], dark
-    assert dark["max_diff"] <= _MAX_LEAK_LEVELS, (
+    assert dark["leak_fraction"] <= _MAX_LEAK_FRACTION, (
         f"transcript text shows through the @ menu: {dark}"
     )
