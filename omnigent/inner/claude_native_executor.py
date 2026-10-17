@@ -23,12 +23,12 @@ from omnigent.harnesses.claude_native.bridge import (
     ClaudeTerminalExited,
     ClaudeUserPromptPending,
     TmuxSessionNotAdvertised,
+    active_session_accepts_input,
     cancellable_injection,
     inject_slash_command,
     inject_user_message,
     is_auth_slash_command,
     kill_session,
-    read_active_session_id,
     read_claude_status_model,
     read_launch_model,
     read_model_env,
@@ -511,12 +511,10 @@ def _session_is_active(bridge_dir: Path, request_session_id: str | None) -> bool
     :param request_session_id: Omnigent session id from
         :data:`REQUEST_SESSION_ID_ENV_VAR`, e.g. ``"conv_abc123"``.
         ``None`` preserves old harness spawns that lack the guard env.
-    :returns: ``True`` when injection is allowed.
+    :returns: ``True`` when injection is allowed; ``False`` once another
+        conversation owns the pane or while a ``/clear`` rotation is in flight.
     """
-    if request_session_id is None:
-        return True
-    active_session_id = read_active_session_id(bridge_dir)
-    return active_session_id is None or active_session_id == request_session_id
+    return active_session_accepts_input(bridge_dir, request_session_id)
 
 
 def _latest_user_text(messages: list[Message], bridge_dir: Path) -> str:

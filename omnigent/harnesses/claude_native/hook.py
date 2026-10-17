@@ -20,7 +20,9 @@ from typing import TYPE_CHECKING, NoReturn
 from omnigent.harnesses.claude_native.bridge import (
     BRIDGE_ID_LABEL_KEY,
     CLAUDE_FRAMEWORK_CONTEXT_FILE,
+    abandon_active_session_rotation,
     approval_wait_marker_path,
+    begin_active_session_rotation,
     hold_approval_wait_marker,
     read_active_session_id,
     read_bridge_id,
@@ -226,6 +228,10 @@ def main(argv: list[str] | None = None) -> int:
 
     record_hook_lifecycle(bridge_dir, payload, time.time())
     if payload.get("hook_event_name") == "SessionEnd":
+        if payload.get("reason") == "clear":
+            # Fires before the replacement session's SessionStart; refusing pane
+            # input from here on keeps a message sent meanwhile out of that session.
+            _begin_clear_rotation(bridge_dir)
         # SessionEnd is diagnostic evidence, not a status or transcript change.
         return 0
     _annotate_resume_session_context(bridge_dir, payload)
@@ -373,13 +379,28 @@ def _rotate_session_on_clear(bridge_dir: Path) -> str | None:
     before Claude prints it. Failures return ``None`` so the background
     forwarder can still perform the rotation from the recorded hook event.
 
+    Pane input for the cleared conversation is refused from the first step
+    here until the replacement session is active, and reopened when the
+    rotation fails so the forwarder's retry starts from today's behavior.
+
     :param bridge_dir: Native Claude bridge directory.
     :returns: New Omnigent session id, e.g. ``"conv_new"``, or ``None`` when
         rotation could not be completed from the hook.
     """
     old_session_id = read_active_session_id(bridge_dir)
-    if not old_session_id:
-        return None
+    new_session_id: str | None = None
+    try:
+        if old_session_id:
+            _begin_clear_rotation(bridge_dir)
+            new_session_id = _rotate_session_on_clear_via_server(bridge_dir, old_session_id)
+    finally:
+        if new_session_id is None:
+            _abandon_clear_rotation(bridge_dir)
+    return new_session_id
+
+
+def _rotate_session_on_clear_via_server(bridge_dir: Path, old_session_id: str) -> str | None:
+    """Run the Omnigent side of a ``/clear`` rotation; ``None`` leaves it to the forwarder."""
     config = read_permission_hook_config(bridge_dir)
     ap_server_url = config.get("ap_server_url")
     if not isinstance(ap_server_url, str) or not ap_server_url:
@@ -406,7 +427,7 @@ def _rotate_session_on_clear(bridge_dir: Path) -> str | None:
         with httpx.Client(
             headers=headers, timeout=httpx.Timeout(_SESSION_ROTATION_TIMEOUT_S)
         ) as client:
-            new_session_id = _create_clear_replacement_session(
+            return _create_clear_replacement_session(
                 client,
                 ap_server_url.rstrip("/"),
                 old_session_id,
@@ -418,7 +439,25 @@ def _rotate_session_on_clear(bridge_dir: Path) -> str | None:
     except RuntimeError as exc:
         print(f"omnigent claude clear hook: rotation failed: {exc}", file=sys.stderr)
         return None
-    return new_session_id
+
+
+def _begin_clear_rotation(bridge_dir: Path) -> None:
+    """Refuse pane input while the pane rotates; the marker must never block Claude's hook."""
+    try:
+        begin_active_session_rotation(bridge_dir)
+    except (OSError, RuntimeError) as exc:
+        print(f"omnigent claude clear hook: could not mark the rotation: {exc}", file=sys.stderr)
+
+
+def _abandon_clear_rotation(bridge_dir: Path) -> None:
+    """Reopen pane input after a rotation the forwarder has to finish instead."""
+    try:
+        abandon_active_session_rotation(bridge_dir)
+    except (OSError, RuntimeError) as exc:
+        print(
+            f"omnigent claude clear hook: could not clear the rotation marker: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _rotate_session_on_fork(bridge_dir: Path) -> str | None:

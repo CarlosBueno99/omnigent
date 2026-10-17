@@ -202,6 +202,12 @@ APPROVAL_WAIT_MARKER_REFRESH_S = 60.0
 # reads stale; a hook killed mid-wait leaves a marker that expires on its own.
 APPROVAL_WAIT_MARKER_TTL_S = 420.0
 _CONFIG_FILE = "bridge.json"
+# ``bridge.json`` key holding the epoch time a ``/clear`` rotation began. Pane
+# input is refused while it is set, so a message sent meanwhile cannot land in
+# the replacement conversation before the hook names it. A marker older than
+# the cap is ignored so a hook killed mid-rotation cannot refuse the pane for good.
+_ACTIVE_SESSION_ROTATION_KEY = "active_session_rotation_started_at"
+ACTIVE_SESSION_ROTATION_MAX_AGE_S = 120.0
 _SERVER_FILE = "server.json"
 # Control socket of one ``serve-mcp`` process under the harness socket root,
 # named by owner pid so a socket left behind by a dead process can be reaped.
@@ -647,10 +653,8 @@ class ClaudeSessionInactive(RuntimeError):
 
 
 def _require_input_session(bridge_dir: Path, expected_session_id: str | None) -> None:
-    if expected_session_id is not None:
-        active = read_active_session_id(bridge_dir)
-        if active is not None and active != expected_session_id:
-            raise ClaudeSessionInactive()
+    if not active_session_accepts_input(bridge_dir, expected_session_id):
+        raise ClaudeSessionInactive()
 
 
 @contextlib.contextmanager
@@ -2070,14 +2074,41 @@ def read_active_session_id(bridge_dir: Path) -> str | None:
     :returns: Active Omnigent session id, e.g. ``"conv_abc123"``, or
         ``None`` when the bridge config is absent or malformed.
     """
-    config = _read_json_file(bridge_dir / _CONFIG_FILE)
-    if not isinstance(config, dict):
-        return None
+    return _active_session_id(_read_json_file(bridge_dir / _CONFIG_FILE))
+
+
+def _active_session_id(config: _JsonObject) -> str | None:
     active = config.get("active_session_id")
     if isinstance(active, str) and active:
         return active
     legacy = config.get("conversation_id")
     return legacy if isinstance(legacy, str) and legacy else None
+
+
+def active_session_accepts_input(bridge_dir: Path, request_session_id: str | None) -> bool:
+    """
+    Return whether input sent from *request_session_id* may reach the shared pane.
+
+    Input is refused while a ``/clear`` rotation is in flight (see
+    :func:`begin_active_session_rotation`) and once another conversation owns
+    the pane. ``None`` preserves harness spawns that predate the owner guard.
+
+    :param bridge_dir: Bridge directory path.
+    :param request_session_id: Omnigent session the input was sent to, e.g.
+        ``"conv_abc123"``.
+    :returns: ``True`` when the pane may receive the input.
+    """
+    if request_session_id is None:
+        return True
+    config = _read_json_file(bridge_dir / _CONFIG_FILE)
+    started_at = config.get(_ACTIVE_SESSION_ROTATION_KEY)
+    if (
+        isinstance(started_at, int | float)
+        and time.time() - started_at < ACTIVE_SESSION_ROTATION_MAX_AGE_S
+    ):
+        return False
+    active = _active_session_id(config)
+    return active is None or active == request_session_id
 
 
 def read_launch_model(bridge_dir: Path) -> str | None:
@@ -2237,7 +2268,41 @@ def write_active_session_id(bridge_dir: Path, session_id: str) -> None:
         raise RuntimeError(f"bridge config missing: {bridge_dir / _CONFIG_FILE}")
     config["active_session_id"] = session_id
     config["conversation_id"] = session_id
+    config.pop(_ACTIVE_SESSION_ROTATION_KEY, None)
     config["updated_at"] = time.time()
+    _write_json_file(bridge_dir / _CONFIG_FILE, config)
+
+
+def begin_active_session_rotation(bridge_dir: Path) -> None:
+    """
+    Refuse pane input until :func:`write_active_session_id` names the replacement owner.
+
+    Claude has already discarded the conversation when its ``/clear`` hooks run,
+    but the Omnigent rotation takes several server round trips; without this
+    marker a message sent meanwhile passes the owner check and is pasted into
+    the replacement conversation.
+
+    :param bridge_dir: Bridge directory path.
+    :returns: None.
+    :raises RuntimeError: If the bridge config does not exist.
+    """
+    config = _read_json_file(bridge_dir / _CONFIG_FILE)
+    if not config:
+        raise RuntimeError(f"bridge config missing: {bridge_dir / _CONFIG_FILE}")
+    config[_ACTIVE_SESSION_ROTATION_KEY] = time.time()
+    _write_json_file(bridge_dir / _CONFIG_FILE, config)
+
+
+def abandon_active_session_rotation(bridge_dir: Path) -> None:
+    """
+    Reopen pane input after a rotation that did not replace the owner.
+
+    :param bridge_dir: Bridge directory path.
+    :returns: None.
+    """
+    config = _read_json_file(bridge_dir / _CONFIG_FILE)
+    if config.pop(_ACTIVE_SESSION_ROTATION_KEY, None) is None:
+        return
     _write_json_file(bridge_dir / _CONFIG_FILE, config)
 
 

@@ -10841,6 +10841,57 @@ def test_framework_context_does_not_replace_a_new_owner_before_atomic_commit(
     assert path.read_text() == "replacement context"
 
 
+def test_a_pending_clear_rotation_refuses_input_until_the_replacement_owner_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The hook marks the pane as rotating before the replacement conversation exists.
+
+    Claude has already discarded the conversation at that point, so a message
+    for the old owner must be refused before its first paste; the replacement
+    owner is accepted as soon as ``write_active_session_id`` names it.
+    """
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    (bridge_dir / "bridge.json").write_text('{"active_session_id": "conv_old"}')
+    sends = _fake_tmux(monkeypatch, [_composer_pane()])
+    monkeypatch.setattr(claude_native_bridge, "_restore_occupied_input", lambda *a, **k: None)
+    monkeypatch.setattr(
+        claude_native_bridge, "_wait_for_claude_prompt_ready", lambda *a, **k: None
+    )
+    assert claude_native_bridge.active_session_accepts_input(bridge_dir, "conv_old")
+
+    claude_native_bridge.begin_active_session_rotation(bridge_dir)
+
+    assert not claude_native_bridge.active_session_accepts_input(bridge_dir, "conv_old")
+    assert claude_native_bridge.active_session_accepts_input(bridge_dir, None)
+    with pytest.raises(claude_native_bridge.ClaudeSessionInactive):
+        inject_user_message(bridge_dir, content="hello", expected_session_id="conv_old")
+    assert sends == []
+
+    claude_native_bridge.write_active_session_id(bridge_dir, "conv_new")
+
+    assert claude_native_bridge.active_session_accepts_input(bridge_dir, "conv_new")
+    assert not claude_native_bridge.active_session_accepts_input(bridge_dir, "conv_old")
+    assert "active_session_rotation_started_at" not in (bridge_dir / "bridge.json").read_text()
+
+
+def test_an_abandoned_or_stale_clear_rotation_reopens_pane_input(tmp_path: Path) -> None:
+    """A failed or killed rotation must not refuse the pane for good."""
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    (bridge_dir / "bridge.json").write_text('{"active_session_id": "conv_old"}')
+
+    claude_native_bridge.begin_active_session_rotation(bridge_dir)
+    claude_native_bridge.abandon_active_session_rotation(bridge_dir)
+    assert claude_native_bridge.active_session_accepts_input(bridge_dir, "conv_old")
+
+    config = json.loads((bridge_dir / "bridge.json").read_text())
+    config["active_session_rotation_started_at"] = (
+        time.time() - claude_native_bridge.ACTIVE_SESSION_ROTATION_MAX_AGE_S - 1
+    )
+    (bridge_dir / "bridge.json").write_text(json.dumps(config))
+    assert claude_native_bridge.active_session_accepts_input(bridge_dir, "conv_old")
+
+
 def test_a_model_switch_types_the_argument_form_and_confirms(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

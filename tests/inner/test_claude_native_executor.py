@@ -276,6 +276,40 @@ async def test_queued_input_rechecks_the_active_native_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delivery", ["turn", "steering"])
+async def test_input_is_refused_while_a_clear_rotation_is_pending(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, delivery: str
+) -> None:
+    """The hook marks the pane as rotating before the replacement conversation exists."""
+    monkeypatch.setattr(claude_bridge, "_TRUSTED_PARENT", tmp_path.parent)
+    monkeypatch.setattr(claude_bridge, "_BRIDGE_ROOT", tmp_path)
+    (tmp_path / "bridge.json").write_text('{"active_session_id": "conv_old"}')
+    monkeypatch.setenv(REQUEST_SESSION_ID_ENV_VAR, "conv_old")
+    sent: list[str] = []
+    monkeypatch.setattr(
+        claude_native_executor,
+        "inject_user_message",
+        lambda *args, **kwargs: sent.append(kwargs["content"]),
+    )
+    executor = ClaudeNativeExecutor(tmp_path)
+    claude_bridge.begin_active_session_rotation(tmp_path)
+
+    if delivery == "steering":
+        assert await executor.enqueue_session_message("main", "held input") is False
+    else:
+        events = [
+            event
+            async for event in executor.run_turn(
+                messages=[{"role": "user", "content": "held input"}], tools=[], system_prompt=""
+            )
+        ]
+        assert len(events) == 1
+        assert isinstance(events[0], ExecutorError) and events[0].undelivered is True
+        assert "no longer active after /clear" in events[0].message
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_model_switch_cannot_deliver_input_after_native_session_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
