@@ -16,7 +16,6 @@ from omnigent.harnesses.claude_native.bridge import (
     CLAUDE_FRAMEWORK_CONTEXT_FILE,
     REQUEST_SESSION_ID_ENV_VAR,
     SWITCH_MODEL_DIALOG_HINT,
-    BridgeOwner,
     ClaudeMessageNotAccepted,
     ClaudePromptTimeout,
     ClaudeSignInPending,
@@ -28,7 +27,6 @@ from omnigent.harnesses.claude_native.bridge import (
     inject_slash_command,
     inject_user_message,
     is_auth_slash_command,
-    native_terminal_cleanup_lock,
     read_active_session_id,
     read_claude_status_model,
     read_launch_model,
@@ -263,7 +261,7 @@ class ClaudeNativeExecutor(Executor):
                 exc_info=not clean_exit,
                 extra={"session_id": self._request_session_id},
             )
-            cleanup_error = self._reap_failed_turn(exc.terminal, exc.owner)
+            cleanup_error = self._reap_failed_turn(exc.terminal)
             message = describe_exception(exc)
             if cleanup_error is not None:
                 message = f"{message} Cleanup also failed: {cleanup_error}"
@@ -274,7 +272,7 @@ class ClaudeNativeExecutor(Executor):
                 "claude-native: prompt delivery to harness timed out",
                 extra={"session_id": self._request_session_id},
             )
-            cleanup_error = self._reap_failed_turn(exc.terminal, exc.owner)
+            cleanup_error = self._reap_failed_turn(exc.terminal)
             message = describe_exception(exc)
             if cleanup_error is not None:
                 message = f"{message} Cleanup also failed: {cleanup_error}"
@@ -336,17 +334,12 @@ class ClaudeNativeExecutor(Executor):
     async def _inject(self, operation: Callable[[], None]) -> None:
         """Drain cancelled delivery workers before releasing the pane's injection lock."""
         cancelled = threading.Event()
-        with cancellable_injection(
-            cancelled,
-            bridge_dir=self._bridge_dir,
-            request_session_id=self._request_session_id,
-        ) as attempt:
+        with cancellable_injection(cancelled) as attempt:
             worker = asyncio.create_task(asyncio.to_thread(operation))
         try:
             await asyncio.shield(worker)
         except ClaudePromptTimeout as exc:
             exc.terminal = attempt.terminal
-            exc.owner = attempt.owner
             raise
         except asyncio.CancelledError:
             cancelled.set()
@@ -355,19 +348,15 @@ class ClaudeNativeExecutor(Executor):
                     await asyncio.shield(worker)
             with contextlib.suppress(Exception, asyncio.CancelledError):
                 worker.result()
-            self._reap_failed_turn(attempt.terminal, attempt.owner)
+            self._reap_failed_turn(attempt.terminal)
             raise
 
-    def _reap_failed_turn(
-        self, terminal: NativeTmuxTerminal | None, owner: BridgeOwner | None
-    ) -> str | None:
+    def _reap_failed_turn(self, terminal: NativeTmuxTerminal | None) -> str | None:
         """Stop only the terminal generation observed by the failed injection."""
         if terminal is None:
             return None
         try:
-            with native_terminal_cleanup_lock(self._bridge_dir, owner) as owned:
-                if owned:
-                    stop_tmux_terminal(terminal)
+            stop_tmux_terminal(terminal)
         except RuntimeError as exc:
             _logger.warning(
                 "claude-native: failed to reap timed-out session",
