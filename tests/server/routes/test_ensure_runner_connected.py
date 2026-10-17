@@ -417,11 +417,13 @@ async def test_raised_uncoded_refusal_fails_fast_with_host_reason(
     assert "failed to spawn runner: boom" in excinfo.value.message
 
 
+@pytest.mark.parametrize("session_exists", [False, True], ids=["deleted", "live"])
 @pytest.mark.asyncio
-async def test_raised_launch_for_deleted_session_is_not_found(
+async def test_not_found_launch_code_is_a_404_only_for_a_deleted_session(
     monkeypatch: pytest.MonkeyPatch,
+    session_exists: bool,
 ) -> None:
-    """A session deleted mid-relaunch is reported as gone, not as a host refusal."""
+    """The row, not the host's code, decides: a deleted session is gone, a live one was refused."""
     monkeypatch.setattr(orchestration, "_get_runner_client", _async_return(None))
     monkeypatch.setattr(
         orchestration,
@@ -434,13 +436,14 @@ async def test_raised_launch_for_deleted_session_is_not_found(
         _async_return(
             SimpleNamespace(
                 runner_id="",
-                error_code=orchestration._SESSION_DELETED_LAUNCH_ERROR_CODE,
+                error_code="session_not_found",
                 error="session was deleted while its relaunch was in flight",
             )
         ),
     )
 
     conv = _conv(host_id="host_1", workspace="/w")
+    store = _Store(conv) if session_exists else SimpleNamespace(get_conversation=lambda _cid: None)
     app_state = SimpleNamespace(
         host_registry=SimpleNamespace(get=lambda _hid: SimpleNamespace(owner="alice@example.com")),
         runner_exit_reports=None,
@@ -452,13 +455,16 @@ async def test_raised_launch_for_deleted_session_is_not_found(
             session_id="conv_1",
             conv=conv,
             app_state=app_state,
-            conversation_store=_Store(conv),
+            conversation_store=store,
             runner_router=None,
             raise_host_refusal=True,
         )
 
-    assert excinfo.value.code == ErrorCode.NOT_FOUND
-    assert "host" not in excinfo.value.message.lower()
+    if session_exists:
+        assert isinstance(excinfo.value, orchestration.HostLaunchRefusedError)
+    else:
+        assert excinfo.value.code == ErrorCode.NOT_FOUND
+        assert "host" not in excinfo.value.message.lower()
 
 
 def test_host_launch_refusal_shows_reason_only_to_the_host_owner() -> None:

@@ -537,13 +537,18 @@ async def _session_host_offline(conv: Conversation, app_state: Any) -> bool:
     """
     if conv.host_id is None:
         return False
+    return await _host_offline(conv.host_id, app_state)
+
+
+async def _host_offline(host_id: str, app_state: Any) -> bool:
+    """Return whether user-run host ``host_id`` is absent here and not live elsewhere."""
     host_registry = getattr(app_state, "host_registry", None)
-    if host_registry is None or host_registry.get(conv.host_id) is not None:
+    if host_registry is None or host_registry.get(host_id) is not None:
         return False
     host_store = getattr(app_state, "host_store", None)
     if host_store is None:
         return True
-    host = await asyncio.to_thread(host_store.get_host, conv.host_id)
+    host = await asyncio.to_thread(host_store.get_host, host_id)
     return host is not None and host.sandbox_provider is None and not host_is_live(host)
 
 
@@ -568,15 +573,17 @@ async def _retry_unavailable_message(
     await _raise_if_runner_re_tunnelled_to_another_replica(
         conv.id, conv.runner_id, conversation_store
     )
-    if conv.host_id is None:
+    # A side chat or sub-agent runs on an ancestor's host; describe that host.
+    host_id = await asyncio.to_thread(routing_host_id, conv, conversation_store)
+    if host_id is None:
         return (
             "This session has no host to relaunch its runner on. "
             "Reconnect the client that started it, then retry."
         )
-    if await _session_host_offline(conv, app_state):
+    if await _host_offline(host_id, app_state):
         return _host_offline_message(next_step="retry")
     host_registry = getattr(app_state, "host_registry", None)
-    if host_registry is not None and host_registry.get(conv.host_id) is None:
+    if host_registry is not None and host_registry.get(host_id) is None:
         # A host row that is missing or managed: nothing here can start it.
         return (
             "The host for this session is not connected to this server. "
@@ -2685,6 +2692,14 @@ def register_events_routes(
                     relaunched_runner_id = launch_attempt.runner_id
                     relaunched_launch_acknowledged = launch_attempt.acknowledged
                     if launch_attempt.error or launch_attempt.error_code:
+                        if (
+                            await asyncio.to_thread(
+                                conversation_store.get_conversation, session_id
+                            )
+                            is None
+                        ):
+                            # Deleted mid-relaunch: the server, not the host, ended it.
+                            raise _session_not_found()
                         # The host answered "failed" without a recognized
                         # category: no runner is coming. Keep the host's
                         # reason in locals for the raise below — recording it
@@ -2765,20 +2780,10 @@ def register_events_routes(
                 conv.kind != "sub_agent" or _is_native_terminal_session(conv)
             )
         if runner_client is None:
-            # A native terminal-session message must NOT be silently
-            # dropped when no runner is reachable — the runner crashed
-            # before connecting (the daemon couldn't bring it up). Persist
-            # the user's message together with the runner-failure error so
-            # it survives reload and the banner explains why, becoming the
-            # AP-server-as-writer failed turn (same shape as a definitive
-            # ensure-probe failure). The cause, when known, is the daemon's
-            # exit report keyed by this session's runner_id; failing that, the
-            # host's launch refusal or an offline host (so no runner could
-            # start); otherwise a generic message. This is safe precisely because
-            # the harness will never see it (no desync — there is no live
-            # harness). Other event types and non-native sessions still
-            # raise: their message would replay to a relaunched runner, so
-            # persisting now WOULD desync the store from harness state.
+            # A native terminal message must not be dropped when no runner is
+            # reachable: persist it with the failure so it survives reload. Safe
+            # because no live harness exists to desync; other event types and
+            # non-native sessions still raise, since their input would replay.
             if body.type == "message" and _is_native_terminal_session(conv):
                 exit_cause = (
                     runner_exit_reports.get(conv.runner_id)

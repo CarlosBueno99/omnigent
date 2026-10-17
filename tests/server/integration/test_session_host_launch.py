@@ -3935,9 +3935,7 @@ async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_hi
         session_id = await _native_host_session(client, app, db_uri, comm)
         permissions.grant(collaborator, session_id, LEVEL_EDIT)
 
-        async def refuse_launch_for(
-            post: Callable[[], Awaitable[httpx.Response]],
-        ) -> httpx.Response:
+        async def refuse_launch_for(post: Callable[[], Awaitable[Any]]) -> Any:
             responder = asyncio.create_task(
                 _serve_one_launch(
                     comm,
@@ -3952,11 +3950,6 @@ async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_hi
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     _ = await responder
 
-        def retry() -> Awaitable[httpx.Response]:
-            return client.post(
-                f"/v1/sessions/{session_id}/events", json={"type": "retry_session", "data": {}}
-            )
-
         send = await refuse_launch_for(lambda: _post_hello(client, session_id))
         assert send.status_code == 202, send.text
 
@@ -3969,15 +3962,58 @@ async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_hi
         snapshot = await client.get(f"/v1/sessions/{session_id}")
         assert snapshot.status_code == 200, snapshot.text
         assert "failed to spawn runner" not in snapshot.text
-        collaborator_retry = await refuse_launch_for(retry)
+
+        def retry(user: str) -> Awaitable[httpx.Response]:
+            return client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={"type": "retry_session", "data": {}},
+                headers={"X-Forwarded-Email": user},
+            )
+
+        # Both requesters share one recovery attempt (a single launch is
+        # answered) yet receive differently scoped answers.
+        started = time.monotonic()
+        owner_retry, collaborator_retry = await refuse_launch_for(
+            lambda: asyncio.gather(retry(owner), retry(collaborator))
+        )
+        assert time.monotonic() - started < budget(10.0)
+        assert owner_retry.status_code == 503, owner_retry.text
+        assert _SPAWN_REFUSAL_FLAT in owner_retry.json()["error"]["message"]
         assert collaborator_retry.status_code == 503, collaborator_retry.text
         assert "failed to spawn runner" not in collaborator_retry.json()["error"]["message"]
         assert "visible to the host owner" in collaborator_retry.json()["error"]["message"]
 
-        client.headers["X-Forwarded-Email"] = owner
-        owner_retry = await refuse_launch_for(retry)
-        assert owner_retry.status_code == 503, owner_retry.text
-        assert _SPAWN_REFUSAL_FLAT in owner_retry.json()["error"]["message"]
+
+async def test_native_message_for_session_deleted_mid_relaunch_is_not_found(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session deleted while its relaunch is in flight answers 404, not a host refusal."""
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes._sessions.helpers import _HostLaunchAttempt
+
+    monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
+    comm = await _connect_host(app)
+    session_id = await _native_host_session(client, app, db_uri, comm)
+    store = SqlAlchemyConversationStore(db_uri)
+
+    async def _delete_then_report(
+        conv: Conversation, *_args: Any, **_kwargs: Any
+    ) -> _HostLaunchAttempt:
+        assert await store.delete_conversation(conv.id)
+        return _HostLaunchAttempt(
+            runner_id=conv.runner_id or "",
+            error_code="session_not_found",
+            error="session was deleted while its relaunch was in flight",
+        )
+
+    monkeypatch.setattr(sessions_module, "_launch_runner_on_host", _delete_then_report)
+    response = await _post_hello(client, session_id)
+
+    assert response.status_code == 404, response.text
+    assert "host" not in response.json()["error"]["message"].lower()
 
 
 async def test_relaunch_stops_the_superseded_runner(
@@ -4462,6 +4498,32 @@ async def test_side_chat_retry_relaunches_exited_source_runner(
     assert ("/v1/sessions", side_chat_id) in [
         (path, body.get("session_id")) for path, body in runners.posts
     ]
+
+
+async def test_side_chat_retry_names_offline_source_host(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume on a side chat whose source host went offline names that host, not a missing one."""
+    comm, runners, _source, side_chat_id = await _side_chat_with_exited_source_runner(
+        client, app, db_uri, monkeypatch, None
+    )
+    try:
+        await comm.send_input({"type": "websocket.disconnect", "code": 1001})
+        await comm.wait(timeout=budget(5.0))
+        response = await client.post(
+            f"/v1/sessions/{side_chat_id}/events", json={"type": "retry_session", "data": {}}
+        )
+    finally:
+        await runners.client.aclose()
+
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["message"] == (
+        "The host for this session is offline. "
+        f"Start it with `{cli_invocation()} host` (or reconnect it) and retry."
+    )
 
 
 @pytest.mark.parametrize(

@@ -10301,32 +10301,6 @@ async def test_retry_session_explains_unreachable_host(
     assert error["message"] == expected
 
 
-async def test_retry_session_redirects_when_runner_reconnected_on_another_replica(
-    client: httpx.AsyncClient,
-    db_uri: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A runner that re-tunnelled to a sibling during recovery is retried there."""
-    from omnigent.server.routes.sessions import routes_events
-
-    agent = await create_test_agent(client)
-    session = await _create_session(client, agent["id"])
-    re_tunnelled = AsyncMock(
-        side_effect=OmnigentError("re-tunnelled", code=ErrorCode.WRONG_REPLICA)
-    )
-    monkeypatch.setattr(
-        routes_events, "_raise_if_runner_re_tunnelled_to_another_replica", re_tunnelled
-    )
-
-    response = await client.post(
-        f"/v1/sessions/{session['id']}/events",
-        json={"type": "retry_session", "data": {}},
-    )
-
-    assert response.json()["error"]["code"] == "wrong_replica", response.text
-    re_tunnelled.assert_awaited_once()
-
-
 @pytest.mark.parametrize(
     "failure_mode",
     [
@@ -12736,12 +12710,24 @@ async def test_native_message_persisted_when_runner_offline(
     assert snap["status"] == "failed"
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "message",
+            "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+        },
+        {"type": "retry_session", "data": {}},
+    ],
+    ids=["message", "retry_session"],
+)
 async def test_runner_re_tunnelled_to_sibling_returns_wrong_replica(
     client: httpx.AsyncClient,
     db_uri: str,
+    event: dict[str, Any],
 ) -> None:
     """
-    A message is re-addressed (not failed) when the runner is live on a sibling.
+    A message or Retry is re-addressed (not failed) when the runner is live on a sibling.
 
     Rollout repro: the bound runner has no local tunnel here, but its
     ``runner_last_seen`` was stamped fresh by another replica it re-tunnelled to.
@@ -12767,13 +12753,7 @@ async def test_runner_re_tunnelled_to_sibling_returns_wrong_replica(
     assert store.set_runner_id(sid, "runner_sibling")
     store.touch_runner_liveness(["runner_sibling"], int(time.time()))
 
-    resp = await client.post(
-        f"/v1/sessions/{sid}/events",
-        json={
-            "type": "message",
-            "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
-        },
-    )
+    resp = await client.post(f"/v1/sessions/{sid}/events", json=event)
     # WRONG_REPLICA → HTTP 400; the turn is NOT recorded as failed.
     assert resp.status_code == 400, resp.text
     assert "wrong_replica" in resp.text

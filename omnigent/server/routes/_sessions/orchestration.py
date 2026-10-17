@@ -246,7 +246,6 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
 # Lower-layer helpers (SSE builders, publishers, persistence, runner-forward
 # primitives) live in _sessions.helpers.
 from omnigent.server.routes._sessions.helpers import (
-    _SESSION_DELETED_LAUNCH_ERROR_CODE,
     SessionLiveness,
     _antigravity_subagent_labels_from_body,
     _antigravity_subagent_title,
@@ -4858,9 +4857,11 @@ async def ensure_runner_connected(
                 )
             if (
                 raise_host_refusal
-                and launch_attempt.error_code == _SESSION_DELETED_LAUNCH_ERROR_CODE
+                and (launch_attempt.error or launch_attempt.error_code)
+                and await asyncio.to_thread(conversation_store.get_conversation, session_id)
+                is None
             ):
-                # The server ended this launch, not the host.
+                # Deleted mid-relaunch: the server, not the host, ended this launch.
                 raise _session_not_found()
             if (
                 _refusal_code is None
