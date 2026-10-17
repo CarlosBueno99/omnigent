@@ -195,10 +195,13 @@ describe("skill display name matching", () => {
 });
 
 describe("menu surface", () => {
-  it("blurs what sits behind it so a translucent dark popover does not ghost the transcript", () => {
-    // The built-in dark palettes give --popover an alpha; without a backdrop
-    // blur the transcript lines behind the floating menu read through it.
+  it("carries the dark glass blur so the translucent dark popover does not ghost the transcript", () => {
+    // Built-in dark palettes give --popover an alpha; the blur keeps the
+    // transcript behind the floating menu from reading through it.
     const { container } = render(<SlashCommandMenu {...props} />);
-    expect(container.firstElementChild).toHaveClass("backdrop-blur-md");
+    expect(container.firstElementChild).toHaveClass(
+      "dark:backdrop-blur-xl",
+      "dark:backdrop-saturate-150",
+    );
   });
 });
