@@ -23,7 +23,7 @@ def terminal_resource_id(base_url: str, session_id: str) -> str | None:
     resp = httpx.get(f"{base_url}/v1/sessions/{session_id}/resources", timeout=10.0)
     resp.raise_for_status()
     for resource in resp.json().get("data", []):
-        if resource.get("type") == "terminal":
+        if resource.get("type") == "terminal" and resource.get("id") is not None:
             return str(resource["id"])
     return None
 

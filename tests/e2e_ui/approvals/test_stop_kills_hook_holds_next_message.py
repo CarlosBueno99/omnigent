@@ -71,19 +71,21 @@ def _wait_pane_contains(
     deadline = time.monotonic() + timeout_s
     screen = ""
     while time.monotonic() < deadline:
-        terminal_id = terminal_resource_id(base_url, session_id)
-        if terminal_id is not None:
-            try:
+        # The resource endpoint and the attach may both be unavailable while the
+        # terminal is still booting; keep polling until the deadline.
+        try:
+            terminal_id = terminal_resource_id(base_url, session_id)
+            if terminal_id is not None:
                 screen = render_terminal_screen(
                     base_url, session_id, terminal_id, cols=_PANE_COLS, rows=_PANE_ROWS
                 )
-            except (httpx.HTTPError, websockets.WebSocketException, OSError):
-                screen = ""
-            # A narrow real pane hard-wraps rows that the wide screen renders
-            # separately, so also match with all whitespace removed.
-            haystack = screen.lower()
-            if needle.lower() in haystack or needle.lower() in "".join(haystack.split()):
-                return True, screen
+        except (httpx.HTTPError, websockets.WebSocketException, OSError):
+            screen = ""
+        # A narrow real pane hard-wraps rows that the wide screen renders
+        # separately, so also match with all whitespace removed.
+        haystack = screen.lower()
+        if needle.lower() in haystack or needle.lower() in "".join(haystack.split()):
+            return True, screen
         time.sleep(1.0)
     return False, screen
 
@@ -105,7 +107,8 @@ def _wait_until(predicate, *, timeout_s: float, interval_s: float = 1.0) -> bool
     shutil.which("claude") is None or shutil.which("tmux") is None,
     reason="a real claude CLI inside tmux owns the approval-wait marker under test",
 )
-@pytest.mark.timeout(420)
+# Phase budgets sum to 405 s; the rest covers per-poll attach and sleep overhead.
+@pytest.mark.timeout(600)
 def test_stop_during_permission_prompt_does_not_hold_next_message(
     native_claude_mock_session: tuple[str, str],
     mock_llm_server_url: str,
@@ -161,7 +164,7 @@ def test_stop_during_permission_prompt_does_not_hold_next_message(
     )
     assert drained, "the session did not return to idle after stop_session"
 
-    # trigger: the next composer message must reach the relaunched session.
+    # verify: the next composer message must reach the relaunched session.
     followup = _send_user_message(base_url, session_id, f"did it work? [{followup_marker}]")
     assert followup.status_code in (200, 202), followup.text
 
