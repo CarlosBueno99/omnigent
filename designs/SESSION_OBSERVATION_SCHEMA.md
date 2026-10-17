@@ -7,20 +7,24 @@ existing session status. Legacy rows retain their runner, status and history;
 epoch/revision default to zero, startup pending defaults to false and optional
 payloads remain null.
 
-Deploy these schema migrations before the separate ownership application
-release. The old application ignores the added columns and continues to read
-and write its existing fields. New application writers must enforce the
-16,383-byte maximum on the final serialized/compressed binary values, including
-framing overhead, and bounds on the observation/error identifiers. That writer
-validation is part of the application release, before any new payload is written.
+Deploy this schema release before the separate ownership application release.
+It includes matching ORM declarations because fresh CockroachDB bootstrap
+creates ORM metadata and stamps the current migration head. Existing store
+responses ignore the added fields and keep their existing behavior.
+
+The new metadata types enforce at most 16,383 final framed bytes for binary
+payloads and 64 characters for observation/error identifiers on typed writes.
+Existing compression columns retain their behavior. Lifecycle writers and
+ownership-aware response behavior remain in the separate application release.
 No backfill or data conversion is performed by these migrations.
 
 Roll back the application first while retaining the additive schema. The old
 application remains compatible with the additional columns. Keep the columns
 through the mixed-version window; dropping them before all new writers stop
-would break the new application. Downgrades remove only the new ownership
-metadata and must be used only after disabling those writers. Existing session
-rows, runner bindings, normal status and conversation history remain intact.
+would break the new application. Before downgrading, return every process to binaries predating the new ORM
+mappings; disabling writers alone is insufficient because the newer readers
+select mapped columns. Downgrades remove only the new ownership metadata.
+Existing session rows, runner bindings, status and history remain intact.
 
 The migration tests cover upgrade, downgrade and upgrade again for default and
 non-default workspaces, preserving existing rows and already-owned state. The
