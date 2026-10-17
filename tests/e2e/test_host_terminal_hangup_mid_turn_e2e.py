@@ -24,6 +24,7 @@ import pexpect
 import pytest
 import yaml
 
+from omnigent.inner import _proc
 from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
 from tests._helpers.compat import apply_runner_env, compat_runner_cwd, runner_executable
 from tests._helpers.live_server import isolated_local_server, isolated_process_env
@@ -95,6 +96,8 @@ class _ForegroundHostTerminal:
         except BaseException:
             with contextlib.suppress(Exception):
                 self.child.close(force=True)
+            with contextlib.suppress(Exception):
+                self.transcript.close()
             raise
 
     def _pump(self) -> None:
@@ -128,12 +131,14 @@ class _ForegroundHostTerminal:
     def close(self) -> None:
         self._stop.set()
         self._drain.join(timeout=5)
-        if self.child.isalive():
-            self.child.kill(9)
-            self.wait_exit(timeout=5)
         try:
+            if self.child.isalive():
+                with contextlib.suppress(Exception):
+                    self.child.kill(9)
+                self.wait_exit(timeout=5)
             if self.child.child_fd != -1:
-                self.child.close(force=True)
+                with contextlib.suppress(Exception):
+                    self.child.close(force=True)
         finally:
             self.transcript.close()
 
@@ -177,6 +182,8 @@ def test_terminal_hangup_lets_in_flight_turn_finish(
     workspace.mkdir()
     runner_pid: int | None = None
     zygote_pid: int | None = None
+    runner_create_time: float | None = None
+    zygote_create_time: float | None = None
     with (
         isolated_local_server(tmp_path / "server") as base_url,
         httpx.Client(base_url=base_url, trust_env=False, timeout=30) as client,
@@ -208,17 +215,26 @@ def test_terminal_hangup_lets_in_flight_turn_finish(
             )
             assert launch.status_code == 200, launch.text
             runner_id = launch.json()["runner_id"]
-            assert _wait_until(
-                lambda: client.get(f"/v1/runners/{runner_id}/status").json().get("online") is True,
-                _RUNNER_ONLINE_TIMEOUT_S,
-            ), "host-launched runner never came online"
+
+            def _runner_online() -> bool:
+                try:
+                    status = client.get(f"/v1/runners/{runner_id}/status").json()
+                except (httpx.HTTPError, ValueError):
+                    return False  # runner still registering; let _wait_until retry
+                return status.get("online") is True
+
+            assert _wait_until(_runner_online, _RUNNER_ONLINE_TIMEOUT_S), (
+                "host-launched runner never came online"
+            )
             bind_session_runner(client.patch, base_url, session_id, runner_id)
             host_log = terminal.log_path.read_text(errors="replace")
             launched = re.search(r"Launched runner \S+ for workspace .*? \(pid=(\d+)\)", host_log)
             assert launched is not None, host_log[-4000:]
             runner_pid = int(launched.group(1))
+            runner_create_time = _proc.process_create_time(runner_pid)
             forked = re.search(r"zygote pid=(\d+), runner pid=", host_log)
             zygote_pid = int(forked.group(1)) if forked else None
+            zygote_create_time = _proc.process_create_time(zygote_pid) if zygote_pid else None
             host_pgid = _pgid_or_none(terminal.child.pid)
             print(
                 f"host pid={terminal.child.pid} pgid={host_pgid} zygote={zygote_pid} "
@@ -229,14 +245,15 @@ def test_terminal_hangup_lets_in_flight_turn_finish(
             response_id = send_user_message_to_session(
                 client, session_id=session_id, content=f"Reply with exactly {_REPLY}."
             )
-            assert _wait_until(
-                lambda: (
-                    httpx.get(f"{mock_url}/gate/pending", timeout=5, trust_env=False)
-                    .json()
-                    .get("pending")
-                ),
-                _GATE_TIMEOUT_S,
-            ), "the turn never reached the model"
+
+            def _gate_pending() -> bool:
+                try:
+                    body = httpx.get(f"{mock_url}/gate/pending", timeout=5, trust_env=False).json()
+                except (httpx.HTTPError, ValueError):
+                    return False  # mock server still warming up; let _wait_until retry
+                return bool(body.get("pending"))
+
+            assert _wait_until(_gate_pending, _GATE_TIMEOUT_S), "the turn never reached the model"
             before = client.get(f"/v1/sessions/{session_id}").json()
             print(f"status before hangup: {before.get('status')}")
 
@@ -285,8 +302,13 @@ def test_terminal_hangup_lets_in_flight_turn_finish(
                 f"runner {runner_pid} kept running after its turn finished"
             )
         finally:
-            for pid in (runner_pid, zygote_pid):
-                if pid and _pid_running(pid):
+            # Reaping does not reserve these non-child PIDs, so confirm identity
+            # (PID plus start time) before SIGKILL to avoid hitting a recycled PID.
+            for pid, create_time in (
+                (runner_pid, runner_create_time),
+                (zygote_pid, zygote_create_time),
+            ):
+                if pid and _pid_running(pid) and _proc.process_create_time(pid) == create_time:
                     with contextlib.suppress(ProcessLookupError, PermissionError):
                         os.kill(pid, 9)
             terminal.close()

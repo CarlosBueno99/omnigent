@@ -704,7 +704,6 @@ def test_malloc_tuning_is_applied_at_the_zygote_exec(monkeypatch, tmp_path) -> N
     assert captured["MALLOC_TRIM_THRESHOLD_"] == "134217728"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions")
 def test_zygote_exec_starts_its_own_session(monkeypatch, tmp_path) -> None:
     """The zygote, and so every runner and harness it forks, leaves the daemon's session.
 

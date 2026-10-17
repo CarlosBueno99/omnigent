@@ -2445,24 +2445,31 @@ def test_run_parent_death_killer_without_hangup_stops_despite_active_work() -> N
 
     assert events == ["stop", "exit"]
     assert elapsed >= 0.2, "a busy non-hangup orphan must wait out the finish-work grace window"
+    assert elapsed < 3.0, "it must stop at the grace window, not enter the finishing deadline"
 
 
 def test_run_parent_death_killer_bounds_finishing_work(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Work that never finishes is stopped once the bound passes."""
+    started = time.monotonic()
     with caplog.at_level(logging.WARNING, logger="omnigent.runner._entry"):
         events = _finish_work_killer(lambda: True, finish_work_max_s=0.05)
+    elapsed = time.monotonic() - started
 
     assert events == ["stop", "exit"]
     assert any("did not finish" in record.message for record in caplog.records)
+    assert elapsed < 2.0, "finishing work must stop at its bound, not run unbounded"
 
 
 def test_run_parent_death_killer_idle_runner_exits_immediately_after_hangup() -> None:
     """An idle runner exits on a hangup exactly as on any parent death."""
+    started = time.monotonic()
     events = _finish_work_killer(lambda: False)
+    elapsed = time.monotonic() - started
 
     assert events == ["stop", "exit"]
+    assert elapsed < 1.0, "an idle runner must skip the grace and finishing waits"
 
 
 def test_run_parent_death_killer_waits_for_a_late_finish_work_signal() -> None:
