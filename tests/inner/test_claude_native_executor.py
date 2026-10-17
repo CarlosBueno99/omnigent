@@ -54,6 +54,11 @@ def reap_attempts(monkeypatch: pytest.MonkeyPatch) -> list[NativeTmuxTerminal | 
     return attempts
 
 
+def _pin_terminal() -> None:
+    """Pin the observed pane the way the real injectors do, once tmux.json resolves."""
+    claude_bridge._capture_injection_terminal("/tmp/sock", "main")
+
+
 @pytest.mark.asyncio
 async def test_run_turn_injects_user_message_without_streaming_transcript(
     monkeypatch: pytest.MonkeyPatch,
@@ -1604,7 +1609,7 @@ async def test_run_turn_reaps_tmux_before_reporting_prompt_timeout(
 
     def fail_inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
         del bridge_dir_arg, content, timeout_s
-        claude_bridge._capture_injection_terminal("/tmp/sock", "main")
+        _pin_terminal()
         raise ClaudePromptTimeout("terminal did not become ready")
 
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
@@ -1947,7 +1952,7 @@ async def test_cancelled_delivery_drains_worker_before_unlocking(
         return "────────────────\n❯ \n────────────────\n"
 
     def inject(*args: Any, **kwargs: Any) -> None:
-        claude_bridge._capture_injection_terminal("/tmp/sock", "main")
+        _pin_terminal()
         try:
             claude_bridge._wait_for_claude_prompt_ready("/tmp/sock", "main", timeout_s=30)
             claude_bridge._run_tmux("/tmp/sock", "send-keys", "late message", "Enter")
@@ -2060,7 +2065,7 @@ async def test_run_turn_reports_reap_failure_with_prompt_timeout(
 
     def fail_inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
         del bridge_dir_arg, content, timeout_s
-        claude_bridge._capture_injection_terminal("/tmp/sock", "main")
+        _pin_terminal()
         raise failure("terminal did not become ready")
 
     def fail_kill(terminal: NativeTmuxTerminal) -> None:

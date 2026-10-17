@@ -84,9 +84,11 @@ def test_stop_tmux_terminal_checks_every_identity_field_in_the_kill_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[list[str]] = []
+    budgets: list[float] = []
 
-    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         commands.append(command)
+        budgets.append(kwargs["timeout"])
         return _completed()
 
     monkeypatch.setattr(subprocess, "run", run)
@@ -94,6 +96,7 @@ def test_stop_tmux_terminal_checks_every_identity_field_in_the_kill_command(
     stop_tmux_terminal(_TERMINAL)
 
     (command,) = commands
+    assert budgets == [10.0]
     assert command[:7] == ["tmux", "-S", "/tmp/t.sock", "if-shell", "-F", "-t", "%7"]
     condition, action = command[7:]
     assert action == "kill-pane -t %7"

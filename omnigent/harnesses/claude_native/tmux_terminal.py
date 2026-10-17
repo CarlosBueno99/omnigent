@@ -58,8 +58,13 @@ def capture_tmux_terminal(
     )
 
 
-def stop_tmux_terminal(terminal: NativeTmuxTerminal, *, timeout_s: float = 1.0) -> None:
-    """Check and stop an owned generation on one native tmux connection."""
+def stop_tmux_terminal(terminal: NativeTmuxTerminal, *, timeout_s: float = 10.0) -> None:
+    """
+    Check and stop an owned generation on one native tmux connection.
+
+    The default budget matches the bridge's other tmux calls; a tighter one
+    would report a kill that merely ran late as a cleanup failure.
+    """
     if (
         min(terminal.server_pid, terminal.server_started_at, terminal.pane_pid) <= 0
         or re.fullmatch(r"\$[0-9]+", terminal.session_id) is None

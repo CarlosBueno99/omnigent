@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -97,12 +98,21 @@ async def test_stale_cleanup_preserves_a_same_owner_native_terminal(
     release_failure = threading.Event()
     original_wait = bridge._wait_for_claude_prompt_ready
 
+    violations: list[str] = []
+
     def wait_for_old(socket_path, tmux_target, *, timeout_s, bridge_dir=None):
         if failure == "cancel":
             failure_observed.set()
             assert release_failure.wait(5)
-            bridge._check_injection_cancelled()
-            raise AssertionError("cancelled worker resumed delivery")
+            # The executor flags cancellation only once CancelledError reaches it,
+            # which can trail task.cancel(); the drain swallows exceptions raised
+            # here, so record the violation for the test body instead.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                bridge._check_injection_cancelled()
+                time.sleep(0.01)
+            violations.append("cancelled worker resumed delivery")
+            raise AssertionError(violations[-1])
         try:
             original_wait(socket_path, tmux_target, timeout_s=0.05, bridge_dir=bridge_dir)
         except bridge.ClaudePromptTimeout:
@@ -259,6 +269,7 @@ async def test_stale_cleanup_preserves_a_same_owner_native_terminal(
             if failure == "cancel":
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(task, timeout=5)
+                assert violations == []
             else:
                 events = await asyncio.wait_for(task, timeout=5)
                 assert len(events) == 1 and isinstance(events[0], ExecutorError)
