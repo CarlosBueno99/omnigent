@@ -69,6 +69,7 @@ from omnigent.entities.session_observation import (
     RunnerOfflineDecision,
     SessionObservation,
     accept_session_projection,
+    is_versioned_session_observation,
 )
 from omnigent.errors import (
     SESSION_AGENT_MISSING_MESSAGE,
@@ -5064,12 +5065,15 @@ def _publish_status(
         and (previous_projection is None or previous_projection.offline_episode_id is None)
         and (
             session_observation is None
-            or previous_projection is None
+            or not is_versioned_session_observation(session_observation)
             or (
-                session_observation.binding_epoch,
-                session_observation.revision,
+                previous_projection is not None
+                and (
+                    session_observation.binding_epoch,
+                    session_observation.revision,
+                )
+                <= previous_projection.order[:2]
             )
-            <= previous_projection.order[:2]
         )
         and (
             owner is None
@@ -5298,6 +5302,8 @@ def reconcile_orphaned_running_status(
     session_id: str,
     conversation_store: ConversationStore,
     stale_before: int,
+    *,
+    owner: SessionObservation | None = None,
 ) -> bool:
     """
     Settle a session that reads ``running`` but whose runner is
@@ -5323,7 +5329,12 @@ def reconcile_orphaned_running_status(
     :param stale_before: Runner stamps at or after this epoch are fresh.
     :returns: Whether this call performed the transition.
     """
-    observation = conversation_store.settle_orphaned_session_observation(session_id, stale_before)
+    captured = owner or conversation_store.get_session_observation(session_id)
+    if captured is None:
+        return False
+    observation = conversation_store.settle_orphaned_session_observation(
+        session_id, stale_before, expected=captured
+    )
     if observation is None:
         return False
     _publish_status(
@@ -9159,7 +9170,7 @@ def _filesystem_attachment_in_history(
                 file_id = block.get("file_id")
                 if isinstance(file_id, str) and file_id in filenames:
                     return filenames[file_id]
-        if not page.has_more or not page.data:
+        if not page.has_more or page.last_id is None:
             return None
         items_after = page.last_id
 

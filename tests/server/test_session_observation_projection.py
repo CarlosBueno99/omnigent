@@ -46,6 +46,116 @@ async def _drain() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["runner_disconnected", "runner_error"])
+async def test_versioned_recovery_from_a_legacy_failed_cache_preserves_real_failures(
+    live_store: tuple[SqlAlchemyConversationStore, list[dict]], code: str
+) -> None:
+    store, _ = live_store
+    conv = store.create_conversation(runner_id="runner-a")
+    store.set_session_live_status(conv.id, "failed")
+    store.set_labels(
+        conv.id,
+        {
+            "omnigent.last_task_error_code": code,
+            "omnigent.last_task_error_message": "Original cause",
+        },
+    )
+    owner = store.get_session_observation(conv.id)
+    assert owner is not None
+    common._session_status_cache[conv.id] = "failed"
+    assert common._session_status_cache.projection(conv.id) is None
+    await orchestration._publish_runner_recovered_status_impl(
+        conv.id, store, require_disconnect_code=True, owner=owner
+    )
+    await _drain()
+    current = store.get_conversation(conv.id)
+    assert current is not None
+    if code == "runner_disconnected":
+        assert current.live_status == "idle" and common._session_status_cache[conv.id] == "idle"
+        assert current.live_status_revision == owner.revision + 1
+        assert "omnigent.last_task_error_code" not in current.labels
+    else:
+        assert current.session_observation == owner
+        assert (
+            current.live_status == "failed" and common._session_status_cache[conv.id] == "failed"
+        )
+        assert current.labels["omnigent.last_task_error_code"] == code
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_unversioned_idle_cannot_clear_a_legacy_failed_cache(
+    live_store: tuple[SqlAlchemyConversationStore, list[dict]], annotated: bool
+) -> None:
+    store, events = live_store
+    conv = store.create_conversation()
+    common._session_status_cache[conv.id] = "failed"
+    helpers._publish_status(
+        conv.id,
+        "idle",
+        persist_live_status=False,
+        session_observation=conv.session_observation if annotated else None,
+    )
+    assert common._session_status_cache[conv.id] == "failed"
+    assert events == []
+
+
+@pytest.mark.parametrize("replacement", ["turn", "runner", "aba"])
+def test_orphan_settlement_cannot_adopt_a_replacement_lifecycle(
+    live_store: tuple[SqlAlchemyConversationStore, list[dict]],
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    store, _ = live_store
+    conv = store.create_conversation(runner_id="runner-a")
+    original = store.record_session_observation(conv.id, "running", response_id="old-turn")
+    assert original is not None
+    settle = store.settle_orphaned_session_observation
+    current = None
+
+    def replace_before_write(*args, **kwargs):
+        nonlocal current
+        if replacement in {"runner", "aba"}:
+            store.replace_runner_id(conv.id, "runner-b")
+        if replacement == "aba":
+            store.replace_runner_id(conv.id, "runner-a")
+        current = store.record_session_observation(conv.id, "running", response_id="new-turn")
+        assert current is not None
+        assert common._session_status_cache.accept(conv.id, SessionProjection(current, "running"))
+        return settle(*args, **kwargs)
+
+    monkeypatch.setattr(store, "settle_orphaned_session_observation", replace_before_write)
+    assert not helpers.reconcile_orphaned_running_status(conv.id, store, 9999999999)
+    assert current is not None and store.get_session_observation(conv.id) == current
+    assert common._session_status_cache[conv.id] == "running"
+
+
+def test_hydration_keeps_status_without_claiming_a_live_local_publisher(
+    live_store: tuple[SqlAlchemyConversationStore, list[dict]],
+) -> None:
+    store, _ = live_store
+    conv = store.create_conversation(runner_id="runner-a")
+    owner = store.record_session_observation(conv.id, "running", response_id="turn-a")
+    assert owner is not None
+    row = store.get_conversation(conv.id)
+    assert row is not None
+    cache = SessionStatusCache()
+    assert cache.hydrate(row) and cache[conv.id] == "running"
+    assert not cache.has_live_status(conv.id)
+    assert cache.accept(conv.id, SessionProjection(owner, "running"))
+    assert cache.has_live_status(conv.id)
+    assert cache.hydrate(row) and cache.has_live_status(conv.id)
+    cache.pop(conv.id)
+    assert cache.hydrate(row) and not cache.has_live_status(conv.id)
+    newer = store.record_session_observation(conv.id, "running", response_id="turn-b")
+    assert newer is not None
+    row = store.get_conversation(conv.id)
+    assert row is not None
+    assert cache.hydrate(row) and not cache.has_live_status(conv.id)
+    cache["legacy"] = "running"
+    assert cache.has_live_status("legacy")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("annotation", ["current", "superseded", "malformed"])
 async def test_relay_startup_status_keeps_its_explicit_owner(
     live_store: tuple[SqlAlchemyConversationStore, list[dict]], annotation: str
@@ -375,7 +485,7 @@ async def test_setup_failure_retry_preserves_consumed_input_response_and_source_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("gate", ["admission", "reply"])
-@pytest.mark.parametrize("replacement", ["turn", "runner", "aba"])
+@pytest.mark.parametrize("replacement", ["turn", "runner", "aba", "unbind"])
 async def test_host_launch_keeps_its_owner_before_admission_and_reply_awaits(
     live_store: tuple[SqlAlchemyConversationStore, list[dict]],
     monkeypatch: pytest.MonkeyPatch,
@@ -410,6 +520,8 @@ async def test_host_launch_keeps_its_owner_before_admission_and_reply_awaits(
             store.replace_runner_id(conv.id, "runner-b")
         if replacement == "aba":
             store.replace_runner_id(conv.id, captured.runner_id)
+        if replacement == "unbind":
+            store.clear_runner_id(conv.id)
         current = store.record_session_observation(conv.id, "running", response_id="new-turn")
         if gate == "reply":
             next(iter(conn.pending_launches.values())).set_result(

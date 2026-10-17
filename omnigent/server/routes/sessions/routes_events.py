@@ -1704,6 +1704,7 @@ def register_events_routes(
                         session_id,
                         conversation_store,
                         int(time.time()) - RUNNER_LIVENESS_TTL_S,
+                        owner=stop_conv.session_observation if stop_conv is not None else None,
                     )
             # Stop is non-sticky: no persistent marker is written. The
             # runner tunnel dropping above flips ``runner_online`` to false
@@ -2791,6 +2792,20 @@ def register_events_routes(
             fresh_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             if fresh_conv is None:
                 raise _session_not_found()
+            if (
+                conv.host_id is None
+                and fresh_conv.host_id is None
+                and conv.runner_id is not None
+                and fresh_conv.runner_id is None
+                and relaunched_runner_id is None
+                and fresh_conv.live_status_observation_id is None
+                and fresh_conv.live_status not in ("running", "waiting")
+                and not fresh_conv.terminal_pending
+            ):
+                # No provider ran: choose the cleared binding before accepting this input.
+                launch_owner = fresh_conv.session_observation
+                launch_predecessor = None
+                launch_dispatch = fresh_conv.labels.get(SUBAGENT_DISPATCH_ID_LABEL_KEY)
             runner_client = await _get_runner_client(
                 session_id, runner_router, conversation=fresh_conv
             )

@@ -9,14 +9,18 @@ import threading
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+import httpx
 import pytest
 
+from omnigent.entities import MessageData
 from omnigent.entities.session_observation import SessionObservation
 from omnigent.runtime import inflight_text, session_stream
 from omnigent.server import session_live_state
 from omnigent.server.routes._sessions import common, orchestration
+from omnigent.server.routes.sessions import routes_events
 from omnigent.server.session_observations import SessionProjection
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from tests.server.helpers import create_test_agent, start_session_stream_collector
 
 
 @pytest.fixture
@@ -75,6 +79,501 @@ class _Runner:
 
     def stream(self, *_args: object, **_kwargs: object) -> _Frames:
         return _Frames(self.events, self.processed, self.release_close)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["response.in_progress", "session.status"])
+@pytest.mark.parametrize("newer_turn", [False, True], ids=["completed", "newer-native-turn"])
+@pytest.mark.parametrize(
+    "harness", ["codex-wrapper", "codex-override", "pi-wrapper", "pi-override", "provider"]
+)
+async def test_native_scaffold_status_cannot_replace_the_forwarder_turn(
+    client: httpx.AsyncClient,
+    store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+    newer_turn: bool,
+    harness: str,
+) -> None:
+    native_terminal = harness != "provider"
+    key = harness.rsplit("-", 1)[0]
+    agent = await create_test_agent(client)
+    created = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "labels": {"omnigent.wrapper": f"{key}-native-ui"}
+            if harness.endswith("-wrapper")
+            else {},
+            "harness_override": f"{key}-native" if harness.endswith("-override") else None,
+        },
+    )
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+    store.replace_runner_id(session_id, "runner-native")
+
+    async def no_forward(*_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    monkeypatch.setattr(routes_events, "_forward_session_change_to_runner", no_forward)
+
+    async def status(value: str, response_id: str) -> httpx.Response:
+        response = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "external_session_status",
+                "data": {"status": value, "response_id": response_id},
+            },
+        )
+        assert response.status_code == 202, response.text
+        return response
+
+    first_response = f"{key}_turn-a" if native_terminal else "resp_provider-initial"
+    completed_response = first_response if native_terminal else "resp_scaffold"
+    next_response = f"{key}_turn-b"
+    assert not (await status("running", first_response)).json().get("ignored")
+    owner = store.get_session_observation(session_id)
+    assert owner is not None and owner.response_id == first_response
+    frame: dict[str, Any] = {"type": event_type}
+    if event_type == "response.in_progress":
+        frame["response"] = {"id": "resp_scaffold"}
+    else:
+        frame.update(status="running", response_id="resp_scaffold")
+    processed, release_close = asyncio.Event(), asyncio.Event()
+    relay = asyncio.create_task(
+        orchestration._relay_runner_stream(
+            session_id,
+            _Runner([frame], processed, release_close),
+            store,
+            runner_id="runner-native",
+        )
+    )
+    try:
+        await asyncio.wait_for(processed.wait(), 10)
+        if not native_terminal:
+            assert store.get_session_observation(session_id).response_id == "resp_scaffold"
+        if newer_turn:
+            assert not (await status("running", next_response)).json().get("ignored")
+        completed = await status("idle", completed_response)
+        current = store.get_session_observation(session_id)
+        assert current is not None
+        if newer_turn:
+            assert completed.json().get("ignored") is True
+            assert (current.status, current.response_id) == ("running", next_response)
+        else:
+            assert not completed.json().get("ignored")
+            assert (current.status, current.response_id) == ("idle", completed_response)
+    finally:
+        release_close.set()
+        await asyncio.wait_for(relay, 10)
+
+
+@pytest.mark.asyncio
+async def test_native_output_and_status_hints_survive_an_older_relay_adoption(
+    client: httpx.AsyncClient,
+    store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = await create_test_agent(client)
+    created = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "labels": {"omnigent.wrapper": "codex-native-ui"}},
+    )
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+    store.replace_runner_id(session_id, "runner-native")
+    idle = store.record_session_observation(session_id, "idle")
+    assert idle is not None
+    assert common._session_status_cache.accept(session_id, SessionProjection(idle, "idle"))
+
+    async def no_forward(*_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    monkeypatch.setattr(routes_events, "_forward_session_change_to_runner", no_forward)
+    connected, release_events = asyncio.Event(), asyncio.Event()
+    processed, release_close = asyncio.Event(), asyncio.Event()
+
+    class GatedFrames(_Frames):
+        async def aiter_text(self) -> AsyncIterator[str]:
+            connected.set()
+            await release_events.wait()
+            async for chunk in super().aiter_text():
+                yield chunk
+
+    class GatedRunner(_Runner):
+        def stream(self, *_args: object, **_kwargs: object) -> _Frames:
+            return GatedFrames(self.events, self.processed, self.release_close)
+
+    frames = [
+        {"type": "response.in_progress", "response": {"id": "resp_scaffold"}},
+        {"type": "session.status", "status": "waiting", "blocked_on": "native approval"},
+        {"type": "response.output_text.delta", "delta": "scaffold narration"},
+        {"type": "response.completed", "response": {"id": "resp_scaffold"}},
+        {"type": "session.status", "status": "idle", "response_id": "resp_scaffold"},
+    ]
+    collector = await start_session_stream_collector(session_id)
+    relay = asyncio.create_task(
+        orchestration._relay_runner_stream(
+            session_id,
+            GatedRunner(frames, processed, release_close),
+            store,
+            runner_id="runner-native",
+        )
+    )
+    try:
+        await asyncio.wait_for(connected.wait(), 10)
+        running = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "external_session_status",
+                "data": {
+                    "status": "running",
+                    "response_id": "codex_turn-a",
+                    "background_task_count": 2,
+                },
+            },
+        )
+        assert running.status_code == 202 and not running.json().get("ignored")
+        release_events.set()
+        await asyncio.wait_for(processed.wait(), 10)
+        current = store.get_session_observation(session_id)
+        assert current is not None and current.status == "waiting"
+        assert current.response_id == "codex_turn-a"
+        assert common._session_background_task_count_cache[session_id] == 2
+        native_delta = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "external_output_text_delta",
+                "data": {"delta": "native live tail", "message_id": "native-message"},
+            },
+        )
+        assert native_delta.status_code == 202, native_delta.text
+        async with asyncio.timeout(10):
+            while True:
+                event = await collector.queue.get()
+                if event.get("message_id") == "native-message":
+                    assert event["delta"] == "native live tail"
+                    break
+        native_item = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": "message",
+                    "response_id": "codex_turn-a",
+                    "source_id": "native-message",
+                    "item_data": {
+                        "role": "assistant",
+                        "agent": "codex-native-ui",
+                        "content": [{"type": "output_text", "text": "native live tail"}],
+                    },
+                },
+            },
+        )
+        assert native_item.status_code == 202, native_item.text
+        completed = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "external_session_status",
+                "data": {
+                    "status": "idle",
+                    "response_id": "codex_turn-a",
+                    "background_task_count": 0,
+                },
+            },
+        )
+        assert completed.status_code == 202 and not completed.json().get("ignored")
+        current = store.get_session_observation(session_id)
+        assert current is not None and current.status == "idle"
+        assert current.response_id == "codex_turn-a"
+        assert session_id not in common._session_background_task_count_cache
+        text = [
+            block["text"]
+            for item in store.list_items(session_id).data
+            if isinstance(item.data, MessageData)
+            for block in item.data.content
+            if block.get("type") == "output_text"
+        ]
+        assert "scaffold narration" in text and "native live tail" in text
+    finally:
+        release_events.set()
+        release_close.set()
+        await asyncio.wait_for(relay, 10)
+        await collector.stop()
+        common._session_background_task_count_cache.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["response.completed", "response.failed"])
+@pytest.mark.parametrize("owned", [False, True], ids=["scaffold", "owned-terminal"])
+async def test_native_terminal_frames_preserve_source_history_and_fence_ownership(
+    store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+    owned: bool,
+) -> None:
+    conv = store.create_conversation(
+        runner_id="runner-native", labels={"omnigent.wrapper": "codex-native-ui"}
+    )
+    owner = store.record_session_observation(conv.id, "running", response_id="codex_turn-a")
+    assert owner is not None
+    assert common._session_status_cache.accept(conv.id, SessionProjection(owner, "running"))
+    original_flush = orchestration._flush_relay_text
+
+    async def fenced_flush(*args: Any, **kwargs: Any) -> Any:
+        common._interrupt_fenced_sessions.add(conv.id)
+        return await original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(orchestration, "_flush_relay_text", fenced_flush)
+    terminal: dict[str, Any] = {
+        "type": event_type,
+        "response": {"id": owner.response_id if owned else "resp_scaffold"},
+    }
+    if owned:
+        terminal["session_observation"] = owner.model_dump()
+    if event_type == "response.failed":
+        terminal["response"]["error"] = {
+            "code": "runner_error",
+            "message": "synthetic delivery failure",
+        }
+    processed, release_close = asyncio.Event(), asyncio.Event()
+    release_close.set()
+    try:
+        await orchestration._relay_runner_stream(
+            conv.id,
+            _Runner(
+                [
+                    {"type": "response.in_progress", "response": {"id": "resp_scaffold"}},
+                    {"type": "response.output_text.delta", "delta": "scaffold narration"},
+                    terminal,
+                    {
+                        "type": "session.status",
+                        "status": "failed" if event_type == "response.failed" else "idle",
+                        "response_id": "resp_scaffold",
+                    },
+                ],
+                processed,
+                release_close,
+            ),
+            store,
+            runner_id="runner-native",
+        )
+        assert store.get_session_observation(conv.id) == owner
+        assert (conv.id in common._interrupt_fenced_sessions) is (not owned)
+        items = store.list_items(conv.id).data
+        assert any(isinstance(item.data, MessageData) for item in items)
+        assert sum(item.type == "error" for item in items) == (event_type == "response.failed")
+    finally:
+        common._interrupt_fenced_sessions.discard(conv.id)
+
+
+@pytest.mark.asyncio
+async def test_native_relay_keeps_an_explicitly_owned_startup_failure(
+    store: SqlAlchemyConversationStore,
+) -> None:
+    conv = store.create_conversation(
+        runner_id="runner-native", labels={"omnigent.wrapper": "codex-native-ui"}
+    )
+    startup = store.begin_terminal_startup(conv.id, conv.session_observation, "startup-token")
+    assert startup is not None
+    processed, release_close = asyncio.Event(), asyncio.Event()
+    release_close.set()
+    await orchestration._relay_runner_stream(
+        conv.id,
+        _Runner(
+            [
+                {
+                    "type": "session.status",
+                    "status": "failed",
+                    "error": {"code": "native_terminal_start_failed", "message": "synthetic"},
+                    "session_observation": startup.model_dump(),
+                }
+            ],
+            processed,
+            release_close,
+        ),
+        store,
+        runner_id="runner-native",
+    )
+    current = store.get_conversation(conv.id)
+    assert current is not None and current.live_status == "failed"
+    assert not current.terminal_pending
+    assert current.labels["omnigent.last_task_error_code"] == "native_terminal_start_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("harness", ["kiro", "cursor", "goose", "qwen", "kimi", "hermes"])
+@pytest.mark.parametrize("newer_turn", [False, True], ids=["delivery-failed", "newer-turn"])
+@pytest.mark.parametrize("identified_by", ["wrapper", "harness"])
+async def test_pty_native_delivery_failure_keeps_its_exact_owner(
+    store: SqlAlchemyConversationStore,
+    harness: str,
+    newer_turn: bool,
+    identified_by: str,
+) -> None:
+    conv = store.create_conversation(
+        runner_id="runner-native",
+        labels={"omnigent.wrapper": f"{harness}-native-ui"} if identified_by == "wrapper" else {},
+        harness_override=f"{harness}-native" if identified_by == "harness" else None,
+    )
+    owner = store.record_session_observation(conv.id, "running")
+    assert owner is not None
+    assert common._session_status_cache.accept(conv.id, SessionProjection(owner, "running"))
+    error = {"code": "runner_error", "message": "synthetic terminal delivery refusal"}
+    processed, release_close = asyncio.Event(), asyncio.Event()
+    release_close.set()
+
+    class Frames(_Frames):
+        async def aiter_text(self) -> AsyncIterator[str]:
+            yield 'data: {"type":"response.in_progress","response":{"id":"resp_delivery"}}\n\n'
+            if newer_turn:
+                newer = store.record_session_observation(
+                    conv.id, "running", response_id="native_newer-turn"
+                )
+                assert newer is not None
+                assert common._session_status_cache.accept(
+                    conv.id, SessionProjection(newer, "running")
+                )
+            async for frame in super().aiter_text():
+                yield frame
+
+    class Runner(_Runner):
+        def stream(self, *_args: object, **_kwargs: object) -> _Frames:
+            return Frames(self.events, processed, release_close)
+
+    await orchestration._relay_runner_stream(
+        conv.id,
+        Runner(
+            [
+                {"type": "response.failed", "response": {"id": "resp_delivery", "error": error}},
+                {
+                    "type": "session.status",
+                    "status": "failed",
+                    "response_id": "resp_delivery",
+                    "error": error,
+                },
+            ],
+            processed,
+            release_close,
+        ),
+        store,
+        runner_id="runner-native",
+    )
+    current = store.get_conversation(conv.id)
+    assert current is not None
+    if newer_turn:
+        assert current.live_status == "running"
+        assert current.session_observation.response_id == "native_newer-turn"
+        assert "omnigent.last_task_error_code" not in current.labels
+    else:
+        assert current.live_status == "failed"
+        assert current.session_observation.response_id == "resp_delivery"
+        assert current.labels["omnigent.last_task_error_code"] == "runner_error"
+    assert sum(item.type == "error" for item in store.list_items(conv.id).data) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["response.completed", "response.failed"])
+@pytest.mark.parametrize("owned", [False, True], ids=["scaffold", "owned-terminal"])
+@pytest.mark.parametrize("newer_turn", [False, True], ids=["current", "newer-turn"])
+async def test_codex_scaffold_terminal_does_not_complete_an_intentional_stop(
+    store: SqlAlchemyConversationStore,
+    event_type: str,
+    owned: bool,
+    newer_turn: bool,
+) -> None:
+    conv = store.create_conversation(
+        runner_id="runner-native", labels={"omnigent.wrapper": "codex-native-ui"}
+    )
+    owner = store.record_session_observation(conv.id, "running", response_id="codex_turn-a")
+    assert owner is not None
+    assert common._session_status_cache.accept(conv.id, SessionProjection(owner, "running"))
+    terminal: dict[str, Any] = {
+        "type": event_type,
+        "response": {"id": owner.response_id if owned else "resp_delivery"},
+    }
+    if owned:
+        terminal["session_observation"] = owner.model_dump()
+    if newer_turn:
+        newer = store.record_session_observation(conv.id, "running", response_id="codex_turn-b")
+        assert newer is not None
+        assert common._session_status_cache.accept(conv.id, SessionProjection(newer, "running"))
+    processed, release_close = asyncio.Event(), asyncio.Event()
+    relay = asyncio.create_task(
+        orchestration._relay_runner_stream(
+            conv.id,
+            _Runner(
+                [
+                    {"type": "response.in_progress", "response": {"id": "resp_delivery"}},
+                    terminal,
+                ],
+                processed,
+                release_close,
+            ),
+            store,
+            runner_id="runner-native",
+        )
+    )
+    handle = common._RelayHandle("runner-native", relay, asyncio.Event())
+    common._runner_relay_tasks[conv.id] = handle
+    common._intentional_stop_sessions[conv.id] = "runner-native"
+    try:
+        await asyncio.wait_for(processed.wait(), 10)
+        assert handle.intentional_stop_turn_ended is (owned and not newer_turn)
+        assert common._intentional_stop_sessions[conv.id] == "runner-native"
+        if newer_turn:
+            assert store.get_session_observation(conv.id) == newer
+    finally:
+        release_close.set()
+        await asyncio.wait_for(relay, 10)
+        common._runner_relay_tasks.pop(conv.id, None)
+        common._intentional_stop_sessions.pop(conv.id, None)
+
+
+@pytest.mark.asyncio
+async def test_real_native_running_after_scaffold_idle_retires_an_older_stop(
+    store: SqlAlchemyConversationStore,
+) -> None:
+    conv = store.create_conversation(
+        runner_id="runner-native", labels={"omnigent.wrapper": "codex-native-ui"}
+    )
+    owner = store.record_session_observation(conv.id, "running", response_id="codex_turn-a")
+    assert owner is not None
+    assert common._session_status_cache.accept(conv.id, SessionProjection(owner, "running"))
+    processed, release_close = asyncio.Event(), asyncio.Event()
+    relay = asyncio.create_task(
+        orchestration._relay_runner_stream(
+            conv.id,
+            _Runner(
+                [
+                    {"type": "response.in_progress", "response": {"id": "resp_delivery"}},
+                    {"type": "session.status", "status": "idle"},
+                    {"type": "session.status", "status": "running"},
+                ],
+                processed,
+                release_close,
+            ),
+            store,
+            runner_id="runner-native",
+        )
+    )
+    handle = common._RelayHandle(
+        "runner-native", relay, asyncio.Event(), intentional_stop_turn_ended=True
+    )
+    common._runner_relay_tasks[conv.id] = handle
+    common._intentional_stop_sessions[conv.id] = "runner-native"
+    try:
+        await asyncio.wait_for(processed.wait(), 10)
+        current = store.get_session_observation(conv.id)
+        assert current is not None and current.status == "running"
+        assert handle.running_event_count == 1
+        assert not handle.intentional_stop_turn_ended
+        assert conv.id not in common._intentional_stop_sessions
+    finally:
+        release_close.set()
+        await asyncio.wait_for(relay, 10)
+        common._runner_relay_tasks.pop(conv.id, None)
+        common._intentional_stop_sessions.pop(conv.id, None)
 
 
 @pytest.mark.asyncio

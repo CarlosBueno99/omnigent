@@ -8983,6 +8983,12 @@ async def _relay_runner_stream(
     if adoption is not None and runner_id is not None and adoption.runner_id != runner_id:
         return
     owner = adoption.session_observation if adoption is not None else None
+    native_agent = (
+        await asyncio.to_thread(_native_coding_agent_for_session, adoption)
+        if adoption is not None
+        else None
+    )
+    callback_owned_turns = native_agent is not None and native_agent.key in {"codex", "pi"}
     loop = asyncio.get_running_loop()
     deadline: float | None = None
     outage_started: float | None = None
@@ -9036,6 +9042,7 @@ async def _relay_runner_stream(
                 runner_id=runner_id,
                 on_stream_ready=_on_stream_ready,
                 owner=owner,
+                callback_owned_turns=callback_owned_turns,
             )
             return
         except _RelayTransportLost as lost:
@@ -9259,6 +9266,7 @@ async def _relay_runner_stream_once(
     runner_id: str | None = None,
     on_stream_ready: Callable[[], None] | None = None,
     owner: SessionObservation | None = None,
+    callback_owned_turns: bool = False,
 ) -> None:
     """
     Subscribe to the runner's SSE stream and relay events locally.
@@ -9290,6 +9298,8 @@ async def _relay_runner_stream_once(
     :param on_stream_ready: Optional callback after this attempt's first
         ``session.heartbeat``. The supervisor uses it for one recovery row;
         it is synchronous and does not create a helper task.
+    :param callback_owned_turns: Codex/Pi callbacks name native turns independently
+        of the scaffold response IDs used for message delivery.
     """
     if (
         owner is None
@@ -9301,6 +9311,10 @@ async def _relay_runner_stream_once(
             if runner_id is not None and observed.runner_id != runner_id:
                 return
             owner = observed
+    if owner is not None:
+        _session_status_cache.accept(
+            session_id, SessionProjection(owner, owner.status or "idle"), published=False
+        )
     text_acc: list[str] = []
     current_response_id: str | None = None
     current_observation = owner
@@ -9399,29 +9413,14 @@ async def _relay_runner_stream_once(
                             ready.set()
                         continue
 
-                    _record_native_input_lifecycle(session_id, event)
-
+                    # Pane repaints already have terminal.activity; they cannot own a turn.
                     if (
-                        evt_type in _TERMINAL_RESPONSE_EVENT_TYPES
-                        or (evt_type == "session.status" and event.get("status") == "running")
-                    ) and _relay_projection_is_current(session_id, current_observation):
-                        relay = _runner_relay_tasks.get(session_id)
-                        if relay is not None and relay.task is asyncio.current_task():
-                            if evt_type in _TERMINAL_RESPONSE_EVENT_TYPES:
-                                relay.intentional_stop_turn_ended = (
-                                    runner_id is not None
-                                    and _intentional_stop_sessions.get(session_id) == runner_id
-                                )
-                            else:
-                                relay.running_event_count += 1
-                                # Running can resume the same turn, including after PTY idle.
-                                # Only completed stopped work makes its marker stale.
-                                if (
-                                    relay.intentional_stop_turn_ended
-                                    and _intentional_stop_sessions.get(session_id) == runner_id
-                                ):
-                                    _intentional_stop_sessions.pop(session_id, None)
-                                relay.intentional_stop_turn_ended = False
+                        evt_type == "session.status"
+                        and event.get("status_source") == "pane_activity"
+                    ):
+                        continue
+
+                    _record_native_input_lifecycle(session_id, event)
 
                     if evt_type == "session.created":
                         child_id = event.get("child_session_id")
@@ -9454,6 +9453,8 @@ async def _relay_runner_stream_once(
                         known_response = (
                             raw_response_id
                             if isinstance(raw_response_id, str)
+                            else None
+                            if callback_owned_turns
                             else current_response_id
                         )
                         known_owner = response_observations.get(known_response or "")
@@ -9471,6 +9472,17 @@ async def _relay_runner_stream_once(
                                 else _capture_status_observation(session_id, owner)
                             )
                         status = event.get("status", "")
+                        if (
+                            callback_owned_turns
+                            and raw_status_owner is None
+                            and isinstance(raw_response_id, str)
+                            and raw_response_id
+                            and (
+                                status_owner is None or raw_response_id != status_owner.response_id
+                            )
+                        ):
+                            # Native callbacks own terminal turns; scaffold IDs name delivery only.
+                            continue
                         accepted, committed = False, None
                         if status:
                             # Forward the runner's failure detail on a
@@ -9587,6 +9599,16 @@ async def _relay_runner_stream_once(
                         if status == "running":
                             if _relay_projection_is_current(session_id, committed):
                                 _interrupt_fenced_sessions.discard(session_id)
+                                relay = _runner_relay_tasks.get(session_id)
+                                if relay is not None and relay.task is asyncio.current_task():
+                                    relay.running_event_count += 1
+                                    # Only completed stopped work makes its marker stale.
+                                    if (
+                                        relay.intentional_stop_turn_ended
+                                        and _intentional_stop_sessions.get(session_id) == runner_id
+                                    ):
+                                        _intentional_stop_sessions.pop(session_id, None)
+                                    relay.intentional_stop_turn_ended = False
                             if session_live_state.conversation_store() is None:
                                 text_acc.clear()
                             # A new turn invalidates any deny marker a prior
@@ -9664,11 +9686,19 @@ async def _relay_runner_stream_once(
                             turn_owner = response_observations.get(_rid)
                             turn_predecessor = None
                             if turn_owner is None:
-                                turn_owner, turn_predecessor = _capture_status_observation(
-                                    session_id, owner
-                                )
+                                if callback_owned_turns:
+                                    turn_owner = owner
+                                    if turn_owner is not None:
+                                        response_observations[_rid] = turn_owner
+                                else:
+                                    turn_owner, turn_predecessor = _capture_status_observation(
+                                        session_id, owner
+                                    )
                             current_observation = turn_owner
-                            if session_live_state.conversation_store() is not None:
+                            if (
+                                session_live_state.conversation_store() is not None
+                                and not callback_owned_turns
+                            ):
                                 status_write = _publish_status(
                                     session_id,
                                     "running",
@@ -9680,7 +9710,7 @@ async def _relay_runner_stream_once(
                                 if accepted and committed is not None:
                                     current_observation = committed
                                     response_observations[_rid] = committed
-                            else:
+                            elif session_live_state.conversation_store() is None:
                                 _session_active_response_cache[session_id] = _rid
                             # Keep the turn identity across transport retries until final status.
                         _model = resp_obj.get("model")
@@ -10128,6 +10158,8 @@ async def _relay_runner_stream_once(
                     if evt_type in _TERMINAL_RESPONSE_EVENT_TYPES:
                         terminal_owner = current_observation
                         raw_terminal_owner = event.get("session_observation")
+                        if callback_owned_turns and raw_terminal_owner is None:
+                            terminal_owner = None
                         if raw_terminal_owner is not None:
                             try:
                                 terminal_owner = SessionObservation.model_validate(
@@ -10141,6 +10173,12 @@ async def _relay_runner_stream_once(
                             and _relay_projection_is_current(session_id, terminal_owner)
                         ):
                             _interrupt_fenced_sessions.discard(session_id)
+                            relay = _runner_relay_tasks.get(session_id)
+                            if relay is not None and relay.task is asyncio.current_task():
+                                relay.intentional_stop_turn_ended = (
+                                    runner_id is not None
+                                    and _intentional_stop_sessions.get(session_id) == runner_id
+                                )
 
                     if (
                         evt_type.startswith("response.")

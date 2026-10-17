@@ -1663,13 +1663,22 @@ def create_runner_app(
         session_id: str,
         status: str,
         blocked_on: str | None = None,
+        *,
+        pane_activity: bool = False,
     ) -> None:
         event: dict[str, object] = {"type": "session.status", "status": status}
+        if pane_activity:
+            event["status_source"] = "pane_activity"
         if blocked_on is not None:
             event["blocked_on"] = blocked_on
         _publish_event(session_id, event)
 
-    resource_registry.set_session_status_publisher(_publish_session_status)
+    resource_registry.set_session_status_publisher(
+        _publish_session_status,
+        pane_activity_publisher=lambda session_id, status, blocked_on: _publish_session_status(
+            session_id, status, blocked_on, pane_activity=True
+        ),
+    )
 
     def _format_terminal_command_for_failure(event: TerminalExitEvent) -> str:
         if event.command is None:
@@ -3921,7 +3930,7 @@ def create_runner_app(
             _interrupted_sessions.discard(conv_id)
             _append_cancellation_items(conv_id)
             if not has_buffered and not _suppress_status:
-                _publish_turn_status(conv_id, "idle")
+                _publish_turn_status(conv_id, "idle", response_id=owner_response_id)
         elif error is not None:
             normalized_error = _normalize_turn_error(error)
             if not _suppress_status:
@@ -3942,7 +3951,11 @@ def create_runner_app(
                     and e.status in ("launching", "running", "waiting")
                     for c in children
                 )
-                _publish_turn_status(conv_id, "waiting" if has_running_children else "idle")
+                _publish_turn_status(
+                    conv_id,
+                    "waiting" if has_running_children else "idle",
+                    response_id=owner_response_id,
+                )
         if was_interrupted:
             if conv_id in _desynced_sessions and not has_buffered:
                 # This turn was torn down by desync recovery (which sets the

@@ -8,7 +8,7 @@ from functools import wraps
 from threading import RLock
 from typing import ParamSpec, TypeVar
 
-from omnigent.db.workspace_cache import WorkspaceScopedCache
+from omnigent.db.workspace_cache import WorkspaceScopedCache, WorkspaceScopedSet
 from omnigent.entities.conversation import Conversation
 from omnigent.entities.session_observation import (
     SessionObservation,
@@ -43,11 +43,13 @@ class SessionStatusCache(WorkspaceScopedCache[str, str]):
         super().__init__()
         self._lock = RLock()
         self._projections: WorkspaceScopedCache[str, SessionProjection] = WorkspaceScopedCache()
+        self._hydrated_only: WorkspaceScopedSet[str] = WorkspaceScopedSet()
 
     def __setitem__(self, key: str, value: str) -> None:
         with self._lock:
             if self._projections.get(key) is None:
                 super().__setitem__(key, value)
+                self._hydrated_only.discard(key)
 
     def synchronized(self, function: Callable[_P, _R]) -> Callable[_P, _R]:
         """Keep a projection and its companion live caches in one critical section."""
@@ -59,12 +61,13 @@ class SessionStatusCache(WorkspaceScopedCache[str, str]):
 
         return guarded
 
-    def accept(self, key: str, projection: SessionProjection) -> bool:
+    def accept(self, key: str, projection: SessionProjection, *, published: bool = True) -> bool:
         with self._lock:
-            return self._accept(key, projection)
+            return self._accept(key, projection, published=published)
 
-    def _accept(self, key: str, projection: SessionProjection) -> bool:
+    def _accept(self, key: str, projection: SessionProjection, *, published: bool) -> bool:
         previous = self._projections.get(key)
+        was_missing = super().get(key) is None
         if previous is not None:
             session_stream.learn_observation(
                 key, previous.observation, previous.offline_episode_id
@@ -82,7 +85,16 @@ class SessionStatusCache(WorkspaceScopedCache[str, str]):
             return False
         self._projections[key] = projection
         super().__setitem__(key, projection.status)
+        if published:
+            self._hydrated_only.discard(key)
+        elif was_missing or previous != projection:
+            self._hydrated_only.add(key)
         return True
+
+    def has_live_status(self, key: str) -> bool:
+        """A hydrated database value is not evidence of a live local publisher."""
+        with self._lock:
+            return super().get(key) is not None and key not in self._hydrated_only
 
     def projection(self, key: str) -> SessionProjection | None:
         with self._lock:
@@ -101,12 +113,14 @@ class SessionStatusCache(WorkspaceScopedCache[str, str]):
                 conversation.live_status or "idle",
                 decision.episode_id if decision is not None else None,
             ),
+            published=False,
         )
 
     def clear(self) -> None:
         with self._lock:
             super().clear()
             self._projections.clear()
+            self._hydrated_only.clear()
 
 
 class SessionTerminalPendingCache(WorkspaceScopedCache[str, bool]):

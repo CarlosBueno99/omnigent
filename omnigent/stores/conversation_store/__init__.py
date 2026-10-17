@@ -1646,9 +1646,9 @@ class ConversationStore(ABC):
 
     @abstractmethod
     def settle_orphaned_session_observation(
-        self, conversation_id: str, stale_before: int
+        self, conversation_id: str, stale_before: int, expected: SessionObservation | None = None
     ) -> SessionObservation | None:
-        """Settle stale liveness and return its committed revision."""
+        """Settle stale liveness for the captured lifecycle and return its revision."""
         ...
 
     @abstractmethod

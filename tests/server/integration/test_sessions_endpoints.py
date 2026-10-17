@@ -5827,6 +5827,7 @@ async def test_native_failures_are_coded_live_and_after_reload(
     status_extra: dict[str, str],
 ) -> None:
     """Native failures keep their diagnosis and raw detail through status and persistence."""
+    monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND", raising=False)
     published: list[dict[str, Any]] = []
     monkeypatch.setattr(
         "omnigent.server.routes.sessions.session_stream.publish",

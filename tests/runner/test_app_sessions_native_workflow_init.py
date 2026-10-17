@@ -32,6 +32,8 @@ from omnigent.runner.app import (
 )
 from omnigent.runner.native import NativeLaunchContext, _resolve_native_spawn_env
 from omnigent.runner.resource_registry import (
+    CLAUDE_NATIVE_TERMINAL_ROLE,
+    PI_NATIVE_TERMINAL_ROLE,
     SessionResourceRegistry,
 )
 from omnigent.spec.types import AgentSpec, ExecutorSpec, LocalToolInfo
@@ -47,7 +49,84 @@ from tests.runner.conftest import (
     _ScriptedHarnessClient,
     _sse,
 )
-from tests.runner.helpers import NullServerClient
+from tests.runner.helpers import NullServerClient, make_test_terminal_instance
+
+
+@pytest.mark.asyncio
+async def test_runner_pane_status_after_init_response_keeps_its_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from omnigent.terminals import TerminalRegistry
+
+    session_id, agent_id = uuid.uuid4().hex, uuid.uuid4().hex
+    registry = SessionResourceRegistry(terminal_registry=TerminalRegistry())
+    spec = AgentSpec(
+        spec_version=1,
+        name="native-status-provenance",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "pi-native"}),
+    )
+
+    async def resolve(*_args: Any, **_kwargs: Any) -> AgentSpec:
+        return spec
+
+    async def launch(ctx: NativeLaunchContext) -> SessionResourceView:
+        return SessionResourceView(
+            id="terminal_pi_main", type="terminal", session_id=ctx.session_id, name="pi:main"
+        )
+
+    monkeypatch.setattr("omnigent.runner.native._launch_pi", launch)
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        spec_resolver=resolve,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        resource_registry=registry,
+    )
+    async with _runner_client(app) as client:
+        response = await client.post(
+            "/v1/sessions", json={"session_id": session_id, "agent_id": agent_id}
+        )
+        assert response.status_code == 201
+        queue = app.state.session_event_queues[session_id]
+        while not queue.empty():
+            queue.get_nowait()
+        instance = make_test_terminal_instance("pi", "main", tmp_path)
+        watcher = Mock()
+        monkeypatch.setattr(instance, "start_idle_watcher_thread", watcher)
+        await registry.observe_required_terminal(
+            session_id, "pi", "main", instance, resource_role=PI_NATIVE_TERMINAL_ROLE
+        )
+        watcher.call_args.kwargs["on_activity"]()
+        watcher.call_args.kwargs["on_idle"]()
+        await asyncio.sleep(0)
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        statuses = [event for event in events if event["type"] == "session.status"]
+        assert [event["status"] for event in statuses] == ["running", "idle"]
+        assert all(event.get("status_source") == "pane_activity" for event in statuses)
+        assert any(event["type"] == "session.terminal.activity" for event in events)
+
+        file_callbacks: list[Any] = []
+
+        def build_poller(**kwargs: Any) -> Any:
+            file_callbacks.append(kwargs["on_status"])
+            return SimpleNamespace(active=True)
+
+        monkeypatch.setattr(registry, "_build_claude_native_status_poller", build_poller)
+        claude = make_test_terminal_instance("claude", "main", tmp_path)
+        monkeypatch.setattr(claude, "start_idle_watcher_thread", Mock())
+        await registry.observe_required_terminal(
+            session_id, "claude", "main", claude, resource_role=CLAUDE_NATIVE_TERMINAL_ROLE
+        )
+        file_callbacks[0]("running", "permission prompt")
+        await asyncio.sleep(0)
+        event = queue.get_nowait()
+        assert event["type"] == "session.status" and event["status"] == "running"
+        assert event.get("blocked_on") == "permission prompt"
+        assert "status_source" not in event
 
 
 @pytest.mark.asyncio

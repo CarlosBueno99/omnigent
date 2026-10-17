@@ -1800,6 +1800,7 @@ def register_core_routes(
         # here and never reaches the probe. Only stamp-stale candidates fall
         # through to liveness_lookup, which additionally rules out a runner
         # whose tunnel is live on THIS replica before we settle.
+        reconciled_ids: set[str] = set()
         if liveness_lookup is not None:
             orphan_suspects = [
                 conv
@@ -1807,7 +1808,7 @@ def register_core_routes(
                 if conv.agent_id is not None
                 and conv.runner_id is not None
                 and conv.live_status in ("running", "waiting")
-                and _session_status_cache.get(conv.id) is None
+                and not _session_status_cache.has_live_status(conv.id)
                 and not runner_seen_is_fresh(conv.runner_last_seen)
                 and (
                     permission_store is None
@@ -1830,12 +1831,24 @@ def register_core_routes(
                     # stale past the TTL), so this fires for a genuinely
                     # orphaned runner, never one mid-reconnect within grace.
                     if result is not None and not result.runner_online:
-                        await asyncio.to_thread(
+                        reconciled = await asyncio.to_thread(
                             reconcile_orphaned_running_status,
                             conv.id,
                             conversation_store,
                             int(time.time()) - RUNNER_LIVENESS_TTL_S,
+                            owner=conv.session_observation,
                         )
+                        if reconciled:
+                            reconciled_ids.add(conv.id)
+        if reconciled_ids:
+            refreshed = await asyncio.to_thread(
+                conversation_store.get_conversations, list(reconciled_ids)
+            )
+            page.data = [
+                refreshed[conv.id] if conv.id in reconciled_ids else conv
+                for conv in page.data
+                if conv.id not in reconciled_ids or conv.id in refreshed
+            ]
         # Build items after reconciliation so each settled row reads its new
         # status straight from the (now-updated) cache.
         items: list[SessionListItem] = [

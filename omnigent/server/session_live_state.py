@@ -392,6 +392,12 @@ def persist_status_observation(
         return None
     previous = _pending_observations.get(session_id)
     explicit_response_id = response_id
+    repeats_captured_idle = (
+        status == "idle" and response_id is None and owner is not None and owner.status == "idle"
+    )
+    # An idle resync reasserts only its captured terminal result.
+    if repeats_captured_idle and owner is not None:
+        response_id = owner.response_id
     # PTY activity carries no turn ID and must not erase a known busy turn.
     if status in {"running", "waiting", "failed"} and response_id is None:
         response_id = captured_response_id(status, owner, predecessor)
@@ -461,7 +467,11 @@ def persist_status_observation(
                 if expected is None:
                     return None
                 if not resolved_predecessor:
-                    queued = resolved_observation(predecessor) if predecessor is not None else None
+                    queued = (
+                        resolved_observation(predecessor)
+                        if predecessor is not None and not repeats_captured_idle
+                        else None
+                    )
                     if (
                         queued is not None
                         and predecessor is not None

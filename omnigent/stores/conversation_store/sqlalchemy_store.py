@@ -4285,7 +4285,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         return self.settle_orphaned_session_observation(conversation_id, stale_before) is not None
 
     def settle_orphaned_session_observation(
-        self, conversation_id: str, stale_before: int
+        self, conversation_id: str, stale_before: int, expected: SessionObservation | None = None
     ) -> SessionObservation | None:
         """Settle stale liveness and return the exact committed idle observation."""
         allowed = {encode_session_live_status("running"), encode_session_live_status("waiting")}
@@ -4298,6 +4298,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             )
             if (
                 meta is None
+                or (expected is not None and _session_observation(meta) != expected)
                 or meta.runner_id is None
                 or meta.live_status not in allowed
                 or (meta.runner_last_seen is not None and meta.runner_last_seen >= stale_before)
