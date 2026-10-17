@@ -202,10 +202,9 @@ APPROVAL_WAIT_MARKER_REFRESH_S = 60.0
 # reads stale; a hook killed mid-wait leaves a marker that expires on its own.
 APPROVAL_WAIT_MARKER_TTL_S = 420.0
 _CONFIG_FILE = "bridge.json"
-# ``bridge.json`` key holding the epoch time a ``/clear`` rotation began. Pane
-# input is refused while it is set, so a message sent meanwhile cannot land in
-# the replacement conversation before the hook names it. A marker older than
-# the cap is ignored so a hook killed mid-rotation cannot refuse the pane for good.
+# ``bridge.json`` key: epoch time a ``/clear`` rotation began. Pane input is
+# refused while it is set so nothing lands in the unnamed replacement; a marker
+# older than the cap is ignored so a hook killed mid-rotation cannot lock the pane.
 _ACTIVE_SESSION_ROTATION_KEY = "active_session_rotation_started_at"
 ACTIVE_SESSION_ROTATION_MAX_AGE_S = 120.0
 _SERVER_FILE = "server.json"
@@ -2264,14 +2263,15 @@ def write_active_session_id(bridge_dir: Path, session_id: str) -> None:
     :returns: None.
     :raises RuntimeError: If the bridge config does not exist.
     """
-    config = _read_json_file(bridge_dir / _CONFIG_FILE)
-    if not config:
-        raise RuntimeError(f"bridge config missing: {bridge_dir / _CONFIG_FILE}")
-    config["active_session_id"] = session_id
-    config["conversation_id"] = session_id
-    config.pop(_ACTIVE_SESSION_ROTATION_KEY, None)
-    config["updated_at"] = time.time()
-    _write_json_file(bridge_dir / _CONFIG_FILE, config)
+    with _bridge_config_write_lock(bridge_dir):
+        config = _read_json_file(bridge_dir / _CONFIG_FILE)
+        if not config:
+            raise RuntimeError(f"bridge config missing: {bridge_dir / _CONFIG_FILE}")
+        config["active_session_id"] = session_id
+        config["conversation_id"] = session_id
+        config.pop(_ACTIVE_SESSION_ROTATION_KEY, None)
+        config["updated_at"] = time.time()
+        _write_json_file(bridge_dir / _CONFIG_FILE, config)
 
 
 def begin_active_session_rotation(bridge_dir: Path) -> None:
@@ -2287,11 +2287,12 @@ def begin_active_session_rotation(bridge_dir: Path) -> None:
     :returns: None.
     :raises RuntimeError: If the bridge config does not exist.
     """
-    config = _read_json_file(bridge_dir / _CONFIG_FILE)
-    if not config:
-        raise RuntimeError(f"bridge config missing: {bridge_dir / _CONFIG_FILE}")
-    config[_ACTIVE_SESSION_ROTATION_KEY] = time.time()
-    _write_json_file(bridge_dir / _CONFIG_FILE, config)
+    with _bridge_config_write_lock(bridge_dir):
+        config = _read_json_file(bridge_dir / _CONFIG_FILE)
+        if not config:
+            raise RuntimeError(f"bridge config missing: {bridge_dir / _CONFIG_FILE}")
+        config[_ACTIVE_SESSION_ROTATION_KEY] = time.time()
+        _write_json_file(bridge_dir / _CONFIG_FILE, config)
 
 
 def abandon_active_session_rotation(bridge_dir: Path) -> None:
@@ -2301,10 +2302,11 @@ def abandon_active_session_rotation(bridge_dir: Path) -> None:
     :param bridge_dir: Bridge directory path.
     :returns: None.
     """
-    config = _read_json_file(bridge_dir / _CONFIG_FILE)
-    if config.pop(_ACTIVE_SESSION_ROTATION_KEY, None) is None:
-        return
-    _write_json_file(bridge_dir / _CONFIG_FILE, config)
+    with _bridge_config_write_lock(bridge_dir):
+        config = _read_json_file(bridge_dir / _CONFIG_FILE)
+        if config.pop(_ACTIVE_SESSION_ROTATION_KEY, None) is None:
+            return
+        _write_json_file(bridge_dir / _CONFIG_FILE, config)
 
 
 def read_permission_hook_config(bridge_dir: Path) -> _JsonObject:

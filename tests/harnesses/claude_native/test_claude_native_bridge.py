@@ -10875,6 +10875,32 @@ def test_a_pending_clear_rotation_refuses_input_until_the_replacement_owner_is_n
     assert "active_session_rotation_started_at" not in (bridge_dir / "bridge.json").read_text()
 
 
+def test_owner_and_rotation_marker_writers_take_the_bridge_config_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook's marker writes and the owner rotation must not lose each other's update."""
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    (bridge_dir / "bridge.json").write_text('{"active_session_id": "conv_old"}')
+    locked: list[str] = []
+    real_lock = claude_native_bridge._bridge_config_write_lock
+
+    @contextlib.contextmanager
+    def recording_lock(directory: Path) -> Iterator[None]:
+        with real_lock(directory):
+            locked.append("held")
+            yield
+        locked.append("released")
+
+    monkeypatch.setattr(claude_native_bridge, "_bridge_config_write_lock", recording_lock)
+
+    claude_native_bridge.begin_active_session_rotation(bridge_dir)
+    claude_native_bridge.abandon_active_session_rotation(bridge_dir)
+    claude_native_bridge.write_active_session_id(bridge_dir, "conv_new")
+
+    assert locked == ["held", "released"] * 3
+    assert claude_native_bridge.read_active_session_id(bridge_dir) == "conv_new"
+
+
 def test_an_abandoned_or_stale_clear_rotation_reopens_pane_input(tmp_path: Path) -> None:
     """A failed or killed rotation must not refuse the pane for good."""
     bridge_dir = _picker_bridge_dir(tmp_path)
