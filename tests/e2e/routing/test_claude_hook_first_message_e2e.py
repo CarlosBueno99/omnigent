@@ -18,8 +18,8 @@ What is scored:
   twice means the replay itself was routed again.
 * **The switch actually lands.** The apply layer types ``/model <id>``, so the
   pane must report the switch before the replay runs. Claude Code answers that
-  form by also rewriting the ``model`` key in the developer's own
-  ``~/.claude/settings.json`` — an accepted trade-off — so everything *else* in
+  form by also saving the ``model`` key in the developer's own
+  ``~/.claude/settings.json``, which the bridge restores; everything *else* in
   that file must be unchanged.
 * **One decision, one turn.** A leaked replay shows up as two user messages for
   one thing typed.

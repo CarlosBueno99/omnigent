@@ -10838,9 +10838,9 @@ def test_a_model_switch_types_the_argument_form_and_confirms(
     """
     A model switch is ``/model <id>`` plus the confirm Enter.
 
-    Accepted trade-off: the argument form also saves the pick as the person's
-    global default for new sessions. The interactive picker avoided that write
-    but needed ~35s of screen-scraping automation to drive.
+    The argument form also saves the pick as the person's global default for
+    new sessions, which ``inject_model_command`` undoes. The interactive picker
+    avoided that write but needed ~35s of screen-scraping automation to drive.
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
     dialog = "  Switch model?\n  This will invalidate the prompt cache.\n"
