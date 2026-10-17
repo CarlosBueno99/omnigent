@@ -44,8 +44,10 @@ from omnigent.harnesses.claude_native.bridge import (
     _is_box_rule,
     _JsonlRecord,
     _occupying_surface,
+    _session_user_settings_path,
     augment_claude_args,
     claude_global_config_path,
+    claude_user_settings_path,
     count_hook_events,
     display_cost_approval_popup,
     ensure_claude_workspace_trusted,
@@ -5944,7 +5946,7 @@ def test_a_failed_restore_still_reports_the_switch(
     with caplog.at_level("WARNING", logger=claude_native_bridge.__name__):
         before = claude_native_bridge.inject_model_command(tmp_path / "bridge", model_arg="sonnet")
 
-    assert before == "opus"
+    assert before.value == "opus"
     assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "sonnet"}
     assert "could not restore the default model" in caplog.text
     assert list(settings.parent.glob(".settings.json.*")) == []
@@ -5994,6 +5996,204 @@ def test_concurrent_switches_never_snapshot_each_others_save(
 
     assert errors == []
     assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
+
+
+def _pending_switches_file(tmp_path: Path) -> Path:
+    return tmp_path / ".locks" / "claude-default-model.pending.json"
+
+
+@pytest.mark.parametrize("first_restored", ["first", "second"])
+def test_queued_switches_in_two_sessions_keep_the_users_default_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+    first_restored: str,
+) -> None:
+    """A switch typed while another session's queued save is on disk still restores the default."""
+    settings = _isolate_claude_user_settings
+    settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+
+    def _claude_pane(_bridge_dir: Path, *, command: str, **_kwargs: object) -> None:
+        settings.write_text(json.dumps({"model": command.split()[1]}), encoding="utf-8")
+
+    monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _claude_pane)
+    switches = {
+        name: (
+            tmp_path / name,
+            model_arg,
+            claude_native_bridge.inject_model_command(
+                tmp_path / name, model_arg=model_arg, defer_restore=True
+            ),
+        )
+        for name, model_arg in (("first", "sonnet"), ("second", "haiku"))
+    }
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "haiku"}
+
+    for name in (first_restored, *(name for name in switches if name != first_restored)):
+        bridge_dir, model_arg, before = switches[name]
+        claude_native_bridge.restore_default_model(bridge_dir, before, model_arg)
+
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
+    assert not _pending_switches_file(tmp_path).exists()
+
+
+def test_a_switch_waits_for_its_own_save_behind_a_queued_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+) -> None:
+    """Another session's queued save landing first does not end the wait for this one's."""
+    settings = _isolate_claude_user_settings
+    settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    monkeypatch.setattr(claude_native_bridge, "_DEFAULT_MODEL_SAVE_WAIT_S", 5.0)
+    late_saves: list[threading.Timer] = []
+
+    def _claude_pane(bridge_dir: Path, *, command: str, **_kwargs: object) -> None:
+        if bridge_dir.name == "idle":
+            # The busy session's queued switch lands first; this one saves a moment later.
+            settings.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+            late = threading.Timer(
+                0.3, lambda: settings.write_text(json.dumps({"model": "haiku"}), encoding="utf-8")
+            )
+            late_saves.append(late)
+            late.start()
+
+    monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _claude_pane)
+    busy = claude_native_bridge.inject_model_command(
+        tmp_path / "busy", model_arg="sonnet", defer_restore=True
+    )
+
+    claude_native_bridge.inject_model_command(tmp_path / "idle", model_arg="haiku")
+    for late in late_saves:
+        late.join(timeout=5)
+    claude_native_bridge.restore_default_model(
+        tmp_path / "busy", busy, "sonnet", wait_for_save=False
+    )
+
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
+
+
+@pytest.mark.parametrize(("age_s", "after"), [(60.0, "sonnet"), (3600.0, "haiku")])
+def test_a_pending_switch_record_expires(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+    age_s: float,
+    after: str,
+) -> None:
+    """A pending switch counts until it is stale, so one a crashed runner left expires."""
+    settings = _isolate_claude_user_settings
+    settings.write_text(json.dumps({"model": "haiku"}), encoding="utf-8")
+    pending_file = _pending_switches_file(tmp_path)
+    pending_file.parent.mkdir(mode=0o700)
+    pending_file.write_text(
+        json.dumps(
+            {
+                str(settings): {
+                    "switches": {"crashed": {"model": "haiku", "at": time.time() - age_s}},
+                    "default": "sonnet",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _claude_pane(_bridge_dir: Path, *, command: str, **_kwargs: object) -> None:
+        settings.write_text(json.dumps({"model": command.split()[1]}), encoding="utf-8")
+
+    monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _claude_pane)
+
+    claude_native_bridge.inject_model_command(tmp_path / "bridge", model_arg="sonnet")
+
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": after}
+
+
+@pytest.mark.parametrize(
+    ("concurrent_write", "after"),
+    [
+        # Another writer changed an unrelated key: the restore keeps it.
+        ({"model": "sonnet", "theme": "light"}, {"model": "opus", "theme": "light"}),
+        # Another writer picked a new default: left alone.
+        ({"model": "haiku"}, {"model": "haiku"}),
+    ],
+)
+def test_restore_redoes_its_edit_when_the_file_changes_before_the_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+    concurrent_write: dict[str, str],
+    after: dict[str, str],
+) -> None:
+    """A write landing after the restore read the file is not replaced by the stale copy."""
+    settings = _isolate_claude_user_settings
+    settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    chmod = os.chmod
+    pending_writes = [concurrent_write]
+
+    def _chmod_then_another_writer_saves(path: Any, mode: int, **kwargs: Any) -> None:
+        chmod(path, mode, **kwargs)
+        if pending_writes and Path(path).name.startswith(".settings.json."):
+            settings.write_text(json.dumps(pending_writes.pop()), encoding="utf-8")
+
+    def _claude_pane(_bridge_dir: Path, *, command: str, **_kwargs: object) -> None:
+        settings.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+
+    monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _claude_pane)
+    monkeypatch.setattr(claude_native_bridge.os, "chmod", _chmod_then_another_writer_saves)
+
+    claude_native_bridge.inject_model_command(tmp_path / "bridge", model_arg="sonnet")
+
+    assert pending_writes == []
+    assert json.loads(settings.read_text(encoding="utf-8")) == after
+
+
+@pytest.mark.parametrize(
+    ("launch_env", "expected"),
+    [
+        ({"HOME": "/home/user"}, "/home/user/.claude/settings.json"),
+        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/claude"}, "/srv/claude/settings.json"),
+        # Joined like Claude's ``path.join``: no ``~`` expansion, relative to its cwd.
+        (
+            {"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "~/cfg/../claude"},
+            "/work/~/claude/settings.json",
+        ),
+        ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": ""}, "/work/settings.json"),
+    ],
+)
+def test_claude_user_settings_path_follows_the_panes_launch_env(
+    launch_env: dict[str, str], expected: str
+) -> None:
+    """The settings file comes from the pane's own environment and working directory."""
+    assert claude_user_settings_path(Path("/work"), launch_env) == Path(expected)
+
+
+def test_a_switch_keeps_the_default_in_the_settings_file_recorded_at_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+) -> None:
+    """A pane launched with its own config dir keeps its default there, not in the runner's."""
+    runner_settings = _isolate_claude_user_settings
+    runner_settings.write_text(json.dumps({"model": "haiku"}), encoding="utf-8")
+    pane_settings = tmp_path / "launch-claude" / "settings.json"
+    pane_settings.parent.mkdir()
+    pane_settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    bridge_dir = prepare_bridge_dir("conv_launch_config", workspace=tmp_path)
+    claude_native_bridge.record_claude_user_settings_path(bridge_dir, pane_settings)
+    # The real per-session lookup, which the autouse settings isolation replaces.
+    monkeypatch.setattr(
+        claude_native_bridge, "_session_user_settings_path", _session_user_settings_path
+    )
+
+    def _claude_pane(_bridge_dir: Path, *, command: str, **_kwargs: object) -> None:
+        pane_settings.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+
+    monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _claude_pane)
+
+    claude_native_bridge.inject_model_command(bridge_dir, model_arg="sonnet")
+
+    assert json.loads(pane_settings.read_text(encoding="utf-8")) == {"model": "opus"}
+    assert json.loads(runner_settings.read_text(encoding="utf-8")) == {"model": "haiku"}
 
 
 def test_cycleable_permission_modes_match_the_server_patch_vocabulary() -> None:

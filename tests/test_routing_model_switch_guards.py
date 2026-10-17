@@ -120,23 +120,24 @@ def test_only_the_default_model_restore_writes_the_users_claude_settings() -> No
     """
     The ``settings.json`` Claude saves ``/model`` to is written by one function.
 
-    Callers of ``claude_user_settings_path()`` only snapshot the ``model`` key
+    Functions that look up the settings path only snapshot the ``model`` key
     or hand the path to ``_restore_settings_model``, the one place allowed to
     rewrite the file.
     """
     functions = _functions(_tree("harnesses/claude_native/bridge.py"))
-    path_users = {
-        name
-        for name, node in functions.items()
-        if "claude_user_settings_path" in _called_names(node)
-    }
+    path_lookups = {"claude_user_settings_path", "_session_user_settings_path"}
+    path_users = {name for name, node in functions.items() if path_lookups & _called_names(node)}
     restore_callers = {
         name
         for name, node in functions.items()
         if "_restore_settings_model" in _called_names(node)
     }
 
-    assert path_users == {"inject_model_command", "_restore_default_model"}
+    assert path_users == {
+        "_session_user_settings_path",
+        "inject_model_command",
+        "restore_default_model",
+    }
     assert restore_callers == {"_restore_default_model"}
     for name in path_users:
         writes = _called_names(functions[name]) & _FILE_WRITE_CALLS

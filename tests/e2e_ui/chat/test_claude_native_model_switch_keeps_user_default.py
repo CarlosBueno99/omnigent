@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -11,6 +10,9 @@ from urllib.parse import urlparse
 import pytest
 from playwright.sync_api import expect
 
+# Bound at import, before the autouse fixture points it at a tmp file: the live
+# runner's Claude shares this process's environment and real settings file.
+from omnigent.harnesses.claude_native.bridge import claude_user_settings_path
 from tests.e2e_ui.conftest import _server_state, native_claude_mock_session_context
 from tests.e2e_ui.messages.test_message_render_parity import _ensure_chat_view
 from tests.e2e_ui.messages.test_native_claude_render_parity import (
@@ -25,13 +27,6 @@ pytestmark = pytest.mark.timeout(300)
 _PICKER_MODELS = {"default": _CLAUDE_MOCK_MODEL, "haiku": "claude-3-5-haiku-20241022"}
 # Longer than the bridge's 3 s wait for Claude's save before it restores.
 _SWITCH_SETTLE_S = 6.0
-
-
-def _claude_user_settings_path() -> Path:
-    # The runner shares this process's Claude config dir (same CLAUDE_CONFIG_DIR when prepared).
-    configured = os.environ.get("CLAUDE_CONFIG_DIR")
-    home = Path(configured).expanduser() if configured else Path.home() / ".claude"
-    return home / "settings.json"
 
 
 def _saved_model(settings_path: Path) -> object:
@@ -50,7 +45,7 @@ def test_web_model_picker_switch_keeps_the_users_claude_default_model(
     mock_llm_server_url: str,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    settings_path = _claude_user_settings_path()
+    settings_path = claude_user_settings_path()
     original_bytes = settings_path.read_bytes() if settings_path.exists() else None
     try:
         with native_claude_mock_session_context(

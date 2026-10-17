@@ -405,9 +405,11 @@ def _isolate_claude_user_settings(
     ``inject_model_command`` reads, and may rewrite, the ``model`` key of
     Claude Code's user ``settings.json`` around every ``/model`` it types.
     Without this, any test that reaches it would touch the developer's real
-    ``~/.claude/settings.json``. The save wait is zeroed too: a fake pane
-    that saves does so before the helper looks, and one that never saves
-    would otherwise hold every test for the full wait.
+    ``~/.claude/settings.json``. The per-session lookup is replaced too: a
+    path an earlier test's launch recorded in a shared bridge dir must not
+    leak into this test. The save wait is zeroed: a fake pane that saves
+    does so before the helper looks, and one that never saves would
+    otherwise hold every test for the full wait.
 
     :param tmp_path_factory: Pytest's session-scoped temp factory.
     :param monkeypatch: Pytest monkeypatch fixture; restores both at teardown.
@@ -416,7 +418,8 @@ def _isolate_claude_user_settings(
     from omnigent.harnesses.claude_native import bridge
 
     settings = tmp_path_factory.mktemp("claude-user-settings") / "settings.json"
-    monkeypatch.setattr(bridge, "claude_user_settings_path", lambda: settings)
+    monkeypatch.setattr(bridge, "claude_user_settings_path", lambda *_args, **_kwargs: settings)
+    monkeypatch.setattr(bridge, "_session_user_settings_path", lambda _bridge_dir: settings)
     monkeypatch.setattr(bridge, "_DEFAULT_MODEL_SAVE_WAIT_S", 0.0)
     return settings
 
