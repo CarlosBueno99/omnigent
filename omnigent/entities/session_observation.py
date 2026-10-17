@@ -33,6 +33,16 @@ class SessionObservation(BaseModel):
     error_key: str | None = None
 
 
+class TerminalStartupClaim(BaseModel):
+    """One immutable reservation and the exact normal-state lineage it protects."""
+
+    model_config = ConfigDict(frozen=True)
+
+    reservation: SessionObservation
+    observation: SessionObservation
+    completed: bool = False
+
+
 def is_versioned_session_observation(observation: SessionObservation | None) -> bool:
     """Default-0 legacy rows have no ordering fence until first observation."""
     return observation is not None and (

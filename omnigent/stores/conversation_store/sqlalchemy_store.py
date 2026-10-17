@@ -95,6 +95,7 @@ from omnigent.entities.session_observation import (
     RecordedRunnerOfflineDecision,
     RunnerOfflineDecision,
     SessionObservation,
+    TerminalStartupClaim,
 )
 from omnigent.errors import ErrorCode, OmnigentError, StaleCursorError
 from omnigent.native.native_coding_agents import native_coding_agent_for_wrapper_label
@@ -215,6 +216,26 @@ def _current_offline_decision(meta: SqlConversationMetadata) -> RunnerOfflineDec
     return decision if decision.matches(_session_observation(meta)) else None
 
 
+def _current_terminal_startup_claim(meta: SqlConversationMetadata) -> TerminalStartupClaim | None:
+    if meta.terminal_startup_claim is None:
+        return None
+    try:
+        claim = TerminalStartupClaim.model_validate_json(meta.terminal_startup_claim)
+    except ValueError:
+        _logger.warning("Ignoring malformed terminal startup claim for session %s", meta.id)
+        return None
+    current = _session_observation(meta)
+    if (
+        claim.observation != current
+        or claim.reservation.runner_id != current.runner_id
+        or claim.reservation.binding_epoch != current.binding_epoch
+        or claim.reservation.revision > current.revision
+        or meta.terminal_pending == claim.completed
+    ):
+        return None
+    return claim
+
+
 def _session_error_labels(meta: SqlConversationMetadata | None) -> dict[str, str] | None:
     if meta is None or meta.live_status_error_labels is None:
         return None
@@ -239,6 +260,7 @@ def _settle_idle_observation(meta: SqlConversationMetadata) -> SessionObservatio
     meta.live_status_error_key = None
     meta.live_status_error_labels = "{}"
     meta.terminal_pending = False
+    meta.terminal_startup_claim = None
     meta.runner_offline_decision = None
     return _session_observation(meta)
 
@@ -255,6 +277,7 @@ def _change_runner_binding(meta: SqlConversationMetadata, runner_id: str | None)
     if meta.live_status_error_labels is not None:
         meta.live_status_error_labels = "{}"
     meta.terminal_pending = False
+    meta.terminal_startup_claim = None
 
 
 def _to_conversation(
@@ -3918,6 +3941,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                         ),
                     ),
                     terminal_pending=False,
+                    terminal_startup_claim=None,
                     runner_offline_decision=None,
                 )
             )
@@ -4020,19 +4044,26 @@ class SqlAlchemyConversationStore(ConversationStore):
             reserved = expected.model_copy(
                 update={"revision": expected.revision + 1, "observation_id": observation_id}
             )
-            if current.observation_id == observation_id:
+            claim = _current_terminal_startup_claim(meta)
+            if claim is not None and claim.reservation.observation_id == observation_id:
                 return (
-                    current
-                    if current == reserved
+                    claim.reservation
+                    if claim.reservation == reserved
+                    and not claim.completed
                     and meta.terminal_pending
                     and _current_offline_decision(meta) is None
                     else None
                 )
+            if current.observation_id == observation_id:
+                return None
             if current != expected:
                 return None
             meta.live_status_revision = reserved.revision
             meta.live_status_observation_id = observation_id
             meta.terminal_pending = True
+            meta.terminal_startup_claim = TerminalStartupClaim(
+                reservation=reserved, observation=reserved
+            ).model_dump_json()
             meta.runner_offline_decision = None
             return _session_observation(meta)
 
@@ -4041,7 +4072,7 @@ class SqlAlchemyConversationStore(ConversationStore):
     def finish_terminal_startup(
         self, conversation_id: str, expected: SessionObservation, observation_id: str
     ) -> SessionObservation | None:
-        """Complete only the captured startup, retaining its last normal result."""
+        """Complete the exact claim while preserving its protected normal result."""
         if not observation_id:
             raise ValueError("Terminal completion requires an immutable observation ID")
 
@@ -4054,26 +4085,28 @@ class SqlAlchemyConversationStore(ConversationStore):
             if meta is None:
                 return None
             current = _session_observation(meta)
-            completed = expected.model_copy(
-                update={"revision": expected.revision + 1, "observation_id": observation_id}
-            )
-            if current.observation_id == observation_id:
+            claim = _current_terminal_startup_claim(meta)
+            if claim is None or claim.reservation != expected:
+                return None
+            if claim.completed:
                 return (
                     current
-                    if current == completed
+                    if current.observation_id == observation_id
                     and not meta.terminal_pending
                     and _current_offline_decision(meta) is None
                     else None
                 )
-            if (
-                current != expected
-                or not meta.terminal_pending
-                or _current_offline_decision(meta) is not None
-            ):
+            if not meta.terminal_pending or _current_offline_decision(meta) is not None:
                 return None
+            completed = current.model_copy(
+                update={"revision": current.revision + 1, "observation_id": observation_id}
+            )
             meta.terminal_pending = False
             meta.live_status_revision = completed.revision
             meta.live_status_observation_id = observation_id
+            meta.terminal_startup_claim = claim.model_copy(
+                update={"observation": completed, "completed": True}
+            ).model_dump_json()
             return _session_observation(meta)
 
         return run_write_transaction(self._session_immediate, "finish_terminal_startup", write)
@@ -4172,6 +4205,20 @@ class SqlAlchemyConversationStore(ConversationStore):
                 observed_error_key = before.error_key
             signature = (status, observed_response_id, observed_error_key)
             previous_signature = (before.status, before.response_id, before.error_key)
+            claim = _current_terminal_startup_claim(meta)
+            preserves_startup = (
+                claim is not None
+                and status == "idle"
+                and not starts_new_turn
+                and expected_observation == before
+                and before.status != "failed"
+                and (
+                    before.response_id is None
+                    or observed_response_id is None
+                    or observed_response_id == before.response_id
+                )
+                and (not claim.completed or signature == previous_signature)
+            )
             if observation_id is not None and before.observation_id == observation_id:
                 if signature != previous_signature:
                     raise ValueError(
@@ -4182,7 +4229,12 @@ class SqlAlchemyConversationStore(ConversationStore):
                     expected_observation.revision + 1,
                 }:
                     return None
-                return before if _current_offline_decision(meta) is None else None
+                if (
+                    claim is None
+                    or preserves_startup
+                    or (status == "idle" and not starts_new_turn)
+                ):
+                    return before if _current_offline_decision(meta) is None else None
             if expected_observation is not None and before != expected_observation:
                 return None
             if expected_revision is not None and before.revision != expected_revision:
@@ -4192,11 +4244,14 @@ class SqlAlchemyConversationStore(ConversationStore):
             if (
                 signature != previous_signature
                 or (starts_new_turn and meta.terminal_pending)
+                or (claim is not None and not preserves_startup)
                 or before.observation_id is None
                 or _current_offline_decision(meta) is not None
             ):
                 meta.live_status = encoded_status
-                meta.terminal_pending = False
+                meta.terminal_pending = bool(
+                    preserves_startup and claim is not None and not claim.completed
+                )
                 meta.live_status_revision += 1
                 meta.live_status_observation_id = observation_id or uuid.uuid4().hex
                 meta.live_status_response_id = observed_response_id
@@ -4216,6 +4271,13 @@ class SqlAlchemyConversationStore(ConversationStore):
                 elif before.status != "failed":
                     meta.live_status_error_labels = None
                 meta.runner_offline_decision = None
+                meta.terminal_startup_claim = (
+                    claim.model_copy(
+                        update={"observation": _session_observation(meta)}
+                    ).model_dump_json()
+                    if preserves_startup and claim is not None
+                    else None
+                )
             return _session_observation(meta)
 
         return run_write_transaction(self._session_immediate, "record_session_observation", write)
@@ -4238,6 +4300,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 return RecordedRunnerOfflineDecision(decision=current, created=False)
             meta.runner_offline_decision = decision.model_dump_json()
             meta.terminal_pending = False
+            meta.terminal_startup_claim = None
             return RecordedRunnerOfflineDecision(decision=decision, created=True)
 
         return run_write_transaction(

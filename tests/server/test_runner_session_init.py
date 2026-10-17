@@ -1400,3 +1400,60 @@ async def test_configured_initializer_preserves_the_runner_rejection(status: int
     response = await initializer.initialize(conversation, client, timeout=10)  # type: ignore[arg-type]
     assert response.status_code == status
     assert response.json() == client.response_json
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_response", [None, "turn-a"])
+async def test_prior_turn_stop_during_initialize_keeps_the_original_startup_claim(
+    native_init_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    previous_response: str | None,
+) -> None:
+    from omnigent.server.routes._sessions import common, helpers, orchestration
+
+    store = native_init_store
+    conv, _, client, initializer = _native_initializer(store)
+    previous = store.record_session_observation(conv.id, "running", response_id=previous_response)
+    assert previous is not None
+    conv = store.get_conversation(conv.id)
+    assert conv is not None
+    entered, release = asyncio.Event(), asyncio.Event()
+    complete = orchestration._complete_native_terminal_startup
+
+    async def held_completion(
+        session_id: str, owner: SessionObservation
+    ) -> SessionObservation | None:
+        entered.set()
+        await release.wait()
+        return await complete(session_id, owner)
+
+    monkeypatch.setattr(orchestration, "_complete_native_terminal_startup", held_completion)
+    task = asyncio.create_task(initializer.initialize(conv, client, timeout=10))
+    try:
+        await asyncio.wait_for(client.entered.wait(), 10)
+        startup = client.at_post[0].session_observation
+        client.release.set()
+        await asyncio.wait_for(entered.wait(), 10)
+        stopped = helpers._publish_status(conv.id, "idle", response_id="turn-a", owner=startup)
+        assert stopped is not None
+        idle = await asyncio.wrap_future(stopped)
+        assert idle is not None and idle.response_id == "turn-a" and idle.status == "idle"
+        current = store.get_conversation(conv.id)
+        assert current is not None and current.terminal_pending
+        release.set()
+        response = await asyncio.wait_for(task, 10)
+        completed = response.extensions["session_observation"]
+        assert response.status_code == 201 and initializer.is_initialized(conv, client)
+        assert len(client.calls) == 1
+        assert completed.status == "idle" and completed.response_id == "turn-a"
+        assert completed.revision == idle.revision + 1
+        current = store.get_conversation(conv.id)
+        assert current is not None and current.session_observation == completed
+        assert not current.terminal_pending and current.labels == conv.labels
+        projection = common._session_status_cache.projection(conv.id)
+        assert projection is not None and projection.observation == completed
+        assert not common._session_terminal_pending_cache.get(conv.id, False)
+    finally:
+        client.release.set()
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)

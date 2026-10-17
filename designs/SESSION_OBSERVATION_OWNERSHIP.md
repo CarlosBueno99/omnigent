@@ -95,8 +95,14 @@ makes a lost write acknowledgement idempotent. The same transaction persists
 the pending boolean, so another replica reads the actual startup state. An
 exact completion clears it with another revision and a deterministic completion
 token; provider work and accepted input are never retried by metadata retries.
-A meaningful normal state transition or binding change also clears the pending
-state. Startup signals retain this canonical owner independently of the status
+The reservation also owns a separate durable claim and an exact normal-state
+lineage. A prior turn's idle completion may advance that lineage under its full
+captured-owner CAS while retaining the immutable reservation. Startup completion
+checks both the original reservation and its protected lineage, preserving the
+completed turn's normal result. Busy or new-turn activity, failure, an incompatible
+or unowned idle write, binding changes, and offline settlement invalidate the
+claim. A completed claim keeps only its exact retry receipt until later work.
+Startup signals retain this canonical owner independently of the status
 cache, so a newer startup before any running edge still rejects an old
 completion or snapshot. Snapshot fields come from one captured row and its
 token, even when a newer cache floor is retained.

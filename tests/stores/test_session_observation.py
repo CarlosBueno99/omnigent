@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import func, select
 
-from omnigent.db.db_models import SqlConversationLabel, workspace_scope
+from omnigent.db.db_models import (
+    SqlConversationLabel,
+    SqlConversationMetadata,
+    current_workspace_id,
+    workspace_scope,
+)
 from omnigent.entities import MessageData, NewConversationItem, ResourceEventData
 from omnigent.entities.session_observation import RunnerOfflineDecision, SessionObservation
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -194,6 +199,217 @@ def test_startup_recovery_invalidates_the_derived_interruption_without_retagging
     current = store.get_conversation(conv.id)
     assert current.runner_offline_decision is None and current.labels == {}
     assert decision.observation == original and decision.episode_id == "offline-episode"
+
+
+@pytest.mark.parametrize("previous_response", [None, "turn-a"])
+def test_prior_turn_completion_keeps_the_exact_startup_claim(
+    store: SqlAlchemyConversationStore, previous_response: str | None
+) -> None:
+    conv = store.create_conversation(runner_id="runner-a")
+    previous = store.record_session_observation(conv.id, "running", response_id=previous_response)
+    assert previous is not None
+    startup = store.begin_terminal_startup(conv.id, previous, "startup-a")
+    assert startup is not None
+    idle = store.record_session_observation(
+        conv.id,
+        "idle",
+        response_id="turn-a",
+        observation_id="completed-a",
+        expected_observation=startup,
+        expected_binding_epoch=startup.binding_epoch,
+        expected_revision=startup.revision,
+    )
+    assert idle is not None and idle.status == "idle" and idle.response_id == "turn-a"
+    assert store.get_conversation(conv.id).terminal_pending is True
+    assert store.begin_terminal_startup(conv.id, previous, "startup-a") == startup
+    assert (
+        store.record_session_observation(
+            conv.id,
+            "idle",
+            response_id="turn-a",
+            observation_id="completed-a",
+            expected_observation=startup,
+            expected_binding_epoch=startup.binding_epoch,
+            expected_revision=startup.revision,
+        )
+        == idle
+    )
+    completed = store.finish_terminal_startup(conv.id, startup, "ready-a")
+    assert completed == idle.model_copy(
+        update={"revision": idle.revision + 1, "observation_id": "ready-a"}
+    )
+    assert store.finish_terminal_startup(conv.id, startup, "ready-a") == completed
+    assert store.get_conversation(conv.id).terminal_pending is False
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    ["running", "waiting", "failed", "new-idle", "startup", "binding-aba", "offline"],
+)
+def test_prior_completion_cannot_keep_a_superseded_startup_claim(
+    store: SqlAlchemyConversationStore, replacement: str
+) -> None:
+    conv = store.create_conversation(runner_id="runner-a")
+    previous = store.record_session_observation(conv.id, "running", response_id="turn-a")
+    assert previous is not None
+    startup = store.begin_terminal_startup(conv.id, previous, "startup-a")
+    assert startup is not None
+    idle = store.record_session_observation(
+        conv.id, "idle", response_id="turn-a", expected_observation=startup
+    )
+    assert idle is not None
+    if replacement == "startup":
+        assert store.begin_terminal_startup(conv.id, idle, "startup-b") is not None
+    elif replacement == "binding-aba":
+        store.replace_runner_id(conv.id, "runner-b")
+        store.replace_runner_id(conv.id, "runner-a")
+    elif replacement == "offline":
+        assert store.record_runner_offline_decision(conv.id, _decision(idle)) is not None
+    else:
+        status = "idle" if replacement == "new-idle" else replacement
+        assert (
+            store.record_session_observation(
+                conv.id,
+                status,
+                response_id="turn-b",
+                expected_observation=idle,
+                starts_new_turn=True,
+                error_key="actual-error" if replacement == "failed" else None,
+                error_labels={"omnigent.last_task_error_code": "actual-error"}
+                if replacement == "failed"
+                else None,
+            )
+            is not None
+        )
+    before = store.get_conversation(conv.id)
+    assert before is not None
+    assert store.finish_terminal_startup(conv.id, startup, "ready-a") is None
+    after = store.get_conversation(conv.id)
+    assert after is not None and after.session_observation == before.session_observation
+    assert after.terminal_pending == before.terminal_pending
+    assert after.labels == before.labels
+    assert after.runner_offline_decision == before.runner_offline_decision
+
+
+@pytest.mark.parametrize("status", ["running", "waiting", "failed"])
+def test_duplicate_busy_or_failure_edge_invalidates_the_startup_claim(
+    store: SqlAlchemyConversationStore, status: str
+) -> None:
+    conv = store.create_conversation(runner_id="runner-a")
+    original = store.record_session_observation(conv.id, status, response_id="turn-a")
+    assert original is not None
+    startup = store.begin_terminal_startup(conv.id, original, "startup-a")
+    assert startup is not None
+    busy = store.record_session_observation(
+        conv.id, status, response_id="turn-a", expected_observation=startup
+    )
+    assert busy is not None and busy.revision > startup.revision
+    assert store.get_conversation(conv.id).terminal_pending is False
+    assert store.finish_terminal_startup(conv.id, startup, "ready-a") is None
+
+
+@pytest.mark.parametrize("replacement", ["unowned-idle", "different-idle", "real-failure"])
+def test_idle_or_failure_without_the_protected_lineage_cannot_complete_startup(
+    store: SqlAlchemyConversationStore, replacement: str
+) -> None:
+    conv = store.create_conversation(runner_id="runner-a")
+    original = store.record_session_observation(conv.id, "running", response_id="turn-a")
+    assert original is not None
+    startup = store.begin_terminal_startup(conv.id, original, "startup-a")
+    assert startup is not None
+    idle = store.record_session_observation(
+        conv.id, "idle", response_id="turn-a", expected_observation=startup
+    )
+    assert idle is not None
+    failed = replacement == "real-failure"
+    current = store.record_session_observation(
+        conv.id,
+        "failed" if failed else "idle",
+        response_id="turn-b" if replacement == "different-idle" else "turn-a",
+        expected_observation=None if replacement == "unowned-idle" else idle,
+        error_key="actual-error" if failed else None,
+        error_labels={"omnigent.last_task_error_code": "actual-error"} if failed else None,
+    )
+    assert current is not None and current.revision > idle.revision
+    assert not store.get_conversation(conv.id).terminal_pending
+    assert store.finish_terminal_startup(conv.id, startup, "ready-a") is None
+    assert store.get_session_observation(conv.id) == current
+    if failed:
+        assert store.get_conversation(conv.id).labels == {
+            "omnigent.last_task_error_code": "actual-error"
+        }
+
+
+def test_late_idle_cannot_cross_a_new_startup_reservation(
+    store: SqlAlchemyConversationStore,
+) -> None:
+    conv = store.create_conversation(runner_id="runner-a")
+    original = store.record_session_observation(conv.id, "running", response_id="turn-a")
+    assert original is not None
+    startup_a = store.begin_terminal_startup(conv.id, original, "startup-a")
+    assert startup_a is not None
+    idle_a = store.record_session_observation(
+        conv.id, "idle", response_id="turn-a", expected_observation=startup_a
+    )
+    assert idle_a is not None
+    startup_b = store.begin_terminal_startup(conv.id, idle_a, "startup-b")
+    assert startup_b is not None
+    assert (
+        store.record_session_observation(
+            conv.id,
+            "idle",
+            response_id="turn-a",
+            observation_id="old-idle",
+            expected_observation=idle_a,
+        )
+        is None
+    )
+    assert store.finish_terminal_startup(conv.id, startup_a, "ready-a") is None
+    assert store.get_session_observation(conv.id) == startup_b
+    completed_b = store.finish_terminal_startup(conv.id, startup_b, "ready-b")
+    assert completed_b is not None and completed_b.response_id == "turn-a"
+
+
+@pytest.mark.parametrize("same_observation_id", [False, True])
+def test_completed_startup_receipt_cannot_survive_new_work_reusing_the_turn_id(
+    store: SqlAlchemyConversationStore, same_observation_id: bool
+) -> None:
+    conv = store.create_conversation(runner_id="runner-a")
+    original = store.record_session_observation(conv.id, "idle", response_id="turn-a")
+    assert original is not None
+    startup = store.begin_terminal_startup(conv.id, original, "startup-a")
+    assert startup is not None
+    completed = store.finish_terminal_startup(conv.id, startup, "ready-a")
+    assert completed is not None
+    newer = store.record_session_observation(
+        conv.id,
+        "idle",
+        response_id="turn-a",
+        observation_id="ready-a" if same_observation_id else "new-work",
+        expected_observation=completed,
+        starts_new_turn=True,
+    )
+    assert newer is not None and newer.revision == completed.revision + 1
+    assert store.finish_terminal_startup(conv.id, startup, "ready-a") is None
+    assert store.get_session_observation(conv.id) == newer
+
+
+@pytest.mark.parametrize("claim_payload", [None, "{}"])
+def test_legacy_or_malformed_pending_row_has_no_implicit_startup_claim(
+    store: SqlAlchemyConversationStore, claim_payload: str | None
+) -> None:
+    conv = store.create_conversation(runner_id="runner-a")
+    original = store.record_session_observation(conv.id, "running", response_id="turn-a")
+    assert original is not None
+    startup = store.begin_terminal_startup(conv.id, original, "startup-a")
+    assert startup is not None
+    with store._session_immediate("simulate_legacy_terminal_startup") as session:
+        meta = session.get(SqlConversationMetadata, (current_workspace_id(), conv.id))
+        assert meta is not None
+        meta.terminal_startup_claim = claim_payload
+    assert store.finish_terminal_startup(conv.id, startup, "ready-a") is None
+    assert store.get_session_observation(conv.id) == startup
+    assert store.get_conversation(conv.id).terminal_pending
 
 
 def test_startup_retry_removes_only_offline_overlay_and_keeps_the_real_failure_payload(

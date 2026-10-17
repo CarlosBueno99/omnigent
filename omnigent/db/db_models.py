@@ -696,6 +696,7 @@ class SqlConversationMetadata(OmnigentBase):
     terminal_pending: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    terminal_startup_claim: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
     runner_offline_decision: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
     # Outstanding elicitation (approval-prompt) count; NULL = never written.
     pending_elicitation_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
