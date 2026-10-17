@@ -3822,8 +3822,9 @@ async def test_retry_session_host_refusal_is_typed_and_does_not_persist(
     from omnigent.server.routes import sessions as sessions_module
 
     monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
-    # A refusal must not wait out the connect timeout for a runner that is not coming.
-    monkeypatch.setattr(sessions_module, "_HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S", 30.0)
+    # A refusal must not wait out the connect timeout; keep it far above any
+    # scaled latency budget so waiting it out can never pass the bound below.
+    monkeypatch.setattr(sessions_module, "_HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S", 300.0)
     comm = await _connect_host(app)
     session = await _inline_launch_session(client, comm)
     session_id = session["id"]
@@ -3918,6 +3919,31 @@ async def test_native_message_relaunch_refusal_keeps_host_reason(
     )
 
 
+async def _owned_host_refused_send(
+    app: FastAPI, client: httpx.AsyncClient, db_uri: str, owner: str
+) -> tuple[ApplicationCommunicator, str, dict[str, Any]]:
+    """Send to a native session on ``owner``'s host, which refuses the relaunch.
+
+    :returns: The host communicator, the session id and the persisted error item.
+    """
+    client.headers["X-Forwarded-Email"] = owner
+    comm = await _connect_host(app, owner=owner)
+    session_id = await _native_host_session(client, app, db_uri, comm)
+    responder = asyncio.create_task(
+        _serve_one_launch(
+            comm,
+            launch_status="failed",
+            launch_error=_SPAWN_REFUSAL,
+            launch_error_code="runner_spawn_failed",
+        )
+    )
+    send = await _post_while_host_answers(responder, lambda: _post_hello(client, session_id))
+    assert send.status_code == 202, send.text
+    items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
+    [error] = [item for item in items if item["type"] == "error"]
+    return comm, session_id, error
+
+
 async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_history(
     auth_host_app: FastAPI,
     auth_host_client: httpx.AsyncClient,
@@ -3936,33 +3962,14 @@ async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_hi
     monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
     monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
     owner, collaborator = "host-owner@example.com", "collaborator@example.com"
-    permissions = SqlAlchemyPermissionStore(db_uri)
     app, client = auth_host_app, auth_host_client
-    client.headers["X-Forwarded-Email"] = owner
-    comm = await _connect_host(app, owner=owner)
-    session_id = await _native_host_session(client, app, db_uri, comm)
-    permissions.grant(collaborator, session_id, LEVEL_EDIT)
+    comm, session_id, error = await _owned_host_refused_send(app, client, db_uri, owner)
+    SqlAlchemyPermissionStore(db_uri).grant(collaborator, session_id, LEVEL_EDIT)
 
-    async def refuse_launch_for(post: Callable[[], Awaitable[_T]]) -> _T:
-        responder = asyncio.create_task(
-            _serve_one_launch(
-                comm,
-                launch_status="failed",
-                launch_error=_SPAWN_REFUSAL,
-                launch_error_code="runner_spawn_failed",
-            )
-        )
-        return await _post_while_host_answers(responder, post)
-
-    send = await refuse_launch_for(lambda: _post_hello(client, session_id))
-    assert send.status_code == 202, send.text
-
-    client.headers["X-Forwarded-Email"] = collaborator
-    items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
-    [error] = [item for item in items if item["type"] == "error"]
     assert error["code"] == "runner_failed_to_start"
     assert "failed to spawn runner" not in error["message"]
     assert "visible to the host owner" in error["message"]
+    client.headers["X-Forwarded-Email"] = collaborator
     snapshot = await client.get(f"/v1/sessions/{session_id}")
     assert snapshot.status_code == 200, snapshot.text
     assert "failed to spawn runner" not in snapshot.text
@@ -3995,9 +4002,19 @@ async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_hi
 
     monkeypatch.setattr(routes_events, "_retry_session_single_flight", _count_joiners)
     monkeypatch.setattr(sessions_module, "_launch_runner_on_host", _launch_after_both_joined)
+    # A second, unanswered recovery would wait this out; keep it far above the bound.
+    monkeypatch.setattr(sessions_module, "_HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S", 300.0)
+    responder = asyncio.create_task(
+        _serve_one_launch(
+            comm,
+            launch_status="failed",
+            launch_error=_SPAWN_REFUSAL,
+            launch_error_code="runner_spawn_failed",
+        )
+    )
     started = time.monotonic()
-    owner_retry, collaborator_retry = await refuse_launch_for(
-        lambda: asyncio.gather(retry(owner), retry(collaborator))
+    owner_retry, collaborator_retry = await _post_while_host_answers(
+        responder, lambda: asyncio.gather(retry(owner), retry(collaborator))
     )
     assert joined == 2
     assert time.monotonic() - started < budget(10.0)
@@ -4019,26 +4036,10 @@ async def test_native_message_relaunch_refusal_keeps_reason_for_single_user_owne
 
     monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
     monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
-    owner = "host-owner@example.com"
-    auth_host_client.headers["X-Forwarded-Email"] = owner
-    comm = await _connect_host(auth_host_app, owner=owner)
-    session_id = await _native_host_session(auth_host_client, auth_host_app, db_uri, comm)
-    responder = asyncio.create_task(
-        _serve_one_launch(
-            comm,
-            launch_status="failed",
-            launch_error=_SPAWN_REFUSAL,
-            launch_error_code="runner_spawn_failed",
-        )
+    _, _, error = await _owned_host_refused_send(
+        auth_host_app, auth_host_client, db_uri, "host-owner@example.com"
     )
 
-    send = await _post_while_host_answers(
-        responder, lambda: _post_hello(auth_host_client, session_id)
-    )
-
-    assert send.status_code == 202, send.text
-    items = (await auth_host_client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
-    [error] = [item for item in items if item["type"] == "error"]
     assert _SPAWN_REFUSAL_FLAT in error["message"], error["message"]
 
 
@@ -4631,6 +4632,75 @@ async def test_sub_agent_retry_does_not_claim_a_launch(
     assert "parent session's runner" in message, message
     assert "asked to start a runner" not in message, message
     assert not await _expect_no_launch(comm, budget_s=budget(1.0))
+
+
+async def test_side_chat_retry_reports_source_runner_that_never_connected(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume on a side chat whose source relaunch never connected says so, not "no host"."""
+    from omnigent.server.routes._sessions import orchestration as orchestration_module
+
+    comm, runners, _source, side_chat_id = await _side_chat_with_exited_source_runner(
+        client, app, db_uri, monkeypatch, None
+    )
+    monkeypatch.setattr(
+        orchestration_module, "_wait_for_host_bound_runner_client", AsyncMock(return_value=None)
+    )
+    responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
+    try:
+        response = await _post_while_host_answers(
+            responder,
+            lambda: client.post(
+                f"/v1/sessions/{side_chat_id}/events", json={"type": "retry_session", "data": {}}
+            ),
+        )
+    finally:
+        await runners.client.aclose()
+
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["message"] == (
+        "The host was asked to start a runner for this session, but none "
+        "connected to the server. Check the runner log on the host, then retry."
+    )
+
+
+async def test_side_chat_retry_redirects_to_source_runner_on_sibling_replica(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source runner relaunched for a side chat that re-tunnelled elsewhere is re-addressed."""
+    from omnigent.server.routes._sessions import orchestration as orchestration_module
+
+    comm, runners, _source, side_chat_id = await _side_chat_with_exited_source_runner(
+        client, app, db_uri, monkeypatch, None
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+
+    async def _connected_elsewhere(*_args: Any, runner_id: str, **_kwargs: Any) -> None:
+        # A sibling replica stamps the replacement runner's liveness; none connects here.
+        store.touch_runner_liveness([runner_id], int(time.time()))
+
+    monkeypatch.setattr(
+        orchestration_module, "_wait_for_host_bound_runner_client", _connected_elsewhere
+    )
+    responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
+    try:
+        response = await _post_while_host_answers(
+            responder,
+            lambda: client.post(
+                f"/v1/sessions/{side_chat_id}/events", json={"type": "retry_session", "data": {}}
+            ),
+        )
+    finally:
+        await runners.client.aclose()
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "wrong_replica"
 
 
 @pytest.mark.parametrize(

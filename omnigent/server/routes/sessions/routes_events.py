@@ -569,9 +569,18 @@ async def _retry_unavailable_message(
     :raises OmnigentError: ``WRONG_REPLICA`` when the host or runner reconnected
         to a sibling replica during the recovery wait.
     """
-    await _raise_if_runner_on_another_replica(conv, app_state, conversation_store)
+    # A side chat recovers through its source, whose relaunch may have rotated the
+    # source's runner while the side chat still names the old one; classify the
+    # source row so the host and replica checks see the runner actually launched.
+    subject = conv
+    source_id = _side_chat_source_id(conv)
+    if source_id is not None:
+        source = await asyncio.to_thread(conversation_store.get_conversation, source_id)
+        if source is not None:
+            subject = source
+    await _raise_if_runner_on_another_replica(subject, app_state, conversation_store)
     await _raise_if_runner_re_tunnelled_to_another_replica(
-        conv.id, conv.runner_id, conversation_store
+        subject.id, subject.runner_id, conversation_store
     )
     # Recovery never asks a host to launch a sub-agent; it rides its parent's runner.
     sub_agent_message = (
@@ -580,7 +589,7 @@ async def _retry_unavailable_message(
         "send your message here again."
     )
     # A side chat or sub-agent runs on an ancestor's host; describe that host.
-    host_id = await asyncio.to_thread(routing_host_id, conv, conversation_store)
+    host_id = await asyncio.to_thread(routing_host_id, subject, conversation_store)
     if host_id is None:
         if conv.kind == "sub_agent":
             return sub_agent_message

@@ -116,7 +116,8 @@ def test_online_host_launch_refusal_surfaces_startup_reason(
 
         output = Path(request.config.getoption("--output"))
         output.mkdir(parents=True, exist_ok=True)
-        page.wait_for_timeout(2500)  # hold the failed-turn copy readable in the clip
+        if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+            page.wait_for_timeout(2500)  # hold the failed-turn copy readable in the clip
         page.screenshot(path=str(output / "facet1-native-send.png"), full_page=True)
 
         with page.expect_response(
@@ -133,5 +134,6 @@ def test_online_host_launch_refusal_surfaces_startup_reason(
         expect(page.get_by_text(f"Resume session failed: {retry_message}")).to_be_visible()
         # Retry explains the same refusal; the host's reason is identical.
         assert retry_message == send_message
-        page.wait_for_timeout(2500)  # hold the retry failure readable in the clip
+        if os.environ.get("OMNIGENT_E2E_RECORD_DIR"):
+            page.wait_for_timeout(2500)  # hold the retry failure readable in the clip
         page.screenshot(path=str(output / "facet2-retry.png"), full_page=True)
