@@ -264,12 +264,14 @@ describe("side chat opened from a + button", () => {
     expect(useChatStore.getState().sideChatComposers["pending:plus"]?.autoFocus).toBe(false);
   });
 
-  it("focuses a live tab's input once the child's agent binding enables it", () => {
+  it("focuses a live tab's input once its agent binding enables it, surviving remounts and only once", () => {
     conversationRegistry.acquire(childId).setState({ boundAgentId: null, sessionStatus: "idle" });
     useChatStore.setState({
       sideChatComposers: { [childId]: { text: "", files: [], autoFocus: true } },
     });
-    renderPane(<SideChatPane childId={childId} />);
+    // The rail or drawer can unmount the pane while the fork is still binding.
+    renderPane(<SideChatPane childId={childId} />).unmount();
+    const bound = renderPane(<SideChatPane childId={childId} />);
     const input = screen.getByTestId("side-chat-input");
     expect(input).toBeDisabled();
     expect(input).not.toHaveFocus();
@@ -279,12 +281,10 @@ describe("side chat opened from a + button", () => {
     expect(input).toBeEnabled();
     expect(input).toHaveFocus();
     expect(useChatStore.getState().sideChatComposers[childId]?.autoFocus).toBe(false);
-  });
 
-  it("leaves a re-selected tab's input unfocused", () => {
-    conversationRegistry.acquire(childId).setState({ sessionStatus: "idle" });
+    // Re-selecting the tab later mounts it again without stealing focus.
+    bound.unmount();
     renderPane(<SideChatPane childId={childId} />);
-
     expect(screen.getByTestId("side-chat-input")).toBeEnabled();
     expect(screen.getByTestId("side-chat-input")).not.toHaveFocus();
   });

@@ -399,7 +399,7 @@ def test_side_chat_opens_in_a_drawer_on_mobile(
     side_chat_forks: list[str],
     mock_llm_server_url: str,
 ) -> None:
-    """Phones hide the Workspace rail, so a side chat opens in a full-screen drawer."""
+    """Phones show side chats in a full-screen drawer, whose ``+`` starts another ready to type."""
     base_url, session_id = seeded_session
     parent_reply = "Retry the upload with exponential backoff."
     side_reply = "Backoff spreads the retries out so the server can recover."
@@ -459,6 +459,14 @@ def test_side_chat_opens_in_a_drawer_on_mobile(
     page.get_by_role("menuitem", name="Side chats").click()
     expect(drawer).to_have_attribute("data-state", "open")
     expect(drawer.locator(_ASSISTANT).filter(has_text=side_reply)).to_be_visible()
+
+    # The drawer's + opens a fresh, empty side chat that is ready to type.
+    drawer.get_by_role("button", name="New side chat", exact=True).click()
+    expect(drawer.get_by_role("tab", name="Side chat 2", exact=True)).to_be_visible()
+    new_input = drawer.get_by_test_id("side-chat-input")
+    expect(new_input).to_be_enabled()
+    expect(new_input).to_have_value("")
+    expect(new_input).to_be_focused()
 
 
 def test_running_empty_side_chat_shows_working(
