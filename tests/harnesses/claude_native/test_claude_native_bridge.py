@@ -5797,13 +5797,13 @@ def test_inject_slash_command_rejects_invalid_commands(
 def test_inject_model_command_restores_only_its_own_save(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
     before: dict[str, str],
     written: str,
     after: dict[str, str],
 ) -> None:
     """``inject_model_command`` undoes Claude's default-model save and nothing else."""
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-    settings = tmp_path / "settings.json"
+    settings = _isolate_claude_user_settings
     settings.write_text(json.dumps(before), encoding="utf-8")
 
     def _claude_pane(_bridge_dir: Path, *, command: str, **_kwargs: object) -> None:

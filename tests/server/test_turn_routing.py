@@ -1054,6 +1054,7 @@ async def test_replay_switches_the_claude_pane_before_delivering(
 async def test_routed_claude_switch_keeps_the_users_default_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
 ) -> None:
     """
     A routed switch applies to this session only.
@@ -1065,13 +1066,10 @@ async def test_routed_claude_switch_keeps_the_users_default_model(
     monkeypatch.setattr(turn_routing, "REPLAY_MARKER_WAIT_S", 1.0)
     monkeypatch.setattr(turn_routing, "REPLAY_POLL_S", 0.01)
     _mark(tmp_path)
-    config_dir = tmp_path / "claude-config"
-    config_dir.mkdir()
-    settings = config_dir / "settings.json"
+    settings = _isolate_claude_user_settings
     # Claude's own layout, which the restore must keep byte for byte.
     original = json.dumps({"model": "opus", "note": "café"}, indent=2, ensure_ascii=False) + "\n"
     settings.write_text(original, encoding="utf-8")
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     typed: list[str] = []
 
     def _claude_pane(_bridge_dir: Path, *, command: str, **_kwargs: object) -> None:
