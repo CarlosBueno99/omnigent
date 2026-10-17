@@ -11,6 +11,7 @@ import os
 import queue
 import select
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from filelock import FileLock
 
 from omnigent.harnesses.claude_native import bridge as claude_native_bridge
 from omnigent.harnesses.claude_native import hook as claude_native_hook
@@ -6073,6 +6075,140 @@ def test_a_switch_waits_for_its_own_save_behind_a_queued_one(
     assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
 
 
+def test_a_queued_switch_that_cannot_be_recorded_is_not_typed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+) -> None:
+    """Without its record, another session could snapshot the queued save as the default."""
+    settings = _isolate_claude_user_settings
+    settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    typed: list[str] = []
+    write_json_file = claude_native_bridge._write_json_file
+
+    def _pending_record_unwritable(path: Path, payload: Any) -> None:
+        if path == _pending_switches_file(tmp_path):
+            raise OSError("disk full")
+        write_json_file(path, payload)
+
+    monkeypatch.setattr(claude_native_bridge, "_write_json_file", _pending_record_unwritable)
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "inject_slash_command",
+        lambda _bridge_dir, *, command, **_kwargs: typed.append(command),
+    )
+
+    with pytest.raises(RuntimeError, match="could not record"):
+        claude_native_bridge.inject_model_command(
+            tmp_path / "busy", model_arg="sonnet", defer_restore=True
+        )
+
+    assert typed == []
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
+
+
+def test_no_switch_runs_without_the_default_model_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+) -> None:
+    """A switch fails before typing while another holds the lock; a queued restore waits it out."""
+    settings = _isolate_claude_user_settings
+    settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    monkeypatch.setattr(claude_native_bridge, "_DEFAULT_MODEL_LOCK_TIMEOUT_S", 0.2)
+    typed: list[str] = []
+
+    def _claude_pane(_bridge_dir: Path, *, command: str, **_kwargs: object) -> None:
+        typed.append(command)
+        settings.write_text(json.dumps({"model": command.split()[1]}), encoding="utf-8")
+
+    monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _claude_pane)
+    queued = claude_native_bridge.inject_model_command(
+        tmp_path / "busy", model_arg="sonnet", defer_restore=True
+    )
+
+    with FileLock(str(tmp_path / ".locks" / "claude-default-model.lock")):
+        with pytest.raises(RuntimeError, match="still running"):
+            claude_native_bridge.inject_model_command(tmp_path / "idle", model_arg="haiku")
+        claude_native_bridge.restore_default_model(tmp_path / "busy", queued, "sonnet")
+        assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "sonnet"}
+    claude_native_bridge.restore_default_model(tmp_path / "busy", queued, "sonnet")
+
+    assert typed == ["/model sonnet"]
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
+
+
+@pytest.mark.parametrize(
+    ("contents", "after"),
+    [
+        # No settings file: Claude creates one for its save, and only the key goes.
+        (None, {}),
+        # Unreadable files are never rewritten.
+        ("{not json", "{not json"),
+        ("[]", "[]"),
+    ],
+)
+def test_a_switch_leaves_a_missing_or_unreadable_settings_file_intact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+    contents: str | None,
+    after: object,
+) -> None:
+    """The restore rewrites only a settings file that is a JSON object with a typed model."""
+    settings = _isolate_claude_user_settings
+    if contents is not None:
+        settings.write_text(contents, encoding="utf-8")
+
+    def _claude_pane(_bridge_dir: Path, *, command: str, **_kwargs: object) -> None:
+        if contents is None:
+            settings.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+
+    monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _claude_pane)
+
+    claude_native_bridge.inject_model_command(tmp_path / "bridge", model_arg="sonnet")
+
+    text = settings.read_text(encoding="utf-8")
+    assert (json.loads(text) if contents is None else text) == after
+
+
+@pytest.mark.parametrize(("refreshed", "after_other_switch"), [(True, "opus"), (False, "sonnet")])
+def test_a_refreshed_pending_switch_outlives_the_record_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+    refreshed: bool,
+    after_other_switch: str,
+) -> None:
+    """A queued switch kept pending past the expiry still is not taken as the user's default."""
+    settings = _isolate_claude_user_settings
+    settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+
+    def _claude_pane(_bridge_dir: Path, *, command: str, **_kwargs: object) -> None:
+        settings.write_text(json.dumps({"model": command.split()[1]}), encoding="utf-8")
+
+    monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _claude_pane)
+    busy = claude_native_bridge.inject_model_command(
+        tmp_path / "busy", model_arg="sonnet", defer_restore=True
+    )
+    pending_file = _pending_switches_file(tmp_path)
+
+    def _age_the_pending_switches(seconds: float) -> None:
+        record = json.loads(pending_file.read_text(encoding="utf-8"))
+        for switch in record[str(settings)]["switches"].values():
+            switch["at"] -= seconds
+        pending_file.write_text(json.dumps(record), encoding="utf-8")
+
+    _age_the_pending_switches(1500.0)
+    if refreshed:
+        claude_native_bridge.keep_default_model_switch_pending(tmp_path / "busy", busy)
+    _age_the_pending_switches(1500.0)
+
+    claude_native_bridge.inject_model_command(tmp_path / "idle", model_arg="haiku")
+
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": after_other_switch}
+
+
 @pytest.mark.parametrize(("age_s", "after"), [(60.0, "sonnet"), (3600.0, "haiku")])
 def test_a_pending_switch_record_expires(
     tmp_path: Path,
@@ -6158,6 +6294,11 @@ def test_restore_redoes_its_edit_when_the_file_changes_before_the_replace(
             "/work/~/claude/settings.json",
         ),
         ({"HOME": "/home/user", "CLAUDE_CONFIG_DIR": ""}, "/work/settings.json"),
+        # Claude NFC-normalizes the config dir.
+        (
+            {"HOME": "/home/user", "CLAUDE_CONFIG_DIR": "/srv/cafe\u0301"},
+            "/srv/caf\u00e9/settings.json",
+        ),
     ],
 )
 def test_claude_user_settings_path_follows_the_panes_launch_env(
@@ -6167,10 +6308,12 @@ def test_claude_user_settings_path_follows_the_panes_launch_env(
     assert claude_user_settings_path(Path("/work"), launch_env) == Path(expected)
 
 
+@pytest.mark.parametrize("session_deleted_before_a_queued_restore", [False, True])
 def test_a_switch_keeps_the_default_in_the_settings_file_recorded_at_launch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     _isolate_claude_user_settings: Path,
+    session_deleted_before_a_queued_restore: bool,
 ) -> None:
     """A pane launched with its own config dir keeps its default there, not in the runner's."""
     runner_settings = _isolate_claude_user_settings
@@ -6190,7 +6333,12 @@ def test_a_switch_keeps_the_default_in_the_settings_file_recorded_at_launch(
 
     monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _claude_pane)
 
-    claude_native_bridge.inject_model_command(bridge_dir, model_arg="sonnet")
+    before = claude_native_bridge.inject_model_command(
+        bridge_dir, model_arg="sonnet", defer_restore=session_deleted_before_a_queued_restore
+    )
+    if session_deleted_before_a_queued_restore:
+        shutil.rmtree(bridge_dir)
+        claude_native_bridge.restore_default_model(bridge_dir, before, "sonnet")
 
     assert json.loads(pane_settings.read_text(encoding="utf-8")) == {"model": "opus"}
     assert json.loads(runner_settings.read_text(encoding="utf-8")) == {"model": "haiku"}

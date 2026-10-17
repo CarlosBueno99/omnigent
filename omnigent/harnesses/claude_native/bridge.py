@@ -4770,7 +4770,7 @@ _DEFAULT_MODEL_SAVE_POLL_S = 0.05
 # Longer than one switch holds it: tmux wait, submit check, confirm, save wait.
 _DEFAULT_MODEL_LOCK_TIMEOUT_S = 60.0
 _DEFAULT_MODEL_RESTORE_ATTEMPTS = 3
-# Outlives the runner's 20-minute watch for a queued switch to land.
+# Expires a switch whose runner stopped refreshing it, e.g. after a crash.
 _DEFAULT_MODEL_PENDING_TTL_S = 1800.0
 _MISSING = object()
 
@@ -4780,7 +4780,12 @@ class DefaultModelSnapshot:
     """The user's default model before a typed ``/model``, for :func:`restore_default_model`."""
 
     value: object
+    settings_path: Path
     pending_id: str | None = None
+
+
+class DefaultModelLockTimeout(RuntimeError):
+    """Another Claude model switch held the default-model lock past the wait."""
 
 
 def inject_model_command(
@@ -4802,24 +4807,28 @@ def inject_model_command(
     The running session keeps the switched model: Claude holds it in memory
     and does not re-read the key for the live session. The snapshot, the
     command and the restore share one lock across sessions, and a deferred
-    switch is recorded until it restores, so no switch snapshots another's
-    unrestored save as the user's default.
+    switch is recorded from before it is typed until it restores, so no
+    switch snapshots another's unrestored save as the user's default.
 
     :param bridge_dir: Bridge directory path.
     :param model_arg: ``/model`` argument, e.g. ``"claude-sonnet-5-5"``.
     :param timeout_s: Seconds to wait for ``tmux.json``, e.g. ``30.0``.
     :param defer_restore: ``True`` for a switch Claude applies later, such as
         one queued behind a busy turn: the caller calls
+        :func:`keep_default_model_switch_pending` while it waits and
         :func:`restore_default_model` once it lands. The restore still runs
         here if typing raises.
     :returns: The default before the switch, for :func:`restore_default_model`.
     :raises ValueError: See :func:`inject_slash_command`.
-    :raises RuntimeError: See :func:`inject_slash_command`.
+    :raises RuntimeError: See :func:`inject_slash_command`; also
+        :class:`DefaultModelLockTimeout`, or a deferred switch that could not
+        be recorded, both before anything is typed.
     """
     with _default_model_lock(bridge_dir):
         path = _session_user_settings_path(bridge_dir)
         pending = _PendingDefaultModelSwitches(bridge_dir, path)
         before = pending.user_default(_read_settings_model(path))
+        pending_id = pending.add(model_arg) if defer_restore else None
         try:
             inject_slash_command(
                 bridge_dir,
@@ -4829,12 +4838,12 @@ def inject_model_command(
                 confirm_hint=SWITCH_MODEL_DIALOG_HINT,
             )
         except BaseException:
+            pending.remove(pending_id)
             _restore_default_model(path, before, model_arg, pending.models())
             raise
-        if defer_restore:
-            return DefaultModelSnapshot(before, pending.add(model_arg))
-        _restore_default_model(path, before, model_arg, pending.models())
-    return DefaultModelSnapshot(before)
+        if not defer_restore:
+            _restore_default_model(path, before, model_arg, pending.models())
+    return DefaultModelSnapshot(before, path, pending_id)
 
 
 def restore_default_model(
@@ -4843,6 +4852,7 @@ def restore_default_model(
     model_arg: str,
     *,
     wait_for_save: bool = True,
+    keep_pending: bool = False,
 ) -> None:
     """
     Undo Claude's save of ``/model <model_arg>`` as the user's default model.
@@ -4852,15 +4862,44 @@ def restore_default_model(
     :param model_arg: The typed ``/model`` argument, e.g. ``"sonnet"``.
     :param wait_for_save: ``False`` to only undo a save already on disk, e.g.
         a second check after :func:`inject_model_command` restored.
+    :param keep_pending: ``True`` to keep a deferred switch's record, for a
+        queued switch that may still land after its caller stops watching.
     :returns: None.
     """
-    with _default_model_lock(bridge_dir):
-        path = _session_user_settings_path(bridge_dir)
-        pending = _PendingDefaultModelSwitches(bridge_dir, path)
-        value = pending.default if pending.remove(before.pending_id) else before.value
-        _restore_default_model(
-            path, value, model_arg, pending.models(), wait_for_save=wait_for_save
-        )
+    path = before.settings_path
+    try:
+        with _default_model_lock(bridge_dir):
+            pending = _PendingDefaultModelSwitches(bridge_dir, path)
+            still_pending = (
+                pending.has(before.pending_id)
+                if keep_pending
+                else pending.remove(before.pending_id)
+            )
+            value = pending.default if still_pending else before.value
+            _restore_default_model(
+                path, value, model_arg, pending.models(), wait_for_save=wait_for_save
+            )
+    except (DefaultModelLockTimeout, OSError):
+        # A deferred switch's record stays, so other switches still undo its save.
+        _logger.warning("claude-native: default model not restored", exc_info=True)
+
+
+def keep_default_model_switch_pending(bridge_dir: Path, before: DefaultModelSnapshot) -> None:
+    """
+    Keep a deferred switch's record from expiring while its switch is still queued.
+
+    :param bridge_dir: Bridge directory of the switched session.
+    :param before: The snapshot :func:`inject_model_command` returned.
+    :returns: None.
+    """
+    if before.pending_id is None:
+        return
+    try:
+        with _default_model_lock(bridge_dir):
+            pending = _PendingDefaultModelSwitches(bridge_dir, before.settings_path)
+            pending.refresh(before.pending_id)
+    except (DefaultModelLockTimeout, OSError):
+        _logger.warning("claude-native: queued model switch not refreshed", exc_info=True)
 
 
 class _PendingDefaultModelSwitches:
@@ -4916,11 +4955,27 @@ class _PendingDefaultModelSwitches:
         return current
 
     def add(self, model_arg: str) -> str:
-        """Record a deferred switch to *model_arg*; return its id."""
+        """
+        Record a deferred switch to *model_arg*; return its id.
+
+        :raises RuntimeError: If the record cannot be written.
+        """
         switch_id = uuid.uuid4().hex
         self._switches[switch_id] = {"model": model_arg, "at": time.time()}
-        self._save()
+        if not self._save():
+            raise RuntimeError("could not record the queued Claude model switch")
         return switch_id
+
+    def refresh(self, switch_id: str) -> None:
+        """Restart the expiry of the switch *switch_id* if it is still pending."""
+        switch = self._switches.get(switch_id)
+        if switch is not None:
+            switch["at"] = time.time()
+            self._save()
+
+    def has(self, switch_id: str | None) -> bool:
+        """Return whether the switch *switch_id* is still pending."""
+        return switch_id in self._switches
 
     def remove(self, switch_id: str | None) -> bool:
         """Drop the switch *switch_id*; return whether it was still pending."""
@@ -4929,7 +4984,7 @@ class _PendingDefaultModelSwitches:
         self._save()
         return True
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
         if self._switches:
             entry: dict[str, Any] = {"switches": self._switches}
             if self.default is not _MISSING:
@@ -4943,36 +4998,39 @@ class _PendingDefaultModelSwitches:
             else:
                 self._file.unlink(missing_ok=True)
         except (OSError, RuntimeError):
-            _logger.warning("claude-native: could not update %s", self._file, exc_info=True)
+            _logger.warning(
+                "claude-native: could not update the pending default-model switches", exc_info=True
+            )
+            return False
+        return True
 
 
 @contextlib.contextmanager
 def _default_model_lock(bridge_dir: Path) -> Iterator[None]:
-    """Serialize default-model snapshots and restores across sessions and processes."""
+    """
+    Serialize default-model snapshots and restores across sessions and processes.
+
+    :raises DefaultModelLockTimeout: If another switch holds the lock past the wait.
+    """
     lock_dir = bridge_dir.parent / ".locks"
     lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock = FileLock(str(lock_dir / "claude-default-model.lock"), mode=0o600)
     deadline = time.monotonic() + _DEFAULT_MODEL_LOCK_TIMEOUT_S
-    acquired = False
-    while not acquired:
+    while True:
         _check_injection_cancelled()
         try:
             lock.acquire(timeout=_INJECTION_LOCK_POLL_INTERVAL_S)
-            acquired = True
+            break
         except FileLockTimeout:
             if time.monotonic() >= deadline:
-                # A stuck holder must not block the switch itself.
-                _logger.warning(
-                    "claude-native: %s still held after %.0fs; switching without it",
-                    lock.lock_file,
-                    _DEFAULT_MODEL_LOCK_TIMEOUT_S,
-                )
-                break
+                raise DefaultModelLockTimeout(
+                    "another Claude model switch is still running after "
+                    f"{_DEFAULT_MODEL_LOCK_TIMEOUT_S:.0f}s; try again"
+                ) from None
     try:
         yield
     finally:
-        if acquired:
-            lock.release()
+        lock.release()
 
 
 def _restore_default_model(

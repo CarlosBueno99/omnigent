@@ -73,15 +73,16 @@ _CLAUDE_MODEL_CONFIRM_TIMEOUT_S = 10.0
 _CLAUDE_MODEL_CONFIRM_POLL_S = 0.25
 
 
-# How long the detached watcher keeps answering a /model confirm dialog that
-# pops after the active turn settles (a mid-turn switch queues in the
-# composer), and how often it looks. While the pane is busy it keeps
-# watching past the budget, until a confirm window after the turn ends. The
-# watch is cheap (one tmux capture per poll) and never types blind.
+# How long the detached watcher answers a /model confirm dialog that pops after
+# the active turn settles, and how often it looks; a busy pane extends the watch.
 _CLAUDE_MODEL_LATE_DIALOG_BUDGET_S = 1200.0
 
 
 _CLAUDE_MODEL_LATE_DIALOG_POLL_S = 2.0
+
+
+# How often the watcher keeps its queued switch's pending record from expiring.
+_CLAUDE_MODEL_PENDING_REFRESH_S = 300.0
 
 
 # Settle delay between keystrokes when driving Codex TUI popups. The
@@ -1190,12 +1191,14 @@ def build_native_controls(
         from omnigent.harnesses.claude_native.bridge import (
             SWITCH_MODEL_DIALOG_HINT,
             confirm_dialog_if_open,
+            keep_default_model_switch_pending,
             read_claude_status_model,
             restore_default_model,
         )
 
         try:
             deadline = time.monotonic() + _CLAUDE_MODEL_LATE_DIALOG_BUDGET_S
+            next_refresh = time.monotonic() + _CLAUDE_MODEL_PENDING_REFRESH_S
             while True:
                 if _native_pane_status.get(conv_id) in ("running", "waiting"):
                     # The queued switch applies only after the turn ends, however long it runs.
@@ -1209,6 +1212,11 @@ def build_native_controls(
                     await asyncio.to_thread(
                         confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
                     )
+                    if time.monotonic() >= next_refresh:
+                        await asyncio.to_thread(
+                            keep_default_model_switch_pending, bridge_dir, default_model_before
+                        )
+                        next_refresh = time.monotonic() + _CLAUDE_MODEL_PENDING_REFRESH_S
                 except Exception:  # noqa: BLE001 — best-effort; the report reconciles
                     _logger.debug(
                         "late model-dialog watch errored for session=%s",
@@ -1366,6 +1374,7 @@ def build_native_controls(
             restore_default_model,
         )
 
+        default_model_before: DefaultModelSnapshot | None = None
         try:
             # A switch typed into a busy pane is queued; its turn may settle before the deadline.
             was_busy = _native_pane_status.get(conv_id) in ("running", "waiting")
@@ -1451,11 +1460,8 @@ def build_native_controls(
                     )
                 )
                 return
-            # Mid-turn switch: Claude queues the typed command and applies it
-            # when the turn settles — its confirm dialog can pop minutes from
-            # now. Not a failure: answer success, keep watching for the late
-            # dialog, and let the forwarder's report settle the picker when
-            # the switch actually lands.
+            # Mid-turn switch: Claude applies it when the turn settles, so answer
+            # success and watch for the late confirm dialog.
             _logger.info(
                 "claude-native model change for session=%s is queued behind an active "
                 "turn; watching for the late confirm dialog",
@@ -1464,8 +1470,22 @@ def build_native_controls(
             )
             reply.set_result(Response(status_code=204))
         except BaseException as exc:
-            if not reply.done():
-                reply.set_exception(exc)
+            try:
+                if default_model_before is not None:
+                    # A queued switch may still land, so its record stays for other switches.
+                    await asyncio.to_thread(
+                        functools.partial(
+                            restore_default_model,
+                            bridge_dir,
+                            default_model_before,
+                            model_arg,
+                            wait_for_save=False,
+                            keep_pending=True,
+                        )
+                    )
+            finally:
+                if not reply.done():
+                    reply.set_exception(exc)
             raise
         await _watch_late_model_dialog(
             conv_id,

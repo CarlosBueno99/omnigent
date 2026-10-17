@@ -133,11 +133,7 @@ def test_only_the_default_model_restore_writes_the_users_claude_settings() -> No
         if "_restore_settings_model" in _called_names(node)
     }
 
-    assert path_users == {
-        "_session_user_settings_path",
-        "inject_model_command",
-        "restore_default_model",
-    }
+    assert path_users == {"_session_user_settings_path", "inject_model_command"}
     assert restore_callers == {"_restore_default_model"}
     for name in path_users:
         writes = _called_names(functions[name]) & _FILE_WRITE_CALLS
