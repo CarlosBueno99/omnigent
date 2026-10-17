@@ -125,6 +125,22 @@ class _HeartbeatRunnerClient:
         return _HeartbeatStreamResponse(self._release)
 
 
+def _raw_error_labels(store: SqlAlchemyConversationStore, conversation_id: str) -> dict[str, str]:
+    from sqlalchemy import select
+
+    from omnigent.db.db_models import SqlConversationLabel, current_workspace_id
+
+    with store._conv_session("inspect_historical_error_labels") as session:
+        return dict(
+            session.execute(
+                select(SqlConversationLabel.key, SqlConversationLabel.value).where(
+                    SqlConversationLabel.workspace_id == current_workspace_id(),
+                    SqlConversationLabel.conversation_id == conversation_id,
+                )
+            ).all()
+        )
+
+
 @pytest.mark.asyncio
 async def test_runner_relay_ready_waits_for_runner_heartbeat() -> None:
     """
@@ -751,13 +767,19 @@ async def test_relay_publishes_failed_status_on_tunnel_close(
             "session.subagent.delegated",
             "session.subagent.returned",
         ]
-        assert items[-1].data.resource == {"title": "Audit", "status": "failed"}
+        resource = items[-1].data.resource
+        assert resource["title"] == "Audit" and resource["status"] == "failed"
+        if failure_path != "relay":
+            assert resource["runner_offline_episode_id"] == event["runner_offline_episode_id"]
+            assert resource["session_observation"] == event["session_observation"]
+        owned = store.get_conversation(session_id).runner_offline_decision
         await record_subagent_activity(
             session_id,
             "returned",
             store,
             status="failed",
-            turn_id=child.id if failure_path == "sweep_after_restart" else "child-turn",
+            turn_id=owned.activity_turn_id if owned is not None else "child-turn",
+            offline_decision=owned,
         )
         assert len(store.list_items(parent.id).data) == 2
         if failure_path == "relay":
@@ -2291,6 +2313,8 @@ async def test_disconnect_uses_status_arriving_during_lookup(
             release_read.set()
             await asyncio.wait_for(task, timeout=_TASK_TIMEOUT_S)
 
+        # A new busy observation arriving after a sweep began belongs to a newer turn.
+        expect_failed = expect_failed and failure_path != "sweep"
         expected = "failed" if expect_failed else arriving_status
         assert sessions_module._session_status_cache[child.id] == expected
         refreshed = get_conversation(child.id)
@@ -2312,7 +2336,9 @@ async def test_disconnect_uses_status_arriving_during_lookup(
             decision["attributes"].items()
             >= {
                 "origin": origin,
-                "decision": "failed_mid_turn" if expect_failed else "idle_no_failure",
+                "decision": "failed_mid_turn"
+                if arriving_status in {"running", "waiting"}
+                else "idle_no_failure",
                 "status_source": "cache",
                 "cached_session_status": arriving_status,
                 "status_lookup": lookup_result,
@@ -3224,6 +3250,99 @@ async def test_offline_sweep_scopes_preserved_cause_to_owning_runner(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rebound", [False, True])
+@pytest.mark.parametrize("status", ["running", "waiting"])
+async def test_offline_sweep_does_not_fail_a_replacement_before_its_relay_exists(
+    db_uri: str,
+    rebound: bool,
+    status: str,
+) -> None:
+    """The persisted binding owns the turn even before its new relay subscribes."""
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.schemas import ErrorDetail
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(runner_id="runner-exiting")
+    store.set_session_live_status(conv.id, status)
+    stale = store.get_conversation(conv.id)
+    assert stale is not None
+    if rebound:
+        store.replace_runner_id(conv.id, "runner-replacement")
+    assert conv.id not in sessions_module._runner_relay_tasks
+    sessions_module._session_status_cache[conv.id] = status
+    try:
+        with capture_debug_rows("server") as rows:
+            await sessions_module._mark_runner_sessions_offline(
+                [stale],
+                ErrorDetail(code="runner_disconnected", message="Synthetic runner exit"),
+                store,
+            )
+        refreshed = store.get_conversation(conv.id)
+        assert refreshed is not None
+        assert refreshed.runner_id == ("runner-replacement" if rebound else "runner-exiting")
+        assert sessions_module._session_status_cache[conv.id] == (status if rebound else "failed")
+        error = sessions_module._last_task_error_from_labels(refreshed.labels)
+        assert (error is None) is rebound
+        assert any(row["event_name"] == "session_turn_failed" for row in rows) is not rebound
+    finally:
+        sessions_module._session_status_cache.pop(conv.id, None)
+        session_stream.close(conv.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rebind_after_update", [False, True])
+async def test_offline_sweep_keeps_the_replacement_after_failure_settlement(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    rebind_after_update: bool,
+) -> None:
+    """A remote replacement can bind before the old sweep publishes its result."""
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.schemas import ErrorDetail
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(runner_id="runner-exiting")
+    store.set_session_live_status(conv.id, "running")
+    stale = store.get_conversation(conv.id)
+    assert stale is not None
+    record = store.record_runner_offline_decision
+
+    def rebind_at_settlement(session_id, decision):
+        if not rebind_after_update:
+            store.replace_runner_id(session_id, "runner-replacement")
+        applied = record(session_id, decision)
+        if rebind_after_update:
+            assert applied is not None
+            store.replace_runner_id(session_id, "runner-replacement")
+        store.set_session_live_status(session_id, "running")
+        return applied
+
+    monkeypatch.setattr(store, "record_runner_offline_decision", rebind_at_settlement)
+    sessions_module._session_status_cache[conv.id] = "running"
+    try:
+        with capture_debug_rows("server") as rows:
+            await sessions_module._mark_runner_sessions_offline(
+                [stale],
+                ErrorDetail(code="runner_disconnected", message="Synthetic runner exit"),
+                store,
+            )
+        refreshed = store.get_conversation(conv.id)
+        assert refreshed is not None and refreshed.runner_id == "runner-replacement"
+        assert refreshed.live_status == "running"
+        assert sessions_module._session_status_cache[conv.id] == "running"
+        assert sessions_module._last_task_error_from_labels(refreshed.labels) is None
+        failures = [row for row in rows if row["event_name"] == "session_turn_failed"]
+        assert len(failures) == int(rebind_after_update)
+        if failures:
+            assert failures[0]["attributes"]["runner_id"] == "runner-exiting"
+    finally:
+        sessions_module._session_status_cache.pop(conv.id, None)
+        session_stream.close(conv.id)
+
+
+@pytest.mark.asyncio
 async def test_offline_sweep_preserves_cause_when_session_rebound_mid_sweep(
     db_uri: str,
 ) -> None:
@@ -3268,7 +3387,11 @@ async def test_offline_sweep_preserves_cause_when_session_rebound_mid_sweep(
             )
         refreshed = store.get_conversation(conv.id)
         assert refreshed is not None
-        assert sessions_module._last_task_error_from_labels(refreshed.labels) == original
+        assert sessions_module._last_task_error_from_labels(refreshed.labels) is None
+        assert (
+            sessions_module._last_task_error_from_labels(_raw_error_labels(store, conv.id))
+            == original
+        )
         assert not any(row["event_name"] == "session_turn_failed" for row in rows)
         decision = next(row for row in rows if row["event_name"] == "runner_disconnect_decision")
         assert decision["attributes"]["decision"] == "already_failed"
@@ -3300,8 +3423,10 @@ async def test_persist_error_labels_records_passed_owner_runner_despite_rebind(
     )
     refreshed = store.get_conversation(conv.id)
     assert refreshed is not None
-    assert refreshed.labels.get("omnigent.last_task_error_runner_id") == "runner-source"
-    assert sessions_module._last_task_error_from_labels(refreshed.labels) == {
+    raw = _raw_error_labels(store, conv.id)
+    assert raw.get("omnigent.last_task_error_runner_id") == "runner-source"
+    assert sessions_module._last_task_error_from_labels(refreshed.labels) is None
+    assert sessions_module._last_task_error_from_labels(raw) == {
         "code": "native_turn_error",
         "message": "Synthetic provider rejection",
     }
