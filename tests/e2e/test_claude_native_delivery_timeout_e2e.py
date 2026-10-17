@@ -272,13 +272,11 @@ _OWNER_A = "conv_A"
 _OWNER_B = "conv_B"
 
 
-def _write_bridge_owner(bridge_dir: Path, owner: str | None) -> None:
-    """Record (``owner``) or clear (``None``) the conversation owning the pane."""
-    config: dict[str, object] = {}
-    if owner is not None:
-        config["active_session_id"] = owner
-        config["conversation_id"] = owner
-    _write_json_file(bridge_dir / _CONFIG_FILE, config)
+def _write_bridge_owner(bridge_dir: Path, owner: str) -> None:
+    """Record the conversation owning the pane, without an ownership generation."""
+    _write_json_file(
+        bridge_dir / _CONFIG_FILE, {"active_session_id": owner, "conversation_id": owner}
+    )
 
 
 def _tmux_session_alive(socket_path: str, target: str) -> bool:
@@ -396,29 +394,6 @@ async def test_cancelled_delivery_cleanup_spares_the_new_pane_owner(
     ]
     assert _tmux_session_alive(socket_path, target), (
         "A's cancelled-delivery cleanup killed conversation B's shared pane"
-    )
-
-
-async def test_failed_delivery_cleanup_spares_pane_with_no_recorded_owner(
-    shared_claude_pane: tuple[Path, str, str],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """With no owning conversation recorded on the bridge, reaping a failed
-    delivery must leave the shared pane alone rather than kill it blind."""
-    bridge_dir, socket_path, target = shared_claude_pane
-    _write_bridge_owner(bridge_dir, None)
-
-    executor = ClaudeNativeExecutor(bridge_dir=bridge_dir)
-    executor._request_session_id = _OWNER_A
-
-    with caplog.at_level(logging.INFO, logger="omnigent.inner.claude_native_executor"):
-        assert executor._reap_failed_turn() is None
-
-    assert any("owner now unrecorded" in record.getMessage() for record in caplog.records), [
-        record.getMessage() for record in caplog.records
-    ]
-    assert _tmux_session_alive(socket_path, target), (
-        "cleanup killed the shared pane despite no recorded pane owner"
     )
 
 

@@ -2227,26 +2227,42 @@ async def test_failed_delivery_cleanup_refuses_while_ownership_is_being_rewritte
 
 
 @pytest.mark.asyncio
-async def test_failed_delivery_cleanup_spares_a_pane_owned_only_after_the_delivery_began(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("owner_at_start", "owner_at_failure"),
+    [
+        pytest.param(None, None, id="never-recorded"),
+        pytest.param(None, "conv_a", id="recorded-after-the-delivery-began"),
+        pytest.param("conv_a", None, id="record-lost-after-the-delivery-began"),
+    ],
+)
+async def test_failed_delivery_cleanup_spares_a_pane_without_a_continuous_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    owner_at_start: str | None,
+    owner_at_failure: str | None,
 ) -> None:
-    """A delivery authorized while the bridge recorded no owner captured none, so an
-    owner recorded afterwards -- even this conversation -- is not one it may reap."""
+    """Cleanup may reap only a pane whose owner was recorded when the delivery was
+    authorized and is still recorded, unchanged, when the delivery fails."""
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
     monkeypatch.setenv(REQUEST_SESSION_ID_ENV_VAR, "conv_a")
+    if owner_at_start is not None:
+        (bridge_dir / "bridge.json").write_text(
+            json.dumps({"active_session_id": owner_at_start, "active_session_generation": "gen-0"})
+        )
     killed: list[Path] = []
 
-    def record_owner_then_fail(
+    def rewrite_owner_then_fail(
         bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0
     ) -> None:
         del content, timeout_s
-        (bridge_dir_arg / "bridge.json").write_text(
-            json.dumps({"active_session_id": "conv_a", "active_session_generation": "gen-1"})
-        )
+        config: dict[str, str] = {}
+        if owner_at_failure is not None:
+            config = {"active_session_id": owner_at_failure, "active_session_generation": "gen-1"}
+        (bridge_dir_arg / "bridge.json").write_text(json.dumps(config))
         raise ClaudePromptTimeout("terminal did not become ready")
 
-    monkeypatch.setattr(claude_native_executor, "inject_user_message", record_owner_then_fail)
+    monkeypatch.setattr(claude_native_executor, "inject_user_message", rewrite_owner_then_fail)
     monkeypatch.setattr(
         claude_native_executor,
         "kill_session",
