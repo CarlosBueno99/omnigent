@@ -173,6 +173,11 @@ def test_composer_menu_hides_the_transcript_in_dark_mode(
     light = _measure_transcript_leak(page, panel, f"light-{menu}")
     assert light["menu_overlaps_last_reply"], light
     assert light["leak_fraction"] <= _MAX_LEAK_FRACTION, f"light-mode control leaks: {light}"
+    # The light popover stays clear because it is opaque and unblurred: a stray light-mode blur
+    # would make this pass for the wrong reason, so assert the dark-only variant is absent here.
+    assert light["panel_style"]["backdropFilter"] in ("none", ""), (
+        f"light-mode popover unexpectedly has a backdrop filter: {light}"
+    )
 
     _choose_mode(page, chat.base_url, "Dark")
     _open_chat_at_bottom(page, chat)
