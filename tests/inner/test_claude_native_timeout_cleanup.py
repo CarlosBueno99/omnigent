@@ -179,6 +179,9 @@ async def test_stale_cleanup_preserves_a_same_owner_native_terminal(
                 await _until(task.cancelling)
             has_replacement = scenario not in {"owned", "unavailable"}
             replacement_target = "main"
+            old_pane = _tmux(
+                old_socket, "display-message", "-p", "-t", "main", "#{pane_id}"
+            ).stdout.strip()
             if has_replacement:
                 if scenario == "renamed_session":
                     assert _tmux(old_socket, "rename-session", "-t", "main", "old").returncode == 0
@@ -270,6 +273,15 @@ async def test_stale_cleanup_preserves_a_same_owner_native_terminal(
                 (tmp_path / "release").touch()
                 await _until((tmp_path / "completed").exists)
                 assert (tmp_path / "completed").read_text() == "1"
+                # Cleanup still retired the pane it observed; a respawned pane or a
+                # restarted server reuses identifiers, so only these scenarios check.
+                if scenario in {"replacement", "cross_process"}:
+                    assert _tmux(old_socket, "has-session", "-t", "main").returncode != 0
+                elif scenario == "renamed_session":
+                    assert _tmux(old_socket, "has-session", "-t", "old").returncode != 0
+                elif scenario == "same_session":
+                    panes = _tmux(old_socket, "list-panes", "-s", "-t", "main", "-F", "#{pane_id}")
+                    assert old_pane not in panes.stdout.split()
             elif scenario == "owned":
                 assert _tmux(old_socket, "has-session", "-t", "main").returncode != 0
             else:

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
+import threading
 from dataclasses import replace
 from typing import Any
 
 import pytest
 
+from omnigent.harnesses.claude_native import bridge as claude_bridge
 from omnigent.harnesses.claude_native.tmux_terminal import (
     NativeTmuxTerminal,
     capture_tmux_terminal,
@@ -109,8 +112,9 @@ def test_stop_tmux_terminal_checks_every_identity_field_in_the_kill_command(
         "can't find pane: %7",
         "no server running on /tmp/t.sock",
         "error connecting to /tmp/t.sock (No such file or directory)",
+        "error connecting to /tmp/t.sock (Datei oder Verzeichnis nicht gefunden)",
     ],
-    ids=["pane_gone", "server_gone", "socket_gone"],
+    ids=["pane_gone", "server_gone", "socket_gone", "socket_gone_localized"],
 )
 def test_stop_tmux_terminal_tolerates_a_pane_that_is_already_gone(
     monkeypatch: pytest.MonkeyPatch, stderr: str
@@ -164,3 +168,22 @@ def test_stop_tmux_terminal_refuses_an_invalid_identity(
 
     with pytest.raises(RuntimeError, match="Invalid native terminal identity"):
         stop_tmux_terminal(terminal)
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["pinned", "unpinned"])
+def test_capture_injection_terminal_warns_only_when_identity_cannot_be_pinned(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, pinned: bool
+) -> None:
+    monkeypatch.setattr(
+        claude_bridge, "capture_tmux_terminal", lambda *_a: _TERMINAL if pinned else None
+    )
+
+    with (
+        caplog.at_level(logging.WARNING, logger="omnigent.harnesses.claude_native.bridge"),
+        claude_bridge.cancellable_injection(threading.Event()) as attempt,
+    ):
+        claude_bridge._capture_injection_terminal("/tmp/t.sock", "main")
+
+    assert attempt.terminal == (_TERMINAL if pinned else None)
+    warnings = [r for r in caplog.records if "could not pin the identity" in r.getMessage()]
+    assert len(warnings) == (0 if pinned else 1)

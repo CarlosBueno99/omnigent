@@ -671,8 +671,15 @@ def _check_injection_cancelled() -> None:
 
 def _capture_injection_terminal(socket_path: str, tmux_target: str) -> None:
     attempt = _INJECTION_ATTEMPT.get()
-    if attempt is not None:
-        attempt.terminal = capture_tmux_terminal(socket_path, tmux_target)
+    if attempt is None:
+        return
+    attempt.terminal = capture_tmux_terminal(socket_path, tmux_target)
+    if attempt.terminal is None:
+        _logger.warning(
+            "claude-native: could not pin the identity of tmux target %s; a failed "
+            "delivery will leave this terminal running",
+            tmux_target,
+        )
 
 
 class TmuxSessionNotAdvertised(RuntimeError):

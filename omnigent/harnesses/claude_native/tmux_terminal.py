@@ -94,8 +94,15 @@ def stop_tmux_terminal(terminal: NativeTmuxTerminal, *, timeout_s: float = 1.0) 
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("Native terminal cleanup could not complete") from exc
+    # A gone pane, session, server or socket is not a failure. tmux's own phrases
+    # are stable; the strerror detail after "error connecting to" is localized.
     if result.returncode != 0 and not any(
         reason in result.stderr.lower()
-        for reason in ("can't find", "no server running", "no such file or directory")
+        for reason in (
+            "can't find",
+            "no server running",
+            "error connecting to",
+            "no such file or directory",
+        )
     ):
         raise RuntimeError(f"Native terminal cleanup failed (rc={result.returncode})")
