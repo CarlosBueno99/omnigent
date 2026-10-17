@@ -1519,3 +1519,66 @@ def test_orphan_episode_does_not_become_legacy_cleanup(include_observation: bool
         },
     )
     assert inflight_text.snapshot_for(cid) == []
+
+
+@pytest.mark.parametrize("rejected_owner", ["stale", "malformed", "orphan_episode"])
+def test_disconnect_observer_only_receives_accepted_stream_events(
+    monkeypatch: pytest.MonkeyPatch, rejected_owner: str
+) -> None:
+    cid = "outcome-stream-fence"
+    current = _owned_observation(2)
+    assert session_stream.learn_observation(cid, current)
+    observed: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        session_stream.disconnect_outcome,
+        "observe_event",
+        lambda session_id, event: observed.append((session_id, event)),
+    )
+    rejected: dict[str, Any] = {"type": "response.output_text.delta", "delta": "rejected"}
+    if rejected_owner == "stale":
+        rejected["session_observation"] = _owned_observation(1).model_dump()
+    elif rejected_owner == "malformed":
+        rejected["session_observation"] = {"revision": -1}
+    else:
+        rejected["runner_offline_episode_id"] = "orphan"
+    assert session_stream.publish(cid, rejected) == 0
+    assert observed == []
+
+    accepted = {
+        "type": "response.output_text.delta",
+        "delta": "accepted",
+        "session_observation": current.model_dump(),
+    }
+    session_stream.publish(cid, accepted)
+    assert observed == [(cid, accepted)]
+
+
+def test_disconnect_observer_uses_reconciled_live_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    cid = "outcome-stream-reconciliation"
+    committed = {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "message",
+            "role": "assistant",
+            "id": "committed",
+            "content": [{"type": "output_text", "text": "OK"}],
+        },
+    }
+    hidden = {
+        "type": "response.output_text.delta",
+        "delta": "OK",
+        "message_id": "native-message",
+        "index": 0,
+    }
+    divergent = {**hidden, "delta": " then", "index": 1}
+    observed: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        session_stream.disconnect_outcome,
+        "observe_event",
+        lambda session_id, event: observed.append((session_id, event)),
+    )
+    session_stream.publish(cid, committed)
+    assert session_stream.publish(cid, hidden) == 0
+    assert observed == [(cid, committed)]
+    session_stream.publish(cid, divergent)
+    assert observed == [(cid, committed), (cid, {**divergent, "delta": "OK then"})]

@@ -114,6 +114,7 @@ from omnigent.runner.subagent_routing import (
 from omnigent.runner.subagent_work import SUBAGENT_DISPATCH_ID_LABEL_KEY
 from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
 from omnigent.runtime import (
+    disconnect_outcome,
     get_policy_store,
     pending_elicitations,
     pending_inputs,
@@ -3985,6 +3986,7 @@ async def _publish_runner_recovered_status_impl(
         if last_error is None or last_error.get("code") != "runner_disconnected":
             return
     versioned_store = callable(getattr(conversation_store, "record_session_observation", None))
+    recovered_observation: SessionObservation | None = None
     if isinstance(conv, Conversation) and versioned_store:
         captured = captured or conv.session_observation
         observed = await asyncio.wrap_future(
@@ -4003,6 +4005,7 @@ async def _publish_runner_recovered_status_impl(
         _publish_status(
             session_id, "idle", persist_live_status=False, session_observation=observed
         )
+        recovered_observation = observed
     else:
         _session_status_cache[session_id] = "idle"
         session_live_state.persist_live_status(session_id, "idle")
@@ -4010,6 +4013,15 @@ async def _publish_runner_recovered_status_impl(
             type="session.status", conversation_id=session_id, status="idle", error=None
         )
         session_stream.publish(session_id, event.model_dump())
+    if require_disconnect_code and (
+        recovered_observation is None
+        or _relay_projection_is_current(session_id, recovered_observation)
+    ):
+        disconnect_outcome.note_disconnect_failure_cleared(
+            session_id,
+            failure_code="runner_disconnected",
+            runner_id=captured.runner_id if captured is not None else None,
+        )
     # Owned disconnect causes live in metadata and clear with the observation.
     if not isinstance(conv, Conversation) or not versioned_store:
         await _persist_session_status_error_labels(session_id, None, conversation_store)
@@ -8261,6 +8273,8 @@ async def _dispatch_session_event_to_runner_impl(
     dispatch_id = conv.labels.get(SUBAGENT_DISPATCH_ID_LABEL_KEY)
     if runner_router is not None:
         await asyncio.to_thread(runner_router.require_mcp_registry_support, conv)
+    if body.type == "message":
+        disconnect_outcome.note_user_turn(conv.id)
     if body.type == "message" and conv.kind == "sub_agent" and _is_codex_native_subagent(conv):
         # Codex /side follow-up: drive the child on its own Codex thread via the
         # parent's runner/bridge; do not persist AP-side (the forwarder mirrors

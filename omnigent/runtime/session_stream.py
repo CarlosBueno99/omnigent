@@ -50,7 +50,7 @@ from omnigent.entities.session_observation import (
 )
 from omnigent.errors import ErrorImpact, ErrorPhase
 from omnigent.native.input_diagnostics import input_attributes
-from omnigent.runtime import inflight_text, pending_elicitations
+from omnigent.runtime import disconnect_outcome, inflight_text, pending_elicitations
 
 _logger = logging.getLogger(__name__)
 
@@ -436,6 +436,7 @@ def _publish_live_event(conversation_id: str, event: dict[str, Any]) -> int:
     pending_elicitations.record_publish(conversation_id, event)
     if live_event is None:
         return 0
+    disconnect_outcome.observe_event(conversation_id, live_event)
     with _lock:
         subs = list(_subscribers.get(conversation_id, ()))
     scheduled = 0
