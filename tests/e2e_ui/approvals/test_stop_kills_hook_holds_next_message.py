@@ -60,8 +60,13 @@ def _send_user_message(base_url: str, session_id: str, text: str) -> httpx.Respo
 
 
 def _snapshot(base_url: str, session_id: str) -> dict:
-    resp = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
-    resp.raise_for_status()
+    """Return the session snapshot, or ``{}`` while a poll fails transiently."""
+    try:
+        resp = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        # The stop/relaunch window can fail a poll; the callers keep polling.
+        return {}
     return resp.json()
 
 
