@@ -20,6 +20,7 @@ from omnigent.harnesses.claude_native.bridge import (
     ClaudeSignInPending,
     ClaudeTerminalDialog,
     ClaudeTerminalExited,
+    DefaultModelLockTimeout,
     TmuxSessionNotAdvertised,
 )
 from omnigent.inner import claude_native_executor
@@ -1685,20 +1686,32 @@ async def test_run_turn_keeps_the_pane_when_a_terminal_dialog_blocks_delivery(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        ClaudeTerminalDialog(
+            "Claude Code's input box is occupied by an overlay, so the command was not sent."
+        ),
+        DefaultModelLockTimeout("another Claude model switch is still running after 60s"),
+    ],
+    ids=["occupied_input_box", "model_switch_lock_busy"],
+)
 async def test_run_turn_reports_a_refused_routed_model_switch_as_undelivered(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    refusal: RuntimeError,
 ) -> None:
     """
-    A ``/model`` switch refused at an occupied input box fails the turn as undelivered.
+    A ``/model`` switch refused before typing fails the turn as undelivered.
 
-    ``inject_slash_command`` raises :class:`ClaudeTerminalDialog` instead of
-    typing into a surface Escape cannot clear (wrapper output before the
-    input box mounts, a hintless confirmation). The routed switch runs before
-    the message, so nothing has reached Claude Code: the message must not be
-    injected behind it, the pane stays alive for the person to clear the
-    surface, and the error is classified undelivered so the sender's queued
-    copy is settled rather than lost on reload.
+    The bridge raises :class:`ClaudeTerminalDialog` instead of typing into a
+    surface Escape cannot clear (wrapper output before the input box mounts,
+    a hintless confirmation), and :class:`DefaultModelLockTimeout` while
+    another session's switch holds the default-model lock. The routed switch
+    runs before the message, so nothing has reached Claude Code: the message
+    must not be injected behind it, the pane stays alive, and the error is
+    classified undelivered so the sender's queued copy is settled rather
+    than lost on reload.
     """
     monkeypatch.delenv(REQUEST_SESSION_ID_ENV_VAR, raising=False)
     bridge_dir = tmp_path / "bridge"
@@ -1706,12 +1719,9 @@ async def test_run_turn_reports_a_refused_routed_model_switch_as_undelivered(
     killed: list[Path] = []
 
     def refuse_slash_command(bridge_dir_arg: Path, *, command: str, **kwargs: object) -> None:
-        """Refuse the switch the way the bridge does at a surface Escape cannot clear."""
-        del bridge_dir_arg, kwargs
-        raise ClaudeTerminalDialog(
-            f"Claude Code's input box is occupied by an overlay, so the command was "
-            f"not sent ({command})."
-        )
+        """Refuse the switch the way the bridge does before typing it."""
+        del bridge_dir_arg, command, kwargs
+        raise refusal
 
     def record_message(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
         """Record a message inject that must never happen."""
@@ -1750,7 +1760,7 @@ async def test_run_turn_reports_a_refused_routed_model_switch_as_undelivered(
     assert len(events) == 1
     error = events[0]
     assert isinstance(error, ExecutorError)
-    assert "occupied by an overlay" in error.message
+    assert str(refusal) in error.message
     assert error.undelivered is True
 
 

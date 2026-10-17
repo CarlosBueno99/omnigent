@@ -21,6 +21,7 @@ from omnigent.harnesses.claude_native.bridge import (
     ClaudeTerminalDialog,
     ClaudeTerminalExited,
     ClaudeUserPromptPending,
+    DefaultModelLockTimeout,
     TmuxSessionNotAdvertised,
     cancellable_injection,
     inject_model_command,
@@ -305,6 +306,14 @@ class ClaudeNativeExecutor(Executor):
             # Enter; the pane stays for the person to answer it.
             _logger.warning(
                 "claude-native: pending Claude prompt blocks delivery; message not delivered",
+                extra={"session_id": self._request_session_id},
+            )
+            yield ExecutorError(message=describe_exception(exc), undelivered=True)
+            return
+        except DefaultModelLockTimeout as exc:
+            # Raised before the routed /model is typed, so the message is still unsent.
+            _logger.warning(
+                "claude-native: another model switch holds the lock; message not delivered",
                 extra={"session_id": self._request_session_id},
             )
             yield ExecutorError(message=describe_exception(exc), undelivered=True)
