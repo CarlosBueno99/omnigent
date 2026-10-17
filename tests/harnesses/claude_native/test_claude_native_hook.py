@@ -2087,7 +2087,8 @@ def _scripted_client(
     ``kind`` values:
       * ``"connect"`` — :class:`httpx.ConnectError` (server never reached: hard)
       * ``"write"``   — :class:`httpx.WriteError` (POST body never fully sent,
-        so no card parked: hard, like a connect failure)
+        so no card parked and ``parked`` never latches; it counts as hard only
+        when held under the floor, resetting the counter if held past it)
       * ``"write_timeout"`` — :class:`httpx.WriteTimeout` (same as ``"write"``:
         the body never fully sent, so no card parked)
       * ``"severed"`` — :class:`httpx.RemoteProtocolError` (established then
@@ -2470,12 +2471,13 @@ def test_reattach_write_phase_failure_does_not_disable_the_unreachable_cap(
     assert len(client.calls) == expected_calls
 
 
-def test_reattach_gateway_502_503_does_not_disable_the_unreachable_cap(
+def test_reattach_gateway_non_504_5xx_does_not_disable_the_unreachable_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A 502/503 held past the floor must not latch the card as parked.
+    """A non-504 5xx held past the floor must not latch the card as parked.
 
-    A slow gateway 5xx that is not an idle-timeout 504 only shows the gateway's
+    A slow gateway 5xx that is not an idle-timeout 504 (here a 503, the
+    representative of the identical non-504 branch) only shows the gateway's
     upstream dial failed; the POST may never have reached the app, so no card is
     parked. It resets the counter (a slow human behind a flaky gateway is never
     capped on a lone 5xx) without latching, or a following host-network outage
@@ -2496,7 +2498,7 @@ def test_reattach_gateway_502_503_does_not_disable_the_unreachable_cap(
         hook_label="permission",
     )
 
-    assert resp is None, "a 502/503 wrongly rode out an unreachable server"
+    assert resp is None, "a non-504 5xx wrongly rode out an unreachable server"
     assert len(client.calls) == cap + 1
 
 

@@ -745,24 +745,19 @@ def _post_hook_with_reattach(
 
     A hard 4xx is final (bad request won't succeed on retry).
 
-    Residual limitation (by design): a *sick* backend that accepts the POST and
-    then silently severs it after its upstream timeout (>= the floor), or whose
-    gateway answers that timeout with a 504, is indistinguishable at the
-    transport layer from a proxy severing a genuinely-parked human poll. Both
-    reset the counter, so this case escapes the hard-failure cap and is bounded
-    only by the absolute :data:`_PERMISSION_TIMEOUT_S` ceiling. The sustained-
-    outage ride-out is narrower: it latches only on response-phase delivery
-    evidence, so a write stall or a 502/503 held past the floor resets the
-    backoff but keeps the cap armed, while a lone sub-floor sever latches (an
-    outage starting within the floor still rides out) and the delivering sever
-    still counts (a read-phase crash loop stays capped). The accept-then-crash-
-    before-read case raises the same read error with no card parked; it resolves
-    toward keeping the approval alive — backing off under the ceiling rather than
+    Residual limitation (by design): a response-phase disconnect cannot be told
+    apart at the transport layer from a server that accepted the POST and then
+    crashed before reading it, so neither counts toward the hard-failure cap.
+    The latch resolves the ambiguity toward keeping the approval alive — riding
+    out under the absolute :data:`_PERMISSION_TIMEOUT_S` ceiling rather than
     spinning — because re-abandoning a parked card is the reported failure this
     loop prevents, and capping sooner would cap a slow human behind a gateway
-    that answers before the floor. Blast radius is one hook re-POSTing over HTTP,
-    at worst once per proxy timeout for up to a day, which keeps the card alive
-    until the server recovers.
+    that answers before the floor. The ride-out stays narrow: only response-
+    phase delivery evidence latches, so a sub-floor sever still rides out (an
+    outage starting within the floor is covered) while a write stall or a held
+    502/503 resets the backoff but keeps the cap armed, and a read-phase crash
+    loop stays capped. Blast radius is one hook re-POSTing over HTTP, at worst
+    once per proxy timeout for up to a day.
 
     The absolute :data:`_PERMISSION_TIMEOUT_S` ceiling bounds the total wait on
     every path, matching the day-long human-answer window.

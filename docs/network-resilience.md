@@ -88,16 +88,24 @@ retrying for up to a day, so for Codex this is also the 120 s outcome.
 
 ### R2: Long outage moves the approval to the terminal
 
-**Resolved** once a card is proven live. When a poll proves the POST reached the
-server — a response-phase sever, or the gateway's idle-timeout `504` on a held
-long-poll — later connection failures no longer count toward the
-`OMNIGENT_HOOK_MAX_RETRIES` (8) cap: the hook backs off and re-POSTs the same
-elicitation until the absolute day-long deadline, and the web card re-parks when
-the link returns. The cap still applies before any delivery evidence — a run of
-connect- or write-phase failures with no card parked still gives up after 8
-tries, about 90 s of backoff, and Claude Code falls back to its own terminal
-prompt. The session stays `running` while the hook waits, and messages the user
-sends during the outage still queue behind the pending approval.
+**Resolved for the Claude native permission hook** once a card is proven live.
+When a poll proves the POST reached the server — a response-phase sever, or the
+gateway's idle-timeout `504` on a held long-poll — later connection failures no
+longer count toward the `OMNIGENT_HOOK_MAX_RETRIES` (8) cap: the hook backs off
+and re-POSTs the same elicitation until the absolute day-long deadline, and the
+web card re-parks when the link returns. The cap still applies before any
+delivery evidence — a run of connect- or write-phase failures with no card
+parked still gives up after 8 tries, about 90 s of backoff, and Claude Code
+falls back to its own terminal prompt. The session stays `running` while the
+hook waits.
+
+The matrix still marks `gap: R2` for the resilience-lab S2/S3/S5 rows: those
+full-mode scenarios and their strict-xfail markers under
+`tests/e2e/resilience/scenarios/` were not re-run for this change, so they stay
+flagged until that lab confirms the hook fix end to end. A message the user
+sends while the host is unreachable is a separate concern and is still lost (see
+[R3](#r3-a-message-sent-while-the-host-is-unreachable-is-lost)); the browser
+regression sends its follow-up only after recovery.
 
 ### R3: A message sent while the host is unreachable is lost
 
