@@ -21,9 +21,8 @@ Regenerate with::
 The output is a two-frame HiDPI TIFF (1x at 72 dpi, 2x at 144 dpi) — the
 layout ``tiffutil -cathidpicheck`` produces. ``tests/test_dmg_installer_background.py``
 guards the composed geometry. The headline uses the first available
-``FONT_CANDIDATES`` entry, so regenerating on macOS (Arial Bold) changes the
-headline pixels but none of the guarded geometry; the committed asset was
-generated on Linux with DejaVu Sans Bold.
+``FONT_CANDIDATES`` entry. The committed asset uses DejaVu Sans Bold; with
+Arial Bold (macOS) only the headline pixels differ, not the guarded geometry.
 """
 
 from __future__ import annotations

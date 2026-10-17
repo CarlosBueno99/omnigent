@@ -13,7 +13,6 @@ the picture.
 from __future__ import annotations
 
 import json
-from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -30,7 +29,9 @@ MIN_LABEL_CONTRAST = 4.5
 LABEL_HALF_WIDTH = 60
 LABEL_BAND_HEIGHT = 24
 SLOT_MARGIN = 4
-# Per-channel deviation from a slot's backdrop colour that counts as artwork.
+# generate_background.py paints the whole window backdrop plain white.
+WINDOW_BACKDROP = (255, 255, 255)
+# Per-channel deviation from the backdrop that counts as artwork.
 ARTWORK_TOLERANCE = 24
 
 
@@ -97,10 +98,33 @@ def test_icon_slot_is_free_of_artwork(item: dict) -> None:
     slot = (item["x"] - margin, item["y"] - margin, item["x"] + margin, item["y"] + margin)
     for scale, frame in _background_frames():
         pixels = _pixels(frame, scale, slot)
-        backdrop = Counter(pixels).most_common(1)[0][0]
-        artwork = sum(_deviation(pixel, backdrop) > ARTWORK_TOLERANCE for pixel in pixels)
+        artwork = sum(_deviation(pixel, WINDOW_BACKDROP) > ARTWORK_TOLERANCE for pixel in pixels)
         assert artwork == 0, (
             f"{scale}x frame: artwork covers {artwork / len(pixels):.1%} of the icon slot {slot}"
+        )
+
+
+def test_install_arrow_points_from_app_to_applications() -> None:
+    app, applications = sorted(DMG_CONFIG["contents"], key=lambda entry: entry["x"])
+    margin = ICON_HALF + SLOT_MARGIN
+    gap = (app["x"] + margin, app["y"] - margin, applications["x"] - margin, app["y"] + margin)
+    for scale, frame in _background_frames():
+        pixels = _pixels(frame, scale, gap)
+        width = (gap[2] - gap[0]) * scale
+        heights = [
+            sum(
+                _deviation(pixel, WINDOW_BACKDROP) > ARTWORK_TOLERANCE
+                for pixel in pixels[column::width]
+            )
+            for column in range(width)
+        ]
+        drawn = [column for column, height in enumerate(heights) if height]
+        assert len(drawn) >= width // 2, (
+            f"{scale}x frame: no install arrow spans the gap {gap} between the icon slots"
+        )
+        tallest = max(range(width), key=heights.__getitem__)
+        assert tallest > (drawn[0] + drawn[-1]) / 2, (
+            f"{scale}x frame: the install arrow in {gap} does not point towards /Applications"
         )
 
 
