@@ -5526,17 +5526,48 @@ def test_kill_session_drops_the_markers_of_the_hooks_it_kills(
     assert other.exists(), "another session's parked hook keeps its evidence"
 
 
-def test_kill_session_raises_on_unexpected_tmux_failure(
+def test_kill_session_drops_markers_when_teardown_removes_the_bridge_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unexpected tmux failures remain visible to the stop caller."""
+    """The session id is captured before the kill, which can trigger bridge teardown."""
     bridge_dir = tmp_path / "bridge"
     write_tmux_target(
         bridge_dir,
         socket_path=Path("/tmp/example/tmux.sock"),
         tmux_target="main",
     )
+    (bridge_dir / "bridge.json").write_text(json.dumps({"active_session_id": "conv_stopped"}))
+    marker = claude_native_bridge.approval_wait_marker_path("conv_stopped", bridge_dir=bridge_dir)
+    marker.parent.mkdir(parents=True)
+    claude_native_bridge.touch_approval_wait_marker(marker)
+
+    def _kill_and_tear_down(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        del cmd, kwargs
+        (bridge_dir / "bridge.json").unlink()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _kill_and_tear_down)
+    kill_session(bridge_dir)
+
+    assert not marker.exists()
+
+
+def test_kill_session_raises_on_unexpected_tmux_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unexpected tmux failures stay visible to the stop caller and keep the hook's marker."""
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="main",
+    )
+    (bridge_dir / "bridge.json").write_text(json.dumps({"active_session_id": "conv_live"}))
+    marker = claude_native_bridge.approval_wait_marker_path("conv_live", bridge_dir=bridge_dir)
+    marker.parent.mkdir(parents=True)
+    claude_native_bridge.touch_approval_wait_marker(marker)
 
     def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         del cmd, kwargs
@@ -5545,6 +5576,8 @@ def test_kill_session_raises_on_unexpected_tmux_failure(
     monkeypatch.setattr("subprocess.run", _fake_run)
     with pytest.raises(RuntimeError, match="permission denied"):
         kill_session(bridge_dir)
+    # The pane may still be alive, so its parked hook keeps its evidence.
+    assert marker.exists()
 
 
 def test_inject_slash_command_clears_draft_pastes_literal_then_enter(

@@ -12,23 +12,22 @@ hook POST can stand in for this journey.
 The journey posts the exact ``message`` / ``stop_session`` event bodies the web
 composer and Stop control send (the behavior under test is the runner's
 buffering decision, not the SPA) and reads the relaunched pane over the
-product's read-only terminal-attach WebSocket, rendered with ``pyte``.
+product's read-only terminal-attach WebSocket.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import secrets
 import shutil
 import time
 
 import httpx
-import pyte
 import pytest
 import websockets
 
-from tests.e2e_ui.conftest import set_fallback_mock_llm
+from tests._helpers.terminal_attach import render_terminal_screen, terminal_resource_id
+from tests.e2e_ui.conftest import configure_mock_llm, set_fallback_mock_llm
 
 _CLAUDE_MOCK_MODEL = "claude-sonnet-4-20250514"
 _GATED_COMMAND = "sudo -n true"
@@ -66,52 +65,24 @@ def _snapshot(base_url: str, session_id: str) -> dict:
     return resp.json()
 
 
-def _terminal_id(base_url: str, session_id: str) -> str | None:
-    resp = httpx.get(f"{base_url}/v1/sessions/{session_id}/resources", timeout=10.0)
-    resp.raise_for_status()
-    for resource in resp.json().get("data", []):
-        if resource.get("type") == "terminal":
-            return str(resource["id"])
-    return None
-
-
-def _render_pane(base_url: str, session_id: str, terminal_id: str, settle_s: float = 3.0) -> str:
-    ws_url = (
-        base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
-        + f"/v1/sessions/{session_id}/resources/terminals/{terminal_id}/attach?read_only=true"
-    )
-    screen = pyte.Screen(_PANE_COLS, _PANE_ROWS)
-    stream = pyte.ByteStream(screen)
-
-    async def _collect() -> None:
-        async with websockets.connect(ws_url, max_size=None, open_timeout=20) as ws:
-            await ws.send(json.dumps({"type": "resize", "cols": _PANE_COLS, "rows": _PANE_ROWS}))
-            deadline = time.monotonic() + settle_s
-            while (remaining := deadline - time.monotonic()) > 0:
-                try:
-                    frame = await asyncio.wait_for(ws.recv(), timeout=remaining)
-                except (TimeoutError, asyncio.TimeoutError):
-                    break
-                if isinstance(frame, (bytes, bytearray)):
-                    stream.feed(bytes(frame))
-
-    asyncio.run(_collect())
-    return "\n".join(screen.display)
-
-
 def _wait_pane_contains(
     base_url: str, session_id: str, needle: str, timeout_s: float
 ) -> tuple[bool, str]:
     deadline = time.monotonic() + timeout_s
     screen = ""
     while time.monotonic() < deadline:
-        terminal_id = _terminal_id(base_url, session_id)
+        terminal_id = terminal_resource_id(base_url, session_id)
         if terminal_id is not None:
             try:
-                screen = _render_pane(base_url, session_id, terminal_id)
+                screen = render_terminal_screen(
+                    base_url, session_id, terminal_id, cols=_PANE_COLS, rows=_PANE_ROWS
+                )
             except (httpx.HTTPError, websockets.WebSocketException, OSError):
                 screen = ""
-            if needle.lower() in screen.lower():
+            # A narrow real pane hard-wraps rows that the wide screen renders
+            # separately, so also match with all whitespace removed.
+            haystack = screen.lower()
+            if needle.lower() in haystack or needle.lower() in "".join(haystack.split()):
                 return True, screen
         time.sleep(1.0)
     return False, screen
@@ -134,7 +105,7 @@ def _wait_until(predicate, *, timeout_s: float, interval_s: float = 1.0) -> bool
     shutil.which("claude") is None or shutil.which("tmux") is None,
     reason="a real claude CLI inside tmux owns the approval-wait marker under test",
 )
-@pytest.mark.timeout(360)
+@pytest.mark.timeout(420)
 def test_stop_during_permission_prompt_does_not_hold_next_message(
     native_claude_mock_session: tuple[str, str],
     mock_llm_server_url: str,
@@ -146,29 +117,23 @@ def test_stop_during_permission_prompt_does_not_hold_next_message(
     # Stray/background/resume requests must never drain or hang the mock.
     set_fallback_mock_llm(mock_llm_server_url, _CLAUDE_MOCK_MODEL, "ok")
     # First message -> a gated Bash tool call (routed by the message nonce).
-    httpx.post(
-        f"{mock_llm_server_url}/mock/configure",
-        json={
-            "match": nonce,
-            "required_tools": ["Bash"],
-            "responses": [
-                {
-                    "tool_calls": [
-                        {
-                            "name": "Bash",
-                            "arguments": json.dumps(
-                                {
-                                    "command": _GATED_COMMAND,
-                                    "description": "check passwordless sudo",
-                                }
-                            ),
-                        }
-                    ]
-                }
-            ],
-        },
-        timeout=5.0,
-    ).raise_for_status()
+    configure_mock_llm(
+        mock_llm_server_url,
+        [
+            {
+                "tool_calls": [
+                    {
+                        "name": "Bash",
+                        "arguments": json.dumps(
+                            {"command": _GATED_COMMAND, "description": "check passwordless sudo"}
+                        ),
+                    }
+                ]
+            }
+        ],
+        match=nonce,
+        required_tools=["Bash"],
+    )
 
     booted, _ = _wait_pane_contains(base_url, session_id, "❯", timeout_s=_BOOT_TIMEOUT_S)
     assert booted, "Claude CLI never reached a ready composer"
@@ -187,13 +152,14 @@ def test_stop_during_permission_prompt_does_not_hold_next_message(
 
     # The orphaned elicitation drains and the session returns to idle; wait so the
     # only thing that could hold the next message is the stale on-disk marker.
-    _wait_until(
+    drained = _wait_until(
         lambda: (
             _snapshot(base_url, session_id).get("status") == "idle"
             and not _pending_elicitations(base_url, session_id)
         ),
-        timeout_s=60.0,
+        timeout_s=90.0,
     )
+    assert drained, "the session did not return to idle after stop_session"
 
     # trigger: the next composer message must reach the relaunched session.
     followup = _send_user_message(base_url, session_id, f"did it work? [{followup_marker}]")

@@ -197,10 +197,9 @@ _APPROVAL_WAIT_ROOT = _BRIDGE_ROOT / _APPROVAL_WAIT_DIR_NAME
 # held, so the marker stays fresh whether or not a gateway ever severs the poll
 # (a direct server holds one POST for the whole wait).
 APPROVAL_WAIT_MARKER_REFRESH_S = 60.0
-# A marker touched more recently than this means a hook is still waiting.
-# Several refresh intervals of slack, so a hook that is slow to wake never
-# reads stale. ``kill_session`` drops the markers of the hooks it kills; a hook
-# that dies any other way leaves a marker that expires on its own.
+# A marker fresher than this means a hook is still waiting; slack covers slow
+# refreshes. ``kill_session`` drops markers of hooks it kills; a hook that dies
+# any other way leaves a marker that expires on its own.
 APPROVAL_WAIT_MARKER_TTL_S = 420.0
 _CONFIG_FILE = "bridge.json"
 _SERVER_FILE = "server.json"
@@ -4656,11 +4655,8 @@ def kill_session(
     down through its normal end-of-session path, so no transcript items
     are synthesized here.
 
-    The pane's parked permission hooks die with it, before their own
-    cleanup runs, so their approval-wait markers are dropped here as well:
-    a leftover one reads as a live prompt (see
-    :func:`has_pending_user_prompt`) until :data:`APPROVAL_WAIT_MARKER_TTL_S`
-    elapsed and would hold the session's next message for that long.
+    Approval-wait markers are cleared once the pane is killed or already
+    gone: terminated hooks cannot run their own cleanup.
 
     :param bridge_dir: Bridge directory path, e.g.
         ``/tmp/omnigent/claude-native/<digest>``.
@@ -4673,13 +4669,15 @@ def kill_session(
         time, or if ``tmux kill-session`` fails for an unexpected reason.
     """
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
+    # Read before the kill: the end-of-session teardown it triggers can rewrite
+    # or remove the bridge config while the markers still need dropping.
+    session_id = read_active_session_id(bridge_dir)
     try:
         _run_tmux(info["socket_path"], "kill-session", "-t", info["tmux_target"])
     except RuntimeError as exc:
         detail = str(exc).lower()
         if "can't find session" not in detail and "no server running on" not in detail:
             raise
-    session_id = read_active_session_id(bridge_dir)
     if session_id is not None:
         clear_approval_wait_markers(session_id, bridge_dir=bridge_dir)
 
