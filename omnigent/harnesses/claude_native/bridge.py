@@ -4326,9 +4326,8 @@ def inject_user_message(
         # Claude Code dropped the message. Re-deliver it escaped so the text
         # reaches the model as a regular user message instead of vanishing.
         _logger.info(
-            "claude-native: Claude Code rejected unknown command /%s; "
-            "re-delivering the message escaped as plain text",
-            unknown_name,
+            "claude-native: Claude Code rejected an unknown command; "
+            "re-delivering the message escaped as plain text"
         )
         try:
             _paste_and_submit(

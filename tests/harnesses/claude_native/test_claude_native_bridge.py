@@ -4555,6 +4555,7 @@ def _run_unknown_command_injection(
 def test_unknown_command_rejection_redelivers_escaped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
     A message rejected as "Unknown command" is re-delivered escaped.
@@ -4565,18 +4566,22 @@ def test_unknown_command_rejection_redelivers_escaped(
     the message again with the space escape so it reaches the model
     as plain user text.
     """
-    payloads = _run_unknown_command_injection(
-        tmp_path,
-        monkeypatch,
-        content="/not-a-real-skill hello world",
-        reject_name="not-a-real-skill",
-    )
+    with caplog.at_level("INFO", logger="omnigent.harnesses.claude_native.bridge"):
+        payloads = _run_unknown_command_injection(
+            tmp_path,
+            monkeypatch,
+            content="/not-a-real-skill hello world",
+            reject_name="not-a-real-skill",
+        )
     assert len(payloads) == 2, (
         f"Expected the rejected message to be pasted twice (raw, then escaped); "
         f"got {len(payloads)} paste(s)."
     )
     assert payloads[0].startswith(b"/not-a-real-skill")
     assert payloads[1].startswith(b" /not-a-real-skill hello world")
+    assert "re-delivering the message escaped as plain text" in caplog.text
+    assert "not-a-real-skill" not in caplog.text
+    assert "hello world" not in caplog.text
 
 
 def test_unknown_name_accepted_as_skill_is_not_redelivered(
