@@ -115,6 +115,9 @@ _DEFAULT_RO_DIRS = (
     "/sbin",
 )
 
+# Linux's MAXSYMLINKS: the kernel fails path resolution with ELOOP beyond it.
+_MAX_SYMLINK_HOPS = 40
+
 # Read-only file binds for the minimal /etc files libc, DNS, the
 # dynamic linker, and TLS clients reach for. Bind individual files
 # (not /etc/) so /etc/shadow, /etc/sudoers, /etc/cron*, etc. are
@@ -906,7 +909,7 @@ def _is_same_path(a: Path, b: Path) -> bool:
 def _combine_executable_exposure(
     args: Sequence[str], *, covered_prefixes: Sequence[Path] = ()
 ) -> list[str]:
-    """Mount content before links, retaining one view through shared directory names."""
+    """Mount content before links, keeping only links no mount already shows."""
     out: list[str] = []
     links: dict[str, str] = {}
     seen_mounts: set[tuple[str, str, str]] = set()
@@ -914,22 +917,18 @@ def _combine_executable_exposure(
     for i in range(0, len(args), 3):
         flag, source, destination = args[i : i + 3]
         if flag == "--symlink":
-            if destination in links and links[destination] != source:
+            if links.setdefault(destination, source) != source:
                 raise ValueError(f"Conflicting executable directory symlink: {destination}")
-            links[destination] = source
             continue
         key = (flag, source, destination)
         if key not in seen_mounts:
             seen_mounts.add(key)
             out.extend(key)
-            if source == destination:
-                mounted_roots.append(Path(destination))
-    for destination in sorted(links, key=lambda path: (len(Path(path).parts), path)):
-        literal = Path(destination)
-        if any(_is_within(literal, root, resolve=False) for root in mounted_roots):
-            continue
-        out.extend(["--symlink", links[destination], destination])
-        mounted_roots.append(literal)
+            mounted_roots.append(Path(destination))
+    for destination, link_text in links.items():
+        # A mounted directory already shows its host links, and is read-only.
+        if not any(_is_within(Path(destination), root, resolve=False) for root in mounted_roots):
+            out.extend(["--symlink", link_text, destination])
     return out
 
 
@@ -941,25 +940,30 @@ def _ensure_executable_visible(argv: list[str], cwd: Path) -> list[str]:
     Bwrap exec's ``argv[0]`` literally — it does NOT follow symlinks on
     the host before exec — so every name in the path the kernel will
     traverse must be visible inside the sandbox. This walks the symlink
-    chain at ``argv[0]`` hop-by-hop. At each hop, the literal path's
-    parent and grandparent are mounted at their resolved names, with
-    directory-symlinks preserved at their literal names. These still work
-    when a later parent mount restores them. For example, uv installs a
-    version-floating symlink ``cpython-3.12 -> cpython-3.12.13``; the
-    kernel follows that literal name to the mounted resolved directory.
+    chain at ``argv[0]`` hop-by-hop. At each hop, the real directories
+    behind the path's parent and grandparent are mounted at their real
+    paths, and every directory symlink the kernel traverses to reach
+    them is recreated at its real location with its host link text. The
+    sandbox therefore mirrors the host layout, so a later parent mount
+    that restores a host symlink still leads to mounted content. For
+    example, uv installs a version-floating symlink
+    ``cpython-3.12 -> cpython-3.12.13``; the kernel follows that name to
+    the mounted ``cpython-3.12.13`` directory.
 
     Common cases:
 
     - ``/usr/bin/python3`` (literal == resolved): covered by
       ``--ro-bind-try /usr``; nothing extra emitted.
     - ``./.venv/bin/python`` inside cwd, symlinking into ``/usr``:
-      covered by the cwd bind (literal) plus ``/usr`` (resolved);
-      nothing extra emitted.
+      covered by the cwd bind plus ``/usr``; nothing extra emitted.
+    - ``./.venv`` inside cwd is a symlink to a virtualenv elsewhere:
+      the virtualenv directories are mounted at their real paths and
+      the cwd bind shows the host ``.venv`` link that leads to them.
     - ``/home/me/omnigent/.venv/bin/python`` while the helper
       runs in ``/tmp/scratch`` (uv-managed Python with intermediate
-      ``cpython-3.12`` symlink): binds the venv bin/lib roots at the
-      resolved paths and preserves the floating install name as a
-      symlink to the mounted ``cpython-3.12.13`` directory.
+      ``cpython-3.12`` symlink): binds the venv bin/lib roots and the
+      ``cpython-3.12.13`` install, and recreates the floating
+      ``cpython-3.12`` symlink.
     - Pyenv-style ``$HOME/.pyenv/versions/3.12/bin/python``: same
       walk produces the binds needed whether or not the
       ``versions/3.12`` component is itself a symlink.
@@ -968,7 +972,7 @@ def _ensure_executable_visible(argv: list[str], cwd: Path) -> list[str]:
     :param cwd: Effective working directory; used to skip binds for
         paths already covered by the cwd mount.
     :returns: Extra bwrap args (possibly empty) to insert before the
-        cwd bind. Never includes a destination already covered by
+        cwd bind. Never includes a mount or symlink already covered by
         :data:`_DEFAULT_RO_DIRS` or by *cwd*.
     """
     return _interpreter_chain_binds(argv, [Path(p) for p in _DEFAULT_RO_DIRS] + [cwd])
@@ -977,8 +981,8 @@ def _ensure_executable_visible(argv: list[str], cwd: Path) -> list[str]:
 def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) -> list[str]:
     """
     Walk ``argv[0]``'s symlink chain and return the read-only mounts and
-    directory-symlinks needed to reach each hop, skipping destinations
-    already covered by *covered_prefixes*.
+    directory symlinks needed to reach each hop, skipping destinations
+    already covered by *covered_prefixes* (by their own or resolved path).
 
     Factored out of :func:`_ensure_executable_visible` so the post-mask
     interpreter re-expose (:func:`_interpreter_reexpose_after_mask`) can
@@ -992,102 +996,88 @@ def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) 
     :param argv: Helper argv. Only ``argv[0]`` is inspected.
     :param covered_prefixes: Paths whose descendants need no explicit
         bind (already visible inside the sandbox).
-    :returns: Extra bwrap args as ``--ro-bind-try`` or ``--symlink`` triples.
+    :returns: Extra bwrap args as ``--ro-bind-try <real> <real>`` and
+        ``--symlink <link text> <real location>`` triples.
     """
     if not argv:
         return []
 
-    extra: list[str] = []
-    seen_dest: set[Path] = set()
-    directory_links: dict[Path, Path] = {}
-    visited_directories: set[Path] = set()
+    covered_roots = [*covered_prefixes, *(Path(os.path.realpath(p)) for p in covered_prefixes)]
 
-    def _record_directory_links(directory: Path) -> None:
-        pending = [directory]
-        while pending and len(visited_directories) < 40:
-            current = pending.pop()
-            if current in visited_directories:
-                continue
-            visited_directories.add(current)
-            for ancestor in (current, *current.parents):
-                try:
-                    if not ancestor.is_symlink():
-                        continue
-                    target = Path(os.readlink(str(ancestor)))
-                except OSError:
-                    continue
-                if not target.is_absolute():
-                    target = Path(os.path.realpath(str(ancestor.parent))) / target
-                target = Path(os.path.abspath(str(target)))
-                resolved = Path(os.path.realpath(str(target)))
-                directory_links[ancestor] = Path(os.path.realpath(str(ancestor)))
-                if target != resolved:
-                    directory_links[target] = resolved
-                pending.append(target)
+    def _covered(path: Path) -> bool:
+        return any(_is_within(path, root, resolve=False) for root in covered_roots)
 
-    def _emit(src: Path, dst: Path) -> None:
-        if dst in seen_dest or dst == dst.parent or src == src.parent:
-            return
-        # The destination is the literal path bwrap/the kernel will
-        # traverse. Skip when that literal lives under a default mount.
-        if any(_is_within(dst, root, resolve=False) for root in covered_prefixes):
-            return
-        seen_dest.add(dst)
-        extra.extend(["--ro-bind-try", str(src), str(dst)])
-
-    def _emit_parent_pair(literal: Path) -> None:
-        """Expose the literal and resolved directory names used by the executable."""
-        parent_literal = literal.parent
-        parent_real = Path(os.path.realpath(str(parent_literal)))
-        gp_literal = parent_literal.parent
-        gp_real = Path(os.path.realpath(str(gp_literal)))
-        covered = next(
-            (root for root in covered_prefixes if _is_within(literal, root, resolve=False)),
-            None,
-        )
-        if covered is not None:
-            # A covered root's own symlink needs no additional directory exposure.
-            expected_parent = (
-                Path(os.path.realpath(str(covered))) / literal.relative_to(covered)
-            ).parent
-            if parent_real == expected_parent:
-                return
-        _record_directory_links(parent_literal)
-        if parent_real != parent_literal:
-            _emit(parent_real, parent_real)
-        if gp_real != gp_literal:
-            _emit(gp_real, gp_real)
-        if covered is not None:
-            return
-        if gp_real == gp_literal:
-            _emit(gp_real, gp_literal)
-            if parent_real == parent_literal:
-                _emit(parent_real, parent_literal)
-
-    # Walk the symlink chain hop-by-hop until either a regular file is
-    # reached or the visited-set catches a cycle. The 40-hop cap matches
-    # Linux's MAXSYMLINKS / ELOOP threshold.
+    mounts: list[str] = []
+    mounted: set[Path] = set()
+    links: dict[Path, str] = {}
     visited: set[Path] = set()
-    current = Path(os.path.abspath(str(Path(argv[0]))))
-    for _ in range(40):
+    # Keep ``..`` unnormalized: the kernel resolves it after following links.
+    current = Path(argv[0]) if os.path.isabs(argv[0]) else Path(os.getcwd(), argv[0])
+    for _ in range(_MAX_SYMLINK_HOPS):
         if current in visited:
             break
         visited.add(current)
-        _emit_parent_pair(current)
+        parent = _resolve_recording_links(current.parent, links)
+        grandparent = _resolve_recording_links(current.parent.parent, links)
+        for directory in (parent, grandparent):
+            if directory is None or directory == directory.parent or directory in mounted:
+                continue
+            if not _covered(directory):
+                mounted.add(directory)
+                mounts.extend(["--ro-bind-try", str(directory), str(directory)])
+        if parent is None:
+            break
         try:
-            if not current.is_symlink():
-                break
-            link = os.readlink(str(current))
+            link = os.readlink(current)
         except OSError:
             break
-        if link.startswith("/"):
-            current = Path(link)
-        else:
-            current = Path(os.path.normpath(str(current.parent / link)))
+        current = parent / link
 
-    for literal, resolved in directory_links.items():
-        extra.extend(["--symlink", str(resolved), str(literal)])
-    return extra
+    for location, link_text in links.items():
+        if not _covered(location):
+            mounts.extend(["--symlink", link_text, str(location)])
+    return mounts
+
+
+def _resolve_recording_links(path: Path, links: dict[Path, str]) -> Path | None:
+    """
+    Resolve *path* component by component, as the kernel does.
+
+    Each symlink traversed is recorded in *links* at its real location
+    (resolved parent plus link name), mapped to its unmodified link text.
+    A ``..`` component steps to the parent of the directory reached so
+    far, not of the lexical path.
+
+    :param path: Absolute path, possibly containing symlinks and ``..``.
+    :param links: Mapping updated in place with each traversed symlink.
+    :returns: The resolved path (missing trailing components are kept
+        as written), or ``None`` when resolution exceeds the kernel's
+        symlink limit.
+    """
+    resolved = Path("/")
+    pending = list(reversed(path.parts[1:]))
+    hops = 0
+    while pending:
+        name = pending.pop()
+        if name == "..":
+            resolved = resolved.parent
+            continue
+        candidate = resolved / name
+        try:
+            link_text = os.readlink(candidate)
+        except OSError:
+            resolved = candidate
+            continue
+        hops += 1
+        if hops > _MAX_SYMLINK_HOPS:
+            return None
+        links.setdefault(candidate, link_text)
+        link_path = Path(link_text)
+        if link_path.is_absolute():
+            resolved = Path("/")
+            link_path = link_path.relative_to("/")
+        pending.extend(reversed(link_path.parts))
+    return resolved
 
 
 def _tmpfs_mask_dirs(mask_args: Sequence[str]) -> list[Path]:

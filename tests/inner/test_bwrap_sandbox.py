@@ -947,6 +947,25 @@ def test_shallow_executable_never_exposes_the_host_root() -> None:
     ]
 
 
+def test_link_resolution_steps_up_from_the_link_target(tmp_path: Path) -> None:
+    real = tmp_path.resolve()
+    (real / "store/lib").mkdir(parents=True)
+    (real / "venv").mkdir()
+    (real / "venv/shortcut").symlink_to("../store/lib")
+    links: dict[Path, str] = {}
+
+    resolved = bwrap_sandbox._resolve_recording_links(real / "venv/shortcut/../bin", links)
+
+    assert resolved == real / "store/bin"
+    assert links == {real / "venv/shortcut": "../store/lib"}
+
+
+def test_link_resolution_stops_at_the_kernel_symlink_limit(tmp_path: Path) -> None:
+    (tmp_path / "loop").symlink_to("loop")
+
+    assert bwrap_sandbox._resolve_recording_links(tmp_path / "loop/bin", {}) is None
+
+
 def test_wrap_launcher_argv_target_already_in_default_mounts(
     tmp_path: Path,
 ) -> None:
@@ -1944,22 +1963,36 @@ print(json.dumps(results))
     )
 
 
+_PARENT_MOUNT_LAYOUTS = (
+    "venv-symlink",
+    "bin-symlink",
+    "venv-chain-absolute",
+    "venv-chain-relative",
+    "bin-chain-absolute",
+    "bin-chain-relative",
+    "venv-bin-chain-relative",
+    "venv-file-link-relative",
+    "split-version-alias",
+    "aliased-checkout",
+    "dotdot-after-link",
+    "physical",
+)
+
+
 @pytestmark_bwrap
 @pytest.mark.parametrize(
-    "layout",
+    ("entry_point", "layout"),
     [
-        "venv-symlink",
-        "bin-symlink",
-        "venv-chain-absolute",
-        "venv-chain-relative",
-        "bin-chain-absolute",
-        "bin-chain-relative",
-        "venv-bin-chain-relative",
-        "physical",
+        *(
+            (entry_point, layout)
+            for entry_point in ("helper", "target")
+            for layout in _PARENT_MOUNT_LAYOUTS
+        ),
+        ("helper-and-target", "venv-chain-relative"),
+        ("helper-and-target", "aliased-checkout"),
     ],
 )
 @pytest.mark.parametrize("exposure", ["unmounted", "read-root", "cwd"])
-@pytest.mark.parametrize("entry_point", ["helper", "target", "helper-and-target"])
 def test_interpreter_directory_symlinks_survive_parent_mounts(
     tmp_path: Path, layout: str, exposure: str, entry_point: str
 ) -> None:
@@ -1998,9 +2031,10 @@ def test_interpreter_directory_symlinks_survive_parent_mounts(
 
 
 def _directory_symlink_interpreter(tmp_path: Path, layout: str) -> tuple[Path, Path, Path]:
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    install = tmp_path / "install"
+    root = tmp_path / "real-root" if layout == "aliased-checkout" else tmp_path
+    checkout = root / "checkout"
+    checkout.mkdir(parents=True)
+    install = root / "install"
     if layout == "venv-bin-chain-relative":
         (install / "real-bin").mkdir(parents=True)
         (install / "real-bin/python").symlink_to(Path(sys.executable).resolve())
@@ -2010,13 +2044,38 @@ def _directory_symlink_interpreter(tmp_path: Path, layout: str) -> tuple[Path, P
         return checkout, checkout / ".venv/bin/python", install
     (install / "bin").mkdir(parents=True)
     (install / "bin/python").symlink_to(Path(sys.executable).resolve())
+    venv = checkout / ".venv"
+    if layout == "venv-file-link-relative":
+        # The relative link climbs from the venv's real directory, not from the checkout.
+        (tmp_path / "floating").symlink_to("install", target_is_directory=True)
+        (tmp_path / "venv-store/bin").mkdir(parents=True)
+        (tmp_path / "venv-store/bin/python").symlink_to("../../floating/bin/python")
+        venv.symlink_to("../venv-store", target_is_directory=True)
+        return checkout, venv / "bin/python", install
+    if layout == "split-version-alias":
+        (checkout / "python").mkdir()
+        (checkout / "python/cpython-3.12").symlink_to("../../install", target_is_directory=True)
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin/python").symlink_to("../../python/cpython-3.12/bin/python")
+        return checkout, venv / "bin/python", install
+    if layout == "aliased-checkout":
+        venv.symlink_to("../install", target_is_directory=True)
+        (tmp_path / "alias-root").symlink_to(root, target_is_directory=True)
+        alias = tmp_path / "alias-root/checkout"
+        return alias, alias / ".venv/bin/python", install
+    if layout == "dotdot-after-link":
+        # The kernel resolves ``shortcut/..`` from the link target, not lexically.
+        (install / "lib").mkdir()
+        (venv / "bin").mkdir(parents=True)
+        (venv / "shortcut").symlink_to(install / "lib", target_is_directory=True)
+        (venv / "bin/python").symlink_to("../shortcut/../bin/python")
+        return checkout, venv / "bin/python", install
     target = install
     if "chain" in layout:
         target = tmp_path / "floating"
         target.symlink_to(
             "install" if layout.endswith("relative") else install, target_is_directory=True
         )
-    venv = checkout / ".venv"
     if layout.startswith("venv-"):
         venv.symlink_to(
             "../floating" if layout.endswith("relative") else target, target_is_directory=True
@@ -2277,6 +2336,8 @@ def test_denied_control_socket_stays_denied_through_interpreter_names(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     control_path = real / "control.sock"
+    if len(os.fsencode(control_path)) >= 100:
+        pytest.skip("tmp_path is too long for an AF_UNIX socket path")
     policy = _make_backend().resolve(
         OSEnvSpec(
             type="caller_process",
