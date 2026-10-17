@@ -4599,7 +4599,8 @@ async def _maybe_wake_stale_resumable_managed_sandbox(
     if host_registry is not None:
         host_registry.deregister(conv.host_id)
     if tunnel_registry is not None and conv.runner_id is not None:
-        tunnel_registry.deregister(conv.runner_id)
+        # A stale tunnel is torn down, not handed to another replica.
+        tunnel_registry.deregister(conv.runner_id, retire=False)
 
     _logger.info(
         "Managed host %s for session %s needs wake before reusing tunnels "
@@ -5777,9 +5778,7 @@ async def _ensure_native_terminal_ready(
         resp.text[:500],
         extra={"session_id": session_id},
     )
-    return _NativeTerminalEnsureOutcome(
-        error=_native_terminal_failure_from_runner_response(resp, display_name=display_name),
-    )
+    return _native_terminal_failure_from_runner_response(resp, display_name=display_name)
 
 
 async def _persist_native_terminal_failure(
@@ -5791,6 +5790,7 @@ async def _persist_native_terminal_failure(
     runner_router: RunnerRouter | None,
     *,
     created_by: str | None,
+    failure_context: FailureContext | None = None,
 ) -> str:
     """
     Persist a consumed user message and terminal-start error.
@@ -5821,6 +5821,7 @@ async def _persist_native_terminal_failure(
         in-process / test setups where the global client is used.
     :param created_by: Authenticated posting actor, e.g.
         ``"alice@example.com"``; ``None`` in single-user mode.
+    :param failure_context: Normalized cause metadata from the runner's ensure response.
     :returns: Store-assigned id of the consumed user message item.
     """
     turn_id = generate_task_id()
@@ -5854,6 +5855,7 @@ async def _persist_native_terminal_failure(
         "failed",
         ErrorDetail(code=error.code, message=error.message),
         failure_origin="native_terminal_boot_failed",
+        failure_context=failure_context,
     )
     # A boot failure on a native sub-agent must wake the parent — mirror
     # the normal terminal-status path (publish + forward), gated on
@@ -7684,6 +7686,7 @@ async def _dispatch_session_event_to_runner_impl(
                 ensure_outcome.error,
                 runner_router,
                 created_by=created_by,
+                failure_context=ensure_outcome.failure_context,
             )
             return _SessionEventDispatchResult(item_id=item_id, pending_id=None)
         if ensure_outcome.policy_notice is not None:
@@ -8178,6 +8181,7 @@ async def _runner_disconnect_requires_failure(
         live, source = None, "unknown"
 
     conv = persisted if persisted is not None else fallback
+    runner_id = handle.runner_id if handle is not None else conv.runner_id if conv else None
     if (
         snapshot is not None
         and snapshot.runner_id is not None
@@ -8185,6 +8189,11 @@ async def _runner_disconnect_requires_failure(
     ):
         # A Stop can arrive while the sweep refreshes its row.
         decision = "intentional_stop"
+    elif shutdown_state.runner_handoff_reason(runner_id) is not None:
+        # This replica moved the runner's tunnel to another replica, which now
+        # owns the turn. A failed or stale local read must not fail a turn that
+        # is still running there.
+        decision = "handed_off"
     elif live in _MID_TURN_STATUSES and source != "cache" and _owned_by_parent_runtime(conv):
         decision = "subagent_unobserved"
     elif live in _MID_TURN_STATUSES:
@@ -8257,10 +8266,11 @@ async def _runner_disconnect_requires_failure(
             status_lookup=lookup,
             session_kind=conv.kind if conv is not None else None,
             parent_session_id=conv.parent_conversation_id if conv is not None else None,
-            runner_id=handle.runner_id if handle is not None else conv.runner_id if conv else None,
+            runner_id=runner_id,
             host_id=conv.host_id if conv is not None else None,
             conversation_updated_at=conv.updated_at if conv is not None else None,
             fail_idle_top_level=fail_idle_top_level,
+            **shutdown_state.disconnect_attributes(runner_id),
         ),
     )
     return decision in ("failed_mid_turn", "failed_before_start")
@@ -8449,6 +8459,9 @@ async def _relay_runner_stream(
                 decision = "intentional_stop"
             elif shutdown_state.server_shutting_down():
                 decision = "server_shutdown"
+            elif shutdown_state.runner_handoff_reason(outage_runner_id) is not None:
+                # See _runner_disconnect_requires_failure.
+                decision = "handed_off"
             elif await _relay_runner_live_elsewhere(session_id, conversation_store):
                 decision = "live_elsewhere"
             elif await _runner_disconnect_requires_failure(
@@ -8479,6 +8492,7 @@ async def _relay_runner_stream(
                     ),
                     retries=retries,
                     telemetry_schema=_RELAY_TELEMETRY_SCHEMA,
+                    **shutdown_state.disconnect_attributes(outage_runner_id),
                 ),
             )
             if decision == "intentional_stop":
@@ -8501,7 +8515,7 @@ async def _relay_runner_stream(
                     session_id,
                     extra={"session_id": session_id},
                 )
-            elif decision == "live_elsewhere":
+            elif decision in ("live_elsewhere", "handed_off"):
                 # The runner re-tunnelled to another replica before this one
                 # noticed the drop; that replica now owns the turn.
                 _relinquish_session_live_state(session_id)
@@ -8833,6 +8847,7 @@ async def _relay_runner_stream_once(
                                     else None
                                 ),
                                 failure_origin="relayed_runner_status",
+                                failure_context=event.get("failure_context"),
                                 blocked_on=(
                                     raw_blocked_on
                                     if isinstance(raw_blocked_on, str) and raw_blocked_on

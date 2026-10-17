@@ -2280,6 +2280,7 @@ async def test_current_tunnel_loss_preserves_owned_predecessor_until_real_loss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from omnigent.runner.transports.ws_tunnel.frames import TUNNEL_RENEWAL_CAPABILITY, HelloFrame
+    from omnigent.server import shutdown_state
     from omnigent.server.routes import sessions
     from tests.server.test_host_registry import FakeWebSocket
 
@@ -2322,7 +2323,7 @@ async def test_current_tunnel_loss_preserves_owned_predecessor_until_real_loss(
         await asyncio.gather(*timers)
 
     try:
-        registry.deregister(runner_id, current)
+        registry.deregister(runner_id, current, retire=False)
         assert registry.get(runner_id) is None
         assert registry.has_live_predecessor(runner_id)
         await captured["disconnect"](runner_id, current)  # type: ignore[operator]
@@ -2330,14 +2331,15 @@ async def test_current_tunnel_loss_preserves_owned_predecessor_until_real_loss(
         assert sessions._session_status_cache[session_id] == "running"
         assert store.get_conversation(session_id).live_status == "running"
         assert not pending.head_future.done()
-        registry.deregister(runner_id, old)
+        registry.deregister(runner_id, old, retire=False)
         with pytest.raises(ConnectionError):
             await pending.head_future
         await captured["disconnect"](runner_id, old)  # type: ignore[operator]
         await settle_timers()
         assert sessions._session_status_cache[session_id] == "failed"
+        assert shutdown_state.runner_handoff_reason(runner_id) is None
     finally:
-        registry.deregister(runner_id, old)
+        registry.deregister(runner_id, old, retire=False)
         if pending.head_future.done() and not pending.head_future.cancelled():
             pending.head_future.exception()
         else:
