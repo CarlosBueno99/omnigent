@@ -4623,14 +4623,16 @@ async def _maybe_wake_stale_resumable_managed_sandbox(
 
 
 _HOST_REFUSAL_REASON_MAX_CHARS = 300
+_ANSI_CONTROL_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _host_launch_refusal_detail(reason: str | None, *, visible: bool) -> str:
     """
     Describe a host's uncategorized launch refusal as a sentence fragment.
 
-    The host's text is untrusted, so it is flattened to one printable line and
-    capped; viewers who may not see it get a pointer to the daemon log instead.
+    The host's text is untrusted, so terminal control sequences are removed, it
+    is flattened to one printable line and capped; viewers who may not see it
+    get a pointer to the daemon log instead.
 
     :param reason: The host's refusal text, e.g. ``"failed to spawn runner:
         [Errno 2] No such file or directory: '/venv/bin/python'"``.
@@ -4638,7 +4640,8 @@ def _host_launch_refusal_detail(reason: str | None, *, visible: bool) -> str:
     :returns: A fragment without a trailing period.
     """
     if reason and visible:
-        flat = " ".join("".join(ch if ch.isprintable() else " " for ch in reason).split())
+        plain = _ANSI_CONTROL_SEQUENCE.sub("", reason)
+        flat = " ".join("".join(ch if ch.isprintable() else " " for ch in plain).split())
         if len(flat) > _HOST_REFUSAL_REASON_MAX_CHARS:
             flat = flat[: _HOST_REFUSAL_REASON_MAX_CHARS - 1].rstrip() + "…"
         if flat:

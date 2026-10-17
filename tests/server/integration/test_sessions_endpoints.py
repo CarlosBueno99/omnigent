@@ -10285,6 +10285,7 @@ async def test_retry_session_explains_unreachable_host(
 
     error = response.json()["error"]
     if host_state == "reconnected_elsewhere":
+        assert response.status_code == 400, response.text
         assert error["code"] == "wrong_replica", response.text
         return
     assert response.status_code == 503, response.text

@@ -31,6 +31,8 @@ def _build_removable_interpreter(dst: Path) -> Path:
     host online while every subsequent launch fails at spawn.
     """
     real_venv = Path(sys.prefix)
+    if not (real_venv / "pyvenv.cfg").is_file():
+        pytest.skip("requires running inside a venv to mirror its interpreter")
     (dst / "bin").mkdir(parents=True, exist_ok=True)
     shutil.copyfile(real_venv / "pyvenv.cfg", dst / "pyvenv.cfg")
     (dst / "lib").symlink_to(real_venv / "lib")

@@ -468,9 +468,9 @@ async def test_not_found_launch_code_is_a_404_only_for_a_deleted_session(
 
 
 def test_host_launch_refusal_shows_reason_only_to_the_host_owner() -> None:
-    """The host's text is flattened, capped, and shown only to its owner."""
+    """The host's text loses control sequences, is flattened and capped, and is owner-only."""
     refusal = orchestration.HostLaunchRefusedError(
-        "bad\x1b[0m\n" + "x" * 1000, "owner@example.com"
+        "\x1b[31mbad\x1b[0m\n" + "x" * 1000, "owner@example.com"
     )
 
     hidden = refusal.for_viewer("collaborator@example.com")
@@ -479,7 +479,7 @@ def test_host_launch_refusal_shows_reason_only_to_the_host_owner() -> None:
     assert str(refusal) == str(hidden)
     shown = str(refusal.for_viewer("owner@example.com"))
     reason = shown.split("the launch failed: ", 1)[1].split(". Fix it", 1)[0]
-    assert reason.startswith("bad [0m x")
+    assert reason.startswith("bad x")
     assert len(reason) == orchestration._HOST_REFUSAL_REASON_MAX_CHARS
     assert reason.endswith("…")
 

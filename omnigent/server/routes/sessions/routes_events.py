@@ -589,6 +589,13 @@ async def _retry_unavailable_message(
             "The host for this session is not connected to this server. "
             "Retry in a moment; if it keeps failing, reconnect the host."
         )
+    if conv.host_id is None and conv.kind == "sub_agent":
+        # Recovery never asks a host to launch a sub-agent; it rides its parent's runner.
+        return (
+            "This sub-agent runs on its parent session's runner and has no runner of "
+            "its own to restart. Resume the parent session if it is not running, then "
+            "send your message here again."
+        )
     return (
         "The host was asked to start a runner for this session, but none "
         "connected to the server. Check the runner log on the host, then retry."
@@ -2781,9 +2788,8 @@ def register_events_routes(
             )
         if runner_client is None:
             # A native terminal message must not be dropped when no runner is
-            # reachable: persist it with the failure so it survives reload. Safe
-            # because no live harness exists to desync; other event types and
-            # non-native sessions still raise, since their input would replay.
+            # reachable: persist it with the failure so it survives reload.
+            # Safe because no live harness exists to desync.
             if body.type == "message" and _is_native_terminal_session(conv):
                 exit_cause = (
                     runner_exit_reports.get(conv.runner_id)

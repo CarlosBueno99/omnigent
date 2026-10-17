@@ -30,5 +30,6 @@ def wait_for_online_host(client: httpx.Client, *, timeout: float = 60.0) -> str:
     wait_until(
         lambda: any(host["status"] == "online" for host in list_hosts(client)), timeout=timeout
     )
-    [host] = [host for host in list_hosts(client) if host["status"] == "online"]
-    return host["host_id"]
+    online = [host for host in list_hosts(client) if host["status"] == "online"]
+    assert len(online) == 1, f"expected exactly one online host, got: {online}"
+    return online[0]["host_id"]

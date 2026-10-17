@@ -3882,9 +3882,12 @@ async def test_native_message_relaunch_refusal_keeps_host_reason(
     )
     try:
         response = await _post_hello(client, session_id)
-    finally:
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            _ = await responder
+    except BaseException:
+        responder.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await responder
+        raise
+    await responder
 
     assert response.status_code == 202, response.text
     items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
@@ -3909,6 +3912,7 @@ async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_hi
     """
     from omnigent.server.auth import LEVEL_EDIT, UnifiedAuthProvider
     from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes.sessions import routes_events
     from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
     from tests.server.conftest import _app_client
 
@@ -3945,10 +3949,14 @@ async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_hi
                 )
             )
             try:
-                return await post()
-            finally:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    _ = await responder
+                result = await post()
+            except BaseException:
+                responder.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await responder
+                raise
+            await responder
+            return result
 
         send = await refuse_launch_for(lambda: _post_hello(client, session_id))
         assert send.status_code == 202, send.text
@@ -3971,11 +3979,33 @@ async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_hi
             )
 
         # Both requesters share one recovery attempt (a single launch is
-        # answered) yet receive differently scoped answers.
+        # answered) yet receive differently scoped answers. The host answers
+        # only once both have reached the single-flight, so neither can start
+        # a second recovery after the first one finished.
+        both_joined = asyncio.Event()
+        joined = 0
+        real_single_flight = routes_events._retry_session_single_flight
+
+        async def _count_joiners(**kwargs: Any) -> dict[str, bool | str]:
+            nonlocal joined
+            joined += 1
+            if joined == 2:
+                both_joined.set()
+            return await real_single_flight(**kwargs)
+
+        real_launch = sessions_module._launch_runner_on_host
+
+        async def _launch_after_both_joined(*args: Any, **kwargs: Any) -> Any:
+            await asyncio.wait_for(both_joined.wait(), timeout=budget(5.0))
+            return await real_launch(*args, **kwargs)
+
+        monkeypatch.setattr(routes_events, "_retry_session_single_flight", _count_joiners)
+        monkeypatch.setattr(sessions_module, "_launch_runner_on_host", _launch_after_both_joined)
         started = time.monotonic()
         owner_retry, collaborator_retry = await refuse_launch_for(
             lambda: asyncio.gather(retry(owner), retry(collaborator))
         )
+        assert joined == 2
         assert time.monotonic() - started < budget(10.0)
         assert owner_retry.status_code == 503, owner_retry.text
         assert _SPAWN_REFUSAL_FLAT in owner_retry.json()["error"]["message"]
@@ -4524,6 +4554,41 @@ async def test_side_chat_retry_names_offline_source_host(
         "The host for this session is offline. "
         f"Start it with `{cli_invocation()} host` (or reconnect it) and retry."
     )
+
+
+async def test_sub_agent_retry_does_not_claim_a_launch(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume on a hostless sub-agent points at its parent's runner; no launch is claimed."""
+    from omnigent.runtime import set_runner_client
+    from omnigent.server.routes import sessions as sessions_module
+
+    monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
+    comm = await _connect_host(app)
+    parent_id = (await _inline_launch_session(client, comm))["id"]
+    store = SqlAlchemyConversationStore(db_uri)
+    parent = store.get_conversation(parent_id)
+    assert parent is not None
+    child = store.create_conversation(
+        kind="sub_agent",
+        title="researcher:auth",
+        parent_conversation_id=parent_id,
+        agent_id=parent.agent_id,
+    )
+    set_runner_client(None)
+
+    response = await client.post(
+        f"/v1/sessions/{child.id}/events", json={"type": "retry_session", "data": {}}
+    )
+
+    assert response.status_code == 503, response.text
+    message = response.json()["error"]["message"]
+    assert "parent session's runner" in message, message
+    assert "asked to start a runner" not in message, message
+    assert not await _expect_no_launch(comm, budget_s=budget(1.0))
 
 
 @pytest.mark.parametrize(
