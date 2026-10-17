@@ -105,7 +105,11 @@ def test_icon_slot_is_free_of_artwork(item: dict) -> None:
 
 
 def test_install_arrow_points_from_app_to_applications() -> None:
-    app, applications = sorted(DMG_CONFIG["contents"], key=lambda entry: entry["x"])
+    app = next(entry for entry in DMG_CONFIG["contents"] if "path" not in entry)
+    applications = next(entry for entry in DMG_CONFIG["contents"] if entry.get("type") == "link")
+    assert app["x"] < applications["x"] and app["y"] == applications["y"], (
+        "the installer must place the app left of /Applications on the same row"
+    )
     margin = ICON_HALF + SLOT_MARGIN
     gap = (app["x"] + margin, app["y"] - margin, applications["x"] - margin, app["y"] + margin)
     for scale, frame in _background_frames():
@@ -129,8 +133,10 @@ def test_install_arrow_points_from_app_to_applications() -> None:
 
 
 def test_installer_shows_one_app_and_the_applications_link() -> None:
+    """dmg-builder places the app bundle at the ``contents`` entry without a ``path``."""
+    apps = [entry for entry in DMG_CONFIG["contents"] if "path" not in entry]
     links = [entry.get("path") for entry in DMG_CONFIG["contents"] if entry.get("type") == "link"]
-    assert len(DMG_CONFIG["contents"]) == 2 and links == ["/Applications"], (
+    assert len(DMG_CONFIG["contents"]) == 2 and len(apps) == 1 and links == ["/Applications"], (
         "the installer must show exactly one app icon and one link to /Applications"
     )
 
