@@ -145,7 +145,8 @@ async def test_restart_uses_the_same_live_owner_after_its_exact_helper_exits(
     try:
         assert (await environment.read("file.txt"))["content"] == "workspace"
         first = environment._helper._proc
-        assert first is not None
+        first_tmpdir = environment._helper._tmpdir
+        assert first is not None and first_tmpdir is not None and first_tmpdir.is_dir()
         first.terminate()
         async with asyncio.timeout(5):
             while first.poll() is None:
@@ -153,6 +154,8 @@ async def test_restart_uses_the_same_live_owner_after_its_exact_helper_exits(
         assert (await environment.read("file.txt"))["content"] == "workspace"
         second = environment._helper._proc
         assert second is not None and second.pid != first.pid
+        assert environment._helper._tmpdir != first_tmpdir
+        assert not first_tmpdir.exists(), "the exited helper's private tmpdir leaked"
         assert len(owners) == 2 and owners[0] is owners[1]
         assert owners[0].is_alive()
         await _assert_survives_request_thread(second)
