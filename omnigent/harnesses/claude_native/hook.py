@@ -140,15 +140,30 @@ def _never_connected_errors() -> tuple[type[Exception], ...]:
     """httpx errors meaning the request never reached a live server.
 
     No response was ever begun — unambiguous hard failures (the server is
-    down / unreachable), not a held poll. Everything else under
-    ``httpx.HTTPError`` that is not a 4xx/5xx status (RemoteProtocolError,
-    ReadError, ReadTimeout, …) means the connection was established and
-    then severed mid-poll. A function, not a module constant, so the
-    hook's hot observer path never imports httpx.
+    down / unreachable), not a held poll. A write-phase failure
+    (``WriteError``/``WriteTimeout``) likewise leaves the POST unsent, so it
+    too fails to prove a parked card; only a response-phase failure does — see
+    :func:`_request_delivered_errors`. A function, not a module constant, so
+    the hook's hot observer path never imports httpx.
     """
     import httpx
 
     return (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError)
+
+
+def _request_delivered_errors() -> tuple[type[Exception], ...]:
+    """httpx errors meaning the full POST reached the server before it failed.
+
+    The request body was sent in full and the failure happened while awaiting
+    or reading the response (``RemoteProtocolError``, ``ReadError``,
+    ``ReadTimeout``), so the server received the POST and parked the card —
+    unlike a connect- or write-phase failure, where the body never fully
+    arrived. A function, not a module constant, so the hook's hot observer
+    path never imports httpx.
+    """
+    import httpx
+
+    return (httpx.RemoteProtocolError, httpx.ReadError, httpx.ReadTimeout)
 
 
 # An established connection that drops in under this many seconds is treated as
@@ -708,12 +723,14 @@ def _post_hook_with_reattach(
       :data:`_PERMISSION_HELD_POLL_FLOOR_S`, or a connection that never
       established (:func:`_never_connected_errors`), or an established
       connection that dropped in under the floor (a flapping/crash-looping
-      server). This is the spin. Exception: once an established connection has
-      been severed — even a sub-floor flap, which still proves the POST reached
-      a server holding the poll — a connect that never reaches the server (a
-      host network outage) backs off without counting, so the card re-parks when
-      the network returns. The flap itself still counts, so a server that only
-      ever establishes-then-drops (never holding a poll) is still bounded.
+      server). This is the spin. Exception: once a response-phase failure has
+      proved the full POST reached the server (:func:`_request_delivered_errors`),
+      even a sub-floor one, the card is live, so a later connect that never
+      reaches the server (a host network outage) backs off without counting and
+      the card re-parks when the network returns. A write-phase failure leaves
+      the POST unsent and does not latch this. The delivering failure itself
+      still counts, so a server that only ever establishes-then-drops (never
+      holding a poll) is still bounded.
     * **Held-poll sever → reset the counter and the backoff.** An established
       connection that dropped mid-poll after being held ≥ the floor, or a
       gateway 5xx (the Databricks front door answers an idle long-poll with
@@ -794,9 +811,8 @@ def _post_hook_with_reattach(
     deadline = time.monotonic() + _PERMISSION_TIMEOUT_S
     reauthed = False
     consecutive_hard_failures = 0
-    # Once an established connection has been severed the server received our
-    # POST and the card is live: ride out a network outage until the deadline so
-    # the re-POST re-publishes it on reconnect.
+    # Set once a response-phase failure proves the full POST reached the server
+    # and the card is live, so a later network outage rides out to the deadline.
     parked = False
     marker_scope = (
         hold_approval_wait_marker(wait_marker)
@@ -858,10 +874,9 @@ def _post_hook_with_reattach(
                 # Hard failure iff the server was never reached, OR an established
                 # connection dropped so fast it's a flap rather than a parked poll.
                 is_hard_failure = never_connected or held_s < _PERMISSION_HELD_POLL_FLOOR_S
-                # An established sever (even a sub-floor flap) proves the POST
-                # reached a server holding the poll, so the card is live and a
-                # later outage rides out; the flap itself still counts (bounded).
-                if not never_connected:
+                # Only a response-phase failure proves the full POST reached the
+                # server; a write-phase failure does not establish a parked card.
+                if isinstance(exc, _request_delivered_errors()):
                     parked = True
                 kind = (
                     "unreachable"

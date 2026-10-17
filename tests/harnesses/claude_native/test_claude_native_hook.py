@@ -2086,6 +2086,8 @@ def _scripted_client(
 
     ``kind`` values:
       * ``"connect"`` — :class:`httpx.ConnectError` (server never reached: hard)
+      * ``"write"``   — :class:`httpx.WriteError` (POST body never fully sent,
+        so no card parked: hard, like a connect failure)
       * ``"severed"`` — :class:`httpx.RemoteProtocolError` (established then
         dropped: a held-poll sever iff ``held_s`` >= the floor)
       * ``"5xx"``     — a 503 response (hard iff ``held_s`` < the floor; a
@@ -2123,6 +2125,8 @@ def _scripted_client(
             req = httpx.Request("POST", url)
             if kind == "connect":
                 raise httpx.ConnectError("AP unreachable", request=req)
+            if kind == "write":
+                raise httpx.WriteError("AP write cut mid-body", request=req)
             if kind == "severed":
                 raise httpx.RemoteProtocolError("server dropped the poll", request=req)
             if kind == "5xx":
@@ -2405,6 +2409,40 @@ def test_reattach_card_parked_under_the_floor_rides_out_an_outage(
     assert len(client.calls) == cap * 3 + 2
 
 
+def test_reattach_write_phase_failure_does_not_disable_the_unreachable_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write-phase failure must not latch the card as parked.
+
+    A ``WriteError`` (or ``WriteTimeout``) fails while the POST body is still
+    being sent, so the server never received the request and no approval card
+    exists. Unlike a response-phase sever it must not mark the wait parked, or
+    a following host-network outage would retry to the day-long deadline
+    instead of failing-ask at the unreachable-server cap. The write flap and
+    every unreachable connect after it count, so the loop still stops at the
+    cap.
+    """
+    cap = claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES
+    # The trailing "ok" is never reached once the cap holds; it only lets a
+    # reintroduced write-phase latch answer so this test fails fast instead of
+    # looping on the fake clock.
+    client = _scripted_client(
+        script=[("write", 0.0)] + [("connect", 0.0)] * (cap * 3) + [("ok", 0.0)],
+        monkeypatch=monkeypatch,
+    )
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", client)
+
+    resp = claude_native_hook._post_hook_with_reattach(
+        url="http://127.0.0.1:8787/v1/sessions/conv_x/hooks/permission-request",
+        headers={},
+        payload={"hook_event_name": "PreToolUse"},
+        hook_label="permission",
+    )
+
+    assert resp is None, "a write-phase failure wrongly rode out an unreachable server"
+    assert len(client.calls) == cap
+
+
 def test_reattach_re_posts_a_held_poll_whose_reply_never_arrives(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2459,7 +2497,7 @@ def test_reattach_re_posts_a_held_poll_whose_reply_never_arrives(
         release.set()
         server.shutdown()
         server.server_close()
-    resp = result["resp"]
+    resp = result.get("resp")
     assert resp is not None and resp.status_code == 200
     assert len(elicitation_ids) == 2 and elicitation_ids[0] == elicitation_ids[1]
 
