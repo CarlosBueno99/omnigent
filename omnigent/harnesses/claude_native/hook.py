@@ -724,13 +724,15 @@ def _post_hook_with_reattach(
       established (:func:`_never_connected_errors`), or an established
       connection that dropped in under the floor (a flapping/crash-looping
       server). This is the spin. Exception: once a response-phase failure has
-      proved the full POST reached the server (:func:`_request_delivered_errors`),
-      even a sub-floor one, the card is live, so a later connect that never
-      reaches the server (a host network outage) backs off without counting and
-      the card re-parks when the network returns. A write-phase failure leaves
-      the POST unsent and does not latch this. The delivering failure itself
-      still counts, so a server that only ever establishes-then-drops (never
-      holding a poll) is still bounded.
+      proved the full POST reached the server (:func:`_request_delivered_errors`,
+      or the gateway's own idle-timeout 504 on a held long-poll), even a
+      sub-floor one, the card is live, so a later connect that never reaches the
+      server (a host network outage) backs off without counting and the card
+      re-parks when the network returns. A write-phase failure or a 502/503
+      leaves the POST unsent/unproven and does not latch this, so a slow write
+      stall cannot disable the cap. The delivering failure itself still counts,
+      so a server that only ever establishes-then-drops (never holding a poll)
+      is still bounded.
     * **Held-poll sever → reset the counter and the backoff.** An established
       connection that dropped mid-poll after being held ≥ the floor, or a
       gateway 5xx (the Databricks front door answers an idle long-poll with
@@ -755,12 +757,20 @@ def _post_hook_with_reattach(
     POST silently with no client-visible "parked" ack. So this case resets the
     counter and is NOT caught by the consecutive-hard-failure cap; it is bounded
     only by the absolute :data:`_PERMISSION_TIMEOUT_S` ceiling below (the same
-    day-long human-answer window). A lone sub-floor response-phase sever latches
-    the same live-card state so an outage starting within the floor still rides
-    out; because that sever still counts, a server that keeps severing in the
-    response phase (a read-phase crash loop) is still capped — only a single
-    flap followed by a sustained unreachable outage reaches this ceiling. That
-    is the tightest safe client-side bound:
+    day-long human-answer window). The live-card latch that lets a *sustained*
+    outage ride out without counting is narrower: it is set only by response-
+    phase delivery evidence — a transport sever after the body was sent, or the
+    gateway's idle-timeout 504 — so a write stall or a 502/503 held past the
+    floor resets the counter but does NOT disable the cap. A lone sub-floor
+    response-phase sever does latch, so an outage starting within the floor
+    still rides out; the delivering sever still counts, so a read-phase crash
+    loop is still capped — only a single flap followed by a sustained unreachable
+    outage reaches the ceiling. The remaining ambiguity — a server that accepts
+    and buffers the body, then crashes before reading it, raises the same read
+    error with no card parked — is resolved toward keeping a pending human
+    approval alive (bounded by the ceiling, backing off rather than spinning),
+    since re-abandoning a genuinely-parked card is the reported failure this
+    loop exists to prevent. That is the tightest safe client-side bound:
     capping it sooner — or raising the floor for 5xx above the 10s shared with
     torn connections — would necessarily cap a real slow human behind any
     gateway that answers sooner than the floor, which is the very wedge this
@@ -812,11 +822,12 @@ def _post_hook_with_reattach(
     )
     # Absolute backstop: even a run of held-poll severs (which don't count
     # toward the hard-failure cap) can't loop past the day-long human-answer
-    # window — matches the read budget and the server's ask_timeout.
+    # window, which matches the server's ask_timeout. (A single parked poll is
+    # bounded separately by the shorter read budget.)
     deadline = time.monotonic() + _PERMISSION_TIMEOUT_S
     reauthed = False
     consecutive_hard_failures = 0
-    # Set once a response-phase failure proves the full POST reached the server
+    # Set once response-phase evidence proves the full POST reached the server
     # and the card is live, so a later network outage rides out to the deadline.
     parked = False
     marker_scope = (
@@ -828,6 +839,7 @@ def _post_hook_with_reattach(
         while True:
             attempt_started = time.monotonic()
             never_connected = False
+            delivered = False
             try:
                 with httpx.Client(headers=headers, timeout=timeout) as client:
                     resp = client.post(url, json=body)
@@ -864,6 +876,10 @@ def _post_hook_with_reattach(
                 # an idle long-poll (a 504 at 300s) — a held-poll sever.
                 held_s = time.monotonic() - attempt_started
                 is_hard_failure = held_s < _PERMISSION_HELD_POLL_FLOOR_S
+                # Only the gateway's own idle-timeout 504 on a held long-poll
+                # proves the POST reached the app and the card is parked; a
+                # 500/502/503 only shows the upstream dial failed, with no card.
+                delivered = exc.response.status_code == 504 and not is_hard_failure
                 kind = "sick" if is_hard_failure else "held-poll severed by gateway"
                 print(
                     f"omnigent {hook_label} hook: Omnigent request failed "
@@ -879,10 +895,10 @@ def _post_hook_with_reattach(
                 # Hard failure iff the server was never reached, OR an established
                 # connection dropped so fast it's a flap rather than a parked poll.
                 is_hard_failure = never_connected or held_s < _PERMISSION_HELD_POLL_FLOOR_S
-                # Only a response-phase failure proves the full POST reached the
-                # server; a write-phase failure does not establish a parked card.
-                if isinstance(exc, _request_delivered_errors()):
-                    parked = True
+                # A response-phase failure (body sent, read failed) proves the
+                # full POST reached the server; a write- or connect-phase failure
+                # leaves it unsent, so it does not establish a parked card.
+                delivered = isinstance(exc, _request_delivered_errors())
                 kind = (
                     "unreachable"
                     if never_connected
@@ -893,17 +909,20 @@ def _post_hook_with_reattach(
                     f"({kind}); retrying: {exc}",
                     file=sys.stderr,
                 )
+            # Latch the live-card state only on response-phase delivery evidence.
+            # Elapsed time alone does not: a write stall or a 502/503 can run past
+            # the floor without ever delivering the POST.
+            if delivered:
+                parked = True
             if is_hard_failure:
-                # A connect that never reached the server cannot spin it, so a
-                # parked wait keeps backing off without counting toward the cap.
+                # A connect that never reached the server cannot spin it, so once
+                # the card is parked a network outage backs off without counting.
                 if not (parked and never_connected):
                     consecutive_hard_failures += 1
             else:
-                parked = True
-                # A proxy severed a genuinely-held poll — the re-park mechanism
-                # working as intended. Reset so a slow human is never capped, and
-                # re-POST promptly so the same id re-parks inside the server's
-                # re-park grace instead of letting the card clear between polls.
+                # A proxy severed a genuinely-held poll (or the gateway idle-cut
+                # it). Reset so a slow human is never capped, and re-POST promptly
+                # so the same id re-parks inside the server's re-park grace.
                 consecutive_hard_failures = 0
                 backoff_s = _PERMISSION_RETRY_INITIAL_BACKOFF_S
                 # The held poll proves this token was accepted, so the one-shot

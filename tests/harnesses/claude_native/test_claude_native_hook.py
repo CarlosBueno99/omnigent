@@ -2088,10 +2088,16 @@ def _scripted_client(
       * ``"connect"`` — :class:`httpx.ConnectError` (server never reached: hard)
       * ``"write"``   — :class:`httpx.WriteError` (POST body never fully sent,
         so no card parked: hard, like a connect failure)
+      * ``"write_timeout"`` — :class:`httpx.WriteTimeout` (same as ``"write"``:
+        the body never fully sent, so no card parked)
       * ``"severed"`` — :class:`httpx.RemoteProtocolError` (established then
-        dropped: a held-poll sever iff ``held_s`` >= the floor)
-      * ``"5xx"``     — a 503 response (hard iff ``held_s`` < the floor; a
-        gateway 5xx ending a held poll is a sever)
+        dropped: a response-phase sever that proves the POST was delivered)
+      * ``"5xx"``     — a 503 response (a hard "sick" failure iff ``held_s`` <
+        the floor; held past the floor it is a gateway sever that resets the
+        counter but does NOT prove a parked card)
+      * ``"504"``     — a 504 response (the gateway's idle-timeout on a held
+        long-poll; held past the floor it proves the POST reached the app and
+        the card is parked)
       * ``"ok"``      — a 200 response (the human answered: final)
 
     :param script: Per-attempt ``(kind, held_s)`` plan.
@@ -2127,10 +2133,14 @@ def _scripted_client(
                 raise httpx.ConnectError("AP unreachable", request=req)
             if kind == "write":
                 raise httpx.WriteError("AP write cut mid-body", request=req)
+            if kind == "write_timeout":
+                raise httpx.WriteTimeout("AP write timed out mid-body", request=req)
             if kind == "severed":
                 raise httpx.RemoteProtocolError("server dropped the poll", request=req)
             if kind == "5xx":
                 return httpx.Response(503, text="upstream down", request=req)
+            if kind == "504":
+                return httpx.Response(504, text="gateway idle timeout", request=req)
             if kind == "ok":
                 return httpx.Response(200, json={"ok": True}, request=req)
             raise AssertionError(f"unknown scripted kind {kind!r}")
@@ -2351,14 +2361,15 @@ def test_reattach_parked_wait_rides_out_a_host_network_outage(
 ) -> None:
     """A parked approval keeps retrying while the host cannot reach the server.
 
-    The server already published the card; giving up after a few unreachable
-    connects left Claude's prompt blocking the session with no card to answer,
-    so web messages stayed buffered until the turn failed.
+    The gateway held the long-poll past the floor and idle-timed-out with a 504,
+    which proves the POST reached the app and the card is parked. Giving up after
+    a few unreachable connects left Claude's prompt blocking the session with no
+    card to answer, so web messages stayed buffered until the turn failed.
     """
     cap = claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES
     held = claude_native_hook._PERMISSION_HELD_POLL_FLOOR_S + 290.0
     client = _scripted_client(
-        script=[("5xx", held)] + [("connect", 30.0)] * (cap * 3) + [("ok", 0.0)],
+        script=[("504", held)] + [("connect", 30.0)] * (cap * 3) + [("ok", 0.0)],
         monkeypatch=monkeypatch,
     )
     monkeypatch.setattr(native_policy_hook.httpx, "Client", client)
@@ -2409,25 +2420,41 @@ def test_reattach_card_parked_under_the_floor_rides_out_an_outage(
     assert len(client.calls) == cap * 3 + 2
 
 
+@pytest.mark.parametrize("write_kind", ["write", "write_timeout"])
+@pytest.mark.parametrize(
+    ("write_held_s", "expected_calls"),
+    [
+        # A fast write flap counts as a hard failure itself, then the connects.
+        (0.0, claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES),
+        # A write that stalls past the floor resets the counter but must not
+        # latch; the following connects alone must still reach the cap.
+        (
+            claude_native_hook._PERMISSION_HELD_POLL_FLOOR_S + 1.0,
+            claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES + 1,
+        ),
+    ],
+)
 def test_reattach_write_phase_failure_does_not_disable_the_unreachable_cap(
+    write_kind: str,
+    write_held_s: float,
+    expected_calls: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A write-phase failure must not latch the card as parked.
 
-    A ``WriteError`` (or ``WriteTimeout``) fails while the POST body is still
-    being sent, so the server never received the request and no approval card
-    exists. Unlike a response-phase sever it must not mark the wait parked, or
-    a following host-network outage would retry to the day-long deadline
-    instead of failing-ask at the unreachable-server cap. The write flap and
-    every unreachable connect after it count, so the loop still stops at the
-    cap.
+    A ``WriteError`` or ``WriteTimeout`` fails while the POST body is still being
+    sent, so the server never received the request and no approval card exists —
+    whether it fails fast or stalls past the floor first (a large ``Write.content``
+    can stall mid-transmission). Unlike a response-phase sever it must not mark
+    the wait parked, or a following host-network outage would retry to the
+    day-long deadline instead of failing-ask at the unreachable-server cap.
     """
     cap = claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES
     # The trailing "ok" is never reached once the cap holds; it only lets a
     # reintroduced write-phase latch answer so this test fails fast instead of
     # looping on the fake clock.
     client = _scripted_client(
-        script=[("write", 0.0)] + [("connect", 0.0)] * (cap * 3) + [("ok", 0.0)],
+        script=[(write_kind, write_held_s)] + [("connect", 0.0)] * (cap * 3) + [("ok", 0.0)],
         monkeypatch=monkeypatch,
     )
     monkeypatch.setattr(native_policy_hook.httpx, "Client", client)
@@ -2440,7 +2467,37 @@ def test_reattach_write_phase_failure_does_not_disable_the_unreachable_cap(
     )
 
     assert resp is None, "a write-phase failure wrongly rode out an unreachable server"
-    assert len(client.calls) == cap
+    assert len(client.calls) == expected_calls
+
+
+def test_reattach_gateway_502_503_does_not_disable_the_unreachable_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 502/503 held past the floor must not latch the card as parked.
+
+    A slow gateway 5xx that is not an idle-timeout 504 only shows the gateway's
+    upstream dial failed; the POST may never have reached the app, so no card is
+    parked. It resets the counter (a slow human behind a flaky gateway is never
+    capped on a lone 5xx) without latching, or a following host-network outage
+    would ride out to the day-long deadline instead of capping.
+    """
+    cap = claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES
+    held = claude_native_hook._PERMISSION_HELD_POLL_FLOOR_S + 1.0
+    client = _scripted_client(
+        script=[("5xx", held)] + [("connect", 0.0)] * (cap * 3) + [("ok", 0.0)],
+        monkeypatch=monkeypatch,
+    )
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", client)
+
+    resp = claude_native_hook._post_hook_with_reattach(
+        url="http://127.0.0.1:8787/v1/sessions/conv_x/hooks/permission-request",
+        headers={},
+        payload={"hook_event_name": "PreToolUse"},
+        hook_label="permission",
+    )
+
+    assert resp is None, "a 502/503 wrongly rode out an unreachable server"
+    assert len(client.calls) == cap + 1
 
 
 def test_reattach_re_posts_a_held_poll_whose_reply_never_arrives(
@@ -2499,7 +2556,11 @@ def test_reattach_re_posts_a_held_poll_whose_reply_never_arrives(
         server.server_close()
     resp = result.get("resp")
     assert resp is not None and resp.status_code == 200
-    assert len(elicitation_ids) == 2 and elicitation_ids[0] == elicitation_ids[1]
+    assert len(elicitation_ids) == 2
+    # The re-park contract is the same id re-POSTed, so the id must be present:
+    # two Nones would satisfy the equality vacuously.
+    assert elicitation_ids[0] is not None
+    assert elicitation_ids[0] == elicitation_ids[1]
 
 
 def test_reattach_holds_the_approval_wait_marker_until_the_wait_ends(
