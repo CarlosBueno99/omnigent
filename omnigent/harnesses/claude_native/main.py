@@ -5949,12 +5949,10 @@ def _rejoin_split_server_tool_results(compacted_messages: list[object]) -> list[
     """
     Return snapshot entries with each server tool result beside its call.
 
-    Claude Code writes one transcript record per content block and rejoins
-    records sharing ``message.id`` on resume. A snapshot stored without that
-    id replays a ``server_tool_use`` and its ``*_tool_result`` as separate
-    assistant messages: Claude Code drops the lone call as interrupted and
-    the API rejects the orphaned result. Fold each result into the preceding
-    assistant run that holds its call; drop results whose call is missing.
+    A snapshot stored without ``message_id`` replays a ``server_tool_use`` and
+    its ``*_tool_result`` as separate assistant messages, which Claude Code
+    treats as an interrupted call and the API rejects. Fold each result into
+    the preceding assistant run holding its call; drop results whose call is gone.
 
     :param compacted_messages: Snapshot entries of a compaction item.
     :returns: String-keyed entries with every server tool pair in one message.
