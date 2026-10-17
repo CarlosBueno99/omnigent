@@ -88,12 +88,16 @@ retrying for up to a day, so for Codex this is also the 120 s outcome.
 
 ### R2: Long outage moves the approval to the terminal
 
-Claude only. After `OMNIGENT_HOOK_MAX_RETRIES` (8) consecutive failed re-POSTs, about 90 s
-of backoff, the hook gives up and Claude Code falls back to its own terminal
-prompt. When the link returns, the web never shows the card again, and an
-approval the user already gave while the host was offline never reaches
-Claude. The session stays `running`, and new messages queue behind a prompt
-that only the terminal can answer.
+**Resolved** once a card is proven live. When a poll proves the POST reached the
+server — a response-phase sever, or the gateway's idle-timeout `504` on a held
+long-poll — later connection failures no longer count toward the
+`OMNIGENT_HOOK_MAX_RETRIES` (8) cap: the hook backs off and re-POSTs the same
+elicitation until the absolute day-long deadline, and the web card re-parks when
+the link returns. The cap still applies before any delivery evidence — a run of
+connect- or write-phase failures with no card parked still gives up after 8
+tries, about 90 s of backoff, and Claude Code falls back to its own terminal
+prompt. The session stays `running` while the hook waits, and messages the user
+sends during the outage still queue behind the pending approval.
 
 ### R3: A message sent while the host is unreachable is lost
 

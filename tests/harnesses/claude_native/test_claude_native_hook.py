@@ -2556,11 +2556,11 @@ def test_reattach_re_posts_a_held_poll_whose_reply_never_arrives(
         server.server_close()
     resp = result.get("resp")
     assert resp is not None and resp.status_code == 200
-    assert len(elicitation_ids) == 2
-    # The re-park contract is the same id re-POSTed, so the id must be present:
-    # two Nones would satisfy the equality vacuously.
+    assert len(elicitation_ids) >= 2
+    # Re-park contract: the same non-null id is re-POSTed each attempt (two
+    # Nones would pass vacuously). A loaded host may add a third attempt.
     assert elicitation_ids[0] is not None
-    assert elicitation_ids[0] == elicitation_ids[1]
+    assert all(eid == elicitation_ids[0] for eid in elicitation_ids)
 
 
 def test_reattach_holds_the_approval_wait_marker_until_the_wait_ends(

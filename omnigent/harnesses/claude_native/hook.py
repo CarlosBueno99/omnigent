@@ -719,20 +719,17 @@ def _post_hook_with_reattach(
 
     Failure classification:
 
-    * **Hard failure → count toward the cap.** A 5xx returned in under
-      :data:`_PERMISSION_HELD_POLL_FLOOR_S`, or a connection that never
-      established (:func:`_never_connected_errors`), or an established
-      connection that dropped in under the floor (a flapping/crash-looping
-      server). This is the spin. Exception: once a response-phase failure has
-      proved the full POST reached the server (:func:`_request_delivered_errors`,
-      or the gateway's own idle-timeout 504 on a held long-poll), even a
-      sub-floor one, the card is live, so a later connect that never reaches the
-      server (a host network outage) backs off without counting and the card
-      re-parks when the network returns. A write-phase failure or a 502/503
-      leaves the POST unsent/unproven and does not latch this, so a slow write
-      stall cannot disable the cap. The delivering failure itself still counts,
-      so a server that only ever establishes-then-drops (never holding a poll)
-      is still bounded.
+    * **Hard failure → count toward the cap.** A 5xx under
+      :data:`_PERMISSION_HELD_POLL_FLOOR_S`, a connection that never established
+      (:func:`_never_connected_errors`), or an established connection dropped
+      under the floor (a flap). This is the spin. Exception: once response-phase
+      delivery evidence proves the full POST reached the server
+      (:func:`_request_delivered_errors`, or the gateway's idle-timeout 504 on a
+      held long-poll) — even a sub-floor one — the card is live, so a later
+      never-connected outage backs off without counting and re-parks on recovery.
+      A write-phase failure or a 502/503 leaves the POST unsent/unproven and does
+      not latch, so a slow write stall cannot disable the cap; the delivering
+      failure itself still counts, so an establish-then-drop loop stays bounded.
     * **Held-poll sever → reset the counter and the backoff.** An established
       connection that dropped mid-poll after being held ≥ the floor, or a
       gateway 5xx (the Databricks front door answers an idle long-poll with
@@ -748,38 +745,24 @@ def _post_hook_with_reattach(
 
     A hard 4xx is final (bad request won't succeed on retry).
 
-    Residual limitation (by design): a *sick* backend behind a proxy/LB that
-    accepts the connection and then silently severs it after its upstream
-    timeout (>= the floor) — or whose proxy answers that timeout with a 5xx —
-    is indistinguishable at the transport layer from a proxy severing a
-    genuinely-parked human poll — both surface as an established-then-severed
-    error (or a late gateway 5xx) after N seconds, and the server holds the
-    POST silently with no client-visible "parked" ack. So this case resets the
-    counter and is NOT caught by the consecutive-hard-failure cap; it is bounded
-    only by the absolute :data:`_PERMISSION_TIMEOUT_S` ceiling below (the same
-    day-long human-answer window). The live-card latch that lets a *sustained*
-    outage ride out without counting is narrower: it is set only by response-
-    phase delivery evidence — a transport sever after the body was sent, or the
-    gateway's idle-timeout 504 — so a write stall or a 502/503 held past the
-    floor resets the counter but does NOT disable the cap. A lone sub-floor
-    response-phase sever does latch, so an outage starting within the floor
-    still rides out; the delivering sever still counts, so a read-phase crash
-    loop is still capped — only a single flap followed by a sustained unreachable
-    outage reaches the ceiling. The remaining ambiguity — a server that accepts
-    and buffers the body, then crashes before reading it, raises the same read
-    error with no card parked — is resolved toward keeping a pending human
-    approval alive (bounded by the ceiling, backing off rather than spinning),
-    since re-abandoning a genuinely-parked card is the reported failure this
-    loop exists to prevent. That is the tightest safe client-side bound:
-    capping it sooner — or raising the floor for 5xx above the 10s shared with
-    torn connections — would necessarily cap a real slow human behind any
-    gateway that answers sooner than the floor, which is the very wedge this
-    loop exists to prevent. The blast radius is limited — this loop only
-    re-POSTs over HTTP from one hook process (it does not itself respawn
-    harness/tool subprocesses), and the host-side orphan reaper (#1782 Bug A)
-    reclaims any subprocesses a re-driven turn does spawn — so the worst case is
-    one hook re-POSTing once per proxy timeout for up to a day, which also
-    keeps the card alive until the server recovers.
+    Residual limitation (by design): a *sick* backend that accepts the POST and
+    then silently severs it after its upstream timeout (>= the floor), or whose
+    gateway answers that timeout with a 504, is indistinguishable at the
+    transport layer from a proxy severing a genuinely-parked human poll. Both
+    reset the counter, so this case escapes the hard-failure cap and is bounded
+    only by the absolute :data:`_PERMISSION_TIMEOUT_S` ceiling. The sustained-
+    outage ride-out is narrower: it latches only on response-phase delivery
+    evidence, so a write stall or a 502/503 held past the floor resets the
+    backoff but keeps the cap armed, while a lone sub-floor sever latches (an
+    outage starting within the floor still rides out) and the delivering sever
+    still counts (a read-phase crash loop stays capped). The accept-then-crash-
+    before-read case raises the same read error with no card parked; it resolves
+    toward keeping the approval alive — backing off under the ceiling rather than
+    spinning — because re-abandoning a parked card is the reported failure this
+    loop prevents, and capping sooner would cap a slow human behind a gateway
+    that answers before the floor. Blast radius is one hook re-POSTing over HTTP,
+    at worst once per proxy timeout for up to a day, which keeps the card alive
+    until the server recovers.
 
     The absolute :data:`_PERMISSION_TIMEOUT_S` ceiling bounds the total wait on
     every path, matching the day-long human-answer window.
@@ -820,10 +803,9 @@ def _post_hook_with_reattach(
         connect=_PERMISSION_CONNECT_TIMEOUT_S,
         read=_PERMISSION_POLL_READ_TIMEOUT_S,
     )
-    # Absolute backstop: even a run of held-poll severs (which don't count
-    # toward the hard-failure cap) can't loop past the day-long human-answer
-    # window, which matches the server's ask_timeout. (A single parked poll is
-    # bounded separately by the shorter read budget.)
+    # Absolute backstop: held-poll severs don't count toward the hard-failure
+    # cap, so only this day-long ceiling (the server's ask_timeout) bounds a run
+    # of them; a single parked poll is bounded separately by the read budget.
     deadline = time.monotonic() + _PERMISSION_TIMEOUT_S
     reauthed = False
     consecutive_hard_failures = 0
