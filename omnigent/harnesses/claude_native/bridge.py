@@ -1594,8 +1594,7 @@ def _approval_wait_markers(session_id: str, bridge_dir: Path | None) -> list[Pat
 
     :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
     :param bridge_dir: Derive the marker root from this bridge, matching the hook writer.
-    :returns: Marker paths, e.g. ``[.../approval-waits/<digest>.<pid>.wait]``;
-        empty when none exists or the root is unreadable.
+    :returns: Marker paths; empty when none exists or the root is unreadable.
     """
     root = bridge_dir.parent / _APPROVAL_WAIT_DIR_NAME if bridge_dir else _APPROVAL_WAIT_ROOT
     try:
@@ -1636,11 +1635,9 @@ def clear_approval_wait_markers(session_id: str, *, bridge_dir: Path | None = No
     """
     Remove every approval-wait marker for *session_id*.
 
-    For the runner side once it has killed the session's pane: the kill takes
-    each parked hook with it before the hook's own cleanup runs, and a marker
-    left behind would read as a live prompt until
-    :data:`APPROVAL_WAIT_MARKER_TTL_S` elapsed, holding the session's next
-    message behind a prompt nobody can answer.
+    For the runner once it has killed the session's pane: the kill ends each
+    parked hook before the hook's own cleanup runs, and a leftover marker would
+    hold the session's next message until the TTL elapsed.
 
     :param session_id: Omnigent session id whose hooks were killed, e.g.
         ``"conv_abc123"``.

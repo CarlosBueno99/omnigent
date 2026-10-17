@@ -5497,9 +5497,9 @@ def test_kill_session_drops_the_markers_of_the_hooks_it_kills(
     """
     Stopping a pane parked on a permission prompt leaves no approval-wait marker.
 
-    ``tmux kill-session`` takes the parked hook down before its own cleanup
-    runs, so the marker it held would otherwise read as a live prompt for the
-    whole TTL and the runner would hold the session's next message behind it.
+    ``tmux kill-session`` ends the parked hook before its own cleanup runs; its
+    marker would otherwise read as a live prompt for the whole TTL and the
+    runner would hold the session's next message behind it.
     """
     bridge_dir = tmp_path / "bridge"
     write_tmux_target(

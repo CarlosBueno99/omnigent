@@ -1,22 +1,18 @@
 """E2E: stopping a claude-native session parked on a permission prompt must not
 hold the next message.
 
-A real ``claude`` CLI parks on a ``Bash`` permission prompt, so the native
-``PermissionRequest`` hook subprocess inside the session's tmux keeps an
-approval-wait marker fresh. The web Stop control (``stop_session``) runs
-``tmux kill-session``, which kills the CLI and that hook mid-wait. The next
-composer message relaunches ``claude --resume`` and must be typed into the
-relaunched pane promptly instead of being buffered behind the dead hook's marker.
+A real ``claude`` CLI parks on a ``Bash`` permission prompt while its
+``PermissionRequest`` hook (inside the session's tmux) keeps an approval-wait
+marker fresh. The web Stop control runs ``tmux kill-session``, killing the CLI
+and that hook mid-wait. The next composer message relaunches ``claude --resume``
+and must be typed into the pane promptly, not buffered behind the dead hook's
+marker. Only a real ``tmux kill-session`` orphans that marker, so no synthetic
+hook POST can stand in for this journey.
 
-The journey is driven at the ``POST /v1/sessions/{id}/events`` boundary — the
-exact ``{"type":"message"}`` / ``{"type":"stop_session"}`` bodies the web composer
-and the Stop control emit — because the behavior under test is the runner's
-buffering decision, not the SPA's rendering. The relaunched pane is observed over
-the product's read-only terminal-attach WebSocket (the runner's tmux socket is not
-reachable from the test), rendered with ``pyte``.
-
-Only a real ``tmux kill-session`` orphans the marker: the hook subprocess inside
-tmux owns it, so a synthetic hook POST cannot stand in for this journey.
+The journey posts the exact ``message`` / ``stop_session`` event bodies the web
+composer and Stop control send (the behavior under test is the runner's
+buffering decision, not the SPA) and reads the relaunched pane over the
+product's read-only terminal-attach WebSocket, rendered with ``pyte``.
 """
 
 from __future__ import annotations
