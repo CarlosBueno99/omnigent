@@ -80,7 +80,8 @@ def _wait_pane_contains(
                     base_url, session_id, terminal_id, cols=_PANE_COLS, rows=_PANE_ROWS
                 )
         except (httpx.HTTPError, websockets.WebSocketException, OSError):
-            screen = ""
+            # Keep the last rendered screen for the failure message.
+            pass
         # A narrow real pane hard-wraps rows that the wide screen renders
         # separately, so also match with all whitespace removed.
         haystack = screen.lower()

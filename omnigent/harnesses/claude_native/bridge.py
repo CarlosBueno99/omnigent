@@ -4668,10 +4668,20 @@ def kill_session(
     :raises RuntimeError: If the tmux target is not advertised in
         time, or if ``tmux kill-session`` fails for an unexpected reason.
     """
-    info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     # Read before the kill: the end-of-session teardown it triggers can rewrite
-    # or remove the bridge config while the markers still need dropping.
-    session_id = read_active_session_id(bridge_dir)
+    # or remove the bridge config while the markers still need dropping. An
+    # unreadable config skips the cleanup (the TTL still bounds it), never the kill.
+    try:
+        session_id = read_active_session_id(bridge_dir)
+    except (OSError, ValueError):
+        session_id = None
+    try:
+        info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
+    except TmuxSessionNotAdvertised:
+        # No advertised pane means no live hook; drop what a dead one left behind.
+        if session_id is not None:
+            clear_approval_wait_markers(session_id, bridge_dir=bridge_dir)
+        raise
     try:
         _run_tmux(info["socket_path"], "kill-session", "-t", info["tmux_target"])
     except RuntimeError as exc:
