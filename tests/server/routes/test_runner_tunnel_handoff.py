@@ -95,12 +95,14 @@ def _event_attributes(
     ]
 
 
+@pytest.mark.parametrize("cached_status", [True, False], ids=["cached", "cold-cache"])
 @pytest.mark.parametrize("handed_off", [True, False])
 async def test_disconnect_decision_leaves_a_handed_off_turn_to_its_new_replica(
     caplog: pytest.LogCaptureFixture,
     handed_off: bool,
+    cached_status: bool,
 ) -> None:
-    """A cached mid-turn status alone fails the turn unless this replica handed it off."""
+    """A mid-turn status, cached or from the snapshot after a failed read, fails only unmarked."""
     caplog.set_level(logging.INFO)
     session_id = "handoff-decision"
     snapshot = Conversation(
@@ -111,7 +113,8 @@ async def test_disconnect_decision_leaves_a_handed_off_turn_to_its_new_replica(
         runner_id=_RUNNER,
         live_status="running",
     )
-    sessions._session_status_cache[session_id] = "running"
+    if cached_status:
+        sessions._session_status_cache[session_id] = "running"
     if handed_off:
         shutdown_state.mark_runner_handed_off(_RUNNER, reason="rebalance")
     try:
@@ -127,6 +130,7 @@ async def test_disconnect_decision_leaves_a_handed_off_turn_to_its_new_replica(
     assert requires_failure is not handed_off
     [decision] = _event_attributes(caplog, "runner_disconnect_decision")
     assert decision["decision"] == ("handed_off" if handed_off else "failed_mid_turn")
+    assert decision["status_source"] == ("cache" if cached_status else "snapshot")
     assert decision["runner_handoff_reason"] == ("rebalance" if handed_off else None)
     assert decision["server_shutting_down"] is False
 
