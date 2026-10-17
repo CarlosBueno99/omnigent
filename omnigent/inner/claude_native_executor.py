@@ -354,6 +354,12 @@ class ClaudeNativeExecutor(Executor):
     def _reap_failed_turn(self, terminal: NativeTmuxTerminal | None) -> str | None:
         """Stop only the terminal generation observed by the failed injection."""
         if terminal is None:
+            # Nothing was pinned, so the advertised terminal may be a replacement.
+            _logger.info(
+                "claude-native: failed delivery observed no terminal; leaving the "
+                "advertised terminal alone",
+                extra={"session_id": self._request_session_id},
+            )
             return None
         try:
             stop_tmux_terminal(terminal)

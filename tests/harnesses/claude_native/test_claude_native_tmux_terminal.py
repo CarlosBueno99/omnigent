@@ -1,0 +1,166 @@
+"""Native pane identity capture and conditional cleanup against a stubbed tmux."""
+
+from __future__ import annotations
+
+import subprocess
+from dataclasses import replace
+from typing import Any
+
+import pytest
+
+from omnigent.harnesses.claude_native.tmux_terminal import (
+    NativeTmuxTerminal,
+    capture_tmux_terminal,
+    stop_tmux_terminal,
+)
+
+_IDENTITY = "4242 1700000000 $3 %7 4343"
+_TERMINAL = NativeTmuxTerminal("/tmp/t.sock", 4242, 1700000000, "$3", "%7", 4343)
+
+
+def _completed(
+    stdout: str = "", returncode: int = 0, stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=["tmux"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def test_capture_tmux_terminal_pins_the_resolved_pane(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return _completed(_IDENTITY + "\n")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert capture_tmux_terminal("/tmp/t.sock", "main") == _TERMINAL
+    (command,) = commands
+    assert command[:7] == ["tmux", "-S", "/tmp/t.sock", "display-message", "-p", "-t", "main"]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode"),
+    [
+        pytest.param("", 0, id="unresolvable_target_prints_nothing"),
+        pytest.param("4242 1700000000 $3 %7", 0, id="missing_field"),
+        pytest.param("pid 1700000000 $3 %7 4343", 0, id="non_numeric_pid"),
+        pytest.param("4242 1700000000 3 %7 4343", 0, id="session_id_without_prefix"),
+        pytest.param("4242 1700000000 $3 7 4343", 0, id="pane_id_without_prefix"),
+        pytest.param("0 1700000000 $3 %7 4343", 0, id="zero_pid"),
+        pytest.param(_IDENTITY, 1, id="rejected_query"),
+    ],
+)
+def test_capture_tmux_terminal_rejects_unusable_answers(
+    monkeypatch: pytest.MonkeyPatch, stdout: str, returncode: int
+) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: _completed(stdout, returncode))
+
+    assert capture_tmux_terminal("/tmp/t.sock", "main") is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [subprocess.TimeoutExpired(cmd="tmux", timeout=10), OSError("tmux missing")],
+    ids=["unanswered", "not_runnable"],
+)
+def test_capture_tmux_terminal_returns_none_when_tmux_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    def run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise error
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert capture_tmux_terminal("/tmp/t.sock", "main") is None
+
+
+def test_stop_tmux_terminal_checks_every_identity_field_in_the_kill_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return _completed()
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    stop_tmux_terminal(_TERMINAL)
+
+    (command,) = commands
+    assert command[:7] == ["tmux", "-S", "/tmp/t.sock", "if-shell", "-F", "-t", "%7"]
+    condition, action = command[7:]
+    assert action == "kill-pane -t %7"
+    for comparison in (
+        "#{==:#{pid},4242}",
+        "#{==:#{start_time},1700000000}",
+        "#{==:#{session_id},$3}",
+        "#{==:#{pane_id},%7}",
+        "#{==:#{pane_pid},4343}",
+    ):
+        assert comparison in condition
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "can't find pane: %7",
+        "no server running on /tmp/t.sock",
+        "error connecting to /tmp/t.sock (No such file or directory)",
+    ],
+    ids=["pane_gone", "server_gone", "socket_gone"],
+)
+def test_stop_tmux_terminal_tolerates_a_pane_that_is_already_gone(
+    monkeypatch: pytest.MonkeyPatch, stderr: str
+) -> None:
+    monkeypatch.setattr(
+        subprocess, "run", lambda *_a, **_k: _completed(returncode=1, stderr=stderr)
+    )
+
+    stop_tmux_terminal(_TERMINAL)
+
+
+def test_stop_tmux_terminal_reports_an_unexpected_tmux_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_a, **_k: _completed(returncode=1, stderr="server exited unexpectedly"),
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        stop_tmux_terminal(_TERMINAL)
+
+
+def test_stop_tmux_terminal_reports_an_unanswered_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    def run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd="tmux", timeout=1)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match="could not complete"):
+        stop_tmux_terminal(_TERMINAL)
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        replace(_TERMINAL, pane_pid=0),
+        replace(_TERMINAL, session_id="3"),
+        replace(_TERMINAL, pane_id="7"),
+    ],
+    ids=["zero_pane_pid", "session_id_without_prefix", "pane_id_without_prefix"],
+)
+def test_stop_tmux_terminal_refuses_an_invalid_identity(
+    monkeypatch: pytest.MonkeyPatch, terminal: NativeTmuxTerminal
+) -> None:
+    def run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("tmux must not run for an identity that cannot be matched")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match="Invalid native terminal identity"):
+        stop_tmux_terminal(terminal)
