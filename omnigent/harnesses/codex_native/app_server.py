@@ -1867,6 +1867,132 @@ def codex_catalog_fingerprint(launch: NativeCodexLaunch, *, codex_path: str | No
     )
 
 
+@dataclass(frozen=True)
+class CodexCatalogSource:
+    """The source files and executable captured before a runner launch resolves."""
+
+    source_home: Path
+    config_profile: str | None
+    config_identity: tuple[object, ...]
+    auth_identity: tuple[str, int, int] | None
+    codex_path: str | None
+    executable_identity: tuple[str, int, int] | None
+    databricks_config_path: Path
+    databricks_config_identity: tuple[str, int, int] | None
+
+    def unchanged(self) -> bool:
+        """Validate the captured sources without selecting a replacement cache key."""
+        from omnigent.models.model_catalog_store import binary_identity
+
+        try:
+            return (
+                _codex_home_config_source_from_env().resolve() == self.source_home
+                and _codex_config_identity(self.source_home, self.config_profile)
+                == self.config_identity
+                and binary_identity(str(self.source_home / "auth.json")) == self.auth_identity
+                and binary_identity(self.codex_path) == self.executable_identity
+                and _codex_catalog_databricks_config_path() == self.databricks_config_path
+                and binary_identity(str(self.databricks_config_path))
+                == self.databricks_config_identity
+            )
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+
+@dataclass(frozen=True)
+class CodexCatalogIdentity:
+    """One actual runner launch's immutable shared-catalog destination."""
+
+    fingerprint: str
+    source: CodexCatalogSource
+    codex_home: Path | None = None
+
+    def unchanged(self) -> bool:
+        """Keep live account rows out of a source whose private login diverged."""
+        from omnigent.models.model_catalog_store import binary_identity
+
+        return (
+            self.codex_home is not None
+            and self.source.unchanged()
+            and binary_identity(str(self.codex_home / "auth.json")) == self.source.auth_identity
+        )
+
+
+def _codex_catalog_databricks_config_path() -> Path:
+    return Path(
+        os.environ.get("DATABRICKS_CONFIG_FILE") or Path.home() / ".databrickscfg"
+    ).resolve()
+
+
+def capture_codex_catalog_source(
+    *, codex_path: str | None, config_profile: str | None
+) -> CodexCatalogSource | None:
+    """Capture metadata before any asynchronous launch resolution or config copying."""
+    from omnigent.models.model_catalog_store import binary_identity
+
+    try:
+        source_home = _codex_home_config_source_from_env().resolve()
+        config_path = _codex_catalog_databricks_config_path()
+        return CodexCatalogSource(
+            source_home,
+            config_profile,
+            _codex_config_identity(source_home, config_profile),
+            binary_identity(str(source_home / "auth.json")),
+            codex_path,
+            binary_identity(codex_path),
+            config_path,
+            binary_identity(str(config_path)),
+        )
+    except Exception:  # noqa: BLE001 — optional provenance must not prevent startup
+        return None
+
+
+def codex_catalog_launch_route(launch: NativeCodexLaunch) -> tuple[object, ...]:
+    """Freeze account/provider routing without a session's model or effort pin."""
+    return (
+        launch.profile,
+        launch.config_profile,
+        launch.login_required,
+        tuple(
+            override
+            for override in launch.config_overrides
+            if override.split("=", 1)[0].strip() not in {"model", "model_reasoning_effort"}
+        ),
+    )
+
+
+def codex_catalog_identity(
+    launch: NativeCodexLaunch,
+    source: CodexCatalogSource | None,
+    *,
+    actual_route: tuple[object, ...],
+) -> CodexCatalogIdentity | None:
+    """Bind a stable original launch source to its canonical catalog fingerprint."""
+    if (
+        source is None
+        or codex_catalog_launch_route(launch) != actual_route
+        or source.codex_path is None
+        or source.config_profile != launch.config_profile
+        or not source.unchanged()
+    ):
+        return None
+    try:
+        fingerprint = codex_catalog_fingerprint(launch, codex_path=source.codex_path)
+        return CodexCatalogIdentity(fingerprint, source) if source.unchanged() else None
+    except Exception:  # noqa: BLE001 — live options remain available without shared writeback
+        return None
+
+
+def bind_codex_catalog_backend(
+    identity: CodexCatalogIdentity | None, codex_home: Path
+) -> CodexCatalogIdentity | None:
+    """Attach the original cache receipt only to a backend using its captured login."""
+    if identity is None:
+        return None
+    bound = replace(identity, codex_home=codex_home)
+    return bound if bound.unchanged() else None
+
+
 def fresh_codex_launch_catalog(
     *, codex_path: str | None = None, launch: NativeCodexLaunch
 ) -> list[_JsonObject] | None:
@@ -2044,6 +2170,8 @@ class CodexNativeAppServer:
     :param model_catalog_rows: Fresh rows from the shared, launch-shaped
         ``model/list`` catalog. When present, startup derives migration
         acknowledgements locally instead of spawning ``codex debug models``.
+    :param catalog_identity: Immutable catalog destination proved by the runner's
+        actual launch, or ``None`` when shared writeback lacks provenance.
     :param trust_project: Whether to trust :attr:`cwd` in the private
         session config before startup. Runner-owned headless sessions set
         this because nobody can answer Codex's project-trust TUI prompt.
@@ -2091,6 +2219,7 @@ class CodexNativeAppServer:
     pinned_model: str | None = None
     pinned_effort: str | None = None
     model_catalog_rows: list[_JsonObject] | None = None
+    catalog_identity: CodexCatalogIdentity | None = None
     process_registry_tag: str | None = None
     process_owner_lock: CodexNativeProcessOwnerLock | None = None
     codex_cli_version: tuple[int, int, int] | None = None
