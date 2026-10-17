@@ -67,12 +67,15 @@ function isPendingSideChat(id: string): boolean {
   return id.startsWith("pending:");
 }
 
+const TEXT_INPUT_TYPES = new Set(["text", "search", "email", "url", "password", "number", "tel"]);
+
 /** A text field other than `own`: typing there must not be interrupted by a focus request. */
 function isOtherTextInput(target: EventTarget | null, own: HTMLElement | null): boolean {
+  if (!(target instanceof HTMLElement) || target === own) return false;
+  if (target instanceof HTMLInputElement) return TEXT_INPUT_TYPES.has(target.type);
   return (
-    target instanceof HTMLElement &&
-    target !== own &&
-    target.matches('input, textarea, [contenteditable]:not([contenteditable="false"])')
+    target instanceof HTMLTextAreaElement ||
+    target.matches('[contenteditable]:not([contenteditable="false"])')
   );
 }
 

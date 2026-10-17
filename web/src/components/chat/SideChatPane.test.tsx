@@ -297,12 +297,14 @@ describe("side chat opened from a + button", () => {
     renderPane(
       <>
         <button type="button" data-testid="menu-trigger" />
+        <input type="checkbox" data-testid="toggle" />
         <textarea data-testid="main-composer" />
         <SideChatPane childId={childId} />
       </>,
     );
-    // A closing menu returning focus to its button does not cancel the request.
+    // A closing menu returning focus to its button, or a toggled checkbox, is not typing.
     act(() => screen.getByTestId("menu-trigger").focus());
+    act(() => screen.getByTestId("toggle").focus());
     expect(useChatStore.getState().sideChatComposers[childId]?.autoFocus).toBe(true);
 
     act(() => screen.getByTestId("main-composer").focus());

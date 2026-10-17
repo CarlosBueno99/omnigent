@@ -1156,9 +1156,9 @@ export interface ChatActions {
     childSessionId: string,
     mutate: (current: SideChatComposerDraft) => SideChatComposerDraft,
   ) => void;
-  /** Drop a side chat's unsent composer state (sent, or the tab was closed). */
   /** Ask a side chat's composer to take focus once it accepts text. */
   requestSideChatFocus: (childSessionId: string) => void;
+  /** Drop a side chat's unsent composer state (sent, or the tab was closed). */
   clearSideChatComposer: (childSessionId: string) => void;
   /**
    * Queue a message client-side instead of POSTing it now, for a send made
