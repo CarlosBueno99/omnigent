@@ -23,7 +23,7 @@ import logging
 import subprocess
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -71,6 +71,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
 from tests.budgets import Deadline, budget
+from tests.server.conftest import ControllableMockClient
 from tests.server.helpers import create_test_agent
 from tests.server.helpers import websocket_scope as _websocket_scope
 
@@ -157,16 +158,21 @@ def app(runtime_init: None, db_uri: str, tmp_path) -> FastAPI:
     )
 
 
-async def _connect_host(app: FastAPI) -> ApplicationCommunicator:
+async def _connect_host(app: FastAPI, *, owner: str | None = None) -> ApplicationCommunicator:
     """Connect a mock host over the WebSocket tunnel and wait for it
     to register in the app's host registry.
 
     :param app: The FastAPI app under test (its ``state.host_registry``
         is the same instance the session-create launch path reads).
+    :param owner: Identity sent as ``X-Forwarded-Email`` for an app with
+        header auth, so the tunnel registers with that owner.
     :returns: The connected ASGI communicator, ready to exchange frames.
     """
     path = f"/v1/hosts/{_HOST_ID}/tunnel"
-    comm = ApplicationCommunicator(app, _websocket_scope(path))
+    scope = _websocket_scope(path)
+    if owner is not None:
+        scope["headers"] = [(b"x-forwarded-email", owner.encode())]
+    comm = ApplicationCommunicator(app, scope)
     await comm.send_input({"type": "websocket.connect"})
     accepted = await comm.receive_output(timeout=budget(1.0))
     assert accepted["type"] == "websocket.accept"
@@ -3890,24 +3896,88 @@ async def test_native_message_relaunch_refusal_keeps_host_reason(
     )
 
 
-def test_host_launch_refusal_hides_reason_from_non_owners_and_bounds_it() -> None:
-    """Only the host owner sees the host's text, flattened and capped."""
-    from omnigent.server.routes._sessions.orchestration import (
-        _HOST_REFUSAL_REASON_MAX_CHARS,
-        HostLaunchRefusedError,
+async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_history(
+    runtime_init: None,
+    db_uri: str,
+    tmp_path: Path,
+    mock_llm: ControllableMockClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With other users around, an owned host's refusal text stays out of shared history.
+
+    Only Retry, which answers one requester at a time, shows it to the host owner.
+    """
+    from omnigent.server.auth import LEVEL_EDIT, UnifiedAuthProvider
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+    from tests.server.conftest import _app_client
+
+    monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
+    monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
+    owner, collaborator = "host-owner@example.com", "collaborator@example.com"
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    app = create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        comment_store=SqlAlchemyCommentStore(db_uri),
+        host_store=HostStore(db_uri),
+        permission_store=permissions,
+        auth_provider=UnifiedAuthProvider(source="header"),
     )
 
-    refusal = HostLaunchRefusedError("bad\x1b[0m\n" + "x" * 1000, "owner@example.com")
+    async with _app_client(app, mock_llm, tmp_path) as client:
+        client.headers["X-Forwarded-Email"] = owner
+        comm = await _connect_host(app, owner=owner)
+        session_id = await _native_host_session(client, app, db_uri, comm)
+        permissions.grant(collaborator, session_id, LEVEL_EDIT)
 
-    hidden = refusal.for_viewer("collaborator@example.com")
-    assert "bad" not in str(hidden)
-    assert "daemon log on the host" in str(hidden)
-    assert str(refusal) == str(hidden)
-    shown = str(refusal.for_viewer("owner@example.com"))
-    reason = shown.split("the launch failed: ", 1)[1].split(". Fix it", 1)[0]
-    assert reason.startswith("bad [0m x")
-    assert len(reason) == _HOST_REFUSAL_REASON_MAX_CHARS
-    assert reason.endswith("…")
+        async def refuse_launch_for(
+            post: Callable[[], Awaitable[httpx.Response]],
+        ) -> httpx.Response:
+            responder = asyncio.create_task(
+                _serve_one_launch(
+                    comm,
+                    launch_status="failed",
+                    launch_error=_SPAWN_REFUSAL,
+                    launch_error_code="runner_spawn_failed",
+                )
+            )
+            try:
+                return await post()
+            finally:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    _ = await responder
+
+        def retry() -> Awaitable[httpx.Response]:
+            return client.post(
+                f"/v1/sessions/{session_id}/events", json={"type": "retry_session", "data": {}}
+            )
+
+        send = await refuse_launch_for(lambda: _post_hello(client, session_id))
+        assert send.status_code == 202, send.text
+
+        client.headers["X-Forwarded-Email"] = collaborator
+        items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
+        [error] = [item for item in items if item["type"] == "error"]
+        assert error["code"] == "runner_failed_to_start"
+        assert "failed to spawn runner" not in error["message"]
+        assert "visible to the host owner" in error["message"]
+        snapshot = await client.get(f"/v1/sessions/{session_id}")
+        assert snapshot.status_code == 200, snapshot.text
+        assert "failed to spawn runner" not in snapshot.text
+        collaborator_retry = await refuse_launch_for(retry)
+        assert collaborator_retry.status_code == 503, collaborator_retry.text
+        assert "failed to spawn runner" not in collaborator_retry.json()["error"]["message"]
+        assert "visible to the host owner" in collaborator_retry.json()["error"]["message"]
+
+        client.headers["X-Forwarded-Email"] = owner
+        owner_retry = await refuse_launch_for(retry)
+        assert owner_retry.status_code == 503, owner_retry.text
+        assert _SPAWN_REFUSAL_FLAT in owner_retry.json()["error"]["message"]
 
 
 async def test_relaunch_stops_the_superseded_runner(

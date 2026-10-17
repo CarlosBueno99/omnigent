@@ -89,6 +89,7 @@ from omnigent.server.auth import (
     LEVEL_OWNER,
     LEVEL_READ,
     AuthProvider,
+    local_single_user_enabled,
 )
 from omnigent.server.background_session_titles import (
     BackgroundSessionTitleCoordinator,
@@ -2542,6 +2543,7 @@ def register_events_routes(
         # the raw host text the 503 below deliberately owner-scopes.
         relaunch_refusal_reason: str | None = None
         relaunch_refusal_visible = False
+        relaunch_refusal_persistable = False
         host_wait_started = time.monotonic()
         _host_conn: HostConnection | None = None
         if runner_client is None and conv.host_id is not None:
@@ -2699,6 +2701,14 @@ def register_events_routes(
                             or _host_conn.owner is None
                             or _host_conn.owner == user_id
                         )
+                        # A persisted failed turn is read by every session
+                        # collaborator, so it carries the host's text only when
+                        # this server cannot have other users.
+                        relaunch_refusal_persistable = (
+                            user_id is None
+                            or _host_conn.owner is None
+                            or local_single_user_enabled()
+                        )
             if (
                 runner_client is None
                 and relaunched_runner_id is not None
@@ -2762,9 +2772,9 @@ def register_events_routes(
             # it survives reload and the banner explains why, becoming the
             # AP-server-as-writer failed turn (same shape as a definitive
             # ensure-probe failure). The cause, when known, is the daemon's
-            # exit report keyed by this session's runner_id; failing that, a
-            # host that is offline (so no runner could start); otherwise a
-            # generic unavailable message. This is safe precisely because
+            # exit report keyed by this session's runner_id; failing that, the
+            # host's launch refusal or an offline host (so no runner could
+            # start); otherwise a generic message. This is safe precisely because
             # the harness will never see it (no desync — there is no live
             # harness). Other event types and non-native sessions still
             # raise: their message would replay to a relaunched runner, so
@@ -2803,7 +2813,7 @@ def register_events_routes(
                     failure_message = exit_cause
                 elif relaunched_launch_refused:
                     failure_message = _host_launch_refusal_message(
-                        relaunch_refusal_reason, visible=relaunch_refusal_visible
+                        relaunch_refusal_reason, visible=relaunch_refusal_persistable
                     )
                 elif host_offline:
                     failure_message = _host_offline_message()

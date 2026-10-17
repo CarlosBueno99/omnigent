@@ -364,3 +364,119 @@ def _async_return(value: Any):
         return value
 
     return _fn
+
+
+@pytest.mark.asyncio
+async def test_raised_uncoded_refusal_fails_fast_with_host_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host that answers "failed" for any other reason ends recovery at once."""
+    monkeypatch.setattr(orchestration, "_get_runner_client", _async_return(None))
+    monkeypatch.setattr(
+        orchestration,
+        "_maybe_wake_stale_resumable_managed_sandbox",
+        _async_return(False),
+    )
+    monkeypatch.setattr(
+        orchestration,
+        "_launch_runner_on_host",
+        _async_return(
+            SimpleNamespace(
+                runner_id="runner_new",
+                error_code="runner_spawn_failed",
+                error="failed to spawn runner: boom",
+            )
+        ),
+    )
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("a refused launch must not wait for a runner")
+
+    monkeypatch.setattr(orchestration, "_wait_for_runner_client", _boom)
+    monkeypatch.setattr(orchestration, "_wait_for_host_bound_runner_client", _boom)
+
+    conv = _conv(host_id="host_1", workspace="/w")
+    app_state = SimpleNamespace(
+        host_registry=SimpleNamespace(get=lambda _hid: SimpleNamespace(owner=None)),
+        runner_exit_reports=None,
+        tunnel_registry=None,
+    )
+
+    with pytest.raises(orchestration.HostLaunchRefusedError) as excinfo:
+        await orchestration.ensure_runner_connected(
+            session_id="conv_1",
+            conv=conv,
+            app_state=app_state,
+            conversation_store=_Store(conv),
+            runner_router=None,
+            raise_host_refusal=True,
+        )
+
+    assert excinfo.value.code == ErrorCode.RUNNER_UNAVAILABLE
+    # An unowned host has nobody to scope the reason to.
+    assert "failed to spawn runner: boom" in excinfo.value.message
+
+
+@pytest.mark.asyncio
+async def test_raised_launch_for_deleted_session_is_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session deleted mid-relaunch is reported as gone, not as a host refusal."""
+    monkeypatch.setattr(orchestration, "_get_runner_client", _async_return(None))
+    monkeypatch.setattr(
+        orchestration,
+        "_maybe_wake_stale_resumable_managed_sandbox",
+        _async_return(False),
+    )
+    monkeypatch.setattr(
+        orchestration,
+        "_launch_runner_on_host",
+        _async_return(
+            SimpleNamespace(
+                runner_id="",
+                error_code=orchestration._SESSION_DELETED_LAUNCH_ERROR_CODE,
+                error="session was deleted while its relaunch was in flight",
+            )
+        ),
+    )
+
+    conv = _conv(host_id="host_1", workspace="/w")
+    app_state = SimpleNamespace(
+        host_registry=SimpleNamespace(get=lambda _hid: SimpleNamespace(owner="alice@example.com")),
+        runner_exit_reports=None,
+        tunnel_registry=None,
+    )
+
+    with pytest.raises(OmnigentError) as excinfo:
+        await orchestration.ensure_runner_connected(
+            session_id="conv_1",
+            conv=conv,
+            app_state=app_state,
+            conversation_store=_Store(conv),
+            runner_router=None,
+            raise_host_refusal=True,
+        )
+
+    assert excinfo.value.code == ErrorCode.NOT_FOUND
+    assert "host" not in excinfo.value.message.lower()
+
+
+def test_host_launch_refusal_shows_reason_only_to_the_host_owner() -> None:
+    """The host's text is flattened, capped, and shown only to its owner."""
+    refusal = orchestration.HostLaunchRefusedError(
+        "bad\x1b[0m\n" + "x" * 1000, "owner@example.com"
+    )
+
+    hidden = refusal.for_viewer("collaborator@example.com")
+    assert "bad" not in str(hidden)
+    assert "daemon log on the host" in str(hidden)
+    assert str(refusal) == str(hidden)
+    shown = str(refusal.for_viewer("owner@example.com"))
+    reason = shown.split("the launch failed: ", 1)[1].split(". Fix it", 1)[0]
+    assert reason.startswith("bad [0m x")
+    assert len(reason) == orchestration._HOST_REFUSAL_REASON_MAX_CHARS
+    assert reason.endswith("…")
+
+    unowned = orchestration.HostLaunchRefusedError("failed to spawn runner: boom", None)
+    assert "failed to spawn runner: boom" in str(unowned)
+    assert str(unowned.for_viewer("anyone@example.com")) == str(unowned)

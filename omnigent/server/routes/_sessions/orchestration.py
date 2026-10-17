@@ -246,6 +246,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
 # Lower-layer helpers (SSE builders, publishers, persistence, runner-forward
 # primitives) live in _sessions.helpers.
 from omnigent.server.routes._sessions.helpers import (
+    _SESSION_DELETED_LAUNCH_ERROR_CODE,
     SessionLiveness,
     _antigravity_subagent_labels_from_body,
     _antigravity_subagent_title,
@@ -4662,8 +4663,9 @@ class HostLaunchRefusedError(OmnigentError):
     """
     The session's host refused a runner launch for an uncategorized reason.
 
-    The default message hides the host's text; :meth:`for_viewer` adds it for
-    requesters allowed to see it, since one recovery attempt can serve many.
+    The default message hides the host's text whenever the host has an owner;
+    :meth:`for_viewer` adds it for requesters allowed to see it, since one
+    recovery attempt can serve many.
     """
 
     def __init__(self, reason: str | None, host_owner: str | None) -> None:
@@ -4672,7 +4674,7 @@ class HostLaunchRefusedError(OmnigentError):
         :param host_owner: Owner of the refusing host, or ``None`` when unowned.
         """
         super().__init__(
-            _host_launch_refusal_message(reason, visible=False),
+            _host_launch_refusal_message(reason, visible=host_owner is None),
             code=ErrorCode.RUNNER_UNAVAILABLE,
         )
         self.reason = reason
@@ -4737,9 +4739,10 @@ async def ensure_runner_connected(
     :param runner_router: The ``RunnerRouter``, or ``None`` for in-process.
     :param raise_host_refusal: Raise typed, non-persisting errors when the
         host rejects launch because the harness is unavailable or the
-        workspace is gone, and :class:`HostLaunchRefusedError` for any other
-        refusal. Resource callers keep the legacy ``False``
-        behavior; retry recovery opts in because it has no message to persist.
+        workspace is gone, :class:`HostLaunchRefusedError` for any other
+        refusal, and the usual not-found error when the session was deleted
+        mid-relaunch. Resource callers keep the legacy ``False`` behavior;
+        retry recovery opts in because it has no message to persist.
     :returns: ``(runner_client, conv)`` — the client is ``None`` when no
         runner is reachable and none is wakeable; ``conv`` is re-read after
         any wake/relaunch so the caller sees the rebound row.
@@ -4853,6 +4856,12 @@ async def ensure_runner_connected(
                         else ErrorCode.WORKSPACE_MISSING
                     ),
                 )
+            if (
+                raise_host_refusal
+                and launch_attempt.error_code == _SESSION_DELETED_LAUNCH_ERROR_CODE
+            ):
+                # The server ended this launch, not the host.
+                raise _session_not_found()
             if (
                 _refusal_code is None
                 and raise_host_refusal

@@ -6000,6 +6000,11 @@ class _HostLaunchAttempt:
     acknowledged: bool = False
 
 
+# ``error_code`` of an attempt the server ended itself because the session was
+# deleted before the launch reached the host.
+_SESSION_DELETED_LAUNCH_ERROR_CODE = "session_not_found"
+
+
 async def _launch_runner_on_host(*args: Any, **kwargs: Any) -> _HostLaunchAttempt:
     """Call-time proxy so a facade patch of this symbol is honored here."""
     from omnigent.server.routes import sessions as _facade
@@ -6120,7 +6125,7 @@ async def _launch_runner_on_host_impl(
             # runner for a session nothing can route to.
             return _HostLaunchAttempt(
                 runner_id=conv.runner_id or "",
-                error_code="session_not_found",
+                error_code=_SESSION_DELETED_LAUNCH_ERROR_CODE,
                 error="session was deleted while its relaunch was in flight",
             )
         if fresh.runner_id and fresh.runner_id != conv.runner_id:
@@ -11888,6 +11893,7 @@ async def _load_model_options_from_host(session_id: str, host_id: str) -> None:
 
 __all__ = [
     "FILE_CONTENT_CACHE_CONTROL",
+    "_SESSION_DELETED_LAUNCH_ERROR_CODE",
     "SessionLiveness",
     "_HostLaunchAttempt",
     "_NativeTerminalEnsureOutcome",
