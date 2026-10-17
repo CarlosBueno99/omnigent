@@ -5926,32 +5926,48 @@ def test_deferred_and_second_check_restores_do_not_wait_for_a_save(
     assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
 
 
-def test_a_failed_restore_still_reports_the_switch(
+@pytest.mark.parametrize("defer_restore", [False, True])
+def test_a_failed_restore_is_retried_by_the_next_switch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     _isolate_claude_user_settings: Path,
+    defer_restore: bool,
 ) -> None:
-    """A settings file that cannot be rewritten is logged, not raised as a failed switch."""
+    """A save that could not be undone is logged, not raised, and the next restore undoes it."""
     settings = _isolate_claude_user_settings
     settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    replace = os.replace
+    settings_replace_failures = [PermissionError("config dir briefly read-only")]
 
     def _claude_pane(_bridge_dir: Path, *, command: str, **_kwargs: object) -> None:
-        settings.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+        model = command.removeprefix("/model ")
+        settings.write_text(json.dumps({"model": model}), encoding="utf-8")
 
-    def _read_only_dir(_source: object, _target: object) -> None:
-        raise PermissionError("read-only config dir")
+    def _settings_replace_fails_once(source: Any, destination: Any) -> None:
+        if Path(destination) == settings.resolve() and settings_replace_failures:
+            raise settings_replace_failures.pop()
+        replace(source, destination)
 
     monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _claude_pane)
-    monkeypatch.setattr(claude_native_bridge.os, "replace", _read_only_dir)
+    monkeypatch.setattr(claude_native_bridge.os, "replace", _settings_replace_fails_once)
 
     with caplog.at_level("WARNING", logger=claude_native_bridge.__name__):
-        before = claude_native_bridge.inject_model_command(tmp_path / "bridge", model_arg="sonnet")
+        before = claude_native_bridge.inject_model_command(
+            tmp_path / "first", model_arg="sonnet", defer_restore=defer_restore
+        )
+        if defer_restore:
+            claude_native_bridge.restore_default_model(tmp_path / "first", before, "sonnet")
 
     assert before.value == "opus"
     assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "sonnet"}
     assert "could not restore the default model" in caplog.text
     assert list(settings.parent.glob(".settings.json.*")) == []
+
+    claude_native_bridge.inject_model_command(tmp_path / "second", model_arg="haiku")
+
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
+    assert not _pending_switches_file(tmp_path).exists()
 
 
 def test_concurrent_switches_never_snapshot_each_others_save(
@@ -6034,6 +6050,36 @@ def test_queued_switches_in_two_sessions_keep_the_users_default_model(
     for name in (first_restored, *(name for name in switches if name != first_restored)):
         bridge_dir, model_arg, before = switches[name]
         claude_native_bridge.restore_default_model(bridge_dir, before, model_arg)
+
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
+    assert not _pending_switches_file(tmp_path).exists()
+
+
+def test_a_switch_queued_after_it_was_typed_keeps_the_users_default_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+) -> None:
+    """An idle switch a starting turn queued is recorded, so a later snapshot skips its save."""
+    settings = _isolate_claude_user_settings
+    settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    monkeypatch.setattr(
+        claude_native_bridge, "inject_slash_command", lambda _bridge_dir, **_kwargs: None
+    )
+    typed_while_idle = claude_native_bridge.inject_model_command(
+        tmp_path / "first", model_arg="sonnet"
+    )
+
+    queued = claude_native_bridge.defer_default_model_restore(
+        tmp_path / "first", typed_while_idle, "sonnet"
+    )
+    settings.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+    second = claude_native_bridge.inject_model_command(
+        tmp_path / "second", model_arg="haiku", defer_restore=True
+    )
+    claude_native_bridge.restore_default_model(tmp_path / "first", queued, "sonnet")
+    settings.write_text(json.dumps({"model": "haiku"}), encoding="utf-8")
+    claude_native_bridge.restore_default_model(tmp_path / "second", second, "haiku")
 
     assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
     assert not _pending_switches_file(tmp_path).exists()

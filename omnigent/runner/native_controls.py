@@ -1205,6 +1205,11 @@ def build_native_controls(
                     deadline = max(deadline, time.monotonic() + _CLAUDE_MODEL_CONFIRM_TIMEOUT_S)
                 if time.monotonic() >= deadline:
                     break
+                if time.monotonic() >= next_refresh:
+                    await asyncio.to_thread(
+                        keep_default_model_switch_pending, bridge_dir, default_model_before
+                    )
+                    next_refresh = time.monotonic() + _CLAUDE_MODEL_PENDING_REFRESH_S
                 try:
                     current = await asyncio.to_thread(read_claude_status_model, bridge_dir)
                     if current and current in expected:
@@ -1212,19 +1217,14 @@ def build_native_controls(
                     await asyncio.to_thread(
                         confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
                     )
-                    if time.monotonic() >= next_refresh:
-                        await asyncio.to_thread(
-                            keep_default_model_switch_pending, bridge_dir, default_model_before
-                        )
-                        next_refresh = time.monotonic() + _CLAUDE_MODEL_PENDING_REFRESH_S
                 except Exception:  # noqa: BLE001 — best-effort; the report reconciles
+                    # Keep watching: the queued save can still land and needs restoring.
                     _logger.debug(
                         "late model-dialog watch errored for session=%s",
                         conv_id,
                         exc_info=True,
                         extra={"session_id": conv_id},
                     )
-                    return
                 await asyncio.sleep(_CLAUDE_MODEL_LATE_DIALOG_POLL_S)
             _logger.info(
                 "late model-dialog watch for session=%s ended without a confirmed switch",
@@ -1369,12 +1369,14 @@ def build_native_controls(
         from omnigent.harnesses.claude_native.bridge import (
             SWITCH_MODEL_DIALOG_HINT,
             confirm_dialog_if_open,
+            defer_default_model_restore,
             inject_model_command,
             read_claude_status_model,
             restore_default_model,
         )
 
         default_model_before: DefaultModelSnapshot | None = None
+        was_busy = False
         try:
             # A switch typed into a busy pane is queued; its turn may settle before the deadline.
             was_busy = _native_pane_status.get(conv_id) in ("running", "waiting")
@@ -1440,6 +1442,17 @@ def build_native_controls(
                     confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
                 )
                 if _native_pane_status.get(conv_id) in ("running", "waiting"):
+                    if not was_busy:
+                        # Typed while idle but queued: Claude saves it after the turn.
+                        default_model_before = await asyncio.to_thread(
+                            defer_default_model_restore,
+                            bridge_dir,
+                            default_model_before,
+                            model_arg,
+                        )
+                        restore_landed_switch = functools.partial(
+                            restore_default_model, bridge_dir, default_model_before, model_arg
+                        )
                     was_busy = True
                 if time.monotonic() >= deadline:
                     break
@@ -1486,7 +1499,18 @@ def build_native_controls(
             finally:
                 if not reply.done():
                     reply.set_exception(exc)
-            raise
+            if not isinstance(exc, Exception):
+                raise
+            # Nothing awaits this task; the request already got the error.
+            _logger.warning(
+                "claude-native model change for session=%s failed",
+                conv_id,
+                exc_info=exc,
+                extra={"session_id": conv_id},
+            )
+            # A queued switch can still land, so the watcher below keeps its restore.
+            if not was_busy or default_model_before is None:
+                return
         await _watch_late_model_dialog(
             conv_id,
             bridge_dir,
