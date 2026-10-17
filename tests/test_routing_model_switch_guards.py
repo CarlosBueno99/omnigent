@@ -6,10 +6,10 @@ covered in ``tests/harnesses/claude_native/test_claude_native_bridge.py`` (the i
 
 A routed switch is typed as ``/model <id>``. Claude Code answers it with "Set
 model to X **and saved as your default for new sessions**" and rewrites the
-``model`` key in the person's own ``~/.claude/settings.json`` — an accepted
-trade-off, since the alternative (driving the interactive picker over tmux)
-cost ~530 lines of fragile screen-scraping automation. What still has to hold
-is that Omnigent itself never writes that file, and that the switch path polls
+``model`` key in the person's own ``~/.claude/settings.json``. Driving the
+interactive picker instead cost ~530 lines of fragile screen-scraping, so the
+bridge puts that one key back after Claude's save. What still has to hold is
+that nothing else in Omnigent writes that file, and that the switch path polls
 the TUI rather than guessing at its render latency.
 """
 
@@ -30,6 +30,7 @@ _SWITCH_PATH_FUNCTIONS = (
     "_confirm_tui_dialog",
     # The confirm retry loop lives here, so it inherits the same rule.
     "_confirm_and_verify_dialog_closed",
+    "_restore_settings_model",
 )
 
 
@@ -45,12 +46,11 @@ def _tree(relative: str) -> ast.Module:
 
 def test_the_users_claude_settings_file_is_only_ever_read() -> None:
     """
-    Guard #18: omnigent reads the user's settings file and never writes it.
+    Guard #18: the bridge's settings readers never write the user's settings file.
 
-    Claude Code rewriting its own ``model`` key on ``/model <id>`` is the
-    accepted trade-off. A write from *our* side is not: it would clobber hook
-    wiring, permissions and everything else in the file, so every reference
-    here must be a read.
+    The only write is ``_restore_settings_model`` undoing Claude's own
+    ``model`` save. Any other write would clobber hook wiring, permissions
+    and everything else in the file, so every reference here must be a read.
     """
     tree = _tree("harnesses/claude_native/bridge.py")
     reads: list[str] = []

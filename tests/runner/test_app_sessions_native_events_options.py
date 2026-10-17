@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -1876,13 +1879,15 @@ async def _post_model_change_with_status_sequence(
     empty_session_catalog: bool = False,
     stored_catalog_rows: list[dict[str, object]] | None = None,
     pane_idle_after_polls: int | None = None,
+    after_response: Callable[[list[str | None]], Awaitable[None]] | None = None,
 ) -> Any:
     """Run one claude-native ``model_change`` with a scripted status file.
 
     ``status_values`` are successive ``read_claude_status_model`` answers
     (the first is the pre-injection baseline); the last value repeats once
     the script is exhausted. Injection is stubbed; the confirm pacing is
-    tightened so the unconfirmed path stays fast.
+    tightened so the unconfirmed path stays fast. ``after_response`` gets the
+    live status script once the reply is in, to drive a detached watcher.
 
     :returns: The ``/events`` HTTP response.
     """
@@ -1985,6 +1990,8 @@ async def _post_model_change_with_status_sequence(
             "/v1/sessions/68c7c1acc5eeec3978c5e62043da51a5/events",
             json={"type": "model_change", "model": model},
         )
+        if after_response is not None:
+            await after_response(script)
     switch_rejected = empty_session_catalog or stored_catalog_rows == []
     assert commands == ([] if switch_rejected else [f"/model {model}"])
     return response
@@ -2162,6 +2169,34 @@ async def test_events_model_change_mid_turn_defers_instead_of_failing(
         pane_status="running",
     )
     assert resp.status_code == 204, resp.text
+
+
+@pytest.mark.asyncio
+async def test_a_mid_turn_switch_keeps_the_users_default_model_when_it_lands_late(
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_claude_user_settings: Path,
+) -> None:
+    """Claude saves a queued mid-turn ``/model`` as the default once the turn settles; undo it."""
+    settings = _isolate_claude_user_settings
+    settings.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    monkeypatch.setattr(native_controls, "_CLAUDE_MODEL_LATE_DIALOG_POLL_S", 0.01)
+
+    async def _turn_settles_and_the_switch_lands(status: list[str | None]) -> None:
+        settings.write_text(json.dumps({"model": "claude-opus-4-7"}), encoding="utf-8")
+        status[:] = ["claude-opus-4-7"]
+        deadline = time.monotonic() + 10.0
+        while "opus-4-7" in settings.read_text(encoding="utf-8") and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+
+    resp = await _post_model_change_with_status_sequence(
+        monkeypatch,
+        ["claude-opus-4-6"],
+        pane_status="running",
+        after_response=_turn_settles_and_the_switch_lands,
+    )
+
+    assert resp.status_code == 204, resp.text
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
 
 
 @pytest.mark.asyncio

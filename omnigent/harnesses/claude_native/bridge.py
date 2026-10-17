@@ -4765,6 +4765,7 @@ def inject_slash_command(
 
 # Claude awaits its own default-model save for at most 3s after ``/model``.
 _DEFAULT_MODEL_SAVE_WAIT_S = 3.0
+_DEFAULT_MODEL_SAVE_POLL_S = 0.05
 _MISSING = object()
 
 
@@ -4773,7 +4774,7 @@ def inject_model_command(
     *,
     model_arg: str,
     timeout_s: float = _TMUX_READY_TIMEOUT_S,
-) -> None:
+) -> object:
     """
     Switch the pane to *model_arg* for this session only.
 
@@ -4788,11 +4789,13 @@ def inject_model_command(
     :param bridge_dir: Bridge directory path.
     :param model_arg: ``/model`` argument, e.g. ``"claude-sonnet-5-5"``.
     :param timeout_s: Seconds to wait for ``tmux.json``, e.g. ``30.0``.
+    :returns: The ``model`` value before the switch, for
+        :func:`restore_default_model` once a switch queued behind a busy turn
+        lands and Claude saves it after this returns.
     :raises ValueError: See :func:`inject_slash_command`.
     :raises RuntimeError: See :func:`inject_slash_command`.
     """
-    path = claude_user_settings_path()
-    before = _read_settings_model(path)
+    before = _read_settings_model(claude_user_settings_path())
     inject_slash_command(
         bridge_dir,
         command=f"/model {model_arg}",
@@ -4800,8 +4803,21 @@ def inject_model_command(
         auto_confirm=True,
         confirm_hint=SWITCH_MODEL_DIALOG_HINT,
     )
+    restore_default_model(before, model_arg)
+    return before
+
+
+def restore_default_model(before: object, model_arg: str) -> None:
+    """
+    Undo Claude's save of ``/model <model_arg>`` as the user's default model.
+
+    :param before: The value :func:`inject_model_command` returned.
+    :param model_arg: The typed ``/model`` argument, e.g. ``"sonnet"``.
+    :returns: None.
+    """
     if isinstance(before, str) and before.strip().lower() == model_arg.strip().lower():
         return  # Claude's save would not change the file.
+    path = claude_user_settings_path()
     try:
         _restore_settings_model(path, before, model_arg)
     except (OSError, ValueError):
@@ -4856,7 +4872,7 @@ def _restore_settings_model(path: Path, before: object, model_arg: str) -> None:
     deadline = time.monotonic() + _DEFAULT_MODEL_SAVE_WAIT_S
     current = _read_settings_model(path)
     while current == before and time.monotonic() < deadline:
-        time.sleep(0.05)
+        time.sleep(_DEFAULT_MODEL_SAVE_POLL_S)
         current = _read_settings_model(path)
     if current == before:
         return  # No save landed (non-interactive session, or the switch did not take).

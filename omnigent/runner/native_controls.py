@@ -1167,6 +1167,9 @@ def build_native_controls(
         conv_id: str,
         bridge_dir: Path,
         expected: set[str],
+        *,
+        default_model_before: object,
+        model_arg: str,
     ) -> None:
         """Answer a ``/model`` confirm dialog that pops after the active turn.
 
@@ -1177,12 +1180,14 @@ def build_native_controls(
         (never blind), stops as soon as the statusLine reports one of the
         expected spellings, and gives up quietly after its budget — the
         persisted request and the forwarder's verbatim report remain the
-        authoritative record either way.
+        authoritative record either way. Claude saves the late switch as the
+        user's default model, so a confirmed one also restores that default.
         """
         from omnigent.harnesses.claude_native.bridge import (
             SWITCH_MODEL_DIALOG_HINT,
             confirm_dialog_if_open,
             read_claude_status_model,
+            restore_default_model,
         )
 
         deadline = time.monotonic() + _CLAUDE_MODEL_LATE_DIALOG_BUDGET_S
@@ -1190,6 +1195,7 @@ def build_native_controls(
             try:
                 current = await asyncio.to_thread(read_claude_status_model, bridge_dir)
                 if current and current in expected:
+                    await asyncio.to_thread(restore_default_model, default_model_before, model_arg)
                     return
                 await asyncio.to_thread(
                     confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
@@ -1294,7 +1300,7 @@ def build_native_controls(
             )
         baseline = await asyncio.to_thread(read_claude_status_model, bridge_dir)
         try:
-            await asyncio.to_thread(
+            default_model_before = await asyncio.to_thread(
                 inject_model_command, bridge_dir, model_arg=model_arg, timeout_s=1.0
             )
         except (RuntimeError, ValueError) as exc:
@@ -1363,7 +1369,13 @@ def build_native_controls(
             # the late dialog, and let the forwarder's report settle the
             # picker when the switch actually lands.
             watcher = asyncio.create_task(
-                _watch_late_model_dialog(conv_id, bridge_dir, expected),
+                _watch_late_model_dialog(
+                    conv_id,
+                    bridge_dir,
+                    expected,
+                    default_model_before=default_model_before,
+                    model_arg=model_arg,
+                ),
                 name=f"claude-model-dialog-{conv_id}",
             )
             _model_dialog_watchers.add(watcher)

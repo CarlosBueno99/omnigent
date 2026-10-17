@@ -326,7 +326,7 @@ class ClaudeNativeExecutor(Executor):
             return
         yield TurnComplete(response=None)
 
-    async def _inject(self, operation: Callable[[], None]) -> None:
+    async def _inject(self, operation: Callable[[], object]) -> None:
         """Drain cancelled delivery workers before releasing the pane's injection lock."""
         cancelled = threading.Event()
         with cancellable_injection(cancelled):
