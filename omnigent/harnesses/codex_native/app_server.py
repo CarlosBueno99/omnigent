@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import functools
 import hashlib
 import json
 import logging
@@ -16,7 +17,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias, cast
 
@@ -1507,34 +1508,49 @@ async def _wait_for_discovery_listener(
     raise TimeoutError("Timed out waiting for Codex model discovery app-server")
 
 
-def _codex_config_identity(source_home: Path) -> tuple[object, ...]:
-    """Invalidate cached CLI answers when configuration or its catalog changes."""
+def _codex_config_identity(
+    source_home: Path, config_profile: str | None = None
+) -> tuple[object, ...]:
+    """Invalidate cached CLI answers when configuration, profile or catalog changes."""
     from omnigent.models.model_catalog_store import binary_identity
 
-    picker_config = _codex_picker_config(source_home)
+    root_picker = _codex_picker_config(source_home)
+    selected_profile = config_profile or root_picker.get("profile")
+    picker_config = _codex_picker_config(source_home, selected_profile)
     return (
         str(source_home.resolve()),
         binary_identity(str(source_home / "config.toml")),
+        binary_identity(
+            str(source_home / f"{selected_profile}.config.toml") if selected_profile else None
+        ),
         binary_identity(picker_config.get("model_catalog_json")),
         binary_identity(str(source_home / "auth.json")),
     )
 
 
-def _codex_picker_config(source_home: Path) -> dict[str, str]:
+def _codex_picker_config(source_home: Path, config_profile: str | None = None) -> dict[str, str]:
     """Read the CLI settings needed to reproduce its model picker.
 
     ``profile`` rides along because the minimal bridge copies profile
     definitions without the active selector, and an active profile's
-    ``model`` decides the CLI's effective default.
+    ``model`` decides the CLI's effective default. A ``--profile``
+    selection layers its own ``model`` and ``model_catalog_json`` on top.
     """
     try:
         config = tomlkit.parse((source_home / "config.toml").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        config = tomlkit.document()
     except (OSError, ValueError):
         return {}
+    overlay = (
+        _codex_profile_overlay(source_home, config.unwrap(), config_profile) or {}
+        if config_profile
+        else {}
+    )
     picker = {
         key: str(value)
         for key in ("model", "model_catalog_json", "profile")
-        if isinstance(value := config.get(key), str) and value
+        if isinstance(value := overlay.get(key, config.get(key)), str) and value
     }
     if catalog := picker.get("model_catalog_json"):
         path = Path(catalog).expanduser()
@@ -1544,7 +1560,51 @@ def _codex_picker_config(source_home: Path) -> dict[str, str]:
     return picker
 
 
-def _probe_codex_home(config_overrides: Sequence[str]) -> Path:
+def _codex_profile_overlay(
+    source_home: Path, config: dict[str, object], config_profile: str
+) -> dict[str, object] | None:
+    """The selected file profile's table, from ``<profile>.config.toml`` or ``[profiles]``."""
+    from omnigent.onboarding.codex_auth_readiness import load_codex_config
+
+    overlay = load_codex_config(source_home / f"{config_profile}.config.toml")
+    if overlay is None:
+        # Codex < 0.134 keeps file profiles inline; newer codex fails at start on a
+        # missing file anyway, so the fallback only matters where it is correct.
+        profiles = config.get("profiles")
+        overlay = profiles.get(config_profile) if isinstance(profiles, dict) else None
+    return overlay if isinstance(overlay, dict) else None
+
+
+def _codex_model_probe_settings(config: Mapping[str, object]) -> dict[str, object]:
+    """Keep catalog discovery free of user hooks, plugins, and MCP processes."""
+    kept = {
+        key: config[key]
+        for key in (
+            "model",
+            "model_catalog_json",
+            "profile",
+            "model_provider",
+            "model_providers",
+            "profiles",
+        )
+        if key in config
+    }
+    profiles = kept.get("profiles")
+    if isinstance(profiles, dict):
+        kept["profiles"] = {
+            name: _codex_model_probe_settings(table)
+            for name, table in profiles.items()
+            if isinstance(name, str) and isinstance(table, dict)
+        }
+    return kept
+
+
+def _probe_codex_home(
+    config_overrides: Sequence[str],
+    config_profile: str | None = None,
+    *,
+    codex_version: tuple[int, int, int] | None = None,
+) -> Path:
     """
     Persistent probe ``CODEX_HOME`` for one provider configuration.
 
@@ -1562,6 +1622,10 @@ def _probe_codex_home(config_overrides: Sequence[str]) -> Path:
     MCPs, hooks and plugins.
 
     :param config_overrides: The probe's ``-c`` overrides.
+    :param config_profile: The launch's ``--profile``, materialized the way
+        start-up materializes it so the probe lists that profile's catalog.
+    :param codex_version: The probing CLI's version, which decides the
+        profile file layout.
     :returns: The created ``CODEX_HOME`` directory.
     """
     # The source home joins the key so switching accounts (a different
@@ -1569,7 +1633,9 @@ def _probe_codex_home(config_overrides: Sequence[str]) -> Path:
     # symlink or account-specific cached state under identical overrides.
     source_home = _codex_home_config_source_from_env()
     key = hashlib.sha256(
-        "\n".join((str(source_home.resolve()), *config_overrides)).encode("utf-8")
+        "\n".join(
+            (str(source_home.resolve()), *config_overrides, *filter(None, [config_profile]))
+        ).encode("utf-8")
     ).hexdigest()[:12]
     home = Path.home() / ".omnigent" / "cache" / "codex-model-probe" / key
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1577,6 +1643,8 @@ def _probe_codex_home(config_overrides: Sequence[str]) -> Path:
     # (not symlinked), so drop the copy to re-read an edited source config.
     with contextlib.suppress(OSError):
         (home / "config.toml").unlink(missing_ok=True)
+        # The profile journal records the previous base; rebuild it from the fresh copy.
+        (home / ".omnigent-config-profile.toml").unlink(missing_ok=True)
     # The probe drives the same native codex binary as a session launch, so
     # keep the full native effort ladder instead of clamping max/ultra.
     _populate_codex_home_config(
@@ -1594,6 +1662,15 @@ def _probe_codex_home(config_overrides: Sequence[str]) -> Path:
         )
         document.update(picker_config)
         config_path.write_text(tomlkit.dumps(document), encoding="utf-8")
+    if config_profile is not None:
+        materialize_codex_config_profile(
+            home, source_home, config_profile, codex_version=codex_version
+        )
+        config_path = home / "config.toml"
+        document = tomlkit.parse(config_path.read_text(encoding="utf-8")).unwrap()
+        config_path.write_text(
+            tomlkit.dumps(_codex_model_probe_settings(document)), encoding="utf-8"
+        )
     return home
 
 
@@ -1694,7 +1771,17 @@ async def probe_codex_model_options(
         config_overrides.extend(databricks.config_overrides)
         env["DATABRICKS_HOST"] = databricks.host
         pinned_model = databricks.model
-    codex_home = await asyncio.to_thread(_probe_codex_home, config_overrides)
+    codex_version = (
+        await _codex_cli_version(resolved_codex) if launch.config_profile is not None else None
+    )
+    codex_home = await asyncio.to_thread(
+        functools.partial(
+            _probe_codex_home,
+            config_overrides,
+            launch.config_profile,
+            codex_version=codex_version,
+        )
+    )
     env["CODEX_HOME"] = str(codex_home)
     port = _allocate_loopback_port()
     listen_url = f"ws://127.0.0.1:{port}"
@@ -1770,10 +1857,11 @@ def codex_catalog_fingerprint(launch: NativeCodexLaunch, *, codex_path: str | No
     profile_host = _read_databrickscfg_host(launch.profile) if launch.profile is not None else None
     return fingerprint_of(
         "codex-native",
-        "isolated-picker-v4",
-        _codex_config_identity(_codex_home_config_source_from_env()),
+        "isolated-picker-v5",
+        _codex_config_identity(_codex_home_config_source_from_env(), launch.config_profile),
         (launch.profile, (profile_host or "").rstrip("/")) if launch.profile is not None else None,
         launch.model,
+        launch.config_profile,
         tuple(launch.config_overrides),
         binary_identity(codex_path or _find_codex_cli()),
     )
@@ -3525,6 +3613,8 @@ class NativeCodexLaunch:
         outcome (provider / profile / model, or the login-fallback state),
         set at resolution time and surfaced in the startup-timeout error so
         hosted users can diagnose without runner-log access (see #2745).
+    :param config_profile: The Codex file profile ``--profile`` selects in the
+        terminal launch args, or ``None`` (the root ``profile`` then applies).
     :param login_required: ``True`` when the launch defers to Codex's own
         login while no usable stored credential exists — the TUI will park
         on the sign-in screen and never start a thread on its own. Lets a
@@ -3537,6 +3627,7 @@ class NativeCodexLaunch:
     profile: str | None
     summary: str = ""
     login_required: bool = False
+    config_profile: str | None = None
 
 
 _MODEL_PROVIDER_OVERRIDE_PREFIX = "model_provider="
@@ -3887,13 +3978,8 @@ def _ambient_builtin_codex_provider(config_profile: str | None) -> str | None:
     if config is None:
         return None
     if config_profile is not None:
-        overlay = load_codex_config(source_home / f"{config_profile}.config.toml")
+        overlay = _codex_profile_overlay(source_home, config, config_profile)
         if overlay is None:
-            # Codex < 0.134 keeps file profiles inline; newer codex fails at start on a
-            # missing file anyway, so the fallback only matters where it is correct.
-            profiles = config.get("profiles")
-            overlay = profiles.get(config_profile) if isinstance(profiles, dict) else None
-        if not isinstance(overlay, dict):
             return None
         _merge_tables(config, copy.deepcopy(overlay))
     return effective_self_sufficient_builtin_provider(config)
@@ -3960,6 +4046,31 @@ def _resolve_subscription_launch(
 
 
 def resolve_native_codex_launch(
+    *,
+    model: str | None,
+    spec: AgentSpec | None = None,
+    terminal_launch_args: Sequence[str] = (),
+) -> NativeCodexLaunch:
+    """Resolve the launch routing, plus the ``--profile`` the launch selects.
+
+    See :func:`_resolve_native_codex_routing` for the routing precedence.
+    """
+    launch = _resolve_native_codex_routing(
+        model=model, spec=spec, terminal_launch_args=terminal_launch_args
+    )
+    return replace(launch, config_profile=codex_launch_config_profile(terminal_launch_args))
+
+
+def codex_launch_config_profile(terminal_launch_args: Sequence[str]) -> str | None:
+    """The ``--profile`` in Codex launch args, or ``None`` when absent or malformed."""
+    try:
+        return codex_config_profile(terminal_launch_args)
+    except ValueError:
+        # Malformed selectors are reported where launch args are validated, at start.
+        return None
+
+
+def _resolve_native_codex_routing(
     *,
     model: str | None,
     spec: AgentSpec | None = None,
