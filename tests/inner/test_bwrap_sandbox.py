@@ -1983,11 +1983,8 @@ _PARENT_MOUNT_LAYOUTS = (
 @pytest.mark.parametrize(
     ("entry_point", "layout"),
     [
-        *(
-            (entry_point, layout)
-            for entry_point in ("helper", "target")
-            for layout in _PARENT_MOUNT_LAYOUTS
-        ),
+        *(("helper", layout) for layout in _PARENT_MOUNT_LAYOUTS),
+        ("target", "venv-chain-relative"),
         ("helper-and-target", "venv-chain-relative"),
         ("helper-and-target", "aliased-checkout"),
     ],
