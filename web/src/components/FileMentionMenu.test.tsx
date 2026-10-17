@@ -6,8 +6,6 @@ afterEach(cleanup);
 
 describe("menu surface", () => {
   it("carries the dark glass blur so the translucent dark popover does not ghost the transcript", () => {
-    // Built-in dark palettes give --popover an alpha; the blur keeps the
-    // transcript behind the floating menu from reading through it.
     render(
       <FileMentionMenu
         currentDir=""
