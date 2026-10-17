@@ -114,7 +114,7 @@ if TYPE_CHECKING:
 
     from omnigent.install_ledger import InstallLedger
     from omnigent.onboarding.acp_auth import AcpAgentEntry
-    from omnigent.server.smart_routing import LLMRoutingClient
+    from omnigent.server.smart_routing import LLMRoutingClient, RoutingSettings
     from omnigent.smart_routing_cli import ArmedSession
     from omnigent.spec.types import LLMConfig
     from omnigent.update_check import _InstalledWheelInfo
@@ -179,6 +179,7 @@ def parse_routing_settings(
         DEFAULT_ROUTER_NAME,
         MODEL_ID_PREFIXES,
         RoutingSettings,
+        parse_judge_settings,
         parse_routing_tables,
     )
 
@@ -195,6 +196,9 @@ def parse_routing_settings(
         # The arm menu / alias / effort tables a deployment fronting a different
         # catalog overrides; absent keys keep the built-in defaults.
         **parse_routing_tables(routing_cfg),
+        # The built-in judge's own budget and effort; absent keys keep the
+        # routing ladder's default.
+        **parse_judge_settings(routing_cfg),
     )
 
 
@@ -361,10 +365,13 @@ def _build_external_routing_client(
 
 def _build_local_llm_routing_client(
     server_llm: LLMConfig | None,
+    settings: RoutingSettings | None = None,
 ) -> LLMRoutingClient | None:
     """Build the built-in :class:`LLMRoutingClient` from the ``llm:`` block.
 
     :param server_llm: The parsed server-level ``LLMConfig``.
+    :param settings: The parsed routing settings, supplying the judge's own
+        budget and reasoning effort. ``None`` keeps the defaults.
     :returns: A configured client, or ``None`` when there is no ``llm:``
         block (or its policy client can't be built).
     """
@@ -379,9 +386,15 @@ def _build_local_llm_routing_client(
     policy_client = _build_policy_llm_client(server_llm, conn)
     if policy_client is None:
         return None
-    from omnigent.server.smart_routing import LLMRoutingClient
+    from omnigent.server.smart_routing import LLMRoutingClient, RoutingSettings
 
-    return LLMRoutingClient(policy_client)
+    if settings is None:
+        settings = RoutingSettings()
+    return LLMRoutingClient(
+        policy_client,
+        request_timeout=settings.judge_request_timeout,
+        reasoning_effort=settings.judge_reasoning_effort,
+    )
 
 
 def _build_routing_backends(
@@ -421,7 +434,9 @@ def _build_routing_backends(
         external = _build_external_routing_client(routing_cfg, settings, cfg)
     elif not isinstance(routing_cfg, dict):
         external = _build_default_databricks_routing_client(cfg, settings)
-    return RoutingBackends(external=external, local=_build_local_llm_routing_client(server_llm))
+    return RoutingBackends(
+        external=external, local=_build_local_llm_routing_client(server_llm, settings)
+    )
 
 
 def _server_uvicorn_log_config(

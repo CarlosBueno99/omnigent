@@ -1367,25 +1367,56 @@ def test_the_routing_call_is_the_innermost_wait_on_the_turn_path() -> None:
     assert SERVER_HOP_TIMEOUT_S > ROUTING_REQUEST_TIMEOUT_S
 
 
-def test_the_builtin_judge_shares_the_external_routers_budget() -> None:
+async def test_the_builtin_judge_shares_the_external_routers_budget() -> None:
     """
-    The judge is a routing call too, so it cannot inherit the ``llm:`` timeout.
+    The judge is a routing call too, so it does not inherit the ``llm:`` timeout.
 
     ``PolicyLLMClient`` defaults to a 300s request timeout and multiplies it by
     every configured fallback model. Left alone, picking the built-in judge as
     the routing source turned a fail-open into a multi-minute hang, on exactly
-    the paths a wedged router is supposed to cost seconds.
+    the paths a wedged router is supposed to cost seconds. An unconfigured
+    ``routing:`` block therefore leaves the judge on the ladder's innermost
+    constant, and a judge built with those defaults puts it on both bounds: the
+    adapter's own per-call HTTP timeout, and the wait_for that covers the
+    fallback chain and any pre-request token refresh.
     """
-    import inspect
+    from unittest.mock import patch
 
-    from omnigent.server.smart_routing import ROUTING_REQUEST_TIMEOUT_S, LLMRoutingClient
+    from omnigent.server.smart_routing import (
+        ROUTING_REQUEST_TIMEOUT_S,
+        LLMRoutingClient,
+        RoutingSettings,
+    )
 
-    source = inspect.getsource(LLMRoutingClient.route)
-    # Both bounds: the adapter's own per-call HTTP timeout, and a wait_for that
-    # covers the fallback chain and any pre-request token refresh.
-    assert "timeout=ROUTING_REQUEST_TIMEOUT_S" in source
-    assert "asyncio.wait_for" in source
+    settings = RoutingSettings()
+    assert settings.judge_request_timeout == ROUTING_REQUEST_TIMEOUT_S
     assert ROUTING_REQUEST_TIMEOUT_S <= 10.0
+
+    seen: dict[str, Any] = {}
+
+    class _Judge:
+        _request_timeout = 300
+
+        async def create(self, **kwargs: Any) -> Any:
+            seen.update(kwargs)
+            raise RuntimeError("no verdict")
+
+    budgets: list[float | None] = []
+    real_wait_for = asyncio.wait_for
+
+    async def _recording_wait_for(awaitable: Any, timeout: float | None) -> Any:
+        budgets.append(timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    client = LLMRoutingClient(
+        _Judge(),
+        request_timeout=settings.judge_request_timeout,
+        reasoning_effort=settings.judge_reasoning_effort,
+    )
+    with patch("asyncio.wait_for", new=_recording_wait_for):
+        assert await client.route("hi", {"claude": ["claude-opus-4-8"]}) is None
+    assert seen["timeout"] == ROUTING_REQUEST_TIMEOUT_S
+    assert budgets == [ROUTING_REQUEST_TIMEOUT_S]
 
 
 # ── Route-once under load, and the manual-pin gap ───────────────────

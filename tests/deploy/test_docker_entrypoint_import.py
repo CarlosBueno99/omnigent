@@ -15,7 +15,7 @@ import importlib
 import sys
 from pathlib import Path
 from typing import NoReturn
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -222,6 +222,28 @@ def test_build_routing_defaults_without_a_routing_block() -> None:
     client, settings = _build_routing({}, None)
     assert client is None
     assert settings == RoutingSettings()
+
+
+def test_build_routing_hands_the_judge_its_configured_budget_and_effort() -> None:
+    from deploy.docker.entrypoint import _build_routing
+    from omnigent.server.smart_routing import LLMRoutingClient
+    from omnigent.spec import parse_server_llm
+
+    cfg = {"routing": {"judge": {"request_timeout": 30, "reasoning_effort": "low"}}}
+    with (
+        patch(
+            "omnigent.runtime.policies.builder._resolve_server_llm_connection",
+            return_value=None,
+        ),
+        patch(
+            "omnigent.runtime.policies.builder._build_policy_llm_client",
+            return_value=MagicMock(),
+        ),
+    ):
+        client, settings = _build_routing(cfg, parse_server_llm({"model": "openai/judge"}))
+    assert isinstance(client, LLMRoutingClient)
+    assert client._request_timeout == settings.judge_request_timeout == 30
+    assert client._reasoning_effort == settings.judge_reasoning_effort == "low"
 
 
 @pytest.mark.parametrize(

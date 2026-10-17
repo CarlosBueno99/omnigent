@@ -556,16 +556,34 @@ _VERDICT_SCHEMA: dict[str, object] = {
 class LLMRoutingClient:
     """Default routing client using the server-level PolicyLLMClient.
 
-    The judge call is capped at :data:`ROUTING_REQUEST_TIMEOUT_S` rather than
-    left on the server ``llm:`` block's own ``request_timeout`` (300s by
-    default, multiplied by every configured fallback model). A judge that slow
-    is not a verdict anybody is still waiting for: the prompt or spawn it
-    belongs to has long since needed an answer, so it degrades to "not routed"
-    on the same budget the external router gets.
+    The judge call is capped at *request_timeout* rather than left on the
+    server ``llm:`` block's own ``request_timeout`` (300s by default,
+    multiplied by every configured fallback model). A judge that slow is not a
+    verdict anybody is still waiting for: the prompt or spawn it belongs to has
+    long since needed an answer, so it degrades to "not routed" on the same
+    budget the external router gets. A deployment whose judge is a reasoning
+    model raises that budget, or lowers the effort it asks for, through the
+    ``routing.judge`` block (:func:`parse_judge_settings`).
     """
 
-    def __init__(self, llm_client: Any) -> None:
+    def __init__(
+        self,
+        llm_client: Any,
+        *,
+        request_timeout: float = ROUTING_REQUEST_TIMEOUT_S,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        """
+        :param llm_client: The :class:`~omnigent.policies.types.PolicyLLMClient`
+            built from the server ``llm:`` block.
+        :param request_timeout: Per-call budget in seconds, applied to both the
+            adapter's own HTTP timeout and the outer wait around the call.
+        :param reasoning_effort: Reasoning effort sent with the judge call,
+            e.g. ``"low"``. ``None`` sends none and leaves the provider default.
+        """
         self._llm = llm_client
+        self._request_timeout = request_timeout
+        self._reasoning_effort = reasoning_effort
         # Reason the most recent route() returned None; see RoutingClient.
         self.last_error: str | None = None
 
@@ -584,6 +602,7 @@ class LLMRoutingClient:
             len(message),
         )
         self.last_error = None
+        reasoning = {"effort": self._reasoning_effort} if self._reasoning_effort else None
         try:
             # Both bounds are needed: ``timeout`` is the adapter's own per-call
             # HTTP budget, and ``wait_for`` covers everything it does not (a
@@ -605,9 +624,10 @@ class LLMRoutingClient:
                             "schema": _VERDICT_SCHEMA,
                         }
                     },
-                    timeout=ROUTING_REQUEST_TIMEOUT_S,
+                    reasoning=reasoning,
+                    timeout=self._request_timeout,
                 ),
-                timeout=ROUTING_REQUEST_TIMEOUT_S,
+                timeout=self._request_timeout,
             )
             text = response.output[0].content[0].text
             # The verdict can echo prompt text in its rationale, so keep it off
@@ -974,6 +994,15 @@ class RoutingSettings:
         :data:`~omnigent.util.reasoning_effort.DEFAULT_MODEL_EFFORT_CAPS`. The
         provider ladders themselves are not configurable — they are the wire
         APIs' own vocabularies, not a deployment fact.
+    :param judge_request_timeout: Seconds the built-in judge's model call may
+        take (:class:`LLMRoutingClient`). Defaults to
+        :data:`ROUTING_REQUEST_TIMEOUT_S`; a reasoning judge that needs longer
+        raises it. The first-prompt and spawn hooks still give up on their own
+        ladder (:mod:`omnigent.runner.turn_routing`), so past that only
+        session-create routing waits the extra time.
+    :param judge_reasoning_effort: Reasoning effort the judge call asks for,
+        e.g. ``"low"`` so a reasoning model answers inside the budget. ``None``
+        sends none and leaves the provider default.
     """
 
     router_name: str = DEFAULT_ROUTER_NAME
@@ -983,6 +1012,8 @@ class RoutingSettings:
     servable_aliases: Mapping[str, str] | None = None
     current_generation_models: Mapping[str, Sequence[str]] | None = None
     model_effort_caps: ModelEffortCaps | None = None
+    judge_request_timeout: float = ROUTING_REQUEST_TIMEOUT_S
+    judge_reasoning_effort: str | None = None
 
 
 def _string_list(raw: Any) -> tuple[str, ...] | None:  # type: ignore[explicit-any]  # parsed YAML
@@ -1076,6 +1107,67 @@ def parse_routing_tables(
         "current_generation_models": _id_table(cfg.get("current_generation_models")),
         "model_effort_caps": caps,
     }
+
+
+def parse_judge_settings(
+    routing_cfg: Any,  # type: ignore[explicit-any]  # parsed YAML block
+) -> dict[str, Any]:  # type: ignore[explicit-any]  # RoutingSettings kwargs
+    """Parse the built-in judge's own knobs out of a ``routing:`` block.
+
+    A reasoning model behind an OpenAI-compatible endpoint can need more than
+    the fixed routing budget, or a lower effort to answer inside it::
+
+        routing:
+          judge:
+            request_timeout: 30
+            reasoning_effort: low
+
+    Each key is independent; a malformed one is logged and dropped so the judge
+    keeps its default rather than failing the boot.
+
+    :param routing_cfg: The parsed ``routing:`` mapping, or ``None``.
+    :returns: Keyword arguments for :class:`RoutingSettings`, one per key the
+        block sets to a usable value.
+    """
+    from omnigent.runner.turn_routing import SERVER_HOP_TIMEOUT_S
+    from omnigent.util.reasoning_effort import EFFORT_VALUES, format_supported
+
+    judge = routing_cfg.get("judge") if isinstance(routing_cfg, dict) else None
+    if not isinstance(judge, dict):
+        return {}
+    settings: dict[str, Any] = {}  # type: ignore[explicit-any]
+    timeout = judge.get("request_timeout")
+    if timeout is not None:
+        if isinstance(timeout, int | float) and not isinstance(timeout, bool) and timeout > 0:
+            settings["judge_request_timeout"] = float(timeout)
+            if timeout > SERVER_HOP_TIMEOUT_S:
+                _logger.warning(
+                    "routing.judge.request_timeout=%ss exceeds the %ss a first-prompt or "
+                    "spawn routing hook waits on the server; those still fall open at the "
+                    "hook's budget and only session-create routing waits the full %ss",
+                    timeout,
+                    SERVER_HOP_TIMEOUT_S,
+                    timeout,
+                )
+        else:
+            _logger.warning(
+                "routing.judge.request_timeout must be a positive number of seconds, "
+                "got %r; keeping %ss",
+                timeout,
+                ROUTING_REQUEST_TIMEOUT_S,
+            )
+    effort = judge.get("reasoning_effort")
+    if effort is not None:
+        normalized = effort.strip().lower() if isinstance(effort, str) else ""
+        if normalized in EFFORT_VALUES:
+            settings["judge_reasoning_effort"] = normalized
+        else:
+            _logger.warning(
+                "routing.judge.reasoning_effort must be one of %s, got %r; sending none",
+                format_supported(EFFORT_VALUES),
+                effort,
+            )
+    return settings
 
 
 @dataclass(frozen=True)

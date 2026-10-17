@@ -19,6 +19,7 @@ import pytest
 from omnigent.server.routing_backend import RoutingBackends
 from omnigent.server.smart_routing import (
     _AUTO_ROUTING_HARNESSES,
+    ROUTING_REQUEST_TIMEOUT_S,
     LLMRoutingClient,
     RoutingResult,
     TaskV1RouteOptionSource,
@@ -2492,6 +2493,66 @@ def test_parse_routing_tables_leaves_absent_or_malformed_tables_at_their_default
     assert tables["model_effort_caps"] is None
 
 
+def test_parse_judge_settings_reads_both_knobs() -> None:
+    from omnigent.server.smart_routing import parse_judge_settings
+
+    judge = parse_judge_settings({"judge": {"request_timeout": 30, "reasoning_effort": " Low "}})
+    assert judge == {"judge_request_timeout": 30.0, "judge_reasoning_effort": "low"}
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected", "dropped"),
+    [
+        (None, {}, 0),
+        ({}, {}, 0),
+        ({"judge": "fast"}, {}, 0),
+        # A usable key is kept while its malformed sibling is dropped.
+        (
+            {"judge": {"request_timeout": "30", "reasoning_effort": "low"}},
+            {"judge_reasoning_effort": "low"},
+            1,
+        ),
+        ({"judge": {"request_timeout": 0}}, {}, 1),
+        ({"judge": {"request_timeout": True}}, {}, 1),
+        (
+            {"judge": {"request_timeout": 12.5, "reasoning_effort": "turbo"}},
+            {"judge_request_timeout": 12.5},
+            1,
+        ),
+        ({"judge": {"reasoning_effort": 5}}, {}, 1),
+    ],
+)
+def test_parse_judge_settings_drops_malformed_knobs_at_their_default(
+    cfg: Any,  # type: ignore[explicit-any]
+    expected: dict[str, Any],  # type: ignore[explicit-any]
+    dropped: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from omnigent.server.smart_routing import parse_judge_settings
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.server.smart_routing"):
+        assert parse_judge_settings(cfg) == expected
+    # Each dropped key is called out, so a typo does not silently keep the default.
+    assert len([r for r in caplog.records if "routing.judge." in r.getMessage()]) == dropped
+
+
+def test_a_judge_budget_past_the_hook_ladder_is_honoured_but_called_out(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The hooks above the judge still give up on their own ladder."""
+    from omnigent.runner.turn_routing import SERVER_HOP_TIMEOUT_S
+    from omnigent.server.smart_routing import parse_judge_settings
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.server.smart_routing"):
+        within = parse_judge_settings({"judge": {"request_timeout": SERVER_HOP_TIMEOUT_S}})
+        beyond = parse_judge_settings({"judge": {"request_timeout": 30}})
+    assert within == {"judge_request_timeout": SERVER_HOP_TIMEOUT_S}
+    assert beyond == {"judge_request_timeout": 30.0}
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1
+    assert f"exceeds the {SERVER_HOP_TIMEOUT_S}s" in messages[0]
+
+
 def test_configured_tables_reach_the_behaviour_through_the_config_block() -> None:
     """End to end: a ``routing:`` block's tables drive the seam's decisions."""
     from omnigent.cli import parse_routing_settings
@@ -2536,6 +2597,8 @@ _PREFIXES_DEFAULT = "<MODEL_ID_PREFIXES>"
                 "router_name": "task_v1",
                 "selection_model": None,
                 "model_prefixes": _PREFIXES_DEFAULT,
+                "judge_request_timeout": ROUTING_REQUEST_TIMEOUT_S,
+                "judge_reasoning_effort": None,
             },
         ),
         # Every key set: each one is read.
@@ -2545,11 +2608,14 @@ _PREFIXES_DEFAULT = "<MODEL_ID_PREFIXES>"
                 "router_name": "task_v2",
                 "selection_model": "gpt-5-4-mini",
                 "model_prefix": ["databricks-", "system.ai."],
+                "judge": {"request_timeout": 30, "reasoning_effort": "low"},
             },
             {
                 "router_name": "task_v2",
                 "selection_model": "gpt-5-4-mini",
                 "model_prefixes": ("databricks-", "system.ai."),
+                "judge_request_timeout": 30.0,
+                "judge_reasoning_effort": "low",
             },
         ),
         # A scalar prefix is wrapped; a malformed one falls back to the shared list.
@@ -3336,6 +3402,69 @@ async def test_the_judge_is_capped_by_its_own_request_timeout_too() -> None:
     client = LLMRoutingClient(_Recording())
     assert await client.route("hi", {"claude-sdk": ["databricks-claude-haiku-4-5"]}) is None
     assert seen["timeout"] == ROUTING_REQUEST_TIMEOUT_S
+    # Unconfigured, the judge asks for no effort either.
+    assert seen["reasoning"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_judge_uses_the_routing_blocks_own_timeout_and_reasoning_effort() -> None:
+    """``routing.judge`` settings reach the judge call, both bounds included.
+
+    A reasoning judge can need more than the fixed budget, or a lower effort to
+    land inside it; the configured budget and effort must reach the call rather
+    than the 9 s default and the provider's default effort.
+    """
+    import asyncio
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from omnigent.cli import _build_routing_backends, parse_routing_settings
+    from omnigent.runtime.policies import builder
+    from omnigent.spec import parse_server_llm
+
+    server_llm = parse_server_llm(
+        {
+            "model": "openai/judge",
+            "connection": {"base_url": "http://judge.test/v1", "api_key": "k"},
+        }
+    )
+    assert server_llm is not None
+    routing = {"provider": "local", "judge": {"request_timeout": 30, "reasoning_effort": "low"}}
+    seen: dict[str, Any] = {}
+    verdict = {"harness": "claude-native", "model": "claude-sonnet-4-20250514", "rationale": "ok"}
+
+    async def _create(**kwargs: Any) -> Any:
+        seen.update(kwargs)
+        text = SimpleNamespace(text=json.dumps(verdict))
+        return SimpleNamespace(output=[SimpleNamespace(content=[text])])
+
+    fake_llm = SimpleNamespace(responses=SimpleNamespace(create=_create))
+    real_build = builder._build_policy_llm_client
+
+    def _build_with_fake_client(*args: Any) -> Any:
+        policy_client = real_build(*args)
+        return None if policy_client is None else replace(policy_client, _client=fake_llm)
+
+    budgets: list[float | None] = []
+    real_wait_for = asyncio.wait_for
+
+    async def _recording_wait_for(awaitable: Any, timeout: float | None) -> Any:
+        budgets.append(timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    # The server bootstrap's own assembly, so the knob is read where it is set.
+    with patch.object(builder, "_build_policy_llm_client", _build_with_fake_client):
+        client = _build_routing_backends(
+            {"routing": routing}, server_llm, parse_routing_settings(routing)
+        ).local
+    assert client is not None
+    with patch("asyncio.wait_for", new=_recording_wait_for):
+        result = await client.route(
+            "refactor the auth module", {"claude-native": ["claude-sonnet-4-20250514"]}
+        )
+    assert result is not None and result.model == "claude-sonnet-4-20250514"
+    # Both bounds and the effort, checked together so a miss shows every gap.
+    assert (seen["timeout"], budgets, seen.get("reasoning")) == (30, [30], {"effort": "low"})
 
 
 @pytest.mark.asyncio

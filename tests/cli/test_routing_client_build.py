@@ -14,8 +14,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from omnigent.cli import _build_routing_backends
+from omnigent.cli import _build_routing_backends, parse_routing_settings
 from omnigent.server.smart_routing import (
+    ROUTING_REQUEST_TIMEOUT_S,
     ExternalRoutingClient,
     LLMRoutingClient,
     RoutingSettings,
@@ -113,6 +114,28 @@ def test_a_databricks_deployment_without_an_llm_block_gets_only_the_gateway(
     backends = _build_routing_backends(cfg, None, RoutingSettings())
     assert isinstance(backends.external, ExternalRoutingClient)
     assert backends.local is None
+
+
+def test_the_judge_carries_the_routing_blocks_budget_and_effort() -> None:
+    """``routing.judge`` reaches the built-in judge the bootstrap assembles."""
+    routing = {"provider": "local", "judge": {"request_timeout": 30, "reasoning_effort": "low"}}
+    with _policy_client():
+        backends = _build_routing_backends(
+            {"routing": routing}, _server_llm(), parse_routing_settings(routing)
+        )
+    assert isinstance(backends.local, LLMRoutingClient)
+    assert backends.local._request_timeout == 30
+    assert backends.local._reasoning_effort == "low"
+
+
+def test_the_judge_keeps_the_routing_ladders_budget_without_a_judge_block() -> None:
+    with _policy_client():
+        backends = _build_routing_backends(
+            {"routing": {"provider": "local"}}, _server_llm(), RoutingSettings()
+        )
+    assert isinstance(backends.local, LLMRoutingClient)
+    assert backends.local._request_timeout == ROUTING_REQUEST_TIMEOUT_S
+    assert backends.local._reasoning_effort is None
 
 
 def test_an_unusable_config_leaves_routing_off() -> None:

@@ -266,47 +266,32 @@ def _select_artifact_store(resolved_config: _ResolvedConfig) -> ArtifactStore:
     return LocalArtifactStore(str(resolved_config.artifact_dir))
 
 
-def _build_local_llm_routing_client(
-    server_llm: Any,  # type: ignore[explicit-any]  # LLMConfig | None
-) -> Any | None:  # type: ignore[explicit-any]  # LLMRoutingClient | None
-    if server_llm is None:
-        return None
-    from omnigent.runtime.policies.builder import (
-        _build_policy_llm_client,
-        _resolve_server_llm_connection,
-    )
-
-    conn = _resolve_server_llm_connection(server_llm)
-    policy_client = _build_policy_llm_client(server_llm, conn)
-    if policy_client is None:
-        return None
-    from omnigent.server.smart_routing import LLMRoutingClient
-
-    return LLMRoutingClient(policy_client)
-
-
 def _build_routing(
     cfg: dict[str, Any],
     server_llm: Any,  # type: ignore[explicit-any]  # LLMConfig | None
 ) -> tuple[Any, Any]:  # type: ignore[explicit-any]  # (RoutingClient | None, RoutingSettings)
     """Build the routing client and settings from the ``routing:`` block.
 
-    Reuses the CLI's parser and builder so a Docker deployment honours the
-    same ``routing.*`` keys (router name, selection model, model prefixes) a
-    local server does.
+    Reuses the CLI's parser and builders so a Docker deployment honours the
+    same ``routing.*`` keys (router name, selection model, model prefixes, the
+    judge's budget and effort) a local server does.
 
     :param cfg: The parsed server config mapping.
     :param server_llm: The parsed server-level ``LLMConfig``, used for the
         built-in judge when no external router is configured.
     :returns: ``(routing_client, routing_settings)`` for ``RuntimeCaps``.
     """
-    from omnigent.cli import _build_external_routing_client, parse_routing_settings
+    from omnigent.cli import (
+        _build_external_routing_client,
+        _build_local_llm_routing_client,
+        parse_routing_settings,
+    )
 
     routing_cfg = cfg.get("routing")
     settings = parse_routing_settings(routing_cfg)
     if isinstance(routing_cfg, dict) and routing_cfg.get("provider") == "external":
         return _build_external_routing_client(routing_cfg, settings), settings
-    return _build_local_llm_routing_client(server_llm), settings
+    return _build_local_llm_routing_client(server_llm, settings), settings
 
 
 def _resolve_execution_timeout(cfg: dict[str, Any]) -> int:
