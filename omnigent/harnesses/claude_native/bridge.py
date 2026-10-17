@@ -53,6 +53,7 @@ import threading
 import time
 import unicodedata
 import urllib.parse
+import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -4916,7 +4917,7 @@ class _PendingDefaultModelSwitches:
 
     def add(self, model_arg: str) -> str:
         """Record a deferred switch to *model_arg*; return its id."""
-        switch_id = secrets.token_hex(8)
+        switch_id = uuid.uuid4().hex
         self._switches[switch_id] = {"model": model_arg, "at": time.time()}
         self._save()
         return switch_id
