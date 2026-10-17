@@ -2165,10 +2165,9 @@ def _install_signal_handlers(
     if finish_work_event is not None and RUNNER_FINISH_WORK_SIGNAL is not None:
         _try_add_handler(RUNNER_FINISH_WORK_SIGNAL, finish_work_event.set)
         if degraded:
-            # The loop handler never installed, so the boot-time SIG_IGN would
-            # persist and leak into exec'd agent subprocesses, since SIG_IGN
-            # survives exec. A plain handler resets to the default on exec and
-            # still records the hangup for the parent-death backstop to honor.
+            # SIG_IGN survives exec and would leak into exec'd agent
+            # subprocesses; a plain handler resets on exec and still records the
+            # hangup for the parent-death backstop.
             def _record_finish_work(_signum: int, _frame: FrameType | None) -> None:
                 finish_work_event.set()
 

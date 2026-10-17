@@ -84,13 +84,18 @@ class _ForegroundHostTerminal:
             timeout=5,
             dimensions=(40, 160),
         )
-        # Open the transcript only after a successful spawn so a spawn failure
-        # cannot leak the file handle (close() never runs in that case).
-        self.transcript = (root / "terminal.txt").open("w", encoding="utf-8")
-        self.child.logfile_read = self.transcript
-        self._stop = threading.Event()
-        self._drain = threading.Thread(target=self._pump, name="host-pty-drain", daemon=True)
-        self._drain.start()
+        # A spawn that succeeds but whose post-spawn setup raises would leak the
+        # host subprocess, so tear it down before propagating the error.
+        try:
+            self.transcript = (root / "terminal.txt").open("w", encoding="utf-8")
+            self.child.logfile_read = self.transcript
+            self._stop = threading.Event()
+            self._drain = threading.Thread(target=self._pump, name="host-pty-drain", daemon=True)
+            self._drain.start()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self.child.close(force=True)
+            raise
 
     def _pump(self) -> None:
         while not self._stop.is_set():
@@ -106,7 +111,12 @@ class _ForegroundHostTerminal:
         self._stop.set()
         self._drain.join(timeout=5)
         assert not self._drain.is_alive(), "pty drain thread did not stop before fd close"
-        os.close(self.child.child_fd)
+        # Close through ptyprocess so it marks the fd closed; a bare os.close()
+        # leaves its fileobj owning the number and GC would reclose a reused fd.
+        ptyproc = self.child.ptyproc
+        ptyproc.fileobj.close()
+        ptyproc.fd = -1
+        ptyproc.closed = True
         self.child.child_fd = -1
 
     def wait_exit(self, timeout: float) -> tuple[int | None, int | None]:

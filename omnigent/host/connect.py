@@ -1367,6 +1367,14 @@ class HostProcess:
         Runs on the hangup signal-exit thread, so it only snapshots handles and
         sends signals; the zygote is not a runner and is never signalled.
 
+        Direct children are polled (non-blocking) so an already-exited child is
+        skipped instead of being signalled on a reused PID. A zygote-forked
+        runner is reaped only over zygote IPC, which must not block this exit
+        thread, so it is filtered on its cached return code. That cache can
+        briefly lag a reap the zygote already performed, leaving a narrow window
+        where the signal could reach a reused PID; closing it fully needs a
+        host-side exit-code cache fed by the runner-reap loop (follow-up).
+
         :param kill: Signal sender, defaults to :func:`os.kill`; injectable for tests.
         """
         from omnigent.runner.identity import RUNNER_FINISH_WORK_SIGNAL
@@ -1377,9 +1385,6 @@ class HostProcess:
         for handle in list(self._runners.values()):
             proc = handle.proc
             pid = proc.pid
-            # Poll direct children so an unreaped exit never signals a reused
-            # PID; a forked runner polls over zygote IPC, so trust its cached
-            # returncode instead of blocking that IPC on the exit thread.
             code = proc.returncode if isinstance(proc, ZygoteRunnerProc) else proc.poll()
             if code is not None or pid == zygote_pid:
                 continue

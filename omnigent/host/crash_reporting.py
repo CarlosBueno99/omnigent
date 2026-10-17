@@ -404,7 +404,7 @@ def _exit_on_signal(signum: int) -> None:
     except RuntimeError:
         # No deadline without a watchdog: don't risk wedging in logging. The
         # non-blocking hangup callback still runs so a hangup finishes work.
-        _run_hangup_callback(signum)
+        _run_hangup_callback(signum, log_failures=False)
         _die_by_signal(signum)
     try:
         _run_hangup_callback(signum)
