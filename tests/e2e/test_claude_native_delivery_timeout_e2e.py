@@ -24,6 +24,12 @@ submit. Delivery must succeed:
 - ``ClaudeNativeExecutor.run_turn`` yields ``TurnComplete`` -- not the
   ``ExecutorError`` failed turn -- and never logs the delivery failure.
 
+The second failure mode (see the section at the bottom) is the
+mirror image: a delayed delivery that is abandoned (cancelled or timed out)
+reaps the pane -- and because one physical tmux pane is shared across the
+Omnigent conversations that ``/clear`` rotates through it, that cleanup can
+kill the pane a newer conversation now owns.
+
 Runs with no LLM, no ``claude`` binary and no server -- only ``tmux``::
 
     pytest tests/e2e/test_claude_native_delivery_timeout_e2e.py -v
@@ -31,6 +37,7 @@ Runs with no LLM, no ``claude`` binary and no server -- only ``tmux``::
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import shutil
 import subprocess
@@ -45,9 +52,14 @@ import pytest
 
 from omnigent.harnesses.claude_native.bridge import (
     _BRIDGE_ROOT,
+    _CONFIG_FILE,
     _SUBMIT_VERIFY_TIMEOUT_S,
+    _bridge_injection_file_lock,
     _capture_pane,
+    _write_json_file,
     inject_user_message,
+    read_active_session_id,
+    write_active_session_id,
     write_tmux_target,
 )
 from omnigent.inner.claude_native_executor import ClaudeNativeExecutor
@@ -250,3 +262,154 @@ async def test_run_turn_completes_despite_stalled_submit(
     assert not any(
         "failed to deliver message to harness" in record.getMessage() for record in caplog.records
     ), [record.getMessage() for record in caplog.records]
+
+
+# ---------------------------------------------------------------------------
+# A delayed delivery's cleanup must not kill a newer conversation that now
+# owns the same shared pane.
+#
+# claude-native runs ONE physical tmux pane per bridge dir; ``/clear`` moves
+# ``active_session_id`` to the new conversation in place. A delivery of the old
+# conversation that is still parked when it is cancelled or times out is reaped
+# against whatever pane the bridge advertises -- now the new owner's.
+# ---------------------------------------------------------------------------
+
+_OWNER_A = "conv_A"
+_OWNER_B = "conv_B"
+
+
+def _write_bridge_owner(bridge_dir: Path, owner: str | None) -> None:
+    """Record (``owner``) or clear (``None``) the conversation owning the pane."""
+    config: dict[str, object] = {}
+    if owner is not None:
+        config["active_session_id"] = owner
+        config["conversation_id"] = owner
+    _write_json_file(bridge_dir / _CONFIG_FILE, config)
+
+
+def _tmux_session_alive(socket_path: str, target: str) -> bool:
+    """Whether the pane's tmux session still exists."""
+    return (
+        subprocess.run(
+            ["tmux", "-S", socket_path, "has-session", "-t", target],
+            capture_output=True,
+            timeout=30.0,
+        ).returncode
+        == 0
+    )
+
+
+@pytest.fixture
+def shared_claude_pane() -> Iterator[tuple[Path, str, str]]:
+    """A claude-native bridge dir advertising a real, idle tmux pane.
+
+    Yields the bridge dir, the tmux socket path and the tmux target. The pane
+    just sleeps: the failure under test is in the executor's cleanup, not in
+    the pane, so the pane survives until something kills its tmux session. The
+    tmux server is always killed on teardown, even when the test body raises.
+    """
+    work = Path(tempfile.mkdtemp(prefix="sharedpane-"))
+    # Keep the socket path short: a long path overflows the AF_UNIX limit.
+    socket_path = work / "t.sock"
+    subprocess.run(
+        [
+            "tmux",
+            "-S",
+            str(socket_path),
+            "new-session",
+            "-d",
+            "-s",
+            "claude",
+            "-x",
+            "80",
+            "-y",
+            "24",
+            sys.executable,
+            "-c",
+            "import time; time.sleep(3600)",
+        ],
+        check=True,
+        timeout=30.0,
+    )
+
+    bridge_dir = _BRIDGE_ROOT / f"sharedpane-{uuid.uuid4().hex}"
+    write_tmux_target(bridge_dir, socket_path=socket_path, tmux_target="claude")
+
+    try:
+        yield bridge_dir, str(socket_path), "claude"
+    finally:
+        subprocess.run(
+            ["tmux", "-S", str(socket_path), "kill-server"],
+            check=False,
+            timeout=30.0,
+        )
+        with contextlib.suppress(OSError):
+            for child in work.iterdir():
+                child.unlink()
+            work.rmdir()
+        shutil.rmtree(bridge_dir, ignore_errors=True)
+
+
+async def test_cancelled_delivery_cleanup_spares_the_new_pane_owner(
+    shared_claude_pane: tuple[Path, str, str],
+) -> None:
+    """Conversation A's delayed delivery, cancelled after ``/clear`` hands the
+    shared pane to conversation B, must not kill B's pane while cleaning up."""
+    bridge_dir, socket_path, target = shared_claude_pane
+    _write_bridge_owner(bridge_dir, _OWNER_A)
+
+    executor = ClaudeNativeExecutor(bridge_dir=bridge_dir)
+    executor._request_session_id = _OWNER_A
+
+    async def _drive() -> None:
+        async for _event in executor.run_turn(
+            messages=[{"role": "user", "content": "A's delayed message"}],
+            tools=[],
+            system_prompt="",
+            config=None,
+        ):
+            pass
+
+    # Hold the per-bridge injection lock so A's delivery parks mid-flight,
+    # as a stalled paste/submit would hold it open past its deadline.
+    file_lock = _bridge_injection_file_lock(bridge_dir)
+    file_lock.acquire()
+    try:
+        task = asyncio.create_task(_drive())
+        # Let the delivery reach and park on the held injection lock.
+        await asyncio.sleep(1.5)
+        assert not task.done(), "A's delivery should be parked on the injection lock"
+
+        # ``/clear`` rotates pane ownership A -> B in place: same socket, same
+        # pane, new ``active_session_id``.
+        write_active_session_id(bridge_dir, _OWNER_B)
+        assert read_active_session_id(bridge_dir) == _OWNER_B
+
+        # A's delivery is abandoned (cancel/timeout); the executor reaps it.
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        file_lock.release()
+
+    assert _tmux_session_alive(socket_path, target), (
+        "A's cancelled-delivery cleanup killed conversation B's shared pane"
+    )
+
+
+async def test_failed_delivery_cleanup_spares_pane_with_no_recorded_owner(
+    shared_claude_pane: tuple[Path, str, str],
+) -> None:
+    """With no owning conversation recorded on the bridge, reaping a failed
+    delivery must leave the shared pane alone rather than kill it blind."""
+    bridge_dir, socket_path, target = shared_claude_pane
+    _write_bridge_owner(bridge_dir, None)
+
+    executor = ClaudeNativeExecutor(bridge_dir=bridge_dir)
+    executor._request_session_id = _OWNER_A
+
+    executor._reap_failed_turn()
+
+    assert _tmux_session_alive(socket_path, target), (
+        "cleanup killed the shared pane despite no recorded pane owner"
+    )
