@@ -312,6 +312,24 @@ describe("side chat opened from a + button", () => {
     expect(screen.getByTestId("side-chat-input")).toBeEnabled();
     expect(screen.getByTestId("main-composer")).toHaveFocus();
   });
+
+  it("leaves a text input that already had focus before the pane mounted alone", () => {
+    conversationRegistry.acquire(childId).setState({ boundAgentId: null, sessionStatus: "idle" });
+    useChatStore.setState({
+      sideChatComposers: { [childId]: { text: "", files: [], autoFocus: true } },
+    });
+    // A slow fork: the user went back to typing before the side chat appeared.
+    render(<textarea data-testid="main-composer" />);
+    act(() => screen.getByTestId("main-composer").focus());
+    renderPane(<SideChatPane childId={childId} />);
+
+    act(() => conversationRegistry.acquire(childId).setState({ boundAgentId: "agent_side" }));
+
+    expect(screen.getByTestId("side-chat-input")).toBeEnabled();
+    expect(screen.getByTestId("side-chat-input")).not.toHaveFocus();
+    expect(screen.getByTestId("main-composer")).toHaveFocus();
+    expect(useChatStore.getState().sideChatComposers[childId]?.autoFocus).toBe(false);
+  });
 });
 
 describe("side-chat selection reply", () => {

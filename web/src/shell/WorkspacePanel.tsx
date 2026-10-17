@@ -873,11 +873,7 @@ function WorkspacePanelImpl({
   const parentAgentId = useChatStore((s) => s.boundAgentId);
   const onNewSideChat = supportsSideChat(sideChatHarness)
     ? () => {
-        const pendingId = sideChats.openPending();
-        useChatStore.getState().updateSideChatComposer(pendingId, (current) => ({
-          ...current,
-          autoFocus: true,
-        }));
+        useChatStore.getState().requestSideChatFocus(sideChats.openPending());
         onRightRailTabChange("sidechat");
       }
     : undefined;

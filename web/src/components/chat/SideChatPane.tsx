@@ -67,6 +67,15 @@ function isPendingSideChat(id: string): boolean {
   return id.startsWith("pending:");
 }
 
+/** A text field other than `own`: typing there must not be interrupted by a focus request. */
+function isOtherTextInput(target: EventTarget | null, own: HTMLElement | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    target !== own &&
+    target.matches('input, textarea, [contenteditable]:not([contenteditable="false"])')
+  );
+}
+
 // The forked-in item ids to hide are captured once per child and PERSISTED, so
 // leaving the tab (which unmounts this pane) or reloading doesn't recapture the
 // side chat's own completed turns as inherited history and blank the transcript.
@@ -463,7 +472,11 @@ function SideChatComposer({
   const autoFocus = composer?.autoFocus === true;
   useEffect(() => {
     if (!autoFocus || !ready) return;
-    textareaRef.current?.focus();
+    // The user may already be typing elsewhere, e.g. during a slow fork before
+    // this pane mounted; leave that field alone and just drop the request.
+    if (!isOtherTextInput(document.activeElement, textareaRef.current)) {
+      textareaRef.current?.focus();
+    }
     updateComposer(childId, (current) => ({ ...current, autoFocus: false }));
   }, [autoFocus, ready, childId, updateComposer]);
   // Typing elsewhere while the fork binds cancels the request so focus is not
@@ -471,12 +484,7 @@ function SideChatComposer({
   useEffect(() => {
     if (!autoFocus || ready) return;
     const cancelOnOtherInput = (event: FocusEvent) => {
-      const target = event.target;
-      if (
-        target instanceof HTMLElement &&
-        target !== textareaRef.current &&
-        target.matches('input, textarea, [contenteditable]:not([contenteditable="false"])')
-      ) {
+      if (isOtherTextInput(event.target, textareaRef.current)) {
         updateComposer(childId, (current) => ({ ...current, autoFocus: false }));
       }
     };

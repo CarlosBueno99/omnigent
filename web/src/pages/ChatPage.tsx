@@ -3864,12 +3864,7 @@ function ComposerImpl(
                         if (sourceId === null) return;
                         createSideChat(sourceId).then(
                           ({ childSessionId }) => {
-                            useChatStore
-                              .getState()
-                              .updateSideChatComposer(childSessionId, (current) => ({
-                                ...current,
-                                autoFocus: true,
-                              }));
+                            useChatStore.getState().requestSideChatFocus(childSessionId);
                             useChatStore.setState({
                               sideChatToOpen: { childId: childSessionId, parentId: sourceId },
                             });
