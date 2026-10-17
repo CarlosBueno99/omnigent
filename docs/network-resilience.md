@@ -90,14 +90,17 @@ retrying for up to a day, so for Codex this is also the 120 s outcome.
 
 **Resolved for the Claude native permission hook** once a card is proven live.
 When a poll proves the POST reached the server — a response-phase sever, or the
-gateway's idle-timeout `504` on a held long-poll — later connection failures no
-longer count toward the `OMNIGENT_HOOK_MAX_RETRIES` (8) cap: the hook backs off
-and re-POSTs the same elicitation until the absolute day-long deadline, and the
-web card re-parks when the link returns. The cap still applies before any
-delivery evidence — a run of connect- or write-phase failures with no card
-parked still gives up after 8 tries, about 90 s of backoff, and Claude Code
-falls back to its own terminal prompt. The session stays `running` while the
-hook waits.
+gateway's idle-timeout `504` on a held long-poll — later connect-phase failures
+no longer count toward the `OMNIGENT_HOOK_MAX_RETRIES` (8) cap: the hook backs
+off and re-POSTs the same elicitation until the absolute day-long deadline, and
+the web card re-parks when the link returns. The exemption is deliberately
+narrow. Only connect-phase failures are forgiven once the card is proven live; a
+write-phase failure or a gateway `502`/`503` held under the 10 s floor still
+counts toward the cap even after latching, because neither proves the card is
+still parked. The cap also applies before any delivery evidence — a run of
+connect- or write-phase failures with no card parked still gives up after 8
+tries, about 90 s of backoff, and Claude Code falls back to its own terminal
+prompt. The session stays `running` while the hook waits.
 
 The matrix still marks `gap: R2` for the resilience-lab S2/S3/S5 rows: those
 full-mode scenarios and their strict-xfail markers under
