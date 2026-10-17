@@ -1,28 +1,19 @@
 """Generate the DMG installer background picture (``background.tiff``).
 
-Finder composes the mounted-DMG window from ``build.dmg`` in
-``web/electron/package.json`` and this picture: electron-builder sizes the
-window from the picture's 1x point size (``dmg.window`` is kept equal to it
-so the config describes the real window), each ``contents`` entry is an icon
-centered at its ``x``/``y`` with ``iconSize`` points per side, and Finder
-draws the icon's filename label in a text band directly below the icon.
-
-The layout keeps every icon slot and its label band on a plain white
-backdrop so the labels stay legible and the drag source / drop target read
-as the interactive elements, draws an install arrow between the app icon
-and the Applications link, and keeps the mascot as a small accent flush
-with the bottom edge, clear of the interactive area. ``mascot@2x.png`` is
-the mascot artwork at 2x resolution.
+The picture keeps each icon slot and label band from ``build.dmg`` in
+``web/electron/package.json`` on a plain white backdrop, draws an install arrow
+from the app icon to the Applications link, and places the mascot
+(``mascot@2x.png``, 2x artwork) flush with the bottom edge. electron-builder
+sizes the window from the picture, so ``dmg.window`` must match its 1x size.
+``tests/test_dmg_installer_background.py`` checks the result.
 
 Regenerate with::
 
     .venv/bin/python web/electron/dmg/generate_background.py
 
-The output is a two-frame HiDPI TIFF (1x at 72 dpi, 2x at 144 dpi) — the
-layout ``tiffutil -cathidpicheck`` produces. ``tests/test_dmg_installer_background.py``
-guards the composed geometry. The headline uses the first available
-``FONT_CANDIDATES`` entry. The committed asset uses DejaVu Sans Bold; with
-Arial Bold (macOS) only the headline pixels differ, not the guarded geometry.
+The output is a two-frame HiDPI TIFF (1x at 72 dpi, 2x at 144 dpi). The headline
+uses the first available ``FONT_CANDIDATES`` entry; the committed asset uses
+DejaVu Sans Bold, and Arial Bold (macOS) changes only the headline pixels.
 """
 
 from __future__ import annotations
