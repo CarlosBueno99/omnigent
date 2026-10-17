@@ -19,8 +19,8 @@ from omnigent.harnesses.claude_native.bridge import (
     ClaudeSignInPending,
     ClaudeTerminalDialog,
     ClaudeTerminalExited,
-    TmuxSessionNotAdvertised,
 )
+from omnigent.harnesses.claude_native.tmux_terminal import NativeTmuxTerminal
 from omnigent.inner import claude_native_executor
 from omnigent.inner.claude_native_executor import ClaudeNativeExecutor
 from omnigent.inner.executor import ExecutorConfig, ExecutorError, TurnComplete
@@ -33,6 +33,13 @@ _TINY_PNG_B64 = (
 )
 _TINY_PNG_DATA_URI = f"data:image/png;base64,{_TINY_PNG_B64}"
 _TINY_PNG_BYTES = base64.b64decode(_TINY_PNG_B64)
+
+
+@pytest.fixture
+def observed_terminal(monkeypatch: pytest.MonkeyPatch) -> NativeTmuxTerminal:
+    terminal = NativeTmuxTerminal("/tmp/synthetic.sock", 123, 456, "$0", "%0", 789)
+    monkeypatch.setattr(claude_bridge, "capture_tmux_terminal", lambda *_args: terminal)
+    return terminal
 
 
 @pytest.mark.asyncio
@@ -661,7 +668,7 @@ async def test_failed_injection_clears_framework_context(
         raise error
 
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
-    monkeypatch.setattr(claude_native_executor, "kill_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(claude_native_executor, "stop_tmux_terminal", lambda *args, **kwargs: None)
     executor = ClaudeNativeExecutor(tmp_path)
     events = [
         event
@@ -1578,20 +1585,22 @@ async def test_a_routed_first_message_switches_the_model_exactly_once(
 async def test_run_turn_reaps_tmux_before_reporting_prompt_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    observed_terminal: NativeTmuxTerminal,
 ) -> None:
     """A readiness timeout cannot leave a failed turn's pane alive."""
     bridge_dir = tmp_path / "bridge"
-    killed: list[Path] = []
+    killed: list[NativeTmuxTerminal] = []
 
     def fail_inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
         del bridge_dir_arg, content, timeout_s
+        claude_bridge._capture_injection_terminal("/tmp/sock", "main")
         raise ClaudePromptTimeout("terminal did not become ready")
 
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
     monkeypatch.setattr(
         claude_native_executor,
-        "kill_session",
-        lambda bridge_dir_arg, *, timeout_s: killed.append(bridge_dir_arg),
+        "stop_tmux_terminal",
+        lambda terminal: killed.append(terminal),
     )
 
     executor = ClaudeNativeExecutor(bridge_dir)
@@ -1604,7 +1613,7 @@ async def test_run_turn_reaps_tmux_before_reporting_prompt_timeout(
         )
     ]
 
-    assert killed == [bridge_dir]
+    assert killed == [observed_terminal]
     assert len(events) == 1
     assert isinstance(events[0], ExecutorError)
 
@@ -1635,7 +1644,7 @@ async def test_run_turn_keeps_the_pane_when_a_terminal_dialog_blocks_delivery(
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
     monkeypatch.setattr(
         claude_native_executor,
-        "kill_session",
+        "stop_tmux_terminal",
         lambda bridge_dir_arg, *, timeout_s: killed.append(bridge_dir_arg),
     )
 
@@ -1700,7 +1709,7 @@ async def test_run_turn_reports_a_refused_routed_model_switch_as_undelivered(
     monkeypatch.setattr(claude_native_executor, "inject_user_message", record_message)
     monkeypatch.setattr(
         claude_native_executor,
-        "kill_session",
+        "stop_tmux_terminal",
         lambda bridge_dir_arg, *, timeout_s: killed.append(bridge_dir_arg),
     )
 
@@ -1786,7 +1795,7 @@ async def test_run_turn_preserves_refused_input_but_keeps_post_submit_failures_a
     monkeypatch.setattr(claude_bridge, "_SUBMIT_VERIFY_TIMEOUT_S", 0.01)
     monkeypatch.setattr(
         claude_native_executor,
-        "kill_session",
+        "stop_tmux_terminal",
         lambda bridge_dir_arg, *, timeout_s: killed.append(bridge_dir_arg),
     )
 
@@ -1845,7 +1854,7 @@ async def test_run_turn_keeps_the_pane_when_a_sign_in_prompt_blocks_delivery(
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
     monkeypatch.setattr(
         claude_native_executor,
-        "kill_session",
+        "stop_tmux_terminal",
         lambda bridge_dir_arg, *, timeout_s: killed.append(bridge_dir_arg),
     )
 
@@ -1903,7 +1912,7 @@ async def test_run_turn_logs_a_closed_terminal_below_error(
 
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
     monkeypatch.setattr(
-        claude_native_executor, "kill_session", lambda bridge_dir_arg, *, timeout_s: None
+        claude_native_executor, "stop_tmux_terminal", lambda bridge_dir_arg, *, timeout_s: None
     )
 
     with caplog.at_level(logging.WARNING, logger="omnigent.inner.claude_native_executor"):
@@ -1934,6 +1943,7 @@ async def test_run_turn_logs_a_closed_terminal_below_error(
 async def test_cancelled_delivery_drains_worker_before_unlocking(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    observed_terminal: NativeTmuxTerminal,
     delivery: str,
     watchdog: bool,
 ) -> None:
@@ -1941,7 +1951,7 @@ async def test_cancelled_delivery_drains_worker_before_unlocking(
     release = threading.Event()
     finished = threading.Event()
     commands: list[tuple[str, ...]] = []
-    reaped: list[Path] = []
+    reaped: list[NativeTmuxTerminal] = []
 
     def capture(socket_path: str, tmux_target: str) -> str:
         started.set()
@@ -1949,16 +1959,17 @@ async def test_cancelled_delivery_drains_worker_before_unlocking(
         return "────────────────\n❯ \n────────────────\n"
 
     def inject(*args: Any, **kwargs: Any) -> None:
+        claude_bridge._capture_injection_terminal("/tmp/sock", "main")
         try:
             claude_bridge._wait_for_claude_prompt_ready("/tmp/sock", "main", timeout_s=30)
             claude_bridge._run_tmux("/tmp/sock", "send-keys", "late message", "Enter")
         finally:
             finished.set()
 
-    def reap(bridge_dir: Path, *, timeout_s: float) -> None:
+    def reap(terminal: NativeTmuxTerminal) -> None:
         assert finished.is_set()
         claude_bridge._check_injection_cancelled()
-        reaped.append(bridge_dir)
+        reaped.append(terminal)
 
     def run(cmd: list[str], **kwargs: Any) -> Any:
         commands.append(tuple(cmd))
@@ -1968,7 +1979,7 @@ async def test_cancelled_delivery_drains_worker_before_unlocking(
     monkeypatch.setattr("subprocess.run", run)
     monkeypatch.setattr(claude_native_executor, "inject_user_message", inject)
     monkeypatch.setattr(claude_native_executor, "inject_slash_command", inject)
-    monkeypatch.setattr(claude_native_executor, "kill_session", reap)
+    monkeypatch.setattr(claude_native_executor, "stop_tmux_terminal", reap)
     executor = ClaudeNativeExecutor(tmp_path / "bridge")
     monkeypatch.setattr(
         executor, "_model_command_arg", lambda model: "sonnet" if delivery == "model" else None
@@ -2008,7 +2019,7 @@ async def test_cancelled_delivery_drains_worker_before_unlocking(
             task.result()
         assert finished.is_set()
         assert not executor._inject_lock.locked()
-        assert reaped == [tmp_path / "bridge"]
+        assert reaped == [observed_terminal]
         assert commands == []
     finally:
         release.set()
@@ -2034,7 +2045,7 @@ async def test_run_turn_does_not_reap_unrelated_runtime_error(
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
     monkeypatch.setattr(
         claude_native_executor,
-        "kill_session",
+        "stop_tmux_terminal",
         lambda *args, **kwargs: killed.append(args[0]),
     )
 
@@ -2059,20 +2070,22 @@ async def test_run_turn_does_not_reap_unrelated_runtime_error(
 async def test_run_turn_reports_reap_failure_with_prompt_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    observed_terminal: NativeTmuxTerminal,
     failure: type[ClaudePromptTimeout],
 ) -> None:
     """A failed hard-stop remains visible beside the delivery error."""
 
     def fail_inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
         del bridge_dir_arg, content, timeout_s
+        claude_bridge._capture_injection_terminal("/tmp/sock", "main")
         raise failure("terminal did not become ready")
 
-    def fail_kill(bridge_dir_arg: Path, *, timeout_s: float) -> None:
-        del bridge_dir_arg, timeout_s
+    def fail_kill(terminal: NativeTmuxTerminal) -> None:
+        del terminal
         raise RuntimeError("tmux kill failed")
 
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
-    monkeypatch.setattr(claude_native_executor, "kill_session", fail_kill)
+    monkeypatch.setattr(claude_native_executor, "stop_tmux_terminal", fail_kill)
 
     executor = ClaudeNativeExecutor(tmp_path / "bridge")
     events = [
@@ -2091,22 +2104,22 @@ async def test_run_turn_reports_reap_failure_with_prompt_timeout(
 
 
 @pytest.mark.asyncio
-async def test_run_turn_ignores_missing_tmux_during_timeout_reap(
+async def test_run_turn_does_not_reap_without_native_terminal_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A pane that exited during readiness polling needs no cleanup error."""
+    """Missing native ownership must not turn into an unfenced cleanup."""
 
     def fail_inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
         del bridge_dir_arg, content, timeout_s
         raise ClaudePromptTimeout("terminal did not become ready")
 
-    def absent_kill(bridge_dir_arg: Path, *, timeout_s: float) -> None:
-        del bridge_dir_arg, timeout_s
-        raise TmuxSessionNotAdvertised("not advertised")
+    def absent_kill(terminal: NativeTmuxTerminal) -> None:
+        del terminal
+        raise AssertionError("cleanup ran without a native terminal identity")
 
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
-    monkeypatch.setattr(claude_native_executor, "kill_session", absent_kill)
+    monkeypatch.setattr(claude_native_executor, "stop_tmux_terminal", absent_kill)
 
     executor = ClaudeNativeExecutor(tmp_path / "bridge")
     events = [
