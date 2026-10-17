@@ -19,7 +19,9 @@ class NativeTmuxTerminal:
     pane_pid: int
 
 
-def capture_tmux_terminal(socket_path: str, target: str) -> NativeTmuxTerminal | None:
+def capture_tmux_terminal(
+    socket_path: str, target: str, *, timeout_s: float = 10.0
+) -> NativeTmuxTerminal | None:
     """Read native identities before an injection begins waiting or writing."""
     try:
         result = subprocess.run(
@@ -35,7 +37,7 @@ def capture_tmux_terminal(socket_path: str, target: str) -> NativeTmuxTerminal |
             ],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=timeout_s,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -94,15 +96,10 @@ def stop_tmux_terminal(terminal: NativeTmuxTerminal, *, timeout_s: float = 1.0) 
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("Native terminal cleanup could not complete") from exc
-    # A gone pane, session, server or socket is not a failure. tmux's own phrases
-    # are stable; the strerror detail after "error connecting to" is localized.
+    # A gone pane, session, server or socket is not a failure. These are tmux's
+    # own phrases; the strerror detail after "error connecting to" is localized.
     if result.returncode != 0 and not any(
         reason in result.stderr.lower()
-        for reason in (
-            "can't find",
-            "no server running",
-            "error connecting to",
-            "no such file or directory",
-        )
+        for reason in ("can't find", "no server running", "error connecting to")
     ):
         raise RuntimeError(f"Native terminal cleanup failed (rc={result.returncode})")

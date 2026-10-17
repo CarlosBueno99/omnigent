@@ -673,7 +673,9 @@ def _capture_injection_terminal(socket_path: str, tmux_target: str) -> None:
     attempt = _INJECTION_ATTEMPT.get()
     if attempt is None:
         return
-    attempt.terminal = capture_tmux_terminal(socket_path, tmux_target)
+    attempt.terminal = capture_tmux_terminal(
+        socket_path, tmux_target, timeout_s=_TMUX_SEND_TIMEOUT_S
+    )
     if attempt.terminal is None:
         _logger.warning(
             "claude-native: could not pin the identity of tmux target %s; a failed "

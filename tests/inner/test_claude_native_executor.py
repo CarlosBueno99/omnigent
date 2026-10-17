@@ -38,7 +38,7 @@ _TINY_PNG_BYTES = base64.b64decode(_TINY_PNG_B64)
 @pytest.fixture
 def observed_terminal(monkeypatch: pytest.MonkeyPatch) -> NativeTmuxTerminal:
     terminal = NativeTmuxTerminal("/tmp/synthetic.sock", 123, 456, "$0", "%0", 789)
-    monkeypatch.setattr(claude_bridge, "capture_tmux_terminal", lambda *_args: terminal)
+    monkeypatch.setattr(claude_bridge, "capture_tmux_terminal", lambda *_args, **_kwargs: terminal)
     return terminal
 
 
@@ -680,7 +680,6 @@ async def test_failed_injection_clears_framework_context(
         raise error
 
     monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
-    monkeypatch.setattr(claude_native_executor, "stop_tmux_terminal", lambda *args, **kwargs: None)
     executor = ClaudeNativeExecutor(tmp_path)
     events = [
         event

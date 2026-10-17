@@ -6,6 +6,7 @@ import logging
 import subprocess
 import threading
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -126,13 +127,16 @@ def test_stop_tmux_terminal_tolerates_a_pane_that_is_already_gone(
     stop_tmux_terminal(_TERMINAL)
 
 
+@pytest.mark.parametrize(
+    "stderr",
+    ["server exited unexpectedly", "open: No such file or directory"],
+    ids=["unexpected_message", "bare_strerror_without_connect_prefix"],
+)
 def test_stop_tmux_terminal_reports_an_unexpected_tmux_failure(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, stderr: str
 ) -> None:
     monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *_a, **_k: _completed(returncode=1, stderr="server exited unexpectedly"),
+        subprocess, "run", lambda *_a, **_k: _completed(returncode=1, stderr=stderr)
     )
 
     with pytest.raises(RuntimeError, match="cleanup failed"):
@@ -175,7 +179,7 @@ def test_capture_injection_terminal_warns_only_when_identity_cannot_be_pinned(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, pinned: bool
 ) -> None:
     monkeypatch.setattr(
-        claude_bridge, "capture_tmux_terminal", lambda *_a: _TERMINAL if pinned else None
+        claude_bridge, "capture_tmux_terminal", lambda *_a, **_k: _TERMINAL if pinned else None
     )
 
     with (
@@ -187,3 +191,47 @@ def test_capture_injection_terminal_warns_only_when_identity_cannot_be_pinned(
     assert attempt.terminal == (_TERMINAL if pinned else None)
     warnings = [r for r in caplog.records if "could not pin the identity" in r.getMessage()]
     assert len(warnings) == (0 if pinned else 1)
+
+
+@pytest.mark.parametrize("injector", ["message", "slash_command"])
+def test_injectors_pin_the_terminal_before_touching_its_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, injector: str
+) -> None:
+    """Both delivery paths pin the pane right after tmux.json resolves, before any keystroke."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    steps: list[str] = []
+
+    def capture(socket_path: str, target: str, **kwargs: Any) -> NativeTmuxTerminal:
+        steps.append(f"capture {socket_path} {target} timeout={kwargs.get('timeout_s')}")
+        return _TERMINAL
+
+    def restore(*_args: Any, **_kwargs: Any) -> str:
+        steps.append("restore input")
+        return "a dialog"
+
+    monkeypatch.setattr(
+        claude_bridge,
+        "_wait_for_tmux_info",
+        lambda *_a, **_k: {"socket_path": "/tmp/t.sock", "tmux_target": "main"},
+    )
+    monkeypatch.setattr(claude_bridge, "capture_tmux_terminal", capture)
+    monkeypatch.setattr(claude_bridge, "_restore_occupied_input", restore)
+    monkeypatch.setattr(
+        claude_bridge, "_run_tmux", lambda *_a, **_k: pytest.fail("no keystroke expected")
+    )
+
+    with (
+        claude_bridge.cancellable_injection(threading.Event()) as attempt,
+        pytest.raises(claude_bridge.ClaudeTerminalDialog),
+    ):
+        if injector == "message":
+            claude_bridge.inject_user_message(bridge_dir, content="hello", timeout_s=0.1)
+        else:
+            claude_bridge.inject_slash_command(bridge_dir, command="/model sonnet", timeout_s=0.1)
+
+    assert attempt.terminal == _TERMINAL
+    assert steps == [
+        f"capture /tmp/t.sock main timeout={claude_bridge._TMUX_SEND_TIMEOUT_S}",
+        "restore input",
+    ]

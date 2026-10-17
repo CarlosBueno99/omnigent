@@ -87,7 +87,7 @@ async def test_stale_cleanup_preserves_a_same_owner_native_terminal(
     monkeypatch.setattr(bridge, "_CLAUDE_READY_POLL_INTERVAL_S", 0.01)
     monkeypatch.setenv(bridge.REQUEST_SESSION_ID_ENV_VAR, "same-conversation")
     if scenario == "unavailable":
-        monkeypatch.setattr(bridge, "capture_tmux_terminal", lambda *_args: None)
+        monkeypatch.setattr(bridge, "capture_tmux_terminal", lambda *_args, **_kwargs: None)
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir(mode=0o700)
     (bridge_dir / "bridge.json").write_text(json.dumps({"active_session_id": "same-conversation"}))
