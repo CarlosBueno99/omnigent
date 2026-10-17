@@ -675,7 +675,8 @@ def _pending_framework_context(
         yield
     except BaseException:
         if identity is not None:
-            with contextlib.suppress(FileNotFoundError):
+            # Any OS error here must not replace the delivery failure being raised.
+            with contextlib.suppress(OSError):
                 current = path.lstat()
                 if (
                     current.st_dev,

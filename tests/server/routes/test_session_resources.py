@@ -7813,7 +7813,7 @@ async def test_uncoded_executor_failure_settles_only_a_proven_undelivered_input(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("refusal_kind", ["auth", "stale_session"])
-async def test_claude_auth_refusal_is_not_reclassified_as_missing_by_later_mirror(
+async def test_claude_pre_delivery_refusal_is_not_reclassified_as_missing_by_later_mirror(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal_kind: str
 ) -> None:
     """An auth or stale-session refusal settles its input before a later accepted mirror."""
