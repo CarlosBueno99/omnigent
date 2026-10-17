@@ -21,10 +21,12 @@ from omnigent.harnesses.claude_native import hook as claude_native_hook
 from omnigent.harnesses.claude_native.bridge import (
     OBSERVER_HOOK_STDERR_FILE,
     ClaudeNativeHookInterpreterMismatchError,
+    active_session_accepts_input,
     approval_wait_is_fresh,
     approval_wait_marker_path,
     build_hook_settings,
     prepare_bridge_dir,
+    read_active_session_id,
     read_transcript_path,
     record_hook_event,
     validate_claude_hook_interpreter_compatibility,
@@ -262,6 +264,8 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
     regresses to the launch conversation URL after ``/clear``.
     """
     requests: list[tuple[str, str, dict[str, object] | None]] = []
+    accepted_during_rotation: list[bool] = []
+    marker_writes: list[Path] = []
 
     class _FakeHttpxClient:
         """
@@ -311,6 +315,7 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
             import httpx
 
             requests.append(("GET", url, None))
+            accepted_during_rotation.append(active_session_accepts_input(bridge_dir, "conv_old"))
             return httpx.Response(
                 200,
                 json={
@@ -382,10 +387,25 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
     }
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
 
+    real_begin = claude_native_hook.begin_active_session_rotation
+    monkeypatch.setattr(
+        claude_native_hook,
+        "begin_active_session_rotation",
+        lambda directory: (marker_writes.append(directory), real_begin(directory)),
+    )
+    assert active_session_accepts_input(bridge_dir, "conv_old")
+
     exit_code = claude_native_hook.main(["--bridge-dir", str(bridge_dir)])
 
     captured = capsys.readouterr()
     assert exit_code == 0
+    # Input for the cleared conversation is refused from the hook's first request
+    # until the replacement owner is written; the marker is refreshed after each
+    # of the three round trips before that write (get, create, bind).
+    assert accepted_during_rotation == [False]
+    assert len(marker_writes) == 4
+    assert active_session_accepts_input(bridge_dir, "conv_new")
+    assert not active_session_accepts_input(bridge_dir, "conv_old")
     assert json.loads(captured.out) == {
         "systemMessage": "Open this session in Omnigent: http://127.0.0.1:8787/c/conv_new"
     }
@@ -431,67 +451,6 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
     assert rotation_timeout.read == claude_native_hook._SESSION_ROTATION_TIMEOUT_S
 
 
-def test_clear_rotation_refuses_pane_input_until_the_replacement_session_is_active(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    Input for the cleared conversation is refused from the hook's first step.
-
-    Claude has already discarded the conversation when this hook runs, but the
-    Omnigent rotation takes several server round trips; a message sent meanwhile
-    used to pass the owner check and land in the replacement conversation.
-    """
-    from omnigent.harnesses.claude_native.bridge import active_session_accepts_input
-
-    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
-    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
-    bridge_dir = prepare_bridge_dir("conv_old", bridge_id="bridge_shared", workspace=tmp_path)
-    build_hook_settings(bridge_dir, ap_server_url="http://127.0.0.1:8787")
-    accepted_during_rotation: list[bool] = []
-
-    class _FakeHttpxClient:
-        def __init__(self, *, headers: dict[str, str], timeout: object) -> None:
-            del headers, timeout
-
-        def __enter__(self) -> _FakeHttpxClient:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            del args
-
-        def get(self, url: str) -> object:
-            accepted_during_rotation.append(active_session_accepts_input(bridge_dir, "conv_old"))
-            return httpx.Response(
-                200,
-                json={"id": "conv_old", "agent_id": "ag_claude", "runner_id": "runner_one"},
-                request=httpx.Request("GET", url),
-            )
-
-        def post(self, url: str, *, json: dict[str, object]) -> object:
-            del json
-            if url.endswith("/v1/sessions"):
-                return httpx.Response(
-                    201, json={"id": "conv_new"}, request=httpx.Request("POST", url)
-                )
-            return httpx.Response(
-                200, json={"id": "terminal_claude_main"}, request=httpx.Request("POST", url)
-            )
-
-        def patch(self, url: str, *, json: dict[str, object]) -> object:
-            del json
-            return httpx.Response(200, json={"id": "patched"}, request=httpx.Request("PATCH", url))
-
-    monkeypatch.setattr(native_policy_hook.httpx, "Client", _FakeHttpxClient)
-    assert active_session_accepts_input(bridge_dir, "conv_old")
-
-    assert claude_native_hook._rotate_session_on_clear(bridge_dir) == "conv_new"
-
-    assert accepted_during_rotation == [False]
-    assert active_session_accepts_input(bridge_dir, "conv_new")
-    assert not active_session_accepts_input(bridge_dir, "conv_old")
-
-
 @pytest.mark.parametrize("reason", ["clear", "prompt_input_exit"])
 def test_session_end_hook_refuses_pane_input_only_when_claude_cleared(
     tmp_path: Path,
@@ -505,8 +464,6 @@ def test_session_end_hook_refuses_pane_input_only_when_claude_cleared(
     Marking the rotation there closes the window in which a web message sent right
     after ``/clear`` still passed the owner check; other session ends stay inert.
     """
-    from omnigent.harnesses.claude_native.bridge import active_session_accepts_input
-
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
     bridge_dir = prepare_bridge_dir("conv_old", bridge_id="bridge_shared", workspace=tmp_path)
@@ -519,17 +476,12 @@ def test_session_end_hook_refuses_pane_input_only_when_claude_cleared(
     assert active_session_accepts_input(bridge_dir, "conv_old") is (reason != "clear")
 
 
-def test_a_failed_clear_rotation_reopens_pane_input(
+def test_a_failed_clear_rotation_keeps_refusing_until_the_replacement_owner_is_named(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A rotation the forwarder has to redo leaves the old conversation usable meanwhile."""
-    from omnigent.harnesses.claude_native.bridge import (
-        active_session_accepts_input,
-        read_active_session_id,
-    )
-
+    """Claude has already cleared, so a failed Omnigent rotation must not reopen the old owner."""
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", tmp_path / "root")
     bridge_dir = prepare_bridge_dir("conv_old", bridge_id="bridge_shared", workspace=tmp_path)
@@ -553,8 +505,12 @@ def test_a_failed_clear_rotation_reopens_pane_input(
     assert claude_native_hook._rotate_session_on_clear(bridge_dir) is None
 
     assert "rotation failed" in capsys.readouterr().err
-    assert active_session_accepts_input(bridge_dir, "conv_old")
+    assert not active_session_accepts_input(bridge_dir, "conv_old")
     assert read_active_session_id(bridge_dir) == "conv_old"
+    # The forwarder's later rotation names the replacement owner and reopens input.
+    write_active_session_id(bridge_dir, "conv_new")
+    assert active_session_accepts_input(bridge_dir, "conv_new")
+    assert not active_session_accepts_input(bridge_dir, "conv_old")
 
 
 def test_fork_session_start_hook_forks_before_printing_conversation_url(

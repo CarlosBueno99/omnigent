@@ -202,11 +202,11 @@ APPROVAL_WAIT_MARKER_REFRESH_S = 60.0
 # reads stale; a hook killed mid-wait leaves a marker that expires on its own.
 APPROVAL_WAIT_MARKER_TTL_S = 420.0
 _CONFIG_FILE = "bridge.json"
-# ``bridge.json`` key: epoch time a ``/clear`` rotation began. Pane input is
-# refused while it is set so nothing lands in the unnamed replacement; a marker
-# older than the cap is ignored so a hook killed mid-rotation cannot lock the pane.
+# ``bridge.json`` key: epoch time of the ``/clear`` rotation's latest step. Pane
+# input is refused while it is set; the hook refreshes it after each server round
+# trip, so only a rotation that never completes lets it age out and reopen the pane.
 _ACTIVE_SESSION_ROTATION_KEY = "active_session_rotation_started_at"
-ACTIVE_SESSION_ROTATION_MAX_AGE_S = 120.0
+ACTIVE_SESSION_ROTATION_MAX_AGE_S = 300.0
 _SERVER_FILE = "server.json"
 # Control socket of one ``serve-mcp`` process under the harness socket root,
 # named by owner pid so a socket left behind by a dead process can be reaped.
@@ -2281,7 +2281,7 @@ def begin_active_session_rotation(bridge_dir: Path) -> None:
     Claude has already discarded the conversation when its ``/clear`` hooks run,
     but the Omnigent rotation takes several server round trips; without this
     marker a message sent meanwhile passes the owner check and is pasted into
-    the replacement conversation.
+    the replacement conversation. Calling it again refreshes the marker's age.
 
     :param bridge_dir: Bridge directory path.
     :returns: None.
@@ -2292,20 +2292,6 @@ def begin_active_session_rotation(bridge_dir: Path) -> None:
         if not config:
             raise RuntimeError(f"bridge config missing: {bridge_dir / _CONFIG_FILE}")
         config[_ACTIVE_SESSION_ROTATION_KEY] = time.time()
-        _write_json_file(bridge_dir / _CONFIG_FILE, config)
-
-
-def abandon_active_session_rotation(bridge_dir: Path) -> None:
-    """
-    Reopen pane input after a rotation that did not replace the owner.
-
-    :param bridge_dir: Bridge directory path.
-    :returns: None.
-    """
-    with _bridge_config_write_lock(bridge_dir):
-        config = _read_json_file(bridge_dir / _CONFIG_FILE)
-        if config.pop(_ACTIVE_SESSION_ROTATION_KEY, None) is None:
-            return
         _write_json_file(bridge_dir / _CONFIG_FILE, config)
 
 

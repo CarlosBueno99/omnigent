@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import io
 import itertools
 import json
@@ -10876,40 +10875,56 @@ def test_a_pending_clear_rotation_refuses_input_until_the_replacement_owner_is_n
     assert "active_session_rotation_started_at" not in (bridge_dir / "bridge.json").read_text()
 
 
-def test_owner_and_rotation_marker_writers_take_the_bridge_config_lock(
+def test_concurrent_owner_and_marker_writers_keep_each_other_s_update(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The hook's marker writes and the owner rotation must not lose each other's update."""
+    """The hook's marker write and the owner rotation run in different processes."""
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    (bridge_dir / "bridge.json").write_text(
+        json.dumps({"active_session_id": "conv_old", "model_picker_values": ["sonnet"]})
+    )
+    owner_read = threading.Event()
+    release_owner = threading.Event()
+    real_read = claude_native_bridge._read_json_file
+    owner_thread = threading.Thread(
+        target=claude_native_bridge.write_active_session_id, args=(bridge_dir, "conv_new")
+    )
+
+    def paused_read(path: Path) -> Any:
+        config = real_read(path)
+        if threading.current_thread() is owner_thread and path.name == "bridge.json":
+            owner_read.set()
+            assert release_owner.wait(5.0)
+        return config
+
+    monkeypatch.setattr(claude_native_bridge, "_read_json_file", paused_read)
+    owner_thread.start()
+    assert owner_read.wait(5.0)
+    marker_thread = threading.Thread(
+        target=claude_native_bridge.begin_active_session_rotation, args=(bridge_dir,)
+    )
+    marker_thread.start()
+    # Without the shared lock the marker writer would finish here, and the owner
+    # write still in flight would then drop its update.
+    marker_thread.join(0.3)
+    assert marker_thread.is_alive()
+    release_owner.set()
+    owner_thread.join(5.0)
+    marker_thread.join(5.0)
+    assert not owner_thread.is_alive() and not marker_thread.is_alive()
+
+    config = json.loads((bridge_dir / "bridge.json").read_text())
+    assert config["active_session_id"] == "conv_new"
+    assert config["model_picker_values"] == ["sonnet"]
+    assert "active_session_rotation_started_at" in config
+
+
+def test_a_stale_clear_rotation_marker_expires(tmp_path: Path) -> None:
+    """A marker left by a rotation that never finished must not refuse the pane for good."""
     bridge_dir = _picker_bridge_dir(tmp_path)
     (bridge_dir / "bridge.json").write_text('{"active_session_id": "conv_old"}')
-    locked: list[str] = []
-    real_lock = claude_native_bridge._bridge_config_write_lock
-
-    @contextlib.contextmanager
-    def recording_lock(directory: Path) -> Iterator[None]:
-        with real_lock(directory):
-            locked.append("held")
-            yield
-        locked.append("released")
-
-    monkeypatch.setattr(claude_native_bridge, "_bridge_config_write_lock", recording_lock)
-
     claude_native_bridge.begin_active_session_rotation(bridge_dir)
-    claude_native_bridge.abandon_active_session_rotation(bridge_dir)
-    claude_native_bridge.write_active_session_id(bridge_dir, "conv_new")
-
-    assert locked == ["held", "released"] * 3
-    assert claude_native_bridge.read_active_session_id(bridge_dir) == "conv_new"
-
-
-def test_an_abandoned_or_stale_clear_rotation_reopens_pane_input(tmp_path: Path) -> None:
-    """A failed or killed rotation must not refuse the pane for good."""
-    bridge_dir = _picker_bridge_dir(tmp_path)
-    (bridge_dir / "bridge.json").write_text('{"active_session_id": "conv_old"}')
-
-    claude_native_bridge.begin_active_session_rotation(bridge_dir)
-    claude_native_bridge.abandon_active_session_rotation(bridge_dir)
-    assert claude_native_bridge.active_session_accepts_input(bridge_dir, "conv_old")
+    assert not claude_native_bridge.active_session_accepts_input(bridge_dir, "conv_old")
 
     config = json.loads((bridge_dir / "bridge.json").read_text())
     config["active_session_rotation_started_at"] = (
