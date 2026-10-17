@@ -755,7 +755,12 @@ def _post_hook_with_reattach(
     POST silently with no client-visible "parked" ack. So this case resets the
     counter and is NOT caught by the consecutive-hard-failure cap; it is bounded
     only by the absolute :data:`_PERMISSION_TIMEOUT_S` ceiling below (the same
-    day-long human-answer window). That is the tightest safe client-side bound:
+    day-long human-answer window). A lone sub-floor response-phase sever latches
+    the same live-card state so an outage starting within the floor still rides
+    out; because that sever still counts, a server that keeps severing in the
+    response phase (a read-phase crash loop) is still capped — only a single
+    flap followed by a sustained unreachable outage reaches this ceiling. That
+    is the tightest safe client-side bound:
     capping it sooner — or raising the floor for 5xx above the 10s shared with
     torn connections — would necessarily cap a real slow human behind any
     gateway that answers sooner than the floor, which is the very wedge this
