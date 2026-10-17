@@ -3913,7 +3913,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                     live_status_error_key=None,
                     live_status_error_labels=case(
                         (SqlConversationMetadata.live_status_error_labels.is_(None), None),
-                        else_="{}",
+                        else_=literal(
+                            "{}", type_=SqlConversationMetadata.live_status_error_labels.type
+                        ),
                     ),
                     terminal_pending=False,
                     runner_offline_decision=None,
