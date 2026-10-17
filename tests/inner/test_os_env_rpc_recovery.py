@@ -152,12 +152,13 @@ def test_unconfirmed_mutation_is_not_resent(
     assert len(starts) == 1
     assert result["code"] == "operation_unconfirmed"
     assert "may have completed" in result["error"]
-    assert (
-        result["cause_type"]
-        == {"flush": "BrokenPipeError", "eof": "RuntimeError", "malformed": "JSONDecodeError"}[
-            fault
-        ]
-    )
+    cause_type, cause_detail = {
+        "flush": ("BrokenPipeError", "reply lost after the request was applied"),
+        "eof": ("RuntimeError", "OS environment helper exited with code 1"),
+        "malformed": ("JSONDecodeError", "Expecting property name"),
+    }[fault]
+    assert result["cause_type"] == cause_type
+    assert cause_detail in result["error"]
     if operation in {"write", "edit"}:
         assert path.read_text() == "needle from replacement B"
     elif operation == "delete":

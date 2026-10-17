@@ -494,7 +494,7 @@ class _HelperProcessClient:
                 return {
                     "error": (
                         "OS environment helper response was not confirmed; the operation "
-                        "may have completed and was not retried"
+                        f"may have completed and was not retried: {exc}"
                     ),
                     "code": "operation_unconfirmed",
                     "cause_type": type(exc).__name__,
