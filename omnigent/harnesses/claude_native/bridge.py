@@ -199,7 +199,8 @@ _APPROVAL_WAIT_ROOT = _BRIDGE_ROOT / _APPROVAL_WAIT_DIR_NAME
 APPROVAL_WAIT_MARKER_REFRESH_S = 60.0
 # A marker touched more recently than this means a hook is still waiting.
 # Several refresh intervals of slack, so a hook that is slow to wake never
-# reads stale; a hook killed mid-wait leaves a marker that expires on its own.
+# reads stale. ``kill_session`` drops the markers of the hooks it kills; a hook
+# that dies any other way leaves a marker that expires on its own.
 APPROVAL_WAIT_MARKER_TTL_S = 420.0
 _CONFIG_FILE = "bridge.json"
 _SERVER_FILE = "server.json"
@@ -1587,6 +1588,22 @@ def clear_approval_wait_marker(marker: Path) -> None:
         marker.unlink(missing_ok=True)
 
 
+def _approval_wait_markers(session_id: str, bridge_dir: Path | None) -> list[Path]:
+    """
+    Return every hook's marker for *session_id*.
+
+    :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
+    :param bridge_dir: Derive the marker root from this bridge, matching the hook writer.
+    :returns: Marker paths, e.g. ``[.../approval-waits/<digest>.<pid>.wait]``;
+        empty when none exists or the root is unreadable.
+    """
+    root = bridge_dir.parent / _APPROVAL_WAIT_DIR_NAME if bridge_dir else _APPROVAL_WAIT_ROOT
+    try:
+        return list(root.glob(f"{_approval_wait_digest(session_id)}.*.wait"))
+    except OSError:
+        return []
+
+
 def approval_wait_is_fresh(session_id: str, *, bridge_dir: Path | None = None) -> bool:
     """
     Whether a permission hook is parked on this session's verdict right now.
@@ -1601,14 +1618,9 @@ def approval_wait_is_fresh(session_id: str, *, bridge_dir: Path | None = None) -
         :data:`APPROVAL_WAIT_MARKER_TTL_S`; ``False`` when none exists, all
         are stale, or the root is unreadable.
     """
-    root = bridge_dir.parent / _APPROVAL_WAIT_DIR_NAME if bridge_dir else _APPROVAL_WAIT_ROOT
-    try:
-        markers = list(root.glob(f"{_approval_wait_digest(session_id)}.*.wait"))
-    except OSError:
-        return False
     now = time.time()
     fresh = False
-    for marker in markers:
+    for marker in _approval_wait_markers(session_id, bridge_dir):
         try:
             touched_at = marker.stat().st_mtime
         except OSError:
@@ -1618,6 +1630,25 @@ def approval_wait_is_fresh(session_id: str, *, bridge_dir: Path | None = None) -
         else:
             clear_approval_wait_marker(marker)
     return fresh
+
+
+def clear_approval_wait_markers(session_id: str, *, bridge_dir: Path | None = None) -> None:
+    """
+    Remove every approval-wait marker for *session_id*.
+
+    For the runner side once it has killed the session's pane: the kill takes
+    each parked hook with it before the hook's own cleanup runs, and a marker
+    left behind would read as a live prompt until
+    :data:`APPROVAL_WAIT_MARKER_TTL_S` elapsed, holding the session's next
+    message behind a prompt nobody can answer.
+
+    :param session_id: Omnigent session id whose hooks were killed, e.g.
+        ``"conv_abc123"``.
+    :param bridge_dir: Derive the marker root from this bridge, matching the hook writer.
+    :returns: None.
+    """
+    for marker in _approval_wait_markers(session_id, bridge_dir):
+        clear_approval_wait_marker(marker)
 
 
 @contextlib.contextmanager
@@ -1631,7 +1662,7 @@ def hold_approval_wait_marker(marker: Path) -> Iterator[None]:
     wait) reads as parked exactly like one a gateway severs every few
     minutes. The refresher is stopped before the marker is cleared so a late
     touch cannot resurrect it; a hook killed mid-wait takes the thread with
-    it and its marker simply expires.
+    it, and its marker is dropped by :func:`kill_session` or simply expires.
 
     :param marker: Marker path from :func:`approval_wait_marker_path`.
     :returns: ``None`` for the duration of the block.
@@ -4628,6 +4659,12 @@ def kill_session(
     down through its normal end-of-session path, so no transcript items
     are synthesized here.
 
+    The pane's parked permission hooks die with it, before their own
+    cleanup runs, so their approval-wait markers are dropped here as well:
+    a leftover one reads as a live prompt (see
+    :func:`has_pending_user_prompt`) until :data:`APPROVAL_WAIT_MARKER_TTL_S`
+    elapsed and would hold the session's next message for that long.
+
     :param bridge_dir: Bridge directory path, e.g.
         ``/tmp/omnigent/claude-native/<digest>``.
     :param timeout_s: Seconds to wait for ``tmux.json`` to be
@@ -4643,9 +4680,11 @@ def kill_session(
         _run_tmux(info["socket_path"], "kill-session", "-t", info["tmux_target"])
     except RuntimeError as exc:
         detail = str(exc).lower()
-        if "can't find session" in detail or "no server running on" in detail:
-            return
-        raise
+        if "can't find session" not in detail and "no server running on" not in detail:
+            raise
+    session_id = read_active_session_id(bridge_dir)
+    if session_id is not None:
+        clear_approval_wait_markers(session_id, bridge_dir=bridge_dir)
 
 
 @_serialize_bridge_injection

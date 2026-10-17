@@ -5479,6 +5479,53 @@ def test_kill_session_is_idempotent_when_tmux_is_absent(
     kill_session(bridge_dir)
 
 
+@pytest.mark.parametrize(
+    "tmux_result",
+    [
+        pytest.param(SimpleNamespace(returncode=0, stdout="", stderr=""), id="killed"),
+        pytest.param(
+            SimpleNamespace(returncode=1, stdout="", stderr="can't find session: main"),
+            id="already-gone",
+        ),
+    ],
+)
+def test_kill_session_drops_the_markers_of_the_hooks_it_kills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmux_result: SimpleNamespace,
+) -> None:
+    """
+    Stopping a pane parked on a permission prompt leaves no approval-wait marker.
+
+    ``tmux kill-session`` takes the parked hook down before its own cleanup
+    runs, so the marker it held would otherwise read as a live prompt for the
+    whole TTL and the runner would hold the session's next message behind it.
+    """
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="main",
+    )
+    (bridge_dir / "bridge.json").write_text(json.dumps({"active_session_id": "conv_stopped"}))
+    # Two hooks parked on this session (parallel tool calls) and one on another.
+    own = claude_native_bridge.approval_wait_marker_path("conv_stopped", bridge_dir=bridge_dir)
+    own.parent.mkdir(parents=True)
+    sibling = own.with_name(own.name.replace(f".{os.getpid()}.", f".{os.getpid() + 1}."))
+    other = claude_native_bridge.approval_wait_marker_path("conv_other", bridge_dir=bridge_dir)
+    for marker in (own, sibling, other):
+        claude_native_bridge.touch_approval_wait_marker(marker)
+    assert claude_native_bridge.has_pending_user_prompt(bridge_dir)
+
+    monkeypatch.setattr("subprocess.run", lambda cmd, **kwargs: tmux_result)
+    kill_session(bridge_dir)
+
+    assert not own.exists() and not sibling.exists()
+    assert not claude_native_bridge.approval_wait_is_fresh("conv_stopped", bridge_dir=bridge_dir)
+    assert not claude_native_bridge.has_pending_user_prompt(bridge_dir)
+    assert other.exists(), "another session's parked hook keeps its evidence"
+
+
 def test_kill_session_raises_on_unexpected_tmux_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
