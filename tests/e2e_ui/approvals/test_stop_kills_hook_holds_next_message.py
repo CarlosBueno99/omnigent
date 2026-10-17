@@ -84,7 +84,8 @@ def _wait_pane_contains(
         # A narrow real pane hard-wraps rows that the wide screen renders
         # separately, so also match with all whitespace removed.
         haystack = screen.lower()
-        if needle.lower() in haystack or needle.lower() in "".join(haystack.split()):
+        squashed_needle = "".join(needle.lower().split())
+        if needle.lower() in haystack or squashed_needle in "".join(haystack.split()):
             return True, screen
         time.sleep(1.0)
     return False, screen

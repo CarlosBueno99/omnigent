@@ -5454,13 +5454,17 @@ def test_kill_session_is_idempotent_when_tmux_is_absent(
     monkeypatch: pytest.MonkeyPatch,
     stderr: str,
 ) -> None:
-    """A stale tmux advertisement still counts as a successful stop."""
+    """A stale tmux advertisement still counts as a successful stop and drops the markers."""
     bridge_dir = tmp_path / "bridge"
     write_tmux_target(
         bridge_dir,
         socket_path=Path("/tmp/example/tmux.sock"),
         tmux_target="main",
     )
+    (bridge_dir / "bridge.json").write_text(json.dumps({"active_session_id": "conv_gone"}))
+    marker = claude_native_bridge.approval_wait_marker_path("conv_gone", bridge_dir=bridge_dir)
+    marker.parent.mkdir(parents=True)
+    claude_native_bridge.touch_approval_wait_marker(marker)
 
     class _FakeCompleted:
         """Fake CompletedProcess returning a non-zero exit code."""
@@ -5477,22 +5481,13 @@ def test_kill_session_is_idempotent_when_tmux_is_absent(
 
     monkeypatch.setattr("subprocess.run", _fake_run)
     kill_session(bridge_dir)
+    # A pane that is already gone has no hook left to own the marker.
+    assert not marker.exists()
 
 
-@pytest.mark.parametrize(
-    "tmux_result",
-    [
-        pytest.param(SimpleNamespace(returncode=0, stdout="", stderr=""), id="killed"),
-        pytest.param(
-            SimpleNamespace(returncode=1, stdout="", stderr="can't find session: main"),
-            id="already-gone",
-        ),
-    ],
-)
 def test_kill_session_drops_the_markers_of_the_hooks_it_kills(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tmux_result: SimpleNamespace,
 ) -> None:
     """
     Stopping a pane parked on a permission prompt leaves no approval-wait marker.
@@ -5517,7 +5512,9 @@ def test_kill_session_drops_the_markers_of_the_hooks_it_kills(
         claude_native_bridge.touch_approval_wait_marker(marker)
     assert claude_native_bridge.has_pending_user_prompt(bridge_dir)
 
-    monkeypatch.setattr("subprocess.run", lambda cmd, **kwargs: tmux_result)
+    monkeypatch.setattr(
+        "subprocess.run", lambda cmd, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr="")
+    )
     kill_session(bridge_dir)
 
     assert not own.exists() and not sibling.exists()
