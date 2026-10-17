@@ -573,14 +573,8 @@ class LLMRoutingClient:
         request_timeout: float = ROUTING_REQUEST_TIMEOUT_S,
         reasoning_effort: str | None = None,
     ) -> None:
-        """
-        :param llm_client: The :class:`~omnigent.policies.types.PolicyLLMClient`
-            built from the server ``llm:`` block.
-        :param request_timeout: Per-call budget in seconds, applied to both the
-            adapter's own HTTP timeout and the outer wait around the call.
-        :param reasoning_effort: Reasoning effort sent with the judge call,
-            e.g. ``"low"``. ``None`` sends none and leaves the provider default.
-        """
+        """*request_timeout* bounds both the adapter's HTTP timeout and the outer
+        wait; *reasoning_effort* is sent as ``reasoning.effort`` when set."""
         self._llm = llm_client
         self._request_timeout = request_timeout
         self._reasoning_effort = reasoning_effort
@@ -1112,23 +1106,9 @@ def parse_routing_tables(
 def parse_judge_settings(
     routing_cfg: Any,  # type: ignore[explicit-any]  # parsed YAML block
 ) -> dict[str, Any]:  # type: ignore[explicit-any]  # RoutingSettings kwargs
-    """Parse the built-in judge's own knobs out of a ``routing:`` block.
-
-    A reasoning model behind an OpenAI-compatible endpoint can need more than
-    the fixed routing budget, or a lower effort to answer inside it::
-
-        routing:
-          judge:
-            request_timeout: 30
-            reasoning_effort: low
-
-    Each key is independent; a malformed one is logged and dropped so the judge
-    keeps its default rather than failing the boot.
-
-    :param routing_cfg: The parsed ``routing:`` mapping, or ``None``.
-    :returns: Keyword arguments for :class:`RoutingSettings`, one per key the
-        block sets to a usable value.
-    """
+    """Parse ``routing.judge.request_timeout`` (seconds) and ``reasoning_effort``
+    into :class:`RoutingSettings` kwargs. A malformed key is logged and dropped so
+    the judge keeps its default rather than failing the boot."""
     from omnigent.runner.turn_routing import SERVER_HOP_TIMEOUT_S
     from omnigent.util.reasoning_effort import EFFORT_VALUES, format_supported
 

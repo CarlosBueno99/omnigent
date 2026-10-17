@@ -3408,12 +3408,9 @@ async def test_the_judge_is_capped_by_its_own_request_timeout_too() -> None:
 
 @pytest.mark.asyncio
 async def test_the_judge_uses_the_routing_blocks_own_timeout_and_reasoning_effort() -> None:
-    """``routing.judge`` settings reach the judge call, both bounds included.
-
-    A reasoning judge can need more than the fixed budget, or a lower effort to
-    land inside it; the configured budget and effort must reach the call rather
-    than the 9 s default and the provider's default effort.
-    """
+    """``routing.judge`` settings reach the judge call: both bounds carry the
+    configured budget and the configured effort is sent, instead of the 9 s
+    default and the provider's default effort."""
     import asyncio
     from dataclasses import replace
     from types import SimpleNamespace
