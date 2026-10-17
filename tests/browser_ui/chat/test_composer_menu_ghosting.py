@@ -101,6 +101,13 @@ def _set_panel_backdrop_filter(panel: Locator, value: str | None) -> None:
     )
 
 
+def _background_alpha(color: str) -> float:
+    """Alpha channel of a computed ``rgb()``/``rgba()`` color; opaque colors return 1.0."""
+    inside = color[color.index("(") + 1 : color.index(")")]
+    channels = [part.strip() for part in inside.split(",")]
+    return float(channels[3]) if len(channels) == 4 else 1.0
+
+
 def _leak_fraction(reference: bytes, actual: bytes, box: tuple[int, int, int, int]) -> float:
     from PIL import Image, ImageChops
 
@@ -177,7 +184,12 @@ def test_composer_menu_hides_the_transcript_in_dark_mode(
     )
 
     # Negative control: the same panel without its blur must expose the ghosting, which
-    # proves the measurement still detects transcript text behind the menu.
+    # proves the measurement still detects transcript text behind the menu. This relies on
+    # the dark popover staying translucent, so check that first — an opaque theme would make
+    # ghosting impossible and the control moot, which should not read as a measurement bug.
+    assert _background_alpha(dark["panel_style"]["backgroundColor"]) < 1, (
+        f"dark popover is opaque, so the blur negative control is moot: {dark}"
+    )
     _set_panel_backdrop_filter(panel, "none")
     unblurred = _measure_transcript_leak(page, panel, f"dark-{menu}-unblurred")
     _set_panel_backdrop_filter(panel, None)

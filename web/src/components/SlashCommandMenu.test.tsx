@@ -193,13 +193,3 @@ describe("skill display name matching", () => {
     expect(rankedSlashCommandNames(commands, "simplified", new Set())).toEqual([]);
   });
 });
-
-describe("menu surface", () => {
-  it("carries the dark glass blur so the translucent dark popover does not ghost the transcript", () => {
-    render(<SlashCommandMenu {...props} />);
-    expect(screen.getByTestId("slash-command-menu")).toHaveClass(
-      "dark:backdrop-blur-xl",
-      "dark:backdrop-saturate-150",
-    );
-  });
-});
