@@ -2164,7 +2164,9 @@ def _install_signal_handlers(
         _try_add_handler(RUNNER_ADOPT_SIGNAL, adopted_event.set)
     if finish_work_event is not None and RUNNER_FINISH_WORK_SIGNAL is not None:
         _try_add_handler(RUNNER_FINISH_WORK_SIGNAL, finish_work_event.set)
-        if degraded:
+        # A loop without signal support suppresses NotImplementedError without
+        # degrading; replace the inherited SIG_IGN so it cannot leak across exec.
+        if degraded or signal.getsignal(RUNNER_FINISH_WORK_SIGNAL) is signal.SIG_IGN:
             # SIG_IGN survives exec and would leak into exec'd agent
             # subprocesses; a plain handler resets on exec and still records the
             # hangup for the parent-death backstop.

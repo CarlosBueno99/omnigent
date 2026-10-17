@@ -185,7 +185,10 @@ def test_terminal_hangup_lets_in_flight_turn_finish(
         try:
 
             def _host_online() -> bool:
-                rows = client.get("/v1/hosts").json().get("hosts", [])
+                try:
+                    rows = client.get("/v1/hosts").json().get("hosts", [])
+                except (httpx.HTTPError, ValueError):
+                    return False  # server still warming up; let _wait_until retry
                 return any(
                     r.get("host_id") == terminal.host_id and r.get("status") == "online"
                     for r in rows
@@ -250,6 +253,10 @@ def test_terminal_hangup_lets_in_flight_turn_finish(
             assert host_exit[1] == signal.SIGHUP, f"host should die by SIGHUP, not {host_exit}"
             time.sleep(2.0)
             runner_alive_at_release = _pid_running(runner_pid)
+            assert runner_alive_at_release, (
+                "runner must outlive the host's terminal hangup, but it exited "
+                f"within 2s of the SIGHUP (host exit {host_exit})"
+            )
             release_mock_gate(mock_url)
             print(
                 f"gate released {time.monotonic() - hangup_at:.2f}s after hangup; "

@@ -25,7 +25,6 @@ from omnigent.runner._entry import (
     _DEFAULT_RUNNER_THREADPOOL_MAX_WORKERS,
     _agent_cache_dest,
     _apply_host_interactive_shells,
-    _await_finish_work_signal,
     _host_interactive_shells_from_env,
     _ignore_finish_work_signal_until_handled,
     _InitialAuthTokenFactory,
@@ -2392,6 +2391,7 @@ def _finish_work_killer(
     *,
     finish_work_set: bool = True,
     finish_work_max_s: float = 5.0,
+    signal_wait_s: float = 2.0,
 ) -> list[str]:
     """Run an already-orphaned killer with the finish-work path wired; return events."""
     import threading
@@ -2409,6 +2409,7 @@ def _finish_work_killer(
         poll_interval_s=0.01,
         grace_s=0.01,
         idle_grace_s=0.01,
+        signal_wait_s=signal_wait_s,
         finish_work_max_s=finish_work_max_s,
         exit_fn=lambda code: events.append("exit"),
     )
@@ -2432,10 +2433,18 @@ def test_run_parent_death_killer_finishes_in_flight_work_after_hangup() -> None:
 
 
 def test_run_parent_death_killer_without_hangup_stops_despite_active_work() -> None:
-    """A plain parent death (e.g. ``host stop``) still stops a busy runner at once."""
-    events = _finish_work_killer(lambda: True, finish_work_set=False)
+    """A plain parent death (``host stop``) waits out only the short finish-work
+    grace window, then stops a busy runner instead of finishing its turn.
+
+    The window lets a lagging hangup signal become visible; a plain death never
+    sets it, so the runner stops once the window elapses.
+    """
+    started = time.monotonic()
+    events = _finish_work_killer(lambda: True, finish_work_set=False, signal_wait_s=0.2)
+    elapsed = time.monotonic() - started
 
     assert events == ["stop", "exit"]
+    assert elapsed >= 0.2, "a busy non-hangup orphan must wait out the finish-work grace window"
 
 
 def test_run_parent_death_killer_bounds_finishing_work(
@@ -2503,13 +2512,6 @@ def test_work_still_active_treats_any_exception_as_active() -> None:
         raise ValueError("state mutated during probe")
 
     assert _work_still_active(boom) is True
-
-
-def test_await_finish_work_signal_times_out_without_a_signal() -> None:
-    """A crash (no finish-work signal) only waits out the short window."""
-    import threading
-
-    assert _await_finish_work_signal(threading.Event(), signal_wait_s=0.02) is False
 
 
 def test_ignore_finish_work_signal_until_handled_masks_the_default_kill() -> None:
@@ -2649,6 +2651,7 @@ async def test_install_signal_handlers_degraded_finish_work_replaces_sig_ign(
 
     monkeypatch.setattr(loop, "add_signal_handler", _broken_add_signal_handler)
     # Boot ignores the signal; the degraded install must swap SIG_IGN out.
+    previous = signal.getsignal(RUNNER_FINISH_WORK_SIGNAL)
     signal.signal(RUNNER_FINISH_WORK_SIGNAL, signal.SIG_IGN)
     finish_work = threading.Event()
     try:
@@ -2662,7 +2665,50 @@ async def test_install_signal_handlers_degraded_finish_work_replaces_sig_ign(
             await asyncio.sleep(0.01)
         assert finish_work.is_set()
     finally:
-        signal.signal(RUNNER_FINISH_WORK_SIGNAL, signal.SIG_DFL)
+        signal.signal(RUNNER_FINISH_WORK_SIGNAL, previous)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGUSR2") or sys.platform == "win32",
+    reason="POSIX signal delivery required",
+)
+async def test_install_signal_handlers_replaces_sig_ign_when_loop_lacks_signals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loop that cannot register signals still swaps the boot-time SIG_IGN out.
+
+    ``add_signal_handler`` raises ``NotImplementedError`` on loops without signal
+    support. That is suppressed without marking the install degraded, so the
+    inherited SIG_IGN must still be replaced or it would survive exec and stop
+    the runner from ever observing a hangup.
+    """
+    import threading
+
+    from omnigent.runner.identity import RUNNER_FINISH_WORK_SIGNAL
+
+    assert RUNNER_FINISH_WORK_SIGNAL is not None
+    loop = asyncio.get_running_loop()
+
+    def _unsupported_add_signal_handler(sig: int, *args: Any) -> None:
+        raise NotImplementedError("signals are not supported on this loop")
+
+    monkeypatch.setattr(loop, "add_signal_handler", _unsupported_add_signal_handler)
+    previous = signal.getsignal(RUNNER_FINISH_WORK_SIGNAL)
+    signal.signal(RUNNER_FINISH_WORK_SIGNAL, signal.SIG_IGN)
+    finish_work = threading.Event()
+    try:
+        _install_signal_handlers(asyncio.Event(), finish_work_event=finish_work)
+        handler = signal.getsignal(RUNNER_FINISH_WORK_SIGNAL)
+        assert handler is not signal.SIG_IGN
+        assert callable(handler)
+        os.kill(os.getpid(), RUNNER_FINISH_WORK_SIGNAL)
+        deadline = time.monotonic() + 2.0
+        while not finish_work.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert finish_work.is_set()
+    finally:
+        signal.signal(RUNNER_FINISH_WORK_SIGNAL, previous)
 
 
 @pytest.mark.asyncio
