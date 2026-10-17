@@ -289,7 +289,11 @@ describe("side chat opened from a + button", () => {
     expect(screen.getByTestId("side-chat-input")).not.toHaveFocus();
   });
 
-  it("drops a live tab's request when the user starts typing elsewhere while it binds", () => {
+  it.each([
+    ["a textarea", () => <textarea data-testid="other-field" />],
+    ["a text input", () => <input type="text" data-testid="other-field" />],
+    ["an editable element", () => <div contentEditable tabIndex={0} data-testid="other-field" />],
+  ])("drops a live tab's request when the user starts typing in %s while it binds", (_, field) => {
     conversationRegistry.acquire(childId).setState({ boundAgentId: null, sessionStatus: "idle" });
     useChatStore.setState({
       sideChatComposers: { [childId]: { text: "", files: [], autoFocus: true } },
@@ -298,7 +302,7 @@ describe("side chat opened from a + button", () => {
       <>
         <button type="button" data-testid="menu-trigger" />
         <input type="checkbox" data-testid="toggle" />
-        <textarea data-testid="main-composer" />
+        {field()}
         <SideChatPane childId={childId} />
       </>,
     );
@@ -307,12 +311,12 @@ describe("side chat opened from a + button", () => {
     act(() => screen.getByTestId("toggle").focus());
     expect(useChatStore.getState().sideChatComposers[childId]?.autoFocus).toBe(true);
 
-    act(() => screen.getByTestId("main-composer").focus());
+    act(() => screen.getByTestId("other-field").focus());
     expect(useChatStore.getState().sideChatComposers[childId]?.autoFocus).toBe(false);
 
     act(() => conversationRegistry.acquire(childId).setState({ boundAgentId: "agent_side" }));
     expect(screen.getByTestId("side-chat-input")).toBeEnabled();
-    expect(screen.getByTestId("main-composer")).toHaveFocus();
+    expect(screen.getByTestId("other-field")).toHaveFocus();
   });
 
   it("leaves a text input that already had focus before the pane mounted alone", () => {

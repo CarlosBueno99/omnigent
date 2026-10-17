@@ -473,6 +473,11 @@ function SideChatComposer({
   // A tab opened from a "+" is ready to type without a click. A live fork's
   // input stays disabled until the child's agent binding arrives, so wait for it.
   const autoFocus = composer?.autoFocus === true;
+  const dropFocusRequest = useCallback(() => {
+    // The tab may have been closed or its draft sent meanwhile; don't recreate it.
+    if (!useChatStore.getState().sideChatComposers[childId]) return;
+    updateComposer(childId, (current) => ({ ...current, autoFocus: false }));
+  }, [childId, updateComposer]);
   useEffect(() => {
     if (!autoFocus || !ready) return;
     // The user may already be typing elsewhere, e.g. during a slow fork before
@@ -480,20 +485,18 @@ function SideChatComposer({
     if (!isOtherTextInput(document.activeElement, textareaRef.current)) {
       textareaRef.current?.focus();
     }
-    updateComposer(childId, (current) => ({ ...current, autoFocus: false }));
-  }, [autoFocus, ready, childId, updateComposer]);
+    dropFocusRequest();
+  }, [autoFocus, ready, dropFocusRequest]);
   // Typing elsewhere while the fork binds cancels the request so focus is not
   // pulled away later; a closing menu returning focus to its button does not.
   useEffect(() => {
     if (!autoFocus || ready) return;
     const cancelOnOtherInput = (event: FocusEvent) => {
-      if (isOtherTextInput(event.target, textareaRef.current)) {
-        updateComposer(childId, (current) => ({ ...current, autoFocus: false }));
-      }
+      if (isOtherTextInput(event.target, textareaRef.current)) dropFocusRequest();
     };
     document.addEventListener("focusin", cancelOnOtherInput);
     return () => document.removeEventListener("focusin", cancelOnOtherInput);
-  }, [autoFocus, ready, childId, updateComposer]);
+  }, [autoFocus, ready, dropFocusRequest]);
   const canSend = text.trim().length > 0 || (!pending && files.length > 0);
   // Slash suggestions mirror the main composer: the session's skills plus /help.
   // Other built-ins (/model, /compact, …) act on the main session and stay out.
