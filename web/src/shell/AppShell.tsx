@@ -299,20 +299,17 @@ export function AppShell() {
     if (canvasMode) setSidebarPeek(false);
   }, [canvasMode]);
 
-  // The settings nav lives INSIDE the sidebar, and its "Back" row is the only
-  // way off the settings page. A collapsed sidebar therefore strands the user
-  // there — the row is still in the DOM but clipped and inert. So entering
-  // /settings pins the sidebar open (and drops any peek, which is a transient
-  // hover card, not somewhere to read a settings page from), and leaving it
-  // restores whatever the sidebar was before, so a collapsed sidebar stays a
-  // preference rather than being silently undone by a trip to settings.
+  // Desktop settings need the sidebar's Back row: collapsing it on /settings
+  // would strand the user on the page. So the settings index pins the sidebar
+  // open (and clears any peek, which is only a transient hover card), then
+  // restores the prior open/collapsed preference on exit.
   //
-  // The pin is only needed WHILE on the page, so restoring on exit cannot
-  // reintroduce the trap: by then the title-bar toggle is back and the Back row
-  // is no longer the only way out. Mirrors sidebarOpenBeforeMaximizeRef, which
+  // Mobile section links keep whatever drawer state navigation chose — the
+  // header can reopen the menu there — so only the top-level /settings route
+  // forces the drawer open. Mirrors sidebarOpenBeforeMaximizeRef, which
   // stashes and restores the same state around the maximize flow.
-  // useLayoutEffect: pin/restore must land in the same paint as the route change,
-  // or a collapsed sidebar shows one full-width frame first.
+  // useLayoutEffect: pin/restore must land in the same paint as the route
+  // change, or a collapsed sidebar shows one full-width frame first.
   const { inSettings } = useSettingsRoute();
   const sidebarOpenBeforeSettingsRef = useRef<boolean | null>(null);
   useLayoutEffect(() => {
@@ -324,7 +321,11 @@ export function AppShell() {
         if (sidebarOpenBeforeSettingsRef.current === null) {
           sidebarOpenBeforeSettingsRef.current = wasOpen;
         }
-        return true;
+        return (
+          !isMobileViewport() ||
+          location.pathname.replace(/\/$/, "") === rebasePath("/settings") ||
+          wasOpen
+        );
       });
       setSidebarPeek(false);
       return;
@@ -335,7 +336,7 @@ export function AppShell() {
       setSidebarOpen(sidebarOpenBeforeSettingsRef.current);
       sidebarOpenBeforeSettingsRef.current = null;
     }
-  }, [inSettings, setSidebarOpen]);
+  }, [inSettings, location.pathname, rebasePath, setSidebarOpen]);
 
   // Reads the same module-level store Sidebar drives, so the rail's ceiling
   // tracks the live sidebar width (including a drag) rather than a guess.
