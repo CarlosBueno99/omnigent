@@ -479,7 +479,7 @@ class BwrapSandboxBackend(SandboxBackend):
         # Make sure argv[0] (the helper interpreter) is reachable inside
         # the sandbox even when it lives outside the default mounts —
         # e.g. a pyenv install under ``$HOME/.pyenv``.
-        bwrap_args += _ensure_executable_visible(argv, cwd_resolved)
+        executable_args = _ensure_executable_visible(argv, cwd_resolved)
 
         # Make sure the final target binary (e.g. the claude CLI at
         # node_modules/.bin/claude) is also reachable.  The launcher
@@ -488,7 +488,10 @@ class BwrapSandboxBackend(SandboxBackend):
         # directory is invisible inside the namespace and the exec
         # fails with FileNotFoundError.
         if target is not None:
-            bwrap_args += _ensure_executable_visible([target], cwd_resolved)
+            executable_args += _ensure_executable_visible([target], cwd_resolved)
+        bwrap_args += _combine_executable_exposure(
+            executable_args, covered_prefixes=[Path(path) for path in _DEFAULT_RO_DIRS]
+        )
 
         # Extra read roots beyond the default toolchain bind set. These
         # mounts precede write grants because bwrap resolves overlaps by
@@ -593,13 +596,7 @@ class BwrapSandboxBackend(SandboxBackend):
         reexpose = _interpreter_reexpose_after_mask(argv, masked_dirs)
         if target is not None:
             reexpose += _interpreter_reexpose_after_mask([target], masked_dirs)
-        seen_reexpose: set[tuple[str, str]] = set()
-        for i in range(0, len(reexpose) - 2, 3):
-            key = (reexpose[i + 1], reexpose[i + 2])
-            if key in seen_reexpose:
-                continue
-            seen_reexpose.add(key)
-            bwrap_args.extend(reexpose[i : i + 3])
+        bwrap_args += _combine_executable_exposure(reexpose)
 
         # AF_UNIX control-socket masks. A denied socket
         # (e.g. the managed tmux control socket) lives inside a bound
@@ -906,21 +903,50 @@ def _is_same_path(a: Path, b: Path) -> bool:
     return a.resolve(strict=False) == b.resolve(strict=False)
 
 
+def _combine_executable_exposure(
+    args: Sequence[str], *, covered_prefixes: Sequence[Path] = ()
+) -> list[str]:
+    """Mount content before links, retaining one view through shared directory names."""
+    out: list[str] = []
+    links: dict[str, str] = {}
+    seen_mounts: set[tuple[str, str, str]] = set()
+    mounted_roots = list(covered_prefixes)
+    for i in range(0, len(args), 3):
+        flag, source, destination = args[i : i + 3]
+        if flag == "--symlink":
+            if destination in links and links[destination] != source:
+                raise ValueError(f"Conflicting executable directory symlink: {destination}")
+            links[destination] = source
+            continue
+        key = (flag, source, destination)
+        if key not in seen_mounts:
+            seen_mounts.add(key)
+            out.extend(key)
+            if source == destination:
+                mounted_roots.append(Path(destination))
+    for destination in sorted(links, key=lambda path: (len(Path(path).parts), path)):
+        literal = Path(destination)
+        if any(_is_within(literal, root, resolve=False) for root in mounted_roots):
+            continue
+        out.extend(["--symlink", links[destination], destination])
+        mounted_roots.append(literal)
+    return out
+
+
 def _ensure_executable_visible(argv: list[str], cwd: Path) -> list[str]:
     """
-    Return any extra ``--ro-bind-try`` args needed so ``argv[0]`` (the
-    helper interpreter) is reachable inside the sandbox.
+    Return the read-only mounts and directory symlinks needed to reach
+    ``argv[0]`` (the helper interpreter) inside the sandbox.
 
     Bwrap exec's ``argv[0]`` literally — it does NOT follow symlinks on
     the host before exec — so every name in the path the kernel will
     traverse must be visible inside the sandbox. This walks the symlink
     chain at ``argv[0]`` hop-by-hop. At each hop, the literal path's
-    parent and grandparent are bound at their literal names, with
-    sources pointing at the fully-resolved real directories. That
-    handles intermediate directory-symlinks: e.g. uv installs a
+    parent and grandparent are mounted at their resolved names, with
+    directory-symlinks preserved at their literal names. These still work
+    when a later parent mount restores them. For example, uv installs a
     version-floating symlink ``cpython-3.12 -> cpython-3.12.13``; the
-    kernel traverses the literal ``cpython-3.12`` name, so we mount the
-    real ``cpython-3.12.13`` contents there.
+    kernel follows that literal name to the mounted resolved directory.
 
     Common cases:
 
@@ -932,8 +958,8 @@ def _ensure_executable_visible(argv: list[str], cwd: Path) -> list[str]:
     - ``/home/me/omnigent/.venv/bin/python`` while the helper
       runs in ``/tmp/scratch`` (uv-managed Python with intermediate
       ``cpython-3.12`` symlink): binds the venv bin/lib roots at the
-      literal paths and the uv-python install dir at its literal
-      name, with the real ``cpython-3.12.13`` mounted there.
+      resolved paths and preserves the floating install name as a
+      symlink to the mounted ``cpython-3.12.13`` directory.
     - Pyenv-style ``$HOME/.pyenv/versions/3.12/bin/python``: same
       walk produces the binds needed whether or not the
       ``versions/3.12`` component is itself a symlink.
@@ -950,9 +976,9 @@ def _ensure_executable_visible(argv: list[str], cwd: Path) -> list[str]:
 
 def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) -> list[str]:
     """
-    Walk ``argv[0]``'s symlink chain and return the ``--ro-bind-try``
-    args needed to reach each hop, skipping destinations already
-    covered by *covered_prefixes*.
+    Walk ``argv[0]``'s symlink chain and return the read-only mounts and
+    directory-symlinks needed to reach each hop, skipping destinations
+    already covered by *covered_prefixes*.
 
     Factored out of :func:`_ensure_executable_visible` so the post-mask
     interpreter re-expose (:func:`_interpreter_reexpose_after_mask`) can
@@ -966,14 +992,38 @@ def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) 
     :param argv: Helper argv. Only ``argv[0]`` is inspected.
     :param covered_prefixes: Paths whose descendants need no explicit
         bind (already visible inside the sandbox).
-    :returns: Extra bwrap args (possibly empty), as ``--ro-bind-try
-        <src> <dst>`` triples.
+    :returns: Extra bwrap args as ``--ro-bind-try`` or ``--symlink`` triples.
     """
     if not argv:
         return []
 
     extra: list[str] = []
     seen_dest: set[Path] = set()
+    directory_links: dict[Path, Path] = {}
+    visited_directories: set[Path] = set()
+
+    def _record_directory_links(directory: Path) -> None:
+        pending = [directory]
+        while pending and len(visited_directories) < 40:
+            current = pending.pop()
+            if current in visited_directories:
+                continue
+            visited_directories.add(current)
+            for ancestor in (current, *current.parents):
+                try:
+                    if not ancestor.is_symlink():
+                        continue
+                    target = Path(os.readlink(str(ancestor)))
+                except OSError:
+                    continue
+                if not target.is_absolute():
+                    target = Path(os.path.realpath(str(ancestor.parent))) / target
+                target = Path(os.path.abspath(str(target)))
+                resolved = Path(os.path.realpath(str(target)))
+                directory_links[ancestor] = Path(os.path.realpath(str(ancestor)))
+                if target != resolved:
+                    directory_links[target] = resolved
+                pending.append(target)
 
     def _emit(src: Path, dst: Path) -> None:
         if dst in seen_dest or dst == dst.parent or src == src.parent:
@@ -986,18 +1036,33 @@ def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) 
         extra.extend(["--ro-bind-try", str(src), str(dst)])
 
     def _emit_parent_pair(literal: Path) -> None:
-        """Bind ``literal``'s parent and grandparent at their literal
-        paths, sourcing from each path's realpath so intermediate
-        directory-symlinks resolve correctly inside the sandbox."""
-        if any(_is_within(literal, root, resolve=False) for root in covered_prefixes):
-            return
+        """Expose the literal and resolved directory names used by the executable."""
         parent_literal = literal.parent
         parent_real = Path(os.path.realpath(str(parent_literal)))
-        _emit(parent_real, parent_literal)
         gp_literal = parent_literal.parent
-        if gp_literal != parent_literal:
-            gp_real = Path(os.path.realpath(str(gp_literal)))
+        gp_real = Path(os.path.realpath(str(gp_literal)))
+        covered = next(
+            (root for root in covered_prefixes if _is_within(literal, root, resolve=False)),
+            None,
+        )
+        if covered is not None:
+            # A covered root's own symlink needs no additional directory exposure.
+            expected_parent = (
+                Path(os.path.realpath(str(covered))) / literal.relative_to(covered)
+            ).parent
+            if parent_real == expected_parent:
+                return
+        _record_directory_links(parent_literal)
+        if parent_real != parent_literal:
+            _emit(parent_real, parent_real)
+        if gp_real != gp_literal:
+            _emit(gp_real, gp_real)
+        if covered is not None:
+            return
+        if gp_real == gp_literal:
             _emit(gp_real, gp_literal)
+            if parent_real == parent_literal:
+                _emit(parent_real, parent_literal)
 
     # Walk the symlink chain hop-by-hop until either a regular file is
     # reached or the visited-set catches a cycle. The 40-hop cap matches
@@ -1020,6 +1085,8 @@ def _interpreter_chain_binds(argv: Sequence[str], covered_prefixes: list[Path]) 
         else:
             current = Path(os.path.normpath(str(current.parent / link)))
 
+    for literal, resolved in directory_links.items():
+        extra.extend(["--symlink", str(resolved), str(literal)])
     return extra
 
 
@@ -1076,8 +1143,8 @@ def _interpreter_reexpose_after_mask(
     :param argv: Helper argv; only ``argv[0]`` is inspected.
     :param masked_dirs: Directory paths the dotfile masker ``--tmpfs``-ed
         (from :func:`_tmpfs_mask_dirs`).
-    :returns: Extra ``--ro-bind-try`` triples, or empty when nothing the
-        interpreter needs was masked.
+    :returns: Read-only mount and directory-symlink triples, or empty
+        when nothing the interpreter needs was masked.
     """
     if not argv or not masked_dirs:
         return []
