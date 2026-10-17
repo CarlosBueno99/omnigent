@@ -417,11 +417,20 @@ async def test_raised_uncoded_refusal_fails_fast_with_host_reason(
     assert "failed to spawn runner: boom" in excinfo.value.message
 
 
-@pytest.mark.parametrize("session_exists", [False, True], ids=["deleted", "live"])
+@pytest.mark.parametrize(
+    ("session_exists", "error_code"),
+    [
+        (False, "session_not_found"),
+        (False, _WORKSPACE_MISSING_ERROR_CODE),
+        (True, "session_not_found"),
+    ],
+    ids=["deleted-server-ended", "deleted-categorized-refusal", "live-echoed-code"],
+)
 @pytest.mark.asyncio
 async def test_not_found_launch_code_is_a_404_only_for_a_deleted_session(
     monkeypatch: pytest.MonkeyPatch,
     session_exists: bool,
+    error_code: str,
 ) -> None:
     """The row, not the host's code, decides: a deleted session is gone, a live one was refused."""
     monkeypatch.setattr(orchestration, "_get_runner_client", _async_return(None))
@@ -436,7 +445,7 @@ async def test_not_found_launch_code_is_a_404_only_for_a_deleted_session(
         _async_return(
             SimpleNamespace(
                 runner_id="",
-                error_code="session_not_found",
+                error_code=error_code,
                 error="session was deleted while its relaunch was in flight",
             )
         ),
@@ -486,3 +495,8 @@ def test_host_launch_refusal_shows_reason_only_to_the_host_owner() -> None:
     unowned = orchestration.HostLaunchRefusedError("failed to spawn runner: boom", None)
     assert "failed to spawn runner: boom" in str(unowned)
     assert str(unowned.for_viewer("anyone@example.com")) == str(unowned)
+    for raw in ("\x1b]0;title\x07bad", "\x1b]8;;http://x\x1b\\bad", "\x1bPq payload\x1b\\bad"):
+        detail = str(orchestration.HostLaunchRefusedError(raw, None)).split("launch failed: ", 1)[
+            1
+        ]
+        assert detail.startswith("bad. Fix it"), detail

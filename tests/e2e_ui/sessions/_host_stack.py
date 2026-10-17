@@ -27,9 +27,11 @@ def list_hosts(client: httpx.Client) -> list[dict]:
 
 def wait_for_online_host(client: httpx.Client, *, timeout: float = 60.0) -> str:
     """Return the id of the one host once it reports ``online``."""
-    wait_until(
-        lambda: any(host["status"] == "online" for host in list_hosts(client)), timeout=timeout
-    )
-    online = [host for host in list_hosts(client) if host["status"] == "online"]
-    assert len(online) == 1, f"expected exactly one online host, got: {online}"
+    online: list[dict] = []
+
+    def one_online() -> bool:
+        online[:] = [host for host in list_hosts(client) if host["status"] == "online"]
+        return len(online) == 1
+
+    wait_until(one_online, timeout=timeout)
     return online[0]["host_id"]

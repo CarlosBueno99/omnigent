@@ -55,6 +55,7 @@ from omnigent.harness_availability import (
     HARNESS_NEEDS_AUTH,
     HARNESS_VERSION_TOO_LOW,
 )
+from omnigent.harnesses.diagnostics import sanitize_diagnostic_text
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE as _HARNESS_NOT_CONFIGURED_ERROR_CODE,
 )
@@ -4623,16 +4624,15 @@ async def _maybe_wake_stale_resumable_managed_sandbox(
 
 
 _HOST_REFUSAL_REASON_MAX_CHARS = 300
-_ANSI_CONTROL_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _host_launch_refusal_detail(reason: str | None, *, visible: bool) -> str:
     """
     Describe a host's uncategorized launch refusal as a sentence fragment.
 
-    The host's text is untrusted, so terminal control sequences are removed, it
-    is flattened to one printable line and capped; viewers who may not see it
-    get a pointer to the daemon log instead.
+    The host's text is untrusted, so terminal controls and known credential
+    patterns are removed, it is flattened to one printable line and capped;
+    viewers who may not see it get a pointer to the daemon log instead.
 
     :param reason: The host's refusal text, e.g. ``"failed to spawn runner:
         [Errno 2] No such file or directory: '/venv/bin/python'"``.
@@ -4640,7 +4640,7 @@ def _host_launch_refusal_detail(reason: str | None, *, visible: bool) -> str:
     :returns: A fragment without a trailing period.
     """
     if reason and visible:
-        plain = _ANSI_CONTROL_SEQUENCE.sub("", reason)
+        plain = sanitize_diagnostic_text(reason)
         flat = " ".join("".join(ch if ch.isprintable() else " " for ch in plain).split())
         if len(flat) > _HOST_REFUSAL_REASON_MAX_CHARS:
             flat = flat[: _HOST_REFUSAL_REASON_MAX_CHARS - 1].rstrip() + "…"
@@ -4844,6 +4844,14 @@ async def ensure_runner_connected(
                 _refusal_message = _workspace_missing_message(conv.workspace)
             else:
                 _refusal_message = launch_attempt.error or ""
+            if (
+                raise_host_refusal
+                and (launch_attempt.error or launch_attempt.error_code)
+                and await asyncio.to_thread(conversation_store.get_conversation, session_id)
+                is None
+            ):
+                # Deleted mid-relaunch: the server, not the host, ended this launch.
+                raise _session_not_found()
             if _refusal_code is not None and raise_host_refusal:
                 raise OmnigentError(
                     _refusal_message
@@ -4858,14 +4866,6 @@ async def ensure_runner_connected(
                         else ErrorCode.WORKSPACE_MISSING
                     ),
                 )
-            if (
-                raise_host_refusal
-                and (launch_attempt.error or launch_attempt.error_code)
-                and await asyncio.to_thread(conversation_store.get_conversation, session_id)
-                is None
-            ):
-                # Deleted mid-relaunch: the server, not the host, ended this launch.
-                raise _session_not_found()
             if (
                 _refusal_code is None
                 and raise_host_refusal

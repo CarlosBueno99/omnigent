@@ -23,9 +23,9 @@ import logging
 import subprocess
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -77,6 +77,7 @@ from tests.server.helpers import websocket_scope as _websocket_scope
 
 pytestmark = pytest.mark.asyncio
 
+_T = TypeVar("_T")
 _HOST_ID = "c2d81b1a6812ae1cf32221c5a2a70ba0"
 _WORKSPACE = "/work/repo"
 _RUNNER_NOT_AVAILABLE = (
@@ -156,6 +157,37 @@ def app(runtime_init: None, db_uri: str, tmp_path) -> FastAPI:
         comment_store=SqlAlchemyCommentStore(db_uri),
         host_store=HostStore(db_uri),
     )
+
+
+@pytest.fixture()
+def auth_host_app(runtime_init: None, db_uri: str, tmp_path: Path) -> FastAPI:
+    """Host-wired app with a permission store and header auth, for multi-user scenarios."""
+    from omnigent.server.auth import UnifiedAuthProvider
+    from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    return create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        comment_store=SqlAlchemyCommentStore(db_uri),
+        host_store=HostStore(db_uri),
+        permission_store=SqlAlchemyPermissionStore(db_uri),
+        auth_provider=UnifiedAuthProvider(source="header"),
+    )
+
+
+@pytest.fixture()
+async def auth_host_client(
+    auth_host_app: FastAPI, mock_llm: ControllableMockClient, tmp_path: Path
+) -> AsyncIterator[httpx.AsyncClient]:
+    """HTTP client for :func:`auth_host_app`."""
+    from tests.server.conftest import _app_client
+
+    async with _app_client(auth_host_app, mock_llm, tmp_path) as client:
+        yield client
 
 
 async def _connect_host(app: FastAPI, *, owner: str | None = None) -> ApplicationCommunicator:
@@ -282,6 +314,25 @@ async def _serve_one_launch(
             )
             return frame
     raise AssertionError("host never received a launch frame from the inline path")
+
+
+async def _post_while_host_answers(
+    responder: asyncio.Task[Any], post: Callable[[], Awaitable[_T]]
+) -> _T:
+    """Run ``post`` while ``responder`` plays the host, surfacing the host's own failures.
+
+    The responder is awaited after a successful request so an ``AssertionError``
+    from the mock host propagates; it is cancelled only when the request raised.
+    """
+    try:
+        result = await post()
+    except BaseException:
+        responder.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await responder
+        raise
+    await responder
+    return result
 
 
 async def _serve_one_stop(comm: ApplicationCommunicator) -> str:
@@ -3732,52 +3783,6 @@ async def test_retry_session_single_flight_evicts_after_only_waiter_cancelled(
     assert attempts == 2
 
 
-@pytest.mark.parametrize(
-    ("error_code", "error_message", "expected_status"),
-    [
-        ("workspace_missing", _WORKSPACE_MISSING_ERROR, 410),
-        ("harness_not_configured", _HARNESS_REFUSAL, 412),
-    ],
-)
-async def test_retry_session_host_refusal_is_typed_and_does_not_persist(
-    client: httpx.AsyncClient,
-    app: FastAPI,
-    monkeypatch: pytest.MonkeyPatch,
-    error_code: str,
-    error_message: str,
-    expected_status: int,
-) -> None:
-    """Retry host refusals stay typed and never enter message persistence."""
-    from omnigent.runtime import set_runner_client
-    from omnigent.server.routes import sessions as sessions_module
-
-    monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
-    comm = await _connect_host(app)
-    session = await _inline_launch_session(client, comm)
-    session_id = session["id"]
-    before = await client.get(f"/v1/sessions/{session_id}/items")
-    set_runner_client(None)
-
-    responder = asyncio.create_task(
-        _serve_one_launch(
-            comm,
-            launch_status="failed",
-            launch_error=error_message,
-            launch_error_code=error_code,
-        )
-    )
-    response = await client.post(
-        f"/v1/sessions/{session_id}/events",
-        json={"type": "retry_session", "data": {}},
-    )
-    await responder
-
-    assert response.status_code == expected_status, response.text
-    assert response.json()["error"]["code"] == error_code
-    after = await client.get(f"/v1/sessions/{session_id}/items")
-    assert after.json() == before.json()
-
-
 _SPAWN_REFUSAL = (
     "failed to spawn runner: [Errno 2] No such file or directory:\n'/opt/host-venv/bin/python'"
 )
@@ -3786,12 +3791,33 @@ _SPAWN_REFUSAL_FLAT = (
 )
 
 
-async def test_retry_session_names_uncategorized_host_refusal(
+@pytest.mark.parametrize(
+    ("error_code", "error_message", "expected_status", "expected_code", "expected_message"),
+    [
+        ("workspace_missing", _WORKSPACE_MISSING_ERROR, 410, "workspace_missing", None),
+        ("harness_not_configured", _HARNESS_REFUSAL, 412, "harness_not_configured", None),
+        (
+            "runner_spawn_failed",
+            _SPAWN_REFUSAL,
+            503,
+            "runner_unavailable",
+            "The host could not start a runner for this session — the host reported "
+            f"the launch failed: {_SPAWN_REFUSAL_FLAT}. Fix it on the host, then retry.",
+        ),
+    ],
+    ids=["workspace-missing", "harness-not-configured", "uncategorized"],
+)
+async def test_retry_session_host_refusal_is_typed_and_does_not_persist(
     client: httpx.AsyncClient,
     app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    error_message: str,
+    expected_status: int,
+    expected_code: str,
+    expected_message: str | None,
 ) -> None:
-    """Retry reports the host's spawn refusal at once instead of a bare unavailable error."""
+    """Retry host refusals stay typed, answer at once, and never enter message persistence."""
     from omnigent.runtime import set_runner_client
     from omnigent.server.routes import sessions as sessions_module
 
@@ -3808,25 +3834,24 @@ async def test_retry_session_names_uncategorized_host_refusal(
         _serve_one_launch(
             comm,
             launch_status="failed",
-            launch_error=_SPAWN_REFUSAL,
-            launch_error_code="runner_spawn_failed",
+            launch_error=error_message,
+            launch_error_code=error_code,
         )
     )
     started = time.monotonic()
-    response = await client.post(
-        f"/v1/sessions/{session_id}/events",
-        json={"type": "retry_session", "data": {}},
+    response = await _post_while_host_answers(
+        responder,
+        lambda: client.post(
+            f"/v1/sessions/{session_id}/events", json={"type": "retry_session", "data": {}}
+        ),
     )
-    await responder
 
-    assert response.status_code == 503, response.text
-    error = response.json()["error"]
-    assert error["code"] == "runner_unavailable"
-    assert error["message"] == (
-        "The host could not start a runner for this session — the host reported "
-        f"the launch failed: {_SPAWN_REFUSAL_FLAT}. Fix it on the host, then retry."
-    )
     assert time.monotonic() - started < budget(10.0)
+    assert response.status_code == expected_status, response.text
+    error = response.json()["error"]
+    assert error["code"] == expected_code
+    if expected_message is not None:
+        assert error["message"] == expected_message
     after = await client.get(f"/v1/sessions/{session_id}/items")
     assert after.json() == before.json()
 
@@ -3847,11 +3872,12 @@ async def test_retry_session_names_launched_runner_that_never_connected(
     set_runner_client(None)
 
     responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
-    response = await client.post(
-        f"/v1/sessions/{session['id']}/events",
-        json={"type": "retry_session", "data": {}},
+    response = await _post_while_host_answers(
+        responder,
+        lambda: client.post(
+            f"/v1/sessions/{session['id']}/events", json={"type": "retry_session", "data": {}}
+        ),
     )
-    await responder
 
     assert response.status_code == 503, response.text
     assert response.json()["error"]["message"] == (
@@ -3880,14 +3906,7 @@ async def test_native_message_relaunch_refusal_keeps_host_reason(
             launch_error_code="runner_spawn_failed",
         )
     )
-    try:
-        response = await _post_hello(client, session_id)
-    except BaseException:
-        responder.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await responder
-        raise
-    await responder
+    response = await _post_while_host_answers(responder, lambda: _post_hello(client, session_id))
 
     assert response.status_code == 202, response.text
     items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
@@ -3900,127 +3919,142 @@ async def test_native_message_relaunch_refusal_keeps_host_reason(
 
 
 async def test_native_message_relaunch_refusal_keeps_owner_only_reason_out_of_history(
-    runtime_init: None,
+    auth_host_app: FastAPI,
+    auth_host_client: httpx.AsyncClient,
     db_uri: str,
-    tmp_path: Path,
-    mock_llm: ControllableMockClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With other users around, an owned host's refusal text stays out of shared history.
 
     Only Retry, which answers one requester at a time, shows it to the host owner.
     """
-    from omnigent.server.auth import LEVEL_EDIT, UnifiedAuthProvider
+    from omnigent.server.auth import LEVEL_EDIT
     from omnigent.server.routes import sessions as sessions_module
     from omnigent.server.routes.sessions import routes_events
     from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
-    from tests.server.conftest import _app_client
 
     monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
     monkeypatch.delenv("OMNIGENT_LOCAL_SINGLE_USER", raising=False)
     owner, collaborator = "host-owner@example.com", "collaborator@example.com"
-    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
     permissions = SqlAlchemyPermissionStore(db_uri)
-    app = create_app(
-        agent_store=SqlAlchemyAgentStore(db_uri),
-        file_store=SqlAlchemyFileStore(db_uri),
-        conversation_store=SqlAlchemyConversationStore(db_uri),
-        artifact_store=artifact_store,
-        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
-        comment_store=SqlAlchemyCommentStore(db_uri),
-        host_store=HostStore(db_uri),
-        permission_store=permissions,
-        auth_provider=UnifiedAuthProvider(source="header"),
+    app, client = auth_host_app, auth_host_client
+    client.headers["X-Forwarded-Email"] = owner
+    comm = await _connect_host(app, owner=owner)
+    session_id = await _native_host_session(client, app, db_uri, comm)
+    permissions.grant(collaborator, session_id, LEVEL_EDIT)
+
+    async def refuse_launch_for(post: Callable[[], Awaitable[_T]]) -> _T:
+        responder = asyncio.create_task(
+            _serve_one_launch(
+                comm,
+                launch_status="failed",
+                launch_error=_SPAWN_REFUSAL,
+                launch_error_code="runner_spawn_failed",
+            )
+        )
+        return await _post_while_host_answers(responder, post)
+
+    send = await refuse_launch_for(lambda: _post_hello(client, session_id))
+    assert send.status_code == 202, send.text
+
+    client.headers["X-Forwarded-Email"] = collaborator
+    items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
+    [error] = [item for item in items if item["type"] == "error"]
+    assert error["code"] == "runner_failed_to_start"
+    assert "failed to spawn runner" not in error["message"]
+    assert "visible to the host owner" in error["message"]
+    snapshot = await client.get(f"/v1/sessions/{session_id}")
+    assert snapshot.status_code == 200, snapshot.text
+    assert "failed to spawn runner" not in snapshot.text
+
+    def retry(user: str) -> Awaitable[httpx.Response]:
+        return client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={"type": "retry_session", "data": {}},
+            headers={"X-Forwarded-Email": user},
+        )
+
+    # Both retries join one single-flight yet get differently scoped answers;
+    # the host answers only after both joined, so no second recovery can start.
+    both_joined = asyncio.Event()
+    joined = 0
+    real_single_flight = routes_events._retry_session_single_flight
+
+    async def _count_joiners(**kwargs: Any) -> dict[str, bool | str]:
+        nonlocal joined
+        joined += 1
+        if joined == 2:
+            both_joined.set()
+        return await real_single_flight(**kwargs)
+
+    real_launch = sessions_module._launch_runner_on_host
+
+    async def _launch_after_both_joined(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.wait_for(both_joined.wait(), timeout=budget(5.0))
+        return await real_launch(*args, **kwargs)
+
+    monkeypatch.setattr(routes_events, "_retry_session_single_flight", _count_joiners)
+    monkeypatch.setattr(sessions_module, "_launch_runner_on_host", _launch_after_both_joined)
+    started = time.monotonic()
+    owner_retry, collaborator_retry = await refuse_launch_for(
+        lambda: asyncio.gather(retry(owner), retry(collaborator))
+    )
+    assert joined == 2
+    assert time.monotonic() - started < budget(10.0)
+    assert owner_retry.status_code == 503, owner_retry.text
+    assert _SPAWN_REFUSAL_FLAT in owner_retry.json()["error"]["message"]
+    assert collaborator_retry.status_code == 503, collaborator_retry.text
+    assert "failed to spawn runner" not in collaborator_retry.json()["error"]["message"]
+    assert "visible to the host owner" in collaborator_retry.json()["error"]["message"]
+
+
+async def test_native_message_relaunch_refusal_keeps_reason_for_single_user_owned_host(
+    auth_host_app: FastAPI,
+    auth_host_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit single-user runtime has no other readers, so an owned host's reason stays."""
+    from omnigent.server.routes import sessions as sessions_module
+
+    monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    owner = "host-owner@example.com"
+    auth_host_client.headers["X-Forwarded-Email"] = owner
+    comm = await _connect_host(auth_host_app, owner=owner)
+    session_id = await _native_host_session(auth_host_client, auth_host_app, db_uri, comm)
+    responder = asyncio.create_task(
+        _serve_one_launch(
+            comm,
+            launch_status="failed",
+            launch_error=_SPAWN_REFUSAL,
+            launch_error_code="runner_spawn_failed",
+        )
     )
 
-    async with _app_client(app, mock_llm, tmp_path) as client:
-        client.headers["X-Forwarded-Email"] = owner
-        comm = await _connect_host(app, owner=owner)
-        session_id = await _native_host_session(client, app, db_uri, comm)
-        permissions.grant(collaborator, session_id, LEVEL_EDIT)
+    send = await _post_while_host_answers(
+        responder, lambda: _post_hello(auth_host_client, session_id)
+    )
 
-        async def refuse_launch_for(post: Callable[[], Awaitable[Any]]) -> Any:
-            responder = asyncio.create_task(
-                _serve_one_launch(
-                    comm,
-                    launch_status="failed",
-                    launch_error=_SPAWN_REFUSAL,
-                    launch_error_code="runner_spawn_failed",
-                )
-            )
-            try:
-                result = await post()
-            except BaseException:
-                responder.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await responder
-                raise
-            await responder
-            return result
-
-        send = await refuse_launch_for(lambda: _post_hello(client, session_id))
-        assert send.status_code == 202, send.text
-
-        client.headers["X-Forwarded-Email"] = collaborator
-        items = (await client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
-        [error] = [item for item in items if item["type"] == "error"]
-        assert error["code"] == "runner_failed_to_start"
-        assert "failed to spawn runner" not in error["message"]
-        assert "visible to the host owner" in error["message"]
-        snapshot = await client.get(f"/v1/sessions/{session_id}")
-        assert snapshot.status_code == 200, snapshot.text
-        assert "failed to spawn runner" not in snapshot.text
-
-        def retry(user: str) -> Awaitable[httpx.Response]:
-            return client.post(
-                f"/v1/sessions/{session_id}/events",
-                json={"type": "retry_session", "data": {}},
-                headers={"X-Forwarded-Email": user},
-            )
-
-        # Both requesters share one recovery attempt (a single launch is
-        # answered) yet receive differently scoped answers. The host answers
-        # only once both have reached the single-flight, so neither can start
-        # a second recovery after the first one finished.
-        both_joined = asyncio.Event()
-        joined = 0
-        real_single_flight = routes_events._retry_session_single_flight
-
-        async def _count_joiners(**kwargs: Any) -> dict[str, bool | str]:
-            nonlocal joined
-            joined += 1
-            if joined == 2:
-                both_joined.set()
-            return await real_single_flight(**kwargs)
-
-        real_launch = sessions_module._launch_runner_on_host
-
-        async def _launch_after_both_joined(*args: Any, **kwargs: Any) -> Any:
-            await asyncio.wait_for(both_joined.wait(), timeout=budget(5.0))
-            return await real_launch(*args, **kwargs)
-
-        monkeypatch.setattr(routes_events, "_retry_session_single_flight", _count_joiners)
-        monkeypatch.setattr(sessions_module, "_launch_runner_on_host", _launch_after_both_joined)
-        started = time.monotonic()
-        owner_retry, collaborator_retry = await refuse_launch_for(
-            lambda: asyncio.gather(retry(owner), retry(collaborator))
-        )
-        assert joined == 2
-        assert time.monotonic() - started < budget(10.0)
-        assert owner_retry.status_code == 503, owner_retry.text
-        assert _SPAWN_REFUSAL_FLAT in owner_retry.json()["error"]["message"]
-        assert collaborator_retry.status_code == 503, collaborator_retry.text
-        assert "failed to spawn runner" not in collaborator_retry.json()["error"]["message"]
-        assert "visible to the host owner" in collaborator_retry.json()["error"]["message"]
+    assert send.status_code == 202, send.text
+    items = (await auth_host_client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
+    [error] = [item for item in items if item["type"] == "error"]
+    assert _SPAWN_REFUSAL_FLAT in error["message"], error["message"]
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    ["session_not_found", HARNESS_NOT_CONFIGURED_ERROR_CODE],
+    ids=["server-ended", "categorized-refusal"],
+)
 async def test_native_message_for_session_deleted_mid_relaunch_is_not_found(
     client: httpx.AsyncClient,
     app: FastAPI,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
 ) -> None:
-    """A session deleted while its relaunch is in flight answers 404, not a host refusal."""
+    """A session deleted while its relaunch is in flight answers 404, whatever the host said."""
     from omnigent.server.routes import sessions as sessions_module
     from omnigent.server.routes._sessions.helpers import _HostLaunchAttempt
 
@@ -4035,7 +4069,7 @@ async def test_native_message_for_session_deleted_mid_relaunch_is_not_found(
         assert await store.delete_conversation(conv.id)
         return _HostLaunchAttempt(
             runner_id=conv.runner_id or "",
-            error_code="session_not_found",
+            error_code=error_code,
             error="session was deleted while its relaunch was in flight",
         )
 
@@ -4556,11 +4590,13 @@ async def test_side_chat_retry_names_offline_source_host(
     )
 
 
+@pytest.mark.parametrize("parent_on_host", [True, False], ids=["host-parent", "hostless-parent"])
 async def test_sub_agent_retry_does_not_claim_a_launch(
     client: httpx.AsyncClient,
     app: FastAPI,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
+    parent_on_host: bool,
 ) -> None:
     """Resume on a hostless sub-agent points at its parent's runner; no launch is claimed."""
     from omnigent.runtime import set_runner_client
@@ -4568,7 +4604,13 @@ async def test_sub_agent_retry_does_not_claim_a_launch(
 
     monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
     comm = await _connect_host(app)
-    parent_id = (await _inline_launch_session(client, comm))["id"]
+    if parent_on_host:
+        parent_id = (await _inline_launch_session(client, comm))["id"]
+    else:
+        agent = await create_test_agent(client)
+        created = await client.post("/v1/sessions", json={"agent_id": agent["id"]})
+        assert created.status_code == 201, created.text
+        parent_id = created.json()["id"]
     store = SqlAlchemyConversationStore(db_uri)
     parent = store.get_conversation(parent_id)
     assert parent is not None

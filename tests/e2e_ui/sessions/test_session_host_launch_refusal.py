@@ -36,6 +36,8 @@ def _build_removable_interpreter(dst: Path) -> Path:
     (dst / "bin").mkdir(parents=True, exist_ok=True)
     shutil.copyfile(real_venv / "pyvenv.cfg", dst / "pyvenv.cfg")
     (dst / "lib").symlink_to(real_venv / "lib")
+    if (real_venv / "lib64").exists():
+        (dst / "lib64").symlink_to(real_venv / "lib64")
     interpreter = dst / "bin" / "python"
     interpreter.symlink_to(os.path.realpath(real_venv / "bin" / "python"))
     return interpreter

@@ -573,9 +573,17 @@ async def _retry_unavailable_message(
     await _raise_if_runner_re_tunnelled_to_another_replica(
         conv.id, conv.runner_id, conversation_store
     )
+    # Recovery never asks a host to launch a sub-agent; it rides its parent's runner.
+    sub_agent_message = (
+        "This sub-agent runs on its parent session's runner and has no runner of "
+        "its own to restart. Resume the parent session if it is not running, then "
+        "send your message here again."
+    )
     # A side chat or sub-agent runs on an ancestor's host; describe that host.
     host_id = await asyncio.to_thread(routing_host_id, conv, conversation_store)
     if host_id is None:
+        if conv.kind == "sub_agent":
+            return sub_agent_message
         return (
             "This session has no host to relaunch its runner on. "
             "Reconnect the client that started it, then retry."
@@ -584,18 +592,25 @@ async def _retry_unavailable_message(
         return _host_offline_message(next_step="retry")
     host_registry = getattr(app_state, "host_registry", None)
     if host_registry is not None and host_registry.get(host_id) is None:
-        # A host row that is missing or managed: nothing here can start it.
+        host_store = getattr(app_state, "host_store", None)
+        host = (
+            await asyncio.to_thread(host_store.get_host, host_id)
+            if host_store is not None
+            else None
+        )
+        if host is not None and host.sandbox_provider is not None:
+            # Users cannot reconnect a server-managed sandbox themselves.
+            return (
+                "The managed sandbox for this session is not connected to this server. "
+                "Retry in a moment; if it keeps failing, start a new session or ask an "
+                "administrator to check the sandbox."
+            )
         return (
             "The host for this session is not connected to this server. "
             "Retry in a moment; if it keeps failing, reconnect the host."
         )
     if conv.host_id is None and conv.kind == "sub_agent":
-        # Recovery never asks a host to launch a sub-agent; it rides its parent's runner.
-        return (
-            "This sub-agent runs on its parent session's runner and has no runner of "
-            "its own to restart. Resume the parent session if it is not running, then "
-            "send your message here again."
-        )
+        return sub_agent_message
     return (
         "The host was asked to start a runner for this session, but none "
         "connected to the server. Check the runner log on the host, then retry."
@@ -1226,7 +1241,7 @@ def register_events_routes(
             try:
                 return await recovery
             except HostLaunchRefusedError as exc:
-                # The recovery is shared; only the host owner sees the host's text.
+                # Shared recovery: re-scope the refusal text per requester.
                 raise exc.for_viewer(user_id) from exc
         # ── Policy evaluation (path-agnostic) ────────────────
         # Evaluate policies BEFORE persistence/runner forwarding so
@@ -2521,6 +2536,8 @@ def register_events_routes(
                     permission_store=permission_store,
                     raise_host_refusal=True,
                 )
+            except HostLaunchRefusedError as exc:
+                raise exc.for_viewer(user_id) from exc
             except OmnigentError as exc:
                 if exc.code not in (
                     ErrorCode.HARNESS_NOT_CONFIGURED,
@@ -2670,6 +2687,12 @@ def register_events_routes(
                         _host_reg,
                         _host_conn,
                     )
+                    if (launch_attempt.error or launch_attempt.error_code) and (
+                        await asyncio.to_thread(conversation_store.get_conversation, session_id)
+                        is None
+                    ):
+                        # Deleted mid-relaunch: the server, not the host, ended it.
+                        raise _session_not_found()
                     host_error_code = _classify_launch_refusal(
                         launch_attempt.error_code,
                         launch_attempt.error,
@@ -2699,14 +2722,6 @@ def register_events_routes(
                     relaunched_runner_id = launch_attempt.runner_id
                     relaunched_launch_acknowledged = launch_attempt.acknowledged
                     if launch_attempt.error or launch_attempt.error_code:
-                        if (
-                            await asyncio.to_thread(
-                                conversation_store.get_conversation, session_id
-                            )
-                            is None
-                        ):
-                            # Deleted mid-relaunch: the server, not the host, ended it.
-                            raise _session_not_found()
                         # The host answered "failed" without a recognized
                         # category: no runner is coming. Keep the host's
                         # reason in locals for the raise below — recording it

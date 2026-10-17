@@ -10245,7 +10245,7 @@ async def test_retry_session_keeps_error_actionable_when_runner_is_unavailable(
     assert snapshot.json()["items"] == []
 
 
-@pytest.mark.parametrize("host_state", ["offline", "unknown", "reconnected_elsewhere"])
+@pytest.mark.parametrize("host_state", ["offline", "unknown", "managed", "reconnected_elsewhere"])
 async def test_retry_session_explains_unreachable_host(
     client: httpx.AsyncClient,
     app: FastAPI,
@@ -10262,7 +10262,11 @@ async def test_retry_session_explains_unreachable_host(
     host_store = HostStore(db_uri)
     monkeypatch.setattr(app.state, "host_store", host_store, raising=False)
     monkeypatch.setattr(app.state, "host_registry", HostRegistry(), raising=False)
-    if host_state != "unknown":
+    if host_state == "managed":
+        assert host_store.reserve_sandbox_host(
+            host_id=host_id, name="sandbox", user_id="owner@example.com", provider="e2b"
+        )
+    elif host_state != "unknown":
         host_store.upsert_on_connect(host_id, "remote-host", "owner@example.com")
         host_store.set_offline(host_id)
 
@@ -10297,6 +10301,11 @@ async def test_retry_session_explains_unreachable_host(
         "unknown": (
             "The host for this session is not connected to this server. "
             "Retry in a moment; if it keeps failing, reconnect the host."
+        ),
+        "managed": (
+            "The managed sandbox for this session is not connected to this server. "
+            "Retry in a moment; if it keeps failing, start a new session or ask an "
+            "administrator to check the sandbox."
         ),
     }[host_state]
     assert error["message"] == expected
