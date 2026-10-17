@@ -466,6 +466,23 @@ function SideChatComposer({
     textareaRef.current?.focus();
     updateComposer(childId, (current) => ({ ...current, autoFocus: false }));
   }, [autoFocus, ready, childId, updateComposer]);
+  // Typing elsewhere while the fork binds cancels the request so focus is not
+  // pulled away later; a closing menu returning focus to its button does not.
+  useEffect(() => {
+    if (!autoFocus || ready) return;
+    const cancelOnOtherInput = (event: FocusEvent) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target !== textareaRef.current &&
+        target.matches('input, textarea, [contenteditable]:not([contenteditable="false"])')
+      ) {
+        updateComposer(childId, (current) => ({ ...current, autoFocus: false }));
+      }
+    };
+    document.addEventListener("focusin", cancelOnOtherInput);
+    return () => document.removeEventListener("focusin", cancelOnOtherInput);
+  }, [autoFocus, ready, childId, updateComposer]);
   const canSend = text.trim().length > 0 || (!pending && files.length > 0);
   // Slash suggestions mirror the main composer: the session's skills plus /help.
   // Other built-ins (/model, /compact, …) act on the main session and stay out.

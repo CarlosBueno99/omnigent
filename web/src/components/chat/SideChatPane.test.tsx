@@ -288,6 +288,30 @@ describe("side chat opened from a + button", () => {
     expect(screen.getByTestId("side-chat-input")).toBeEnabled();
     expect(screen.getByTestId("side-chat-input")).not.toHaveFocus();
   });
+
+  it("drops a live tab's request when the user starts typing elsewhere while it binds", () => {
+    conversationRegistry.acquire(childId).setState({ boundAgentId: null, sessionStatus: "idle" });
+    useChatStore.setState({
+      sideChatComposers: { [childId]: { text: "", files: [], autoFocus: true } },
+    });
+    renderPane(
+      <>
+        <button type="button" data-testid="menu-trigger" />
+        <textarea data-testid="main-composer" />
+        <SideChatPane childId={childId} />
+      </>,
+    );
+    // A closing menu returning focus to its button does not cancel the request.
+    act(() => screen.getByTestId("menu-trigger").focus());
+    expect(useChatStore.getState().sideChatComposers[childId]?.autoFocus).toBe(true);
+
+    act(() => screen.getByTestId("main-composer").focus());
+    expect(useChatStore.getState().sideChatComposers[childId]?.autoFocus).toBe(false);
+
+    act(() => conversationRegistry.acquire(childId).setState({ boundAgentId: "agent_side" }));
+    expect(screen.getByTestId("side-chat-input")).toBeEnabled();
+    expect(screen.getByTestId("main-composer")).toHaveFocus();
+  });
 });
 
 describe("side-chat selection reply", () => {
