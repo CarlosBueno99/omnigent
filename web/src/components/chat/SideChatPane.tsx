@@ -458,6 +458,14 @@ function SideChatComposer({
   }, [autoSend, agentId, send, childId, clearSideChatDraft, refreshLabels]);
 
   const ready = pending ? !starting : agentId !== null;
+  // A tab opened from a "+" is ready to type without a click. A live fork's
+  // input stays disabled until the child's agent binding arrives, so wait for it.
+  const autoFocus = composer?.autoFocus === true;
+  useEffect(() => {
+    if (!autoFocus || !ready) return;
+    textareaRef.current?.focus();
+    updateComposer(childId, (current) => ({ ...current, autoFocus: false }));
+  }, [autoFocus, ready, childId, updateComposer]);
   const canSend = text.trim().length > 0 || (!pending && files.length > 0);
   // Slash suggestions mirror the main composer: the session's skills plus /help.
   // Other built-ins (/model, /compact, …) act on the main session and stay out.

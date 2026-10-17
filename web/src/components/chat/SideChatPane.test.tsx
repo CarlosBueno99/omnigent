@@ -253,6 +253,43 @@ describe("side chat opened from a text selection", () => {
   });
 });
 
+describe("side chat opened from a + button", () => {
+  it("focuses a pending tab's input at once", () => {
+    useChatStore.setState({
+      sideChatComposers: { "pending:plus": { text: "", files: [], autoFocus: true } },
+    });
+    renderPane(<SideChatPane childId="pending:plus" onStart={vi.fn()} />);
+
+    expect(screen.getByTestId("side-chat-input")).toHaveFocus();
+    expect(useChatStore.getState().sideChatComposers["pending:plus"]?.autoFocus).toBe(false);
+  });
+
+  it("focuses a live tab's input once the child's agent binding enables it", () => {
+    conversationRegistry.acquire(childId).setState({ boundAgentId: null, sessionStatus: "idle" });
+    useChatStore.setState({
+      sideChatComposers: { [childId]: { text: "", files: [], autoFocus: true } },
+    });
+    renderPane(<SideChatPane childId={childId} />);
+    const input = screen.getByTestId("side-chat-input");
+    expect(input).toBeDisabled();
+    expect(input).not.toHaveFocus();
+
+    act(() => conversationRegistry.acquire(childId).setState({ boundAgentId: "agent_side" }));
+
+    expect(input).toBeEnabled();
+    expect(input).toHaveFocus();
+    expect(useChatStore.getState().sideChatComposers[childId]?.autoFocus).toBe(false);
+  });
+
+  it("leaves a re-selected tab's input unfocused", () => {
+    conversationRegistry.acquire(childId).setState({ sessionStatus: "idle" });
+    renderPane(<SideChatPane childId={childId} />);
+
+    expect(screen.getByTestId("side-chat-input")).toBeEnabled();
+    expect(screen.getByTestId("side-chat-input")).not.toHaveFocus();
+  });
+});
+
 describe("side-chat selection reply", () => {
   function selectText(element: HTMLElement) {
     const range = document.createRange();

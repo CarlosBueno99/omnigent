@@ -100,7 +100,7 @@ def test_composer_add_tray_offers_a_side_chat(
     runner_id: str,
     mock_llm_server_url: str,
 ) -> None:
-    """The ``+`` tray starts a working side chat whose composer also opens the slash menu."""
+    """The ``+`` tray starts a side chat whose focused composer also opens the slash menu."""
     base_url, session_id = seeded_session
     question = f"tray-side-{session_id}: answer in the side chat"
     reply = "The add tray started a side chat."
@@ -110,7 +110,10 @@ def test_composer_add_tray_offers_a_side_chat(
 
     page.get_by_test_id("composer-attach").click()
     page.get_by_role("menuitem", name="Start a new side chat").click()
-    page.get_by_test_id("side-chat-input").fill(question)
+    side_input = page.get_by_test_id("side-chat-input")
+    expect(side_input).to_be_enabled(timeout=30_000)
+    expect(side_input).to_be_focused()
+    side_input.fill(question)
     page.get_by_test_id("side-chat-send").click()
     expect(page.locator(".side-chat-backdrop").get_by_text(reply, exact=True)).to_be_visible(
         timeout=30_000
@@ -122,14 +125,15 @@ def test_composer_add_tray_offers_a_side_chat(
 
     # The live side chat shares the main composer's slash menu; /help is the
     # built-in offered on every non-native harness, so it proves the menu opened.
-    side_input = page.get_by_test_id("side-chat-input")
     expect(side_input).to_be_enabled(timeout=30_000)
     side_input.fill("/")
     expect(page.get_by_test_id("slash-menu-item-help")).to_be_visible(timeout=10_000)
 
 
-def test_rail_new_tab_menu_offers_a_side_chat(page: Page, seeded_session: tuple[str, str]) -> None:
-    """The Workspace rail's "Open new" (``+``) menu lists "Side chat"."""
+def test_rail_new_tab_menu_opens_a_focused_side_chat(
+    page: Page, seeded_session: tuple[str, str]
+) -> None:
+    """The rail's "Open new" (``+``) menu lists "Side chat" and opens it ready to type."""
     base_url, session_id = seeded_session
     page.goto(f"{base_url}/c/{session_id}")
     expect(page.get_by_placeholder("Send a message…")).to_be_visible()
@@ -137,7 +141,12 @@ def test_rail_new_tab_menu_offers_a_side_chat(page: Page, seeded_session: tuple[
     open_right_rail(page)
     rail = page.get_by_role("complementary", name="Workspace")
     rail.get_by_role("button", name="Open new", exact=True).click()
-    expect(page.get_by_role("menuitem", name="Side chat", exact=True)).to_be_visible()
+    side_chat_item = page.get_by_role("menuitem", name="Side chat", exact=True)
+    expect(side_chat_item).to_be_visible()
+
+    side_chat_item.click()
+    expect(rail.get_by_role("tab", name="Side chat 1", exact=True)).to_be_visible()
+    expect(page.get_by_test_id("side-chat-input")).to_be_focused()
 
 
 @pytest.mark.parametrize("entrypoint", ["slash", "panel"])
