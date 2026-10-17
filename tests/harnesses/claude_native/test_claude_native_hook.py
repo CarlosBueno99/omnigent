@@ -2372,6 +2372,39 @@ def test_reattach_parked_wait_rides_out_a_host_network_outage(
     assert len(client.calls) == cap * 3 + 2
 
 
+def test_reattach_card_parked_under_the_floor_rides_out_an_outage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card parked for less than the floor still survives an immediate outage.
+
+    When a host network outage severs the first held poll before the floor and
+    then refuses every re-POST, the brief establish-then-sever still proves the
+    server parked the card, so the loop rides out the outage instead of capping.
+    This is the timing where the outage hits seconds after the card appears, so
+    the first sever is a sub-floor flap rather than a long held poll.
+    """
+    cap = claude_native_hook._PERMISSION_MAX_CONSECUTIVE_FAILURES
+    client = _scripted_client(
+        script=[("severed", 1.0)] + [("connect", 30.0)] * (cap * 3) + [("ok", 0.0)],
+        monkeypatch=monkeypatch,
+    )
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", client)
+
+    resp = claude_native_hook._post_hook_with_reattach(
+        url="http://127.0.0.1:8787/v1/sessions/conv_x/hooks/permission-request",
+        headers={},
+        payload={"hook_event_name": "PreToolUse"},
+        hook_label="permission",
+    )
+
+    assert resp is not None and resp.status_code == 200, (
+        "a card parked under the floor fail-asked during a network outage"
+    )
+    # The one sub-floor flap counts once; the whole outage of unreachable
+    # connects never does, so the loop reaches the answer instead of capping.
+    assert len(client.calls) == cap * 3 + 2
+
+
 def test_reattach_re_posts_a_held_poll_whose_reply_never_arrives(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
