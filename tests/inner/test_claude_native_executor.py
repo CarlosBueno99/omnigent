@@ -2224,3 +2224,80 @@ async def test_failed_delivery_cleanup_refuses_while_ownership_is_being_rewritte
     assert isinstance(events[0], ExecutorError)
     assert "Cleanup also failed: bridge ownership is being updated" in events[0].message
     assert events[0].undelivered is True
+
+
+@pytest.mark.asyncio
+async def test_failed_delivery_cleanup_spares_a_pane_owned_only_after_the_delivery_began(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A delivery authorized while the bridge recorded no owner captured none, so an
+    owner recorded afterwards -- even this conversation -- is not one it may reap."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    monkeypatch.setenv(REQUEST_SESSION_ID_ENV_VAR, "conv_a")
+    killed: list[Path] = []
+
+    def record_owner_then_fail(
+        bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0
+    ) -> None:
+        del content, timeout_s
+        (bridge_dir_arg / "bridge.json").write_text(
+            json.dumps({"active_session_id": "conv_a", "active_session_generation": "gen-1"})
+        )
+        raise ClaudePromptTimeout("terminal did not become ready")
+
+    monkeypatch.setattr(claude_native_executor, "inject_user_message", record_owner_then_fail)
+    monkeypatch.setattr(
+        claude_native_executor,
+        "kill_session",
+        lambda bridge_dir_arg, *, timeout_s: killed.append(bridge_dir_arg),
+    )
+
+    events = [
+        event
+        async for event in ClaudeNativeExecutor(bridge_dir).run_turn(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            system_prompt="",
+        )
+    ]
+
+    assert killed == []
+    assert isinstance(events[0], ExecutorError)
+    assert events[0].message == "terminal did not become ready"
+
+
+@pytest.mark.asyncio
+async def test_failed_delivery_cleanup_still_reaps_an_owner_recorded_without_a_generation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A bridge written before generations were recorded still gets its unchanged
+    owner's pane reaped."""
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / "bridge.json").write_text(json.dumps({"active_session_id": "conv_a"}))
+    monkeypatch.setenv(REQUEST_SESSION_ID_ENV_VAR, "conv_a")
+    killed: list[Path] = []
+
+    def fail_inject(bridge_dir_arg: Path, *, content: str, timeout_s: float = 30.0) -> None:
+        del bridge_dir_arg, content, timeout_s
+        raise ClaudePromptTimeout("terminal did not become ready")
+
+    monkeypatch.setattr(claude_native_executor, "inject_user_message", fail_inject)
+    monkeypatch.setattr(
+        claude_native_executor,
+        "kill_session",
+        lambda bridge_dir_arg, *, timeout_s: killed.append(bridge_dir_arg),
+    )
+
+    events = [
+        event
+        async for event in ClaudeNativeExecutor(bridge_dir).run_turn(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            system_prompt="",
+        )
+    ]
+
+    assert killed == [bridge_dir]
+    assert isinstance(events[0], ExecutorError)

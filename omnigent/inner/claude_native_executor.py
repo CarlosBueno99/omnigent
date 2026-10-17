@@ -363,8 +363,8 @@ class ClaudeNativeExecutor(Executor):
         the bridge, so the kill happens only while the bridge still records
         this executor's conversation under the same generation as *owner*.
 
-        :param owner: The owner read when the delivery was authorized, or
-            ``None`` when no delivery captured one.
+        :param owner: The owner read when the delivery was authorized. ``None``
+            (no owner was recorded then) refuses the kill.
         :returns: A cleanup error to show beside the delivery error, or ``None``.
         """
         try:
@@ -394,11 +394,11 @@ class ClaudeNativeExecutor(Executor):
 
     def _owns_pane(self, current: BridgeOwner | None, captured: BridgeOwner | None) -> bool:
         """Whether the advertised pane still belongs to the delivery that failed."""
-        if current is None:
+        if current is None or captured is None:
             return False
         if self._request_session_id is not None and current.session_id != self._request_session_id:
             return False
-        return captured is None or current == captured
+        return current == captured
 
     def _model_command_arg(self, wanted_model: str | None) -> str | None:
         """

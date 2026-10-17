@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import shutil
 import subprocess
 import sys
@@ -59,6 +60,7 @@ from omnigent.harnesses.claude_native.bridge import (
     _write_json_file,
     inject_user_message,
     read_active_session_id,
+    read_bridge_owner,
     write_active_session_id,
     write_tmux_target,
 )
@@ -264,15 +266,7 @@ async def test_run_turn_completes_despite_stalled_submit(
     ), [record.getMessage() for record in caplog.records]
 
 
-# ---------------------------------------------------------------------------
-# A delayed delivery's cleanup must not kill a newer conversation that now
-# owns the same shared pane.
-#
-# claude-native runs ONE physical tmux pane per bridge dir; ``/clear`` moves
-# ``active_session_id`` to the new conversation in place. A delivery of the old
-# conversation that is still parked when it is cancelled or times out is reaped
-# against whatever pane the bridge advertises -- now the new owner's.
-# ---------------------------------------------------------------------------
+# Abandoned deliveries must not reap a pane now owned by a newer conversation.
 
 _OWNER_A = "conv_A"
 _OWNER_B = "conv_B"
@@ -352,6 +346,7 @@ def shared_claude_pane() -> Iterator[tuple[Path, str, str]]:
 
 async def test_cancelled_delivery_cleanup_spares_the_new_pane_owner(
     shared_claude_pane: tuple[Path, str, str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Conversation A's delayed delivery, cancelled after ``/clear`` hands the
     shared pane to conversation B, must not kill B's pane while cleaning up."""
@@ -387,11 +382,18 @@ async def test_cancelled_delivery_cleanup_spares_the_new_pane_owner(
 
         # A's delivery is abandoned (cancel/timeout); the executor reaps it.
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with (
+            caplog.at_level(logging.INFO, logger="omnigent.inner.claude_native_executor"),
+            pytest.raises(asyncio.CancelledError),
+        ):
             await task
     finally:
         file_lock.release()
 
+    # The cleanup ran and chose to spare the pane, rather than never running.
+    assert any("no longer owns the pane" in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
     assert _tmux_session_alive(socket_path, target), (
         "A's cancelled-delivery cleanup killed conversation B's shared pane"
     )
@@ -399,6 +401,7 @@ async def test_cancelled_delivery_cleanup_spares_the_new_pane_owner(
 
 async def test_failed_delivery_cleanup_spares_pane_with_no_recorded_owner(
     shared_claude_pane: tuple[Path, str, str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """With no owning conversation recorded on the bridge, reaping a failed
     delivery must leave the shared pane alone rather than kill it blind."""
@@ -408,8 +411,30 @@ async def test_failed_delivery_cleanup_spares_pane_with_no_recorded_owner(
     executor = ClaudeNativeExecutor(bridge_dir=bridge_dir)
     executor._request_session_id = _OWNER_A
 
-    executor._reap_failed_turn()
+    with caplog.at_level(logging.INFO, logger="omnigent.inner.claude_native_executor"):
+        assert executor._reap_failed_turn() is None
 
+    assert any("owner now unrecorded" in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
     assert _tmux_session_alive(socket_path, target), (
         "cleanup killed the shared pane despite no recorded pane owner"
+    )
+
+
+async def test_failed_delivery_cleanup_still_reaps_the_unchanged_owners_pane(
+    shared_claude_pane: tuple[Path, str, str],
+) -> None:
+    """The fence only spares a pane that changed hands: a conversation whose
+    delivery failed while it still owns the pane gets that pane reaped."""
+    bridge_dir, socket_path, target = shared_claude_pane
+    _write_bridge_owner(bridge_dir, _OWNER_A)
+
+    executor = ClaudeNativeExecutor(bridge_dir=bridge_dir)
+    executor._request_session_id = _OWNER_A
+
+    assert executor._reap_failed_turn(read_bridge_owner(bridge_dir)) is None
+
+    assert not _tmux_session_alive(socket_path, target), (
+        "cleanup left the failing conversation's own pane running"
     )
