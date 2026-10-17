@@ -1118,6 +1118,14 @@ def try_install_harness_cli(key: str) -> HarnessInstallResult:
     try:
         result = subprocess.run(cmd, check=False, timeout=300)
     except subprocess.TimeoutExpired:
+        # A partial upgrade can change dependencies behind an unchanged launcher.
+        if spec is not None:
+            try:
+                resolved = resolve_cli_binary(spec.binary)
+            except OSError:
+                resolved = None
+            if resolved is not None:
+                _invalidate_version_probe_cache(resolved)
         return HarnessInstallResult(False, "install timed out after 300s")
     except OSError as exc:
         return HarnessInstallResult(False, f"install command failed to run: {exc}")

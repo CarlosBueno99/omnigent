@@ -823,6 +823,101 @@ def test_try_install_invalidates_cached_version_after_an_upgrade(
     assert hi._VERSION_PROBE_CACHE[signature] == "0.137.0"
 
 
+@pytest.mark.parametrize(
+    ("new_version", "expected_ready"),
+    [("0.137.0", True), ("0.0.2", False), ("dev-SNAPSHOT", False)],
+)
+def test_timed_out_partial_upgrade_invalidates_only_its_version_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, new_version: str, expected_ready: bool
+) -> None:
+    """A timed-out dependency upgrade leaves readiness needing a fresh version probe."""
+    monkeypatch.setenv("PATH", "/usr/bin")
+    binary = tmp_path / "codex"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    dependency = tmp_path / "dependency-version"
+    dependency.write_text("0.0.1", encoding="utf-8")
+    signature = hi._binary_signature(str(binary))
+    assert signature is not None
+    unrelated = (str(tmp_path / "other-cli"), 1, 1)
+    monkeypatch.setattr(hi, "_VERSION_PROBE_CACHE", {signature: "0.0.1", unrelated: "1.2.3"})
+    monkeypatch.setattr(hi.shutil, "which", lambda name: "/usr/bin/npm" if name == "npm" else None)
+    monkeypatch.setattr(hi, "resolve_cli_binary", lambda _name: str(binary))
+    calls: list[str] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if len(argv) >= 2 and argv[1] == "--version":
+            calls.append("version")
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f"codex-cli {dependency.read_text(encoding='utf-8')}\n",
+                stderr="",
+            )
+        calls.append("install")
+        dependency.write_text(new_version, encoding="utf-8")
+        raise subprocess.TimeoutExpired(argv, 300)
+
+    monkeypatch.setattr(hi.subprocess, "run", run)
+
+    result = hi.try_install_harness_cli(OPENAI_FAMILY)
+
+    assert result == (False, "install timed out after 300s")
+    assert hi._binary_signature(str(binary)) == signature
+    assert calls == ["install"]
+    assert signature not in hi._VERSION_PROBE_CACHE
+    assert hi._VERSION_PROBE_CACHE[unrelated] == "1.2.3"
+    assert os.environ["PATH"] == "/usr/bin"
+    assert hi.harness_cli_installed(OPENAI_FAMILY) is expected_ready
+    assert calls == ["install", "version"]
+    assert hi._VERSION_PROBE_CACHE.get(signature) != "0.0.1"
+
+
+@pytest.mark.parametrize("resolution", ["missing", "unavailable"])
+def test_timeout_reason_survives_unresolvable_post_install_binary(
+    monkeypatch: pytest.MonkeyPatch, resolution: str
+) -> None:
+    monkeypatch.setattr(hi.shutil, "which", lambda name: "/usr/bin/npm" if name == "npm" else None)
+
+    def resolve(_name: str) -> None:
+        if resolution == "unavailable":
+            raise OSError("lookup unavailable")
+        return
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, 300)
+
+    monkeypatch.setattr(hi, "resolve_cli_binary", resolve)
+    monkeypatch.setattr(hi.subprocess, "run", run)
+
+    assert hi.try_install_harness_cli(OPENAI_FAMILY) == (False, "install timed out after 300s")
+
+
+def test_installer_spawn_error_does_not_invalidate_version_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signature = ("/opt/codex", 1, 1)
+    monkeypatch.setattr(hi, "_VERSION_PROBE_CACHE", {signature: "0.0.1"})
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(hi.shutil, "which", lambda name: "/usr/bin/npm" if name == "npm" else None)
+
+    def resolve(_name: str) -> None:
+        raise AssertionError("a failed spawn cannot change the CLI installation")
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("exec blocked")
+
+    monkeypatch.setattr(hi, "resolve_cli_binary", resolve)
+    monkeypatch.setattr(hi.subprocess, "run", run)
+
+    assert hi.try_install_harness_cli(OPENAI_FAMILY) == (
+        False,
+        "install command failed to run: exec blocked",
+    )
+    assert {signature: "0.0.1"} == hi._VERSION_PROBE_CACHE
+    assert os.environ["PATH"] == "/usr/bin"
+
+
 def test_try_install_harness_cli_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """A successful install → ``(True, None)``; the bool wrapper agrees."""
     state = {"installed": False}
