@@ -183,10 +183,9 @@ def test_composer_menu_hides_the_transcript_in_dark_mode(
         f"transcript text shows through the {menu} menu: {dark}"
     )
 
-    # Negative control: the same panel without its blur must expose the ghosting, which
-    # proves the measurement still detects transcript text behind the menu. This relies on
-    # the dark popover staying translucent, so check that first — an opaque theme would make
-    # ghosting impossible and the control moot, which should not read as a measurement bug.
+    # Negative control: the same panel without its blur must expose the ghosting, proving
+    # the measurement can detect transcript text behind the menu. This needs a translucent
+    # dark popover, so check that first — an opaque theme would make the control moot.
     assert _background_alpha(dark["panel_style"]["backgroundColor"]) < 1, (
         f"dark popover is opaque, so the blur negative control is moot: {dark}"
     )
