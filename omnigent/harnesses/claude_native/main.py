@@ -5651,10 +5651,9 @@ def _claude_transcript_records_from_session_items(
                     }
                 )
                 parent_uuid = boundary_uuid
-                for compacted_index, compacted_value in enumerate(compacted_messages):
-                    compacted_message = _json_object(compacted_value)
-                    if compacted_message is None:
-                        continue
+                for compacted_index, compacted_message in enumerate(
+                    _rejoin_split_server_tool_results(compacted_messages)
+                ):
                     cm_uuid = _synthetic_claude_transcript_uuid(
                         session_id=session_id,
                         external_session_id=external_session_id,
@@ -5742,7 +5741,8 @@ def _claude_transcript_record_from_session_item(
     :param bridge_dir: Session bridge directory for re-materializing
         attachment blocks.
     :param allow_native_message_content: Accept Claude-native string and
-        content-block shapes when API-block conversion finds no content.
+        content-block shapes when API-block conversion finds no content, and
+        write a snapshot entry's ``message_id`` back as ``message.id``.
     :returns: Claude transcript record, or ``None`` for unsupported or
         empty Omnigent items.
     """
@@ -5772,6 +5772,10 @@ def _claude_transcript_record_from_session_item(
             message = {"role": "assistant", "content": assistant_content}
         else:
             return None
+        message_id = item.get("message_id") if allow_native_message_content else None
+        if isinstance(message_id, str) and message_id:
+            # Claude Code rejoins records sharing message.id into one API message.
+            message["id"] = message_id
     elif item_type == "function_call":
         name = item.get("name")
         call_id = item.get("call_id")
@@ -5898,6 +5902,124 @@ def _claude_native_message_content(
     # downgrade any unusable image block to its omitted-image placeholder.
     sanitized = sanitize_replayed_image_blocks(blocks)
     return cast(list[_JsonObject], sanitized)
+
+
+_SERVER_TOOL_CALL_TYPES = frozenset({"server_tool_use", "mcp_tool_use"})
+
+
+def _server_tool_result_call_id(block: object) -> str | None:
+    """Return the call id a provider-executed tool result block answers."""
+    if not isinstance(block, dict):
+        return None
+    block_type, call_id = block.get("type"), block.get("tool_use_id")
+    if (
+        isinstance(block_type, str)
+        and block_type != "tool_result"
+        and block_type.endswith("_tool_result")
+        and isinstance(call_id, str)
+    ):
+        return call_id
+    return None
+
+
+def _server_tool_call_ids(blocks: list[object]) -> set[str]:
+    """Return the ids of provider-executed tool calls among assistant blocks."""
+    return {
+        block["id"]
+        for block in blocks
+        if isinstance(block, dict)
+        and block.get("type") in _SERVER_TOOL_CALL_TYPES
+        and isinstance(block.get("id"), str)
+    }
+
+
+def _assistant_snapshot_blocks(entry: _JsonObject) -> list[object] | None:
+    """Return an assistant snapshot entry's content blocks, else ``None``."""
+    content = entry.get("content")
+    if (
+        entry.get("type") == "message"
+        and entry.get("role") == "assistant"
+        and isinstance(content, list)
+    ):
+        return content
+    return None
+
+
+def _rejoin_split_server_tool_results(compacted_messages: list[object]) -> list[_JsonObject]:
+    """
+    Return snapshot entries with each server tool result beside its call.
+
+    Claude Code writes one transcript record per content block and rejoins
+    records sharing ``message.id`` on resume. A snapshot stored without that
+    id replays a ``server_tool_use`` and its ``*_tool_result`` as separate
+    assistant messages: Claude Code drops the lone call as interrupted and
+    the API rejects the orphaned result. Fold each result into the preceding
+    assistant run that holds its call; drop results whose call is missing.
+
+    :param compacted_messages: Snapshot entries of a compaction item.
+    :returns: String-keyed entries with every server tool pair in one message.
+    """
+    rejoined: list[_JsonObject] = []
+    for value in compacted_messages:
+        entry = _json_object(value)
+        if entry is None:
+            continue
+        blocks = _assistant_snapshot_blocks(entry)
+        if blocks is None:
+            rejoined.append(entry)
+            continue
+        called = _server_tool_call_ids(blocks)
+        missing = {
+            call_id
+            for block in blocks
+            if (call_id := _server_tool_result_call_id(block)) is not None
+            and call_id not in called
+        }
+        if not missing:
+            rejoined.append(entry)
+            continue
+        start = len(rejoined)
+        for index in range(len(rejoined) - 1, -1, -1):
+            run_blocks = _assistant_snapshot_blocks(rejoined[index])
+            if run_blocks is None:
+                break
+            found = missing & _server_tool_call_ids(run_blocks)
+            if found:
+                missing -= found
+                start = index
+            if not missing:
+                break
+        kept: _JsonObject = {
+            **entry,
+            "content": [
+                block for block in blocks if _server_tool_result_call_id(block) not in missing
+            ],
+        }
+        if start == len(rejoined):
+            if kept["content"]:
+                rejoined.append(kept)
+            continue
+        run = [*rejoined[start:], kept]
+        del rejoined[start:]
+        rejoined.append(_merge_assistant_snapshot_entries(run))
+    return rejoined
+
+
+def _merge_assistant_snapshot_entries(entries: list[_JsonObject]) -> _JsonObject:
+    """Merge consecutive assistant snapshot entries into one message."""
+    merged: _JsonObject = {**entries[0]}
+    merged["content"] = [
+        block for entry in entries for block in cast(list[object], entry["content"])
+    ]
+    source_ids = [
+        source_id
+        for entry in entries
+        if isinstance(entry.get("forwarded_source_ids"), list)
+        for source_id in entry["forwarded_source_ids"]
+    ]
+    if source_ids:
+        merged["forwarded_source_ids"] = source_ids
+    return merged
 
 
 def _synthetic_claude_transcript_uuid(
