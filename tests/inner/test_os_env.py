@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
 import os
 import shutil
+import signal
+import subprocess
+import sys
+import threading
 import tracemalloc
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -15,6 +21,7 @@ import pytest
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import (
     _child_shell_env,
+    _HelperSpawner,
     _project_root,
     _read_impl,
     _shell_impl,
@@ -515,3 +522,94 @@ def test_shell_command_does_not_see_omnigent_project_root(
     out = result.get("stdout", "")
     assert project_entry in out
     assert str(_project_root()) not in out
+
+
+@contextlib.contextmanager
+def _interrupt_main_thread(when: threading.Event, delivered: threading.Event) -> Iterator[None]:
+    """Raise ``KeyboardInterrupt`` in the main thread once *when* is set."""
+
+    def interrupt(signum: int, frame: object) -> None:
+        if not when.is_set():
+            signal.setitimer(signal.ITIMER_REAL, 0.01)
+            return
+        delivered.set()
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, 0.01)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.posix_only
+def test_helper_spawner_kills_the_process_of_an_interrupted_start() -> None:
+    """An interrupted start waits for the running spawn and kills what it started."""
+    spawner = _HelperSpawner()
+    entered, delivered = threading.Event(), threading.Event()
+    started: list[subprocess.Popen[str]] = []
+
+    def spawn() -> subprocess.Popen[str]:
+        entered.set()
+        assert delivered.wait(10)
+        started.append(
+            subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], text=True)
+        )
+        return started[0]
+
+    with _interrupt_main_thread(entered, delivered), pytest.raises(KeyboardInterrupt):
+        spawner.start(spawn)
+
+    assert len(started) == 1
+    assert started[0].returncode is not None
+
+
+@pytest.mark.posix_only
+def test_helper_spawner_skips_an_interrupted_start_that_never_ran() -> None:
+    """A start cancelled while queued never runs and leaves the spawner serving."""
+    spawner = _HelperSpawner()
+    busy, release, delivered = threading.Event(), threading.Event(), threading.Event()
+    ran: list[str] = []
+
+    def occupy() -> None:
+        busy.set()
+        release.wait(10)
+
+    occupier = threading.Thread(target=spawner.start, args=(occupy,), daemon=True)
+    occupier.start()
+    with _interrupt_main_thread(busy, delivered), pytest.raises(KeyboardInterrupt):
+        spawner.start(lambda: ran.append("cancelled"))
+    release.set()
+    occupier.join(10)
+
+    served: list[object] = []
+    follow_up = threading.Thread(
+        target=lambda: served.append(spawner.start(lambda: "served")), daemon=True
+    )
+    follow_up.start()
+    follow_up.join(10)
+    assert served == ["served"]
+    assert ran == []
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+def test_helper_spawner_serves_a_child_forked_after_it_started() -> None:
+    """A forked child must start its own spawner, not wait on the parent's dead one."""
+    script = (
+        "import os, signal, subprocess, sys\n"
+        "from omnigent.inner.os_env import _HELPER_SPAWNER\n"
+        "def spawn():\n"
+        "    return subprocess.Popen([sys.executable, '-c', 'pass'])\n"
+        "_HELPER_SPAWNER.start(spawn).wait()\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    signal.alarm(30)\n"
+        "    os._exit(_HELPER_SPAWNER.start(spawn).wait())\n"
+        "sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr

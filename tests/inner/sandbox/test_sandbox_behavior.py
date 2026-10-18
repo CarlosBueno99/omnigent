@@ -725,7 +725,7 @@ def test_sandbox_start_in_scratch_helper_starts_in_scratch_tmpdir(
     ``start_in_scratch=True`` lands the helper in the per-helper
     scratch tmpdir, so ``./relative`` writes from the shell tool
     naturally land in the writable scratch dir without prefixing
-    every path with ``$TMPDIR``.
+    every path with ``$TMPDIR``. Later shell calls see the same scratch dir.
 
     The workspace cwd stays bound at its real absolute path on both
     backends so the agent can still read project files; the
@@ -744,6 +744,7 @@ def test_sandbox_start_in_scratch_helper_starts_in_scratch_tmpdir(
         write_result = run_async(
             os_env.shell("printf scratch-write > ./probe.txt; cat ./probe.txt")
         )
+        follow_up_result = run_async(os_env.shell("cat ./probe.txt; echo; pwd"))
     finally:
         os_env.close()
 
@@ -760,6 +761,7 @@ def test_sandbox_start_in_scratch_helper_starts_in_scratch_tmpdir(
         f"Relative write inside scratch failed: stderr={write_result.get('stderr')!r}"
     )
     assert write_result["stdout"] == "scratch-write"
+    assert follow_up_result["stdout"].splitlines() == ["scratch-write", pwd_out], follow_up_result
     assert not (tmp_path / "probe.txt").exists(), (
         "./probe.txt leaked back into the workspace cwd; the helper's "
         "cwd was not actually relocated to the scratch dir."

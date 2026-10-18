@@ -418,7 +418,15 @@ class _HelperSpawner:
         """
         future: concurrent.futures.Future[subprocess.Popen[str]] = concurrent.futures.Future()
         self._queue().put((spawn, future))
-        return future.result()
+        try:
+            return future.result()
+        except BaseException:
+            # An interrupted wait must not leave a running job using the
+            # caller's fds, nor orphan the process it starts.
+            if not future.cancel():
+                with contextlib.suppress(BaseException), future.result() as proc:
+                    proc.kill()
+            raise
 
     def _queue(self) -> queue.SimpleQueue[_SpawnJob]:
         with self._lock:
@@ -436,6 +444,8 @@ class _HelperSpawner:
     def _serve(jobs: queue.SimpleQueue[_SpawnJob]) -> None:
         while True:
             spawn, future = jobs.get()
+            if not future.set_running_or_notify_cancel():
+                continue
             try:
                 future.set_result(spawn())
             except BaseException as exc:  # noqa: BLE001 — forwarded to the requesting thread
