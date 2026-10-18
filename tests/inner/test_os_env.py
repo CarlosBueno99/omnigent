@@ -525,14 +525,21 @@ def test_shell_command_does_not_see_omnigent_project_root(
 
 
 @contextlib.contextmanager
-def _interrupt_main_thread(when: threading.Event, delivered: threading.Event) -> Iterator[None]:
-    """Raise ``KeyboardInterrupt`` in the main thread once *when* is set."""
+def _interrupt_main_thread(
+    when: threading.Event, delivered: threading.Event, count: int = 1
+) -> Iterator[None]:
+    """Raise ``KeyboardInterrupt`` *count* times in the main thread once *when* is set."""
+    remaining = [count]
 
     def interrupt(signum: int, frame: object) -> None:
         if not when.is_set():
             signal.setitimer(signal.ITIMER_REAL, 0.01)
             return
-        delivered.set()
+        remaining[0] -= 1
+        if remaining[0]:
+            signal.setitimer(signal.ITIMER_REAL, 0.01)
+        else:
+            delivered.set()
         raise KeyboardInterrupt
 
     previous = signal.signal(signal.SIGALRM, interrupt)
@@ -545,10 +552,14 @@ def _interrupt_main_thread(when: threading.Event, delivered: threading.Event) ->
 
 
 @pytest.mark.posix_only
-def test_helper_spawner_kills_the_process_of_an_interrupted_start() -> None:
-    """An interrupted start waits for the running spawn and kills what it started."""
+@pytest.mark.parametrize("interrupts", [1, 2])
+def test_helper_spawner_kills_the_process_of_an_interrupted_start(interrupts: int) -> None:
+    """An interrupted start waits for the running spawn, whose process is then killed.
+
+    A further interrupt during that wait must not skip either step.
+    """
     spawner = _HelperSpawner()
-    entered, delivered = threading.Event(), threading.Event()
+    entered, delivered, spawned = threading.Event(), threading.Event(), threading.Event()
     started: list[subprocess.Popen[str]] = []
 
     def spawn() -> subprocess.Popen[str]:
@@ -557,13 +568,22 @@ def test_helper_spawner_kills_the_process_of_an_interrupted_start() -> None:
         started.append(
             subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], text=True)
         )
+        spawned.set()
         return started[0]
 
-    with _interrupt_main_thread(entered, delivered), pytest.raises(KeyboardInterrupt):
-        spawner.start(spawn)
-
-    assert len(started) == 1
-    assert started[0].returncode is not None
+    try:
+        with (
+            _interrupt_main_thread(entered, delivered, interrupts),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            spawner.start(spawn)
+        assert spawned.is_set()
+        assert started[0].wait(timeout=10) == -signal.SIGKILL
+    finally:
+        spawned.wait(10)
+        for proc in started:
+            proc.kill()
+            proc.wait()
 
 
 @pytest.mark.posix_only

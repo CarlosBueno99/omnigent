@@ -421,11 +421,13 @@ class _HelperSpawner:
         try:
             return future.result()
         except BaseException:
-            # An interrupted wait must not leave a running job using the
-            # caller's fds, nor orphan the process it starts.
+            # Keep the caller's fds open until a running spawn ends; the callback
+            # kills its process even if another interrupt cuts this wait short.
             if not future.cancel():
-                with contextlib.suppress(BaseException), future.result() as proc:
-                    proc.kill()
+                future.add_done_callback(self._kill_abandoned)
+                while not future.done():
+                    with contextlib.suppress(BaseException):
+                        concurrent.futures.wait([future])
             raise
 
     def _queue(self) -> queue.SimpleQueue[_SpawnJob]:
@@ -439,6 +441,12 @@ class _HelperSpawner:
                     daemon=True,
                 ).start()
             return self._jobs
+
+    @staticmethod
+    def _kill_abandoned(future: concurrent.futures.Future[subprocess.Popen[str]]) -> None:
+        if future.exception() is None:
+            with future.result() as proc:
+                proc.kill()
 
     @staticmethod
     def _serve(jobs: queue.SimpleQueue[_SpawnJob]) -> None:
