@@ -733,7 +733,11 @@ class _HelperProcessClient:
         if r_fd is not None:
             popen_kwargs["pass_fds"] = (r_fd,)
 
+        spawned = False
+
         def spawn() -> subprocess.Popen[str]:
+            nonlocal spawned
+            spawned = True
             try:
                 return subprocess.Popen(
                     spawn_argv,
@@ -758,6 +762,10 @@ class _HelperProcessClient:
             # short-lived) worker thread; see :class:`_HelperSpawner`.
             self._proc = _HELPER_SPAWNER.start(spawn)
         except Exception:
+            # A spawn that was never queued cannot close its own config fd.
+            if not spawned and r_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(r_fd)
             self._stop_locked()
             raise
 

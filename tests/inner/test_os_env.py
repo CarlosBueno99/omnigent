@@ -605,6 +605,38 @@ def test_helper_spawn_closes_the_parent_config_fd(
     assert config_fd_open == [False]
 
 
+@pytest.mark.posix_only
+def test_helper_start_closes_the_config_fd_of_a_spawn_that_never_ran(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A start that fails before its spawn is queued still closes the parent's config fd."""
+    pipes: list[tuple[int, int]] = []
+    create_pipe = os.pipe
+
+    def recording_pipe() -> tuple[int, int]:
+        read_fd, write_fd = create_pipe()
+        pipes.append((read_fd, os.fstat(read_fd).st_ino))
+        return read_fd, write_fd
+
+    def refuse(spawn: Callable[[], subprocess.Popen[str]]) -> subprocess.Popen[str]:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(os, "pipe", recording_pipe)
+    monkeypatch.setattr(os_env_module._HELPER_SPAWNER, "start", refuse)
+    os_env = create_os_environment(
+        OSEnvSpec(type="caller_process", cwd=str(tmp_path), sandbox=OSEnvSandboxSpec(type="none"))
+    )
+    try:
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            asyncio.run(os_env.shell("echo ok"))
+    finally:
+        os_env.close()
+    assert len(pipes) == 1
+    config_fd, config_inode = pipes[0]
+    with contextlib.suppress(OSError):
+        assert os.fstat(config_fd).st_ino != config_inode
+
+
 def test_helper_spawner_raises_a_failed_spawn_and_keeps_serving() -> None:
     """A spawn error reaches its caller, and the spawner still serves the next start."""
     spawner = _HelperSpawner()
@@ -620,7 +652,6 @@ def test_helper_spawner_raises_a_failed_spawn_and_keeps_serving() -> None:
         assert proc.wait(timeout=10) == 0
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
 def test_helper_spawner_retries_a_thread_that_failed_to_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -652,6 +683,7 @@ def test_helper_spawner_retries_a_thread_that_failed_to_start(
         assert proc.wait(timeout=10) == 0
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
 def test_helper_spawner_serves_a_child_forked_after_it_started() -> None:
     """A forked child must start its own spawner, not wait on the parent's dead one."""
     script = (
