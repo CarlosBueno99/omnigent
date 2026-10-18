@@ -10,7 +10,6 @@ export function isTurnBlockingSend(
 }
 
 // Preserve FIFO even with always-steer enabled or a transient idle status.
-// Native side chats bypass the queue.
 export function shouldQueueSend(
   conversationId: string | null,
   status: "idle" | "streaming",
