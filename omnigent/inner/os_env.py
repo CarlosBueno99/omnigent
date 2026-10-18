@@ -431,13 +431,14 @@ class _HelperSpawner:
     def _queue(self) -> queue.SimpleQueue[_SpawnJob]:
         with self._lock:
             if self._jobs is None:
-                self._jobs = queue.SimpleQueue()
+                jobs: queue.SimpleQueue[_SpawnJob] = queue.SimpleQueue()
                 threading.Thread(
                     target=self._serve,
-                    args=(self._jobs,),
+                    args=(jobs,),
                     name="omnigent-os-helper-spawner",
                     daemon=True,
                 ).start()
+                self._jobs = jobs
             return self._jobs
 
     @staticmethod
@@ -746,10 +747,8 @@ class _HelperProcessClient:
                     **popen_kwargs,
                 )
             finally:
-                # Close the parent's copy of the read end either way —
-                # the child has its own copy (via pass_fds) and the data
-                # has already been written. Closing it here, after Popen,
-                # holds even if the caller below is interrupted first.
+                # The child has its own copy via pass_fds; closing the parent's here
+                # releases it even if the caller is interrupted.
                 if r_fd is not None:
                     with contextlib.suppress(OSError):
                         os.close(r_fd)

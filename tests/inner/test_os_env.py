@@ -621,6 +621,37 @@ def test_helper_spawner_raises_a_failed_spawn_and_keeps_serving() -> None:
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+def test_helper_spawner_retries_a_thread_that_failed_to_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spawner whose thread failed to start starts one for the next request."""
+    spawner = _HelperSpawner()
+    thread_start = threading.Thread.start
+    failures = [RuntimeError("can't start new thread")]
+
+    def fail_first_spawner_thread(thread: threading.Thread) -> None:
+        if thread.name == "omnigent-os-helper-spawner" and failures:
+            raise failures.pop()
+        thread_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_first_spawner_thread)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        spawner.start(lambda: pytest.fail("ran without a spawner thread"))
+
+    started: list[subprocess.Popen[str]] = []
+    follow_up = threading.Thread(
+        target=lambda: started.append(
+            spawner.start(lambda: subprocess.Popen([sys.executable, "-c", "pass"], text=True))
+        ),
+        daemon=True,
+    )
+    follow_up.start()
+    follow_up.join(10)
+    assert len(started) == 1
+    with started[0] as proc:
+        assert proc.wait(timeout=10) == 0
+
+
 def test_helper_spawner_serves_a_child_forked_after_it_started() -> None:
     """A forked child must start its own spawner, not wait on the parent's dead one."""
     script = (
