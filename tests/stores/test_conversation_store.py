@@ -2773,11 +2773,13 @@ def test_non_activity_and_message_append_bumps_updated_at(
     assert fetched.updated_at == 2000
 
 
-def test_resource_event_with_duplicate_message_preserves_updated_at(
+@_NON_ACTIVITY_ITEMS
+def test_non_activity_with_duplicate_message_preserves_updated_at(
     conversation_store: SqlAlchemyConversationStore,
     monkeypatch: pytest.MonkeyPatch,
+    non_activity_item: Callable[[str], NewConversationItem],
 ) -> None:
-    """A resource event plus a deduplicated message contains no new activity."""
+    """A non-activity item plus a deduplicated message contains no new activity."""
     import omnigent.stores.conversation_store.sqlalchemy_store as store_mod
 
     monkeypatch.setattr(store_mod, "now_epoch", lambda: 1000)
@@ -2790,11 +2792,12 @@ def test_resource_event_with_duplicate_message_preserves_updated_at(
     )
     conversation_store.append(conv.id, [message])
     monkeypatch.setattr(store_mod, "now_epoch", lambda: 2000)
+    item = non_activity_item(conv.id)
 
-    appended = conversation_store.append(conv.id, [message, _deleted_terminal_event(conv.id)])
+    appended = conversation_store.append(conv.id, [message, item])
 
     assert appended[0].deduplicated is True
-    assert [item.type for item in appended] == ["message", "resource_event"]
+    assert [appended_item.type for appended_item in appended] == ["message", item.type]
     fetched = conversation_store.get_conversation(conv.id)
     assert fetched is not None
     assert fetched.updated_at == 1000
