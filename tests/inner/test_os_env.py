@@ -13,11 +13,12 @@ import subprocess
 import sys
 import threading
 import tracemalloc
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
+from omnigent.inner import os_env as os_env_module
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import (
     _child_shell_env,
@@ -525,21 +526,13 @@ def test_shell_command_does_not_see_omnigent_project_root(
 
 
 @contextlib.contextmanager
-def _interrupt_main_thread(
-    when: threading.Event, delivered: threading.Event, count: int = 1
-) -> Iterator[None]:
-    """Raise ``KeyboardInterrupt`` *count* times in the main thread once *when* is set."""
-    remaining = [count]
+def _interrupt_main_thread(when: threading.Event) -> Iterator[None]:
+    """Raise ``KeyboardInterrupt`` in the main thread once *when* is set."""
 
     def interrupt(signum: int, frame: object) -> None:
         if not when.is_set():
             signal.setitimer(signal.ITIMER_REAL, 0.01)
             return
-        remaining[0] -= 1
-        if remaining[0]:
-            signal.setitimer(signal.ITIMER_REAL, 0.01)
-        else:
-            delivered.set()
         raise KeyboardInterrupt
 
     previous = signal.signal(signal.SIGALRM, interrupt)
@@ -552,19 +545,15 @@ def _interrupt_main_thread(
 
 
 @pytest.mark.posix_only
-@pytest.mark.parametrize("interrupts", [1, 2])
-def test_helper_spawner_kills_the_process_of_an_interrupted_start(interrupts: int) -> None:
-    """An interrupted start waits for the running spawn, whose process is then killed.
-
-    A further interrupt during that wait must not skip either step.
-    """
+def test_helper_spawner_kills_the_process_of_an_interrupted_start() -> None:
+    """An interrupted start raises at once; its spawn still runs and the process is killed."""
     spawner = _HelperSpawner()
-    entered, delivered, spawned = threading.Event(), threading.Event(), threading.Event()
+    entered, release, spawned = threading.Event(), threading.Event(), threading.Event()
     started: list[subprocess.Popen[str]] = []
 
     def spawn() -> subprocess.Popen[str]:
         entered.set()
-        assert delivered.wait(10)
+        assert release.wait(10)
         started.append(
             subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], text=True)
         )
@@ -572,14 +561,14 @@ def test_helper_spawner_kills_the_process_of_an_interrupted_start(interrupts: in
         return started[0]
 
     try:
-        with (
-            _interrupt_main_thread(entered, delivered, interrupts),
-            pytest.raises(KeyboardInterrupt),
-        ):
+        with _interrupt_main_thread(entered), pytest.raises(KeyboardInterrupt):
             spawner.start(spawn)
-        assert spawned.is_set()
+        assert not spawned.is_set()
+        release.set()
+        assert spawned.wait(10)
         assert started[0].wait(timeout=10) == -signal.SIGKILL
     finally:
+        release.set()
         spawned.wait(10)
         for proc in started:
             proc.kill()
@@ -587,31 +576,33 @@ def test_helper_spawner_kills_the_process_of_an_interrupted_start(interrupts: in
 
 
 @pytest.mark.posix_only
-def test_helper_spawner_skips_an_interrupted_start_that_never_ran() -> None:
-    """A start cancelled while queued never runs and leaves the spawner serving."""
-    spawner = _HelperSpawner()
-    busy, release, delivered = threading.Event(), threading.Event(), threading.Event()
-    ran: list[str] = []
+def test_helper_spawn_closes_the_parent_config_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spawn job itself closes the parent's config fd, so no caller has to."""
+    config_fd_open: list[bool] = []
 
-    def occupy() -> None:
-        busy.set()
-        release.wait(10)
+    def start(spawn: Callable[[], subprocess.Popen[str]]) -> subprocess.Popen[str]:
+        proc = spawn()
+        config_fd = int(proc.args[proc.args.index("--config-fd") + 1])
+        try:
+            os.fstat(config_fd)
+        except OSError:
+            config_fd_open.append(False)
+        else:
+            config_fd_open.append(True)
+        return proc
 
-    occupier = threading.Thread(target=spawner.start, args=(occupy,), daemon=True)
-    occupier.start()
-    with _interrupt_main_thread(busy, delivered), pytest.raises(KeyboardInterrupt):
-        spawner.start(lambda: ran.append("cancelled"))
-    release.set()
-    occupier.join(10)
-
-    served: list[object] = []
-    follow_up = threading.Thread(
-        target=lambda: served.append(spawner.start(lambda: "served")), daemon=True
+    monkeypatch.setattr(os_env_module._HELPER_SPAWNER, "start", start)
+    os_env = create_os_environment(
+        OSEnvSpec(type="caller_process", cwd=str(tmp_path), sandbox=OSEnvSandboxSpec(type="none"))
     )
-    follow_up.start()
-    follow_up.join(10)
-    assert served == ["served"]
-    assert ran == []
+    try:
+        result = asyncio.run(os_env.shell("echo ok"))
+    finally:
+        os_env.close()
+    assert result.get("exit_code") == 0, result
+    assert config_fd_open == [False]
 
 
 def test_helper_spawner_raises_a_failed_spawn_and_keeps_serving() -> None:

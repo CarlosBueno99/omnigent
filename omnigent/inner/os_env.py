@@ -412,22 +412,20 @@ class _HelperSpawner:
     def start(self, spawn: Callable[[], subprocess.Popen[str]]) -> subprocess.Popen[str]:
         """Run *spawn* on the spawner thread and return the started process.
 
+        Every queued *spawn* runs, even if this call is interrupted first, so
+        *spawn* must release its own resources, such as fds it passes to the
+        child. The process of an interrupted call is killed once it starts.
+
         :param spawn: Zero-argument callable that starts the helper, e.g. a
             ``subprocess.Popen`` call bound with its arguments.
         :returns: The process *spawn* started.
         """
         future: concurrent.futures.Future[subprocess.Popen[str]] = concurrent.futures.Future()
-        self._queue().put((spawn, future))
         try:
+            self._queue().put((spawn, future))
             return future.result()
         except BaseException:
-            # Keep the caller's fds open until a running spawn ends; the callback
-            # kills its process even if another interrupt cuts this wait short.
-            if not future.cancel():
-                future.add_done_callback(self._kill_abandoned)
-                while not future.done():
-                    with contextlib.suppress(BaseException):
-                        concurrent.futures.wait([future])
+            future.add_done_callback(self._kill_abandoned)
             raise
 
     def _queue(self) -> queue.SimpleQueue[_SpawnJob]:
@@ -452,8 +450,6 @@ class _HelperSpawner:
     def _serve(jobs: queue.SimpleQueue[_SpawnJob]) -> None:
         while True:
             spawn, future = jobs.get()
-            if not future.set_running_or_notify_cancel():
-                continue
             try:
                 future.set_result(spawn())
             except BaseException as exc:  # noqa: BLE001 — forwarded to the requesting thread
@@ -735,11 +731,10 @@ class _HelperProcessClient:
         popen_kwargs: _PopenKwargs = {}
         if r_fd is not None:
             popen_kwargs["pass_fds"] = (r_fd,)
-        try:
-            # Fork from the long-lived spawner thread, not this (often
-            # short-lived) worker thread; see :class:`_HelperSpawner`.
-            self._proc = _HELPER_SPAWNER.start(
-                lambda: subprocess.Popen(
+
+        def spawn() -> subprocess.Popen[str]:
+            try:
+                return subprocess.Popen(
                     spawn_argv,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -750,19 +745,22 @@ class _HelperProcessClient:
                     env=env,
                     **popen_kwargs,
                 )
-            )
+            finally:
+                # Close the parent's copy of the read end either way —
+                # the child has its own copy (via pass_fds) and the data
+                # has already been written. Closing it here, after Popen,
+                # holds even if the caller below is interrupted first.
+                if r_fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(r_fd)
+
+        try:
+            # Fork from the long-lived spawner thread, not this (often
+            # short-lived) worker thread; see :class:`_HelperSpawner`.
+            self._proc = _HELPER_SPAWNER.start(spawn)
         except Exception:
             self._stop_locked()
             raise
-        finally:
-            # Close the parent's copy of the read end either way —
-            # the child has its own copy (via pass_fds) and the data
-            # has already been written. Leaving the parent's copy
-            # open would prevent the child from seeing EOF on the
-            # pipe after reading the config.
-            if r_fd is not None:
-                with contextlib.suppress(OSError):
-                    os.close(r_fd)
 
         # Post-spawn containment (parent side). A no-op for the POSIX
         # launcher backends (they isolate via wrap_launcher_argv before
