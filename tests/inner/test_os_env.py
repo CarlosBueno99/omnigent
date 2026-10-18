@@ -614,6 +614,21 @@ def test_helper_spawner_skips_an_interrupted_start_that_never_ran() -> None:
     assert ran == []
 
 
+def test_helper_spawner_raises_a_failed_spawn_and_keeps_serving() -> None:
+    """A spawn error reaches its caller, and the spawner still serves the next start."""
+    spawner = _HelperSpawner()
+
+    def fail() -> subprocess.Popen[str]:
+        raise FileNotFoundError("bwrap")
+
+    with pytest.raises(FileNotFoundError, match="bwrap"):
+        spawner.start(fail)
+    with spawner.start(
+        lambda: subprocess.Popen([sys.executable, "-c", "pass"], text=True)
+    ) as proc:
+        assert proc.wait(timeout=10) == 0
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
 def test_helper_spawner_serves_a_child_forked_after_it_started() -> None:
     """A forked child must start its own spawner, not wait on the parent's dead one."""
