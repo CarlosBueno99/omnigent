@@ -6208,10 +6208,13 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
         fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
           const url = typeof input === "string" ? input : input.toString();
           if (url.startsWith("/v1/sessions/conv_snapshot_status?") && !init?.method) {
+            // Like the server, report waiting only to callers that opt in.
+            const query = new URL(url, "http://test.local").searchParams;
+            const reportsWaiting = query.get("include_waiting_status") === "true";
             return mockResponse({
               id: "conv_snapshot_status",
               agent_id: "agent_xyz",
-              status: snapshotStatus,
+              status: snapshotStatus === "waiting" && !reportsWaiting ? "running" : snapshotStatus,
               active_response_id: "resp_done",
               created_at: 0,
               items: [],
@@ -6226,12 +6229,6 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
         const state = useChatStore.getState();
         expect(state.sessionStatus).toBe(snapshotStatus);
         expect(state.status).toBe(expectedStatus);
-        const snapshotUrl = fetchMock.mock.calls
-          .map(([input]) => String(input))
-          .find((url) => url.startsWith("/v1/sessions/conv_snapshot_status?"));
-        expect(
-          new URL(snapshotUrl!, "http://test.local").searchParams.get("include_waiting_status"),
-        ).toBe("true");
       },
     );
 
