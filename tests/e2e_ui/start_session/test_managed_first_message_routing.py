@@ -25,6 +25,7 @@ import httpx
 import pytest
 from playwright.async_api import async_playwright, expect
 
+from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
 from tests.e2e_ui.conftest import _find_free_port, configure_mock_llm, set_fallback_mock_llm
 from tests.e2e_ui.start_session._managed_replica_server import terminate
 from tests.e2e_ui.start_session.test_start_session import _run_in_fresh_loop
@@ -259,6 +260,12 @@ async def _drive(rig: ManagedReplicas, model_url: str) -> None:
             snapshot = (await client.get(rig.a + session_path)).json()
             assert snapshot["host_id"] is None and snapshot["runner_id"] is None
             await expect(page.get_by_test_id("runner-starting-indicator")).to_be_visible()
+            # The unbound sandbox is launching; the composer must not report a missing host.
+            host_chip = page.get_by_test_id("composer-host-select")
+            await expect(host_chip).to_have_attribute(
+                "aria-label", "Host Modal Sandbox, Provisioning sandbox"
+            )
+            await expect(host_chip.locator(".lucide-monitor-cloud")).to_be_visible()
 
             # Keep the real keyless stream healthy across an actual heartbeat;
             # timeout-based stale-stream recovery must not be what fixes this.
@@ -319,6 +326,10 @@ async def _drive(rig: ManagedReplicas, model_url: str) -> None:
             (await client.post(f"{model_url}/gate/release")).raise_for_status()
             await expect(assistant.filter(has_text=_FOLLOWUP_REPLY)).to_be_visible(timeout=20_000)
             await expect(page.get_by_test_id("runner-starting-indicator")).to_have_count(0)
+            await expect(host_chip).to_have_attribute(
+                "aria-label", "Host Modal Sandbox, online", timeout=20_000
+            )
+            await expect(host_chip.locator(".lucide-monitor-cloud")).to_be_visible()
             rows = (await client.get(network_url)).json()
             assert len(streams(rows)) == stream_count
             assert len(posts(rows)) == 3
@@ -481,4 +492,65 @@ async def _drive_sharded(rig: ManagedReplicas, model_url: str, *, keyed: bool) -
             for url in (rig.a, rig.b):
                 await client.post(f"{url}/__test/provision/release")
             await client.post(f"{model_url}/gate/release")
+            await browser.close()
+
+
+# The web's cold-boot grace for a fresh session (STARTING_GRACE_S in useSessionLiveness.ts).
+_COLD_BOOT_GRACE_S = 45
+
+
+@pytest.mark.timeout(300)
+def test_terminal_view_stays_starting_while_sandbox_provisions(
+    managed_replicas: ManagedReplicas,
+) -> None:
+    """
+    A terminal-first session keeps its Terminal view on "Starting up…" through a
+    provision that outlasts the cold-boot grace, instead of offering Resume.
+    """
+    _run_in_fresh_loop(_drive_terminal_startup(managed_replicas))
+
+
+async def _drive_terminal_startup(rig: ManagedReplicas) -> None:
+    async with (
+        async_playwright() as playwright,
+        httpx.AsyncClient(timeout=10, trust_env=False) as client,
+    ):
+        browser = await playwright.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1440, "height": 960})
+        try:
+            await page.goto(rig.ui)
+            agents = (await client.get(f"{rig.a}/v1/agents")).json()["data"]
+            agent_id = next(a["id"] for a in agents if a["name"] == CLAUDE_NATIVE_AGENT_NAME)
+            await page.get_by_test_id("new-chat-landing-agent-select").click()
+            await page.get_by_test_id(f"new-chat-landing-agent-{agent_id}").click()
+            await page.get_by_test_id("new-chat-landing-input").fill("Hey")
+            await page.get_by_test_id("new-chat-landing-submit").click()
+            await expect(page).to_have_url(re.compile(r"/c/[a-f0-9]+"), timeout=30_000)
+            session_path = f"/v1/sessions/{page.url.rsplit('/', 1)[-1]}"
+            await page.get_by_test_id("view-mode-terminal").click()
+            terminal = page.locator('[data-testid="main-terminal-view"][data-visible="true"]')
+            starting = terminal.get_by_test_id("terminal-starting-up")
+            await expect(starting).to_be_visible()
+
+            # The keyed create provisions on B; outlast the grace plus a liveness poll.
+            created_at = (await client.get(rig.b + session_path)).json()["created_at"]
+            await asyncio.sleep(max(0.0, created_at + _COLD_BOOT_GRACE_S + 15 - time.time()))
+            snapshot = (await client.get(rig.b + session_path)).json()
+            assert snapshot["sandbox_status"]["stage"] == "provisioning"
+            assert snapshot["runner_id"] is None
+            await expect(starting).to_be_visible()
+            await expect(terminal.get_by_role("button", name="Resume session")).to_have_count(0)
+            await page.screenshot(path=str(rig.logs / "terminal-provisioning.png"))
+
+            # A freshly loaded tab learns about the launch from the session snapshot.
+            async with page.expect_response(
+                lambda response: "/health?session_ids=" in response.url
+            ):
+                await page.reload()
+            await page.get_by_test_id("view-mode-terminal").click()
+            await expect(starting).to_be_visible()
+            await expect(terminal.get_by_role("button", name="Resume session")).to_have_count(0)
+        finally:
+            for url in (rig.a, rig.b):
+                await client.post(f"{url}/__test/provision/release")
             await browser.close()
