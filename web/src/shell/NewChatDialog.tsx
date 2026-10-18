@@ -102,6 +102,7 @@ import { backgroundSessionTitlesRequestHeaders } from "@/lib/backgroundSessionTi
 import { fetchGithubBranches, fetchGithubRepos, type GithubRepo } from "@/lib/githubIntegration";
 import { composerContextToLabels } from "@/lib/composerContextAdapters";
 import { randomUUID } from "@/lib/randomUUID";
+import { sessionRoutingHostId, setSessionHost } from "@/lib/sessionHost";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
 import { ComposerAttachments } from "@/components/ComposerAttachments";
 import { recordOptimisticTitle } from "@/lib/optimisticTitles";
@@ -2627,6 +2628,7 @@ export function NewChatLandingScreen() {
   const [createError, setCreateError] = useState<string | null>(null);
   // "Connect a host" instructions modal, opened from the host dropdown.
   const [connectOpen, setConnectOpen] = useState(false);
+  const [offlineHostLimit, setOfflineHostLimit] = useState(0);
   // Harness "Set up" dialog target, opened from the composer notice or a picker
   // row; null when closed. One dialog serves every entry point.
   const [setupTarget, setSetupTarget] = useState<{
@@ -5673,6 +5675,11 @@ export function NewChatLandingScreen() {
                   ...(createProjectId !== null ? { workspace: null, git: null } : {}),
                   // Omitted when null so a default create is unchanged.
                   ...(sandboxProvider !== null ? { sandbox_provider: sandboxProvider } : {}),
+                  // The new sandbox host's id, in the server's minted shape;
+                  // keys the create and the session's requests until it binds.
+                  ...(info !== "loading" && info.request_managed_sandbox_host_id
+                    ? { host_id: randomUUID().replace(/-/g, "") }
+                    : {}),
                   ...(sandboxPreviewEnabled && sandboxModels.data?.configuration_revision
                     ? {
                         inference_configuration_revision: sandboxModels.data.configuration_revision,
@@ -5768,7 +5775,13 @@ export function NewChatLandingScreen() {
           }
           const created = (await response.json()) as {
             id: string;
+            labels?: Record<string, string>;
           };
+          // Route the new session's first requests by its chosen host id
+          // before any snapshot of it loads. Only seeds: a null here would
+          // erase a host the session's snapshot already recorded.
+          const requestedHostId = sessionRoutingHostId(null, created.labels);
+          if (requestedHostId !== null) setSessionHost(created.id, requestedHostId);
           return { id: created.id };
         })();
         // Once the create answers, its id is authoritative — stop listening.
@@ -5932,17 +5945,33 @@ export function NewChatLandingScreen() {
     host.host_id === arcaHostId ||
     !!host.sandbox_provider ||
     host.name.toLowerCase().includes("cloud");
-  const orderedHosts = [...onlineHosts, ...offlineHosts];
-  const cloudHosts = orderedHosts.filter(isCloudHostEntry);
-  const localHosts = orderedHosts.filter((host) => !isCloudHostEntry(host));
+  const isReconnectRow = (host: Host) =>
+    host.status === "offline" && host.host_id === thisMachineHostId && canConnectThisMachine;
+  // Keep the selected host and this machine's reconnect action above the fold.
+  const listedHosts = [
+    ...onlineHosts,
+    ...offlineHosts.filter((host) => host.host_id === selectedHostId || isReconnectRow(host)),
+  ];
+  // Preserve /v1/hosts order: most recently updated first.
+  const otherOfflineHosts = offlineHosts.filter(
+    (host) => host.host_id !== selectedHostId && !isReconnectRow(host),
+  );
+  const cloudHosts = listedHosts.filter(isCloudHostEntry);
+  const localHosts = listedHosts.filter((host) => !isCloudHostEntry(host));
+  const myMachines = allHosts.filter((host) => !isCloudHostEntry(host));
+  let myMachinesEmptyText: string | null = null;
+  if (myMachines.length === 0) {
+    myMachinesEmptyText = "No hosts connected yet.";
+  } else if (!myMachines.some((host) => host.status === "online")) {
+    myMachinesEmptyText = "No hosts online.";
+  }
   const hasCloudOptions =
     managedSandboxesEnabled ||
     showDisabledSandboxWithDocs ||
     cloudHosts.length > 0 ||
     showArcaOption;
   const renderHostMenuItem = (host: Host) => {
-    const reconnect =
-      host.status === "offline" && host.host_id === thisMachineHostId && canConnectThisMachine;
+    const reconnect = isReconnectRow(host);
     return (
       <DropdownMenuItem
         key={host.host_id}
@@ -6729,6 +6758,7 @@ export function NewChatLandingScreen() {
                     <DropdownMenu
                       onOpenChange={(open) => {
                         setHostMenuOpen(open);
+                        if (!open) setOfflineHostLimit(0);
                         // Run a requested "connect this machine" only once the menu
                         // has closed.
                         if (!open && pendingConnectRef.current) {
@@ -6752,11 +6782,13 @@ export function NewChatLandingScreen() {
                       >
                         <DropdownMenuTrigger asChild>
                           <ComposerHostTrigger
-                            label={`Host: ${hostLabel}, ${selectedHost?.status === "online" && !sandboxSelected ? "Online" : "Offline"}`}
+                            label={
+                              sandboxSelected
+                                ? `Host: ${hostLabel}`
+                                : `Host: ${hostLabel}, ${selectedHost?.status === "online" ? "Online" : "Offline"}`
+                            }
                             status={
-                              selectedHost?.status === "online" && !sandboxSelected
-                                ? "online"
-                                : "offline"
+                              sandboxSelected ? undefined : (selectedHost?.status ?? "offline")
                             }
                             cloud={isCloudHost}
                             className={cn(
@@ -6862,11 +6894,13 @@ export function NewChatLandingScreen() {
                         <div className="px-2 py-1 text-xs leading-[18px] text-muted-foreground/75">
                           My machines
                         </div>
-                        {allHosts.length === 0 && !showConnectThisMachine && (
-                          <div className="px-2 py-1.5 text-sm text-muted-foreground">
-                            No hosts connected yet.
-                          </div>
-                        )}
+                        {localHosts.length === 0 &&
+                          !showConnectThisMachine &&
+                          myMachinesEmptyText && (
+                            <div className="px-2 py-1.5 text-sm text-muted-foreground">
+                              {myMachinesEmptyText}
+                            </div>
+                          )}
                         {localHosts.map(renderHostMenuItem)}
                         {/* Desktop shell, no active host and machine not listed:
                     show the disconnected local-machine state inline. */}
@@ -6895,6 +6929,51 @@ export function NewChatLandingScreen() {
                               {connectingThisMachine ? <ConnectingText /> : "Use this machine"}
                             </span>
                           </DropdownMenuItem>
+                        )}
+                        {otherOfflineHosts.length > 0 && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              aria-expanded={offlineHostLimit > 0}
+                              onSelect={(event) => {
+                                event.preventDefault();
+                                setOfflineHostLimit((limit) => (limit > 0 ? 0 : 5));
+                              }}
+                              className="text-muted-foreground"
+                            >
+                              {offlineHostLimit > 0 ? (
+                                <ChevronDownIcon className="size-4" />
+                              ) : (
+                                <ChevronRightIcon className="size-4" />
+                              )}
+                              Offline hosts ({otherOfflineHosts.length})
+                            </DropdownMenuItem>
+                            {offlineHostLimit > 0 && (
+                              <>
+                                <div
+                                  role="group"
+                                  aria-label="Offline hosts"
+                                  className="max-h-48 overflow-y-auto"
+                                >
+                                  {otherOfflineHosts
+                                    .slice(0, offlineHostLimit)
+                                    .map(renderHostMenuItem)}
+                                </div>
+                                {offlineHostLimit < otherOfflineHosts.length && (
+                                  <DropdownMenuItem
+                                    onSelect={(event) => {
+                                      event.preventDefault();
+                                      setOfflineHostLimit((limit) => limit + 5);
+                                    }}
+                                    className="text-muted-foreground"
+                                  >
+                                    Show more ({otherOfflineHosts.length - offlineHostLimit}{" "}
+                                    remaining)
+                                  </DropdownMenuItem>
+                                )}
+                              </>
+                            )}
+                          </>
                         )}
                         <DropdownMenuSeparator />
                         {/* Persistent escape hatch: open the connect-a-host
