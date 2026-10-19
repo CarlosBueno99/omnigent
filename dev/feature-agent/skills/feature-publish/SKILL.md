@@ -67,9 +67,10 @@ CUJ's `recordings` in the handoff, as a path under `recordings/`.
   after your turn. Do not upload them yourself.
 - **Local run:** when a Linear key is available, post one ticket comment with a
   `CUJ-n` label per covered CUJ and its clips (GraphQL `fileUpload`, then
-  `commentCreate` with the returned asset URLs). Without a Linear key, tell the
-  user the clip paths so they can post them, and say in each Demo entry that
-  its recordings are pending manual upload.
+  `commentCreate` with the returned asset URLs). Without a Linear key, or when
+  the upload or comment fails, tell the user the clip paths so they can post
+  them, and say in each affected Demo entry that its recordings are pending
+  manual upload.
 
 ## Drive the PR (direct publication)
 

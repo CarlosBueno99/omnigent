@@ -143,6 +143,7 @@ def test_feature_handoff_passes_the_shared_review_gate() -> None:
                 "publish a **ready** PR",
                 "`manual_test`",
                 "`partially_implemented`",
+                "Never commit recordings, and never upload them to the PR.",
             ],
         ),
         (
@@ -171,7 +172,7 @@ def test_feature_handoff_passes_the_shared_review_gate() -> None:
                 "The demos go on the Linear ticket, never on the PR.",
                 "the workflow posts each covered CUJ's listed recordings to the ticket",
                 "(GraphQL `fileUpload`, then `commentCreate` with the returned asset URLs)",
-                "Without a Linear key, tell the user the clip paths",
+                "or when the upload or comment fails, tell the user the clip paths",
                 "leave `pr_url` empty",
             ],
         ),
