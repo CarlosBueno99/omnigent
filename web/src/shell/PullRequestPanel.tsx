@@ -24,6 +24,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { isFeatureEnabled } from "@/lib/capabilities";
+import { useSession } from "@/hooks/useSession";
+import { isEditorLevel } from "@/lib/permissionsApi";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -1031,6 +1035,9 @@ function pullRequestLabel(pr: PullRequestAssociation, sessionProvider?: string |
 
 export function PullRequestPanel({ conversationId }: { conversationId: string }) {
   const isMobileViewport = useIsMobileViewport();
+  const managed = isFeatureEnabled(useServerInfo(), "pull_request_management");
+  const { session } = useSession(managed ? conversationId : null);
+  const canEdit = !managed || isEditorLevel(session?.permissionLevel ?? null);
   const [selection, setSelection] = useState<{ sessionId: string; url?: string }>();
   const [prPickerOpen, setPrPickerOpen] = useState(false);
   const [prPickerTooltipOpen, setPrPickerTooltipOpen] = useState(false);
@@ -1051,9 +1058,12 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
         setRefreshing(true);
         try {
           await Promise.all(
-            ["github-info", "github-changed-files", "github-pr-diff"].map((key) =>
-              queryClient.invalidateQueries({ queryKey: [key, conversationId] }),
-            ),
+            [
+              "github-info",
+              "github-changed-files",
+              "github-pr-diff",
+              ...(managed ? ["session-prs"] : []),
+            ].map((key) => queryClient.invalidateQueries({ queryKey: [key, conversationId] })),
           );
         } finally {
           setRefreshing(false);
@@ -1100,10 +1110,10 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
   const changeSelection = (next?: string) => setSelection({ sessionId: conversationId, url: next });
   const prs = associations?.prs ?? [];
   const selectedPr = prs.find((pr) => pr.url === (selected ?? associations?.selected_pr_url));
-  const linkInEmptyState = prs.length === 0 && panelState.kind === "no-pr";
+  const linkInEmptyState = !managed && prs.length === 0 && panelState.kind === "no-pr";
   const linkControls = (
     <>
-      {linking && (
+      {linking && canEdit && (
         <form
           className="mt-2 flex gap-2"
           onKeyDown={(event) => {
@@ -1170,14 +1180,14 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
         </a>
       </div>
     ) : undefined;
-  const showTrackingControls = !!associations?.tracking_available && !linkInEmptyState;
+  const showTrackingControls = managed || (!!associations?.tracking_available && !linkInEmptyState);
   return (
     <div className="flex h-full min-h-0 flex-col">
       {showTrackingControls ? (
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-2">
           <PanelTitle copy={copy} showTitle={prs.length === 0} />
           <div className="ml-auto flex min-w-0 flex-1 items-center gap-2">
-            {prs.length > 0 && (
+            {prs.length > 0 && !managed && (
               <TooltipProvider>
                 <Select
                   open={prPickerOpen}
@@ -1186,7 +1196,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
                     setPrPickerTooltipOpen(false);
                     setFocusedPrUrl(undefined);
                   }}
-                  value={selected ?? associations.selected_pr_url ?? ""}
+                  value={selected ?? associations?.selected_pr_url ?? ""}
                   onValueChange={changeSelection}
                 >
                   <Tooltip
@@ -1203,7 +1213,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
                     </TooltipTrigger>
                     {selectedPr && (
                       <TooltipContent className="wrap-anywhere">
-                        {pullRequestLabel(selectedPr, associations.provider)}
+                        {pullRequestLabel(selectedPr, associations?.provider)}
                       </TooltipContent>
                     )}
                   </Tooltip>
@@ -1228,7 +1238,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
                             }
                             className="*:[span]:last:block *:[span]:last:min-w-0 *:[span]:last:truncate"
                           >
-                            {pullRequestLabel(pr, associations.provider)}
+                            {pullRequestLabel(pr, associations?.provider)}
                           </SelectItem>
                         </TooltipTrigger>
                         <TooltipContent
@@ -1236,7 +1246,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
                           className="wrap-anywhere"
                           style={isMobileViewport ? { pointerEvents: "none" } : undefined}
                         >
-                          {pullRequestLabel(pr, associations.provider)}
+                          {pullRequestLabel(pr, associations?.provider)}
                         </TooltipContent>
                       </Tooltip>
                     ))}
@@ -1247,13 +1257,17 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
             <div className="ml-auto flex shrink-0 items-center gap-1">
               {refreshButton}
               <TooltipProvider delayDuration={0}>
-                <IconButton label="Link a PR" onClick={() => setLinking(!linking)}>
+                <IconButton
+                  label="Link a PR"
+                  disabled={!canEdit}
+                  onClick={() => setLinking(!linking)}
+                >
                   <PlusIcon className="size-3.5" aria-hidden="true" />
                 </IconButton>
-                {selected && (
+                {selected && !managed && (
                   <IconButton
                     label="Unlink PR"
-                    disabled={update.isPending}
+                    disabled={update.isPending || !canEdit}
                     onClick={() =>
                       update.mutate(
                         { url: selected, action: "remove" },
@@ -1276,6 +1290,55 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
           {refreshButton}
         </div>
       ) : null}
+      {managed && (
+        <ul
+          aria-label="Linked pull requests"
+          className="max-h-48 shrink-0 overflow-y-auto border-b border-border"
+        >
+          {prs.length === 0 && (
+            <li className="p-3 text-ui text-muted-foreground">
+              No linked pull requests. Use Link a PR to add one.
+            </li>
+          )}
+          {prs.map((pr) => (
+            <li key={pr.url} className="flex items-center gap-2 px-2 py-1">
+              <button
+                type="button"
+                className="min-w-0 flex-1 rounded p-1 text-left text-ui hover:bg-muted"
+                aria-pressed={pr.url === (selected ?? associations?.selected_pr_url)}
+                onClick={() => changeSelection(pr.url)}
+              >
+                <span className="block truncate">
+                  {pullRequestLabel(pr, associations?.provider)}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {(info.data?.pr?.url === pr.url ? info.data.pr.state : pr.state) ??
+                    "Status unknown"}
+                </span>
+              </button>
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label={`Unlink ${pr.repository} #${pr.number}`}
+                disabled={!canEdit || update.isPending}
+                onClick={() =>
+                  update.mutate(
+                    { url: pr.url, action: "remove" },
+                    {
+                      onSuccess: (data) => {
+                        if (pr.url === (selected ?? associations?.selected_pr_url))
+                          changeSelection(data.selected_pr_url);
+                      },
+                    },
+                  )
+                }
+              >
+                <Trash2Icon className="size-3.5" />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
       {showTrackingControls && (linking || update.isError) && (
         <div className="shrink-0 border-b border-border p-2">{linkControls}</div>
       )}

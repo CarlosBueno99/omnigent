@@ -68,7 +68,7 @@ export function useComposerGitStatus({
   creationBranch?: string | null;
 }): ComposerGitStatus {
   const worktrees = useSessionWorktrees(sessionId, hostId, workspace);
-  const github = usePullRequestInfo(sessionId ?? undefined);
+  const github = usePullRequestInfo(sessionId ?? undefined, { details: !!workspace });
   const info = github.data;
   const result = worktrees.data;
 

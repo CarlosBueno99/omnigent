@@ -925,6 +925,7 @@ export function AppShell() {
     enabled: canBrowseWorkspace,
   });
   const showFilesPanel = canBrowseWorkspace && environmentQuery.data?.available !== false;
+  const showGithubPanel = showFilesPanel || isFeatureEnabled(serverInfo, "pull_request_management");
   // Per-tab availability for the right workspace rail — the single source
   // of truth shared by the tab-fallback effect below, the rail's mount
   // gate, and the header's collapse toggle, so they can never disagree.
@@ -937,7 +938,7 @@ export function AppShell() {
         changes: showFilesPanel,
         // Pull Requests tab: shares the Files/workspace gate. Non-git workspaces and
         // other unavailable reasons are shown as empty states in the panel.
-        github: showFilesPanel,
+        github: showGithubPanel,
         // Browser soft tabs: available only when the shell hosts the embedded
         // WebContentsView. Plain web and older desktop builds hide the "+"
         // option entirely so they never surface a dead tab whose calls no-op.
@@ -949,7 +950,7 @@ export function AppShell() {
         // rail's tab strip (see WorkspacePanel's TerminalTabsStrip / "+"
         // menu). Mobile keeps a shells drawer (see ``showShellsTab`` below).
       }) as const,
-    [showFilesPanel],
+    [showFilesPanel, showGithubPanel],
   );
   // Whether the rail has anything at all to show. When false the workspace
   // card doesn't mount and the header hides its collapse toggle — a
@@ -2484,6 +2485,7 @@ export function AppShell() {
                     hasAgentInfo={hasAgentInfo}
                     onAgentInfo={() => setAgentInfoOpen(true)}
                     hasHeaderMenu={hasHeaderMenu}
+                    showGithubPanel={showGithubPanel}
                     showFilesPanel={showFilesPanel}
                     hasRailContent={hasRailContent}
                     rightPanelOpen={rightPanelOpen}
@@ -2676,7 +2678,7 @@ export function AppShell() {
                   />
                 </MobilePanelDrawer>
               )}
-              {conversationId && showFilesPanel && (
+              {conversationId && showGithubPanel && (
                 <MobilePanelDrawer
                   open={githubPanelOpen}
                   title="Pull Requests"

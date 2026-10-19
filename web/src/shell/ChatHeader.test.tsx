@@ -123,6 +123,7 @@ function renderHeader(props: {
             onAgentInfo={() => {}}
             hasHeaderMenu={props.hasHeaderMenu ?? false}
             showFilesPanel={props.showFilesPanel ?? false}
+            showGithubPanel={props.showFilesPanel ?? false}
             hasRailContent={props.hasRailContent ?? true}
             rightPanelOpen={props.rightPanelOpen ?? false}
             onToggleRightPanel={() => {}}
@@ -577,6 +578,7 @@ function renderHeaderWithSession(
       onAgentInfo={() => {}}
       hasHeaderMenu={false}
       showFilesPanel={false}
+      showGithubPanel={false}
       hasRailContent={false}
       rightPanelOpen={false}
       onToggleRightPanel={() => {}}

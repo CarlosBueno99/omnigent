@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -330,6 +331,34 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://server") as c:
         yield c
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user,can_sync", [("viewer", False), ("owner", True)])
+async def test_pr_info_only_synchronizes_for_editors(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    monkeypatch: pytest.MonkeyPatch,
+    user: str,
+    can_sync: bool,
+) -> None:
+    from omnigent.server.feature_flags import Feature, FeatureFlags
+
+    state = {"prs": [], "manual": [], "excluded": []}
+    update = Mock(return_value=state)
+    monkeypatch.setattr(
+        _StubConversationStore, "get_pull_requests", lambda *args: state, raising=False
+    )
+    monkeypatch.setattr(_StubConversationStore, "update_pull_requests", update, raising=False)
+    app.state.feature_flags = FeatureFlags(frozenset({Feature.PULL_REQUEST_MANAGEMENT}))
+    response = await client.get(
+        "/v1/sessions/conv_share/resources/github",
+        headers={"X-Forwarded-Email": f"{user}@example.com"},
+    )
+    assert response.status_code == 200
+    assert bool(runner_client.posts) is can_sync
+    update.assert_not_called()  # Empty provider payloads don't require a database write.
 
 
 @pytest.mark.asyncio

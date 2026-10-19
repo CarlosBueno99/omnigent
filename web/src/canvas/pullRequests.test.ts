@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement, type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Conversation } from "@/hooks/useConversations";
 import type {
   PullRequestAssociation,
@@ -17,7 +17,15 @@ import {
   usePullRequests,
 } from "./pullRequests";
 
-vi.mock("@/hooks/usePullRequests", () => ({ fetchPullRequestInfo: vi.fn() }));
+vi.mock("@/hooks/usePullRequests", () => ({
+  fetchPullRequestInfo: vi.fn(),
+  fetchSessionPullRequests: vi.fn(),
+}));
+const feature = vi.hoisted(() => ({ enabled: false, loading: false }));
+vi.mock("@/lib/CapabilitiesContext", () => ({
+  useServerInfo: () =>
+    feature.loading ? "loading" : { features: { pull_request_management: feature.enabled } },
+}));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -109,12 +117,87 @@ describe("PullRequestQueue", () => {
 describe("usePullRequests", () => {
   beforeEach(() => {
     vi.mocked(pullRequestHooks.fetchPullRequestInfo).mockReset();
+    vi.mocked(pullRequestHooks.fetchSessionPullRequests).mockReset();
+    feature.enabled = false;
+    feature.loading = false;
   });
+  afterEach(() => vi.useRealTimers());
 
   function wrapper({ children }: { children: ReactNode }) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     return createElement(QueryClientProvider, { client }, children);
   }
+
+  it("waits for capabilities and ignores an old mode's in-flight results", async () => {
+    feature.loading = true;
+    const legacy = deferred<PullRequestInfo>();
+    vi.mocked(pullRequestHooks.fetchPullRequestInfo).mockReturnValue(legacy.promise);
+    vi.mocked(pullRequestHooks.fetchSessionPullRequests).mockResolvedValue({
+      prs: [association()],
+    });
+    const sessions = [session("s", "main")];
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result, rerender } = renderHook(() => usePullRequests(sessions), {
+      wrapper: ({ children }) => createElement(QueryClientProvider, { client }, children),
+    });
+    expect(pullRequestHooks.fetchPullRequestInfo).not.toHaveBeenCalled();
+    feature.loading = false;
+    rerender();
+    await waitFor(() => expect(pullRequestHooks.fetchPullRequestInfo).toHaveBeenCalledTimes(1));
+    feature.enabled = true;
+    rerender();
+    await waitFor(() => expect(result.current.s?.count).toBe(1));
+    await act(async () => legacy.resolve(info(null)));
+    expect(result.current.s?.count).toBe(1);
+  });
+
+  it("accepts only safe visible associations and prunes removed sessions", async () => {
+    feature.enabled = true;
+    const pending = deferred<{ prs: PullRequestAssociation[] }>();
+    vi.mocked(pullRequestHooks.fetchSessionPullRequests).mockReturnValue(pending.promise);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result, rerender } = renderHook(({ sessions }) => usePullRequests(sessions), {
+      initialProps: { sessions: [session("s", null)] },
+      wrapper: ({ children }) => createElement(QueryClientProvider, { client }, children),
+    });
+    act(() => {
+      client.setQueryData(["session-prs", "other"], { prs: [association()] });
+      client.setQueryData(["session-prs", "s"], {
+        prs: [association({ url: "javascript:alert(1)" }), association()],
+      });
+    });
+    expect(Object.keys(result.current)).toEqual(["s"]);
+    expect(result.current.s?.url).toBe(FORGE_URL);
+    rerender({ sessions: [] });
+    await act(async () => pending.resolve({ prs: [association()] }));
+    expect(result.current).toEqual({});
+  });
+
+  it("loads flagged branchless sessions, retries failures and reflects association mutations", async () => {
+    feature.enabled = true;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(pullRequestHooks.fetchSessionPullRequests)
+      .mockRejectedValueOnce(new Error("Disconnected"))
+      .mockResolvedValue({ prs: [association(), association({ number: 8 })] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const sessions = [session("plain", null)];
+    const { result } = renderHook(() => usePullRequests(sessions), {
+      wrapper: ({ children }) => createElement(QueryClientProvider, { client }, children),
+    });
+    await waitFor(() => expect(pullRequestHooks.fetchSessionPullRequests).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PULL_REQUEST_RETRY_MS + 50);
+    });
+    await waitFor(() =>
+      expect(result.current.plain).toMatchObject({ number: 7, count: 2, state: "UNKNOWN" }),
+    );
+    expect(pullRequestHooks.fetchPullRequestInfo).not.toHaveBeenCalled();
+    act(() => {
+      client.setQueryData(["session-prs", "plain"], { prs: [] });
+    });
+    expect(result.current.plain).toBeNull();
+    vi.useRealTimers();
+  });
 
   it("looks up only branch-bearing sessions, bounded by the concurrency limit", async () => {
     const gates = new Map<string, ReturnType<typeof deferred<PullRequestInfo>>>();

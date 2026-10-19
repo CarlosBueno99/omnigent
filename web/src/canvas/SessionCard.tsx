@@ -133,6 +133,7 @@ function SessionCardComponent({ data, selected }: NodeProps<SessionCardNode>) {
           <span className="truncate">
             {prNumberPrefix}
             {pullRequest.number} {pullRequest.title}
+            {(pullRequest.count ?? 0) > 1 && ` · ${pullRequest.count} linked PRs`}
           </span>
         </a>
       )}

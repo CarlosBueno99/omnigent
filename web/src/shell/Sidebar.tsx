@@ -4354,8 +4354,12 @@ function pullRequestStatus(pr: PullRequest): { icon: LucideIcon; label: string }
 // its content on open) and shared with the GitHub panel's cache.
 function SessionTooltipDetails({ conversation }: { conversation: Conversation }) {
   const viewerId = useContext(ViewerIdContext);
+  const managed = isFeatureEnabled(useContext(ServerInfoContext), "pull_request_management");
   // Only a workspace-bound session has a checkout to read GitHub state from.
-  const { data: github } = usePullRequestInfo(conversation.workspace ? conversation.id : undefined);
+  const { data: github } = usePullRequestInfo(
+    managed || conversation.workspace ? conversation.id : undefined,
+    { details: !!conversation.workspace },
+  );
   // `owner` is null when permissions are off; there's no creator to name then.
   const owner = conversation.owner ?? null;
   const createdBy = owner !== null && isOwnedByViewer(conversation, viewerId) ? "You" : owner;
@@ -4367,6 +4371,7 @@ function SessionTooltipDetails({ conversation }: { conversation: Conversation })
   const association =
     github?.prs?.find((p) => p.url === github.selected_pr_url) ?? github?.prs?.[0] ?? null;
   const prNumber = pr?.number ?? association?.number ?? null;
+  const prCount = github?.prs?.length ?? 0;
   const prStatus = pr ? pullRequestStatus(pr) : null;
   const branch = conversation.git_branch ?? github?.branch ?? null;
   if (createdBy === null && repo === null && prNumber === null && branch === null) return null;
@@ -4393,6 +4398,7 @@ function SessionTooltipDetails({ conversation }: { conversation: Conversation })
           testId="session-tooltip-pr"
         >
           #{prNumber}
+          {managed && prCount > 1 ? ` · ${prCount} linked PRs` : ""}
           {prStatus ? ` · ${prStatus.label}` : ""}
         </SessionTooltipDetail>
       )}
@@ -4423,6 +4429,7 @@ function LegacySessionTooltipContent({
   hostsById: ReadonlyMap<string, Host>;
   hasError: boolean;
 }) {
+  const managed = isFeatureEnabled(useContext(ServerInfoContext), "pull_request_management");
   return (
     <TooltipContent
       side="right"
@@ -4447,14 +4454,18 @@ function LegacySessionTooltipContent({
         <LaptopIcon aria-hidden className="size-3.5 shrink-0" />
         <span className="truncate">{sessionLocationLabel(conversation, hostsById)}</span>
       </p>
-      {conversation.git_branch && (
-        <p
-          data-testid="session-tooltip-branch"
-          className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground"
-        >
-          <GitBranchIcon aria-hidden className="size-3.5 shrink-0" />
-          <span className="truncate">{conversation.git_branch}</span>
-        </p>
+      {managed ? (
+        <SessionTooltipDetails conversation={conversation} />
+      ) : (
+        conversation.git_branch && (
+          <p
+            data-testid="session-tooltip-branch"
+            className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground"
+          >
+            <GitBranchIcon aria-hidden className="size-3.5 shrink-0" />
+            <span className="truncate">{conversation.git_branch}</span>
+          </p>
+        )
       )}
       {hasError && <SessionErrorHint />}
     </TooltipContent>

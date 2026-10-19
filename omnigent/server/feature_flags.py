@@ -27,6 +27,7 @@ class Feature(StrEnum):
     IMPORT_REVIEW = "import_review"
     CUSTOM_AGENTS_SETTINGS_UI = "custom_agents_settings_ui"
     SIDEBAR_GROUPING_UI = "sidebar_grouping_ui"
+    PULL_REQUEST_MANAGEMENT = "pull_request_management"
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,12 @@ class FeatureDefinition:
 
 
 FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
+    FeatureDefinition(
+        feature=Feature.PULL_REQUEST_MANAGEMENT,
+        description="Session PR links, diff review tools, metadata edits and reviewer requests",
+        owner="web",
+        review_by_release="0.20.0",
+    ),
     FeatureDefinition(
         feature=Feature.USAGE_PAGE,
         description="Web Usage page with cost timeline and breakdowns",

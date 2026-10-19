@@ -16,9 +16,12 @@
 // Runner-offline (503 runner_unavailable) and no-os_env (404) are handled the
 // same way as the workspace filesystem hooks — reusing their helpers.
 
+import { useEffect, useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { GitProviderDisplay } from "@/lib/gitProviders";
 import { authenticatedFetch } from "@/lib/identity";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { isFeatureEnabled } from "@/lib/capabilities";
 import { isTempConvId } from "@/lib/tempConversationId";
 import {
   isRunnerUnavailable503,
@@ -150,6 +153,7 @@ export type PullRequestUnavailableReason =
   "not_a_git_repo" | "no_os_env" | "unsupported_remote" | "provider_unavailable" | "host_outdated";
 
 export interface PullRequestAssociation {
+  state?: string | null;
   url: string;
   host: string;
   repository: string;
@@ -159,6 +163,29 @@ export interface PullRequestAssociation {
   /** Git provider id; absent from hosts that predate providers (GitHub). */
   provider?: string;
   provider_display?: GitProviderDisplay;
+}
+
+export async function fetchSessionPullRequests(
+  conversationId: string,
+): Promise<{ prs: PullRequestAssociation[] }> {
+  const prs: PullRequestAssociation[] = [];
+  let after: string | null = null;
+  /* eslint-disable no-await-in-loop -- Each page needs the cursor from the previous response. */
+  do {
+    const query = after ? `?${new URLSearchParams({ after })}` : "";
+    const response = await authenticatedFetch(
+      `/v1/sessions/${encodeURIComponent(conversationId)}/resources/github/prs${query}`,
+    );
+    if (!response.ok) throw await errorFromResponse(response);
+    const page = (await response.json()) as {
+      prs: PullRequestAssociation[];
+      next_cursor?: string | null;
+    };
+    prs.push(...page.prs);
+    after = page.next_cursor ?? null;
+  } while (after);
+  /* eslint-enable no-await-in-loop */
+  return { prs };
 }
 
 function prQuery(prUrl?: string): string {
@@ -409,19 +436,28 @@ export function computePullRequestPollInterval(info: PullRequestInfo | undefined
  */
 export function usePullRequestInfo(
   rawConversationId: string | undefined,
-  options?: { poll?: boolean; prUrl?: string },
+  options?: { poll?: boolean; prUrl?: string; details?: boolean },
 ) {
   // A `temp:*` id (navigate-first new-chat window) has no server session.
   const conversationId = isTempConvId(rawConversationId) ? undefined : rawConversationId;
   const serveable = useWorkspaceServeable(conversationId);
+  const managed = isFeatureEnabled(useServerInfo(), "pull_request_management");
+  const queryClient = useQueryClient();
+  const associations = useQuery({
+    queryKey: ["session-prs", conversationId],
+    queryFn: () => fetchSessionPullRequests(conversationId!),
+    enabled: managed && !!conversationId,
+    staleTime: 10_000,
+    refetchInterval: options?.poll ? 10_000 : false,
+  });
   // Turn-end backstop: refetch when the focused session goes active→idle, so a
   // just-opened PR appears without opening the tab. Keys off the turn lifecycle,
   // so it works for every harness (no per-harness tool detection).
   useTrailingInvalidate(conversationId, useSessionActive(conversationId), "github-info");
-  return useQuery({
+  const info = useQuery({
     queryKey: ["github-info", conversationId, ...(options?.prUrl ? [options.prUrl] : [])],
     queryFn: () => fetchPullRequestInfo(conversationId!, options?.prUrl),
-    enabled: !!conversationId && serveable !== false,
+    enabled: !!conversationId && serveable !== false && options?.details !== false,
     retry: shouldRetryRunnerOffline,
     retryDelay: runnerOfflineRetryDelay,
     staleTime: 30_000,
@@ -433,6 +469,30 @@ export function usePullRequestInfo(
       : false,
     refetchIntervalInBackground: false,
   });
+  useEffect(() => {
+    if (managed && info.dataUpdatedAt) {
+      // Details can import host observations. Only the collection query owns
+      // membership, so a delayed detail response cannot restore removed links.
+      void queryClient.invalidateQueries({ queryKey: ["session-prs", conversationId] });
+    }
+  }, [managed, info.dataUpdatedAt, queryClient, conversationId]);
+  const data = useMemo(() => {
+    if (!managed || !associations.data) return info.data;
+    const prs = associations.data.prs;
+    const selected = [options?.prUrl, info.data?.selected_pr_url, prs[0]?.url].find((url) =>
+      prs.some((pr) => pr.url === url),
+    );
+    return {
+      object: "session.github.info" as const,
+      available: false,
+      ...info.data,
+      pr: info.data?.pr && info.data.pr.url === selected ? info.data.pr : null,
+      selected_pr_url: selected,
+      prs,
+      tracking_available: true,
+    };
+  }, [managed, associations.data, info.data, options?.prUrl]);
+  return { ...info, data };
 }
 
 /** The account (a gh login) and/or base repo (a git remote name or `owner/repo`)
@@ -614,9 +674,20 @@ export function useUpdateSessionPr(conversationId: string) {
       return normalizePullRequestInfo((await response.json()) as PullRequestInfo);
     },
     onSuccess: async (info, body) => {
+      await queryClient.cancelQueries({ queryKey: ["session-prs", conversationId] });
+      queryClient.setQueryData(["session-prs", conversationId], { prs: info.prs ?? [] });
       await queryClient.cancelQueries({ queryKey: ["github-info", conversationId] });
-      queryClient.setQueryData(["github-info", conversationId], info);
-      if (info.selected_pr_url) {
+      queryClient.setQueriesData<PullRequestInfo>(
+        { queryKey: ["github-info", conversationId] },
+        (previous) => {
+          if (!previous || !info.prs?.some((pr) => pr.url === previous.selected_pr_url))
+            return info;
+          return { ...previous, prs: info.prs };
+        },
+      );
+      if (!queryClient.getQueryData(["github-info", conversationId]))
+        queryClient.setQueryData(["github-info", conversationId], info);
+      if (body.action === "attach" && info.selected_pr_url) {
         queryClient.setQueryData(["github-info", conversationId, info.selected_pr_url], info);
       }
       if (body.action === "remove") {

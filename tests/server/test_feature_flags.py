@@ -28,6 +28,7 @@ def test_unset_or_empty_disables_every_feature(environ: dict[str, str]) -> None:
         "import_review": False,
         "custom_agents_settings_ui": False,
         "sidebar_grouping_ui": False,
+        "pull_request_management": False,
     }
 
 

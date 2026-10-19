@@ -1514,6 +1514,56 @@ class SqlAlchemyConversationStore(ConversationStore):
 
         run_write_transaction(self._conv_session_immediate, "set_labels", write)
 
+    def get_pull_requests(self, conversation_id: str) -> dict[str, Any]:
+        with self._session("read_session_pull_requests") as session:
+            raw = session.scalar(
+                select(SqlConversationMetadata.pull_requests).where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.id == conversation_id,
+                )
+            )
+            return json.loads(raw) if raw else {"prs": [], "excluded": [], "manual": []}
+
+    def update_pull_requests(
+        self,
+        conversation_id: str,
+        *,
+        url: str | None = None,
+        action: str = "import",
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from omnigent.stores.conversation_store.pull_requests import update_pull_requests
+
+        def write(session: Session) -> dict[str, Any]:
+            query = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                query = query.with_for_update()
+            meta = session.scalars(query).first()
+            if meta is None:
+                raise LookupError("Session no longer exists")
+            state = update_pull_requests(
+                json.loads(meta.pull_requests) if meta.pull_requests else {},
+                url=url,
+                action=action,
+                snapshot=snapshot,
+            )
+            from omnigent.db.compression import encode
+
+            serialized = json.dumps(state, separators=(",", ":"))
+            # ponytail: one bounded session value; use child rows if larger histories are needed.
+            if len(serialized.encode()) >= 16_384 or len(encode(serialized) or b"") >= 16_384:
+                raise ValueError("Session PR tracking storage is full; no changes were saved")
+            if serialized != meta.pull_requests:
+                meta.pull_requests = serialized
+            return state
+
+        return run_write_transaction(
+            self._session_immediate, "update_session_pull_requests", write
+        )
+
     def set_session_state(
         self,
         conversation_id: str,
@@ -5116,6 +5166,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     source_meta_ref.inference_snapshot if source_meta_ref else None
                 ),
                 project_id=project_id,
+                pull_requests=source_meta_ref.pull_requests if source_meta_ref else None,
             )
             meta_sess.add(fork_meta)
             if creating_clone and agent_id is not None:

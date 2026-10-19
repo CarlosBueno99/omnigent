@@ -3752,6 +3752,10 @@ class HostProcess:
 
         from omnigent.runner import pr_resource
 
+        if op == "github_prs_sync":
+            from omnigent.runner.session_prs import SessionPrRegistry
+
+            return SessionPrRegistry(str(params["session_id"])).sync(params)
         if op == "github_set_preference":
             return pr_resource.set_pr_preference(
                 workspace,

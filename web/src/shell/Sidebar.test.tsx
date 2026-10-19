@@ -3583,7 +3583,7 @@ describe("Sidebar view options", () => {
         "Branchonboarding-flow",
       );
     });
-    expect(usePullRequestInfoMock).toHaveBeenCalledWith("conv_gh");
+    expect(usePullRequestInfoMock).toHaveBeenCalledWith("conv_gh", { details: true });
   });
 
   it("shows the tracked PR number when gh can't resolve its state", async () => {
@@ -3627,8 +3627,24 @@ describe("Sidebar view options", () => {
       pointerType: "mouse",
     });
     await screen.findByTestId("session-tooltip-content");
-    expect(usePullRequestInfoMock).toHaveBeenCalledWith(undefined);
+    expect(usePullRequestInfoMock).toHaveBeenCalledWith(undefined, { details: false });
     expect(screen.queryByTestId("session-tooltip-repo")).toBeNull();
+  });
+
+  it.each([false, true])("shows flagged offline PR counts with grouping=%s", async (grouping) => {
+    usePullRequestInfoMock.mockReturnValue({
+      data: { pr: null, prs: [{ number: 7 }, { number: 8 }] },
+    });
+    mockConversations([conv("conv_offline", "Codex")]);
+    renderSidebar(true, "/", undefined, {
+      ...FALLBACK_SERVER_INFO,
+      features: { pull_request_management: true, sidebar_grouping_ui: grouping },
+    });
+    fireEvent.pointerMove(screen.getByRole("link", { name: "conv_offline" }), {
+      pointerType: "mouse",
+    });
+    expect(await screen.findByTestId("session-tooltip-pr")).toHaveTextContent("#7 · 2 linked PRs");
+    expect(usePullRequestInfoMock).toHaveBeenCalledWith("conv_offline", { details: false });
   });
 
   it("names the creator in the session tooltip", async () => {

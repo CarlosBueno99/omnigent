@@ -54,6 +54,21 @@ class SessionPullRequest(PullRequestRef):
     title_checked_at: float = 0
     title_lookup_timed_out: bool = False
 
+    def merge(self, incoming: SessionPullRequest) -> SessionPullRequest:
+        """Keep the strongest observation and the latest title lookup on replay."""
+        relationships = ("inferred", "attached", "worked_on", "created")
+        strongest = max((self, incoming), key=lambda pr: relationships.index(pr.relationship))
+        latest_title = max((self, incoming), key=lambda pr: pr.title_checked_at)
+        return strongest.model_copy(
+            update={
+                "first_seen_at": min(self.first_seen_at, incoming.first_seen_at),
+                "last_seen_at": max(self.last_seen_at, incoming.last_seen_at),
+                "title": latest_title.title,
+                "title_checked_at": latest_title.title_checked_at,
+                "title_lookup_timed_out": latest_title.title_lookup_timed_out,
+            }
+        )
+
 
 class _Associations(BaseModel):
     schema_version: Literal[1] = 1
@@ -67,6 +82,10 @@ class _Registry(_Associations):
 
 class _ProviderRegistry(_Associations):
     order: list[str] = Field(default_factory=list)
+
+
+class _ServerSnapshot(_Registry):
+    manual: list[str] = Field(default_factory=list)
 
 
 class SessionPrRegistry:
@@ -231,6 +250,37 @@ class SessionPrRegistry:
                 state.excluded.append(reference.url)
             # Commit the exclusion before deleting its companion association.
             self._write(state, legacy_first=reference.provider != "github")
+
+    def sync(self, snapshot: dict[str, object]) -> dict[str, object]:
+        """Apply server choices atomically and return legacy observations for import."""
+        incoming = _ServerSnapshot.model_validate(snapshot)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            with FileLock(str(self.path) + ".lock", timeout=1):
+                state = self._read()
+                previous = state.model_dump()
+                entries = {pr.url: pr for pr in state.prs}
+                excluded = set(state.excluded)
+                manual = {PullRequestRef.from_url(url).url for url in incoming.manual}
+                for entry in incoming.prs:
+                    entry = entry.model_copy(
+                        update=PullRequestRef.from_url(entry.url).model_dump()
+                    )
+                    if entry.url in manual:
+                        excluded.discard(entry.url)
+                    existing = entries.get(entry.url)
+                    entries[entry.url] = existing.merge(entry) if existing else entry
+                excluded.update(PullRequestRef.from_url(url).url for url in incoming.excluded)
+                state.excluded = sorted(excluded)
+                state.prs = [entry for url, entry in entries.items() if url not in excluded]
+                if state.model_dump() != previous:
+                    self._write(state)
+                return {
+                    "prs": [entry.model_dump() for entry in state.prs],
+                    "excluded": state.excluded,
+                }
+        except FileLockTimeout as exc:
+            raise ValueError("PR tracking is busy; try again.") from exc
 
 
 def observation_key(source: str, call_id: str, payload: object) -> str:

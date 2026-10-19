@@ -1369,6 +1369,17 @@ def register_resource_routes(
             session_id, "update_session_pr", url=body["url"], action=body.get("action", "attach")
         )
 
+    @app.post("/v1/sessions/{session_id}/resources/github/prs/sync")
+    async def sync_github_prs(session_id: str, request: Request) -> dict[str, object]:
+        from omnigent.runner.session_prs import SessionPrRegistry
+
+        try:
+            return await asyncio.to_thread(
+                SessionPrRegistry(session_id).sync, await request.json()
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/v1/sessions/{session_id}/resources/github/preferences")
     async def set_github_preference_route(session_id: str, request: Request) -> JSONResponse:
         body = await request.json()

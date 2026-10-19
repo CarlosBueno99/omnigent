@@ -52,6 +52,7 @@ from omnigent.server.auth import (
     LEVEL_READ,
     AuthProvider,
 )
+from omnigent.server.feature_flags import Feature, FeatureFlags
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
@@ -2923,6 +2924,60 @@ def register_resources_routes(
     # ``/resources/github`` is not captured as a resource id. The diff route
     # lives on ``file_read_router`` (gzip) above.
 
+    def pr_management_enabled(request: Request) -> bool:
+        return getattr(request.app.state, "feature_flags", FeatureFlags()).enabled(
+            Feature.PULL_REQUEST_MANAGEMENT
+        )
+
+    async def sync_prs(session_id: str, conv: Conversation) -> None:
+        state = await asyncio.to_thread(conversation_store.get_pull_requests, session_id)
+        try:
+            status, snapshot = await _proxy_post_to_runner(
+                session_id, f"/v1/sessions/{session_id}/resources/github/prs/sync", state, conv
+            )
+        except OmnigentError as exc:
+            if exc.code != ErrorCode.RUNNER_UNAVAILABLE:
+                raise
+            snapshot = await _write_workspace_via_host(
+                session_id,
+                conv,
+                op="github_prs_sync",
+                host_params={**state, "session_id": session_id},
+            )
+            status = 200 if snapshot is not None else 503
+        if (
+            status < 400
+            and snapshot
+            and any(snapshot.get(key) for key in ("prs", "excluded", "pr"))
+        ):
+            await asyncio.to_thread(
+                conversation_store.update_pull_requests, session_id, snapshot=snapshot
+            )
+
+    @router.get("/sessions/{session_id}/resources/github/prs", response_model=None)
+    async def list_session_prs(
+        request: Request,
+        session_id: str,
+        limit: int = Query(50, ge=1, le=100),
+        after: str | None = Query(None, max_length=16_383),
+    ) -> dict[str, Any]:
+        await _validate_session(session_id, request, LEVEL_READ)
+        if not pr_management_enabled(request):
+            raise HTTPException(status_code=404, detail="PR management is disabled")
+        state = await asyncio.to_thread(conversation_store.get_pull_requests, session_id)
+        # The unique session lookup reads one size-bounded value. URL order makes
+        # continuation stable if links before the cursor are removed.
+        remaining = sorted(
+            (entry for entry in state["prs"] if after is None or entry["url"] > after),
+            key=lambda entry: entry["url"],
+        )
+        page = remaining[:limit]
+        return {
+            "object": "session.pull_requests",
+            "prs": page,
+            "next_cursor": page[-1]["url"] if len(remaining) > limit else None,
+        }
+
     @router.get(
         "/sessions/{session_id}/resources/github",
         response_model=None,
@@ -2944,14 +2999,66 @@ def register_resources_routes(
         :returns: The ``session.github.info`` object.
         """
         conv = await _validate_session(session_id, request, LEVEL_READ)
-        return await _fs_get_with_host_fallback(
-            session_id,
-            conv,
-            op="github_info",
-            host_params={"pr_url": pr_url} if pr_url else {},
-            runner_params={"pr_url": pr_url} if pr_url else None,
-            runner_path=f"/v1/sessions/{session_id}/resources/github",
+        managed = pr_management_enabled(request)
+        can_import = managed and (
+            permission_store is None
+            or await asyncio.to_thread(
+                check_session_access,
+                _get_user_id(request, auth_provider),
+                session_id,
+                LEVEL_EDIT,
+                permission_store,
+                conversation_store,
+                conversation=conv,
+            )
         )
+        result: dict[str, Any]
+        sync_warning = None
+        if can_import:
+            # Older hosts still expose associations through their info response.
+            try:
+                with contextlib.suppress(OmnigentError, HTTPException):
+                    await sync_prs(session_id, conv)
+            except ValueError as exc:
+                sync_warning = str(exc)
+        try:
+            result = await _fs_get_with_host_fallback(
+                session_id,
+                conv,
+                op="github_info",
+                host_params={"pr_url": pr_url} if pr_url else {},
+                runner_params={"pr_url": pr_url} if pr_url else None,
+                runner_path=f"/v1/sessions/{session_id}/resources/github",
+            )
+        except (OmnigentError, HTTPException):
+            if not managed:
+                raise
+            result = {
+                "object": "session.github.info",
+                "available": False,
+                "warnings": ["PR details are unavailable. Connect the host and refresh."],
+            }
+        if managed:
+            if can_import and any(result.get(key) for key in ("prs", "excluded", "pr")):
+                try:
+                    await asyncio.to_thread(
+                        conversation_store.update_pull_requests, session_id, snapshot=result
+                    )
+                except ValueError as exc:
+                    sync_warning = str(exc)
+            state = await asyncio.to_thread(conversation_store.get_pull_requests, session_id)
+            urls = {entry["url"] for entry in state["prs"]}
+            detail_url = (result.get("pr") or {}).get("url")
+            selected = next(
+                (url for url in (pr_url, detail_url) if url in urls),
+                next(iter(state["prs"]), {}).get("url"),
+            )
+            result.update(prs=state["prs"], tracking_available=True, selected_pr_url=selected)
+            if detail_url != selected:
+                result["pr"] = None
+            if sync_warning:
+                result["warnings"] = [*(result.get("warnings") or []), sync_warning]
+        return result
 
     @router.get(
         "/sessions/{session_id}/resources/github/changes",
@@ -2985,6 +3092,32 @@ def register_resources_routes(
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("url"), str):
             raise HTTPException(status_code=400, detail="Expected a pull request URL")
+        if pr_management_enabled(request):
+            if body.get("action", "attach") not in ("attach", "remove"):
+                raise HTTPException(status_code=400, detail="Expected attach or remove")
+            try:
+                state = await asyncio.to_thread(
+                    conversation_store.update_pull_requests,
+                    session_id,
+                    url=body["url"],
+                    action=body.get("action", "attach"),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            from omnigent.runner.session_prs import PullRequestRef
+
+            selected = (
+                PullRequestRef.from_url(body["url"]).url
+                if body.get("action", "attach") == "attach"
+                else next(iter(state["prs"]), {}).get("url")
+            )
+            return {
+                "object": "session.github.info",
+                "available": False,
+                "tracking_available": True,
+                "prs": state["prs"],
+                "selected_pr_url": selected,
+            }
         params = {
             "url": body["url"],
             "action": body.get("action", "attach"),

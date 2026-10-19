@@ -1211,6 +1211,21 @@ class ConversationStore(ABC):
         """
         ...
 
+    def get_pull_requests(self, conversation_id: str) -> dict[str, Any]:
+        """Read server-owned PR associations and removal exclusions."""
+        raise NotImplementedError
+
+    def update_pull_requests(
+        self,
+        conversation_id: str,
+        *,
+        url: str | None = None,
+        action: str = "import",
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically update associations without provider I/O."""
+        raise NotImplementedError
+
     @abstractmethod
     def set_session_state(
         self,

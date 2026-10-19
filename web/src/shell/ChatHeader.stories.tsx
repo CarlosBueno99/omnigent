@@ -55,6 +55,7 @@ const meta = {
     onAgentInfo: () => undefined,
     hasHeaderMenu: false,
     showFilesPanel: false,
+    showGithubPanel: false,
     hasRailContent: false,
     rightPanelOpen: false,
     onToggleRightPanel: () => undefined,
@@ -86,6 +87,7 @@ export const FiledSessionWithPresence: Story = {
     canShare: true,
     hasRailContent: true,
     showFilesPanel: true,
+    showGithubPanel: true,
   },
   decorators: [
     (Story) => {

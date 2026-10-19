@@ -1374,3 +1374,37 @@ def test_shell_continuation_respects_quoting(quote: str, created: bool) -> None:
     refs, was_created = extract_prs("Bash", {"command": command}, A)
     assert [pr.url for pr in refs] == [A]
     assert was_created is created
+
+
+def test_server_sync_imports_legacy_exclusions_and_preserves_removal(tmp_path: Path) -> None:
+    registry = SessionPrRegistry("session", root=tmp_path)
+    url = "https://github.com/acme/app/pull/7"
+    reference = PullRequestRef.from_url(url)
+    registry.record([reference], relationship="created", source="test")
+    snapshot = registry.sync({})
+    assert len(snapshot["prs"]) == 1
+    registry.remove(url)
+    assert registry.sync({})["excluded"] == [url]
+    assert registry.sync(snapshot)["prs"] == []
+    assert len(registry.sync({**snapshot, "manual": [url]})["prs"]) == 1
+    registry.sync({"excluded": [url]})
+    registry.record([reference], relationship="created", source="replay")
+    assert registry.list() == []
+
+
+def test_server_sync_preserves_newer_observations_and_reports_busy(tmp_path: Path) -> None:
+    registry = SessionPrRegistry("session", root=tmp_path)
+    reference = PullRequestRef.from_url(A)
+    registry.record([reference], relationship="inferred", source="branch", timestamp=1)
+    registry.update_titles({A: "Old title"}, timestamp=2)
+    stale = registry.sync({})
+    registry.record([reference], relationship="created", source="agent", timestamp=4)
+    registry.update_titles({A: "New title"}, timestamp=5)
+    latest = registry.list()[0]
+    registry.sync(stale)
+    assert registry.list() == [latest]
+    assert latest.first_seen_at == 1 and latest.last_seen_at == 4
+    assert latest.relationship == "created" and latest.title == "New title"
+    with FileLock(str(registry.path) + ".lock"):
+        with pytest.raises(ValueError, match="busy"):
+            registry.sync(stale)

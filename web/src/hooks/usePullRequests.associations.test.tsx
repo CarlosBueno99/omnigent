@@ -6,7 +6,12 @@ import {
   usePullRequestChangedFiles,
   usePullRequestInfo,
   useUpdateSessionPr,
+  fetchSessionPullRequests,
+  type PullRequestAssociation,
+  type PullRequestInfo,
 } from "./usePullRequests";
+import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
+import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 
 vi.mock("./useWorkspaceChangedFiles", async (importOriginal) => ({
   ...(await importOriginal<typeof WorkspaceChangedFiles>()),
@@ -14,6 +19,135 @@ vi.mock("./useWorkspaceChangedFiles", async (importOriginal) => ({
 }));
 
 afterEach(() => vi.unstubAllGlobals());
+
+const first: PullRequestAssociation = {
+  url: "https://github.com/team/project/pull/7",
+  host: "github.com",
+  repository: "team/project",
+  number: 7,
+  relationship: "attached",
+};
+const second = { ...first, url: "https://github.com/team/project/pull/8", number: 8 };
+
+it("follows association cursors", async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ prs: [first], next_cursor: first.url })))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ prs: [second], next_cursor: null })));
+  vi.stubGlobal("fetch", fetch);
+  expect(await fetchSessionPullRequests("conv")).toEqual({ prs: [first, second] });
+  expect(String(fetch.mock.calls[1][0])).toContain(`after=${encodeURIComponent(first.url)}`);
+});
+
+it("keeps merged data stable and does not restore links from a late detail response", async () => {
+  let resolveDetails!: (response: Response) => void;
+  const pendingDetails = new Promise<Response>((resolve) => {
+    resolveDetails = resolve;
+  });
+  let prs = [first, second];
+  const stale: PullRequestInfo = {
+    object: "session.github.info",
+    available: false,
+    tracking_available: true,
+    prs,
+    selected_pr_url: second.url,
+  };
+  let detailRequests = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        prs = [second];
+        return new Response(JSON.stringify({ ...stale, prs }));
+      }
+      if (String(input).includes("/github/prs")) return new Response(JSON.stringify({ prs }));
+      if (++detailRequests === 1) return pendingDetails;
+      return new Response(JSON.stringify({ ...stale, prs }));
+    }),
+  );
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { result, rerender, unmount } = renderHook(
+    () => ({
+      info: usePullRequestInfo("conv", { prUrl: second.url }),
+      update: useUpdateSessionPr("conv"),
+    }),
+    {
+      wrapper: ({ children }) => (
+        <CapabilitiesProvider
+          info={{ ...FALLBACK_SERVER_INFO, features: { pull_request_management: true } }}
+        >
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        </CapabilitiesProvider>
+      ),
+    },
+  );
+  await waitFor(() => expect(result.current.info.data?.prs).toHaveLength(2));
+  const data = result.current.info.data;
+  rerender();
+  expect(result.current.info.data).toBe(data);
+  await act(() => result.current.update.mutateAsync({ url: first.url, action: "remove" }));
+  await waitFor(() => expect(result.current.info.data?.prs).toEqual([second]));
+  await act(async () => resolveDetails(new Response(JSON.stringify(stale))));
+  expect(client.getQueryData(["session-prs", "conv"])).toEqual({ prs: [second] });
+  expect(result.current.info.data?.selected_pr_url).toBe(second.url);
+  unmount();
+  client.clear();
+});
+
+it("loads workspace-free summaries without fetching provider details", async () => {
+  const fetch = vi.fn(
+    async (_input: RequestInfo | URL) => new Response(JSON.stringify({ prs: [first] })),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { result, unmount } = renderHook(() => usePullRequestInfo("conv", { details: false }), {
+    wrapper: ({ children }) => (
+      <CapabilitiesProvider
+        info={{ ...FALLBACK_SERVER_INFO, features: { pull_request_management: true } }}
+      >
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </CapabilitiesProvider>
+    ),
+  });
+  await waitFor(() => expect(result.current.data?.prs).toEqual([first]));
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(String(fetch.mock.calls[0][0])).toMatch(/\/github\/prs$/);
+  unmount();
+  client.clear();
+});
+
+it("preserves the selected PR's cached metadata when unlinking another PR", async () => {
+  const response = {
+    object: "session.github.info",
+    available: false,
+    prs: [second],
+    selected_pr_url: second.url,
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response(JSON.stringify(response))),
+  );
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const cached = {
+    ...response,
+    available: true,
+    prs: [first, second],
+    pr: { url: second.url, title: "Selected title" },
+  };
+  client.setQueryData(["github-info", "conv", second.url], cached);
+  const { result, unmount } = renderHook(() => useUpdateSessionPr("conv"), {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+  await act(() => result.current.mutateAsync({ url: first.url, action: "remove" }));
+  expect(client.getQueryData(["github-info", "conv", second.url])).toEqual({
+    ...cached,
+    prs: [second],
+  });
+  unmount();
+  client.clear();
+});
 
 it.each([
   { url: "https://github.com/team/project/pull/7", staleSelection: false },

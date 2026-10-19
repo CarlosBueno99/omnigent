@@ -9,6 +9,8 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type * as UsePullRequestsModule from "@/hooks/usePullRequests";
+import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
+import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import type {
   PullRequest,
   PullRequestAssociation,
@@ -20,6 +22,7 @@ import type {
 } from "@/hooks/usePullRequests";
 
 const state = vi.hoisted(() => ({
+  update: vi.fn(),
   info: null as {
     data?: PullRequestInfo;
     isLoading: boolean;
@@ -65,7 +68,7 @@ vi.mock("@/hooks/usePullRequests", async (importOriginal) => ({
   fetchPullRequestFileContents: async () => ({ before: "old", after: "new" }),
   // The account selector (shown in the repo-unresolved empty state) calls this;
   // stub the mutation shape it reads.
-  useUpdateSessionPr: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+  useUpdateSessionPr: () => ({ mutate: state.update, isPending: false, isError: false }),
   useSetPullRequestPreference: () => ({
     mutate: () => {},
     isPending: false,
@@ -131,11 +134,16 @@ function file(
   };
 }
 
-function renderPanel() {
+function renderPanel(managed = false, permissionLevel: number | null = 3) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(["session", "conv_1"], { id: "conv_1", permissionLevel });
   return render(<PullRequestPanel conversationId="conv_1" />, {
     wrapper: ({ children }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      <CapabilitiesProvider
+        info={{ ...FALLBACK_SERVER_INFO, features: { pull_request_management: managed } }}
+      >
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </CapabilitiesProvider>
     ),
   });
 }
@@ -255,6 +263,69 @@ afterEach(() => {
 });
 
 describe("PullRequestPanel", () => {
+  it.each([1, 2, 3, null])("lists linked PRs with permission level %s", (permissionLevel) => {
+    state.info!.data = {
+      object: "session.github.info",
+      available: false,
+      tracking_available: true,
+      prs: [
+        {
+          url: "https://github.com/acme/app/pull/7",
+          repository: "acme/app",
+          host: "github.com",
+          number: 7,
+          relationship: "attached",
+        },
+      ],
+    };
+    renderPanel(true, permissionLevel);
+    expect(screen.getByRole("list", { name: "Linked pull requests" })).toHaveTextContent(
+      "acme/app #7",
+    );
+    expect(screen.getByText("Status unknown")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Unlink acme/app #7" })).toHaveProperty(
+      "disabled",
+      permissionLevel !== null && permissionLevel < 2,
+    );
+    expect(screen.getByRole("button", { name: "Link a PR" })).toHaveProperty(
+      "disabled",
+      permissionLevel !== null && permissionLevel < 2,
+    );
+  });
+
+  it("keeps the current selection when unlinking another row", () => {
+    const prs: PullRequestAssociation[] = [7, 8, 9].map((number) => ({
+      url: `https://github.com/acme/app/pull/${number}`,
+      repository: "acme/app",
+      host: "github.com",
+      number,
+      relationship: "attached",
+    }));
+    state.info!.data = {
+      object: "session.github.info",
+      available: false,
+      prs,
+      selected_pr_url: prs[0].url,
+    };
+    state.update.mockImplementationOnce((_body, options) =>
+      options.onSuccess({ selected_pr_url: prs[0].url }),
+    );
+    renderPanel(true);
+    fireEvent.click(screen.getByRole("button", { name: /acme\/app #9.*Status unknown/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Unlink acme/app #8" }));
+    expect(screen.getByRole("button", { name: /acme\/app #9.*Status unknown/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("offers linking with no workspace or PR", () => {
+    state.info!.data = { object: "session.github.info", available: false };
+    renderPanel(true);
+    fireEvent.click(screen.getByRole("button", { name: "Link a PR" }));
+    expect(screen.getByRole("textbox", { name: "Pull request URL" })).toBeVisible();
+  });
+
   it("shows the PR title in the header and CI check pills on the Summary tab", async () => {
     renderPanel();
     const heading = screen.getByRole("heading", { name: "GitHub" });
