@@ -742,8 +742,8 @@ class SessionResourceRegistry:
 
         :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
         :param status: External native status, e.g. ``"running"`` or ``"idle"``.
-        :param turn_ended_at_ms: When Claude's ``Stop`` hook fired, in epoch
-            milliseconds, or ``None`` when the forwarder did not report it.
+        :param turn_ended_at_ms: When Claude's ``Stop`` hook fired with a
+            background agent still running, in epoch milliseconds, or ``None``.
         """
         if status in {"idle", "failed"}:
             self._set_session_status_memo(session_id, status)

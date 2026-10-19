@@ -276,8 +276,9 @@ class SessionStatusPoller:
 
     Claude keeps the file ``busy`` while a background agent outlives the turn,
     and rewrites ``statusUpdatedAt`` only when the status changes. A ``busy``
-    stamped no later than the last ``Stop`` with no turn started since then is
-    that holdover, so it reads as :data:`IDLE` like the ``shell`` literal. A
+    stamped no later than the last ``Stop`` that left such an agent running,
+    with no turn started since then, is that holdover, so it reads as
+    :data:`IDLE` like the ``shell`` literal. A
     turn Claude starts during the holdover leaves the file untouched, so each
     tick of the holdover rechecks the last prompt time.
 
@@ -450,7 +451,7 @@ class SessionStatusPoller:
         self.resync()
 
     def note_turn_ended(self, ended_at_ms: int) -> None:
-        """Record a ``Stop`` hook's time, then re-assert the file.
+        """Record a ``Stop`` that left a background agent running, then re-assert.
 
         :param ended_at_ms: When the hook was recorded, in epoch milliseconds.
         """

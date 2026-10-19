@@ -220,9 +220,9 @@ async def post_external_session_status(
         edge that cannot distinguish "finished" from "stopped early".
     :param failure_context: Optional bounded native error evidence, independent
         of display text. Older servers ignore this additive field.
-    :param turn_ended_at_ms: When the harness's turn-end hook fired, in epoch
-        milliseconds. The runner uses it to tell a status file left ``busy`` by
-        a background agent from a newer turn. ``None`` omits the field.
+    :param turn_ended_at_ms: When a turn-end hook fired with a background agent
+        still running, in epoch milliseconds. The runner uses it to tell a status
+        file left ``busy`` by that agent from a newer turn. ``None`` omits the field.
     :raises httpx.HTTPError: If the Omnigent request fails or is rejected.
     """
     data: dict[str, object] = {"status": status}

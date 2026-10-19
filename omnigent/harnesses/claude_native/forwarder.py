@@ -4436,9 +4436,13 @@ async def _forward_available_status_events(
                 # never on an interrupt, so its ``idle`` edge is a confirmed
                 # turn completion, unlike quiescence-derived idles.
                 turn_completed=True if status == "idle" else None,
+                # A background agent keeps Claude's status file busy past this
+                # Stop; its time lets the runner read that held busy as idle.
                 turn_ended_at_ms=(
                     int(record.recorded_at * 1000)
-                    if status == "idle" and record.recorded_at is not None
+                    if status == "idle"
+                    and record.background_agent_running
+                    and record.recorded_at is not None
                     else None
                 ),
                 # Only the ``Stop`` (idle) edge carries an authoritative

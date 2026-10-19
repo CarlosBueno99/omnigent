@@ -6,6 +6,7 @@ import json
 import time
 import uuid
 
+import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
@@ -21,6 +22,9 @@ _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 _FIRST_TURN_TIMEOUT_MS = 180_000
 # Outlasts the follow-up assertions, so the sub-agent is still running throughout.
 _SUB_AGENT_HOLD_S = 150.0
+# Spans many 0.2s status-file polls, so a held busy cannot flip idle back to running.
+_IDLE_STABLE_S = 2.0
+_IDLE_SETTLE_TIMEOUT_S = 30.0
 
 
 def _user_text_seen(mock_llm_server_url: str, token: str) -> bool:
@@ -30,6 +34,39 @@ def _user_text_seen(mock_llm_server_url: str, token: str) -> bool:
             if message.get("role") == "user" and token in json.dumps(message.get("content")):
                 return True
     return False
+
+
+def _task_notification_seen(mock_llm_server_url: str, conversation_token: str) -> bool:
+    """Return whether a request carrying *conversation_token* has a task notification."""
+    for captured in get_mock_requests(mock_llm_server_url):
+        user_texts = [
+            json.dumps(message.get("content"))
+            for message in captured.get("messages") or []
+            if message.get("role") == "user"
+        ]
+        if any(conversation_token in text for text in user_texts) and any(
+            "<task-notification>" in text for text in user_texts
+        ):
+            return True
+    return False
+
+
+def _wait_for_stable_idle(base_url: str, session_id: str) -> None:
+    """Wait until the session has read idle for ``_IDLE_STABLE_S`` without leaving it."""
+    deadline = time.monotonic() + _IDLE_SETTLE_TIMEOUT_S
+    idle_since: float | None = None
+    while time.monotonic() < deadline:
+        response = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+        response.raise_for_status()
+        now = time.monotonic()
+        if response.json().get("status") != "idle":
+            idle_since = None
+        elif idle_since is None:
+            idle_since = now
+        elif now - idle_since >= _IDLE_STABLE_S:
+            return
+        time.sleep(0.2)
+    pytest.fail(f"session did not stay idle for {_IDLE_STABLE_S:.0f}s after Claude replied")
 
 
 def _send(page: Page, text: str) -> None:
@@ -101,13 +138,12 @@ def test_follow_up_is_delivered_while_background_agent_runs(
         timeout=_FIRST_TURN_TIMEOUT_MS
     )
     assert _user_text_seen(mock_llm_server_url, worker_token), "background sub-agent never started"
-    # Let the turn's Stop hook land so the follow-up is typed at Claude's idle prompt.
-    time.sleep(5.0)
+    _wait_for_stable_idle(base_url, session_id)
 
     _send(page, f"{follow_up_token} Reply to this follow-up.")
     expect(page.get_by_test_id("composer-queued-strip")).to_have_count(0, timeout=10_000)
     expect(page.locator(_ASSISTANT, has_text=follow_up_reply).first).to_be_visible(timeout=30_000)
     # Claude notifies the parent when a background agent finishes, fails, or is killed.
-    assert not _user_text_seen(mock_llm_server_url, "<task-notification>"), (
+    assert not _task_notification_seen(mock_llm_server_url, launch_token), (
         "background sub-agent ended before the follow-up was answered"
     )
