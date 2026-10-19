@@ -80,6 +80,7 @@ from tests.helpers.ui_configuration import (
     _ALLOW_DEV_BASE_URL_ENV,
     ServerState,
     prepared_repro_environment,
+    validate_native_claude_mock_routing,
 )
 from tests.helpers.ui_configuration import (
     _CLAUDE_MOCK_MODEL as _CLAUDE_MOCK_MODEL,
@@ -2816,23 +2817,32 @@ def native_codex_session(
                 respawned.wait(timeout=5)
 
 
-@pytest.fixture
-def native_claude_mock_session(
+@contextlib.contextmanager
+def native_claude_mock_session_context(
     live_server: str,
     mock_llm_server_url: str,
     tmp_path_factory: pytest.TempPathFactory,
+    *,
+    terminal_launch_args: list[str] | None = None,
 ) -> Iterator[tuple[str, str]]:
     """A real Claude CLI using an explicitly configured mock provider.
 
     Workflow-owned runners are already configured. Standalone tests temporarily
     install a mock provider regardless of ambient credential placeholders.
+    ``terminal_launch_args`` are persisted on the session and passed to ``claude``.
+    Callers request ``claude_managed_settings`` to expose real machine routing.
     """
+    validate_native_claude_mock_routing(mock_llm_server_url)
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
     with _temp_omnigent_mock_config(
         mock_llm_server_url, "claude", workflow_owned=bool(_server_state.get("workflow_owned"))
     ):
-        session_id = _create_native_claude_session(live_server, runner_id)
+        # Keep the default create call unchanged; tests/test_ui_fixture_wiring.py pins it.
+        launch_args = (
+            {} if terminal_launch_args is None else {"terminal_launch_args": terminal_launch_args}
+        )
+        session_id = _create_native_claude_session(live_server, runner_id, **launch_args)
         try:
             yield (live_server, session_id)
         finally:
@@ -2844,6 +2854,20 @@ def native_claude_mock_session(
                 except subprocess.TimeoutExpired:
                     respawned.kill()
                     respawned.wait(timeout=5)
+
+
+@pytest.fixture
+def native_claude_mock_session(
+    live_server: str,
+    mock_llm_server_url: str,
+    tmp_path_factory: pytest.TempPathFactory,
+    claude_managed_settings: None,
+) -> Iterator[tuple[str, str]]:
+    """A real Claude CLI using an explicitly configured mock provider."""
+    with native_claude_mock_session_context(
+        live_server, mock_llm_server_url, tmp_path_factory
+    ) as session:
+        yield session
 
 
 @pytest.fixture
