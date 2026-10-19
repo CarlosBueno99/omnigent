@@ -1472,6 +1472,7 @@ class HostProcess:
             self._runners.pop(rid)
         if dead:
             self._trigger_maintenance("runner_exited_during_reconnect")
+            self._schedule_runtime_gone_retire()
         return list(self._runners.keys())
 
     def _tunnel_url(self) -> str:
@@ -2293,6 +2294,7 @@ class HostProcess:
         # zygote-forked one — run them off the loop so a wedged zygote can't
         # freeze the daemon's control handler.
         await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
+        self._schedule_runtime_gone_retire()
         _logger.info("Stopped runner %s", frame.runner_id)
         print(
             f"  ↓ Runner stopped: {frame.runner_id}",
@@ -2477,7 +2479,18 @@ class HostProcess:
             # an intentional termination, not a crash to report.
             return
         self._runners.pop(runner_id)
-        self._retire_if_runtime_gone()
+        try:
+            await self._report_unexpected_exit(runner_id, handle)
+        finally:
+            self._schedule_runtime_gone_retire()
+
+    async def _report_unexpected_exit(self, runner_id: str, handle: _RunnerHandle) -> None:
+        """Report a tracked runner's unexpected exit to the server.
+
+        :param runner_id: The exited runner, e.g. ``"runner_abc123..."``.
+        :param handle: Its already-untracked :class:`_RunnerHandle`.
+        :returns: None.
+        """
         self._trigger_maintenance("runner_exited")
         had_connected = None
         if handle.connect_marker is not None:
@@ -4058,9 +4071,20 @@ class HostProcess:
                     error_phase=ErrorPhase.RUNNER_LAUNCH.value,
                 ),
             )
-        asyncio.get_running_loop().call_later(
-            _RUNTIME_GONE_RETIRE_DELAY_S, self._retire_if_runtime_gone
-        )
+        self._schedule_runtime_gone_retire()
+
+    def _schedule_runtime_gone_retire(self) -> None:
+        """Recheck retirement shortly, once frames about the change have been sent.
+
+        Called whenever a runner stops being tracked, so the last one leaving
+        retires a host whose runtime is gone however it left.
+
+        :returns: None.
+        """
+        if self._runtime_gone:
+            asyncio.get_running_loop().call_later(
+                _RUNTIME_GONE_RETIRE_DELAY_S, self._retire_if_runtime_gone
+            )
 
     def _retire_if_runtime_gone(self) -> None:
         """Retire the host once its runtime is gone and no runner is left.
@@ -5230,6 +5254,13 @@ def _generate_ucode_configs() -> None:
     )
 
 
+class HostRuntimeGoneExit(SystemExit):
+    """Exit for a host whose own Python runtime was deleted while it ran."""
+
+    def __init__(self) -> None:
+        super().__init__(HOST_RUNTIME_GONE_EXIT_CODE)
+
+
 def run_host_process(
     server_url: str,
     config_path: Path | None = None,
@@ -5290,6 +5321,8 @@ def run_host_process(
         crash_reporting.await_signal_exit()
         if isinstance(exc, KeyboardInterrupt):
             crash_reporting.report_host_exit("interrupted")
+        elif isinstance(exc, HostRuntimeGoneExit):
+            crash_reporting.report_host_exit("runtime_gone", exit_code=HOST_RUNTIME_GONE_EXIT_CODE)
         elif isinstance(exc, SystemExit):
             code = 0 if exc.code is None else exc.code if isinstance(exc.code, int) else 1
             crash_reporting.report_host_exit("clean" if code == 0 else "exit", exit_code=code)
@@ -5437,12 +5470,11 @@ def _serve_host_until_exit(
         )
         raise SystemExit(HOST_FATAL_EXIT_CODE) from exc
     if host.runtime_gone:
-        crash_reporting.report_host_exit("runtime_gone", exit_code=HOST_RUNTIME_GONE_EXIT_CODE)
         print(
             f"\n✗ This host's Python runtime ({sys.executable}) was deleted. "
             "Restart the host to run it on a fresh runtime.",
             file=sys.stderr,
             flush=True,
         )
-        raise SystemExit(HOST_RUNTIME_GONE_EXIT_CODE)
+        raise HostRuntimeGoneExit
     return host.lifecycle_lost

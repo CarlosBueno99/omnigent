@@ -25,11 +25,12 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 from omnigent import debug_logging
-from omnigent.host import HOST_FATAL_EXIT_CODE
+from omnigent.host import HOST_FATAL_EXIT_CODE, HOST_RUNTIME_GONE_EXIT_CODE
 from omnigent.host.connect import (
     HostConnectError,
     HostProcess,
     HostRetryableConnectionError,
+    HostRuntimeGoneExit,
     ModelOptionsResult,
     _build_runner_env,
     _runner_exit_error,
@@ -1778,6 +1779,7 @@ async def test_handle_launch_immediate_exit_reports_exit_code_and_log_tail(
     assert maintenance_reasons == ["runner_launch_failed"]
 
 
+@pytest.mark.parametrize("runtime_gone", [False, True])
 @pytest.mark.parametrize(
     "marker_state", ["connected", "not_connected", "unavailable", "unreadable"]
 )
@@ -1785,6 +1787,7 @@ async def test_watch_runner_reports_unexpected_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     marker_state: str,
+    runtime_gone: bool,
 ) -> None:
     """A runner that dies after launch is reported via host.runner_exited.
 
@@ -1845,9 +1848,26 @@ async def test_watch_runner_reports_unexpected_exit(
             exists=Mock(side_effect=[OSError("marker unavailable"), False])
         )
 
+    events: list[str] = []
+    if runtime_gone:
+        # The runtime was deleted while this runner still ran; its exit is the last one.
+        host._runtime_gone = True
+        monkeypatch.setattr("omnigent.host.connect._RUNTIME_GONE_RETIRE_DELAY_S", 0.0)
+        record_send = tunnel.send
+
+        async def _send(data: str) -> None:
+            events.append("runner_exited")
+            await record_send(data)
+
+        monkeypatch.setattr(tunnel, "send", _send)
+        monkeypatch.setattr(host, "_abort_live_tunnel", lambda: events.append("tunnel_aborted"))
+
     # Wait for the watcher to observe the death and send its report.
     await asyncio.wait_for(asyncio.gather(*host._watcher_tasks), timeout=5.0)
+    await asyncio.sleep(0.01)
 
+    assert host.runtime_gone is runtime_gone
+    assert events == (["runner_exited", "tunnel_aborted"] if runtime_gone else [])
     # Exactly one report; a second would double-record server-side.
     assert len(tunnel.sent) == 1
     report = decode_host_frame(tunnel.sent[0])
@@ -3470,6 +3490,38 @@ async def test_handle_stop_terminates_process(tmp_path: Path) -> None:
     assert proc.poll() is not None, "Runner process should be terminated after stop"
     # Runner should be removed from tracking.
     assert "runner_aaa" not in host._runners
+
+
+@pytest.mark.parametrize("path", ["stop", "reconnect_cleanup"])
+async def test_last_runner_leaving_retires_host_whose_runtime_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """A deleted-runtime host retires when its last runner leaves by any path.
+
+    The first recheck after the failed launch found a live runner; neither a
+    server stop nor the reconnect cleanup of a dead runner goes through the
+    watcher, so each must recheck on its own.
+    """
+    monkeypatch.setattr("omnigent.host.connect._RUNTIME_GONE_RETIRE_DELAY_S", 0.0)
+    host = _make_host_process()
+    proc = subprocess.Popen(["sleep", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    host._runners["runner_last"] = _RunnerHandle(proc=proc, log_path=tmp_path / "runner.log")
+    host._note_runtime_gone()
+    await asyncio.sleep(0.01)
+    assert not host.runtime_gone
+
+    if path == "stop":
+        result = await host._handle_stop(
+            HostStopRunnerFrame(request_id="req_last", runner_id="runner_last")
+        )
+        assert result.status == "stopped"
+    else:
+        proc.kill()
+        proc.wait()
+        assert host._alive_runner_ids() == []
+    await asyncio.sleep(0.01)
+
+    assert host.runtime_gone
 
 
 async def test_handle_stop_unknown_runner() -> None:
@@ -9089,8 +9141,16 @@ async def test_host_mcp_tools_failure_is_private(monkeypatch, caplog, error, sta
         (lambda: (_ for _ in ()).throw(SystemExit(0)), "clean"),
         (lambda: (_ for _ in ()).throw(SystemExit(3)), "exit"),
         (lambda: (_ for _ in ()).throw(KeyboardInterrupt()), "interrupted"),
+        (lambda: (_ for _ in ()).throw(HostRuntimeGoneExit()), "runtime_gone"),
     ],
-    ids=["lifecycle-lost", "system-exit-none", "system-exit-0", "system-exit-3", "ctrl-c"],
+    ids=[
+        "lifecycle-lost",
+        "system-exit-none",
+        "system-exit-0",
+        "system-exit-3",
+        "ctrl-c",
+        "runtime-gone",
+    ],
 )
 def test_run_host_process_classifies_how_the_host_ended(
     monkeypatch: pytest.MonkeyPatch,
@@ -9102,13 +9162,21 @@ def test_run_host_process_classifies_how_the_host_ended(
     caplog.set_level(logging.INFO, logger="omnigent.host.crash_reporting")
     monkeypatch.setattr("omnigent.host.connect._serve_host_until_exit", lambda *_a, **_k: serve())
 
-    with contextlib.suppress(SystemExit, KeyboardInterrupt):
+    exit_code: object = None
+    try:
         run_host_process(
             server_url="https://app.example.databricks.com",
             config_path=tmp_path / "config.yaml",
         )
+    except SystemExit as exc:
+        exit_code = exc.code
+    except KeyboardInterrupt:
+        pass
 
     assert _host_exit_reasons(caplog) == [expected]
+    if expected == "runtime_gone":
+        # A restartable status, so a supervisor relaunches the host.
+        assert exit_code == HOST_RUNTIME_GONE_EXIT_CODE
 
 
 @pytest.mark.parametrize(
