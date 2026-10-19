@@ -3001,7 +3001,8 @@ async def _persist_external_conversation_item_unlocked(
         if drained is not None:
             cleared_pending_id = drained.pending_id
             item = _merge_pending_file_blocks(item, drained.content)
-            if drained.message_source is not None:
+            # A positional guess cannot vouch for who sent this message.
+            if drained.message_source is not None and match_method != "fifo_fallback":
                 item = item.model_copy(
                     update={"data": item.data.model_copy(update=drained.message_source)}
                 )

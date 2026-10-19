@@ -8511,6 +8511,35 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       expect(useChatStore.getState().pendingUserMessages).toEqual([]);
     });
 
+    it("leaves a person's queued bubble alone when an agent-sent message is consumed", () => {
+      const typed: PendingUserMessage = {
+        tempId: "pend_typed",
+        content: [{ type: "input_text", text: "my own note" }],
+      };
+      useChatStore.setState({ blocks: [], pendingUserMessages: [typed] });
+      const event = {
+        type: "session_input_consumed",
+        itemId: "msg_from_parent",
+        itemType: "message",
+        data: {
+          role: "user",
+          content: sentContent,
+          source_session_id: "conv_parent",
+          source_agent_name: "Claude",
+        },
+      } as const;
+
+      handleSessionEvent(event);
+      handleSessionEvent(event);
+
+      const [fresh, ...rest] = useChatStore.getState().blocks as UserMessageBlock[];
+      expect(rest).toEqual([]);
+      expect(fresh.content).toEqual(sentContent);
+      expect(fresh.stableKey).toBeUndefined();
+      expect(fresh.source).toEqual({ sessionId: "conv_parent", agentName: "Claude" });
+      expect(useChatStore.getState().pendingUserMessages).toEqual([typed]);
+    });
+
     it("leaves ctx.createdBy unset when the event omits an author", () => {
       // No created_by (agent/system items, single-user "local") must not
       // produce a label; ctx.createdBy stays undefined rather than null.

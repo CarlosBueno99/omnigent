@@ -290,7 +290,10 @@ describe("UserBubble literal text", () => {
 });
 
 describe("UserBubble message source", () => {
-  it("names and links the agent session that sent the message", () => {
+  it.each([
+    ["conv_parent", "/c/conv_parent"],
+    ["conv/../settings?tab=1#x", "/c/conv%2F..%2Fsettings%3Ftab%3D1%23x"],
+  ])("names and links the agent session %s that sent the message", (sessionId, href) => {
     render(
       <MemoryRouter>
         <BubbleView
@@ -298,7 +301,7 @@ describe("UserBubble message source", () => {
             kind: "user",
             itemId: "user_sent",
             content: [{ type: "input_text", text: "Run the tests" }],
-            source: { sessionId: "conv_parent", agentName: "Claude" },
+            source: { sessionId, agentName: "Claude" },
           }}
           isLastAssistant={false}
         />
@@ -307,7 +310,7 @@ describe("UserBubble message source", () => {
 
     const label = screen.getByTestId("message-source");
     expect(label).toHaveTextContent("From Claude");
-    expect(label).toHaveAttribute("href", "/c/conv_parent");
+    expect(label).toHaveAttribute("href", href);
     expect(screen.getByTestId("message-bubble")).toContainElement(label);
   });
 

@@ -620,7 +620,7 @@ async def test_post_event_keeps_parent_runner_message_source(
     assert persisted.data.source_agent_name == "Claude"
 
 
-@pytest.mark.parametrize("claim", ["no_runner_proof", "not_the_parent"])
+@pytest.mark.parametrize("claim", ["no_runner_proof", "not_the_parent", "parent_on_other_runner"])
 @pytest.mark.asyncio
 async def test_post_event_drops_unverified_message_source(
     auth_client: httpx.AsyncClient,
@@ -638,14 +638,16 @@ async def test_post_event_drops_unverified_message_source(
     monkeypatch.setattr(sessions_mod, "_ensure_runner_relay_ready", _noop_relay_ready)
     agent = await create_test_agent(auth_client, user="alice@example.com")
     parent_id, child_id = _seed_parent_and_child(db_uri, agent["id"])
+    conv_store = SqlAlchemyConversationStore(db_uri)
     if claim == "no_runner_proof":
         source_id, headers = parent_id, {}
     else:
-        # The runner really drives this unrelated session, but it is not the child's parent.
-        source_id = (
-            SqlAlchemyConversationStore(db_uri).create_conversation(agent_id=agent["id"]).id
-        )
-        headers = _bind_runner(db_uri, source_id)
+        # The token's runner really drives this unrelated session, not the child's parent.
+        unrelated_id = conv_store.create_conversation(agent_id=agent["id"]).id
+        headers = _bind_runner(db_uri, unrelated_id)
+        source_id = unrelated_id if claim == "not_the_parent" else parent_id
+        if claim == "parent_on_other_runner":
+            assert conv_store.set_runner_id(parent_id, "runner_elsewhere") is True
 
     resp = await auth_client.post(
         f"/v1/sessions/{child_id}/events",

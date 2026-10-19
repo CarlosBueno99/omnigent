@@ -94,18 +94,27 @@ async def test_native_authorship_survives_delivery_and_retries(
     assert len(store.list_items(conv.id, type="message").data) == 1
 
 
+_PARENT_SOURCE = {"source_session_id": "conv_parent", "source_agent_name": "Claude"}
+
+
 @pytest.mark.parametrize(
-    "message_source",
-    [None, {"source_session_id": "conv_parent", "source_agent_name": "Claude"}],
-    ids=["typed", "agent-sent"],
+    "queued_text,message_source,applied",
+    [
+        ("Do the task", None, False),
+        ("Do the task", _PARENT_SOURCE, True),
+        ("Agent task", _PARENT_SOURCE, False),
+    ],
+    ids=["typed", "agent-sent", "terminal-typed-over-agent-sent"],
 )
 @pytest.mark.asyncio
 async def test_native_drain_applies_only_the_queued_message_source(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
+    queued_text: str,
     message_source: dict[str, str] | None,
+    applied: bool,
 ) -> None:
-    """The pending entry, not the transcript forwarder, decides who sent the message."""
+    """Only the text-matched pending entry, never the forwarder, decides who sent a message."""
     content = [{"type": "input_text", "text": "Do the task"}]
     forged = {"source_session_id": "conv_forged", "source_agent_name": "Mallory"}
     body = SessionEventInput.model_validate(
@@ -120,14 +129,18 @@ async def test_native_drain_applies_only_the_queued_message_source(
     )
     store = SqlAlchemyConversationStore(db_uri)
     conv = store.create_conversation(title="Child")
-    pending_inputs.record(conv.id, content, message_source=message_source)
+    pending_inputs.record(
+        conv.id, [{"type": "input_text", "text": queued_text}], message_source=message_source
+    )
     publish = Mock()
     monkeypatch.setattr("omnigent.runtime.session_stream.publish", publish)
 
     await _persist_external_conversation_item(conv.id, conv, body, store)
 
+    assert pending_inputs.snapshot_for(conv.id) == []
     [item] = store.list_items(conv.id, type="message").data
-    expected = message_source or {"source_session_id": None, "source_agent_name": None}
+    unlabeled = {"source_session_id": None, "source_agent_name": None}
+    expected = message_source if applied and message_source else unlabeled
     assert item.data.source_session_id == expected["source_session_id"]
     assert item.data.source_agent_name == expected["source_agent_name"]
     [receipt] = [

@@ -715,7 +715,7 @@ function useCopyMessageLink(messageId: string | null): {
 function MessageSourceLabel({ source }: { source: MessageSource }) {
   return (
     <Link
-      to={`/c/${source.sessionId}`}
+      to={`/c/${encodeURIComponent(source.sessionId)}`}
       data-testid="message-source"
       className="flex items-center gap-1 pb-1 text-[11px] leading-4 text-muted-foreground hover:text-foreground hover:underline"
     >
