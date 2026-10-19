@@ -48,8 +48,9 @@ in, keeping every heading and checkbox row:
 - **Test Plan:** each covered CUJ with the tests that exercise it, plus the
   impact-assessment checks, as short bullets.
 - **Demo:** a `### CUJ-n` heading for each covered CUJ, saying its recordings
-  are on the Linear ticket (see "Post the demo" below). For a CUJ with a
-  blocked recording, give the blocker and the manual test steps instead.
+  are on the Linear ticket, or pending manual upload when nothing can post
+  them (see "Post the demo" below). For a CUJ with a blocked recording, give
+  the blocker and the manual test steps instead.
 - Check **Feature**, plus **UI / frontend change** when the UI changes.
 
 Aim for fewer than 800 visible words. If the checkout has
@@ -66,8 +67,9 @@ CUJ's `recordings` in the handoff, as a path under `recordings/`.
   after your turn. Do not upload them yourself.
 - **Local run:** when a Linear key is available, post one ticket comment with a
   `CUJ-n` label per covered CUJ and its clips (GraphQL `fileUpload`, then
-  `commentCreate` with the returned asset URLs). Otherwise, tell the user the
-  clip paths so they can post them.
+  `commentCreate` with the returned asset URLs). Without a Linear key, tell the
+  user the clip paths so they can post them, and say in each Demo entry that
+  its recordings are pending manual upload.
 
 ## Drive the PR (direct publication)
 
