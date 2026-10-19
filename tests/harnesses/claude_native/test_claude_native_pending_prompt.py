@@ -95,6 +95,8 @@ def test_live_hook_protects_a_prompt_even_during_a_torn_capture(
         _QUESTION.replace("Enter to select", "Space to select · Enter to submit"),
         _PERMISSION,
         _AUTO_MODE_SETUP_OFFER,
+        # A wide-character session title shortens the composer's opening rule as a string.
+        _AUTO_MODE_SETUP_OFFER.replace("─" * 80 + "\n❯", "─" * 73 + " 会话 ─\n❯"),
     ],
 )
 @pytest.mark.parametrize("operation", ["message", "settings"])
@@ -124,6 +126,10 @@ def test_terminal_fallback_prompt_receives_no_injected_keystrokes(
         "❯ 1. refactor X\n● Press Enter to continue.\n",
         "──────────────────────────────\n❯ 1. Yes\n  2. Not now\n"
         "Enter to confirm · Esc to cancel\n● Mock LLM response\n",
+        "● Captured pane:\n  ────────────\n  ❯ 1. Yes\n  Enter to confirm · Esc to cancel\n",
+        "● Captured pane:\n  ──────────────────────────────\n  ❯ 1. Yes\n"
+        "  Enter to confirm · Esc to cancel\n",
+        "● Captured pane:\n────────────\n  ❯ 1. Yes\n  Enter to confirm · Esc to cancel\n",
     ],
 )
 def test_decision_text_above_a_ready_composer_does_not_block_delivery(
