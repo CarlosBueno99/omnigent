@@ -203,9 +203,9 @@ def main() -> None:
     print(f"→ worktree: {worktree}  (branch {created.branch})")
 
     # Run the agent FROM the worktree so the worktree is its workspace (local
-    # mode uses the runner's cwd as the workspace). dev/repro-agent resolves
-    # relative to the worktree, which is a full checkout of the same commit.
-    cmd = ["omnigent", "run", _AGENT_REL, "-p", prompt]
+    # mode uses the runner's cwd as the workspace). Use the source agent path
+    # so local preparation does not dirty the reproduction branch.
+    cmd = ["omnigent", "run", str(agent_dir), "-p", prompt]
     if args.server is not None:
         cmd += ["--server", args.server]
 
