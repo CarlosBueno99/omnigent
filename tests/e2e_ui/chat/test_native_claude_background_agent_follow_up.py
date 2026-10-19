@@ -6,12 +6,12 @@ import contextlib
 import json
 import time
 import uuid
-from collections.abc import Callable
 
 import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests._helpers.polling import poll_until
 from tests.e2e.conftest import get_mock_requests
 from tests.e2e_ui.conftest import configure_mock_llm
 from tests.e2e_ui.messages.test_message_render_parity import _ensure_chat_view
@@ -68,14 +68,6 @@ def _wait_for_stable_status(base_url: str, session_id: str, status: str) -> None
             return
         time.sleep(0.2)
     pytest.fail(f"session did not stay {status} for {_STATUS_STABLE_S:.0f}s")
-
-
-def _wait_until(condition: Callable[[], bool], failure: str) -> None:
-    deadline = time.monotonic() + _MOCK_REQUEST_TIMEOUT_S
-    while not condition():
-        if time.monotonic() > deadline:
-            pytest.fail(failure)
-        time.sleep(0.2)
 
 
 def _gate_pending(mock_llm_server_url: str) -> bool:
@@ -176,9 +168,10 @@ def test_follow_up_is_delivered_while_background_agent_runs(
         timeout=_FIRST_TURN_TIMEOUT_MS
     )
     # The worker's first model request races the parent's reply request.
-    _wait_until(
+    poll_until(
         lambda: _user_text_seen(mock_llm_server_url, worker_token),
-        "background sub-agent never started",
+        timeout_s=_MOCK_REQUEST_TIMEOUT_S,
+        interval_s=0.2,
     )
     _wait_for_stable_status(base_url, session_id, "idle")
 
@@ -192,9 +185,11 @@ def test_follow_up_is_delivered_while_background_agent_runs(
     _wait_for_stable_status(base_url, session_id, "idle")
 
     assert _release_gate(mock_llm_server_url), "background sub-agent was not held"
-    _wait_until(
+    # Claude asks the parent model to handle the finished agent.
+    poll_until(
         lambda: _gate_pending(mock_llm_server_url),
-        "Claude never asked the parent to handle the finished agent",
+        timeout_s=_MOCK_REQUEST_TIMEOUT_S,
+        interval_s=0.2,
     )
     assert _task_notification_seen(mock_llm_server_url, launch_token)
     _wait_for_stable_status(base_url, session_id, "running")
