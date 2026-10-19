@@ -46,7 +46,7 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -511,6 +511,7 @@ async def bridge_tmux_control_to_websocket(
     socket_path: str,
     tmux_target: str,
     read_only: bool,
+    authorize_input: Callable[[], Awaitable[bool]] | None = None,
     on_client_interaction: Callable[[], None] | None = None,
     reader_done: asyncio.Event | None = None,
     forward_done: asyncio.Event | None = None,
@@ -526,6 +527,7 @@ async def bridge_tmux_control_to_websocket(
     :param tmux_target: The ``-t`` target string identifying the session.
     :param read_only: When ``True``, drop inbound binary input frames and
         attach with ``ignore-size`` so the viewer can't resize the pane.
+    :param authorize_input: Optional live permission check before typing.
     :param on_client_interaction: Optional callback fired on every client
         interaction (connect, disconnect, each input/resize frame) so the
         idle watcher can discount client-driven repaints.
@@ -768,6 +770,8 @@ async def bridge_tmux_control_to_websocket(
                             continue
                         await _send_command(f"refresh-client -C {cols}x{rows}\n".encode())
                 elif data is not None and not read_only:
+                    if authorize_input is not None and not await authorize_input():
+                        return
                     # Stamp before sending so the next %output (the echo) takes
                     # the small interactive frame cap.
                     last_client_input_at = _monotonic()

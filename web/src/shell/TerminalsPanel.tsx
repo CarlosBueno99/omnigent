@@ -60,10 +60,8 @@ interface TerminalsPanelProps {
   fluid?: boolean;
   /**
    * When true, attach terminals read-only — the viewer can watch but
-   * not type. Set for non-owners: a shared PTY's keystrokes carry no
-   * per-user identity, so only the owner may drive it (the server
-   * enforces this and refuses a non-owner write attach). Default false
-   * (owner / single-user).
+   * not type. Follows the server's shell-access policy and the viewer's
+   * session permissions.
    */
   readOnly?: boolean;
 }

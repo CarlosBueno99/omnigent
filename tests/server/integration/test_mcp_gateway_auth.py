@@ -63,6 +63,54 @@ async def test_gateway_checks_session_permissions_before_backend(
     assert backend.list_tools.await_args.args[1] == "alice@example.test"
 
 
+@pytest.mark.parametrize("tool", ["sys_os_shell", "sys_terminal_launch", "sys_terminal_send"])
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize(
+    "owner_only,caller,proof,expected",
+    [
+        (True, "bob@example.test", "", 403),
+        (False, "bob@example.test", "", 200),
+        (True, "alice@example.test", "", 200),
+        (True, "bob@example.test", "shell-runner-binding", 200),
+        (True, "bob@example.test", "fake-runner-token", 403),
+        (True, "bob@example.test", "allowlisted-runner-token", 200),
+    ],
+)
+async def test_direct_mcp_shell_calls_follow_shell_policy(
+    auth_app, auth_client, monkeypatch, tool, background, owner_only, caller, proof, expected
+):
+    from fastapi.responses import JSONResponse
+
+    from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
+    from omnigent.runtime import get_conversation_store
+    from omnigent.server.routes.sessions import routes_agent
+    from tests.server.integration.test_session_agent_owner import _share_editor
+
+    owner, editor = "alice@example.test", "bob@example.test"
+    agent = await create_test_agent(auth_client, name="shell-mcp", user=owner)
+    session_id = agent["_session_id"]
+    await _share_editor(auth_client, session_id, owner, editor)
+    get_conversation_store().set_runner_id(
+        session_id, token_bound_runner_id("shell-runner-binding")
+    )
+    auth_app.state.shell_owner_only = lambda: owner_only
+    auth_app.state.runner_tunnel_tokens = frozenset({"allowlisted-runner-token"})
+    execute = AsyncMock(return_value=JSONResponse({"result": {"content": []}}))
+    monkeypatch.setattr(routes_agent, "_handle_mcp_tools_call", execute)
+    params = (
+        {"name": "sys_call_async", "arguments": {"tool": tool, "args": "{}"}}
+        if background
+        else {"name": tool, "arguments": {}}
+    )
+    response = await auth_client.post(
+        f"/v1/sessions/{session_id}/mcp",
+        headers={"X-Forwarded-Email": caller, RUNNER_TUNNEL_TOKEN_HEADER: proof},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params},
+    )
+    assert response.status_code == expected, response.text
+    assert execute.await_count == (1 if expected == 200 else 0)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("entitled", [False, True])

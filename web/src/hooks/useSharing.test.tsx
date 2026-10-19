@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { usePublicSharingMaxLevel, useSetSharing } from "./useSharing";
+import { usePublicSharingMaxLevel, useSetSharing, useShellOwnerOnly } from "./useSharing";
 import { authenticatedFetch } from "@/lib/identity";
 
 vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
@@ -56,5 +56,40 @@ describe("public sharing ceiling", () => {
     await waitFor(() => expect(result.current.ceiling.data).toBe("read"));
     await result.current.update.mutateAsync({ public_sharing_max_level: "edit" });
     await waitFor(() => expect(result.current.ceiling.data).toBe("edit"));
+  });
+});
+
+describe("shell owner-only policy", () => {
+  it.each([undefined, null, "off", 0, true])(
+    "requires ownership for an absent or invalid %s capability",
+    async (value) => {
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ shell_owner_only: value })));
+      const { result } = renderHook(() => useShellOwnerOnly(true), { wrapper: wrapper() });
+      await waitFor(() => expect(result.current.data).toBe(true));
+    },
+  );
+
+  it("fails closed on a network error", async () => {
+    fetchMock.mockRejectedValue(new Error("offline"));
+    const { result } = renderHook(() => useShellOwnerOnly(true), { wrapper: wrapper() });
+    await waitFor(() => expect(result.current.data).toBe(true));
+  });
+
+  it("updates shell access immediately after an admin change and on refresh", async () => {
+    let ownerOnly = true;
+    fetchMock.mockImplementation(async (_url, init) => {
+      if (init?.method === "PUT") ownerOnly = false;
+      return new Response(JSON.stringify({ shell_owner_only: ownerOnly }));
+    });
+    const { result } = renderHook(
+      () => ({ policy: useShellOwnerOnly(true), update: useSetSharing() }),
+      { wrapper: wrapper() },
+    );
+    await waitFor(() => expect(result.current.policy.data).toBe(true));
+    await result.current.update.mutateAsync({ shell_owner_only: false });
+    await waitFor(() => expect(result.current.policy.data).toBe(false));
+    ownerOnly = true;
+    await result.current.policy.refetch();
+    await waitFor(() => expect(result.current.policy.data).toBe(true));
   });
 });

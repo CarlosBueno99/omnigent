@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSessionAgent } from "@/hooks/useAgents";
+import { useCanUseShell, useSessionPermissionLevel } from "@/hooks/usePermissions";
 import { terminalTabKey, useCreateTerminal } from "@/hooks/useTerminals";
 import { useTerminalFirst } from "./TerminalFirstContext";
 
@@ -58,6 +59,7 @@ export function NewTerminalButton({
 }: NewTerminalButtonProps) {
   const { data: agent } = useSessionAgent(conversationId);
   const create = useCreateTerminal(conversationId);
+  const canUseShell = useCanUseShell(useSessionPermissionLevel(conversationId));
   // Native-wrapper sessions declare the host's installed shells as their
   // terminals (default `$SHELL` first); SDK agents declare distinct-purpose
   // terminals with no default. Only the native case gets the split-button
@@ -65,7 +67,7 @@ export function NewTerminalButton({
   const isNativeWrapper = useTerminalFirst()?.isNativeWrapper ?? false;
   const declared = agent?.terminals ?? [];
   // The iff gate, UI side: no declared terminals → no affordance.
-  if (declared.length === 0) return null;
+  if (declared.length === 0 || !canUseShell) return null;
 
   const launch = (name: string) => {
     create.mutate(name, {

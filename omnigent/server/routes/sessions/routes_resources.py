@@ -60,6 +60,7 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._auth_helpers import (
     require_access_and_level as _require_access_and_level,
 )
+from omnigent.server.routes._auth_helpers import shell_write_level
 from omnigent.server.routes._content_type import (
     require_json_content_type,
 )
@@ -1254,13 +1255,10 @@ def register_resources_routes(
     async def _caller_owns_session(session_id: str, request: Request) -> bool:
         """Return whether the requester holds owner-level access.
 
-        Non-raising variant of the owner gate used for optional
-        enrichment: an interactive (write) attach requires owner level
-        (see ``terminal_attach._authorize_terminal_attach``), so the
-        direct-attach token — which grants write attach without a
-        server-side check — may only be disclosed to owners. Mirrors
-        the relay's permissions-disabled behavior: no permission store
-        means single-user mode, where the caller is the owner.
+        The direct-attach token bypasses live server policy, so only owners
+        receive it. Edit collaborators use the revocable server relay even
+        when shell access is enabled for them. Disabled permissions preserve
+        single-user behavior.
 
         :param session_id: Session/conversation identifier.
         :param request: The incoming request carrying auth context.
@@ -1370,7 +1368,7 @@ def register_resources_routes(
             declared by the agent spec (or the agent has no
             ``terminals:`` block at all).
         """
-        conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        conv = await _validate_session(session_id, request, shell_write_level(request))
         body = await request.json()
         is_native_bootstrap = (
             bool(body.get("ensure_native_terminal") or body.get("bridge_inject_dir"))
@@ -1515,7 +1513,7 @@ def register_resources_routes(
             e.g. ``"terminal_claude_main"``.
         :returns: The terminal resource object under the target session.
         """
-        conv = await _validate_session(session_id, request, LEVEL_EDIT)
+        conv = await _validate_session(session_id, request, shell_write_level(request))
         body = await request.json()
         target_session_id = body.get("target_session_id") if isinstance(body, dict) else None
         if not isinstance(target_session_id, str) or not target_session_id:
@@ -2911,11 +2909,8 @@ def register_resources_routes(
         """
         Execute a shell command in an environment.
 
-        Owner-only. A command has no path to inspect, so unlike the
-        filesystem proxy there is no workspace-relative form that could
-        be opened to collaborators: any command reaches the owner's own
-        machine, the same boundary ``_browse_level`` closes for absolute
-        paths, and it passes no policy or approval gate on the way.
+        The server's shell policy requires owner access by default; admins
+        can also allow collaborators with edit access to run commands.
 
         :param session_id: Session/conversation identifier.
         :param environment_id: Environment resource id.
@@ -2931,7 +2926,7 @@ def register_resources_routes(
             path,
             body,
             request=request,
-            required_level=LEVEL_OWNER,
+            required_level=shell_write_level(request),
             environment_id=environment_id,
             publish_invalidation=False,
         )

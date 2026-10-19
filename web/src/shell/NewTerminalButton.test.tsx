@@ -12,6 +12,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NewTerminalButton } from "./NewTerminalButton";
 import type { TerminalFirstContextValue } from "./TerminalFirstContext";
 import { TerminalFirstContextProvider } from "./TerminalFirstContext";
+import type * as PermissionsModule from "@/hooks/usePermissions";
+
+const permission = vi.hoisted(() => ({ level: 4 as number | null }));
+vi.mock("@/hooks/usePermissions", async (importOriginal) => ({
+  ...(await importOriginal<typeof PermissionsModule>()),
+  useSessionPermissionLevel: () => permission.level,
+}));
 
 function mockResponse(body: unknown, init?: { ok?: boolean; status?: number }): Response {
   return {
@@ -62,6 +69,7 @@ function renderButton(
 }
 
 beforeEach(() => {
+  permission.level = 4;
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
 });
@@ -72,6 +80,23 @@ afterEach(() => {
 });
 
 describe("NewTerminalButton access gate", () => {
+  it.each([1, 2, 3])("hides shell creation for level %i with owner-only access", async (level) => {
+    permission.level = level;
+    fetchMock.mockResolvedValue(mockResponse(agentWire(["shell"])));
+    renderButton();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /new shell/i })).toBeNull();
+  });
+
+  it("allows editors to create shells when owner-only access is disabled", async () => {
+    permission.level = 2;
+    fetchMock.mockImplementation(async (url: string) =>
+      mockResponse(url === "/v1/info" ? { shell_owner_only: false } : agentWire(["shell"])),
+    );
+    renderButton();
+    expect(await screen.findByRole("button", { name: /new shell/i })).toBeEnabled();
+  });
+
   it("renders nothing when the agent declares no terminals", async () => {
     fetchMock.mockResolvedValue(mockResponse(agentWire([])));
 

@@ -38,6 +38,14 @@ import { COMPOSER_SEND_SHORTCUT_STORAGE_KEY } from "@/lib/composerSendShortcutPr
 import { composerContextToLabels } from "@/lib/composerContextAdapters";
 import { CHAT_COLUMN_WIDTH } from "./chatLayout";
 
+const shellPolicy = vi.hoisted(() => ({ ownerOnly: true }));
+vi.mock("@/hooks/useSharing", () => ({
+  useShellOwnerOnly: () => ({ data: shellPolicy.ownerOnly }),
+}));
+afterEach(() => {
+  shellPolicy.ownerOnly = true;
+});
+
 // Composer reads workspace files via a TanStack query hook (for "@"-file
 // mentions). These slash-command tests don't exercise that, so stub the hook
 // to avoid needing a QueryClientProvider around every bare render.
@@ -268,6 +276,46 @@ function tooltipKeys(tooltip: HTMLElement): string[] {
     (key) => key.textContent ?? "",
   );
 }
+
+describe("Composer shell access", () => {
+  beforeEach(() => {
+    clearSessionDrafts();
+    useChatStore.setState({ conversationId: "conv_shell", blocks: [] });
+  });
+  afterEach(() => {
+    cleanup();
+    clearSessionDrafts();
+  });
+
+  it("keeps an editor's native shell command draft while allowing ordinary chat", () => {
+    const props = composerProps({ permissionLevel: 2, isNativeWrapper: true });
+    render(<Composer {...props} />);
+    fireEvent.change(textarea(), { target: { value: "!pwd" } });
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(
+      screen.getByText("Only the session owner can send shell commands on this server."),
+    ).toBeVisible();
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(props.onSend).not.toHaveBeenCalled();
+    expect(textarea()).toHaveValue("!pwd");
+    fireEvent.change(textarea(), { target: { value: "hello" } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(props.onSend).toHaveBeenCalledWith("hello", undefined);
+  });
+
+  it.each([
+    [2, false, true],
+    [4, true, true],
+    [2, true, false],
+  ])("allows ! input for level %i, owner-only %s, native %s", (level, ownerOnly, native) => {
+    shellPolicy.ownerOnly = ownerOnly;
+    const props = composerProps({ permissionLevel: level, isNativeWrapper: native });
+    render(<Composer {...props} />);
+    fireEvent.change(textarea(), { target: { value: "!pwd" } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(props.onSend).toHaveBeenCalledWith("!pwd", undefined);
+  });
+});
 
 describe("Composer Escape interrupt", () => {
   beforeEach(() => {

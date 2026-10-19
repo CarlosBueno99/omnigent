@@ -22,12 +22,14 @@ import asyncio
 import dataclasses
 
 from fastapi import Request
+from starlette.requests import HTTPConnection
 
 from omnigent.db.utils import shared_read_scope
 from omnigent.entities import Conversation
 from omnigent.entities.agent import Agent
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import (
+    LEVEL_EDIT,
     LEVEL_OWNER,
     RESERVED_USER_LOCAL,
     AuthProvider,
@@ -42,6 +44,13 @@ from omnigent.stores import ConversationStore
 from omnigent.stores.permission_store import PermissionStore
 
 _LEVEL_NAMES = {1: "read", 2: "edit", 3: "manage", 4: "owner"}
+
+
+def shell_write_level(connection: HTTPConnection) -> int:
+    """Minimum access for shell commands and interactive terminal controls."""
+    owner_only = getattr(connection.app.state, "shell_owner_only", True)
+    owner_only = owner_only() if callable(owner_only) else owner_only
+    return LEVEL_EDIT if owner_only is False else LEVEL_OWNER
 
 
 def get_user_id(

@@ -13,7 +13,9 @@ redeploy:
 - the public permission ceiling: ``OMNIGENT_PUBLIC_SHARING_MAX_LEVEL`` →
   ``<data_dir>/public_sharing_max_level`` (``read`` / ``edit``, default read);
 - which *new* sessions start public: ``OMNIGENT_DEFAULT_PUBLIC_SESSIONS`` →
-  ``<data_dir>/default_public_sessions`` (``off`` / ``sandbox`` / ``all``).
+  ``<data_dir>/default_public_sessions`` (``off`` / ``sandbox`` / ``all``);
+- owner-only shell access: ``OMNIGENT_SHELL_OWNER_ONLY`` →
+  ``<data_dir>/shell_owner_only`` (``on`` / ``off``, default on).
 
 A missing, empty, or unreadable file means "no override recorded", so the caller
 falls back to the env-var default; an unrecognized value is likewise ignored
@@ -245,6 +247,23 @@ def read_public_sharing_override() -> bool | None:
 def write_public_sharing_override(enabled: bool) -> None:
     """Persist the admin public-sharing override atomically."""
     _write_override_text(resolve_public_sharing_path(), "on" if enabled else "off")
+
+
+def shell_owner_only_env_default() -> bool:
+    """Only an explicit falsy value permits editors to use shells."""
+    return os.environ.get("OMNIGENT_SHELL_OWNER_ONLY", "").strip().lower() not in _PUBLIC_FALSY
+
+
+def read_shell_owner_only_override() -> bool | None:
+    raw = _read_override_text(resolve_data_dir() / "shell_owner_only")
+    if not raw:
+        return None
+    return raw.lower() not in _PUBLIC_FALSY
+
+
+def write_shell_owner_only_override(enabled: bool) -> None:
+    """Persist the admin shell-access policy atomically."""
+    _write_override_text(resolve_data_dir() / "shell_owner_only", "on" if enabled else "off")
 
 
 def public_sharing_max_level_env_default() -> PublicSharingMaxLevel:

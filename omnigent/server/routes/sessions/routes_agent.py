@@ -56,6 +56,7 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._auth_helpers import (
     require_user as _require_user,
 )
+from omnigent.server.routes._auth_helpers import shell_write_level
 from omnigent.server.routes._content_type import (
     require_json_content_type,
 )
@@ -549,9 +550,25 @@ def register_agent_routes(
             return response
 
         if method == "tools/call":
-            from omnigent.server.mcp_identity import mcp_policy_actor
+            from omnigent.server.mcp_identity import is_session_runner_request, mcp_policy_actor
 
             conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            tool_name = params.get("name")
+            arguments = params.get("arguments")
+            if tool_name == "sys_call_async" and isinstance(arguments, dict):
+                tool_name = arguments.get("tool")
+            if (
+                conv is not None
+                and tool_name in ("sys_os_shell", "sys_terminal_launch", "sys_terminal_send")
+                and not is_session_runner_request(request, conv)
+            ):
+                await _require_access(
+                    user_id,
+                    session_id,
+                    shell_write_level(request),
+                    permission_store,
+                    conversation_store,
+                )
             actor = mcp_policy_actor(request, conv, user_id) if conv else _build_actor(user_id)
             return await _handle_mcp_tools_call(
                 rpc_id,

@@ -147,6 +147,8 @@ export function SharingPage() {
   const publicMaxEditable = state?.public_sharing_max_level_editable ?? false;
   const defaultPublic = state?.default_public_sessions ?? "off";
   const defaultPublicEditable = state?.default_public_sessions_editable ?? false;
+  const shellOwnerOnly = state?.shell_owner_only ?? true;
+  const shellOwnerOnlyEditable = state?.shell_owner_only_editable ?? false;
   // Settings a higher-level one overrides are greyed out and show their
   // effective value; the saved value returns once the blocker is lifted.
   const sharingOff = current === "off";
@@ -161,6 +163,7 @@ export function SharingPage() {
   const publicDisabled = !publicEditable || setMode.isPending || publicBlockedReason !== null;
   const defaultPublicDisabled =
     !defaultPublicEditable || setMode.isPending || defaultPublicBlockedReason !== null;
+  const shellOwnerOnlyDisabled = !shellOwnerOnlyEditable || setMode.isPending;
 
   function choose(mode: SharingMode) {
     if (!editable || mode === current || setMode.isPending) return;
@@ -178,6 +181,12 @@ export function SharingPage() {
     if (defaultPublicDisabled || next === defaultPublic) return;
     setError(null);
     setMode.mutate({ default_public_sessions: next }, { onError: (err) => setError(err.message) });
+  }
+
+  function toggleShellOwnerOnly(next: boolean) {
+    if (shellOwnerOnlyDisabled) return;
+    setError(null);
+    setMode.mutate({ shell_owner_only: next }, { onError: (err) => setError(err.message) });
   }
 
   return (
@@ -236,6 +245,33 @@ export function SharingPage() {
                     );
                   })}
                 </fieldset>
+              </SettingsGroup>
+
+              <SettingsGroup title="Shell access" testId="settings-group-shell-access">
+                <div className="flex items-center justify-between gap-4">
+                  <SettingsLabel
+                    label="Only owners can use shells"
+                    className="flex-1"
+                    description={
+                      <>
+                        Only session owners can start shells, send shell commands, or type in
+                        terminals. Turn off to also allow editors. Viewers always remain read-only.
+                        {!shellOwnerOnlyEditable && (
+                          <span className="mt-1 block">
+                            Managed by this deployment and can&apos;t be changed here.
+                          </span>
+                        )}
+                      </>
+                    }
+                  />
+                  <Switch
+                    checked={shellOwnerOnly}
+                    onCheckedChange={toggleShellOwnerOnly}
+                    disabled={shellOwnerOnlyDisabled}
+                    aria-label="Only owners can use shells"
+                    componentId="settings.sharing.shell_owner_only"
+                  />
+                </div>
               </SettingsGroup>
 
               <SettingsGroup title="Public sharing" testId="settings-group-public-sharing">

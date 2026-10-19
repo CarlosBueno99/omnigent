@@ -51,11 +51,8 @@ interface MainTerminalViewProps {
   visible?: boolean;
   /**
    * When true, attach every terminal (agent TUI and user shells)
-   * read-only — the viewer can watch but not type. Set for non-owners:
-   * a shared PTY's keystrokes carry no per-user identity, so only the
-   * owner may drive it (the server enforces this and refuses a
-   * non-owner write attach). Non-owners interact via the chat composer
-   * instead. Default false (owner / single-user).
+   * read-only — the viewer can watch but not type. Follows the server's
+   * shell-access policy and the viewer's session permissions.
    */
   readOnly?: boolean;
   /** Known runner-tunnel state for the active session. */

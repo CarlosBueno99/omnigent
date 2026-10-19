@@ -23,6 +23,7 @@ import { useSidebarToggleHotkeys } from "@/hooks/useSidebarToggleHotkeys";
 import { useCommandPaletteHotkey } from "@/hooks/useCommandPaletteHotkey";
 import { useNewSessionHotkey } from "@/hooks/useNewSessionHotkey";
 import { useNewShellHotkey } from "@/hooks/useNewShellHotkey";
+import { useCanUseShell } from "@/hooks/usePermissions";
 import { useSettingsHotkey } from "@/hooks/useSettingsHotkey";
 import { useIsEmbedded } from "@/lib/embedded";
 import { AgentInfoContent, agentHasInfo } from "@/components/AgentInfo";
@@ -1985,8 +1986,10 @@ export function AppShell() {
   // flight, so two quick presses can't spawn two shells (the menu disables its
   // item on create.isPending for the same reason).
   const createTerminal = useCreateTerminal(conversationId ?? "");
+  const canUseShell = useCanUseShell(permissionLevel);
   const shellLaunchable =
     agentSupportsShells &&
+    canUseShell &&
     !!conversationId &&
     !createTerminal.isPending &&
     liveness?.kind !== "host_offline" &&
@@ -2569,7 +2572,8 @@ export function AppShell() {
                       // can create the first one). Desktop rail tab stays gated
                       // on an existing shell (railTabsAvailable.terminals).
                       showShellsTab:
-                        !hideTerminalsTab && (railTerminals.length > 0 || agentSupportsShells),
+                        !hideTerminalsTab &&
+                        (railTerminals.length > 0 || (agentSupportsShells && canUseShell)),
                       terminalsLength: railTerminals.length,
                       debugMode,
                       changedCount,
@@ -2685,9 +2689,7 @@ export function AppShell() {
                   // No neighbor to resize against (chat is hidden, FilesPanel
                   // owns its own width) — grow via flex-1.
                   fluid={panelOpen}
-                  // Non-owners attach read-only: a shared PTY can't attribute
-                  // input per-user, so only the owner may type (server-enforced).
-                  readOnly={!isOwnerLevel(permissionLevel)}
+                  readOnly={!canUseShell}
                   onClose={() => setPanelInitialKey(null)}
                 />
               )}

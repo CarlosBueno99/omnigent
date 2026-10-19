@@ -1305,3 +1305,4 @@ describe("WorkspacePanel panel picker", () => {
     expect(onRightRailTabChange).toHaveBeenCalledWith("sidechat");
   });
 });
+vi.mock("@/hooks/useSharing", () => ({ useShellOwnerOnly: () => ({ data: true }) }));

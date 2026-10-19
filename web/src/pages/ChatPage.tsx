@@ -66,7 +66,7 @@ import {
   useBrainHarnessLabels,
   useHarnessEffortFamilies,
 } from "@/lib/agentLabels";
-import { usePermissions, useSessionOwner } from "@/hooks/usePermissions";
+import { useCanUseShell, usePermissions, useSessionOwner } from "@/hooks/usePermissions";
 import type { NativeModelOption, Session, SessionStatus, SkillSummary } from "@/lib/types";
 import { usePromptHistory } from "@/hooks/usePromptHistory";
 import { useReplyDraft } from "@/hooks/useReplyDraft";
@@ -1667,10 +1667,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
   // Hidden overlays retain layout so FitAddon geometry stays stable; the chat
   // surface unmounts while Terminal is shown.
   const mountTerminal = shouldMountTerminalSurface(conversationId, terminalFirst);
-  // Non-owners attach read-only: a shared PTY can't attribute input
-  // per-user, so only the owner may type. They drive the agent via the
-  // composer instead. Server enforces this too.
-  const terminalReadOnly = !isOwnerLevel(permissionLevel);
+  const terminalReadOnly = !useCanUseShell(permissionLevel);
   const [warmTerminals, setWarmTerminals] = useState<WarmTerminalEntry[]>([]);
   useEffect(() => {
     if (!mountTerminal || !conversationId) return;
@@ -2371,6 +2368,11 @@ function ComposerImpl(
   // explains *why* this specific row can't receive input.
   const isReadOnly =
     readOnlyReason !== null || (permissionLevel === 1 && sendDisabledReason === null);
+  const canUseShell = useCanUseShell(permissionLevel);
+  const shellInputDisabledReason =
+    isNativeWrapper && !canUseShell && fullText.trimStart().startsWith("!")
+      ? "Only the session owner can send shell commands on this server."
+      : null;
   // A pending elicitation addressed to this session parks the turn
   // server-side (the runner blocks on the verdict Future), so a message
   // sent now would sit queued and unread until the card is answered —
@@ -3256,6 +3258,7 @@ function ComposerImpl(
       (!trimmed && files.length === 0 && mentionedItems.length === 0) ||
       disabled ||
       sendDisabledReason !== null ||
+      shellInputDisabledReason !== null ||
       hasPendingElicitation
     )
       return;
@@ -3833,6 +3836,9 @@ function ComposerImpl(
               />
               {/* Inline slash-command feedback: errors and /help output */}
               {commandError !== null && <ComposerFeedbackRow>{commandError}</ComposerFeedbackRow>}
+              {shellInputDisabledReason !== null && (
+                <ComposerFeedbackRow>{shellInputDisabledReason}</ComposerFeedbackRow>
+              )}
             </>
           ),
         }}
@@ -3972,9 +3978,14 @@ function ComposerImpl(
                             disabled ||
                             isReadOnly ||
                             sendDisabledReason !== null ||
+                            shellInputDisabledReason !== null ||
                             hasPendingElicitation
                       }
-                      title={showInterruptButton ? "Interrupt" : (sendDisabledReason ?? undefined)}
+                      title={
+                        showInterruptButton
+                          ? "Interrupt"
+                          : (sendDisabledReason ?? shellInputDisabledReason ?? undefined)
+                      }
                       label={showInterruptButton ? "Interrupt" : "Send"}
                     />
                   </TooltipTrigger>

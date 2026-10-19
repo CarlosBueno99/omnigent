@@ -38,7 +38,9 @@ workspace: only the owner's workspace-relative reads reach the runner marked
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -56,7 +58,7 @@ from omnigent.server.auth import (
     RESERVED_USER_PUBLIC,
     UnifiedAuthProvider,
 )
-from omnigent.server.routes.sessions import create_sessions_router
+from omnigent.server.routes.sessions import create_sessions_router, routes_resources
 
 # The server route is mounted under /v1 and proxies to the runner at the
 # same path, so the client URL and the recorded runner path are identical.
@@ -78,6 +80,7 @@ class _StubConversationStore:
         *,
         share_workspace_files: bool = False,
         parent: str | None = None,
+        harness_override: str | None = None,
     ) -> None:
         self._conversations[conversation_id] = Conversation(
             id=conversation_id,
@@ -87,6 +90,7 @@ class _StubConversationStore:
             parent_conversation_id=parent,
             agent_id="ag_test",
             share_workspace_files=share_workspace_files,
+            harness_override=harness_override,
         )
 
 
@@ -248,6 +252,9 @@ class _FakeRunnerRouter:
     def __init__(self, client: _RecordingRunnerClient) -> None:
         self.client = client
 
+    def require_mcp_registry_support(self, conversation: Conversation) -> None:
+        pass
+
     def client_for_session_resources(
         self,
         session_id: str,
@@ -285,6 +292,7 @@ def app(runner_globals_reset: None, runner_client: _RecordingRunnerClient) -> Fa
     # A sub-agent of conv_share: nobody holds a direct grant on it, so every
     # caller's access is inherited through the parent.
     conv_store.add("conv_child", parent="conv_share")
+    conv_store.add("conv_native", parent="conv_share", harness_override="claude-native")
     perm_store = _StubPermissionStore()
     perm_store.add_grant("owner@example.com", "conv_share", LEVEL_EDIT)
     perm_store.add_grant("viewer@example.com", "conv_share", LEVEL_READ)
@@ -401,6 +409,113 @@ async def test_shell_allows_owner_and_proxies(
     assert resp.json()["stdout"] == "ok\n"
     # The owner's command reached the runner verbatim.
     assert runner_client.posts == [(_SHELL_PATH, {"command": "echo hi"})]
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        (_SHELL_PATH, {"command": "echo hi"}),
+        (
+            "/v1/sessions/conv_share/resources/terminals",
+            {"terminal": "claude", "session_key": "main", "ensure_native_terminal": True},
+        ),
+        (
+            "/v1/sessions/conv_share/resources/terminals/terminal_claude_main/transfer",
+            {"target_session_id": "conv_child"},
+        ),
+    ],
+    ids=["command", "launch", "transfer"],
+)
+@pytest.mark.parametrize(
+    "caller,level",
+    [
+        ("viewer@example.com", LEVEL_READ),
+        ("owner@example.com", LEVEL_EDIT),
+        ("manager@example.com", LEVEL_MANAGE),
+        ("real-owner@example.com", LEVEL_OWNER),
+        ("admin@example.com", LEVEL_OWNER),
+    ],
+)
+async def test_live_shell_policy_controls_commands_and_terminals(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    body: dict[str, Any],
+    caller: str,
+    level: int,
+) -> None:
+    async def connected(**kwargs: Any) -> tuple[None, Conversation]:
+        return None, kwargs["conv"]
+
+    monkeypatch.setattr(routes_resources, "ensure_runner_connected", connected)
+    policy = [True]
+    app.state.shell_owner_only = lambda: policy[0]
+    for owner_only in (True, False, True):
+        policy[0] = owner_only
+        runner_client.posts.clear()
+        response = await client.post(path, json=body, headers={"X-Forwarded-Email": caller})
+        allowed = level >= (LEVEL_OWNER if owner_only else LEVEL_EDIT)
+        assert response.status_code == (200 if allowed else 403), response.text
+        assert bool(runner_client.posts) is allowed
+
+
+@pytest.mark.parametrize(
+    "session_id,owner_only,caller,text,expected",
+    [
+        ("conv_native", True, "owner@example.com", " \n!echo hi", 403),
+        ("conv_native", False, "owner@example.com", "!echo hi", 202),
+        ("conv_native", True, "real-owner@example.com", "!echo hi", 202),
+        ("conv_native", True, "admin@example.com", "!echo hi", 202),
+        ("conv_native", True, "owner@example.com", "hello", 202),
+        ("conv_share", True, "owner@example.com", "!literal SDK prompt", 202),
+    ],
+)
+async def test_native_shell_input_is_authorized_before_durable_enqueue(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    session_id: str,
+    owner_only: bool,
+    caller: str,
+    text: str,
+    expected: int,
+) -> None:
+    app.state.shell_owner_only = owner_only
+    enqueue = AsyncMock(return_value=SimpleNamespace(id="saved_input"))
+    app.state.startup_inputs = SimpleNamespace(
+        accepts=AsyncMock(return_value=True), enqueue=enqueue
+    )
+    response = await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "message",
+            "data": {"role": "user", "content": [{"type": "input_text", "text": text}]},
+        },
+        headers={"X-Forwarded-Email": caller},
+    )
+    assert response.status_code == expected, response.text
+    assert enqueue.await_count == (1 if expected == 202 else 0)
+    assert runner_client.posts == []
+
+
+@pytest.mark.parametrize("role", [None, "assistant", "invalid"])
+async def test_native_shell_input_cannot_bypass_owner_gate_with_role(
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    role: str | None,
+) -> None:
+    data: dict[str, Any] = {"content": [{"type": "input_text", "text": "!echo hi"}]}
+    if role is not None:
+        data["role"] = role
+    response = await client.post(
+        "/v1/sessions/conv_native/events",
+        json={"type": "message", "data": data},
+        headers={"X-Forwarded-Email": "owner@example.com"},
+    )
+    assert response.status_code == 403, response.text
+    assert runner_client.posts == []
 
 
 _FS_BASE = "/v1/sessions/conv_share/resources/environments/default/filesystem"

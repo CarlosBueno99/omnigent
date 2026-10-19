@@ -54,6 +54,8 @@ function state(overrides: Partial<SharingState> = {}): SharingState {
     default_public_sessions: "off",
     default_public_sessions_editable: true,
     default_public_sessions_options: ["off", "sandbox", "all"],
+    shell_owner_only: true,
+    shell_owner_only_editable: true,
     ...overrides,
   };
 }
@@ -247,6 +249,78 @@ describe("SharingPage", () => {
       expect(toggle).toBeDisabled();
       fireEvent.click(toggle);
       expect(setModeMutate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("shell access toggle", () => {
+    it.each([true, false])(
+      "updates owner-only access from %s independently of sharing",
+      async (ownerOnly) => {
+        setSharingState(
+          state({
+            sharing_mode: "off",
+            public_sharing_enabled: false,
+            shell_owner_only: ownerOnly,
+          }),
+        );
+
+        renderPage();
+        const toggle = await screen.findByRole("switch", { name: "Only owners can use shells" });
+        expect(toggle).toBeEnabled();
+        expect(toggle).toHaveAttribute("aria-checked", String(ownerOnly));
+        fireEvent.click(toggle);
+
+        expect(setModeMutate).toHaveBeenCalledWith(
+          { shell_owner_only: !ownerOnly },
+          expect.anything(),
+        );
+      },
+    );
+
+    it("disables deployment-managed shell access", async () => {
+      setSharingState(state({ shell_owner_only_editable: false }));
+
+      renderPage();
+      const toggle = await screen.findByRole("switch", { name: "Only owners can use shells" });
+      expect(toggle).toBeDisabled();
+      expect(screen.getByTestId("settings-group-shell-access")).toHaveTextContent(
+        "Managed by this deployment and can't be changed here.",
+      );
+      fireEvent.click(toggle);
+      expect(setModeMutate).not.toHaveBeenCalled();
+    });
+
+    it("defaults to owner-only and read-only with an older server", async () => {
+      setSharingState(state({ shell_owner_only: undefined, shell_owner_only_editable: undefined }));
+
+      renderPage();
+      const toggle = await screen.findByRole("switch", { name: "Only owners can use shells" });
+      expect(toggle).toBeChecked();
+      expect(toggle).toBeDisabled();
+    });
+
+    it("disables shell updates while a setting is being saved", async () => {
+      setSharingState(state());
+      vi.mocked(sharingHook.useSetSharing).mockReturnValue({
+        mutate: setModeMutate,
+        isPending: true,
+      } as unknown as ReturnType<typeof sharingHook.useSetSharing>);
+
+      renderPage();
+      expect(
+        await screen.findByRole("switch", { name: "Only owners can use shells" }),
+      ).toBeDisabled();
+    });
+
+    it("shows a shell access update failure", async () => {
+      setSharingState(state());
+      setModeMutate.mockImplementationOnce((_update, options) => {
+        options.onError(new Error("Shell access could not be saved."));
+      });
+
+      renderPage();
+      fireEvent.click(await screen.findByRole("switch", { name: "Only owners can use shells" }));
+      expect(screen.getByText("Shell access could not be saved.")).toBeInTheDocument();
     });
   });
 

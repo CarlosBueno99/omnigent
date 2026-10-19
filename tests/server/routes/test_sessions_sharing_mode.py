@@ -21,6 +21,7 @@ lifespan) since none of these paths need the runtime.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -70,6 +71,7 @@ def _isolate_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OMNIGENT_ADMIN_CREDENTIALS_PATH", str(tmp_path / "admin-credentials"))
     monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "")
     monkeypatch.delenv("OMNIGENT_PUBLIC_SHARING_MAX_LEVEL", raising=False)
+    monkeypatch.delenv("OMNIGENT_SHELL_OWNER_ONLY", raising=False)
     sharing_settings._cache = {}
 
 
@@ -80,6 +82,7 @@ def _build_app(
     sharing_mode: SharingMode | object | None = None,
     public_sharing: bool | object | None = None,
     public_sharing_max_level: str | None = None,
+    shell_owner_only: bool | Callable[[], bool] | None = None,
     permission_store: SqlAlchemyPermissionStore | None = None,
     auth_provider: AuthProvider | None = None,
 ) -> FastAPI:
@@ -96,6 +99,7 @@ def _build_app(
         sharing_mode=sharing_mode,
         public_sharing=public_sharing,
         public_sharing_max_level=public_sharing_max_level,
+        shell_owner_only=shell_owner_only,
     )
 
 
@@ -335,6 +339,64 @@ def _admin_app(
         permission_store=permission_store,
         auth_provider=UnifiedAuthProvider(source="header"),
     )
+
+
+@pytest.mark.asyncio
+async def test_shell_policy_is_admin_only_live_and_persisted(db_uri: str, tmp_path: Path) -> None:
+    app = _admin_app(db_uri, tmp_path)
+    async with _client(app) as anonymous, _client(app, _OWNER) as member:
+        for client, status in ((anonymous, 401), (member, 403)):
+            assert (await client.get("/v1/sharing")).status_code == status
+            assert (
+                await client.put("/v1/sharing", json={"shell_owner_only": False})
+            ).status_code == status
+    async with _client(app, _ADMIN) as admin:
+        initial = (await admin.get("/v1/sharing")).json()
+        assert initial["shell_owner_only"] is True
+        assert initial["shell_owner_only_editable"] is True
+        for enabled in (False, True, False):
+            updated = await admin.put("/v1/sharing", json={"shell_owner_only": enabled})
+            assert updated.status_code == 200
+            assert updated.json()["shell_owner_only"] is enabled
+            assert (await admin.get("/v1/info")).json()["shell_owner_only"] is enabled
+    restarted = _admin_app(db_uri, tmp_path)
+    assert restarted.state.shell_owner_only() is False
+
+
+@pytest.mark.asyncio
+async def test_managed_shell_policy_is_live_and_rejects_partial_updates(
+    db_uri: str, tmp_path: Path
+) -> None:
+    enabled = False
+    app = _build_app(db_uri, tmp_path, shell_owner_only=lambda: enabled)
+    async with _client(app) as client:
+        state = (await client.get("/v1/sharing")).json()
+        assert state["shell_owner_only"] is False
+        assert state["shell_owner_only_editable"] is False
+        enabled = True
+        assert (await client.get("/v1/info")).json()["shell_owner_only"] is True
+        denied = await client.put(
+            "/v1/sharing", json={"public_sharing": False, "shell_owner_only": False}
+        )
+        assert denied.status_code == 403
+        assert (await client.get("/v1/sharing")).json()["public_sharing_enabled"] is True
+    static = _build_app(db_uri, tmp_path, shell_owner_only=False)
+    assert static.state.shell_owner_only() is False
+    assert static.state.shell_owner_only_writable is False
+
+
+def test_shell_policy_env_and_invalid_override_fail_closed(
+    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_SHELL_OWNER_ONLY", "typo")
+    assert _build_app(db_uri, tmp_path).state.shell_owner_only() is True
+    monkeypatch.setenv("OMNIGENT_SHELL_OWNER_ONLY", "off")
+    app = _build_app(db_uri, tmp_path)
+    assert app.state.shell_owner_only() is False
+    path = sharing_settings.resolve_data_dir() / "shell_owner_only"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("typo\n")
+    assert app.state.shell_owner_only() is True
 
 
 # ── SharingMode.coerce — fail-open-to-ON contract ────────────────────

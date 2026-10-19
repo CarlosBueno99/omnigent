@@ -38,7 +38,7 @@ import {
   readDefaultWorkspaceTab,
   readPinnedWorkspaceTabs,
 } from "@/lib/workspaceTabPreferences";
-import { isEditorLevel, isOwnerLevel } from "@/lib/permissionsApi";
+import { isEditorLevel } from "@/lib/permissionsApi";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -64,6 +64,7 @@ import { useChatStore } from "@/store/chatStore";
 import { SIDE_CHAT_COMMAND_PREFIX, supportsSideChat, usesNativeSideChatFork } from "@/lib/sideChat";
 import { createSideChat, stopSession } from "@/lib/sessionsApi";
 import { useSessionAgent } from "@/hooks/useAgents";
+import { useCanUseShell } from "@/hooks/usePermissions";
 import type { SessionLiveness } from "@/hooks/useSessionLiveness";
 import { terminalTabKey, useCreateTerminal, useTerminals } from "@/hooks/useTerminals";
 import { SuppressBrowserView } from "@/hooks/useSuppressBrowserView";
@@ -187,6 +188,7 @@ function NewTabMenu({
   onCreateError,
   triggerClassName,
   liveness,
+  canUseShell,
 }: {
   conversationId: string;
   panels: readonly DefaultWorkspaceTab[];
@@ -209,6 +211,7 @@ function NewTabMenu({
   /** Open session's derived liveness — drives the "Shell" item's connect
    *  affordance. Absent is treated as ready. */
   liveness?: SessionLiveness;
+  canUseShell: boolean;
 }) {
   const { data: agent } = useSessionAgent(conversationId);
   const create = useCreateTerminal(conversationId);
@@ -221,7 +224,7 @@ function NewTabMenu({
   // Shell access mirrors NewTerminalButton's gate: the agent's spec must
   // declare a non-empty ``terminals:`` block.
   const declaredTerminals = agent?.terminals ?? [];
-  const canOpenShell = declaredTerminals.length > 0;
+  const canOpenShell = declaredTerminals.length > 0 && canUseShell;
   if (!canOpenShell && !onOpenBrowser && !onOpenSideChat && panels.length === 0) return null;
 
   // The remembered shell, or the first declared type. Used only when shell
@@ -836,6 +839,7 @@ function WorkspacePanelImpl({
   mobileSideChatsOpen = false,
   onMobileSideChatsOpenChange,
 }: WorkspacePanelProps) {
+  const canUseShell = useCanUseShell(permissionLevel);
   const browsers = useBrowserTabs(conversationId);
   const closeBrowserTab = async (tabId: string) => {
     const closed = await browsers.close(tabId);
@@ -1497,6 +1501,7 @@ function WorkspacePanelImpl({
               </WorkspaceTabsScroller>
               {/* Keep new-panel actions outside the scrolling viewport. */}
               <NewTabMenu
+                canUseShell={canUseShell}
                 conversationId={conversationId}
                 panels={unpinnedTabs}
                 onOpenPanel={selectPermanentTab}
@@ -1516,6 +1521,7 @@ function WorkspacePanelImpl({
             to nothing when the agent has no terminal access. */}
           {showEmptyNewTab && (
             <NewTabMenu
+              canUseShell={canUseShell}
               conversationId={conversationId}
               panels={unpinnedTabs}
               onOpenPanel={selectPermanentTab}
@@ -1620,7 +1626,7 @@ function WorkspacePanelImpl({
             <RailTerminalView
               conversationId={conversationId}
               terminalKey={selectedTerminalKey}
-              readOnly={!isOwnerLevel(permissionLevel)}
+              readOnly={!canUseShell}
               autoFocus={autoFocusSelectedTerminal}
             />
           ) : selectedFilePath !== null ? (

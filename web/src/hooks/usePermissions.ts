@@ -11,11 +11,14 @@ import {
   derivePermissionLevel,
   getSessionOwner,
   grantPermission,
+  isEditorLevel,
+  isOwnerLevel,
   listPermissions,
   revokePermission,
 } from "@/lib/permissionsApi";
 import { isTempConvId } from "@/lib/tempConversationId";
 import { useSession } from "./useSession";
+import { useShellOwnerOnly } from "./useSharing";
 
 function permissionsKey(sessionId: string) {
   return ["permissions", sessionId] as const;
@@ -81,19 +84,29 @@ export function useRevokePermission(sessionId: string) {
  * `null` permission level (single-user mode) is treated as unrestricted.
  */
 export function useCanEdit(conversationId: string): boolean {
+  return isEditorLevel(useSessionPermissionLevel(conversationId));
+}
+
+export function useCanUseShell(permissionLevel: number | null): boolean {
+  const owner = isOwnerLevel(permissionLevel);
+  const editor = isEditorLevel(permissionLevel);
+  const { data: ownerOnly = true } = useShellOwnerOnly(!owner && editor);
+  return owner || (editor && !ownerOnly);
+}
+
+export function useSessionPermissionLevel(conversationId: string): number | null {
   const { data: conversationsData } = useLoadedConversations();
   const { session: activeSession, isLoading: sessionLoading } = useSession(conversationId);
   return useMemo(() => {
     const conversations = conversationsData?.pages.flatMap((p) => p.data);
     const activeConv = conversations?.find((c) => c.id === conversationId) ?? null;
-    const permissionLevel = derivePermissionLevel(
+    return derivePermissionLevel(
       activeSession,
       sessionLoading,
       activeConv,
       conversationId,
       conversationsData !== undefined,
     );
-    return permissionLevel == null || permissionLevel >= 2;
   }, [conversationsData, conversationId, activeSession, sessionLoading]);
 }
 

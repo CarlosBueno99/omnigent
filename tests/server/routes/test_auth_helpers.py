@@ -11,6 +11,7 @@ production exactly.
 from __future__ import annotations
 
 import pytest
+from fastapi import FastAPI, Request
 
 from omnigent.entities.agent import Agent
 from omnigent.errors import ErrorCode, OmnigentError
@@ -27,6 +28,7 @@ from omnigent.server.routes._auth_helpers import (
     can_mutate_session_agent,
     require_access_and_level,
     require_agent_owner,
+    shell_write_level,
 )
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
@@ -37,6 +39,16 @@ from omnigent.stores.permission_store.sqlalchemy_store import (
 
 ALICE = "alice@test.com"
 BOB = "bob@test.com"
+
+
+@pytest.mark.parametrize("policy", [None, True, False, "false"])
+@pytest.mark.parametrize("live", [False, True])
+def test_shell_write_level_fails_closed_except_explicit_false(policy: object, live: bool) -> None:
+    app = FastAPI()
+    if policy is not None:
+        app.state.shell_owner_only = (lambda: policy) if live else policy
+    request = Request({"type": "http", "app": app})
+    assert shell_write_level(request) == (LEVEL_EDIT if policy is False else LEVEL_OWNER)
 
 
 def _session_agent(

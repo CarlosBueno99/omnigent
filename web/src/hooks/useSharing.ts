@@ -22,6 +22,10 @@ export interface SharingState {
   /** False when the deployment manages this default itself (not file-backed). */
   default_public_sessions_editable: boolean;
   default_public_sessions_options: DefaultPublicSessions[];
+  /** Whether shell commands and terminal input require session ownership. */
+  shell_owner_only?: boolean;
+  /** False when the deployment manages shell access itself (not file-backed). */
+  shell_owner_only_editable?: boolean;
 }
 
 /** ``off`` = all private, ``sandbox`` = cloud sandbox sessions public, ``all`` = every session. */
@@ -33,10 +37,31 @@ export interface SharingUpdate {
   public_sharing?: boolean;
   public_sharing_max_level?: "read" | "edit";
   default_public_sessions?: DefaultPublicSessions;
+  shell_owner_only?: boolean;
 }
 
 const QUERY_KEY = ["sharing"];
 const PUBLIC_MAX_LEVEL_QUERY_KEY = ["sharing", "public-max-level"];
+const SHELL_OWNER_ONLY_QUERY_KEY = ["sharing", "shell-owner-only"];
+
+export function useShellOwnerOnly(enabled: boolean) {
+  return useQuery({
+    queryKey: SHELL_OWNER_ONLY_QUERY_KEY,
+    enabled,
+    staleTime: 0,
+    refetchInterval: 5_000,
+    queryFn: async (): Promise<boolean> => {
+      try {
+        const response = await authenticatedFetch("/v1/info");
+        if (!response.ok) return true;
+        const info = await response.json();
+        return info.shell_owner_only !== false;
+      } catch {
+        return true;
+      }
+    },
+  });
+}
 
 export function usePublicSharingMaxLevel(enabled: boolean) {
   return useQuery({
@@ -90,6 +115,7 @@ export function useSetSharing() {
       // Reflect the new value immediately, then revalidate.
       queryClient.setQueryData(QUERY_KEY, data);
       queryClient.setQueryData(PUBLIC_MAX_LEVEL_QUERY_KEY, data.public_sharing_max_level ?? "read");
+      queryClient.setQueryData(SHELL_OWNER_ONLY_QUERY_KEY, data.shell_owner_only !== false);
       void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
     },
   });

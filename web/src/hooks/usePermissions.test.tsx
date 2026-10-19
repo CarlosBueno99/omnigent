@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useConversations as useTestConversations } from "@/hooks/useConversations";
+import { useConversations } from "@/hooks/useConversations";
 
-vi.mock("@/hooks/useSidebarData", () => ({ useLoadedConversations: () => useTestConversations() }));
+vi.mock("@/hooks/useSidebarData", () => ({ useLoadedConversations: () => useConversations() }));
 // Tests for the `useCanEdit` edit-gate hook.
 //
 // `useCanEdit` is what every editable surface (CodeViewer,
@@ -21,10 +21,11 @@ import type { Session } from "@/lib/types";
 
 vi.mock("./useConversations", () => ({ useConversations: vi.fn() }));
 vi.mock("./useSession", () => ({ useSession: vi.fn() }));
+vi.mock("./useSharing", () => ({ useShellOwnerOnly: vi.fn(() => ({ data: undefined })) }));
 
-import { useConversations } from "./useConversations";
 import { useSession } from "./useSession";
-import { useCanEdit } from "./usePermissions";
+import { useCanEdit, useCanUseShell } from "./usePermissions";
+import { useShellOwnerOnly } from "./useSharing";
 
 const useConversationsMock = vi.mocked(useConversations);
 const useSessionMock = vi.mocked(useSession);
@@ -131,5 +132,26 @@ describe("useCanEdit — safe defaults", () => {
     // sidebar settles. derivePermissionLevel returns null → permissive.
     setHooks({ session: null, sessionLoading: false, conversations: undefined });
     expect(renderHook(() => useCanEdit("conv_1")).result.current).toBe(true);
+  });
+});
+
+describe("useCanUseShell", () => {
+  it.each([
+    [1, true, false],
+    [1, false, false],
+    [2, true, false],
+    [2, false, true],
+    [3, true, false],
+    [3, false, true],
+    [4, true, true],
+    [4, false, true],
+    [null, true, true],
+    [2, undefined, false],
+  ])("level %s with owner-only %s permits shell access %s", (level, ownerOnly, expected) => {
+    vi.mocked(useShellOwnerOnly).mockReturnValue({ data: ownerOnly } as ReturnType<
+      typeof useShellOwnerOnly
+    >);
+    expect(renderHook(() => useCanUseShell(level)).result.current).toBe(expected);
+    expect(useShellOwnerOnly).toHaveBeenLastCalledWith(level === 2 || level === 3);
   });
 });

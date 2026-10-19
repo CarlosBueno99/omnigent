@@ -192,6 +192,7 @@ class ServerInfoResponse(BaseModel):
     sharing_mode: Literal["on", "read_only", "restricted_read_only", "off"]
     public_sharing_enabled: bool
     public_sharing_max_level: Literal["read", "edit"] = "read"
+    shell_owner_only: bool = True
     server_version: str
     smart_routing_enabled: bool
     smart_routing_sources: SmartRoutingSourcesInfo
@@ -1350,6 +1351,7 @@ def create_app(
     public_sharing: bool | Callable[[], bool] | None = None,
     public_sharing_max_level: str | Callable[[], str] | None = None,
     default_public_sessions: str | Callable[[], str] | None = None,
+    shell_owner_only: bool | Callable[[], bool] | None = None,
     server_config: dict[str, Any] | None = None,
     feature_flags: FeatureFlags | None = None,
     extension_state: ExtensionPluginState | None = None,
@@ -1487,6 +1489,11 @@ def create_app(
     :param server_config: Resolved non-secret server settings. The optional
         ``session_title_instructions`` string augments the isolated automatic
         title prompt. ``None`` loads the standard server config.
+    :param shell_owner_only: Require owner access to start shells, send shell
+        commands and type into terminals (default true). ``None`` reads
+        ``OMNIGENT_SHELL_OWNER_ONLY`` with an admin-editable file override;
+        a static bool or callable is deployment-managed. Disabling permits
+        editors; viewers remain read-only.
     :param base_path: Public URL prefix the server is served under by a
         reverse proxy, e.g. ``"/proxy/6767"`` (code-server port proxy).
         ``None`` reads ``OMNIGENT_WEB_BASE_PATH``; empty/``"/"`` is a normal
@@ -2061,6 +2068,21 @@ def create_app(
 
     app.state.public_sharing_max_level = _resolve_public_sharing_max_level
     app.state.public_sharing_max_level_writable = public_sharing_max_level is None
+    from omnigent.server.sharing_settings import (
+        read_shell_owner_only_override,
+        shell_owner_only_env_default,
+    )
+
+    _shell_owner_env = shell_owner_only_env_default()
+
+    def _resolve_shell_owner_only() -> bool:
+        if shell_owner_only is None:
+            override = read_shell_owner_only_override()
+            return override if override is not None else _shell_owner_env
+        return bool(shell_owner_only() if callable(shell_owner_only) else shell_owner_only)
+
+    app.state.shell_owner_only = _resolve_shell_owner_only
+    app.state.shell_owner_only_writable = shell_owner_only is None
     # Default-public policy for NEW sessions, same shape as public_sharing.
 
     if default_public_sessions is None:
@@ -3160,6 +3182,7 @@ def create_app(
                 "sharing_mode": sharing_mode.value,
                 "public_sharing_enabled": public_sharing_enabled,
                 "public_sharing_max_level": app.state.public_sharing_max_level().value,
+                "shell_owner_only": app.state.shell_owner_only(),
                 "server_version": _server_version(),
                 "smart_routing_enabled": smart_routing_enabled,
                 "smart_routing_sources": smart_routing_sources,

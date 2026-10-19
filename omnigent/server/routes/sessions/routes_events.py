@@ -113,6 +113,7 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._auth_helpers import (
     require_user as _require_user,
 )
+from omnigent.server.routes._auth_helpers import shell_write_level
 from omnigent.server.routes._errors import session_not_found as _session_not_found
 from omnigent.server.routes._sessions.common import (
     _ALLOWED_EVENT_TYPES,
@@ -178,6 +179,7 @@ from omnigent.server.routes._sessions.helpers import (
     _build_skill_slash_command_policy_body,
     _dispatch_skill_slash_command_to_runner,
     _evaluate_output_policy,
+    _extract_user_text_from_event,
     _filesystem_attachment_in_history,
     _forward_session_change_to_runner,
     _get_runner_client,
@@ -1033,6 +1035,18 @@ def register_events_routes(
         :raises OmnigentError: 404 if no session exists.
         """
         user_id, conv = await _authorized_conversation(request, session_id)
+        if (
+            body.type == "message"
+            and _extract_user_text_from_event(body).lstrip().startswith("!")
+            and _is_native_terminal_session(conv)
+        ):
+            await _require_access(
+                user_id,
+                session_id,
+                shell_write_level(cast("Request", request)),
+                permission_store,
+                conversation_store,
+            )
         if in_flight is not None:
             # Marked only after authorization, so an unauthorized caller
             # cannot flip a session to "running" even transiently.

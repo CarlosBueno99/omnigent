@@ -1,9 +1,10 @@
-"""Admin route for the server-wide session-sharing policy.
+"""Admin route for server-wide session-sharing and shell-access policies.
 
-``GET /v1/sharing`` reports three independent settings and whether each is
+``GET /v1/sharing`` reports the independent settings and whether each is
 editable here: the sharing *mode* (the tri-state tier + tier list), whether
 *public* (anyone-with-the-link) access may be granted, and which new sessions
-start public by default. ``PUT /v1/sharing`` sets any of them (admin only),
+start public by default, and owner-only shell access. ``PUT /v1/sharing`` sets any
+of them (admin only),
 persisting an override file in the data dir that the grant gate, session
 creation and ``GET /v1/info`` read per request.
 
@@ -32,6 +33,7 @@ from omnigent.server.sharing_settings import (
     write_public_sharing_max_level_override,
     write_public_sharing_override,
     write_sharing_mode_override,
+    write_shell_owner_only_override,
 )
 from omnigent.stores.permission_store import PermissionStore
 
@@ -55,6 +57,7 @@ class SetSharingRequest(BaseModel):
     public_sharing: bool | None = None
     public_sharing_max_level: str | None = None
     default_public_sessions: str | None = None
+    shell_owner_only: bool | None = None
 
 
 def _state_response(request: Request) -> dict[str, Any]:
@@ -85,6 +88,8 @@ def _state_response(request: Request) -> dict[str, Any]:
             getattr(state, "default_public_sessions_writable", False)
         ),
         "default_public_sessions_options": [p.value for p in DefaultPublicSessions],
+        "shell_owner_only": state.shell_owner_only(),
+        "shell_owner_only_editable": bool(getattr(state, "shell_owner_only_writable", False)),
     }
 
 
@@ -140,6 +145,7 @@ def create_sharing_router(
             and body.public_sharing is None
             and body.public_sharing_max_level is None
             and body.default_public_sessions is None
+            and body.shell_owner_only is None
         ):
             raise OmnigentError(
                 "No sharing settings to update.",
@@ -210,6 +216,13 @@ def create_sharing_router(
                     "Expected one of: " + ", ".join(p.value for p in DefaultPublicSessions) + ".",
                     code=ErrorCode.INVALID_INPUT,
                 ) from exc
+        if body.shell_owner_only is not None and not getattr(
+            state, "shell_owner_only_writable", False
+        ):
+            raise OmnigentError(
+                "Shell access is managed by this deployment and cannot be changed here.",
+                code=ErrorCode.FORBIDDEN,
+            )
         # All checks passed — apply the writes.
         if mode is not None:
             await asyncio.to_thread(write_sharing_mode_override, mode)
@@ -219,6 +232,8 @@ def create_sharing_router(
             await asyncio.to_thread(write_public_sharing_max_level_override, public_max)
         if default_public is not None:
             await asyncio.to_thread(write_default_public_sessions_override, default_public)
+        if body.shell_owner_only is not None:
+            await asyncio.to_thread(write_shell_owner_only_override, body.shell_owner_only)
         return _state_response(request)
 
     return router
