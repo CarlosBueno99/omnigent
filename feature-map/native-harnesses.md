@@ -38,9 +38,10 @@ implements them separately, so a fix for one harness does not reach the others.
   Session and workspace config can add to or override these host defaults.
   Other harnesses keep their credential card only. The portable user settings
   in `~/.omnigent/config.yaml` (`model`, `opencode_model`,
-  `auto_open_conversation`, `harness.default`, `harness.<id>.args`) follow the
+  `harness.default`, `harness.<id>.args`) follow the
   user to their other connected hosts; credentials, the host identity and
-  `harness.<id>.command` stay on each machine.
+  `harness.<id>.command` stay on each machine. `auto_open_conversation` stays
+  local so a headless host's startup defaults do not change a laptop's behavior.
 - `skill-contents`: open plain or plugin skills to read their SKILL.md markdown,
   with loading, truncation, unavailable-host, and older-server states.
 

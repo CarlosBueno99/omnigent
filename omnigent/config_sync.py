@@ -6,12 +6,13 @@ one copy per user and fans changes out to the user's other connected hosts.
 Only these keys travel:
 
 - ``model`` and ``opencode_model`` (default model preferences)
-- ``auto_open_conversation``
 - ``harness.default`` and each ``harness.<id>.args`` startup override
 
 Credentials (``providers``), the host identity (``host``), the server
 selection, and anything naming a path on one machine (``default_agent``,
-``harness.<id>.command``, ``github.accounts``) stay local.
+``harness.<id>.command``, ``github.accounts``) stay local. Browser-opening
+behavior (``auto_open_conversation``) stays local too: a headless host or its
+startup wrapper may need a different default from a laptop.
 
 Protocol: a host sends ``host.config_sync`` on connect, whenever its local
 portable subset changes, and periodically. The frame carries the revision the
@@ -32,7 +33,6 @@ from typing import TypeAlias
 SyncedSettings: TypeAlias = dict[str, object]
 
 SYNCED_MODEL_KEYS: tuple[str, ...] = ("model", "opencode_model")
-SYNCED_FLAG_KEYS: tuple[str, ...] = ("auto_open_conversation",)
 # ``harness`` is synced only for its ``default`` and per-harness ``args`` fields.
 _SYNCED_HARNESS_FIELDS: frozenset[str] = frozenset({"args"})
 MAX_SYNCED_SETTINGS_BYTES = 16 * 1024
@@ -59,10 +59,6 @@ def synced_settings(cfg: Mapping[str, object]) -> SyncedSettings:
     for key in SYNCED_MODEL_KEYS:
         value = cfg.get(key)
         if isinstance(value, str) and value:
-            settings[key] = value
-    for key in SYNCED_FLAG_KEYS:
-        value = cfg.get(key)
-        if isinstance(value, bool):
             settings[key] = value
     harness = _synced_harness(cfg.get("harness"))
     if harness:
@@ -111,7 +107,7 @@ def apply_synced_settings(
     :returns: The merged config mapping to write back.
     """
     merged = dict(cfg)
-    for key in (*SYNCED_MODEL_KEYS, *SYNCED_FLAG_KEYS):
+    for key in SYNCED_MODEL_KEYS:
         if key in settings:
             merged[key] = settings[key]
         else:
@@ -174,10 +170,6 @@ def validate_synced_settings(value: object) -> SyncedSettings:
         if key in SYNCED_MODEL_KEYS:
             if not isinstance(item, str) or not item:
                 raise ValueError(f"synced setting {key!r} must be a non-empty string")
-            result[key] = item
-        elif key in SYNCED_FLAG_KEYS:
-            if not isinstance(item, bool):
-                raise ValueError(f"synced setting {key!r} must be a boolean")
             result[key] = item
         elif key == "harness":
             result[key] = _validate_harness(item)

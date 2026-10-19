@@ -62,6 +62,7 @@ from omnigent.config import (
     global_config_path,
     load_global_config,
     load_local_config,
+    write_global_config,
 )
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.host.daemon_lifecycle import (
@@ -1176,9 +1177,7 @@ def _save_global_config(  # type: ignore[explicit-any]
         for key in unset_keys:
             cfg.pop(key, None)
         _normalize_harness_scalar_on_write(cfg, path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=True)
+        write_global_config(cfg, path)
 
 
 def _materialize_bundled_example(name: str) -> Path:

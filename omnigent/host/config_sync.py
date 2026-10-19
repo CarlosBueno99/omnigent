@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,8 @@ from omnigent.host.frames import HostConfigSyncFrame, HostConfigUpdateFrame
 _logger = logging.getLogger(__name__)
 
 CONFIG_SYNC_STATE_FILENAME = "config-sync.json"
+# Last cause logged per sidecar, so a broken file is reported once rather than every poll.
+_UNREADABLE_STATE_WARNED: dict[Path, str] = {}
 
 
 @dataclass(frozen=True)
@@ -81,7 +84,7 @@ def load_sync_state(server_url: str, config_path: Path | None = None) -> ConfigS
 def load_reported_settings(
     server_url: str, config_path: Path | None = None
 ) -> SyncedSettings | None:
-    """Return the settings this host last reported to *server_url*, if recorded."""
+    """Return the first unacknowledged settings reported to *server_url*, if recorded."""
     path = sync_state_path(config_path)
     entry = _read_servers(path).get(server_url)
     if not isinstance(entry, dict) or "reported" not in entry:
@@ -91,23 +94,6 @@ def load_reported_settings(
     except ValueError as exc:
         _warn_unreadable(path, exc)
         return None
-
-
-def record_reported_settings(
-    settings: SyncedSettings, server_url: str, config_path: Path | None = None
-) -> None:
-    """Remember what was reported, so an edit made before the acknowledgement stays an edit."""
-    config = config_path or global_config_path()
-    path = sync_state_path(config)
-    with global_config_lock(config):
-        servers = _read_servers(path)
-        entry = servers.get(server_url)
-        current = dict(entry) if isinstance(entry, dict) else {}
-        if current.get("reported") == settings:
-            return
-        current["reported"] = settings
-        servers[server_url] = current
-        _write_servers(path, servers)
 
 
 def _read_servers(path: Path) -> dict[str, object]:
@@ -128,7 +114,6 @@ def _warn_unreadable(path: Path, exc: Exception) -> None:
     if _UNREADABLE_STATE_WARNED.get(path) != cause:
         _UNREADABLE_STATE_WARNED[path] = cause
         _logger.warning("Ignoring unreadable %s: %s", path, exc)
-        return None
 
 
 def save_sync_state(state: ConfigSyncState, config_path: Path | None = None) -> None:
@@ -155,7 +140,7 @@ def _write_servers(path: Path, servers: dict[str, object]) -> None:
             state_file.flush()
             os.fsync(state_file.fileno())
         os.replace(tmp, path)
-    except OSError:
+    except BaseException:
         tmp.unlink(missing_ok=True)
         raise
 
@@ -166,9 +151,17 @@ def build_sync_frame(server_url: str, config_path: Path | None = None) -> HostCo
     A host that never synced reports revision 0 and counts any local settings
     as a change, so an empty server adopts them.
     """
-    local = synced_settings(load_global_config(config_path))
-    state = load_sync_state(server_url, config_path)
-    record_reported_settings(local, server_url, config_path)
+    path = config_path or global_config_path()
+    with global_config_lock(path):
+        local = synced_settings(load_global_config(path))
+        state = load_sync_state(server_url, path)
+        if state is None and load_reported_settings(server_url, path) is None:
+            # Keep the first report until an acknowledgement supplies the baseline.
+            # Later polls must not hide edits made while that reply is in flight.
+            sidecar = sync_state_path(path)
+            servers = _read_servers(sidecar)
+            servers[server_url] = {"reported": local}
+            _write_servers(sidecar, servers)
     if state is None:
         return HostConfigSyncFrame(revision=0, settings=local, changed=bool(local))
     return HostConfigSyncFrame(

@@ -6259,7 +6259,16 @@ async def test_host_diagnostics_correlate_real_socket_closes_and_reset_on_reconn
         assert isinstance(hello, HostHelloFrame)
         hellos.append(hello)
         await ws.send(encode_frame(PingFrame(ts=123)))
-        assert decode_frame(await ws.recv()) == PongFrame(ts=123)
+        while True:
+            raw = await ws.recv()
+            try:
+                keepalive = decode_frame(raw)
+            except ValueError:
+                # Host frames such as the connect-time settings report are not keepalives.
+                assert isinstance(decode_host_frame(raw), HostConfigSyncFrame)
+                continue
+            assert keepalive == PongFrame(ts=123)
+            break
         if abrupt:
             ws.transport.abort()
         else:
@@ -9126,6 +9135,7 @@ async def test_host_publishes_stored_workspace_at_startup(
 
     assert host._origin_workspace_id == "1965859176160743"
     assert os.environ[debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR] == "1965859176160743"
+
 
 # ── Portable user settings sync ───────────────────────────────────────────
 

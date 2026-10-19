@@ -504,7 +504,11 @@ def create_host_tunnel_router(
                     try:
                         pending_syncs = list(conn.config_sync_tasks)
                         for task in (
-                            sender_task, ping_task, receive_task, heartbeat_task, *pending_syncs
+                            sender_task,
+                            ping_task,
+                            receive_task,
+                            heartbeat_task,
+                            *pending_syncs,
                         ):
                             task.cancel()
                         with anyio.move_on_after(
@@ -838,8 +842,8 @@ async def _receive_loop(
             continue
 
         if isinstance(frame, HostConfigSyncFrame):
-            # A server-provisioned sandbox carries an operator template, not the
-            # user's own settings; it neither seeds nor receives them.
+            # Launch-token hosts keep operator templates local. Self-registering
+            # hosts using user credentials participate even on managed machines.
             if user_config_store is not None and not conn.registered_with_managed_token:
                 # Reconcile off this loop: waiting for another of the user's hosts must
                 # not delay the result frames and readiness updates behind it.

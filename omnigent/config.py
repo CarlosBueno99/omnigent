@@ -16,8 +16,12 @@ import yaml
 
 try:
     import fcntl
-except ImportError:  # Windows has no advisory file locks; writers stay atomic but unserialized.
+except ImportError:  # Windows: fall back to msvcrt below.
     fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 
 _log = logging.getLogger(__name__)
 _cwd_missing_warned = False
@@ -166,7 +170,7 @@ def global_config_lock(path: Path | None = None) -> Iterator[None]:
     """
     resolved = path or global_config_path()
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    with resolved.with_name(resolved.name + ".lock").open("a") as lock_file:
+    with resolved.with_name(resolved.name + ".lock").open("a+") as lock_file:
         if fcntl is not None:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
         elif msvcrt is not None:

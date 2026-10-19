@@ -1280,6 +1280,8 @@ class HostProcess:
         # threads; interleaving them could report stale settings as a local edit.
         self._config_sync_lock = threading.Lock()
         self._config_sync_report_error: str | None = None
+        # Updates are applied in arrival order even though each frame runs on its own task.
+        self._config_update_order = asyncio.Lock()
         # Strong refs to per-runner watcher tasks; asyncio only keeps
         # weak refs, so an unreferenced task can be GC'd mid-flight.
         self._watcher_tasks: set[asyncio.Task[None]] = set()
@@ -4763,7 +4765,7 @@ class HostProcess:
             # the socket, then watched for local changes off this loop.
             config_report = await asyncio.to_thread(self._build_config_sync_report)
             if config_report is not None:
-                await ws.send(encode_host_frame(config_report))
+                await self._send_text(ws, encode_host_frame(config_report))
             config_sync_task = asyncio.create_task(self._config_sync_loop(ws, config_report))
             print(
                 f"✓ Connected as {self._identity.name!r} "
@@ -4908,9 +4910,9 @@ class HostProcess:
             poll_due = now >= next_poll and (
                 self._config_sync_acked or probes < CONFIG_SYNC_PROBE_ATTEMPTS
             )
-            local_edit = sent is not None and frame.changed and frame.settings != sent.settings
+            local_edit = sent is not None and frame.changed and frame != sent
             if sent is None or local_edit or poll_due:
-                await ws.send(encode_host_frame(frame))
+                await self._send_text(ws, encode_host_frame(frame))
                 sent = frame
                 next_poll = now + CONFIG_SYNC_POLL_INTERVAL_S
                 # Local edits are always reported and do not use up the probe budget.
@@ -5163,7 +5165,8 @@ class HostProcess:
             await self._send_text(ws, encode_host_frame(startup_result))
         elif isinstance(frame, HostConfigUpdateFrame):
             self._config_sync_acked = True
-            await asyncio.to_thread(self._handle_config_update, frame)
+            async with self._config_update_order:
+                await asyncio.to_thread(self._handle_config_update, frame)
         elif isinstance(frame, HostMcpServersFrame):
             mcp_result = await asyncio.to_thread(self._handle_mcp_servers, frame)
             await self._send_text(ws, encode_host_frame(mcp_result))

@@ -34,7 +34,6 @@ def test_synced_settings_keeps_only_portable_keys() -> None:
     assert synced_settings(_LOCAL_CONFIG) == {
         "model": "gpt-5",
         "opencode_model": "openai/gpt-5",
-        "auto_open_conversation": False,
         "harness": {
             "default": "codex",
             "codex-native": {"args": ["--profile", "work"]},
@@ -70,6 +69,7 @@ def test_apply_replaces_portable_keys_and_preserves_the_rest() -> None:
     )
     assert merged == {
         "model": "claude-opus",
+        "auto_open_conversation": False,
         "default_agent": "/home/me/agents/dev.yaml",
         "server": "https://omnigent.example.test",
         "providers": _LOCAL_CONFIG["providers"],
@@ -90,7 +90,7 @@ def test_apply_empty_settings_removes_portable_keys_only() -> None:
     merged = apply_synced_settings(_LOCAL_CONFIG, {})
     assert "model" not in merged
     assert "opencode_model" not in merged
-    assert "auto_open_conversation" not in merged
+    assert merged["auto_open_conversation"] is False
     assert merged["harness"] == {"codex-native": {"command": "/opt/codex"}}
     assert merged["providers"] == _LOCAL_CONFIG["providers"]
     assert apply_synced_settings({"harness": "codex"}, {}) == {}
@@ -126,6 +126,7 @@ def test_validate_accepts_extracted_settings() -> None:
         {"model": ""},
         {"model": 5},
         {"auto_open_conversation": "yes"},
+        {"auto_open_conversation": True},
         {"harness": "codex"},
         {"harness": {"default": ""}},
         {"harness": {"codex-native": {"command": "/opt/codex"}}},

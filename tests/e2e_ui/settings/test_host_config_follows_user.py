@@ -118,6 +118,7 @@ def test_codex_startup_setting_made_on_one_machine_is_shown_for_the_users_other_
             config_entries={
                 "providers": providers,
                 "model": MACHINE_A_MODEL,
+                "auto_open_conversation": True,
                 "harness": {"codex-native": {"args": MACHINE_A_CODEX_ARGS}},
             },
         ) as machine_a,
@@ -125,7 +126,7 @@ def test_codex_startup_setting_made_on_one_machine_is_shown_for_the_users_other_
             tmp_path / "machine-b",
             live_server,
             name="machine-b",
-            config_entries={"providers": providers},
+            config_entries={"providers": providers, "auto_open_conversation": False},
         ) as machine_b,
     ):
         machine_a.wait_online(client, timeout=120)
@@ -154,3 +155,9 @@ def test_codex_startup_setting_made_on_one_machine_is_shown_for_the_users_other_
         _omnigent(machine_a, tmp_path, "config", "set", "--global", "model=changed-on-machine-a")
         _wait_for_config(machine_b, lambda cfg: cfg.get("model") == "changed-on-machine-a")
         assert "model=changed-on-machine-a" in _config_list(machine_b, tmp_path)
+
+        _omnigent(machine_a, tmp_path, "config", "unset", "--global", "model")
+        _wait_for_config(machine_b, lambda cfg: "model" not in cfg)
+        for machine, auto_open in ((machine_a, True), (machine_b, False)):
+            config = yaml.safe_load((machine.home / ".omnigent" / "config.yaml").read_text())
+            assert config["auto_open_conversation"] is auto_open

@@ -114,6 +114,7 @@ def test_apply_config_update_writes_portable_keys_and_records_the_revision(
     assert apply_config_update(update, _SERVER, config_path) is True
 
     assert yaml.safe_load(config_path.read_text()) == {
+        "auto_open_conversation": True,
         "providers": _LOCAL["providers"],
         "host": _LOCAL["host"],
         "model": "from-machine-b",
@@ -175,16 +176,23 @@ def test_apply_config_update_on_a_never_synced_host_adopts_the_servers_settings(
     assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(3, _PORTABLE, False)
 
 
-def test_first_ack_keeps_an_edit_made_while_the_report_was_in_flight(config_path: Path) -> None:
+@pytest.mark.parametrize("polls_before_ack", [0, 1, 3])
+@pytest.mark.parametrize("edited", [{**_PORTABLE, "model": "edited-before-ack"}, {}])
+def test_first_ack_keeps_an_edit_made_while_the_report_was_in_flight(
+    config_path: Path, polls_before_ack: int, edited: dict[str, object]
+) -> None:
     _write(config_path, _LOCAL)
     # The initial report (no sidecar yet) carries machine-a's settings.
     assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(0, _PORTABLE, True)
-    _write(config_path, {**_LOCAL, "model": "edited-before-ack"})
+    _write(config_path, edited)
+    for _ in range(polls_before_ack):
+        assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(
+            0, edited, bool(edited)
+        )
 
     # The acknowledgement of that report must not erase the edit made meanwhile.
     assert apply_config_update(HostConfigUpdateFrame(1, _PORTABLE), _SERVER, config_path) is False
-    assert yaml.safe_load(config_path.read_text())["model"] == "edited-before-ack"
-    edited = {**_PORTABLE, "model": "edited-before-ack"}
+    assert yaml.safe_load(config_path.read_text()) == edited
     assert build_sync_frame(_SERVER, config_path) == HostConfigSyncFrame(1, edited, True)
 
 

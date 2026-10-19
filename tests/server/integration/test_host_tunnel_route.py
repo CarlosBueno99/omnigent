@@ -7,6 +7,7 @@ import contextlib
 import logging
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import anyio
@@ -2256,6 +2257,47 @@ async def test_config_sync_host_that_synced_before_reseeds_a_lost_store(db_uri: 
     assert config_store.get("alice@example.com") == SyncedConfig(_SETTINGS_A, 1)
 
 
+@pytest.mark.parametrize("established", [False, True])
+async def test_config_sync_local_edit_survives_polls_before_first_ack(
+    db_uri: str, tmp_path: Path, established: bool
+) -> None:
+    from omnigent.config import load_global_config, save_global_config
+    from omnigent.host.config_sync import apply_config_update, build_sync_frame
+
+    registry = HostRegistry()
+    store = UserConfigStore(db_uri)
+    if established:
+        store.save("alice@example.com", {"model": "from-another-machine"})
+    app = _sync_app(db_uri, registry, store, authed_user="alice@example.com")
+    connection = await _connect_sync_host(app, registry, _SYNC_HOST_A, "machine-a")
+    config = tmp_path / "config.yaml"
+    server = "https://example.test"
+    try:
+        save_global_config({"model": "before-edit"}, path=config)
+        first = build_sync_frame(server, config)
+        await _report_config(connection, first.revision, first.settings, changed=first.changed)
+        delayed_ack = await _receive_config_update(connection)
+
+        # Hold the first reply while an edit and another poll cross the real route.
+        save_global_config({"model": "new-local-edit"}, path=config)
+        second = build_sync_frame(server, config)
+        await _report_config(connection, second.revision, second.settings, changed=second.changed)
+        apply_config_update(delayed_ack, server, config)
+        apply_config_update(await _receive_config_update(connection), server, config)
+
+        assert load_global_config(config) == {"model": "new-local-edit"}
+        retry = build_sync_frame(server, config)
+        assert retry.changed and retry.revision == 1
+        await _report_config(connection, retry.revision, retry.settings, changed=retry.changed)
+        apply_config_update(await _receive_config_update(connection), server, config)
+        assert store.get("alice@example.com") == SyncedConfig({"model": "new-local-edit"}, 2)
+        assert build_sync_frame(server, config) == HostConfigSyncFrame(
+            2, {"model": "new-local-edit"}, False
+        )
+    finally:
+        await connection.send_input({"type": "websocket.disconnect", "code": 1000})
+
+
 async def test_config_sync_last_writer_wins_and_unchanged_reports_are_acked(db_uri: str) -> None:
     registry = HostRegistry()
     config_store = UserConfigStore(db_uri)
@@ -2346,3 +2388,15 @@ async def test_config_sync_ignores_managed_sandbox_hosts(db_uri: str) -> None:
     await _report_config(laptop, 0, _SETTINGS_A, changed=True)
     assert await _receive_config_update(laptop) == HostConfigUpdateFrame(1, _SETTINGS_A)
     await _assert_no_output(sandbox)
+
+    # A managed row that reconnects using its owner's credentials participates.
+    await sandbox.send_input({"type": "websocket.disconnect", "code": 1000})
+    await asyncio.wait_for(_wait_deregistered(registry, _SYNC_HOST_B), timeout=budget(2.0))
+    user_host = await _connect_sync_host(app, registry, _SYNC_HOST_B, "user-host")
+    assert not registry.get(_SYNC_HOST_B).registered_with_managed_token
+    await _report_config(user_host, 0, {"model": "template-model"}, changed=True)
+    assert await _receive_config_update(user_host) == HostConfigUpdateFrame(1, _SETTINGS_A)
+    await _report_config(laptop, 1, {"model": "updated-on-laptop"}, changed=True)
+    expected = HostConfigUpdateFrame(2, {"model": "updated-on-laptop"})
+    assert await _receive_config_update(laptop) == expected
+    assert await _receive_config_update(user_host) == expected
