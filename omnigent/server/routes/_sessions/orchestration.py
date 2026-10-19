@@ -3162,15 +3162,9 @@ def _new_external_conversation_item(
 ) -> NewConversationItem:
     """Parse an external item event, keyed by its ``source_id`` when it has one."""
     item = _parse_external_conversation_item(body)
-    if isinstance(item.data, MessageData) and _message_source_fields(item.data.model_dump()):
+    if isinstance(item.data, MessageData):
         # Only a verified queued send can name a sender; see the pending-input drain.
-        item = item.model_copy(
-            update={
-                "data": item.data.model_copy(
-                    update={"source_session_id": None, "source_agent_name": None}
-                )
-            }
-        )
+        item = item.model_copy(update={"data": item.data.without_source()})
     return_id = body.data.get("subagent_return_id")
     if (
         isinstance(return_id, str)

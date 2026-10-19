@@ -344,6 +344,12 @@ class MessageData(BaseModel):
             raise ValueError("assistant messages require 'agent'")
         return self
 
+    def without_source(self) -> MessageData:
+        """Return this message without sender fields that only the server may stamp."""
+        if self.source_session_id is None and self.source_agent_name is None:
+            return self
+        return self.model_copy(update={"source_session_id": None, "source_agent_name": None})
+
 
 def synthesize_conversation_title(
     content: list[dict[str, Any]],

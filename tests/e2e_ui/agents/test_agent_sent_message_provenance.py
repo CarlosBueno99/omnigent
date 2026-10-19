@@ -102,7 +102,7 @@ def _send_until_tools_ready(
         _wait_reply(page, base_url, session_id, marker, reply)
         if {_CREATE_TOOL, _SEND_TOOL} <= _advertised_tools(mock_url, marker):
             return
-    raise AssertionError(f"Claude never advertised {_CREATE_TOOL}")
+    raise AssertionError(f"Claude never advertised {_CREATE_TOOL} and {_SEND_TOOL}")
 
 
 def _agents_rail(page: Page) -> Locator:
@@ -192,7 +192,7 @@ def test_agent_sent_cross_session_messages_name_their_sender(
 
     _agents_rail(page).locator(_SUBAGENT_ROW).first.click()
     page.wait_for_url(re.compile(re.escape(f"/c/{child_id}")))
-    for view in ("live", "after reload"):
+    for view in ("on first load", "after reload"):
         if view == "after reload":
             page.reload()
         expect(page.locator(_MESSAGE, has_text=sent_text).first).to_be_visible(timeout=60_000)
