@@ -4415,7 +4415,10 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
             approvalsReviewer="auto_review", approvalPolicy="on-request", sandbox="workspace-write"
         )
     params.update(typed_params)
-    if "permissions" in params:
+    if "--dangerously-bypass-approvals-and-sandbox" in args:
+        # A profile written back while the thread ran sandboxed must not undo bypass.
+        params.pop("permissions", None)
+    elif "permissions" in params:
         params.pop("sandbox", None)
     return params
 
@@ -4733,6 +4736,11 @@ def _strip_approval_sandbox_flags(codex_args: tuple[str, ...]) -> list[str]:
     return cleaned
 
 
+def codex_bypass_launch_args(codex_args: Sequence[str]) -> list[str]:
+    """Replace the approval/sandbox flags in ``codex_args`` with the full-bypass flag."""
+    return [_CODEX_BYPASS_SANDBOX_FLAG, *_strip_approval_sandbox_flags(tuple(codex_args))]
+
+
 def _strip_codex_resume_permission_args(codex_args: tuple[str, ...]) -> list[str]:
     """Omit permissions configured on the app-server at startup or thread/resume."""
     args = _strip_approval_sandbox_flags(codex_args)
@@ -4840,7 +4848,8 @@ def build_codex_remote_args(
         prompts and the command sandbox; it is gated behind an explicit,
         typed-confirmation opt-in in the web UI. Default ``False`` keeps
         the granular flags untouched. On Codex 0.154+, resumed terminals
-        omit these flags and use the existing preload path. See issue #657.
+        omit these flags; pass :func:`codex_bypass_launch_args` to the
+        preload instead. See issue #657.
     :param bypass_hook_trust: When ``True``, emit
         ``--dangerously-bypass-hook-trust`` so the TUI runs all enabled
         hooks without the interactive "Hooks need review" trust prompt.
@@ -4867,9 +4876,8 @@ def build_codex_remote_args(
             )
         override_args.extend(["-c", override])
     if bypass_sandbox:
-        # Strip the conflicting granular flags, then prepend one canonical
-        # bypass flag (a global flag, so it precedes any ``resume``).
-        passthrough = [_CODEX_BYPASS_SANDBOX_FLAG, *_strip_approval_sandbox_flags(codex_args)]
+        # A global flag, so it precedes any ``resume``.
+        passthrough = codex_bypass_launch_args(codex_args)
     else:
         passthrough = normalize_codex_permission_launch_args(codex_args)
     passthrough = without_codex_config_profile(passthrough)

@@ -677,7 +677,7 @@ describe("ForkSessionDialog", () => {
     });
   });
 
-  it("arms Codex bypass only on an explicit pick, with a danger banner", async () => {
+  it("arms Codex bypass on an explicit pick, with a danger banner", async () => {
     forkSessionMock.mockResolvedValue({
       id: "conv_fork",
     } as unknown as Awaited<ReturnType<typeof forkSession>>);
@@ -705,6 +705,37 @@ describe("ForkSessionDialog", () => {
       sandbox: undefined,
     });
   });
+
+  it.each([
+    {
+      source: "a bypass-armed",
+      labels: { "omnigent.codex_native.bypass_sandbox": "1" },
+      banner: true,
+      // The server never copies the source's bypass label, so the fork must ask for it.
+      config: { terminalLaunchArgs: [], codexBypassSandbox: true },
+    },
+    { source: "a sandboxed", labels: {}, banner: false, config: {} },
+  ])(
+    "submits the Codex approval it displays for an untouched fork of $source source",
+    async ({ labels, banner, config }) => {
+      setAgents(AVAILABLE_AGENTS, "codex-native");
+      useSessionMock.mockReturnValue({
+        session: { harness: "codex-native", labels },
+        isLoading: false,
+        error: null,
+      } as unknown as ReturnType<typeof useSession>);
+      forkSessionMock.mockResolvedValue({
+        id: "conv_fork",
+      } as unknown as Awaited<ReturnType<typeof forkSession>>);
+      renderDialog();
+
+      expect(screen.queryByTestId("fork-session-codex-bypass-banner") !== null).toBe(banner);
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+      await waitFor(() => expect(forkSessionMock).toHaveBeenCalledTimes(1));
+      expect(forkSessionMock.mock.calls[0][1]?.config).toEqual(config);
+    },
+  );
 
   it("labels the keep-current option with the source agent's name, not generic text", () => {
     // The source is bound to the claude-sdk built-in ("Claude"). The
