@@ -7,22 +7,23 @@ export function useProjectOrder() {
   return useQuery({ queryKey: ["project-order"], queryFn: getProjectOrder });
 }
 
-function orderProjects(projects: ProjectSummary[], names: string[] | null) {
-  const ranks = new Map(names?.map((name, index) => [name, index]));
-  return [...projects].sort((left, right) =>
-    names === null
-      ? left.name < right.name
-        ? -1
-        : left.name > right.name
-          ? 1
-          : 0
-      : (ranks.get(left.name) ?? Infinity) - (ranks.get(right.name) ?? Infinity),
-  );
+function orderProjects(projects: ProjectSummary[], order: ProjectSummary[] | null) {
+  if (order === null)
+    return [...projects].sort((left, right) => {
+      if (left.name === right.name) return 0;
+      return left.name < right.name ? -1 : 1;
+    });
+  const ids = new Map(order.map((project, index) => [project.id, index]));
+  ids.delete(null);
+  const names = new Map(order.map((project, index) => [project.name, index]));
+  const rank = (project: ProjectSummary) =>
+    ids.get(project.id) ?? names.get(project.previousName ?? project.name) ?? order.length;
+  return [...projects].sort((left, right) => rank(left) - rank(right));
 }
 
 const confirmedOrders = new WeakMap<
   QueryClient,
-  { names: string[] | null; preference: ProjectOrder | undefined }
+  { projects: ProjectSummary[] | null; preference: ProjectOrder | undefined }
 >();
 
 export function useSaveProjectOrder() {
@@ -42,16 +43,13 @@ export function useSaveProjectOrder() {
         client.cancelQueries({ queryKey: ["projects"] }),
         client.cancelQueries({ queryKey: ["project-order"] }),
       ]);
-      const current = client.getQueryData<ProjectSummary[]>(["projects"]) ?? [];
+      const current = client.getQueryData<ProjectSummary[]>(["projects"]);
       if (!confirmedOrders.has(client))
         confirmedOrders.set(client, {
-          names: current.map((project) => project.name),
+          projects: current ?? [],
           preference: client.getQueryData<ProjectOrder>(["project-order"]),
         });
-      client.setQueryData(
-        ["projects"],
-        orderProjects(current, projects?.map((project) => project.name) ?? null),
-      );
+      if (current) client.setQueryData(["projects"], orderProjects(current, projects));
       client.setQueryData<ProjectOrder>(["project-order"], (previous) => ({
         sort_mode: projects ? "manual" : "alphabetical",
         ordered_project_ids: projects
@@ -61,7 +59,7 @@ export function useSaveProjectOrder() {
     },
     onSuccess: (preference, projects) => {
       confirmedOrders.set(client, {
-        names: projects?.map((project) => project.name) ?? null,
+        projects,
         preference,
       });
       if (client.isMutating({ mutationKey: ["project-order"] }) === 1)
@@ -71,7 +69,7 @@ export function useSaveProjectOrder() {
       const confirmed = confirmedOrders.get(client);
       if (confirmed && client.isMutating({ mutationKey: ["project-order"] }) === 1) {
         client.setQueryData<ProjectSummary[]>(["projects"], (current) =>
-          current ? orderProjects(current, confirmed.names) : current,
+          current ? orderProjects(current, confirmed.projects) : current,
         );
         if (confirmed.preference) client.setQueryData(["project-order"], confirmed.preference);
       }

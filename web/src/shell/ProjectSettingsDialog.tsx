@@ -563,11 +563,6 @@ export function ProjectSettingsDialog({
               disabled so your existing defaults aren't overwritten.
             </p>
           )}
-          {updateConfig.isError && (
-            <p className="text-destructive text-ui" role="alert">
-              {(updateConfig.error as Error).message}
-            </p>
-          )}
 
           <DialogFooter className="border-t-0 bg-transparent">
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>

@@ -12,6 +12,7 @@ afterEach(cleanup);
 describe("NewProjectButton", () => {
   it("dismisses before creation finishes and leaves a reopened draft untouched", async () => {
     let finish!: (project: Project) => void;
+    const onCreateFailed = vi.fn();
     vi.mocked(createProject).mockReturnValue(
       new Promise((resolve) => {
         finish = resolve;
@@ -24,7 +25,7 @@ describe("NewProjectButton", () => {
     render(
       <QueryClientProvider client={client}>
         <TooltipProvider>
-          <NewProjectButton onCreated={onCreated} />
+          <NewProjectButton onCreated={onCreated} onCreateFailed={onCreateFailed} />
         </TooltipProvider>
       </QueryClientProvider>,
     );
@@ -43,5 +44,10 @@ describe("NewProjectButton", () => {
     expect(screen.getByPlaceholderText("Project name…")).toHaveValue("Second");
     expect(onCreated).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+    vi.mocked(createProject).mockRejectedValueOnce(new Error("offline"));
+    fireEvent.keyDown(screen.getByPlaceholderText("Project name…"), { key: "Enter" });
+    await waitFor(() => expect(onCreateFailed).toHaveBeenCalledWith("Second"));
+    fireEvent.click(screen.getByRole("button", { name: "New project" }));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

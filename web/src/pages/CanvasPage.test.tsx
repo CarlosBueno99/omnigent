@@ -89,10 +89,21 @@ vi.mock("@/hooks/usePullRequests", () => ({
   fetchPullRequestInfo: vi.fn(async () => ({ object: "session.github.info", available: false })),
 }));
 vi.mock("@/shell/NewProjectButton", () => ({
-  NewProjectButton: ({ onCreated }: { onCreated: (name: string) => void }) => (
-    <button type="button" onClick={() => onCreated("Release")}>
-      New project
-    </button>
+  NewProjectButton: ({
+    onCreated,
+    onCreateFailed,
+  }: {
+    onCreated: (name: string) => void;
+    onCreateFailed: (name: string) => void;
+  }) => (
+    <>
+      <button type="button" onClick={() => onCreated("Release")}>
+        New project
+      </button>
+      <button type="button" onClick={() => onCreateFailed("Release")}>
+        Fail creation
+      </button>
+    </>
   ),
 }));
 
@@ -804,6 +815,27 @@ describe("CanvasPage", () => {
       expect(screen.getByTestId("location")).toHaveTextContent(
         navigateAway ? "/canvas" : "/canvas?canvas=proj_release",
       );
+    },
+  );
+
+  it.each([false, true])(
+    "keeps Main selected after failed creation (duplicate: %s)",
+    (duplicate) => {
+      const existing = { id: "existing", name: "Release" };
+      vi.mocked(conversationsHook.useProjects).mockReturnValue(
+        projectsStub(duplicate ? [existing] : []),
+      );
+      const { rerender } = renderPage();
+      fireEvent.click(screen.getByRole("button", { name: "New project" }));
+      if (duplicate) {
+        vi.mocked(conversationsHook.useProjects).mockReturnValue(projectsStub([{ ...existing }]));
+        rerender(pageTree());
+        expect(screen.getByRole("tab", { name: "Main" })).toHaveAttribute("aria-selected", "true");
+      }
+      fireEvent.click(screen.getByRole("button", { name: "Fail creation" }));
+      vi.mocked(conversationsHook.useProjects).mockReturnValue(projectsStub([existing]));
+      rerender(pageTree());
+      expect(screen.getByRole("tab", { name: "Main" })).toHaveAttribute("aria-selected", "true");
     },
   );
 

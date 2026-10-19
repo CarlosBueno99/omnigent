@@ -95,16 +95,25 @@ export async function getProject(id: string): Promise<Project> {
   return (await res.json()) as Project;
 }
 
-/**
- * Create a project, optionally with initial `config` defaults. Rejects with the
- * server's message on a duplicate name (409) so callers can surface it inline.
- */
-const pendingProjectCreates = new Map<string, Promise<Project>>();
+const pendingProjectCreates = new Map<
+  string,
+  { config?: ProjectConfig; request: Promise<Project> }
+>();
 
+/**
+ * Create a project, sharing same-name requests unless their configs conflict.
+ * Configless callers can join any creation; existing names are rejected by the server.
+ */
 export function createProject(name: string, config?: ProjectConfig): Promise<Project> {
   const key = JSON.stringify([getOmnigentHostGeneration(), getCurrentUserId(), name]);
   const pending = pendingProjectCreates.get(key);
-  if (pending) return pending;
+  if (pending) {
+    if (config && JSON.stringify(config) !== JSON.stringify(pending.config))
+      return Promise.reject(
+        new Error(`“${name}” is already being created with different settings.`),
+      );
+    return pending.request;
+  }
   const request = (async () => {
     const res = await authenticatedFetch("/v1/projects", {
       method: "POST",
@@ -114,7 +123,7 @@ export function createProject(name: string, config?: ProjectConfig): Promise<Pro
     if (!res.ok) throw new Error(await readError(res));
     return (await res.json()) as Project;
   })();
-  pendingProjectCreates.set(key, request);
+  pendingProjectCreates.set(key, { config, request });
   const clear = () => {
     pendingProjectCreates.delete(key);
   };

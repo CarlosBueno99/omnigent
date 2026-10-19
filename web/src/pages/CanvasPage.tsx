@@ -641,7 +641,11 @@ function CanvasSurface({ selectedSessionId }: { selectedSessionId?: string | nul
         </div>
         <NewProjectButton
           onCreated={(name) => {
-            pendingProjectNameRef.current = name;
+            if (!projects.some((project) => project.name === name))
+              pendingProjectNameRef.current = name;
+          }}
+          onCreateFailed={(name) => {
+            if (pendingProjectNameRef.current === name) pendingProjectNameRef.current = null;
           }}
         />
       </nav>

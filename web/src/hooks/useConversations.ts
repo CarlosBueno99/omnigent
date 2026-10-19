@@ -1581,7 +1581,10 @@ export function useBulkMoveToProject() {
     onError: (error, variables) => {
       const failed = error instanceof BulkConversationMutationError ? error.failed : variables.ids;
       toast.error(`Couldn't move ${failed.length} sessions`, {
-        description: `Failed: ${failed.join(", ")}. Other sessions stay in their new project.`,
+        description:
+          error instanceof BulkConversationMutationError && error.succeeded.length > 0
+            ? "Other sessions stay in their new project."
+            : undefined,
         duration: Infinity,
         action: {
           label: "Retry failed",
@@ -2138,12 +2141,12 @@ export function useProjects() {
       const current = queryClient.getQueryData<ProjectSummary[]>(["projects"]) ?? [];
       const pending = current.filter((project) => project.pending);
       const names = new Set(pending.flatMap((project) => [project.name, project.previousName]));
-      const merged = incoming.filter((project) => !names.has(project.name));
-      for (const project of pending) merged.splice(current.indexOf(project), 0, project);
-      if (queryClient.isMutating({ mutationKey: ["project-order"] })) {
+      const merged = [...incoming.filter((project) => !names.has(project.name)), ...pending];
+      if (pending.length || queryClient.isMutating({ mutationKey: ["project-order"] })) {
         const ranks = new Map(current.map((project, index) => [project.name, index]));
         merged.sort(
-          (left, right) => (ranks.get(left.name) ?? Infinity) - (ranks.get(right.name) ?? Infinity),
+          (left, right) =>
+            (ranks.get(left.name) ?? current.length) - (ranks.get(right.name) ?? current.length),
         );
       }
       return merged;
@@ -2516,7 +2519,8 @@ export function useMoveToProject() {
       );
       return { row, projectName, folders };
     },
-    onError: (_err, { id }, previous) => {
+    onError: (error, { id }, previous) => {
+      if (!previous) toast.error("Couldn't move session", { description: error.message });
       if (!previous?.row) return;
       const current = findCachedConversationRow(queryClient, id) ?? previous.row;
       const { [PROJECT_LABEL_KEY]: _project, ...labels } = current.labels;
@@ -2781,7 +2785,7 @@ export function useDeleteProject() {
       toast.error(`Couldn't delete “${variables.name}”`, {
         description:
           error instanceof BulkConversationMutationError
-            ? `${error.succeeded.length} sessions archived; ${error.failed.length} failed (${error.failed.join(", ")}). Retry to finish the remaining work.`
+            ? `${error.succeeded.length} sessions archived; ${error.failed.length} failed. Retry to finish the remaining work.`
             : error.message,
         duration: Infinity,
         action: { label: "Retry", onClick: () => mutation.mutate(variables) },
@@ -2967,14 +2971,17 @@ export function useRenameProject() {
             ? new Set(partial.failure.failed)
             : null;
         for (const row of context.rows.values()) {
-          if (partial && failed && !failed.has(row.id)) continue;
+          if (partial && !failed?.has(row.id)) continue;
           const current = findCachedConversationRow(queryClient, row.id);
           if (current?.labels[PROJECT_LABEL_KEY] === variables.newName) {
+            const { [PROJECT_LABEL_KEY]: _project, ...labels } = current.labels;
+            if (row.labels[PROJECT_LABEL_KEY])
+              labels[PROJECT_LABEL_KEY] = row.labels[PROJECT_LABEL_KEY];
             overlayProjectMembership(
               queryClient,
               current,
               row.project_id,
-              { ...current.labels, [PROJECT_LABEL_KEY]: row.labels[PROJECT_LABEL_KEY] ?? "" },
+              labels,
               variables.oldName,
             );
           }

@@ -2242,13 +2242,13 @@ function ConversationList({
         target,
       );
       if (action.kind === "move") {
-        moveToProject.mutate({ id: dragged.id, project: action.project });
-        // Unpin a pinned session so it actually drops into the folder instead of
-        // staying floated up in Pinned (pin outranks project membership). No
-        // Undo pill: re-pinning would leave the session filed in the new folder.
-        if (action.unpin) pinAt({ id: dragged.id, pinned: false }).catch(() => {});
-        // Open the (possibly brand-new) folder so the session is visible in it.
-        expandProject(action.project);
+        moveToProject
+          .mutateAsync({ id: dragged.id, project: action.project })
+          .then(async () => {
+            expandProject(action.project);
+            if (action.unpin) await pinAt({ id: dragged.id, pinned: false });
+          })
+          .catch(() => {});
         return;
       }
       if (action.kind === "reorder-pin") {
@@ -2284,8 +2284,12 @@ function ConversationList({
       if (action.kind === "ungroup") {
         // Unfile silently — a first-class project persists when emptied, so
         // dragging out its last session deletes nothing. Mirrors the kebab flow.
-        moveToProject.mutate({ id: dragged.id, project: "" });
-        if (action.unpin) pinAt({ id: dragged.id, pinned: false }).catch(() => {});
+        moveToProject
+          .mutateAsync({ id: dragged.id, project: "" })
+          .then(async () => {
+            if (action.unpin) await pinAt({ id: dragged.id, pinned: false });
+          })
+          .catch(() => {});
       }
     },
     [
@@ -6052,11 +6056,6 @@ function useProjectFolderMenu(
               <p className="text-ui text-destructive" role="alert">
                 Couldn&apos;t load this project&apos;s icon settings. You can still rename it;
                 changing the icon is unavailable until this loads.
-              </p>
-            )}
-            {(renameProject.isError || updateConfig.isError) && (
-              <p className="text-ui text-destructive" role="alert">
-                {((renameProject.error ?? updateConfig.error) as Error).message}
               </p>
             )}
             <DialogFooter className="border-t-0 bg-transparent">

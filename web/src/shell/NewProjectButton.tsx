@@ -21,7 +21,13 @@ import { cn } from "@/lib/utils";
  * the legacy label model can't express. On submission the pending folder is expanded
  * (via `onCreated`) so progress is visible outside the dismissed dialog.
  */
-export function NewProjectButton({ onCreated }: { onCreated: (name: string) => void }) {
+export function NewProjectButton({
+  onCreated,
+  onCreateFailed,
+}: {
+  onCreated: (name: string) => void;
+  onCreateFailed?: (name: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [icon, setIcon] = useState<string | undefined>(undefined);
@@ -33,7 +39,7 @@ export function NewProjectButton({ onCreated }: { onCreated: (name: string) => v
     const trimmed = name.trim();
     if (trimmed === "" || submitted.current) return;
     submitted.current = true;
-    createProject.mutate({ name: trimmed, icon });
+    createProject.mutate({ name: trimmed, icon }, { onError: () => onCreateFailed?.(trimmed) });
     setOpen(false);
     setName("");
     setIcon(undefined);
@@ -154,11 +160,6 @@ export function NewProjectButton({ onCreated }: { onCreated: (name: string) => v
               }}
             />
           </div>
-          {createProject.isError && (
-            <p className="text-ui text-destructive" role="alert">
-              {(createProject.error as Error).message}
-            </p>
-          )}
           <DialogFooter className="border-t-0 bg-transparent">
             <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
               Cancel

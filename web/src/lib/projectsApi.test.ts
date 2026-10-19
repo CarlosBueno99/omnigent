@@ -62,6 +62,23 @@ describe("createProject", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it.each([undefined, { icon: "📁" }])(
+    "rejects conflicting config instead of silently sharing %j",
+    async (config) => {
+      let finish!: (response: Response) => void;
+      fetchMock.mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const first = createProject("Pending", config);
+      await expect(createProject("Pending", { icon: "🔥" })).rejects.toThrow("different settings");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      finish(mockResponse({ id: "real", name: "Pending", config }));
+      expect(await first).toMatchObject({ id: "real", config });
+    },
+  );
+
   it("POSTs the name and returns the project", async () => {
     fetchMock.mockResolvedValueOnce(mockResponse({ id: "p_1", name: "New" }));
     const result = await createProject("New");

@@ -69,10 +69,8 @@ describe("saving project order", () => {
       act(() => result.current.mutate(null));
       await waitFor(() => expect(client.getQueryData(["projects"])).toEqual(projects));
       expect(writes).toHaveLength(1);
-      client.setQueryData(
-        ["projects"],
-        [{ ...projects[0], icon: "🔥" }, projects[1], { id: "c", name: "C" }],
-      );
+      const renamed = { ...projects[0], name: "Renamed", icon: "🔥" };
+      client.setQueryData(["projects"], [renamed, projects[1], { id: "c", name: "C" }]);
       act(() =>
         firstFails
           ? writes[0].reject(new Error("offline"))
@@ -80,7 +78,7 @@ describe("saving project order", () => {
       );
       await waitFor(() => expect(writes).toHaveLength(2));
       expect(client.getQueryData(["projects"])).toEqual([
-        { ...projects[0], icon: "🔥" },
+        renamed,
         projects[1],
         { id: "c", name: "C" },
       ]);
@@ -88,8 +86,8 @@ describe("saving project order", () => {
       await waitFor(() => expect(result.current.isError).toBe(true));
       expect(client.getQueryData(["projects"])).toEqual(
         firstFails
-          ? [{ ...projects[0], icon: "🔥" }, projects[1], { id: "c", name: "C" }]
-          : [projects[1], { ...projects[0], icon: "🔥" }, { id: "c", name: "C" }],
+          ? [renamed, projects[1], { id: "c", name: "C" }]
+          : [projects[1], renamed, { id: "c", name: "C" }],
       );
       expect(client.getQueryData(["project-order"])).toEqual(
         firstFails
@@ -112,18 +110,23 @@ describe("saving project order", () => {
     expect(saveProjectOrder).toHaveBeenCalledWith(["legacy-id", "a"]);
   });
 
-  it("resets without promoting folders and invalidates both queries", async () => {
-    vi.mocked(saveProjectOrder).mockResolvedValue({
-      ordered_project_ids: ["b", "a"],
-      sort_mode: "alphabetical",
-    });
-    const { result, client } = setup();
-    client.setQueryData(["project-order"], { ordered_project_ids: ["b", "a"] });
-    act(() => result.current.mutate(null));
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(saveProjectOrder).toHaveBeenCalledWith(null);
-    expect(resolveOrCreateProjectId).not.toHaveBeenCalled();
-    expect(client.getQueryState(["projects"])?.isInvalidated).toBe(true);
-    expect(client.getQueryState(["project-order"])?.isInvalidated).toBe(true);
-  });
+  it.each([false, true])(
+    "resets without promoting folders (projects uncached: %s)",
+    async (uncached) => {
+      vi.mocked(saveProjectOrder).mockResolvedValue({
+        ordered_project_ids: ["b", "a"],
+        sort_mode: "alphabetical",
+      });
+      const { result, client } = setup();
+      if (uncached) client.removeQueries({ queryKey: ["projects"] });
+      client.setQueryData(["project-order"], { ordered_project_ids: ["b", "a"] });
+      act(() => result.current.mutate(null));
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      expect(saveProjectOrder).toHaveBeenCalledWith(null);
+      expect(resolveOrCreateProjectId).not.toHaveBeenCalled();
+      if (uncached) expect(client.getQueryData(["projects"])).toBeUndefined();
+      else expect(client.getQueryState(["projects"])?.isInvalidated).toBe(true);
+      expect(client.getQueryState(["project-order"])?.isInvalidated).toBe(true);
+    },
+  );
 });
