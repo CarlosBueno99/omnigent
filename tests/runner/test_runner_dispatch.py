@@ -100,6 +100,7 @@ from omnigent.runtime.prompt import EMBEDDED_BROWSER_PRIORITY_INSTRUCTION
 from omnigent.server.schemas import CreateResponseRequest as _CreateResponseRequest
 from omnigent.spec.types import AgentSpec, ExecutorSpec, SharePolicy, ToolsConfig
 from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
+from tests._helpers.providers import isolate_provider_resolution
 from tests.runner.conftest import (
     _FakeProcessManager as _RecoveryFakeProcessManager,
 )
@@ -4529,10 +4530,8 @@ def _isolate_model_providers(
     :param tmp_path: Per-test temp dir holding ``config.yaml``.
     :param yaml_text: The config contents, e.g. a ``providers:`` block.
     """
-    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
-    monkeypatch.setenv("OMNIGENT_DISABLE_KEYRING", "1")
+    isolate_provider_resolution(monkeypatch, tmp_path)
     monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
-    monkeypatch.setattr("omnigent.onboarding.detected.detect_providers", list)
     (tmp_path / "config.yaml").write_text(yaml_text)
 
 
@@ -10962,6 +10961,65 @@ async def test_resync_ownership_gate_ignores_superseded_delivery_failure() -> No
     app.state.active_turns.pop(conv, None)
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("replaced", [False, True])
+@pytest.mark.asyncio
+async def test_interrupt_client_lookup_preserves_turn_ownership(
+    stream: bool, replaced: bool
+) -> None:
+    """A delayed harness lookup must not send the old interrupt to new work."""
+    conv = "conv_interrupt_lookup_owner"
+    original = asyncio.create_task(asyncio.Event().wait())
+    successor = asyncio.create_task(asyncio.Event().wait())
+
+    class InterruptClient(_RecoveryScriptedHarnessClient):
+        async def post(self, url: str, *, json: dict[str, Any], timeout: Any = None) -> Any:
+            if json.get("type") == "interrupt":
+                task = app.state.active_turns.get(conv)
+                if isinstance(task, asyncio.Task):
+                    task.cancel()
+                else:
+                    app.state.on_proxy_stream_end(conv)
+            return await super().post(url, json=json, timeout=timeout)
+
+    class DelayedProcessManager(_RecoveryFakeProcessManager):
+        async def get_client(
+            self, conversation_id: str, harness: str, env: Any = None
+        ) -> _RecoveryScriptedHarnessClient:
+            if replaced:
+                app.state.on_proxy_stream_end(conv)
+                app.state.begin_turn_slot(conv)
+                app.state.active_turns[conv] = successor
+            return await super().get_client(conversation_id, harness, env)
+
+    harness = InterruptClient([])
+    app = create_runner_app(
+        process_manager=DelayedProcessManager(harness),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    app.state.begin_turn_slot(conv)
+    if not stream:
+        app.state.active_turns[conv] = original
+    try:
+        async with _recovery_runner_client(app) as http:
+            response = await http.post(f"/v1/sessions/{conv}/events", json={"type": "interrupt"})
+            assert response.status_code == 204, response.text
+
+        assert successor.cancelling() == 0
+        if replaced:
+            assert app.state.active_turns.get(conv) is successor
+            assert harness.patched_events == []
+        else:
+            assert harness.patched_events == [{"type": "interrupt"}]
+            assert conv not in app.state.active_turns
+    finally:
+        for task in (original, successor):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        app.state.active_turns.pop(conv, None)
+
+
 @pytest.mark.asyncio
 async def test_resync_clears_in_flight_marker_no_buffer() -> None:
     """B1: an accepted no-buffer resync clears the process-manager in-flight marker."""
@@ -13103,11 +13161,16 @@ _SIGNED_IN_SCREENS = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("harness", ["codex-native", "claude-native"])
+@pytest.mark.parametrize(
+    ("harness", "rotated"),
+    [("codex-native", False), ("codex-native", True), ("claude-native", False)],
+    ids=["codex-native", "codex-native-rotated", "claude-native"],
+)
 async def test_sign_in_pending_failure_posts_a_notice_once_the_agent_is_ready(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     harness: str,
+    rotated: bool,
 ) -> None:
     """
     A turn that failed on a pending Databricks sign-in is followed by one "signed in" notice.
@@ -13116,15 +13179,21 @@ async def test_sign_in_pending_failure_posts_a_notice_once_the_agent_is_ready(
     prompt is on screen nothing is posted. Once the prompt is gone and the
     agent can take a message (Codex has published its bridge state, Claude Code
     shows its composer), one neutral notice lands in the transcript so the
-    person knows the sign-in worked and can resend.
+    person knows the sign-in worked and can resend. A rotated Codex session's
+    launch publishes its state in its bridge-id label's directory.
     """
     from omnigent.harnesses.codex_native import bridge as codex_bridge
+    from omnigent.runner.native import orchestration as native_orchestration
     from omnigent.terminals import TerminalRegistry
     from tests.runner.helpers import NullServerClient, make_test_terminal_instance
 
     conv = f"conv_signin_{harness.replace('-', '_')}"
     monkeypatch.setattr(sign_in_watch, "_SIGN_IN_WATCH_INTERVAL_S", 0.01)
     monkeypatch.setattr(codex_bridge, "_BRIDGE_ROOT", tmp_path / "bridges")
+    bridge_dir = codex_bridge.bridge_dir_for_bridge_id(conv)
+    if rotated:
+        bridge_dir = codex_bridge.bridge_dir_for_bridge_id("conv_signin_rotated_from")
+        monkeypatch.setitem(native_orchestration._AUTO_CODEX_BRIDGE_DIRS, conv, bridge_dir)
 
     class _RecordingServerClient(NullServerClient):
         def __init__(self) -> None:
@@ -13145,7 +13214,7 @@ async def test_sign_in_pending_failure_posts_a_notice_once_the_agent_is_ready(
         if harness == "codex-native":
             # Thread discovery publishes the bridge state as the TUI starts a thread.
             codex_bridge.write_bridge_state(
-                codex_bridge.bridge_dir_for_bridge_id(conv),
+                bridge_dir,
                 codex_bridge.CodexNativeBridgeState(
                     session_id=conv,
                     socket_path="ws://127.0.0.1:1",
