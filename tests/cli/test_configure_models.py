@@ -1589,9 +1589,10 @@ def test_databricks_drift_notice_silent_without_ucode_state(tmp_path, monkeypatc
 def test_overview_banner_warns_on_databricks_ucode_drift(
     isolated_config, tmp_path, monkeypatch
 ) -> None:
-    """The overview hands ``select`` a warning-styled ``status`` banner naming
-    the switched workspace when the configured Databricks profile and ucode's
-    current workspace diverge."""
+    """The overview shows a warning-styled banner naming the switched workspace
+    when the configured Databricks profile and ucode's current workspace diverge."""
+    from omnigent.onboarding import interactive
+
     _seed_ucode_and_databrickscfg(
         tmp_path, monkeypatch, cfg_profiles={"ai_devtools": _WS_A}, ucode_current=_WS_B
     )
@@ -1610,28 +1611,24 @@ def test_overview_banner_warns_on_databricks_ucode_drift(
             f,
         )
 
-    captured: dict[str, object] = {}
+    real_select = interactive.select
+    overview_styles: list[object] = []
 
-    def _capture_select(
-        title: str,
-        options: list[str],
-        *,
-        status: str | None = None,
-        status_style: str = "bold green",
-        **_kwargs: object,
-    ) -> int:
+    def _spy_select(title: str, options: list[str], **kwargs: object) -> int:
         if title == "Configure harnesses":
-            captured["status"] = status
-            captured["status_style"] = status_style
-        return -1
+            overview_styles.append(kwargs.get("status_style"))
+        return real_select(title, options, **kwargs)
 
-    monkeypatch.setattr("omnigent.onboarding.interactive.select", _capture_select)
-    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"])
+    monkeypatch.setattr("omnigent.onboarding.interactive.select", _spy_select)
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input="q\n")
     assert result.exit_code == 0, result.output
-    assert captured.get("status") == _drift_notice(
+    expected = _drift_notice(
         "workspace-b.cloud.databricks.com", "ai_devtools", "workspace-a.cloud.databricks.com"
-    ), captured
-    assert captured["status_style"] == "bold yellow"
+    )
+    rendered = " ".join(result.output.split())
+    assert expected in rendered, result.output
+    assert rendered.index(expected) < rendered.index("Configure harnesses")
+    assert overview_styles == ["bold yellow"]
 
 
 def test_configure_harnesses_add_databricks_normalizes_url_and_persists(

@@ -106,6 +106,25 @@ def test_select_uses_numbered_fallback_on_windows_tty(
     assert result == 1
 
 
+@pytest.mark.parametrize(("stdin_is_tty", "is_windows"), [(False, False), (True, True)])
+def test_select_fallback_prints_status_above_title(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stdin_is_tty: bool,
+    is_windows: bool,
+) -> None:
+    """Numbered fallbacks keep the status line the raw-termios menu shows."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: stdin_is_tty)
+    monkeypatch.setattr(interactive, "IS_WINDOWS", is_windows)
+    _feed(monkeypatch, ["1"])
+
+    interactive.select("Pick one", ["alpha"], status="⚠ drift", status_style="bold yellow")
+
+    out = capsys.readouterr().out
+    assert "⚠ drift" in out
+    assert out.index("⚠ drift") < out.index("Pick one")
+
+
 def test_select_fallback_reprompts_on_invalid_then_accepts(
     non_tty: None,
     monkeypatch: pytest.MonkeyPatch,
