@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosed
 
 from omnigent.errors import ErrorCode
 from omnigent.runner.transports.ws_tunnel.frames import (
+    EVENT_ACK_BUSY,
     EventAckFrame,
     EventBatchFrame,
     encode_frame,
@@ -227,8 +228,9 @@ class RunnerEventDispatcher:
                     result.set_result(EventAckFrame(ack.id, batch.applied, ack.error))
                 elif _is_preview(batch.events):
                     raise ConnectionError("preview backpressure")
-                elif not _is_replayable(batch.events):
-                    # The producer bounds retries of other events, as it does over HTTP.
+                elif not _is_replayable(batch.events) and ack.error != EVENT_ACK_BUSY:
+                    # A busy batch was never applied, so it stays queued; the producer
+                    # bounds retries of other unconfirmed events, as it does over HTTP.
                     result.set_result(
                         EventAckFrame(ack.id, batch.applied, ack.error, retryable=True)
                     )

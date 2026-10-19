@@ -19,6 +19,7 @@ from omnigent.runner.transports.ws_tunnel.event_delivery import (
     TunnelEventClient,
 )
 from omnigent.runner.transports.ws_tunnel.frames import (
+    EVENT_ACK_BUSY,
     EventAckFrame,
     EventBatchFrame,
     EventReadyFrame,
@@ -702,8 +703,8 @@ async def test_status_uses_http_while_the_tunnel_is_down() -> None:
     assert http_posts == [_STATUS]
 
 
-@pytest.mark.parametrize("failure", ["lost-ack", "retryable-ack"])
-async def test_undelivered_status_returns_to_its_producer(failure: str) -> None:
+@pytest.mark.parametrize("failure", ["lost-ack", "failed-ingest-ack"])
+async def test_unconfirmed_status_returns_to_its_producer(failure: str) -> None:
     dispatcher = RunnerEventDispatcher()
     http_posts: list[object] = []
     frames: list[EventBatchFrame] = []
@@ -716,7 +717,7 @@ async def test_undelivered_status_returns_to_its_producer(failure: str) -> None:
             dispatcher.disconnected()
             asyncio.get_running_loop().call_soon(dispatcher.ready, send)
         else:
-            dispatcher.acknowledge(EventAckFrame(frame.id, 0, "busy", retryable=True))
+            dispatcher.acknowledge(EventAckFrame(frame.id, 0, "ingest failed", retryable=True))
 
     dispatcher.ready(send)
     async with _client(dispatcher, http_posts, _STATUS_ONLY) as client:
@@ -724,5 +725,29 @@ async def test_undelivered_status_returns_to_its_producer(failure: str) -> None:
         await asyncio.sleep(0.5)
     assert response.status_code == 503
     assert len(frames) == 1
+    assert http_posts == []
+    assert not dispatcher.has_pending
+
+
+async def test_busy_status_stays_queued_until_the_server_applies_it() -> None:
+    dispatcher = RunnerEventDispatcher()
+    http_posts: list[object] = []
+    frames: list[EventBatchFrame] = []
+    busy_acks = 4  # Outlasts the forwarder's three POST attempts.
+
+    async def send(text: str) -> None:
+        frame = decode_frame(text)
+        assert isinstance(frame, EventBatchFrame)
+        frames.append(frame)
+        if len(frames) <= busy_acks:
+            dispatcher.acknowledge(EventAckFrame(frame.id, 0, EVENT_ACK_BUSY, retryable=True))
+        else:
+            dispatcher.acknowledge(EventAckFrame(frame.id, len(frame.events)))
+
+    dispatcher.ready(send)
+    async with _client(dispatcher, http_posts, _STATUS_ONLY) as client:
+        response = await asyncio.wait_for(client.post(_URL, json=_STATUS), timeout=5)
+    assert response.status_code == 202
+    assert [frame.events for frame in frames] == [[_STATUS]] * (busy_acks + 1)
     assert http_posts == []
     assert not dispatcher.has_pending

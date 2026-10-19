@@ -198,4 +198,6 @@ def test_codex_chat_reports_prompt_blocked_after_runner_login_lapses(
     expect(error_pill).to_be_visible(timeout=_NOTICE_TIMEOUT_MS)
     expect(page.locator(_WORKING)).to_have_count(0, timeout=30_000)
     error_pill.click()
-    expect(error_pill.get_by_test_id("error-message-content")).to_contain_text(_FAILURE_TEXT)
+    expect(error_pill.get_by_test_id("error-message-content")).to_contain_text(
+        "policy evaluation unavailable", ignore_case=True
+    )
