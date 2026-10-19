@@ -290,7 +290,7 @@ async def launch_or_reuse_daemon_runner(
     # high-latency / reconnecting setups start reliably. Bounded, so a
     # genuinely-offline host still fails reasonably fast.
     _RETRY_DELAYS_S = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.0, 3.0)  # ~16.5s budget
-    with session_env_handoff(session_id, session_env):
+    async with session_env_handoff(session_id, session_env):
         for attempt in range(len(_RETRY_DELAYS_S) + 1):
             if attempt:
                 await asyncio.sleep(_RETRY_DELAYS_S[attempt - 1])

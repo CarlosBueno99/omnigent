@@ -57,7 +57,7 @@ directly instead of going through `data_dir()`.
 | `attachments/` | Native harness attachment copies, grouped by an opaque session cache key. The original uploads remain in the server's configured artifact store. | `attachment_cache_dir()` in `omnigent/inner/native_attachments.py` |
 | `runners/` | Runner identity: `runner_id` (stable per-machine id), created by `identity.py`. Also holds per-runner workspace subdirs — `runner_<id>/` and, for token-bound remote `run --server` runners, `runner_token_<hash>/` — each with a `pending-tokens/` dir; those are created by the host/runner launch path, not `identity.py`. | `omnigent/runner/identity.py` (`runner_id`) |
 | `daemons/` | Daemon lifecycle registry, one JSON record per target. | `daemon_registry_dir()` in `omnigent/host/daemon_lifecycle.py` |
-| `session-env/` | Transient owner-only files carrying the variables a launching CLI forwarded with `OMNIGENT_SESSION_ENV_PASSTHROUGH`; the daemon removes each one when it launches that session's runner. | `omnigent/host/session_env.py` |
+| `session-env/` | Transient owner-only files carrying the variables a launching CLI forwarded with `OMNIGENT_SESSION_ENV_PASSTHROUGH`; the daemon removes each one when it launches that session's runner, and `.lock` files serialize concurrent launches of one session. | `omnigent/host/session_env.py` |
 | `crashes/` | Crash reports, `crash-<timestamp>.md`. | `omnigent/crash_handler.py` |
 | `cache/` | Derived caches: `model-catalogs/` (per-harness model lists) and `codex-model-probe/` **†**. | `omnigent/models/model_catalog_store.py`, `omnigent/harnesses/codex_native/app_server.py` |
 | `models/` **†** | Downloaded models, e.g. `dictation/asr` and `dictation/punct`. | `omnigent/server/dictation.py` |

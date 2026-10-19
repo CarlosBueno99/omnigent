@@ -269,8 +269,8 @@ def build_devin_native_terminal_env(
 ) -> dict[str, str]:
     """Build the allowlisted child environment for the ``devin`` TUI."""
     env = os.environ if source_env is None else source_env
-    allowed = (*_CHILD_ENV_ALLOWLIST, *forwarded_session_env_names(env))
-    child = {key: env[key] for key in allowed if env.get(key)}
+    child = {key: env[key] for key in _CHILD_ENV_ALLOWLIST if env.get(key)}
+    child.update({key: env[key] for key in forwarded_session_env_names(env) if key in env})
     bridge_dir = prepare_bridge_dir(session_id)
     child[DEVIN_NATIVE_BRIDGE_DIR_ENV_VAR] = str(bridge_dir)
     return child

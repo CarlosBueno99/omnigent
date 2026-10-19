@@ -743,12 +743,14 @@ class TestSpawnEnv:
             "conv_abc123",
             source_env={
                 "PATH": "/usr/bin",
-                "OMNIGENT_RUNNER_SESSION_ENV_NAMES": "ARCATERM_CAPABILITY",
+                "OMNIGENT_RUNNER_SESSION_ENV_NAMES": "ARCATERM_CAPABILITY,ARCATERM_PROJECTS_ROOT",
                 "ARCATERM_CAPABILITY": "capability-for-pane-1",
+                "ARCATERM_PROJECTS_ROOT": "",
                 "UNLISTED_SECRET": "nope",
             },
         )
         assert env["ARCATERM_CAPABILITY"] == "capability-for-pane-1"
+        assert env["ARCATERM_PROJECTS_ROOT"] == ""
         assert env["PATH"] == "/usr/bin"
         assert "UNLISTED_SECRET" not in env
 

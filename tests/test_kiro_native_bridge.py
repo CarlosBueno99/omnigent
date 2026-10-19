@@ -129,15 +129,19 @@ def test_build_terminal_env_keeps_variables_forwarded_for_the_session(
         "conv_kiro",
         source_env={
             "PATH": "/usr/bin",
-            "OMNIGENT_RUNNER_SESSION_ENV_NAMES": "ARCATERM_CAPABILITY,MACTERM_SOCKET",
+            "OMNIGENT_RUNNER_SESSION_ENV_NAMES": (
+                "ARCATERM_CAPABILITY,MACTERM_SOCKET,ARCATERM_PROJECTS_ROOT"
+            ),
             "ARCATERM_CAPABILITY": "capability-for-pane-1",
             "MACTERM_SOCKET": "/tmp/mt.sock",
+            "ARCATERM_PROJECTS_ROOT": "",
             "UNLISTED_SECRET": "nope",
         },
     )
 
     assert env["ARCATERM_CAPABILITY"] == "capability-for-pane-1"
     assert env["MACTERM_SOCKET"] == "/tmp/mt.sock"
+    assert env["ARCATERM_PROJECTS_ROOT"] == ""
     assert "UNLISTED_SECRET" not in env
 
 
