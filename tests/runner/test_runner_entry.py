@@ -48,6 +48,7 @@ from omnigent.runner._entry import (
     main,
 )
 from omnigent.runner.identity import (
+    RUNNER_AUTH_REJECTED_EXIT_CODE,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
     RUNNER_INTERACTIVE_SHELLS_ENV_VAR,
     RUNNER_TUNNEL_TOKEN_HEADER,
@@ -61,6 +62,7 @@ from omnigent.runner.transports.ws_tunnel.frames import (
 from omnigent.runner.transports.ws_tunnel.serve import (
     RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX,
     RUNNER_TUNNEL_REJECTION_PREFIX,
+    RunnerTunnelAuthRejectedError,
 )
 from tests._helpers.session import bundle_files
 
@@ -406,6 +408,29 @@ def test_initial_host_token_defers_local_auth_until_rejected(
     ]
     assert resolve_calls == [1]
     assert mint_calls == []
+
+
+def test_initial_token_factory_reports_a_fallback_sign_in_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host bearer never waits on a sign-in; the fallback source behind it can."""
+
+    class _PendingFallback:
+        sign_in_pending = True
+
+        def __call__(self) -> str | None:
+            return None
+
+    monkeypatch.setattr(
+        "omnigent.runner._entry._make_auth_token_factory", lambda *_a, **_k: _PendingFallback()
+    )
+    factory = _InitialAuthTokenFactory("host-bootstrap-token", "https://app.databricksapps.com")
+
+    assert factory() == "host-bootstrap-token"
+    assert factory.sign_in_pending is False
+    assert factory.invalidate() is True
+    assert factory() is None
+    assert factory.sign_in_pending is True
 
 
 def test_initial_host_token_falls_back_to_managed_mint_when_no_sdk_auth(
@@ -2945,16 +2970,26 @@ async def test_resolve_agent_spec_from_server_raises_for_non_404_errors(
     [RUNNER_TUNNEL_REJECTION_PREFIX, RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX],
     ids=["rejected-by-server", "no-credential"],
 )
+@pytest.mark.parametrize(
+    ("error_type", "exit_code"),
+    [(RuntimeError, 1), (RunnerTunnelAuthRejectedError, RUNNER_AUTH_REJECTED_EXIT_CODE)],
+)
 def test_main_reports_tunnel_rejection_without_traceback(
     prefix: str,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    error_type: type[RuntimeError],
+    exit_code: int,
 ) -> None:
     """Fatal tunnel auth failures are rendered as concise CLI errors.
+
+    A refused credential exits with its own code so the host can report it.
 
     :param prefix: Fatal-class message prefix emitted by ``serve_tunnel``.
     :param monkeypatch: Pytest monkeypatch fixture.
     :param capsys: Pytest stdout/stderr capture fixture.
+    :param error_type: Fatal rejection type ``serve_tunnel`` raises.
+    :param exit_code: Expected process exit code.
     :returns: None.
     """
 
@@ -2964,7 +2999,7 @@ def test_main_reports_tunnel_rejection_without_traceback(
         :returns: None.
         :raises RuntimeError: Always, matching a fatal tunnel auth failure.
         """
-        raise RuntimeError(f"{prefix}(HTTP 401); check remote server authentication")
+        raise error_type(f"{prefix}(HTTP 401); check remote server authentication")
 
     monkeypatch.setattr(
         "omnigent.runner._entry._run_tunnel_from_env",
@@ -2974,7 +3009,7 @@ def test_main_reports_tunnel_rejection_without_traceback(
     with pytest.raises(SystemExit) as exc_info:
         main()
 
-    assert exc_info.value.code == 1
+    assert exc_info.value.code == exit_code
     stderr = capsys.readouterr().err
     # The CLI should expose the actionable message without dumping the
     # asyncio/serve_tunnel traceback onto stderr.
