@@ -89,6 +89,20 @@ it.each([true, false])(
   },
 );
 
+it.each([true, false])(
+  "keeps a same-origin non-session link off the session path (in-app browser preference %s)",
+  (preference) => {
+    writeOpenLinksInApp(preference);
+    window.history.replaceState(null, "", "/c/conv-1");
+    const settingsLink = `${window.location.origin}/settings/c/session`;
+    expect(clickLink(settingsLink).defaultPrevented).toBe(preference);
+    expect(window.location.pathname).toBe("/c/conv-1");
+    expect(openOrNavigate.mock.calls).toEqual(
+      preference ? [["conv-1", settingsLink, undefined, { agent: true }]] : [],
+    );
+  },
+);
+
 it("keeps another server's session link on the external path", () => {
   writeOpenLinksInApp(false);
   window.history.replaceState(null, "", "/c/conv-1");

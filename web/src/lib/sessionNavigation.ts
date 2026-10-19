@@ -1,4 +1,4 @@
-import { withBasePath } from "./basePath";
+import { stripBasePath, withBasePath } from "./basePath";
 
 // Search params whose values belong to one session's restored workspace state.
 // They must not carry across links that switch to another session.
@@ -18,7 +18,7 @@ export function sessionNavigationSearch(search: string): string {
   return next ? `?${next}` : "";
 }
 
-/** Navigate in place to a same-origin session URL (`.../c/<id>`); false for any other link. */
+/** Navigate in place to a same-origin session URL (`/c/<id>` or `/canvas/c/<id>`); false otherwise. */
 export function openSameOriginSessionLink(uri: string): boolean {
   let url: URL;
   try {
@@ -27,7 +27,7 @@ export function openSameOriginSessionLink(uri: string): boolean {
     return false;
   }
   if (url.origin !== window.location.origin) return false;
-  if (!/(^|\/)c\/[^/]+\/?$/.test(url.pathname)) return false;
+  if (!/^\/(?:canvas\/)?c\/[^/]+\/?$/.test(stripBasePath(url.pathname))) return false;
   // An unprefixed `/c/<id>` link is rebased under the router basename;
   // withBasePath leaves an already-prefixed link unchanged.
   const target = withBasePath(`${url.pathname}${url.search}${url.hash}`);
