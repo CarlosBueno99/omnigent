@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -746,8 +747,12 @@ async def test_hook_status_resyncs_watcher_dedup(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "poll_before_stop", [False, True], ids=["busy-read-after-stop", "busy-read-before-stop"]
 )
+@pytest.mark.parametrize("stop_reports_time", [False, True], ids=["untimed-stop", "timed-stop"])
 async def test_queued_turn_republishes_running_after_stop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, poll_before_stop: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    poll_before_stop: bool,
+    stop_reports_time: bool,
 ) -> None:
     """A prior turn's Stop must not leave a queued turn reported as idle."""
     session_id = "conv_queued_status"
@@ -783,7 +788,9 @@ async def test_queued_turn_republishes_running_after_stop(
         assert statuses == ["running"]
 
     # The forwarder posts the previous turn's Stop directly to the server.
-    registry.note_external_session_status(session_id, "idle")
+    registry.note_external_session_status(
+        session_id, "idle", turn_ended_at_ms=2000 if stop_reports_time else None
+    )
     assert not registry.session_turn_is_active(session_id)
 
     on_tick()
@@ -796,7 +803,9 @@ async def test_queued_turn_republishes_running_after_stop(
     assert statuses == ["running", "running"]
 
     # The queued turn's own Stop and idle file still produce one completion.
-    registry.note_external_session_status(session_id, "idle")
+    registry.note_external_session_status(
+        session_id, "idle", turn_ended_at_ms=3500 if stop_reports_time else None
+    )
     status_file.write_text(
         json.dumps({**record, "status": "idle", "statusUpdatedAt": 4000}),
         encoding="utf-8",
@@ -806,6 +815,63 @@ async def test_queued_turn_republishes_running_after_stop(
     on_tick()
     await asyncio.sleep(0)
     assert statuses == ["running", "running"]
+    assert not registry.session_turn_is_active(session_id)
+
+
+@pytest.mark.asyncio
+async def test_background_agent_busy_does_not_republish_running_after_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A background agent's leftover busy file leaves the finished turn idle.
+
+    Until the runner delivers another turn, the stale busy must not turn the
+    session back to running. Re-reading the same file after a delivery or a
+    reconnect must still publish the right state.
+    """
+    session_id = "conv_background_agent"
+    on_tick, statuses, registry, status_file = await _observe_native_with_real_poller(
+        tmp_path, monkeypatch, session_id
+    )
+    status_file.write_text(
+        json.dumps(
+            {
+                "pid": 123,
+                "sessionId": "claude-background-agent",
+                "kind": "interactive",
+                "status": "busy",
+                "statusUpdatedAt": 1000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+
+    registry.note_external_session_status(session_id, "idle", turn_ended_at_ms=2000)
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+    assert not registry.session_turn_is_active(session_id)
+    assert registry.claude_status_file_reports_busy(session_id)
+
+    registry.resync_session_statuses()
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running", "idle"]
+
+    registry.note_session_turn_started(session_id)
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running", "idle", "running"]
+    assert registry.session_turn_is_active(session_id)
+
+    registry.note_external_session_status(
+        session_id, "idle", turn_ended_at_ms=int(time.time() * 1000)
+    )
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running", "idle", "running"]
     assert not registry.session_turn_is_active(session_id)
 
 

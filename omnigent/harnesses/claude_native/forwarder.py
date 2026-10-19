@@ -4436,6 +4436,11 @@ async def _forward_available_status_events(
                 # never on an interrupt, so its ``idle`` edge is a confirmed
                 # turn completion, unlike quiescence-derived idles.
                 turn_completed=True if status == "idle" else None,
+                turn_ended_at_ms=(
+                    int(record.recorded_at * 1000)
+                    if status == "idle" and record.recorded_at is not None
+                    else None
+                ),
                 # Only the ``Stop`` (idle) edge carries an authoritative
                 # background-shell count — ``0`` clears the tally, ``N`` sets it.
                 # This is the one thing the status file cannot report: its

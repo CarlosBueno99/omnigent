@@ -271,7 +271,13 @@ class SessionStatusPoller:
     callback fires only on ``running`` ⇄ ``idle`` transitions.
 
     File reads and dedup baselines live on the watcher thread. Other threads
-    may request a resync; a lock protects only that pending request.
+    may request a resync or report turn boundaries; a lock protects only that
+    pending request and the boundary timestamps.
+
+    Claude keeps the file ``busy`` while a background agent outlives the turn,
+    and rewrites ``statusUpdatedAt`` only when the status changes. A ``busy``
+    stamped no later than the last ``Stop`` with no turn started since then is
+    that holdover, so it reads as :data:`IDLE` like the ``shell`` literal.
 
     Lifecycle:
 
@@ -328,6 +334,8 @@ class SessionStatusPoller:
         self._last_status: SessionStatus | None = None
         self._resync_lock = threading.Lock()
         self._resync_requested = False
+        self._turn_started_at_ms: int | None = None
+        self._turn_ended_at_ms: int | None = None
 
     @property
     def active(self) -> bool:
@@ -425,6 +433,45 @@ class SessionStatusPoller:
         with self._resync_lock:
             self._resync_requested = True
 
+    def note_turn_started(self, started_at_ms: int) -> None:
+        """Record that the runner delivered a turn, then re-assert the file.
+
+        :param started_at_ms: Delivery time in epoch milliseconds.
+        """
+        with self._resync_lock:
+            self._turn_started_at_ms = max(started_at_ms, self._turn_started_at_ms or 0)
+        self.resync()
+
+    def note_turn_ended(self, ended_at_ms: int) -> None:
+        """Record a ``Stop`` hook's time, then re-assert the file.
+
+        :param ended_at_ms: When the hook was recorded, in epoch milliseconds.
+        """
+        with self._resync_lock:
+            self._turn_ended_at_ms = max(ended_at_ms, self._turn_ended_at_ms or 0)
+        self.resync()
+
+    def _runner_status(self, status: SessionStatus) -> str:
+        """Map a read to the runner vocabulary, treating a delegate holdover as idle."""
+        with self._resync_lock:
+            started_at_ms = self._turn_started_at_ms
+            ended_at_ms = self._turn_ended_at_ms
+        if (
+            status.raw_status == "busy"
+            and ended_at_ms is not None
+            and status.status_updated_at is not None
+            and status.status_updated_at <= ended_at_ms
+            and (started_at_ms is None or started_at_ms <= ended_at_ms)
+        ):
+            return IDLE
+        return status.runner_status
+
+    @property
+    def reports_busy(self) -> bool:
+        """Whether the file last read ``busy``, even when that publishes idle."""
+        status = self._last_status
+        return self.active and status is not None and status.raw_status == "busy"
+
     @property
     def blocked_on(self) -> str | None:
         """Why Claude is parked, when it is parked on a dialog.
@@ -459,8 +506,9 @@ class SessionStatusPoller:
             self._last_edge = None
             return
         self._last_status = status
-        edge = (status.runner_status, status.blocked_on)
+        runner_status = self._runner_status(status)
+        edge = (runner_status, status.blocked_on)
         if edge == self._last_edge:
             return
         self._last_edge = edge
-        self._on_status(status.runner_status, status.blocked_on)
+        self._on_status(runner_status, status.blocked_on)

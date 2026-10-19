@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import ANY
 
 import httpx
 import pytest
@@ -405,7 +406,12 @@ async def test_forwarder_ignores_subagent_stop_failure_without_subagents_path(
     # ``failed``; only the parent's ``idle`` should arrive.
     assert first["body"] == {
         "type": "external_session_status",
-        "data": {"status": "idle", "background_task_count": 0, "turn_completed": True},
+        "data": {
+            "status": "idle",
+            "background_task_count": 0,
+            "turn_completed": True,
+            "turn_ended_at_ms": ANY,
+        },
     }
 
 
@@ -611,7 +617,12 @@ async def test_forwarder_ignores_subagent_stop_hook(
 
     assert first["body"] == {
         "type": "external_session_status",
-        "data": {"status": "idle", "background_task_count": 0, "turn_completed": True},
+        "data": {
+            "status": "idle",
+            "background_task_count": 0,
+            "turn_completed": True,
+            "turn_ended_at_ms": ANY,
+        },
     }
 
 

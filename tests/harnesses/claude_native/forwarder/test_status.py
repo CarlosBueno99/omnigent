@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
+from unittest.mock import ANY
 
 import httpx
 import pytest
@@ -181,10 +183,12 @@ async def test_forwarder_posts_idle_on_stop_and_ignores_user_prompt_submit(
         bridge_dir,
         {"hook_event_name": "UserPromptSubmit", "session_id": "subagent-session"},
     )
+    stop_recorded_after_ms = int(time.time() * 1000)
     record_hook_event(
         bridge_dir,
         {"hook_event_name": "Stop", "session_id": "claude-session"},
     )
+    stop_recorded_before_ms = int(time.time() * 1000)
     server, thread, base_url = _start_recording_server()
     task = asyncio.create_task(
         forwarder.forward_claude_transcript_to_session(
@@ -211,10 +215,18 @@ async def test_forwarder_posts_idle_on_stop_and_ignores_user_prompt_submit(
     # arriving first would mean UserPromptSubmit is still wrongly mapped.
     assert request["path"] == "/v1/sessions/conv_abc/events"
     # The Stop hook carries its authoritative background-shell count (0 here,
-    # no background tasks) so a finished shell clears the indicator.
+    # no background tasks) so a finished shell clears the indicator, and its
+    # hook time so the runner can tell a background agent's busy file from a new turn.
+    turn_ended_at_ms = request["body"]["data"]["turn_ended_at_ms"]
+    assert stop_recorded_after_ms <= turn_ended_at_ms <= stop_recorded_before_ms
     assert request["body"] == {
         "type": "external_session_status",
-        "data": {"status": "idle", "background_task_count": 0, "turn_completed": True},
+        "data": {
+            "status": "idle",
+            "background_task_count": 0,
+            "turn_completed": True,
+            "turn_ended_at_ms": turn_ended_at_ms,
+        },
     }
 
     submitted = [
@@ -499,6 +511,7 @@ async def test_forwarder_posts_idle_with_count_when_stop_has_background_tasks(
         "data": {
             "status": "idle",
             "turn_completed": True,
+            "turn_ended_at_ms": ANY,
             "background_task_count": 1,
             # Per-shell detail rides alongside the count so the UI can name the
             # running shells (see BackgroundTaskInfo / _normalize_background_task).
@@ -602,6 +615,7 @@ async def test_forward_status_events_stamps_response_id_on_idle(tmp_path: Path) 
             "data": {
                 "status": "idle",
                 "turn_completed": True,
+                "turn_ended_at_ms": ANY,
                 "background_task_count": 0,
                 "response_id": "resp_turn_1",
             },
