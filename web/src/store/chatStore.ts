@@ -8298,12 +8298,11 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         });
       }
       finalizeCurrentActive("cancelled", event.responseId, sourceConversationId);
-      // Stopping the turn stops its compaction, and the idle that follows a
-      // native stop may name no turn, so the stop itself retires the spinner.
+      // Stopping halts compaction even when a steered native message left the
+      // spinner with an earlier turn, and the idle after a native stop may name no turn.
       applyToConversation((s) => {
-        const stopped = s.activeResponse?.responseId;
-        const blocks = stopped ? withoutSettledCompactionSpinners(s.blocks, stopped) : null;
-        return blocks === null ? {} : { blocks };
+        const blocks = s.blocks.filter((b) => b.type !== "compaction_loading");
+        return blocks.length === s.blocks.length ? {} : { blocks };
       });
       return;
     case "session_created":

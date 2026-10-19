@@ -19192,25 +19192,52 @@ describe("chatStore — compaction spinner follows its turn", () => {
     expect(spinnerIds()).toEqual([]);
   });
 
+  const nativeAgentStatus = (status: string) =>
+    sse("session.status", { conversation_id: "conv_native_compact", status });
+
   it.each([
-    { outcome: "keeps", agent: "busy", agentStatus: "running", remaining: ["resp_compact_input"] },
-    { outcome: "clears", agent: "idle", agentStatus: "idle", remaining: [] },
+    {
+      outcome: "keeps",
+      when: "a message reaches the busy agent",
+      agentStatus: "running",
+      afterMessage: [],
+      remaining: ["resp_compact_input"],
+    },
+    {
+      outcome: "clears",
+      when: "a message reaches the idle agent",
+      agentStatus: "idle",
+      afterMessage: [],
+      remaining: [],
+    },
+    {
+      outcome: "clears",
+      when: "the busy agent is stopped after a message",
+      agentStatus: "running",
+      afterMessage: [
+        sse("session.interrupted", {
+          type: "session.interrupted",
+          data: { requested_at: 1704067200 },
+        }),
+        nativeAgentStatus("idle"),
+      ],
+      remaining: [],
+    },
   ])(
-    "$outcome a native compaction spinner when a message reaches the $agent agent",
-    async ({ agentStatus, remaining }) => {
+    "$outcome a native compaction spinner when $when",
+    async ({ agentStatus, afterMessage, remaining }) => {
       // A native runner wraps each delivered message in a short response; the
       // native CLI compacts outside those wrappers.
       const { sink, controller } = startPump("conv_native_compact");
       useChatStore.setState({ isNativeTerminalSession: true });
-      const agentStatusEvent = (status: string) =>
-        sse("session.status", { conversation_id: "conv_native_compact", status });
       sink.push(turnEvent("response.in_progress", "resp_compact_input"));
       sink.push(turnEvent("response.completed", "resp_compact_input"));
-      sink.push(agentStatusEvent("running"));
+      sink.push(nativeAgentStatus("running"));
       sink.push(sse("response.compaction.in_progress", {}));
-      sink.push(agentStatusEvent(agentStatus));
+      sink.push(nativeAgentStatus(agentStatus));
       sink.push(turnEvent("response.in_progress", "resp_next_input"));
       sink.push(turnEvent("response.completed", "resp_next_input"));
+      afterMessage.forEach((event) => sink.push(event));
       await tick();
 
       expect(spinnerIds()).toEqual(remaining);
