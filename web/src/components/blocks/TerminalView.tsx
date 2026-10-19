@@ -645,14 +645,8 @@ export function TerminalView({
     sessionRef.current?.setClipboardEnabled(!readOnly && active);
   }, [readOnly, active]);
 
-  // On the hidden→visible edge of a mounted surface: focus the
-  // terminal (the session's WS-open focus is a no-op while the element is
-  // hidden — visibility:hidden elements aren't focusable), and if the
-  // transport dropped while the surface sat in the background — possibly
-  // exhausting the reconnect budget with nobody watching — retry
-  // immediately with a fresh budget. Reveal is a user signal, exactly
-  // like the visibilitychange redial for frozen tabs. Deliberate closes
-  // (4xxx) keep the dead-end overlay as ever.
+  // On reveal: focus (WS-open focus is a no-op while hidden) and redial a
+  // reconnectable close with a fresh budget, since reveal is a user signal.
   const stateRef = useRef(state);
   stateRef.current = state;
   const wasActiveRef = useRef(active);

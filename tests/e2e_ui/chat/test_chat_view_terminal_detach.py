@@ -36,29 +36,41 @@ _PAINT = """el => {
   return {opacity, displayed, visibility: getComputedStyle(el).visibility,
     width: rect.width, height: rect.height};
 }"""
+# WebSocketRoute.on_close raises KeyError for a close without a code, so read
+# the page's own socket state instead.
+_TRACK_ATTACH_SOCKETS = """() => {
+  const sockets = (window.__terminalAttachSockets = []);
+  window.WebSocket = class extends window.WebSocket {
+    constructor(...args) {
+      super(...args);
+      if (String(args[0]).includes('/attach')) sockets.push(this);
+    }
+  };
+}"""
+_WEBSOCKET_CLOSED = 3
 
 
 @pytest.fixture
-def terminal_scrollbar_session(live_server: str) -> Iterator[tuple[str, str]]:
-    """Create an unbound terminal-first session with an overflowing transcript."""
+def terminal_scrollbar_session(live_server: str) -> Iterator[tuple[str, str, str]]:
+    """Create an unbound terminal-first session with an overflowing transcript.
+
+    Also creates a plain chat session to switch to.
+    """
     with httpx.Client(base_url=live_server, timeout=30) as client:
-        response = client.post(
-            "/v1/sessions",
-            data={
-                "metadata": json.dumps(
-                    {
-                        "labels": {
-                            "omnigent.ui": "terminal",
-                            "omnigent.wrapper": "codex-native-ui",
-                        }
-                    }
-                )
-            },
-            files={"bundle": ("agent.tar.gz", _build_hello_world_bundle())},
-        )
-        response.raise_for_status()
-        session_id = response.json()["session_id"]
+        created: list[str] = []
         try:
+            for metadata in (
+                {"labels": {"omnigent.ui": "terminal", "omnigent.wrapper": "codex-native-ui"}},
+                {},
+            ):
+                response = client.post(
+                    "/v1/sessions",
+                    data={"metadata": json.dumps(metadata)},
+                    files={"bundle": ("agent.tar.gz", _build_hello_world_bundle())},
+                )
+                response.raise_for_status()
+                created.append(response.json()["session_id"])
+            session_id, other_session_id = created
             for role, text in (
                 ("user", "Inspect the chat layout."),
                 (
@@ -86,9 +98,10 @@ def terminal_scrollbar_session(live_server: str) -> Iterator[tuple[str, str]]:
                         },
                     },
                 ).raise_for_status()
-            yield live_server, session_id
+            yield live_server, session_id, other_session_id
         finally:
-            client.delete(f"/v1/sessions/{session_id}").raise_for_status()
+            for created_id in created:
+                client.delete(f"/v1/sessions/{created_id}").raise_for_status()
 
 
 class _TerminalMock:
@@ -176,6 +189,18 @@ def _select_view(page: Page, view: str) -> None:
         expect(page.get_by_role("menu")).to_have_count(0)
 
 
+def _open_from_sidebar(page: Page, session_id: str) -> None:
+    sidebar = page.locator("aside[aria-label='Conversations']")
+    if sidebar.get_attribute("aria-hidden") == "true":
+        page.get_by_role("button", name="Open sidebar", exact=True).click()
+    sidebar.locator(f'a[href="/c/{session_id}"]').click()
+    expect(page).to_have_url(re.compile(rf"/c/{re.escape(session_id)}(?:[?#]|$)"))
+
+
+def _attach_socket_states(page: Page) -> list[int]:
+    return page.evaluate("() => window.__terminalAttachSockets.map(socket => socket.readyState)")
+
+
 def _emit_output(page: Page, surface: Locator, socket: WebSocketRoute) -> None:
     previous_height = surface.locator(_SLIDER).evaluate("el => el.getBoundingClientRect().height")
     socket.send("".join(f"Terminal line {n:03d}\r\n" for n in range(96)).encode())
@@ -192,13 +217,13 @@ def _emit_output(page: Page, surface: Locator, socket: WebSocketRoute) -> None:
 @pytest.mark.parametrize("mobile", [True, False], ids=["mobile", "desktop"])
 def test_terminal_attaches_only_while_terminal_view_is_shown(
     browser: Browser,
-    terminal_scrollbar_session: tuple[str, str],
+    terminal_scrollbar_session: tuple[str, str, str],
     mobile: bool,
 ) -> None:
-    """Chat view holds no attach; Terminal view attaches and returning to Chat releases it."""
+    """Chat view holds no attach; each Terminal visit attaches and leaving it releases it."""
     if mobile and browser.browser_type.name == "firefox":
         pytest.skip("Playwright Firefox does not support mobile contexts")
-    base_url, session_id = terminal_scrollbar_session
+    base_url, session_id, other_session_id = terminal_scrollbar_session
     context = browser.new_context(
         viewport={"width": 402, "height": 714} if mobile else {"width": 1400, "height": 900},
         is_mobile=mobile,
@@ -218,6 +243,7 @@ def test_terminal_attaches_only_while_terminal_view_is_shown(
         expect(surface).to_have_count(0)
         assert terminal.sockets == [], "Chat view opened a terminal attach"
 
+        page.evaluate(_TRACK_ATTACH_SOCKETS)
         _select_view(page, "terminal")
         expect(surface.get_by_test_id("terminal-view")).to_have_attribute(
             "data-state", "connected", timeout=20_000
@@ -250,6 +276,23 @@ def test_terminal_attaches_only_while_terminal_view_is_shown(
         expect(page.get_by_test_id("terminal-view")).to_have_count(0)
         page.wait_for_timeout(_CHAT_VIEW_HOLD_MS)
         assert len(terminal.sockets) == 1, "Chat view re-dialed the terminal attach"
+        assert _attach_socket_states(page) == [_WEBSOCKET_CLOSED], (
+            "Chat view kept the terminal attach open"
+        )
         expect(page.get_by_test_id("transcript-scrollbar-thumb")).to_be_visible()
+
+        _select_view(page, "terminal")
+        expect(surface.get_by_test_id("terminal-view")).to_have_attribute(
+            "data-state", "connected", timeout=20_000
+        )
+        assert len(terminal.sockets) == 2, "Terminal view did not attach again"
+
+        _open_from_sidebar(page, other_session_id)
+        expect(surface).to_have_count(0)
+        page.wait_for_timeout(_CHAT_VIEW_HOLD_MS)
+        assert len(terminal.sockets) == 2
+        assert _attach_socket_states(page) == [_WEBSOCKET_CLOSED] * 2, (
+            "Switching sessions kept the terminal attach open"
+        )
     finally:
         context.close()
