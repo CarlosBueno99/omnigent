@@ -166,7 +166,7 @@ def test_terminal_launch_sends_turns_to_configured_provider(workspaces) -> None:
     )
     spec = request["spec"]
 
-    subprocess.run(
+    result = subprocess.run(
         [spec["command"], *spec["args"]],
         env={**os.environ, **spec["env"]},
         cwd=spec["cwd"],
@@ -175,6 +175,13 @@ def test_terminal_launch_sends_turns_to_configured_provider(workspaces) -> None:
         text=True,
         timeout=120,
     )
+    diagnostics = f"returncode={result.returncode} stderr={result.stderr[-2000:]}"
 
-    assert workspace_a.requests, f"workspace B received: {workspace_b.requests}"
+    assert workspace_a.requests, f"workspace B received: {workspace_b.requests}; {diagnostics}"
     assert not workspace_b.requests, f"workspace B received: {workspace_b.requests}"
+    assert {request["credential"] for request in workspace_a.requests} == {"token-workspace-a"}, (
+        f"workspace A received: {workspace_a.requests}"
+    )
+    models = {request["model"] for request in workspace_a.requests}
+    assert "claude-sonnet-4-20250514" in models, f"workspace A received: {workspace_a.requests}"
+    assert not models & _OTHER_WORKSPACE_MODELS, f"workspace A received: {workspace_a.requests}"
