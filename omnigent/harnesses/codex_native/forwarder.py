@@ -2213,6 +2213,9 @@ async def supervise_forwarder(
         transport=ap_transport,
         event_dispatcher=event_dispatcher,
         tunneled_event_types=_CODEX_TUNNELED_EVENT_TYPES,
+        # Sub-agent rows can keep a stale runner binding, which tunnel ingestion
+        # rejects; over HTTP their statuses still apply.
+        tunneled_session_id=session_id,
     ) as ap_client:
         # Synthesize the thread's MCP startup round (see the comment on
         # _CODEX_MCP_STARTUP_STATUS_METHOD): the fresh-launch forwarder

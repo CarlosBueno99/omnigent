@@ -774,6 +774,7 @@ def open_server_client(
     host_id: str | None = None,
     event_dispatcher: RunnerEventDispatcher | None = None,
     tunneled_event_types: frozenset[str] | None = None,
+    tunneled_session_id: str | None = None,
 ) -> httpx.AsyncClient:
     """Open an :class:`httpx.AsyncClient` to an Omnigent server, keyed for routing.
 
@@ -816,6 +817,8 @@ def open_server_client(
         session events are delivered on the runner's tunnel instead of HTTP.
     :param tunneled_event_types: Event types sent on the tunnel, e.g.
         ``frozenset({"external_session_status"})``; ``None`` keeps the default.
+    :param tunneled_session_id: Restrict tunnel delivery to this session's
+        events, e.g. ``"conv_abc123"``; ``None`` tunnels every session's.
     :returns: A configured :class:`httpx.AsyncClient`.
     """
     import httpx
@@ -835,6 +838,7 @@ def open_server_client(
 
         if tunneled_event_types is not None:
             kwargs["tunneled_event_types"] = tunneled_event_types
+        kwargs["tunneled_session_id"] = tunneled_session_id
         return TunnelEventClient(
             event_dispatcher=event_dispatcher,
             base_url=server_url,

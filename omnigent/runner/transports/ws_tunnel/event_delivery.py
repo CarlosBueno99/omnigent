@@ -292,6 +292,8 @@ class TunnelEventClient(httpx.AsyncClient):
     :param event_dispatcher: Runner dispatcher that owns tunnel delivery.
     :param tunneled_event_types: Event types sent on the tunnel. Conversation
         items additionally need a ``source_id`` so a lost ACK can be replayed.
+    :param tunneled_session_id: When set, only this session's events use the
+        tunnel, e.g. ``"conv_abc123"``; other sessions keep HTTP.
     """
 
     def __init__(
@@ -299,11 +301,13 @@ class TunnelEventClient(httpx.AsyncClient):
         *,
         event_dispatcher: RunnerEventDispatcher,
         tunneled_event_types: frozenset[str] = DEFAULT_TUNNELED_EVENT_TYPES,
+        tunneled_session_id: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._event_dispatcher = event_dispatcher
         self._tunneled_event_types = tunneled_event_types
+        self._tunneled_session_id = tunneled_session_id
 
     def _is_tunneled(self, event: dict[str, Any]) -> bool:
         event_type = event.get("type")
@@ -334,11 +338,13 @@ class TunnelEventClient(httpx.AsyncClient):
             events = cast("list[dict[str, Any]]", value)
         else:
             return await super().post(*args, **kwargs)
-        if not all(self._is_tunneled(event) for event in events):
+        session_id = unquote(match.group(1))
+        if not all(self._is_tunneled(event) for event in events) or (
+            self._tunneled_session_id is not None and session_id != self._tunneled_session_id
+        ):
             return await super().post(*args, **kwargs)
         # Child-history callers inspect each item_id in the HTTP batch
         # acknowledgement; even a one-entry array needs a list response.
-        session_id = unquote(match.group(1))
         if (
             (
                 isinstance(value, list)

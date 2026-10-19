@@ -47,6 +47,7 @@ def _client(
     dispatcher: RunnerEventDispatcher,
     http_posts: list[object],
     tunneled_event_types: frozenset[str] = DEFAULT_TUNNELED_EVENT_TYPES,
+    tunneled_session_id: str | None = None,
 ) -> TunnelEventClient:
     def handler(request: httpx.Request) -> httpx.Response:
         http_posts.append(json.loads(request.content))
@@ -55,6 +56,7 @@ def _client(
     return TunnelEventClient(
         event_dispatcher=dispatcher,
         tunneled_event_types=tunneled_event_types,
+        tunneled_session_id=tunneled_session_id,
         transport=httpx.MockTransport(handler),
         base_url="http://server",
     )
@@ -664,7 +666,7 @@ async def test_disconnect_during_failed_send_leaves_no_unretrieved_future_error(
     assert not reported
 
 
-async def test_status_uses_the_tunnel_only_for_clients_that_opt_in() -> None:
+async def test_status_uses_the_tunnel_only_for_the_opted_in_session() -> None:
     dispatcher = RunnerEventDispatcher()
     default_posts: list[object] = []
     opted_in_posts: list[object] = []
@@ -679,13 +681,14 @@ async def test_status_uses_the_tunnel_only_for_clients_that_opt_in() -> None:
     dispatcher.ready(send)
     async with _client(dispatcher, default_posts) as default_client:
         await default_client.post(_URL, json=_STATUS)
-    async with _client(dispatcher, opted_in_posts, _STATUS_ONLY) as status_client:
+    async with _client(dispatcher, opted_in_posts, _STATUS_ONLY, "session-a") as status_client:
         status = await status_client.post(_URL, json=_STATUS)
+        child_status = await status_client.post("/v1/sessions/child-b/events", json=_STATUS)
         item = await status_client.post(_URL, json=_ITEM)
-    assert status.status_code == item.status_code == 202
-    assert [frame.events for frame in frames] == [[_STATUS]]
+    assert status.status_code == child_status.status_code == item.status_code == 202
+    assert [(frame.session_id, frame.events) for frame in frames] == [("session-a", [_STATUS])]
     assert default_posts == [_STATUS]
-    assert opted_in_posts == [_ITEM]
+    assert opted_in_posts == [_STATUS, _ITEM]
 
 
 async def test_status_uses_http_while_the_tunnel_is_down() -> None:
