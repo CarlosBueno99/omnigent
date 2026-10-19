@@ -7895,12 +7895,8 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
           eventContent !== null &&
           isClaudeAgentMessageContent(eventContent) &&
           (!pendingHead || contentKeyOf(pendingHead.content) !== contentKeyOf(eventContent));
-        // Another session's agent sent this, so only its own queued bubble may settle it.
-        const unmatchedAgentSend =
-          source !== undefined &&
-          (eventContent === null ||
-            !pendingHead ||
-            contentKeyOf(pendingHead.content) !== contentKeyOf(eventContent));
+        // Another session's agent sent this: only the queued entry the server names is its own.
+        const agentSend = source !== undefined;
         // An older server's skip receipt names a `!cmd` bubble its shell input already
         // cleared: it owns no bubble, and the FIFO head belongs to a later message.
         const named = event.clearedPendingId;
@@ -7943,7 +7939,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
           // steal a real queued message's bubble. Hold the head back for a marker.
           if (
             unmatchedEnvelope ||
-            unmatchedAgentSend ||
+            agentSend ||
             (eventContent !== null && isSystemUserContent(eventContent))
           ) {
             return {};
@@ -7996,7 +7992,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         const head =
           settledShell ||
           unmatchedEnvelope ||
-          unmatchedAgentSend ||
+          agentSend ||
           (eventContent !== null && isSystemUserContent(eventContent)) ||
           s.pendingUserMessages[0]?.initialDraft
             ? undefined
