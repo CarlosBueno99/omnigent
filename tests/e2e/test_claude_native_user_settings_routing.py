@@ -28,10 +28,11 @@ pytestmark = [
 ]
 
 _OTHER_WORKSPACE_MODELS = {"ws-b-opus", "ws-b-sonnet", "ws-b-haiku"}
+_OTHER_WORKSPACE_HEADER = "x-workspace-b-secret"
 
 
 class _RecordingServer:
-    """Loopback endpoint that records each request's model and credential, then rejects it."""
+    """Loopback endpoint that records what each request carries, then rejects it."""
 
     def __init__(self) -> None:
         self.requests: list[dict[str, object]] = []
@@ -45,7 +46,14 @@ class _RecordingServer:
                 except (ValueError, AttributeError):
                     model = None
                 credential = self.headers.get("x-api-key") or self.headers.get("Authorization")
-                recorded.append({"path": self.path, "model": model, "credential": credential})
+                recorded.append(
+                    {
+                        "path": self.path,
+                        "model": model,
+                        "credential": credential,
+                        "other_workspace_header": self.headers.get(_OTHER_WORKSPACE_HEADER),
+                    }
+                )
                 payload = json.dumps(
                     {
                         "type": "error",
@@ -134,6 +142,7 @@ def workspaces(
                         "ANTHROPIC_DEFAULT_OPUS_MODEL": "ws-b-opus",
                         "ANTHROPIC_DEFAULT_SONNET_MODEL": "ws-b-sonnet",
                         "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ws-b-haiku",
+                        "ANTHROPIC_CUSTOM_HEADERS": f"{_OTHER_WORKSPACE_HEADER}: secret-b",
                     },
                     "apiKeyHelper": "printf %s token-workspace-b",
                 }
@@ -185,3 +194,6 @@ def test_terminal_launch_sends_turns_to_configured_provider(workspaces) -> None:
     models = {request["model"] for request in workspace_a.requests}
     assert "claude-sonnet-4-20250514" in models, f"workspace A received: {workspace_a.requests}"
     assert not models & _OTHER_WORKSPACE_MODELS, f"workspace A received: {workspace_a.requests}"
+    assert not any(request["other_workspace_header"] for request in workspace_a.requests), (
+        f"workspace A received: {workspace_a.requests}"
+    )

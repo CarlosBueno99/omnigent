@@ -269,7 +269,7 @@ _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV = CUSTOM_MODEL_OPTION_ENV_VAR
 _ANTHROPIC_CUSTOM_MODEL_OPTION_NAME_ENV = CUSTOM_MODEL_OPTION_NAME_ENV_VAR
 _UCODE_CLAUDE_CUSTOM_TIER = LEGACY_CUSTOM_SLOT_ROW_ID
 _UCODE_CLAUDE_CUSTOM_TIER_LABEL = "Sonnet 5"
-# Endpoint and model keys a resolved launch config owns; see
+# Endpoint, request-header and model keys a resolved launch config owns; see
 # build_native_claude_settings_env. The raw Bedrock token is never pinned
 # there because the probe and title runs pass those settings in argv.
 _CLAUDE_SETTINGS_OWNED_ROUTING_ENV: tuple[str, ...] = (
@@ -277,6 +277,7 @@ _CLAUDE_SETTINGS_OWNED_ROUTING_ENV: tuple[str, ...] = (
     _ANTHROPIC_BEDROCK_BASE_URL_ENV,
     _CLAUDE_CODE_USE_BEDROCK_ENV,
     "CLAUDE_CODE_USE_VERTEX",
+    _CLAUDE_CODE_CUSTOM_HEADERS_ENV,
     _ANTHROPIC_MODEL_ENV,
     *_UCODE_CLAUDE_TIER_TO_ENV.values(),
     _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV,

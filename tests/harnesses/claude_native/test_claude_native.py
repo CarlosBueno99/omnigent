@@ -295,6 +295,7 @@ def test_claude_terminal_request_injects_claude_config(tmp_path, monkeypatch) ->
         "ANTHROPIC_BEDROCK_BASE_URL": "",
         "CLAUDE_CODE_USE_BEDROCK": "",
         "CLAUDE_CODE_USE_VERTEX": "",
+        "ANTHROPIC_CUSTOM_HEADERS": "",
         "ANTHROPIC_MODEL": "",
         "ANTHROPIC_DEFAULT_FABLE_MODEL": "",
         "ANTHROPIC_DEFAULT_OPUS_MODEL": "",
@@ -462,6 +463,8 @@ def test_ucode_config_for_profile_reads_allowlisted_claude_state(
         api_key_helper="printf token",
         model="databricks-claude-opus-test",
     )
+    settings_env = claude_native.build_native_claude_settings_env(config)
+    assert settings_env["ANTHROPIC_CUSTOM_HEADERS"] == "x-databricks-use-coding-agent-mode: true"
 
 
 def _ucode_state_with_auth_command(auth_command: str) -> Any:
