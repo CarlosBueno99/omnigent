@@ -8698,6 +8698,11 @@ def test_claude_settings_file_args_uses_a_removed_owner_only_file() -> None:
         assert settings_path.parent.stat().st_mode & 0o777 == 0o700
         assert json.loads(settings_path.read_text()) == {"env": {"TOKEN": "secret"}}
     assert not settings_path.parent.exists()
+    with pytest.raises(RuntimeError, match="launch failed"):
+        with claude_native.claude_settings_file_args({"env": {"TOKEN": "secret"}}) as failed_args:
+            failed_path = Path(failed_args[1])
+            raise RuntimeError("launch failed")
+    assert not failed_path.parent.exists()
 
 
 def test_bedrock_config_for_native_claude_keeps_betas_under_use_gateway(
