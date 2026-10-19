@@ -7388,6 +7388,7 @@ describe("NewChatLandingScreen", () => {
   it.each([undefined, true])(
     "includes managed first input only when the server accepts it durably (%s)",
     async (durableInitialInput) => {
+      mockHosts([]);
       renderLanding({
         managed_sandboxes_enabled: true,
         durable_initial_input: durableInitialInput,
@@ -7410,6 +7411,7 @@ describe("NewChatLandingScreen", () => {
   );
 
   it("uploads managed first-message files in the create request", async () => {
+    mockHosts([]);
     renderLanding({ managed_sandboxes_enabled: true, durable_initial_input: true });
     const file = new File(["saved context"], "context.txt", { type: "text/plain" });
     fireEvent.change(screen.getByTestId("new-chat-landing-file-input"), {
