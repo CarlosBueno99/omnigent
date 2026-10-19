@@ -1658,37 +1658,30 @@ _KEY_PROVIDER = {
 }
 
 
+_INVALID_UTF8_UCODE_STATE = b'{"current_workspace": "\xff"}'
+
+
 @pytest.mark.parametrize(
-    ("state_bytes", "cfg_bytes", "providers"),
+    ("state_bytes", "cfg_bytes"),
     [
+        pytest.param(_INVALID_UTF8_UCODE_STATE, None, id="state-invalid-utf8"),
         pytest.param(
-            b'{"current_workspace": "\xff"}', None, _KEY_PROVIDER, id="state-invalid-utf8"
+            None, b"[ai_devtools]\nhost = https://a.example\n# \xff\n", id="profile-invalid-utf8"
         ),
         pytest.param(
-            None,
-            b"[ai_devtools]\nhost = https://a.example\n# \xff\n",
-            _DATABRICKS_PROVIDER,
-            id="profile-invalid-utf8",
+            None, b"[ai_devtools]\nhost = https://a.example/%zz\n", id="profile-bad-interpolation"
         ),
         pytest.param(
-            None,
-            b"[ai_devtools]\nhost = https://a.example/%zz\n",
-            _DATABRICKS_PROVIDER,
-            id="profile-bad-interpolation",
-        ),
-        pytest.param(
-            None,
-            b"[ai_devtools]\nhost = https://[a.example\n",
-            _DATABRICKS_PROVIDER,
-            id="profile-invalid-ipv6-host",
+            None, b"[ai_devtools]\nhost = https://[a.example\n", id="profile-invalid-ipv6-host"
         ),
     ],
 )
-def test_overview_opens_when_drift_inputs_are_unreadable(
-    isolated_config, tmp_path, monkeypatch, state_bytes, cfg_bytes, providers
+def test_databricks_drift_notice_skips_unreadable_inputs(
+    tmp_path, monkeypatch, state_bytes: bytes | None, cfg_bytes: bytes | None
 ) -> None:
-    """Damaged ucode state or profile files skip the drift warning instead of
-    stopping ``omni setup`` before the overview renders."""
+    """Damaged ucode state or profile files skip the advisory warning instead of raising."""
+    from omnigent.cli_config import _databricks_workspace_drift_notice
+
     _seed_ucode_and_databrickscfg(
         tmp_path, monkeypatch, cfg_profiles={"ai_devtools": _WS_A}, ucode_current=_WS_B
     )
@@ -1696,8 +1689,21 @@ def test_overview_opens_when_drift_inputs_are_unreadable(
         (tmp_path / ".ucode" / "state.json").write_bytes(state_bytes)
     if cfg_bytes is not None:
         (tmp_path / ".databrickscfg").write_bytes(cfg_bytes)
+
+    assert _databricks_workspace_drift_notice({"providers": _DATABRICKS_PROVIDER}) is None
+
+
+def test_overview_opens_when_ucode_state_is_unreadable(
+    isolated_config, tmp_path, monkeypatch
+) -> None:
+    """A damaged ucode state file does not stop ``omni setup`` before the overview
+    renders, including for users without a Databricks provider."""
+    _seed_ucode_and_databrickscfg(
+        tmp_path, monkeypatch, cfg_profiles={"ai_devtools": _WS_A}, ucode_current=_WS_B
+    )
+    (tmp_path / ".ucode" / "state.json").write_bytes(_INVALID_UTF8_UCODE_STATE)
     with open(os.path.join(isolated_config, "config.yaml"), "w") as f:
-        yaml.safe_dump({"providers": providers}, f)
+        yaml.safe_dump({"providers": _KEY_PROVIDER}, f)
 
     result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input="q\n")
 

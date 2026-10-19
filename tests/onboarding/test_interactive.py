@@ -106,16 +106,29 @@ def test_select_uses_numbered_fallback_on_windows_tty(
     assert result == 1
 
 
-@pytest.mark.parametrize(("stdin_is_tty", "is_windows"), [(False, False), (True, True)])
+@pytest.mark.parametrize(
+    ("stdin_is_tty", "is_windows", "raw_mode_fails"),
+    [(False, False, False), (True, True, False), (True, False, True)],
+    ids=["non-tty", "windows-tty", "raw-mode-unavailable"],
+)
 def test_select_fallback_prints_status_above_title(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     stdin_is_tty: bool,
     is_windows: bool,
+    raw_mode_fails: bool,
 ) -> None:
     """Numbered fallbacks keep the status line the raw-termios menu shows."""
     monkeypatch.setattr(sys.stdin, "isatty", lambda: stdin_is_tty)
     monkeypatch.setattr(interactive, "IS_WINDOWS", is_windows)
+    if raw_mode_fails:
+        import termios
+
+        def _no_raw_mode(_fd: int) -> list[object]:
+            raise termios.error("raw mode unavailable")
+
+        monkeypatch.setattr(sys.stdin, "fileno", lambda: 0)
+        monkeypatch.setattr(termios, "tcgetattr", _no_raw_mode)
     _feed(monkeypatch, ["1"])
 
     interactive.select("Pick one", ["alpha"], status="⚠ drift", status_style="bold yellow")

@@ -1,9 +1,9 @@
 """Verify that ``omni setup`` warns about ucode workspace drift without changing
 the configured credential label.
 
-``omni setup`` runs for real under a pseudo-TTY against a seeded HOME. ucode is
-stood in by :mod:`tests.e2e._fake_ucode`; ``databricks`` and ``uvx`` shims fail
-loudly so the host's CLIs and login state never take part.
+``omni setup`` runs for real under a pseudo-TTY against a seeded HOME. The test
+writes the files ``ug configure`` leaves behind; ``databricks`` and ``uvx`` shims
+fail loudly so the host's CLIs and login state never take part.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ import contextlib
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -22,7 +21,6 @@ import pytest
 pexpect = pytest.importorskip("pexpect")
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_FAKE_UCODE = Path(__file__).with_name("_fake_ucode.py")
 
 WORKSPACE_A = "https://workspace-a.cloud.databricks.com"
 WORKSPACE_B = "https://workspace-b.cloud.databricks.com"
@@ -31,7 +29,6 @@ PROFILE_B = "fevm2"
 DRIFT_MARKER = "ucode now points at"
 
 _ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[=>]")
-_UG_SHIM = '#!/usr/bin/env bash\nexec "{python}" "{script}" "$@"\n'
 _FORBIDDEN_SHIM = (
     "#!/usr/bin/env bash\n"
     'echo "{name} $*" >> "$HOME/forbidden-cli-calls.log"\n'
@@ -42,20 +39,27 @@ _FORBIDDEN_SHIM = (
 
 def _write_shims(bin_dir: Path) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
-    shims = {"ug": _UG_SHIM.format(python=sys.executable, script=_FAKE_UCODE)}
     for name in ("databricks", "uvx"):
-        shims[name] = _FORBIDDEN_SHIM.format(name=name)
-    for name, content in shims.items():
         path = bin_dir / name
-        path.write_text(content)
+        path.write_text(_FORBIDDEN_SHIM.format(name=name))
         path.chmod(0o755)
+
+
+def _configure_ucode(home: Path, url: str, profile: str) -> None:
+    """Leave HOME as ``ug configure --workspaces <url> --profile <profile>`` does."""
+    with (home / ".databrickscfg").open("a") as handle:
+        handle.write(f"[{profile}]\nhost = {url}\nauth_type = databricks-cli\n")
+    state_path = home / ".ucode" / "state.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {"workspaces": {}}
+    state["workspaces"][url] = {"workspace": url}
+    state["current_workspace"] = url
+    state_path.parent.mkdir(exist_ok=True)
+    state_path.write_text(json.dumps(state))
 
 
 def _seed_home(home: Path) -> None:
     """Leave HOME as ``omni setup`` does after adding PROFILE_A for WORKSPACE_A."""
-    (home / ".databrickscfg").write_text(
-        f"[{PROFILE_A}]\nhost = {WORKSPACE_A}\nauth_type = databricks-cli\n"
-    )
+    _configure_ucode(home, WORKSPACE_A, PROFILE_A)
     (home / ".omnigent").mkdir()
     (home / ".omnigent" / "config.yaml").write_text(
         "providers:\n"
@@ -138,13 +142,6 @@ def _setup_overview(env: dict[str, str]) -> str:
         _quit(child)
 
 
-def _ucode_configure(env: dict[str, str], url: str, profile: str | None = None) -> None:
-    argv = ["ug", "configure", "--workspaces", url, "--agents", "claude,codex"]
-    if profile:
-        argv += ["--profile", profile]
-    subprocess.run(argv, env=env, check=True, capture_output=True, text=True)
-
-
 @pytest.mark.timeout(300)
 def test_setup_warns_when_ucode_switches_workspace(tmp_path: Path) -> None:
     home = tmp_path / "home"
@@ -153,15 +150,12 @@ def test_setup_warns_when_ucode_switches_workspace(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     _write_shims(bin_dir)
     env = _env(home, bin_dir)
-    _ucode_configure(env, WORKSPACE_A)
 
     shown = _setup_overview(env)
     assert f"Databricks ({PROFILE_A})" in _status_row(shown, "Claude"), shown
     assert DRIFT_MARKER not in shown, shown
 
-    _ucode_configure(env, WORKSPACE_B, PROFILE_B)
-    state = json.loads((home / ".ucode" / "state.json").read_text())
-    assert state["current_workspace"] == WORKSPACE_B
+    _configure_ucode(home, WORKSPACE_B, PROFILE_B)
 
     shown = _setup_overview(env)
     host_a = WORKSPACE_A.split("://", 1)[-1]
