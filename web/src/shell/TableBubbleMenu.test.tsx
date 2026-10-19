@@ -3,7 +3,8 @@
 // position/move helpers (freshCellPos, moveRowToIndex, …) are covered in
 // tableActions.test.ts; this file exercises the *component wiring*:
 //
-//   - a mousemove over a cell portals the row + column grips into <body>,
+//   - a mousemove over a cell portals the row + column grips into <body>
+//     (or the embed root when embedded),
 //   - clicking a grip opens its dropdown menu,
 //   - clicking each menu item runs the matching TipTap command against the
 //     cell the grip belongs to (Insert row above/below, Delete row; Insert
@@ -21,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Editor } from "@tiptap/core";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 import { StarterKit } from "@tiptap/starter-kit";
+import { setEmbedRoot } from "@/lib/host";
 import { TableHandles } from "./TableBubbleMenu";
 
 /** Minimal 3×3 table: one header row + two body rows. */
@@ -97,6 +99,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   editor.destroy();
+  setEmbedRoot(null);
 });
 
 describe("TableHandles — grip visibility", () => {
@@ -214,5 +217,25 @@ describe("TableHandles — context menu", () => {
     const item = screen.getByText("Delete table");
     fireEvent.click(item);
     expect(editor.view.dom.querySelector("table")).toBeNull();
+  });
+});
+
+describe("TableHandles — embedded portal target", () => {
+  it("portals grips, grip menus and the context menu into the embed root", () => {
+    // WHY: managed CSS is scoped under the embed root; body-level portals
+    // render unstyled, so the table controls become invisible and unusable.
+    const embedRoot = document.createElement("div");
+    document.body.appendChild(embedRoot);
+    setEmbedRoot(embedRoot);
+    renderHandles();
+
+    const rowMenu = openRowMenu(1);
+    expect(embedRoot).toContainElement(screen.getByRole("button", { name: "Row options" }));
+    expect(embedRoot).toContainElement(screen.getByRole("button", { name: "Column options" }));
+    expect(embedRoot).toContainElement(rowMenu);
+
+    fireEvent.contextMenu(rows()[1].cells[1], { bubbles: true, clientX: 10, clientY: 10 });
+    expect(embedRoot).toContainElement(screen.getByText("Delete table"));
+    embedRoot.remove();
   });
 });

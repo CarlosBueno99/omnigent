@@ -9,7 +9,8 @@
 //   Click : dropdown menu — Insert column before/after, Delete column
 //
 // Both are fixed-position portals so they are never clipped by the editor's
-// overflow container.  Drag uses mousedown/mousemove/mouseup rather than the
+// overflow container. They portal into the embed root when embedded so the
+// `.omnigent-app`-scoped styles still apply.  Drag uses mousedown/mousemove/mouseup rather than the
 // HTML5 DnD API because ProseMirror intercepts dragover/drop events on its
 // own DOM node, making native DnD unreliable.
 
@@ -25,6 +26,7 @@ import { TextSelection } from "@tiptap/pm/state";
 import { Fragment } from "@tiptap/pm/model";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { MoreHorizontal, MoreVertical, Trash2 } from "lucide-react";
+import { getEmbedRoot } from "@/lib/host";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -253,7 +255,7 @@ function HandleMenu({
         ),
       )}
     </div>,
-    document.body,
+    getEmbedRoot() ?? document.body,
   );
 }
 
@@ -769,7 +771,7 @@ export function TableHandles({
               height: rowSelRect.height,
             }}
           />,
-          document.body,
+          getEmbedRoot() ?? document.body,
         )}
 
       {/* Column selection overlay — full-border rectangle spanning the entire hovered column */}
@@ -784,7 +786,7 @@ export function TableHandles({
               height: colSelRect.height,
             }}
           />,
-          document.body,
+          getEmbedRoot() ?? document.body,
         )}
 
       {/* Drag target overlay — shows where the dragged row/column will land */}
@@ -799,7 +801,7 @@ export function TableHandles({
               height: dragTargetRect.height,
             }}
           />,
-          document.body,
+          getEmbedRoot() ?? document.body,
         )}
 
       {/* Row handle — vertical pill with ⋮ to the left of the hovered row */}
@@ -867,7 +869,7 @@ export function TableHandles({
           >
             <MoreVertical className="size-3.5" />
           </div>,
-          document.body,
+          getEmbedRoot() ?? document.body,
         )}
 
       {rowMenu && (
@@ -946,7 +948,7 @@ export function TableHandles({
           >
             <MoreHorizontal className="size-3.5" />
           </div>,
-          document.body,
+          getEmbedRoot() ?? document.body,
         )}
 
       {colMenu && (
@@ -972,7 +974,7 @@ export function TableHandles({
               height: dragGhostRect.height,
             }}
           />,
-          document.body,
+          getEmbedRoot() ?? document.body,
         )}
 
       {/* Right-click context menu — shown when right-clicking inside a table cell */}
@@ -1010,7 +1012,7 @@ export function TableHandles({
               height: dropIndicator.height,
             }}
           />,
-          document.body,
+          getEmbedRoot() ?? document.body,
         )}
     </>
   );
