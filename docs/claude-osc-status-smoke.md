@@ -2,7 +2,7 @@
 
 Smoke branch: `omni-12244-manual-smoke`. Production code is identical to
 PR [#10259](https://github.com/omnigent-ai/omnigent/pull/10259) at
-`fc3db84101dd94dc3960a7209dd263587ad085fd`; this branch only adds this recipe.
+`6dbbe5908`; this branch only adds this recipe.
 Allow about 10–15 minutes. Use **Claude Code / claude-native**, with Claude
 2.1.295 or newer, and your existing live provider credentials.
 
@@ -13,11 +13,12 @@ On Pat's machine, the worktree and dependencies are already prepared:
 ```sh
 cd /Users/pat.sukprasert/git/omnigent-worktrees/omni-12244-manual-smoke
 claude --version
-UV_FROZEN=1 OMNIGENT_FEATURES=claude_osc_status omnidev
+env -u OMNIGENT_FEATURES UV_FROZEN=1 omnidev
 ```
 
 Run this from a fresh terminal. Open the exact **ui** URL printed by omnidev.
 Keep the supervisor running; use the shutdown steps below before toggling flags.
+The command leaves `OMNIGENT_FEATURES` unset to exercise the enabled default.
 The pod has its own Omnigent config and database. It inherits your existing
 provider credentials and Claude machine settings. `UV_FROZEN=1` preserves the
 candidate's dependency lock when omnidev launches subprocesses.
@@ -86,7 +87,7 @@ for this live smoke.
 - **Local CLI:** in a second terminal, from the smoke worktree, run:
 
   ```sh
-  UV_FROZEN=1 OMNIGENT_FEATURES=claude_osc_status omnidev omnigent claude --model haiku
+  env -u OMNIGENT_FEATURES UV_FROZEN=1 omnidev omnigent claude --model haiku
   ```
 
   Open its linked session in the same pod's web UI. Send the harmless sleep
@@ -94,7 +95,7 @@ for this live smoke.
   second turn, then complete a follow-up. Exit the Claude terminal afterward.
   If you use a custom `--pod-dir`, pass it to both omnidev commands.
 
-## Flag-off control and cleanup
+## Kill-switch control and cleanup
 
 Quit omnidev with `q` or Ctrl-C. Then stop any detached host for this pod before
 restarting. In the command below, replace the URL with the exact **server** URL
@@ -110,7 +111,7 @@ feature setting. Do not use `omnigent stop` or `host stop --all`; those affect
 other running environments. Then restart from the same worktree:
 
 ```sh
-UV_FROZEN=1 OMNIGENT_FEATURES= omnidev
+UV_FROZEN=1 OMNIGENT_FEATURES=-claude_osc_status omnidev
 ```
 
 Start a **fresh** Claude session and repeat a short reply and the quiet-work
@@ -119,8 +120,10 @@ in quiet status: the legacy status-file path can also be accurate, so a visible
 difference is not required. The automated flag-off control additionally checks
 that no OSC relay status file exists.
 
-To re-enable, repeat the shutdown steps and rerun the flag-on command, then start another fresh
-session. This is a startup flag, not a hot switch; existing terminals retain
+To re-enable, repeat the shutdown steps and rerun the default command, then
+start another fresh session. With other feature entries, preserve them and
+append `-claude_osc_status` to disable OSC; remove the negative entry to
+re-enable it. An explicit disable wins even if the positive name is present. This is a startup flag, not a hot switch; existing terminals retain
 their launch configuration. These commands change only this pod's launch
 environment. No release default or global rollout setting changes.
 
