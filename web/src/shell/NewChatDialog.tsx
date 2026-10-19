@@ -172,7 +172,7 @@ import { CliCommandBlock, renderTextWithInlineCode } from "./CliCommandBlock";
 import { isHostAbsolutePath, isNavigablePath } from "./WorkspacePicker";
 import { WorkspacePickerDialog } from "./WorkspacePickerDialog";
 import { StaticSandboxPicker } from "./StaticSandboxPicker";
-import { StaticSandboxName } from "./StaticSandboxName";
+import { StaticSandboxEdit, StaticSandboxName } from "./StaticSandboxName";
 import { RecentWorkspaceList } from "./RecentWorkspaceList";
 import {
   WORKTREE_RADIO_SELECTOR_INPUT_CLASS,
@@ -2535,6 +2535,12 @@ export function NewChatLandingScreen() {
   const onboardingHostSettled = useRef(false);
   const [connectingThisMachine, setConnectingThisMachine] = useState(false);
   const [hostMenuOpen, setHostMenuOpen] = useState(false);
+  const hostPickerRef = useRef<HTMLButtonElement>(null);
+  const [editingHost, setEditingHost] = useState<Host | null>(null);
+  const editSandboxName = (host: Host) => {
+    setHostMenuOpen(false);
+    setEditingHost(host);
+  };
   // Error surfaced when "Run on this machine" fails (sign-in needed, enrollment
   // declined, server unreachable). Rendered in the composer body with a retry,
   // so the failure isn't silently swallowed and the user isn't stranded on the
@@ -6280,7 +6286,16 @@ export function NewChatLandingScreen() {
         }
         data-active={!sandboxSelected && host.host_id === selectedHostId ? "true" : undefined}
         title={`${host.display_name ?? host.name} — ${host.status}`}
-        className={reconnect ? "group" : undefined}
+        className={cn("group/sandbox", reconnect && "group")}
+        aria-description={
+          host.sandbox_attached ? "Right Arrow to edit the sandbox name." : undefined
+        }
+        onKeyDown={(event) => {
+          if (host.sandbox_attached && event.key === "ArrowRight") {
+            event.preventDefault();
+            editSandboxName(host);
+          }
+        }}
       >
         <HostOption
           host={host}
@@ -6296,7 +6311,9 @@ export function NewChatLandingScreen() {
                 : undefined
           }
           action={
-            reconnect ? (
+            host.sandbox_attached ? (
+              <StaticSandboxEdit onEdit={() => editSandboxName(host)} />
+            ) : reconnect ? (
               <span
                 className="inline-flex h-6 shrink-0 items-center rounded-md px-2 text-xs font-medium text-muted-foreground group-hover:text-foreground"
                 data-testid="new-chat-landing-use-this-machine"
@@ -7058,6 +7075,7 @@ export function NewChatLandingScreen() {
                     </div>
                     {/* Host chip */}
                     <DropdownMenu
+                      open={hostMenuOpen}
                       onOpenChange={(open) => {
                         setHostMenuOpen(open);
                         if (!open) setOfflineHostLimit(0);
@@ -7084,6 +7102,7 @@ export function NewChatLandingScreen() {
                       >
                         <DropdownMenuTrigger asChild>
                           <ComposerHostTrigger
+                            ref={hostPickerRef}
                             label={
                               sandboxSelected
                                 ? `Host: ${hostLabel}`
@@ -7107,6 +7126,9 @@ export function NewChatLandingScreen() {
                         sideOffset={6}
                         className="composer-host-menu min-w-[220px] max-w-[min(360px,calc(100vw-24px))]"
                         data-testid="new-chat-landing-host-menu"
+                        onCloseAutoFocus={(event) => {
+                          if (editingHost) event.preventDefault();
+                        }}
                       >
                         {hasCloudOptions && (
                           <div className="px-2 py-1 text-xs leading-[18px] text-muted-foreground/75">
@@ -7306,10 +7328,6 @@ export function NewChatLandingScreen() {
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
-
-                    {!sandboxSelected && selectedHost?.sandbox_attached && (
-                      <StaticSandboxName host={selectedHost} />
-                    )}
 
                     {noExecutionTargetSelected ? (
                       <ComposerPermissionPicker
@@ -7721,6 +7739,17 @@ export function NewChatLandingScreen() {
           provider={discoveryProvider}
           onClose={() => setDiscoveryProvider(null)}
           onSelect={selectHost}
+        />
+      )}
+
+      {editingHost && (
+        <StaticSandboxName
+          host={editingHost}
+          onClose={() => setEditingHost(null)}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            hostPickerRef.current?.focus();
+          }}
         />
       )}
 
