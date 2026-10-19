@@ -12,6 +12,7 @@ it.each([
   ["", "/c/conv-2", "/c/conv-2"],
   ["", "/canvas/c/conv-2", "/canvas/c/conv-2"],
   ["/proxy/6767", "/proxy/6767/canvas/c/conv-2", "/proxy/6767/canvas/c/conv-2"],
+  ["/proxy/6767", "/c/conv-2", "/proxy/6767/c/conv-2"],
 ])("opens a session route in place (base %j, link %s)", (base, path, expected) => {
   window.__OMNIGENT_BASE_PATH__ = base;
   expect(openSameOriginSessionLink(`${ORIGIN}${path}`)).toBe(true);

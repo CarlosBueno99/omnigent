@@ -108,4 +108,5 @@ it("keeps another server's session link on the external path", () => {
   window.history.replaceState(null, "", "/c/conv-1");
   expect(clickLink("https://other.example.com/c/conv-2").defaultPrevented).toBe(false);
   expect(window.location.pathname).toBe("/c/conv-1");
+  expect(openOrNavigate).not.toHaveBeenCalled();
 });
