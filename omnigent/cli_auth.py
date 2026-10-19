@@ -773,6 +773,7 @@ def open_server_client(
     transport: httpx.AsyncBaseTransport | None = None,
     host_id: str | None = None,
     event_dispatcher: RunnerEventDispatcher | None = None,
+    tunneled_event_types: frozenset[str] | None = None,
 ) -> httpx.AsyncClient:
     """Open an :class:`httpx.AsyncClient` to an Omnigent server, keyed for routing.
 
@@ -811,6 +812,10 @@ def open_server_client(
         :func:`databricks_request_headers` (which emits it as the slice-key only
         on a host-sharded mount and otherwise falls back to the runner's own
         host_id). Pass it unconditionally when known.
+    :param event_dispatcher: Runner tunnel dispatcher. When set, supported
+        session events are delivered on the runner's tunnel instead of HTTP.
+    :param tunneled_event_types: Event types sent on the tunnel, e.g.
+        ``frozenset({"external_session_status"})``; ``None`` keeps the default.
     :returns: A configured :class:`httpx.AsyncClient`.
     """
     import httpx
@@ -828,6 +833,8 @@ def open_server_client(
     if event_dispatcher is not None:
         from omnigent.runner.transports.ws_tunnel.event_delivery import TunnelEventClient
 
+        if tunneled_event_types is not None:
+            kwargs["tunneled_event_types"] = tunneled_event_types
         return TunnelEventClient(
             event_dispatcher=event_dispatcher,
             base_url=server_url,

@@ -27,6 +27,18 @@ _EVENTS_PATH = re.compile(r"/v1/sessions/([^/]+)/events$")
 _MAX_EVENTS = 32
 _MAX_BATCH_BYTES = 256 * 1024
 _MAX_PENDING_BATCHES = 34  # Two active workers plus 32 queued batches.
+DEFAULT_TUNNELED_EVENT_TYPES = frozenset(
+    {"external_output_text_delta", "external_conversation_item"}
+)
+
+
+def _is_replayable(events: list[dict[str, Any]]) -> bool:
+    """Report whether the dispatcher can retransmit a batch until acknowledged."""
+    return all(event["type"] == "external_conversation_item" for event in events)
+
+
+def _is_preview(events: list[dict[str, Any]]) -> bool:
+    return all(event["type"] == "external_output_text_delta" for event in events)
 
 
 class TunnelIngestUnsupported(Exception):
@@ -86,6 +98,11 @@ class RunnerEventDispatcher:
         changed = self._state_changed
         self._state_changed = asyncio.Event()
         changed.set()
+
+    @property
+    def is_ready(self) -> bool:
+        """Whether the current tunnel generation accepts event batches now."""
+        return self._state == "ready"
 
     def connected(self, send: Callable[[str], Awaitable[None]]) -> None:
         """Start capability negotiation for this connection generation."""
@@ -208,8 +225,13 @@ class RunnerEventDispatcher:
                     result.set_result(EventAckFrame(ack.id, batch.applied))
                 elif not ack.retryable:
                     result.set_result(EventAckFrame(ack.id, batch.applied, ack.error))
-                elif all(event["type"] == "external_output_text_delta" for event in batch.events):
+                elif _is_preview(batch.events):
                     raise ConnectionError("preview backpressure")
+                elif not _is_replayable(batch.events):
+                    # The producer bounds retries of other events, as it does over HTTP.
+                    result.set_result(
+                        EventAckFrame(ack.id, batch.applied, ack.error, retryable=True)
+                    )
                 else:
                     await asyncio.sleep(0.25)
                     if not result.done():
@@ -229,9 +251,10 @@ class RunnerEventDispatcher:
                 self._queue.task_done()
 
     async def _deliver(self, session_id: str, events: list[dict[str, Any]]) -> EventAckFrame:
-        preview = all(event["type"] == "external_output_text_delta" for event in events)
+        preview = _is_preview(events)
+        replayable = _is_replayable(events)
         while True:
-            if not await self._mode(initial_fallback=False, preview=preview):
+            if not await self._mode(initial_fallback=False, preview=not replayable):
                 raise TunnelIngestUnsupported
             send = self._send
             if send is None:
@@ -243,8 +266,8 @@ class RunnerEventDispatcher:
                 await send(encode_frame(EventBatchFrame(batch_id, session_id, events)))
                 ack = await asyncio.wait_for(future, timeout=30.0)
             except (ConnectionError, ConnectionClosed, OSError, TimeoutError):
-                # An ACK can disappear after the server committed the item.
-                # All durable events admitted here carry a stable source_id.
+                # An ACK can disappear after the server committed the batch.
+                # Items replay by source_id; other events return to their producer.
                 if preview:
                     raise
                 return EventAckFrame(batch_id, 0, retryable=True)
@@ -262,11 +285,33 @@ class RunnerEventDispatcher:
 
 
 class TunnelEventClient(httpx.AsyncClient):
-    """Use the tunnel for supported native events; keep every other HTTP RPC."""
+    """Use the tunnel for supported native events; keep every other HTTP RPC.
 
-    def __init__(self, *, event_dispatcher: RunnerEventDispatcher, **kwargs: Any) -> None:
+    :param event_dispatcher: Runner dispatcher that owns tunnel delivery.
+    :param tunneled_event_types: Event types sent on the tunnel. Conversation
+        items additionally need a ``source_id`` so a lost ACK can be replayed.
+    """
+
+    def __init__(
+        self,
+        *,
+        event_dispatcher: RunnerEventDispatcher,
+        tunneled_event_types: frozenset[str] = DEFAULT_TUNNELED_EVENT_TYPES,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         self._event_dispatcher = event_dispatcher
+        self._tunneled_event_types = tunneled_event_types
+
+    def _is_tunneled(self, event: dict[str, Any]) -> bool:
+        event_type = event.get("type")
+        if event_type not in self._tunneled_event_types:
+            return False
+        if event_type != "external_conversation_item":
+            return True
+        data = event.get("data")
+        source_id = data.get("source_id") if isinstance(data, dict) else None
+        return isinstance(source_id, str) and bool(source_id)
 
     async def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
         url = args[0] if args else kwargs.get("url")
@@ -287,16 +332,7 @@ class TunnelEventClient(httpx.AsyncClient):
             events = cast("list[dict[str, Any]]", value)
         else:
             return await super().post(*args, **kwargs)
-        if not all(
-            event.get("type") == "external_output_text_delta"
-            or (
-                event.get("type") == "external_conversation_item"
-                and isinstance(event.get("data"), dict)
-                and isinstance(event["data"].get("source_id"), str)
-                and bool(event["data"]["source_id"])
-            )
-            for event in events
-        ):
+        if not all(self._is_tunneled(event) for event in events):
             return await super().post(*args, **kwargs)
         # Child-history callers inspect each item_id in the HTTP batch
         # acknowledgement; even a one-entry array needs a list response.
@@ -313,12 +349,15 @@ class TunnelEventClient(httpx.AsyncClient):
             > _MAX_BATCH_BYTES
         ):
             return await super().post(*args, **kwargs)
+        if not (_is_replayable(events) or _is_preview(events) or self._event_dispatcher.is_ready):
+            # Events the dispatcher cannot replay keep HTTP during tunnel outages.
+            return await super().post(*args, **kwargs)
         if not await self._event_dispatcher.wait_for_first_ready():
             return await super().post(*args, **kwargs)
         request = self.build_request("POST", url)
         try:
             submit = self._event_dispatcher.submit(session_id, events)
-            if all(event["type"] == "external_output_text_delta" for event in events):
+            if _is_preview(events):
                 ack = await asyncio.wait_for(submit, timeout=2.0)
             else:
                 ack = await submit
