@@ -10,6 +10,7 @@ import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests._helpers.polling import poll_until
 from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm, set_fallback_mock_llm
 from tests.e2e_ui.messages.test_message_render_parity import (
     _ASSISTANT,
@@ -31,14 +32,8 @@ _COMPACTING = '[data-testid="compacting-indicator"]'
 _QUEUED_STRIP = '[data-testid="composer-queued-strip"]'
 
 
-def _wait_session_idle(base_url: str, session_id: str, timeout_s: float = 90.0) -> None:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        status = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0).json()
-        if status.get("status") == "idle":
-            return
-        time.sleep(1.0)
-    raise AssertionError(f"session {session_id} never settled to idle")
+def _session_status(base_url: str, session_id: str) -> str | None:
+    return httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0).json().get("status")
 
 
 def _model_requests_containing(mock_url: str, text: str) -> int:
@@ -84,17 +79,20 @@ def test_web_compact_keeps_progress_visible_and_delivers_followup(
     composer.press("Enter")
     expect(page.locator(_ASSISTANT).first).to_contain_text("first reply", timeout=180_000)
     expect(page.locator(_WORKING)).to_have_count(0, timeout=60_000)
-    _wait_session_idle(base_url, session_id)
+    poll_until(
+        lambda: _session_status(base_url, session_id) == "idle", timeout_s=90.0, interval_s=1.0
+    )
     page.wait_for_timeout(2_000)
 
     composer.click()
     page.keyboard.type("/compact", delay=60)
     page.wait_for_timeout(800)
     composer.press("Enter")
-    deadline = time.monotonic() + 30.0
-    while _model_requests_containing(mock_llm_server_url, _COMPACT_PROMPT) == 0:
-        assert time.monotonic() < deadline, "Claude Code never sent its compaction request"
-        page.wait_for_timeout(250)
+    poll_until(
+        lambda: _model_requests_containing(mock_llm_server_url, _COMPACT_PROMPT),
+        timeout_s=30.0,
+        interval_s=0.25,
+    )
     compaction_requested = time.monotonic()
     compacting = page.locator(_COMPACTING)
     compacted = page.get_by_text("Conversation compacted")
@@ -107,7 +105,7 @@ def test_web_compact_keeps_progress_visible_and_delivers_followup(
         expect(page.locator(_QUEUED_STRIP)).to_contain_text(marker, timeout=5_000)
 
     while (elapsed := time.monotonic() - compaction_requested) < _COMPACT_DELAY_S - 1:
-        assert compacting.or_(compacted).count(), (
+        assert compacting.is_visible() or compacted.is_visible(), (
             f"chat stopped showing compaction {elapsed:.1f}s after it started"
         )
         page.wait_for_timeout(1_000)
