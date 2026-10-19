@@ -2644,19 +2644,28 @@ async def _subscribe_until_ready(
     forwarder_state: _CodexForwarderState | None = None,
     ready_signal: asyncio.Event | None = None,
 ) -> None:
-    """Reserve authoritative delivery order while subscribing and replaying."""
-    async with _conversation_item_delivery_scope(session_id):
-        await _subscribe_until_ready_inner(
-            client,
-            ap_client,
-            session_id=session_id,
-            bridge_dir=bridge_dir,
-            thread_id=thread_id,
-            usage_coalescer=usage_coalescer,
-            elicitation_tracker=elicitation_tracker,
-            forwarder_state=forwarder_state,
-            ready_signal=ready_signal,
-        )
+    """
+    Reserve authoritative delivery order while subscribing and replaying.
+
+    A subscription Codex refused is retried when *ready_signal* next reports
+    the thread active, with the order lock released while waiting.
+    """
+    while True:
+        async with _conversation_item_delivery_scope(session_id):
+            refused = await _subscribe_until_ready_inner(
+                client,
+                ap_client,
+                session_id=session_id,
+                bridge_dir=bridge_dir,
+                thread_id=thread_id,
+                usage_coalescer=usage_coalescer,
+                elicitation_tracker=elicitation_tracker,
+                forwarder_state=forwarder_state,
+                ready_signal=ready_signal,
+            )
+        if not refused or ready_signal is None:
+            return
+        await ready_signal.wait()
 
 
 async def _subscribe_until_ready_inner(
@@ -2670,7 +2679,7 @@ async def _subscribe_until_ready_inner(
     elicitation_tracker: _CodexElicitationTaskTracker,
     forwarder_state: _CodexForwarderState | None = None,
     ready_signal: asyncio.Event | None = None,
-) -> None:
+) -> bool:
     """
     Subscribe this app-server connection to a Codex thread.
 
@@ -2686,10 +2695,14 @@ async def _subscribe_until_ready_inner(
     idle window before the user's first turn), this parks on
     *ready_signal* and only retries once the caller observes the thread
     become active on the live event stream (its first turn, which
-    materializes the rollout). ``thread/status/changed``/turn/item events
-    reach the connection without a successful resume, so the caller can
-    detect activity and set the signal. A short poll still covers the
+    materializes the rollout). ``thread/status/changed`` is broadcast to
+    every connection, so the caller can detect activity without a
+    successful resume and set the signal. A short poll still covers the
     brief window between "thread active" and the rollout being flushed.
+
+    Codex routes turn and item notifications only to subscribed connections,
+    so when it refuses the subscription outright the bridge's active turn is
+    failed with Codex's reason instead of staying ``running`` unobserved.
 
     :param client: Codex app-server client.
     :param ap_client: Omnigent HTTP client used for replayed items.
@@ -2706,7 +2719,7 @@ async def _subscribe_until_ready_inner(
         thread parks here instead of polling. ``None`` falls back to the
         fixed-interval retry (used where no live event stream drives the
         signal).
-    :returns: None.
+    :returns: ``True`` when Codex refused the subscription.
     """
     bridge_state = read_bridge_state(bridge_dir)
     replay_from_turn_id = (
@@ -2744,7 +2757,20 @@ async def _subscribe_until_ready_inner(
                     await _sleep(_SUBSCRIBE_RETRY_DELAY_SECONDS)
                 continue
             _logger.warning("failed to subscribe to Codex thread %s", thread_id, exc_info=True)
-            return
+            if not isinstance(exc, CodexAppServerResponseError):
+                return False
+            if ready_signal is not None:
+                ready_signal.clear()
+            await _fail_turn_after_refused_subscription(
+                client,
+                ap_client,
+                session_id=session_id,
+                bridge_dir=bridge_dir,
+                thread_id=thread_id,
+                refusal=exc,
+                forwarder_state=forwarder_state,
+            )
+            return True
         if forwarder_state is not None:
             forwarder_state.note_resume_response(response)
             # Source of truth for the cost policy is config.toml's model (what
@@ -2783,7 +2809,63 @@ async def _subscribe_until_ready_inner(
             forwarder_state=forwarder_state,
             replay_from_turn_id=replay_from_turn_id,
         )
+        return False
+
+
+async def _fail_turn_after_refused_subscription(
+    client: CodexAppServerClient,
+    ap_client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    bridge_dir: Path,
+    thread_id: str,
+    refusal: CodexAppServerResponseError,
+    forwarder_state: _CodexForwarderState | None,
+) -> None:
+    """
+    Interrupt and fail the bridge's active turn after Codex refused the subscription.
+
+    :param client: Codex app-server client used to interrupt the turn.
+    :param ap_client: HTTP client for Omnigent event posts.
+    :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
+    :param bridge_dir: Native Codex bridge directory.
+    :param thread_id: Codex thread id, e.g. ``"thread_123"``.
+    :param refusal: Codex's ``thread/resume`` error, e.g. ``-32601
+        list_turns is not supported yet``.
+    :param forwarder_state: Optional connection state that suppresses the
+        interrupted turn's later terminal boundary.
+    :returns: None.
+    """
+    state = read_bridge_state(bridge_dir)
+    if state is None or state.thread_id != thread_id or state.active_turn_id is None:
         return
+    turn_id = state.active_turn_id
+    if forwarder_state is not None:
+        forwarder_state.surfaced_terminal_error_turns.add(turn_id)
+    try:
+        await client.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - the failure is surfaced either way.
+        _logger.warning("Codex turn interrupt after a refused subscription failed", exc_info=True)
+    clear_active_turn_id_if_matches(bridge_dir, turn_id)
+    reason = refusal.message or str(refusal)
+    await _post_turn_status_edge(
+        ap_client,
+        session_id,
+        _CodexTurnStatusEdge(
+            status="failed",
+            turn_id=turn_id,
+            source="thread/resume:refused",
+            error=_CodexTerminalError(
+                message=(
+                    "Codex refused Omnigent's subscription to this thread, so the turn "
+                    f"could not be followed and was stopped: {reason}"
+                ),
+                kind=_CODEX_ERROR_KIND_GENERIC,
+            ),
+        ),
+    )
 
 
 def _event_indicates_thread_active(event: CodexMessage) -> bool:
