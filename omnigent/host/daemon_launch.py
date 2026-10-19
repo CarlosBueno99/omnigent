@@ -310,9 +310,10 @@ async def launch_or_reuse_daemon_runner(
             if resp.status_code < 400:
                 if handoff_id is not None and session_env_handoff_pending(session_id, handoff_id):
                     click.echo(
-                        f"Warning: the server or host daemon is too old to forward "
-                        f"{SESSION_ENV_PASSTHROUGH_ENV_VAR} variables; the runner "
-                        f"started without them.",
+                        f"Warning: the host daemon did not receive the "
+                        f"{SESSION_ENV_PASSTHROUGH_ENV_VAR} variables, so the runner "
+                        f"started without them. The server or daemon may be older than "
+                        f"this CLI, or the daemon may use a different data directory.",
                         err=True,
                     )
                 break

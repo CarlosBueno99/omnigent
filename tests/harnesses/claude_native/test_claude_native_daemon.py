@@ -47,14 +47,20 @@ async def test_native_wrappers_share_daemon_terminal_helpers() -> None:
     )
 
 
-async def test_launch_or_reuse_daemon_runner_reuses_online_runner() -> None:
+async def test_launch_or_reuse_daemon_runner_reuses_online_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """
     An already-bound, still-online runner is reused — no new launch.
 
     Resuming into a live session must not spawn a second runner. If the
     helper POSTed to ``/runners`` here it would 400 ("already bound") or
-    spawn a duplicate; reuse keeps the existing one.
+    spawn a duplicate; reuse keeps the existing one, along with the
+    environment it was launched with.
     """
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OMNIGENT_SESSION_ENV_PASSTHROUGH", "ARCATERM_CAPABILITY")
+    monkeypatch.setenv("ARCATERM_CAPABILITY", "capability-for-pane-2")
     posted: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -79,6 +85,7 @@ async def test_launch_or_reuse_daemon_runner_reuses_online_runner() -> None:
     assert runner_id == "runner_live"
     # No launch POST fired — proves the online runner was reused, not respawned.
     assert posted == []
+    assert not (tmp_path / "session-env").exists()
 
 
 async def test_launch_or_reuse_daemon_runner_launches_when_unbound() -> None:

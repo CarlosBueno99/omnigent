@@ -440,5 +440,5 @@ async def test_launch_warns_when_an_older_peer_leaves_forwarded_values_unconsume
 
     assert runner_id == "runner_from_older_server"
     stderr = capsys.readouterr().err
-    assert "too old to forward OMNIGENT_SESSION_ENV_PASSTHROUGH" in stderr
+    assert "did not receive the OMNIGENT_SESSION_ENV_PASSTHROUGH variables" in stderr
     assert "capability-for-pane-1" not in stderr

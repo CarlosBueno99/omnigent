@@ -85,6 +85,7 @@ from omnigent.host.frames import (
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteUnavailable
+from omnigent.host.session_env import session_env_handoff
 from omnigent.runner.identity import (
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_DELEGATED_AUTH_ENV_VAR,
@@ -988,7 +989,7 @@ async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
     finally:
         _cleanup_host(host)
 
-    assert "too old" not in capsys.readouterr().err
+    assert "did not receive" not in capsys.readouterr().err
     assert not any(b"capability-for-pane-1" in content for content in launch_requests)
     arcaterm_body, plain_body = (json.loads(content) for content in launch_requests)
     assert arcaterm_body.pop("session_env_handoff_id")
@@ -8267,6 +8268,7 @@ async def test_fatal_upgrade_error_bodyless_4xx_falls_back_to_generic() -> None:
     assert "the server rejected the host tunnel request" in str(err)
 
 
+@_FORWARDS_SESSION_ENV
 async def test_handle_launch_supersedes_previous_runner_for_same_session(
     tmp_path: Path,
 ) -> None:
@@ -8274,7 +8276,9 @@ async def test_handle_launch_supersedes_previous_runner_for_same_session(
 
     The server rotates the binding token on every relaunch, so without
     this the host accumulates one live runner per attempt — each with a
-    transcript forwarder tailing the same session (the #5182 leak).
+    transcript forwarder tailing the same session (the #5182 leak). A
+    server-driven relaunch also starts without the first launch's forwarded
+    variables.
     """
     host = _make_host_process()
     maintenance_reasons: list[str] = []
@@ -8285,21 +8289,29 @@ async def test_handle_launch_supersedes_previous_runner_for_same_session(
     workspace.mkdir()
 
     original_popen = subprocess.Popen
+    spawned_envs: list[dict[str, str]] = []
 
     def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        spawned_envs.append(dict(kwargs["env"]))  # type: ignore[call-overload]
         return original_popen(
             ["sleep", "30"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+    with (
+        patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen),
+        session_env_handoff(
+            "conv_super", {"ARCATERM_CAPABILITY": "capability-for-pane-1"}
+        ) as handoff_id,
+    ):
         first = await host._handle_launch(
             HostLaunchRunnerFrame(
                 request_id="req_a",
                 binding_token="tok_a",
                 workspace=str(workspace),
                 session_id="conv_super",
+                session_env_handoff_id=handoff_id,
             )
         )
         first_handle = host._runners[first.runner_id]
@@ -8329,6 +8341,11 @@ async def test_handle_launch_supersedes_previous_runner_for_same_session(
         await asyncio.sleep(0.01)
     assert maintenance_reasons == ["runner_superseded"]
     assert second.runner_id in host._runners
+    first_env, replacement_env = spawned_envs
+    assert first_env["ARCATERM_CAPABILITY"] == "capability-for-pane-1"
+    assert (
+        not {"ARCATERM_CAPABILITY", "OMNIGENT_RUNNER_SESSION_ENV_NAMES"} & replacement_env.keys()
+    )
     _cleanup_host(host)
 
 
