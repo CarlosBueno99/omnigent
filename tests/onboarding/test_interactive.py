@@ -109,17 +109,30 @@ def test_select_uses_numbered_fallback_on_windows_tty(
 
 @pytest.mark.parametrize(
     ("stdin_is_tty", "is_windows", "raw_mode_fails"),
-    [(False, False, False), (True, True, False), (True, False, True)],
-    ids=["non-tty", "windows-tty", "raw-mode-unavailable"],
+    [
+        pytest.param(False, False, False, id="non-tty"),
+        pytest.param(True, True, False, id="windows-tty"),
+        pytest.param(
+            True,
+            False,
+            True,
+            id="raw-mode-unavailable",
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="termios is POSIX-only"),
+        ),
+    ],
 )
 def test_select_fallback_prints_status_above_title(
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
     stdin_is_tty: bool,
     is_windows: bool,
     raw_mode_fails: bool,
 ) -> None:
-    """Numbered fallbacks keep the status line the raw-termios menu shows."""
+    """Numbered fallbacks keep the styled status line the raw-termios menu shows."""
+    from rich.console import Console
+
+    output = io.StringIO()
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(interactive, "console", Console(file=output, force_terminal=True))
     monkeypatch.setattr(sys.stdin, "isatty", lambda: stdin_is_tty)
     monkeypatch.setattr(interactive, "IS_WINDOWS", is_windows)
     _feed(monkeypatch, ["1"])
@@ -130,8 +143,8 @@ def test_select_fallback_prints_status_above_title(
             monkeypatch.setattr(sys.stdin, "fileno", not_a_terminal.fileno)
         interactive.select("Pick one", ["alpha"], status="⚠ drift", status_style="bold yellow")
 
-    out = capsys.readouterr().out
-    assert "⚠ drift" in out
+    out = output.getvalue()
+    assert "\x1b[1;33m  ⚠ drift" in out
     assert out.index("⚠ drift") < out.index("Pick one")
 
 

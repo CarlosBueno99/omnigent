@@ -1529,6 +1529,22 @@ def test_databricks_drift_notice_compares_hosts_like_the_sdk(
     assert (_databricks_workspace_drift_notice(config) is not None) is drifted
 
 
+def test_databricks_drift_notice_keeps_schemes_when_only_the_scheme_differs(
+    tmp_path, monkeypatch
+) -> None:
+    """A scheme-only drift names both full origins so the two hosts read differently."""
+    from omnigent.cli_config import _databricks_workspace_drift_notice
+
+    http_host = "http://workspace-a.cloud.databricks.com"
+    _seed_ucode_and_databrickscfg(
+        tmp_path, monkeypatch, cfg_profiles={"ai_devtools": http_host}, ucode_current=_WS_A
+    )
+
+    assert _databricks_workspace_drift_notice(
+        {"providers": _DATABRICKS_PROVIDER}
+    ) == _drift_notice(_WS_A, "ai_devtools", http_host)
+
+
 def test_databricks_drift_notice_names_the_default_profile(tmp_path, monkeypatch) -> None:
     """With several drifted Databricks profiles, the notice names the default one."""
     from omnigent.cli_config import _databricks_workspace_drift_notice

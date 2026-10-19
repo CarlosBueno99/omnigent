@@ -1397,12 +1397,12 @@ def _databricks_workspace_drift_notice(config: dict[str, Any]) -> str | None:  #
     # With several drifted profiles, name the default one: sessions route through it.
     profile, _default, omni_url = next((item for item in configured if item[1]), configured[0])
 
-    def _bare(url: str) -> str:
-        return url.split("://", 1)[-1]
-
+    ucode_shown, omni_shown = ucode_url.split("://", 1)[-1], omni_url.split("://", 1)[-1]
+    if ucode_shown == omni_shown:
+        ucode_shown, omni_shown = ucode_url, omni_url
     return (
-        f"⚠ Databricks: ucode now points at {_bare(ucode_url)}, but Omnigent still "
-        f"uses the '{profile}' profile ({_bare(omni_url)}). "
+        f"⚠ Databricks: ucode now points at {ucode_shown}, but Omnigent still "
+        f"uses the '{profile}' profile ({omni_shown}). "
         "Reconfigure Databricks to follow ucode."
     )
 
