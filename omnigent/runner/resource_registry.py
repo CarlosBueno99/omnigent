@@ -1737,10 +1737,15 @@ class SessionResourceRegistry:
         from omnigent.harnesses.claude_native.bridge import (
             bridge_dir_for_conversation_id,
             read_claude_session_id,
+            read_prompt_submitted_at,
         )
         from omnigent.harnesses.claude_native.status_file import SessionStatusPoller
 
         bridge_dir = bridge_dir_for_conversation_id(session_id)
+
+        def _prompt_submitted_at_ms() -> int | None:
+            submitted_at = read_prompt_submitted_at(bridge_dir)
+            return None if submitted_at is None else int(submitted_at * 1000)
 
         def _session_id_getter() -> str | None:
             # Best-effort: the bridge records Claude's uuid only after the
@@ -1757,6 +1762,7 @@ class SessionResourceRegistry:
             pane_pid_getter=instance.pane_pid_sync,
             session_id_getter=_session_id_getter,
             omnigent_session_id=session_id,
+            prompt_submitted_at_getter=_prompt_submitted_at_ms,
         )
 
     async def _handle_terminal_exit(

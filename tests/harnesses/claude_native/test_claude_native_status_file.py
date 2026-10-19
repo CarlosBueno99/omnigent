@@ -413,6 +413,47 @@ def test_turn_after_stop_reads_the_held_busy_as_running(tmp_path: Path) -> None:
     assert published == [RUNNING, IDLE, RUNNING, IDLE, RUNNING]
 
 
+def test_prompt_during_the_holdover_reads_the_unchanged_busy_as_running(tmp_path: Path) -> None:
+    """A turn Claude starts while still ``busy`` is running without any file write.
+
+    Another agent finishing, or a prompt typed in the pane, keeps the file
+    ``busy`` with its old stamp; only the prompt time shows the new turn.
+    """
+    sessions = tmp_path / "sessions"
+    _rewrite_session_file(sessions, mtime=1000, status="busy", status_updated_at=1000)
+    prompt_submitted_at: list[int | Exception] = [500]
+
+    def _prompt_submitted_at() -> int:
+        value = prompt_submitted_at[0]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    published: list[str] = []
+    poller = SessionStatusPoller(
+        on_status=lambda status, _reason: published.append(status),
+        pane_pid_getter=_StubPidGetter(1),
+        session_id_getter=lambda: "s",
+        config_dir=tmp_path,
+        prompt_submitted_at_getter=_prompt_submitted_at,
+    )
+    poller.tick()
+    poller.note_turn_ended(2000)
+    poller.tick()
+    prompt_submitted_at[0] = OSError("state file unreadable")
+    poller.tick()
+    assert published == [RUNNING, IDLE]
+
+    prompt_submitted_at[0] = 3000
+    poller.tick()
+    assert published == [RUNNING, IDLE, RUNNING]
+
+    poller.note_turn_ended(4000)
+    poller.tick()
+    poller.tick()
+    assert published == [RUNNING, IDLE, RUNNING, IDLE]
+
+
 def test_retire_stops_the_file_owning_status(tmp_path: Path) -> None:
     """A dead pane retires the poller, even with a readable file left behind.
 

@@ -876,6 +876,59 @@ async def test_background_agent_busy_does_not_republish_running_after_stop(
 
 
 @pytest.mark.asyncio
+async def test_claude_prompt_during_background_agent_republishes_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn Claude starts itself while a background agent runs reads as running.
+
+    The busy file keeps its old stamp for that turn; only the prompt hook shows it.
+    """
+    from omnigent.harnesses.claude_native.bridge import (
+        bridge_dir_for_conversation_id,
+        record_hook_event,
+    )
+
+    session_id = "conv_background_agent_prompt"
+    on_tick, statuses, registry, status_file = await _observe_native_with_real_poller(
+        tmp_path, monkeypatch, session_id
+    )
+    status_file.write_text(
+        json.dumps(
+            {
+                "pid": 123,
+                "sessionId": "claude-parent",
+                "kind": "interactive",
+                "status": "busy",
+                "statusUpdatedAt": 1000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    on_tick()
+    registry.note_external_session_status(session_id, "idle", turn_ended_at_ms=2000)
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+
+    record_hook_event(
+        bridge_dir_for_conversation_id(session_id),
+        {"hook_event_name": "UserPromptSubmit", "session_id": "claude-parent"},
+    )
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running", "running"]
+
+    registry.note_external_session_status(
+        session_id, "idle", turn_ended_at_ms=int(time.time() * 1000)
+    )
+    on_tick()
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running", "running"]
+    assert registry.claude_status_file_reports_busy(session_id)
+
+
+@pytest.mark.asyncio
 async def test_failed_hook_does_not_republish_stale_running_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

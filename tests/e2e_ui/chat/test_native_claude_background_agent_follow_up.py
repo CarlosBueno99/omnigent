@@ -107,3 +107,7 @@ def test_follow_up_is_delivered_while_background_agent_runs(
     _send(page, f"{follow_up_token} Reply to this follow-up.")
     expect(page.get_by_test_id("composer-queued-strip")).to_have_count(0, timeout=10_000)
     expect(page.locator(_ASSISTANT, has_text=follow_up_reply).first).to_be_visible(timeout=30_000)
+    # Claude notifies the parent when a background agent finishes, fails, or is killed.
+    assert not _user_text_seen(mock_llm_server_url, "<task-notification>"), (
+        "background sub-agent ended before the follow-up was answered"
+    )

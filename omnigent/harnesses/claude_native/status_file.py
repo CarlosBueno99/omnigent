@@ -277,7 +277,9 @@ class SessionStatusPoller:
     Claude keeps the file ``busy`` while a background agent outlives the turn,
     and rewrites ``statusUpdatedAt`` only when the status changes. A ``busy``
     stamped no later than the last ``Stop`` with no turn started since then is
-    that holdover, so it reads as :data:`IDLE` like the ``shell`` literal.
+    that holdover, so it reads as :data:`IDLE` like the ``shell`` literal. A
+    turn Claude starts during the holdover leaves the file untouched, so each
+    tick of the holdover rechecks the last prompt time.
 
     Lifecycle:
 
@@ -307,6 +309,8 @@ class SessionStatusPoller:
         bridge has captured it, or ``None`` before the first hook. Used to
         cross-check the pid file and to scan as a fallback.
     :param config_dir: Explicit Claude config dir override (tests).
+    :param prompt_submitted_at_getter: Returns when Claude last submitted a
+        prompt of its own session, in epoch milliseconds, or ``None``.
     """
 
     def __init__(
@@ -317,11 +321,13 @@ class SessionStatusPoller:
         session_id_getter: Callable[[], str | None],
         config_dir: Path | None = None,
         omnigent_session_id: str | None = None,
+        prompt_submitted_at_getter: Callable[[], int | None] | None = None,
     ) -> None:
         self._on_status = on_status
         self._pane_pid_getter = pane_pid_getter
         # Claude's own session uuid, resolved lazily from the bridge.
         self._session_id_getter = session_id_getter
+        self._prompt_submitted_at_getter = prompt_submitted_at_getter
         # The Omnigent conversation id this poller watches — for debug-log
         # attribution only (distinct from Claude's session uuid above).
         self._omnigent_session_id = omnigent_session_id
@@ -336,6 +342,7 @@ class SessionStatusPoller:
         self._resync_requested = False
         self._turn_started_at_ms: int | None = None
         self._turn_ended_at_ms: int | None = None
+        self._holding_busy = False
 
     @property
     def active(self) -> bool:
@@ -457,14 +464,31 @@ class SessionStatusPoller:
             started_at_ms = self._turn_started_at_ms
             ended_at_ms = self._turn_ended_at_ms
         if (
-            status.raw_status == "busy"
-            and ended_at_ms is not None
-            and status.status_updated_at is not None
-            and status.status_updated_at <= ended_at_ms
-            and (started_at_ms is None or started_at_ms <= ended_at_ms)
+            status.raw_status != "busy"
+            or ended_at_ms is None
+            or status.status_updated_at is None
+            or status.status_updated_at > ended_at_ms
+            or (started_at_ms is not None and started_at_ms > ended_at_ms)
         ):
-            return IDLE
-        return status.runner_status
+            return status.runner_status
+        prompt_at_ms = self._prompt_submitted_at()
+        if prompt_at_ms is not None and prompt_at_ms > ended_at_ms:
+            return status.runner_status
+        return IDLE
+
+    def _prompt_submitted_at(self) -> int | None:
+        """Read Claude's last prompt time, treating a failed read as unknown."""
+        if self._prompt_submitted_at_getter is None:
+            return None
+        try:
+            return self._prompt_submitted_at_getter()
+        except Exception:  # noqa: BLE001 - a best-effort read must not stop the watcher.
+            _logger.debug(
+                "claude prompt time read failed",
+                exc_info=True,
+                extra={"session_id": self._omnigent_session_id},
+            )
+            return None
 
     @property
     def reports_busy(self) -> bool:
@@ -494,19 +518,25 @@ class SessionStatusPoller:
             self._exhausted = True
             return
         if self._last_mtime is not None and mtime == self._last_mtime:
-            return
-        self._last_mtime = mtime
-        status = read_session_status(self._path)
-        if status is None:
-            # An unrecognized literal — the file is an undocumented internal
-            # detail whose vocabulary can grow. We are now blind to this
-            # transition, so drop the dedup baseline: the next readable
-            # status must publish rather than be swallowed as a duplicate.
-            self._last_status = None
-            self._last_edge = None
-            return
-        self._last_status = status
+            if not self._holding_busy or self._last_status is None:
+                return
+            status = self._last_status
+        else:
+            self._last_mtime = mtime
+            read = read_session_status(self._path)
+            if read is None:
+                # An unrecognized literal — the file is an undocumented internal
+                # detail whose vocabulary can grow. We are now blind to this
+                # transition, so drop the dedup baseline: the next readable
+                # status must publish rather than be swallowed as a duplicate.
+                self._last_status = None
+                self._last_edge = None
+                self._holding_busy = False
+                return
+            status = read
+            self._last_status = status
         runner_status = self._runner_status(status)
+        self._holding_busy = status.raw_status == "busy" and runner_status == IDLE
         edge = (runner_status, status.blocked_on)
         if edge == self._last_edge:
             return

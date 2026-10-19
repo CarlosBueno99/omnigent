@@ -2960,6 +2960,8 @@ def record_hook_event(bridge_dir: Path, payload: _JsonObject) -> None:
                 seen = read_seen_claude_session_ids(bridge_dir)
                 seen.add(claude_session_id)
                 state["seen_claude_session_ids"] = sorted(seen)
+            if event_name == "UserPromptSubmit" and not payload.get("agent_id"):
+                state["prompt_submitted_at"] = envelope["recorded_at"]
         else:
             _logger.debug(
                 "Ignoring identity fields from side-channel hook event; "
@@ -3010,6 +3012,25 @@ def read_claude_session_id(bridge_dir: Path) -> str | None:
     if not isinstance(raw, str) or not raw:
         return None
     return raw
+
+
+def read_prompt_submitted_at(bridge_dir: Path) -> float | None:
+    """
+    Return when the pinned Claude session last submitted a prompt.
+
+    Set by :func:`record_hook_event` from the session's own
+    ``UserPromptSubmit`` hook, whether the prompt was typed in the pane,
+    delivered by Omnigent, or a background agent's completion notice.
+
+    :param bridge_dir: Bridge directory path.
+    :returns: The hook's recorded time in epoch seconds, e.g.
+        ``1792430876.27``, or ``None`` before the first prompt.
+    """
+    state = _read_json_file(bridge_dir / _STATE_FILE)
+    raw = state.get("prompt_submitted_at") if isinstance(state, dict) else None
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        return None
+    return float(raw)
 
 
 def read_seen_claude_session_ids(bridge_dir: Path) -> set[str]:
