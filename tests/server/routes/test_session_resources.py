@@ -3154,6 +3154,21 @@ async def test_managed_pr_info_imports_observations_without_replaying_removals(
     assert store.get_pull_requests(session.id)["excluded"] == [urls[1]]
     assert ("POST", path + "/prs/sync") in runner.calls
 
+    # Validation errors may include private host input; expose only a safe warning.
+    saved = store.get_pull_requests(session.id)
+    invalid = {"prs": [{"title": "private-host-debug-detail"}]}
+    for failing_path in (path + "/prs/sync", path):
+        runner = _FakeRunnerClient(
+            payload={"available": True}, responses={failing_path: (200, invalid)}
+        )
+        set_runner_router(_FakeRunnerRouter(runner))  # type: ignore[arg-type]
+        response = await client.get(path)
+        assert response.status_code == 200
+        assert response.json()["warnings"]
+        assert "private-host-debug-detail" not in response.text
+        assert response.json()["prs"] == saved["prs"]
+        assert store.get_pull_requests(session.id) == saved
+
 
 @pytest.mark.asyncio
 async def test_github_changes_proxies_to_runner(client: httpx.AsyncClient) -> None:

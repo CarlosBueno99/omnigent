@@ -3013,14 +3013,15 @@ def register_resources_routes(
             )
         )
         result: dict[str, Any]
-        sync_warning = None
+        sync_failed = False
         if can_import:
             # Older hosts still expose associations through their info response.
             try:
                 with contextlib.suppress(OmnigentError, HTTPException):
                     await sync_prs(session_id, conv)
-            except ValueError as exc:
-                sync_warning = str(exc)
+            except ValueError:
+                _logger.warning("Could not synchronize session PR links", exc_info=True)
+                sync_failed = True
         try:
             result = await _fs_get_with_host_fallback(
                 session_id,
@@ -3044,8 +3045,9 @@ def register_resources_routes(
                     await asyncio.to_thread(
                         conversation_store.update_pull_requests, session_id, snapshot=result
                     )
-                except ValueError as exc:
-                    sync_warning = str(exc)
+                except ValueError:
+                    _logger.warning("Could not import session PR details", exc_info=True)
+                    sync_failed = True
             state = await asyncio.to_thread(conversation_store.get_pull_requests, session_id)
             urls = {entry["url"] for entry in state["prs"]}
             detail_url = (result.get("pr") or {}).get("url")
@@ -3056,8 +3058,11 @@ def register_resources_routes(
             result.update(prs=state["prs"], tracking_available=True, selected_pr_url=selected)
             if detail_url != selected:
                 result["pr"] = None
-            if sync_warning:
-                result["warnings"] = [*(result.get("warnings") or []), sync_warning]
+            if sync_failed:
+                result["warnings"] = [
+                    *(result.get("warnings") or []),
+                    "Some host PR links could not be imported. Check the server logs for details.",
+                ]
         return result
 
     @router.get(
