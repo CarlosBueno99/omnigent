@@ -2512,7 +2512,10 @@ describe("Sidebar project sections", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Work" }));
     expect(bulkMoveToProjectSpy).toHaveBeenCalledTimes(1);
     const [move] = bulkMoveToProjectSpy.mock.calls[0];
-    expect({ ...move, ids: [...move.ids].sort() }).toEqual({ ids: ["one", "two"], project: "Work" });
+    expect({ ...move, ids: [...move.ids].sort() }).toEqual({
+      ids: ["one", "two"],
+      project: "Work",
+    });
     expect(screen.queryByRole("button", { name: "Exit selection mode" })).toBeNull();
   });
 
