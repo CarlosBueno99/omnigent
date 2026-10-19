@@ -125,11 +125,13 @@ def _seed_title_and_content_matches(
         time.sleep(1.1)
     deadline = time.monotonic() + 30
     while True:
-        found = httpx.get(
+        response = httpx.get(
             f"{base_url}/v1/sessions",
             params={"search_query": marker, "visibility": "all"},
             timeout=10.0,
-        ).json()["data"]
+        )
+        response.raise_for_status()
+        found = response.json()["data"]
         if len(found) == 3 or time.monotonic() > deadline:
             break
         time.sleep(0.5)
