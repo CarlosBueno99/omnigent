@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 import uuid
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -20,12 +22,10 @@ from tests.e2e_ui.messages.test_native_claude_render_parity import (
 
 _ASSISTANT = '[data-testid="message-bubble"][data-role="assistant"]'
 _FIRST_TURN_TIMEOUT_MS = 180_000
-# Outlasts the follow-up assertions, so the sub-agent is still running throughout.
-_SUB_AGENT_HOLD_S = 150.0
-# Spans many 0.2s status-file polls, so a held busy cannot flip idle back to running.
-_IDLE_STABLE_S = 2.0
-_IDLE_SETTLE_TIMEOUT_S = 30.0
-_WORKER_START_TIMEOUT_S = 30.0
+# Spans many 0.2s status-file polls, so a misread status cannot flip back unseen.
+_STATUS_STABLE_S = 2.0
+_STATUS_SETTLE_TIMEOUT_S = 30.0
+_MOCK_REQUEST_TIMEOUT_S = 30.0
 
 
 def _user_text_seen(mock_llm_server_url: str, token: str) -> bool:
@@ -52,22 +52,48 @@ def _task_notification_seen(mock_llm_server_url: str, conversation_token: str) -
     return False
 
 
-def _wait_for_stable_idle(base_url: str, session_id: str) -> None:
-    """Wait until the session has read idle for ``_IDLE_STABLE_S`` without leaving it."""
-    deadline = time.monotonic() + _IDLE_SETTLE_TIMEOUT_S
-    idle_since: float | None = None
+def _wait_for_stable_status(base_url: str, session_id: str, status: str) -> None:
+    """Wait until the session has read *status* for ``_STATUS_STABLE_S`` without leaving it."""
+    deadline = time.monotonic() + _STATUS_SETTLE_TIMEOUT_S
+    status_since: float | None = None
     while time.monotonic() < deadline:
         response = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
         response.raise_for_status()
         now = time.monotonic()
-        if response.json().get("status") != "idle":
-            idle_since = None
-        elif idle_since is None:
-            idle_since = now
-        elif now - idle_since >= _IDLE_STABLE_S:
+        if response.json().get("status") != status:
+            status_since = None
+        elif status_since is None:
+            status_since = now
+        elif now - status_since >= _STATUS_STABLE_S:
             return
         time.sleep(0.2)
-    pytest.fail(f"session did not stay idle for {_IDLE_STABLE_S:.0f}s after Claude replied")
+    pytest.fail(f"session did not stay {status} for {_STATUS_STABLE_S:.0f}s")
+
+
+def _wait_until(condition: Callable[[], bool], failure: str) -> None:
+    deadline = time.monotonic() + _MOCK_REQUEST_TIMEOUT_S
+    while not condition():
+        if time.monotonic() > deadline:
+            pytest.fail(failure)
+        time.sleep(0.2)
+
+
+def _gate_pending(mock_llm_server_url: str) -> bool:
+    response = httpx.get(f"{mock_llm_server_url}/gate/pending", timeout=5.0)
+    response.raise_for_status()
+    return bool(response.json().get("pending"))
+
+
+def _release_gate(mock_llm_server_url: str) -> bool:
+    response = httpx.post(f"{mock_llm_server_url}/gate/release", timeout=5.0)
+    response.raise_for_status()
+    return bool(response.json().get("released"))
+
+
+def _release_all_gates(mock_llm_server_url: str) -> None:
+    with contextlib.suppress(httpx.HTTPError):
+        while _release_gate(mock_llm_server_url):
+            pass
 
 
 def _send(page: Page, text: str) -> None:
@@ -84,18 +110,20 @@ def test_follow_up_is_delivered_while_background_agent_runs(
     native_claude_mock_session: tuple[str, str],
     mock_llm_server_url: str,
 ) -> None:
-    """Claude takes a new prompt once the turn ends, so a follow-up must not wait for Steer."""
+    """Claude takes a prompt once its turn ends, and the agent's completion turn reads running."""
     base_url, session_id = native_claude_mock_session
     nonce = uuid.uuid4().hex[:8]
     launch_token = f"launch-{nonce}"
     launch_reply = f"launch-reply-{nonce}"
     worker_token = f"worker-{nonce}-background-task"
-    # Longest token, because the follow-up request also carries the earlier prompts.
+    # Longest tokens, because later parent requests also carry the earlier prompts.
     follow_up_token = f"follow-up-{nonce}-sent-after-the-agent-launched"
     follow_up_reply = f"follow-up-reply-{nonce}"
+    worker_result = f"worker-result-{nonce}-reported-back-to-the-parent-on-completion"
+    completion_reply = f"completion-reply-{nonce}"
     configure_mock_llm(
         mock_llm_server_url,
-        [{"text": f"worker-done-{nonce}", "delay": _SUB_AGENT_HOLD_S}],
+        [{"text": worker_result, "block": True}],
         match=worker_token,
     )
     agent_arguments = {
@@ -127,6 +155,15 @@ def test_follow_up_is_delivered_while_background_agent_runs(
         match=follow_up_token,
         required_tools=["Bash"],
     )
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": completion_reply, "block": True}],
+        match=worker_result,
+        required_tools=["Bash"],
+    )
+
+    # A held request would wedge the shared mock-backed runner for later tests.
+    request.addfinalizer(lambda: _release_all_gates(mock_llm_server_url))
 
     page = request.getfixturevalue("page")
     page.goto(f"{base_url}/c/{session_id}")
@@ -139,12 +176,11 @@ def test_follow_up_is_delivered_while_background_agent_runs(
         timeout=_FIRST_TURN_TIMEOUT_MS
     )
     # The worker's first model request races the parent's reply request.
-    deadline = time.monotonic() + _WORKER_START_TIMEOUT_S
-    while not _user_text_seen(mock_llm_server_url, worker_token):
-        if time.monotonic() > deadline:
-            pytest.fail("background sub-agent never started")
-        time.sleep(0.2)
-    _wait_for_stable_idle(base_url, session_id)
+    _wait_until(
+        lambda: _user_text_seen(mock_llm_server_url, worker_token),
+        "background sub-agent never started",
+    )
+    _wait_for_stable_status(base_url, session_id, "idle")
 
     _send(page, f"{follow_up_token} Reply to this follow-up.")
     expect(page.get_by_test_id("composer-queued-strip")).to_have_count(0, timeout=10_000)
@@ -153,3 +189,15 @@ def test_follow_up_is_delivered_while_background_agent_runs(
     assert not _task_notification_seen(mock_llm_server_url, launch_token), (
         "background sub-agent ended before the follow-up was answered"
     )
+    _wait_for_stable_status(base_url, session_id, "idle")
+
+    assert _release_gate(mock_llm_server_url), "background sub-agent was not held"
+    _wait_until(
+        lambda: _gate_pending(mock_llm_server_url),
+        "Claude never asked the parent to handle the finished agent",
+    )
+    assert _task_notification_seen(mock_llm_server_url, launch_token)
+    _wait_for_stable_status(base_url, session_id, "running")
+    assert _release_gate(mock_llm_server_url)
+    expect(page.locator(_ASSISTANT, has_text=completion_reply).first).to_be_visible(timeout=30_000)
+    _wait_for_stable_status(base_url, session_id, "idle")
