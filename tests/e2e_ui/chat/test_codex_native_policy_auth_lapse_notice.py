@@ -11,10 +11,13 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -64,7 +67,27 @@ class DatabricksCliCodexSession:
     cli_calls: Path
 
 
-def _write_lapsing_databricks_cli(root: Path) -> tuple[Path, Path]:
+class _WorkspaceHostHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_error(404)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@contextmanager
+def _local_workspace_host() -> Iterator[str]:
+    """Serve a workspace host whose metadata probe 404s, which the SDK does not retry."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _WorkspaceHostHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _write_lapsing_databricks_cli(root: Path, host: str) -> tuple[Path, Path]:
     """Write a CLI that issues short-lived tokens until ``login-lapsed`` exists."""
     bin_dir = root / "bin"
     bin_dir.mkdir(parents=True)
@@ -89,8 +112,7 @@ def _write_lapsing_databricks_cli(root: Path) -> tuple[Path, Path]:
     cli.chmod(0o755)
     profile = root / "databrickscfg"
     profile.write_text(
-        "[DEFAULT]\nhost = https://dbc-11112222-3333.cloud.databricks.com\n"
-        "auth_type = databricks-cli\n",
+        f"[DEFAULT]\nhost = {host}\nauth_type = databricks-cli\n",
         encoding="utf-8",
     )
     return bin_dir, profile
@@ -112,15 +134,16 @@ def databricks_cli_codex_session(
     config_home = tmp_path / "config-home"
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
     cli_root = tmp_path / "databricks"
-    cli_bin, profile = _write_lapsing_databricks_cli(cli_root)
     shared_env = {"OMNIGENT_CONFIG_HOME": str(config_home)}
     with (
+        _local_workspace_host() as workspace_host,
         _temp_omnigent_mock_config(mock_llm_server_url, "codex"),
         server_runner(
             tmp_path / "stack",
             server_env={**shared_env, "OMNIGENT_WEB_UI_DIST": str(_BUILD_OUTPUT)},
         ) as stack,
     ):
+        cli_bin, profile = _write_lapsing_databricks_cli(cli_root, workspace_host)
         stack.start_runner(
             env={
                 **shared_env,
