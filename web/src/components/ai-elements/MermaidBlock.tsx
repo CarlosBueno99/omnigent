@@ -174,9 +174,15 @@ export function MermaidFullscreenProvider({
     () => ({
       open: (block, source) => openWhenDrawn(block, source, Date.now() + DIAGRAM_RENDER_WAIT_MS),
       // A settled reply remounts its blocks; the replacement takes over a click still waiting.
+      // A streaming fence only grows, so match the last source seen minus its trailing newline.
       adoptPendingOpen: (block, source) => {
         const pending = pendingRef.current;
-        if (pending && pending.source === source && !pending.block.isConnected) {
+        if (pending?.block === block) pending.source = source;
+        else if (
+          pending &&
+          !pending.block.isConnected &&
+          source.startsWith(pending.source.trimEnd())
+        ) {
           openWhenDrawn(block, source, pending.deadline);
         }
       },
@@ -190,7 +196,7 @@ export function MermaidFullscreenProvider({
   return (
     <MermaidFullscreenContext.Provider value={fullscreen}>
       {children}
-      {svgMarkup != null && <MermaidFullscreenOverlay onClose={close} svgMarkup={svgMarkup} />}
+      {svgMarkup !== null && <MermaidFullscreenOverlay onClose={close} svgMarkup={svgMarkup} />}
     </MermaidFullscreenContext.Provider>
   );
 }
@@ -229,7 +235,7 @@ function MermaidFullscreenButton({
 // The .chat-mermaid rule reserves a slot beside Streamdown's download/copy toolbar.
 export function MermaidBlock({ block }: { block: ReactNode }) {
   const blockRef = useRef<HTMLDivElement>(null);
-  const hasProvider = useContext(MermaidFullscreenContext) != null;
+  const hasProvider = useContext(MermaidFullscreenContext) !== null;
   const content = (
     <div ref={blockRef} className="chat-mermaid relative">
       {block}
