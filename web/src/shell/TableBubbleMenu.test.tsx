@@ -18,7 +18,7 @@
 
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createRef } from "react";
-import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -228,27 +228,44 @@ describe("TableHandles — embedded portal target", () => {
     document.body.appendChild(embedRoot);
     onTestFinished(() => embedRoot.remove());
     setEmbedRoot(embedRoot);
+    // jsdom rows are zero-sized; give each a 20px band so a drag resolves a target row.
+    const rowRect = vi
+      .spyOn(HTMLTableRowElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLTableRowElement) {
+        const top = this.rowIndex * 20;
+        return DOMRect.fromRect({ x: 0, y: top, width: 300, height: 20 });
+      });
+    onTestFinished(() => rowRect.mockRestore());
     renderHandles();
     // Any portal into <body> would add a direct child beyond these.
     const bodyChildren = Array.from(document.body.children);
+    const expectOnlyInEmbedRoot = (portalCount: number) => {
+      expect(Array.from(document.body.children)).toEqual(bodyChildren);
+      expect(embedRoot.childElementCount).toBe(portalCount);
+    };
 
     const rowMenu = openRowMenu(1);
-    expect(embedRoot).toContainElement(screen.getByRole("button", { name: "Column options" }));
     expect(embedRoot).toContainElement(rowMenu);
-
-    // Hovering the grip shows the selection overlay; dragging it shows the
-    // ghost, target and drop-indicator overlays.
-    const rowGrip = screen.getByRole("button", { name: "Row options" });
-    expect(embedRoot).toContainElement(rowGrip);
-    fireEvent.mouseEnter(rowGrip);
-    fireEvent.mouseDown(rowGrip, { clientX: 0, clientY: 0 });
-    fireEvent.mouseMove(document, { clientX: 0, clientY: 40 });
-    expect(Array.from(document.body.children)).toEqual(bodyChildren);
-    expect(embedRoot.childElementCount).toBeGreaterThan(3);
-    fireEvent.mouseUp(document, { clientX: 0, clientY: 40 });
-
     fireEvent.contextMenu(rows()[1].cells[1], { bubbles: true, clientX: 10, clientY: 10 });
     expect(embedRoot).toContainElement(screen.getByText("Delete table"));
-    expect(Array.from(document.body.children)).toEqual(bodyChildren);
+    // Close both menus so the overlay counts below start from the grips alone.
+    fireEvent.mouseDown(document.body);
+
+    hoverCell(1, 0);
+    expectOnlyInEmbedRoot(2); // row + column grips
+    const rowGrip = screen.getByRole("button", { name: "Row options" });
+    const colGrip = screen.getByRole("button", { name: "Column options" });
+
+    fireEvent.mouseEnter(colGrip);
+    expectOnlyInEmbedRoot(3); // + column selection overlay
+    fireEvent.mouseLeave(colGrip);
+    fireEvent.mouseEnter(rowGrip);
+    expectOnlyInEmbedRoot(3); // row selection overlay replaces the column one
+
+    // Drag row 1 into row 2's band: + ghost, drag-target overlay, drop indicator.
+    fireEvent.mouseDown(rowGrip, { clientX: 10, clientY: 30 });
+    fireEvent.mouseMove(document, { clientX: 10, clientY: 50 });
+    expectOnlyInEmbedRoot(6);
+    fireEvent.mouseUp(document, { clientX: 10, clientY: 50 });
   });
 });
