@@ -22,7 +22,6 @@ from omnigent.host.frames import (
     HostLaunchRunnerResultFrame,
     encode_host_frame,
 )
-from omnigent.host.identity import HOST_AUTH_REQUIRED_HEADER
 from omnigent.server.auth import LEVEL_OWNER
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.routes._host_launch import HostLaunchTarget, resolve_host_launch
@@ -1193,7 +1192,6 @@ async def test_tunnel_accepts_authenticated_owner(
     await comm.send_input({"type": "websocket.connect"})
     accepted = await comm.receive_output(timeout=budget(1.0))
     assert accepted["type"] == "websocket.accept"
-    assert _auth_required_signal(accepted) == b"1"
     await comm.send_input(
         {"type": "websocket.receive", "text": _make_hello()},
     )
@@ -1207,27 +1205,6 @@ async def test_tunnel_accepts_authenticated_owner(
     stored = host_store.get_host(host_id)
     assert stored is not None
     assert stored.user_id == "alice@test.com"
-
-
-async def test_tunnel_accept_signals_that_auth_is_disabled(
-    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
-) -> None:
-    """Without an auth provider the host learns its runners need no bearer."""
-    app, _registry, _hs, _cs = host_api_app
-    comm = ApplicationCommunicator(app, _websocket_scope(f"/v1/hosts/{_HOST_ID}/tunnel"))
-    await comm.send_input({"type": "websocket.connect"})
-    accepted = await comm.receive_output(timeout=budget(1.0))
-    assert accepted["type"] == "websocket.accept"
-    assert _auth_required_signal(accepted) == b"0"
-    await comm.send_input({"type": "websocket.disconnect", "code": 1000})
-    with contextlib.suppress(Exception):
-        await comm.wait(timeout=budget(2.0))
-
-
-def _auth_required_signal(accepted: dict) -> bytes | None:
-    """Return the auth-required header value from a ``websocket.accept`` message."""
-    name = HOST_AUTH_REQUIRED_HEADER.lower().encode()
-    return next((v for k, v in accepted.get("headers", []) if k.lower() == name), None)
 
 
 def _register_fake_host(registry: HostRegistry, host_id: str, owner: str) -> None:

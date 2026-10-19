@@ -2297,9 +2297,11 @@ def test_workspace_missing_message_is_the_host_spelling() -> None:
 
 def test_host_login_expired_message_names_the_relogin_command() -> None:
     """The server-authored refusal points the user at the `login` command."""
+    from omnigent.cli_invocation import cli_invocation
+
     message = host_login_expired_message()
     assert "stored login has expired" in message
-    assert "login" in message
+    assert f"{cli_invocation()} login" in message
 
 
 def test_list_worktrees_legacy_request_defaults_to_picker_mode() -> None:

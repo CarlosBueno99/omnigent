@@ -1086,10 +1086,8 @@ async def test_message_relaunch_deterministic_failure_persists_error_turn(
         assert "SECRET_TOKEN" not in error_items[0]["message"]
         assert "\n" not in error_items[0]["message"]
     if expected_error_code == HOST_LOGIN_EXPIRED_ERROR_CODE:
-        # The server authors this refusal, so the host's runner-log tail
-        # (and its embedded secret) must never reach the transcript.
-        assert "SECRET_TOKEN" not in error_items[0]["message"]
-        assert "\n" not in error_items[0]["message"]
+        # The server authors this refusal, so the host's runner-log tail never reaches it.
+        assert error_items[0]["message"] == host_login_expired_message()
 
     # Binding kept so a later message can relaunch after remediation.
     conv = SqlAlchemyConversationStore(db_uri).get_conversation(session_id)

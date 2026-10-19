@@ -5,7 +5,8 @@ a stand-in for an authenticating front door such as the Databricks Apps edge.
 The real host daemon connects through the edge with a short-lived stored login,
 and its control tunnel outlives that login. A runner launched afterwards would be
 rejected (HTTP 401) on its token endpoint and tunnel upgrades, so the launch must
-be refused up front with a re-login hint while the host stays connected.
+be refused up front with a re-login hint while the host stays connected. Without
+the edge, the runner mints its own owner token, so the same launch must proceed.
 """
 
 from __future__ import annotations
@@ -49,14 +50,11 @@ LOGIN_TTL_S = 90.0
 @dataclass
 class StaleLoginStack:
     edge: AuthEdgeProxy
+    url: str
     mock_llm_url: str
     admin_token: str
     account_generation: str | None
     workspace: Path
-
-    @property
-    def url(self) -> str:
-        return self.edge.url
 
     def client(self) -> httpx.Client:
         return httpx.Client(
@@ -147,8 +145,10 @@ class StaleLoginStack:
 
 
 @contextmanager
-def stale_login_stack(root: Path, mock_llm_url: str) -> Iterator[StaleLoginStack]:
-    """Run an accounts-mode server behind the auth edge and sign the admin in."""
+def stale_login_stack(
+    root: Path, mock_llm_url: str, *, via_edge: bool = True
+) -> Iterator[StaleLoginStack]:
+    """Run an accounts-mode server, behind the auth edge unless *via_edge* is False."""
     root.mkdir(parents=True, exist_ok=True)
     agent_yaml = root / "hello_world.yaml"
     agent_yaml.write_text(AGENT_YAML)
@@ -168,13 +168,14 @@ def stale_login_stack(root: Path, mock_llm_url: str) -> Iterator[StaleLoginStack
         "OPENAI_BASE_URL": f"{mock_llm_url}/v1",
         "OPENAI_API_KEY": "mock-key",
     }
-    with isolated_local_server(
-        root / "server", env=server_env, extra_args=["--agent", str(agent_yaml)]
-    ) as upstream:
-        edge.start(upstream)
-        try:
+    try:
+        with isolated_local_server(
+            root / "server", env=server_env, extra_args=["--agent", str(agent_yaml)]
+        ) as upstream:
+            edge.start(upstream)
+            url = edge.url if via_edge else upstream
             login = httpx.post(
-                f"{edge.url}/auth/login",
+                f"{url}/auth/login",
                 json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
                 timeout=30,
                 trust_env=False,
@@ -186,13 +187,14 @@ def stale_login_stack(root: Path, mock_llm_url: str) -> Iterator[StaleLoginStack
             )
             yield StaleLoginStack(
                 edge=edge,
+                url=url,
                 mock_llm_url=mock_llm_url,
                 admin_token=admin_token,
                 account_generation=claims.get("account_generation"),
                 workspace=workspace,
             )
-        finally:
-            edge.stop()
+    finally:
+        edge.stop()
 
 
 @contextmanager
@@ -205,12 +207,13 @@ def host_with_stored_login(
         yield host, expires_at
 
 
-@pytest.mark.timeout(600)
-def test_host_with_lapsed_login_refuses_launch_while_tunnel_stays_online(
-    tmp_path: Path, mock_llm_server_url: str
-) -> None:
+@contextmanager
+def host_after_login_lapsed(
+    tmp_path: Path, mock_llm_url: str, *, via_edge: bool
+) -> Iterator[tuple[StaleLoginStack, Host, httpx.Client]]:
+    """Connect a host, launch a healthy baseline, then wait until its stored login lapses."""
     with (
-        stale_login_stack(tmp_path / "stack", mock_llm_server_url) as stack,
+        stale_login_stack(tmp_path / "stack", mock_llm_url, via_edge=via_edge) as stack,
         host_with_stored_login(stack, tmp_path / "host", LOGIN_TTL_S) as (host, expires_at),
         stack.client() as client,
     ):
@@ -230,14 +233,42 @@ def test_host_with_lapsed_login_refuses_launch_while_tunnel_stays_online(
         assert host_row is not None and host_row["status"] == "online", (
             f"host tunnel did not outlive its login: {host_row}"
         )
+        yield stack, host, client
 
+
+@pytest.mark.timeout(600)
+def test_host_with_lapsed_login_refuses_launch_while_tunnel_stays_online(
+    tmp_path: Path, mock_llm_server_url: str
+) -> None:
+    with host_after_login_lapsed(tmp_path, mock_llm_server_url, via_edge=True) as (
+        stack,
+        host,
+        client,
+    ):
         launch = stack.launch_session(client, host.host_id)
         assert launch.status_code == 503, launch.text
         error = launch.json().get("error", {})
         assert error.get("code") == "host_login_expired", launch.text
         assert "login" in (error.get("message") or "").lower(), launch.text
-        # No runner was spawned, so the edge never rejected a runner credential.
-        assert not stack.edge.rejections("/token"), stack.edge_summary()
+        # Only the host's own admission probe reached the token endpoint; no runner
+        # was spawned to be rejected on it or on its tunnel.
+        assert len(stack.edge.rejections("/token")) == 1, stack.edge_summary()
         assert not stack.edge.rejections("/tunnel"), stack.edge_summary()
         host_row = stack.host_record(client, host.host_id)
         assert host_row is not None and host_row["status"] == "online", host_row
+
+
+@pytest.mark.timeout(600)
+def test_host_with_lapsed_login_launches_when_runner_mints_its_own_token(
+    tmp_path: Path, mock_llm_server_url: str
+) -> None:
+    """Reached directly, the server mints the runner's owner token from its binding token."""
+    with host_after_login_lapsed(tmp_path, mock_llm_server_url, via_edge=False) as (
+        stack,
+        host,
+        client,
+    ):
+        launch = stack.launch_session(client, host.host_id)
+        assert launch.status_code == 200, launch.text
+        status = stack.wait_runner_settled(client, launch.json()["runner_id"])
+        assert status.get("online") is True, f"runner never connected: {status}"

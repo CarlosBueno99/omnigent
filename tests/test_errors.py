@@ -395,6 +395,13 @@ def test_is_permission_denied_rpc_error_requires_rpc_error_ancestry() -> None:
     assert is_permission_denied_rpc_error(ValueError("nope")) is False
 
 
+def test_host_login_expired_code_matches_the_host_frame_code() -> None:
+    """The host refusal's frame code and the API error code are one wire string."""
+    from omnigent.host.frames import HOST_LOGIN_EXPIRED_ERROR_CODE
+
+    assert ErrorCode.HOST_LOGIN_EXPIRED == HOST_LOGIN_EXPIRED_ERROR_CODE == "host_login_expired"
+
+
 def test_classify_exception_cancelled_rpc_is_transient_upstream() -> None:
     """A peer-cancelled RPC buckets as a transient upstream blip, and its wire
     code stays pinned (clients dispatch on the string)."""
