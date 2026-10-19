@@ -43,6 +43,12 @@ from omnigent.inner.executor import (
     TurnCancelled,
     TurnComplete,
 )
+from omnigent.inner.message_content import (
+    extract_text_content as _extract_user_text,
+)
+from omnigent.inner.message_content import (
+    normalize_message_content as _normalize_message_content,
+)
 from omnigent.inner.tracing import TracingContext, is_tracing_enabled
 from omnigent.native.input_diagnostics import (
     INPUT_FIELDS,
@@ -1442,20 +1448,6 @@ def _extract_last_user_message(
     return last_user_text
 
 
-def _extract_user_text(
-    input_value: str | list[dict[str, Any]],
-) -> str:
-    """Extract concatenated text from an injection input for ``enqueue_session_message``."""
-    if isinstance(input_value, str):
-        return input_value
-    parts: list[str] = []
-    for block in input_value:
-        text_value = block.get("text")
-        if isinstance(text_value, str):
-            parts.append(text_value)
-    return "\n".join(parts)
-
-
 def _translate_input_to_messages(
     input_value: str | list[dict[str, Any]],
 ) -> list[Message]:
@@ -1495,37 +1487,6 @@ def _extract_role_keyed_messages(
             continue
         messages.append({"role": role, "content": content})
     return messages
-
-
-_MULTIMODAL_BLOCK_TYPES: frozenset[str] = frozenset({"input_image", "input_file", "input_audio"})
-
-
-def _normalize_message_content(
-    content: Any,
-) -> str | list[dict[str, Any]]:
-    """Normalize message content: plain string for text-only; full block list for multimodal."""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-
-    has_multimodal = any(
-        isinstance(block, dict) and block.get("type") in _MULTIMODAL_BLOCK_TYPES
-        for block in content
-    )
-    if has_multimodal:
-        return content
-
-    parts: list[str] = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        text_value = block.get("text")
-        if isinstance(text_value, str):
-            parts.append(text_value)
-    return "\n".join(parts)
 
 
 def _serialize_args(args: dict[str, Any]) -> str:

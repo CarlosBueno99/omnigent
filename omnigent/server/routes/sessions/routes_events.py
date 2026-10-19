@@ -53,7 +53,9 @@ from omnigent.host.frames import (
 from omnigent.host.frames import (
     workspace_missing_message as _workspace_missing_message,
 )
+from omnigent.inner.message_content import native_shell_input
 from omnigent.mcp_selection import mcp_selection_revision, selected_mcp_spec
+from omnigent.native.native_coding_agents import native_coding_agent_for_harness
 from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
 from omnigent.runner.launch_failure import (
     CODEX_COMPACTION_MODEL_FAILED,
@@ -1035,19 +1037,17 @@ def register_events_routes(
         :raises OmnigentError: 404 if no session exists.
         """
         user_id, conv = await _authorized_conversation(request, session_id)
-        if (
-            body.type == "message"
-            and _is_native_terminal_session(conv)
-            and isinstance(body.data.get("content"), list)
-            and _extract_user_text_from_event(body).lstrip().startswith("!")
-        ):
-            await _require_access(
-                user_id,
-                session_id,
-                shell_write_level(cast("Request", request)),
-                permission_store,
-                conversation_store,
-            )
+        if body.type == "message" and isinstance(body.data.get("content"), list):
+            harness = _resolve_harness(conv, agent_store=agent_store, agent_cache=agent_cache)
+            if harness in (None, "auto") or native_coding_agent_for_harness(harness) is not None:
+                if native_shell_input(body.data["content"], harness):
+                    await _require_access(
+                        user_id,
+                        session_id,
+                        shell_write_level(cast("Request", request)),
+                        permission_store,
+                        conversation_store,
+                    )
         if in_flight is not None:
             # Marked only after authorization, so an unauthorized caller
             # cannot flip a session to "running" even transiently.

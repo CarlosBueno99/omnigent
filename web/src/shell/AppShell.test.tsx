@@ -10,6 +10,7 @@ import type * as UseSessionModule from "@/hooks/useSession";
 import type * as UseHostsModule from "@/hooks/useHosts";
 import type * as UseConversationsModule from "@/hooks/useConversations";
 import type * as RunnerHealthModule from "@/hooks/RunnerHealthProvider";
+import type * as UseSharingModule from "@/hooks/useSharing";
 import type * as SessionsApiModule from "@/lib/sessionsApi";
 
 import { useCallback, useState } from "react";
@@ -34,6 +35,14 @@ import { clearOptimisticTitles, recordOptimisticTitle } from "@/lib/optimisticTi
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { writeWorkspacePanelDefault } from "@/lib/workspacePanelPreferences";
 import { writePinnedWorkspaceTabs } from "@/lib/workspaceTabPreferences";
+import { useNewShellHotkey } from "@/hooks/useNewShellHotkey";
+
+vi.mock("@/hooks/useNewShellHotkey", { spy: true });
+const shellPolicy = vi.hoisted(() => ({ ownerOnly: false }));
+vi.mock("@/hooks/useSharing", async (importOriginal) => ({
+  ...(await importOriginal<typeof UseSharingModule>()),
+  useShellOwnerOnly: () => ({ data: shellPolicy.ownerOnly }),
+}));
 
 const runnerHealthState = vi.hoisted(() => ({
   runnerOnline: undefined as boolean | undefined,
@@ -667,6 +676,8 @@ function withWindowOrigin(origin: string, run: () => void) {
 }
 
 beforeEach(() => {
+  shellPolicy.ownerOnly = false;
+  vi.mocked(useNewShellHotkey).mockClear();
   runnerHealthState.runnerOnline = undefined;
   useConvMock.mockReset();
   useTerminalsMock.mockReset();
@@ -4041,41 +4052,49 @@ describe("Mobile session menu", () => {
     expect(screen.getByRole("menuitem", { name: /Shells/i })).toBeInTheDocument();
   });
 
-  it("shows the Shells entry on mobile at zero shells when the agent declares shell access", () => {
-    // Mobile has no tab-strip "+" menu, so the drawer is the create entry point:
-    // its Shells entry shows before any shell exists (declared access), unlike
-    // the desktop rail tab which gates on an existing shell. Here the only
-    // terminal is the embedded REPL (excluded from the inventory), so there's
-    // no shell yet — the entry must still appear.
-    useEnvironmentMock.mockReturnValue({
-      data: { available: true, root: null },
-      isLoading: false,
-    } as unknown as ReturnType<typeof useWorkspaceEnvironment>);
-    mockConversations([{ id: "conv_sdk", permission_level: null }]);
-    useTerminalsMock.mockReturnValue({
-      terminals: [{ id: "terminal_tui_main", name: "tui", session: "main", running: true }],
-      isLoading: false,
-      error: null,
-    });
-    useSessionAgentMock.mockReturnValue({
-      data: { id: "ag_x", name: "polly", terminals: ["zsh"] },
-    } as ReturnType<typeof useSessionAgent>);
+  it.each([false, true])(
+    "gates the zero-shell mobile entry and shortcut with owner-only access %s",
+    (ownerOnly) => {
+      // Mobile offers shell creation before a shell exists. The embedded REPL
+      // is excluded from inventory, so policy decides whether editors see it.
+      useEnvironmentMock.mockReturnValue({
+        data: { available: true, root: null },
+        isLoading: false,
+      } as unknown as ReturnType<typeof useWorkspaceEnvironment>);
+      shellPolicy.ownerOnly = ownerOnly;
+      mockConversations([
+        { id: "conv_sdk", permission_level: 2, labels: { "omnigent.ui": "terminal" } },
+      ]);
+      useTerminalsMock.mockReturnValue({
+        terminals: [{ id: "terminal_tui_main", name: "tui", session: "main", running: true }],
+        isLoading: false,
+        error: null,
+      });
+      useSessionAgentMock.mockReturnValue({
+        data: { id: "ag_x", name: "polly", terminals: ["zsh"] },
+      } as ReturnType<typeof useSessionAgent>);
 
-    renderShell("/c/conv_sdk");
-    openSessionMenu();
+      renderShell("/c/conv_sdk");
+      expect(useNewShellHotkey).toHaveBeenLastCalledWith(expect.any(Function), !ownerOnly);
+      openSessionMenu();
 
-    const shellsEntry = screen.getByRole("menuitem", { name: /^Shells/i });
-    expect(shellsEntry).toBeInTheDocument();
-    fireEvent.click(shellsEntry);
+      if (ownerOnly) {
+        expect(screen.queryByRole("menuitem", { name: /^Shells/i })).toBeNull();
+        return;
+      }
+      const shellsEntry = screen.getByRole("menuitem", { name: /^Shells/i });
+      expect(shellsEntry).toBeInTheDocument();
+      fireEvent.click(shellsEntry);
 
-    const drawer = screen.getByTestId("shells-panel-drawer");
-    expect(drawer).toHaveAttribute("data-state", "open");
-    expect(within(drawer).getByTestId("inline-terminals-section")).toBeInTheDocument();
-    // The drawer covers the whole phone screen; without the safe-area class
-    // its header (title + Close) renders under the status bar / dynamic
-    // island and the panel can't be dismissed.
-    expect(drawer).toHaveClass("mobile-panel-drawer");
-  });
+      const drawer = screen.getByTestId("shells-panel-drawer");
+      expect(drawer).toHaveAttribute("data-state", "open");
+      expect(within(drawer).getByTestId("inline-terminals-section")).toBeInTheDocument();
+      // The drawer covers the whole phone screen; without the safe-area class
+      // its header (title + Close) renders under the status bar / dynamic
+      // island and the panel can't be dismissed.
+      expect(drawer).toHaveClass("mobile-panel-drawer");
+    },
+  );
 
   it("opens the Agents drawer and mounts the subagents panel", () => {
     useEnvironmentMock.mockReturnValue({

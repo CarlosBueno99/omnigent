@@ -84,6 +84,7 @@ from omnigent.inner.executor import (
     TurnComplete,
     describe_exception,
 )
+from omnigent.inner.message_content import native_text_content
 from omnigent.llms.errors import PermanentLLMError
 from omnigent.util.reasoning_effort import ANTIGRAVITY_EFFORTS, validate_effort_or_llm_error
 
@@ -456,19 +457,12 @@ def _content_to_text(content: EnqueuedContent, bridge_dir: Path) -> str:
     if isinstance(content, list):
         from omnigent.inner.native_attachments import attachment_reference_line
 
-        attachment_lines: list[str] = []
-        text_parts: list[str] = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type", "")
-            if block_type in ("input_text", "text"):
-                text = block.get("text")
-                if isinstance(text, str) and text:
-                    text_parts.append(text)
-            elif block_type in ("input_image", "input_file"):
-                attachment_lines.append(attachment_reference_line(block, bridge_dir))
-        return "\n".join(attachment_lines + text_parts).strip()
+        return native_text_content(
+            content,
+            attachment_text=lambda block: attachment_reference_line(block, bridge_dir),
+            separator="\n",
+            skip_empty_text=True,
+        ).strip()
     if content is None:
         return ""
     return json.dumps(content, ensure_ascii=True)

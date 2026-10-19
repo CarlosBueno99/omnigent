@@ -85,6 +85,7 @@ afterEach(() => {
   vi.clearAllMocks();
   isMobileMock.mockReturnValue(false);
   shellPolicy.ownerOnly = false;
+  useChatStore.setState({ sessionHarness: null });
   Reflect.deleteProperty(window, "omnigentDesktop");
   useTerminalsMock.mockReturnValue({ terminals: [], isLoading: false, error: null });
   useCreateTerminalMock.mockReturnValue({
@@ -729,32 +730,44 @@ describe('WorkspacePanel "+" new-tab menu', () => {
     },
   );
 
-  it("offers Shell (gated on declared terminals), creating one and opening it as a tab", async () => {
-    // Agent declares a shell; creating it resolves to a terminal whose tab key
-    // is handed to openTerminalTab.
-    declaresShell();
-    const created = { id: "terminal_zsh_s1", name: "zsh", session: "u-1", running: true };
-    const mutate = vi.fn((_name: string, opts?: { onSuccess?: (info: unknown) => void }) =>
-      opts?.onSuccess?.(created),
-    );
-    useCreateTerminalMock.mockReturnValue({
-      mutate,
-      isPending: false,
-      isError: false,
-    } as unknown as ReturnType<typeof useCreateTerminal>);
+  it.each([false, true])(
+    "gates an editor's Shell entry with owner-only access %s",
+    async (ownerOnly) => {
+      // Agent declares a shell; creating it resolves to a terminal whose tab key
+      // is handed to openTerminalTab.
+      declaresShell();
+      shellPolicy.ownerOnly = ownerOnly;
+      useChatStore.setState({ sessionHarness: "claude-sdk" });
+      const created = { id: "terminal_zsh_s1", name: "zsh", session: "u-1", running: true };
+      const mutate = vi.fn((_name: string, opts?: { onSuccess?: (info: unknown) => void }) =>
+        opts?.onSuccess?.(created),
+      );
+      useCreateTerminalMock.mockReturnValue({
+        mutate,
+        isPending: false,
+        isError: false,
+      } as unknown as ReturnType<typeof useCreateTerminal>);
 
-    const { openTerminalTab } = renderWorkspace({ showBrowserTab: false });
+      const { openTerminalTab } = renderWorkspace({ showBrowserTab: true, permissionLevel: 2 });
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Open new" }), { button: 0 });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /shell/i }));
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Open new" }), { button: 0 });
+      expect(await screen.findByRole("menuitem", { name: "Browser" })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: "Side chat" })).toBeInTheDocument();
+      if (ownerOnly) {
+        expect(screen.queryByRole("menuitem", { name: /shell/i })).toBeNull();
+        expect(mutate).not.toHaveBeenCalled();
+        return;
+      }
+      fireEvent.click(await screen.findByRole("menuitem", { name: /shell/i }));
 
-    // Launches the first declared shell and opens the created terminal's tab.
-    expect(mutate).toHaveBeenCalledWith("zsh", expect.any(Object));
-    expect(openTerminalTab).toHaveBeenCalledWith("terminal:terminal_zsh_s1");
+      // Launches the first declared shell and opens the created terminal's tab.
+      expect(mutate).toHaveBeenCalledWith("zsh", expect.any(Object));
+      expect(openTerminalTab).toHaveBeenCalledWith("terminal:terminal_zsh_s1");
 
-    // The menu closes on its own after the launch.
-    await waitFor(() => expect(screen.queryByRole("menuitem", { name: /shell/i })).toBeNull());
-  });
+      // The menu closes on its own after the launch.
+      await waitFor(() => expect(screen.queryByRole("menuitem", { name: /shell/i })).toBeNull());
+    },
+  );
 
   it("names the current default in the Shell item and launches it on click when several are declared", async () => {
     // Multiple declared terminals → the "Shell" item names the default inline

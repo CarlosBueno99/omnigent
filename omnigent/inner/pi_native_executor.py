@@ -22,6 +22,7 @@ from omnigent.inner.executor import (
     ToolSpec,
     TurnComplete,
 )
+from omnigent.inner.message_content import native_text_content
 from omnigent.inner.native_attachments import attachment_reference_line
 
 
@@ -189,19 +190,11 @@ def _content_to_text(content: EnqueuedContent, bridge_dir: Path) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        attachment_lines: list[str] = []
-        text_parts: list[str] = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type", "")
-            if block_type == "input_text":
-                text = block.get("text")
-                if isinstance(text, str):
-                    text_parts.append(text)
-            elif block_type in ("input_image", "input_file"):
-                attachment_lines.append(attachment_reference_line(block, bridge_dir))
-        return "\n\n".join([*attachment_lines, *text_parts])
+        return native_text_content(
+            content,
+            attachment_text=lambda block: attachment_reference_line(block, bridge_dir),
+            allow_text_alias=False,
+        )
     if content is None:
         return ""
     return str(content)

@@ -46,8 +46,8 @@ from omnigent.inner.executor import (
     TurnComplete,
     describe_exception,
 )
+from omnigent.inner.message_content import native_text_content
 from omnigent.inner.native_attachments import (
-    FRAMEWORK_NOTICE_BLOCK_TYPE,
     attachment_reference_line,
     framework_notices,
 )
@@ -612,22 +612,11 @@ def _content_to_text(content: EnqueuedContent, bridge_dir: Path) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        attachment_lines: list[str] = []
-        text_parts: list[str] = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type", "")
-            if block_type == FRAMEWORK_NOTICE_BLOCK_TYPE:
-                continue
-            if block_type == "input_text":
-                text = block.get("text")
-                if isinstance(text, str):
-                    text_parts.append(text)
-            elif block_type in ("input_image", "input_file"):
-                attachment_lines.append(attachment_reference_line(block, bridge_dir))
-        parts = attachment_lines + text_parts
-        return "\n\n".join(parts)
+        return native_text_content(
+            content,
+            attachment_text=lambda block: attachment_reference_line(block, bridge_dir),
+            allow_text_alias=False,
+        )
     return ""
 
 

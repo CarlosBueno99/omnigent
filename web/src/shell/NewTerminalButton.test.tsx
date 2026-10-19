@@ -59,13 +59,16 @@ function renderButton(
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <TerminalFirstContextProvider value={terminalFirstCtx(isNativeWrapper)}>
-        <NewTerminalButton conversationId="conv_abc" onCreated={onCreated} variant={variant} />
-      </TerminalFirstContextProvider>
-    </QueryClientProvider>,
-  );
+  return {
+    ...render(
+      <QueryClientProvider client={queryClient}>
+        <TerminalFirstContextProvider value={terminalFirstCtx(isNativeWrapper)}>
+          <NewTerminalButton conversationId="conv_abc" onCreated={onCreated} variant={variant} />
+        </TerminalFirstContextProvider>
+      </QueryClientProvider>,
+    ),
+    queryClient,
+  };
 }
 
 beforeEach(() => {
@@ -85,8 +88,18 @@ describe("NewTerminalButton access gate", () => {
     fetchMock.mockImplementation(async (url: string) =>
       mockResponse(url === "/v1/info" ? { shell_owner_only: true } : agentWire(["shell"])),
     );
-    renderButton();
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const { queryClient } = renderButton();
+    await waitFor(() => {
+      for (const queryKey of [
+        ["session-agent", "conv_abc"],
+        ["sharing", "shell-owner-only"],
+      ]) {
+        expect(queryClient.getQueryState(queryKey)).toMatchObject({
+          status: "success",
+          fetchStatus: "idle",
+        });
+      }
+    });
     expect(screen.queryByRole("button", { name: /new shell/i })).toBeNull();
   });
 

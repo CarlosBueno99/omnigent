@@ -81,6 +81,7 @@ class _StubConversationStore:
         share_workspace_files: bool = False,
         parent: str | None = None,
         harness_override: str | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
         self._conversations[conversation_id] = Conversation(
             id=conversation_id,
@@ -91,6 +92,7 @@ class _StubConversationStore:
             agent_id="ag_test",
             share_workspace_files=share_workspace_files,
             harness_override=harness_override,
+            labels=labels or {},
         )
 
 
@@ -285,7 +287,7 @@ def runner_client() -> _RecordingRunnerClient:
 def app(runner_globals_reset: None, runner_client: _RecordingRunnerClient) -> FastAPI:
     del runner_globals_reset
     conv_store = _StubConversationStore()
-    conv_store.add("conv_share")
+    conv_store.add("conv_share", harness_override="claude-sdk")
     # A second session whose owner opted into sharing workspace files with
     # view-level collaborators — same grant shape, share flag on.
     conv_store.add("conv_open", share_workspace_files=True)
@@ -293,6 +295,30 @@ def app(runner_globals_reset: None, runner_client: _RecordingRunnerClient) -> Fa
     # caller's access is inherited through the parent.
     conv_store.add("conv_child", parent="conv_share")
     conv_store.add("conv_native", parent="conv_share", harness_override="claude-native")
+    for harness in (
+        "pi-native",
+        "cursor-native",
+        "antigravity-native",
+        "codex-native",
+        "opencode-native",
+    ):
+        conv_store.add(f"conv_{harness}", parent="conv_share", harness_override=harness)
+    for session_id, harness, wrapper in (
+        ("conv_claude_labeled_codex", "claude-native", "codex-native-ui"),
+        ("conv_claude_labeled_cursor", "claude-native", "cursor-native-ui"),
+        ("conv_cursor_labeled_claude", "cursor-native", "claude-code-native-ui"),
+        ("conv_unknown_labeled_codex", None, "codex-native-ui"),
+        ("conv_auto_labeled_codex", "auto", "codex-native-ui"),
+        ("conv_auto_labeled_cursor", "auto", "cursor-native-ui"),
+    ):
+        conv_store.add(
+            session_id,
+            parent="conv_share",
+            harness_override=harness,
+            labels={"omnigent.wrapper": wrapper},
+        )
+    conv_store.add("conv_unknown", parent="conv_share")
+    conv_store.add("conv_auto", parent="conv_share", harness_override="auto")
     perm_store = _StubPermissionStore()
     perm_store.add_grant("owner@example.com", "conv_share", LEVEL_EDIT)
     perm_store.add_grant("viewer@example.com", "conv_share", LEVEL_READ)
@@ -491,6 +517,9 @@ async def test_terminal_transfer_requires_shell_access_on_destination(
         ("conv_native", True, "real-owner@example.com", "!echo hi", 202),
         ("conv_native", True, "admin@example.com", "!echo hi", 202),
         ("conv_native", True, "owner@example.com", "hello", 202),
+        ("conv_native", True, "owner@example.com", "hello\n!id", 202),
+        ("conv_unknown", True, "owner@example.com", "hello\n!id", 202),
+        ("conv_auto", True, "owner@example.com", "hello\n!id", 202),
         ("conv_share", True, "owner@example.com", "!literal SDK prompt", 202),
     ],
 )
@@ -523,6 +552,96 @@ async def test_native_shell_input_is_authorized_before_durable_enqueue(
     assert runner_client.posts == []
 
 
+@pytest.mark.parametrize(
+    "session_id,decoy_type,expected",
+    [
+        ("conv_native", "output_text", 403),
+        ("conv_native", "input_audio", 403),
+        ("conv_native", "unknown", 403),
+        ("conv_native", "text", 403),
+        ("conv_native", [], 403),
+        ("conv_native", {}, 403),
+        ("conv_pi-native", "text", 403),
+        ("conv_cursor-native", "output_text", 403),
+        ("conv_antigravity-native", "output_text", 403),
+        ("conv_cursor-native", "text", 202),
+        ("conv_codex-native", "output_text", 202),
+        ("conv_opencode-native", "output_text", 202),
+        ("conv_claude_labeled_codex", "output_text", 403),
+        ("conv_claude_labeled_cursor", "text", 403),
+        ("conv_cursor_labeled_claude", "text", 202),
+        ("conv_unknown", "text", 403),
+        ("conv_auto", "text", 403),
+        ("conv_unknown_labeled_codex", "text", 403),
+        ("conv_auto_labeled_codex", "text", 403),
+        ("conv_auto_labeled_cursor", "text", 403),
+    ],
+)
+@pytest.mark.parametrize(
+    "owner_only,caller",
+    [(True, "owner@example.com"), (True, "real-owner@example.com"), (False, "owner@example.com")],
+    ids=["enabled-editor", "enabled-owner", "disabled-editor"],
+)
+async def test_native_shell_gate_checks_delivered_text_before_enqueue(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    session_id: str,
+    decoy_type: object,
+    expected: int,
+    owner_only: bool,
+    caller: str,
+) -> None:
+    app.state.shell_owner_only = owner_only
+    enqueue = AsyncMock(return_value=SimpleNamespace(id="saved_input"))
+    app.state.startup_inputs = SimpleNamespace(
+        accepts=AsyncMock(return_value=True), enqueue=enqueue
+    )
+    content = [
+        {"type": "input_audio"},
+        {"type": decoy_type, "text": "hello"},
+        {"type": "input_text", "text": "!id"},
+    ]
+    response = await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={"type": "message", "data": {"role": "user", "content": content}},
+        headers={"X-Forwarded-Email": caller},
+    )
+    expected_status = expected if owner_only and caller == "owner@example.com" else 202
+    assert response.status_code == expected_status, response.text
+    assert enqueue.await_count == (1 if expected_status == 202 else 0)
+    assert runner_client.posts == []
+
+
+async def test_native_shell_gate_checks_live_injection_text_before_enqueue(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+) -> None:
+    app.state.shell_owner_only = True
+    enqueue = AsyncMock()
+    app.state.startup_inputs = SimpleNamespace(
+        accepts=AsyncMock(return_value=True), enqueue=enqueue
+    )
+    response = await client.post(
+        "/v1/sessions/conv_native/events",
+        json={
+            "type": "message",
+            "data": {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "data:image/png;base64,aGk="},
+                    {"type": "input_text", "text": "!id"},
+                ],
+            },
+        },
+        headers={"X-Forwarded-Email": "owner@example.com"},
+    )
+    assert response.status_code == 403, response.text
+    enqueue.assert_not_awaited()
+    assert runner_client.posts == []
+
+
 @pytest.mark.parametrize("role", [None, "assistant", "invalid"])
 async def test_native_shell_input_cannot_bypass_owner_gate_with_role(
     app: FastAPI,
@@ -544,13 +663,13 @@ async def test_native_shell_input_cannot_bypass_owner_gate_with_role(
 
 
 @pytest.mark.parametrize("session_id", ["conv_native", "conv_share"])
-@pytest.mark.parametrize("content", [5, True])
+@pytest.mark.parametrize("content", [5, True, [5]])
 async def test_shell_policy_preserves_invalid_message_content_validation(
     app: FastAPI,
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
     session_id: str,
-    content: int | bool,
+    content: object,
 ) -> None:
     app.state.shell_owner_only = True
     response = await client.post(
