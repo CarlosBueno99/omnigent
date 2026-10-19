@@ -6742,7 +6742,7 @@ function BulkActionBar({
           </div>
         </div>
 
-        {(bulkArchive.isError || bulkDelete.isError || bulkMove.isError) && (
+        {(bulkArchive.isError || bulkDelete.isError) && (
           <p className="text-sm text-destructive" role="alert">
             Some actions failed. Retry or dismiss.
           </p>

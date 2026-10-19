@@ -79,6 +79,31 @@ describe("createProject", () => {
     },
   );
 
+  it.each([
+    [
+      { host_id: "host", agent_id: "agent" },
+      { agent_id: "agent", host_id: "host" },
+    ],
+    [undefined, {}],
+    [{}, undefined],
+    [{ icon: "🔥" }, { icon: undefined }],
+  ])(
+    "shares compatible configs regardless of key order: %j / %j",
+    async (firstConfig, nextConfig) => {
+      let finish!: (response: Response) => void;
+      fetchMock.mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const first = createProject("Pending", firstConfig);
+      expect(createProject("Pending", nextConfig)).toBe(first);
+      finish(mockResponse({ id: "real", name: "Pending", config: firstConfig }));
+      await first;
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
   it("POSTs the name and returns the project", async () => {
     fetchMock.mockResolvedValueOnce(mockResponse({ id: "p_1", name: "New" }));
     const result = await createProject("New");

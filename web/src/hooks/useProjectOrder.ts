@@ -33,8 +33,19 @@ export function useSaveProjectOrder() {
     scope: { id: "project-order" },
     mutationFn: async (projects: ProjectSummary[] | null) => {
       if (projects === null) return saveProjectOrder(null);
+      const current = client.getQueryData<ProjectSummary[]>(["projects"]);
+      const remaining = projects.flatMap((project) => {
+        const latest = current
+          ? current.find((item) =>
+              project.id !== null
+                ? item.id === project.id
+                : item.name === project.name || item.previousName === project.name,
+            )
+          : project;
+        return latest && latest.pending !== "Deleting" ? [latest] : [];
+      });
       const ids = await Promise.all(
-        projects.map((project) => project.id ?? resolveOrCreateProjectId(project.name)),
+        remaining.map((project) => project.id ?? resolveOrCreateProjectId(project.name)),
       );
       return saveProjectOrder(ids);
     },
@@ -44,11 +55,18 @@ export function useSaveProjectOrder() {
         client.cancelQueries({ queryKey: ["project-order"] }),
       ]);
       const current = client.getQueryData<ProjectSummary[]>(["projects"]);
-      if (!confirmedOrders.has(client))
+      if (!confirmedOrders.has(client)) {
+        const preference = client.getQueryData<ProjectOrder>(["project-order"]);
         confirmedOrders.set(client, {
-          projects: current ?? [],
-          preference: client.getQueryData<ProjectOrder>(["project-order"]),
+          projects:
+            preference?.sort_mode === "alphabetical"
+              ? null
+              : (current ??
+                preference?.ordered_project_ids?.map((id) => ({ id, name: "" })) ??
+                null),
+          preference,
         });
+      }
       if (current) client.setQueryData(["projects"], orderProjects(current, projects));
       client.setQueryData<ProjectOrder>(["project-order"], (previous) => ({
         sort_mode: projects ? "manual" : "alphabetical",
@@ -66,8 +84,9 @@ export function useSaveProjectOrder() {
         client.setQueryData(["project-order"], preference);
     },
     onError: () => {
+      if (client.isMutating({ mutationKey: ["project-order"] }) !== 1) return;
       const confirmed = confirmedOrders.get(client);
-      if (confirmed && client.isMutating({ mutationKey: ["project-order"] }) === 1) {
+      if (confirmed) {
         client.setQueryData<ProjectSummary[]>(["projects"], (current) =>
           current ? orderProjects(current, confirmed.projects) : current,
         );

@@ -31,7 +31,7 @@ vi.mock("@/hooks/useConversations", async () => {
   const { conversationHooksMock } = await import("@/test/sidebarMockHelpers");
   return {
     ...conversationHooksMock(),
-    useProjects: () => ({ data: [{ id: PROJECT_ID, name: PROJECT_NAME }] }),
+    useProjects: vi.fn(() => ({ data: [{ id: PROJECT_ID, name: PROJECT_NAME }] })),
     useProjectSessions: () => ({
       data: undefined,
       isLoading: false,
@@ -60,7 +60,7 @@ vi.mock("./ProjectSettingsDialog", () => ({
 }));
 vi.mock("@/components/PermissionsModal", () => ({ PermissionsModal: () => null }));
 
-import { type Conversation, useConversations } from "@/hooks/useConversations";
+import { type Conversation, useConversations, useProjects } from "@/hooks/useConversations";
 
 const useConversationsMock = vi.mocked(useConversations);
 
@@ -82,8 +82,8 @@ function mockConversations(conversations: Conversation[]) {
 }
 
 function folderHeader(): HTMLElement {
-  const header = Array.from(document.querySelectorAll("h2 button")).find(
-    (button) => button.textContent === PROJECT_NAME,
+  const header = Array.from(document.querySelectorAll("h2 button")).find((button) =>
+    button.textContent?.startsWith(PROJECT_NAME),
   );
   if (header === undefined) throw new Error(`No folder header for ${PROJECT_NAME}`);
   return header as HTMLElement;
@@ -123,6 +123,9 @@ function expectProjectMenuActions() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(useProjects).mockReturnValue({
+    data: [{ id: PROJECT_ID, name: PROJECT_NAME }],
+  } as ReturnType<typeof useProjects>);
   useConversationsMock.mockReset();
   localStorage.clear();
   mockConversations([FILED_CONVERSATION]);
@@ -141,6 +144,28 @@ describe("project folder header context menu", () => {
     expectProjectMenuActions();
     expect(header).toHaveAttribute("data-slot", "context-menu-trigger");
   });
+
+  it.each(["Creating", "Saving", "Deleting"] as const)(
+    "keeps pending %s folders navigable but prevents conflicting edits",
+    (pending) => {
+      vi.mocked(useProjects).mockReturnValue({
+        data: [{ id: PROJECT_ID, name: PROJECT_NAME, pending }],
+      } as ReturnType<typeof useProjects>);
+      renderSidebar();
+      expect(folderHeader().closest("section")!.querySelector('[role="status"]')).toHaveTextContent(
+        pending,
+      );
+      fireEvent.click(folderHeader());
+      expect(folderHeader()).toHaveAttribute("aria-expanded", "true");
+      fireEvent.contextMenu(folderHeader());
+      for (const id of ["rename-project", "project-settings", "delete-project"])
+        expect(screen.getByTestId(id)).toHaveAttribute("aria-disabled", "true");
+      expect(screen.getByTestId("project-new-session-menu")).not.toHaveAttribute(
+        "aria-disabled",
+        "true",
+      );
+    },
+  );
 
   it("carries exactly the same items as the kebab", () => {
     renderSidebar();

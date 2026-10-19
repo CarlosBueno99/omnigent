@@ -2419,6 +2419,7 @@ describe("useUpdateProjectConfig cache seeding", () => {
     // and its (empty) config.
     queryClient.setQueryData(["projects"], [{ id: null, name: "Work" }]);
     queryClient.setQueryData(["project-config", "p_new"], {});
+    queryClient.setQueryData(["project-config", "Work"], { workspace: "/other" });
     const wrapper = ({ children }: { children: ReactNode }) =>
       createElement(QueryClientProvider, { client: queryClient }, children);
 
@@ -2436,6 +2437,8 @@ describe("useUpdateProjectConfig cache seeding", () => {
 
     // The config cache holds the fresh value keyed by the NEW id.
     expect(queryClient.getQueryData(["project-config", "p_new"])).toEqual({ agent_id: "ag_x" });
+    expect(queryClient.getQueryData(["project-config", "Work"])).toEqual({ workspace: "/other" });
+    expect(queryClient.getQueryState(["project-config", "legacy", "Work"])).toBeUndefined();
     // The projects list now resolves "Work" → the promoted first-class id.
     expect(queryClient.getQueryData(["projects"])).toEqual([{ id: "p_new", name: "Work" }]);
   });
@@ -3751,44 +3754,141 @@ describe("background project mutations", () => {
     ]);
   });
 
-  it.each([false, true])(
-    "rolls back membership only when rename itself fails (members fail: %s)",
-    async (membersFail) => {
+  it.each(["rename", "list", "member"] as const)(
+    "preserves completed rename work when %s fails",
+    async (failure) => {
+      vi.spyOn(toast, "error");
       const { client, wrapper } = setup();
       const row = conversation({ id: "member", project_id: "work", labels: { keep: "value" } });
       const key = ["conversations", "", false];
-      client.setQueryData(key, infinitePage([row]));
-      if (membersFail)
+      const legacy = conversation({
+        id: "legacy",
+        project_id: null,
+        labels: { omni_project: "Work" },
+      });
+      client.setQueryData(key, infinitePage(failure === "member" ? [row, legacy] : [row]));
+      if (failure !== "rename")
         fetchMock.mockResolvedValueOnce(mockResponse({ id: "work", name: "Renamed" }));
+      if (failure === "member")
+        fetchMock
+          .mockResolvedValueOnce(
+            mockResponse({ data: [{ id: "member" }, { id: "legacy" }], has_more: false }),
+          )
+          .mockResolvedValueOnce(mockResponse({}));
       fetchMock.mockRejectedValueOnce(new Error("offline"));
       const { result } = renderHook(() => useRenameProject(), { wrapper });
       act(() => result.current.mutate({ id: "work", oldName: "Work", newName: "Renamed" }));
       await waitFor(() => expect(result.current.isError).toBe(true));
       expect(client.getQueryData<ConversationsInfiniteData>(key)!.pages[0].data[0].labels).toEqual(
-        membersFail ? { keep: "value", omni_project: "Renamed" } : { keep: "value" },
+        failure === "list" ? { keep: "value", omni_project: "Renamed" } : { keep: "value" },
       );
       expect(client.getQueryData(["projects"])).toEqual([
-        { id: "work", name: membersFail ? "Renamed" : "Work", icon: "📁" },
+        { id: "work", name: failure === "rename" ? "Work" : "Renamed", icon: "📁" },
       ]);
+      if (failure === "member") {
+        expect(client.getQueryData<ConversationsInfiniteData>(key)!.pages[0].data[1]).toEqual(
+          legacy,
+        );
+        const completedCalls = fetchMock.mock.calls.length;
+        fetchMock
+          .mockResolvedValueOnce(mockResponse({ data: [{ id: "legacy" }], has_more: false }))
+          .mockResolvedValueOnce(mockResponse({}));
+        retryLastError();
+        await waitFor(() => expect(client.isMutating()).toBe(0));
+        expect(
+          fetchMock.mock.calls
+            .slice(completedCalls)
+            .map(([url, init]) => [url, init?.method ?? "GET"]),
+        ).toEqual([
+          [expect.stringContaining("project=Work"), "GET"],
+          ["/v1/sessions/legacy", "PATCH"],
+        ]);
+        expect(client.getQueryData<ConversationsInfiniteData>(key)!.pages[0].data[1]).toMatchObject(
+          { project_id: "work", labels: {} },
+        );
+      }
     },
   );
 
-  it("reports a rejected move without changing the session or sending a request", async () => {
-    const notification = vi.spyOn(toast, "error");
-    const { client, wrapper } = setup();
-    client.setQueryData(["projects"], [{ id: null, name: "New", pending: "Creating" }]);
-    const key = ["conversations", "", false];
-    const row = conversation({ id: "one", labels: { "omnigent.pinned": "1000" } });
-    client.setQueryData(key, infinitePage([row]));
-    const { result } = renderHook(() => useMoveToProject(), { wrapper });
-    act(() => result.current.mutate({ id: "one", project: "New" }));
-    await waitFor(() => expect(result.current.isError).toBe(true));
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(client.getQueryData<ConversationsInfiniteData>(key)!.pages[0].data).toEqual([row]);
-    expect(notification).toHaveBeenCalledWith("Couldn't move session", {
-      description: "This project is still updating. Try again when it finishes.",
-    });
-  });
+  it.each([false, true])(
+    "reports rejected moves once without changing sessions (bulk: %s)",
+    async (bulk) => {
+      const notification = vi.spyOn(toast, "error");
+      const { client, wrapper } = setup();
+      client.setQueryData(["projects"], [{ id: null, name: "New", pending: "Creating" }]);
+      const key = ["conversations", "", false];
+      const row = conversation({ id: "one", labels: { "omnigent.pinned": "1000" } });
+      const rows = [row, conversation({ id: "two" })];
+      client.setQueryData(key, infinitePage(rows));
+      const { result } = renderHook(
+        () => ({ single: useMoveToProject(), bulk: useBulkMoveToProject() }),
+        { wrapper },
+      );
+      act(() => {
+        if (bulk) result.current.bulk.mutate({ ids: ["one", "two"], project: "New" });
+        else result.current.single.mutate({ id: "one", project: "New" });
+      });
+      await waitFor(() =>
+        expect((bulk ? result.current.bulk : result.current.single).isError).toBe(true),
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(client.getQueryData<ConversationsInfiniteData>(key)!.pages[0].data).toEqual(rows);
+      expect(notification).toHaveBeenCalledExactlyOnceWith(
+        bulk ? "Couldn't move 2 sessions" : "Couldn't move session",
+        expect.objectContaining({
+          description: bulk
+            ? undefined
+            : "This project is still updating. Try again when it finishes.",
+        }),
+      );
+    },
+  );
+
+  it.each(["create", "rename", "delete", "config"] as const)(
+    "does not offer Retry for permanent %s errors",
+    async (operation) => {
+      const notification = vi.spyOn(toast, "error");
+      const { client, wrapper } = setup();
+      const { result } = renderHook(
+        () => {
+          const create = useCreateProject();
+          const rename = useRenameProject();
+          const remove = useDeleteProject();
+          const config = useUpdateProjectConfig();
+          return {
+            create: () => create.mutate({ name: "New" }),
+            rename: () => rename.mutate({ id: "work", oldName: "Work", newName: "New" }),
+            delete: () => remove.mutate({ id: "work", name: "Work" }),
+            config: () => config.mutate({ id: "work", name: "Work", config: {} }),
+          };
+        },
+        { wrapper },
+      );
+      fetchMock.mockResolvedValue(
+        mockResponse({ error: { message: "Conflict" } }, { ok: false, status: 409 }),
+      );
+      act(() => result.current[operation]());
+      await waitFor(() => expect(client.isMutating()).toBe(0));
+      expect(notification).toHaveBeenCalledOnce();
+      expect(notification.mock.calls[0][1]?.action).toBeUndefined();
+      expect(notification.mock.calls[0][1]?.duration).not.toBe(Infinity);
+      notification.mockClear();
+      fetchMock.mockClear();
+      client.setQueryData(
+        ["projects"],
+        [
+          { id: "work", name: "Work", pending: "Saving" },
+          { id: "new", name: "New" },
+        ],
+      );
+      act(() => result.current[operation]());
+      await waitFor(() => expect(client.isMutating()).toBe(0));
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(notification).toHaveBeenCalledOnce();
+      expect(notification.mock.calls[0][1]?.action).toBeUndefined();
+      expect(notification.mock.calls[0][1]?.duration).not.toBe(Infinity);
+    },
+  );
 
   it("reserves a rename target before another project can claim it", async () => {
     let finish!: (response: Response) => void;
@@ -4007,32 +4107,51 @@ describe("background project mutations", () => {
     notification.mockRestore();
   });
 
-  it("moves optimistic defaults to a promoted project's id and rolls them back after failure", async () => {
-    let reject!: (error: Error) => void;
-    fetchMock.mockResolvedValueOnce(mockResponse({ id: "work", name: "Work" })).mockReturnValueOnce(
-      new Promise<Response>((_resolve, fail) => {
-        reject = fail;
-      }),
-    );
-    const { client, wrapper } = setup();
-    client.setQueryData(["projects"], [{ id: null, name: "Work" }]);
-    const { result, unmount } = renderHook(() => useUpdateProjectConfig(), { wrapper });
-    act(() =>
-      result.current.mutate({
-        id: null,
-        name: "Work",
-        config: { workspace: "/new" },
-        fields: ["workspace"],
-      }),
-    );
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(client.getQueryData(["project-config", "work"])).toEqual({ workspace: "/new" });
-    unmount();
-    act(() => reject(new Error("offline")));
-    await waitFor(() => expect(client.isMutating()).toBe(0));
-    expect(client.getQueryData(["projects"])).toEqual([{ id: "work", name: "Work" }]);
-    expect(client.getQueryData(["project-config", "work"])).toEqual({});
-  });
+  it.each([false, true])(
+    "cleans legacy config after failure (promotion fails: %s)",
+    async (promotionFails) => {
+      let reject!: (error: Error) => void;
+      if (!promotionFails)
+        fetchMock.mockResolvedValueOnce(mockResponse({ id: "work", name: "Work" }));
+      fetchMock.mockReturnValueOnce(
+        new Promise<Response>((_resolve, fail) => {
+          reject = fail;
+        }),
+      );
+      const { client, wrapper } = setup();
+      client.setQueryData(["projects"], [{ id: null, name: "Work" }]);
+      client.setQueryData(["project-config", "Work"], { workspace: "/other", icon: "📁" });
+      const { result, unmount } = renderHook(() => useUpdateProjectConfig(), { wrapper });
+      act(() =>
+        result.current.mutate({
+          id: null,
+          name: "Work",
+          config: { workspace: "/new" },
+          fields: ["workspace"],
+        }),
+      );
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(promotionFails ? 1 : 2));
+      expect(client.getQueryData(["project-config", "legacy", "Work"])).toEqual({
+        workspace: "/new",
+      });
+      if (!promotionFails)
+        expect(client.getQueryData(["project-config", "work"])).toEqual({ workspace: "/new" });
+      unmount();
+      act(() => reject(new Error("offline")));
+      await waitFor(() => expect(client.isMutating()).toBe(0));
+      expect(client.getQueryData(["projects"])).toEqual([
+        { id: promotionFails ? null : "work", name: "Work" },
+      ]);
+      expect(client.getQueryData(["project-config", "work"])).toEqual(
+        promotionFails ? undefined : {},
+      );
+      expect(client.getQueryData(["project-config", "Work"])).toEqual({
+        workspace: "/other",
+        icon: "📁",
+      });
+      expect(client.getQueryState(["project-config", "legacy", "Work"])).toBeUndefined();
+    },
+  );
 
   it("keeps successful project archives completed when another member fails", async () => {
     vi.spyOn(toast, "error");

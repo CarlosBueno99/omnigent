@@ -82,11 +82,12 @@ describe("saving project order", () => {
         projects[1],
         { id: "c", name: "C" },
       ]);
+      expect(showToast).not.toHaveBeenCalled();
       act(() => writes[1].reject(new Error("offline")));
       await waitFor(() => expect(result.current.isError).toBe(true));
       expect(client.getQueryData(["projects"])).toEqual(
         firstFails
-          ? [renamed, projects[1], { id: "c", name: "C" }]
+          ? [projects[1], { id: "c", name: "C" }, renamed]
           : [projects[1], renamed, { id: "c", name: "C" }],
       );
       expect(client.getQueryData(["project-order"])).toEqual(
@@ -97,18 +98,89 @@ describe("saving project order", () => {
     },
   );
 
-  it("promotes legacy folders while preserving the intended order", async () => {
-    vi.mocked(resolveOrCreateProjectId).mockResolvedValue("legacy-id");
-    vi.mocked(saveProjectOrder).mockResolvedValue({
-      ordered_project_ids: ["legacy-id", "a"],
-      sort_mode: "manual",
-    });
-    const { result } = setup();
-    act(() => result.current.mutate([{ id: null, name: "Legacy" }, projects[0]]));
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(resolveOrCreateProjectId).toHaveBeenCalledWith("Legacy");
-    expect(saveProjectOrder).toHaveBeenCalledWith(["legacy-id", "a"]);
-  });
+  it.each([false, true])(
+    "promotes only surviving legacy folders (deleting: %s)",
+    async (deleting) => {
+      vi.mocked(resolveOrCreateProjectId).mockResolvedValue("legacy-id");
+      vi.mocked(saveProjectOrder).mockResolvedValue({
+        ordered_project_ids: ["legacy-id", "a"],
+        sort_mode: "manual",
+      });
+      const { result, client } = setup();
+      const order = [{ id: null, name: "Legacy" }, projects[0]];
+      client.setQueryData(
+        ["projects"],
+        [{ ...order[0], pending: deleting ? "Deleting" : undefined }, projects[0]],
+      );
+      act(() => result.current.mutate(order));
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      if (deleting) expect(resolveOrCreateProjectId).not.toHaveBeenCalled();
+      else expect(resolveOrCreateProjectId).toHaveBeenCalledWith("Legacy");
+      expect(saveProjectOrder).toHaveBeenCalledWith(deleting ? ["a"] : ["legacy-id", "a"]);
+    },
+  );
+
+  it.each([false, true])(
+    "rechecks queued projects before promotion (deletion finished: %s)",
+    async (deleted) => {
+      let finish!: (value: Awaited<ReturnType<typeof saveProjectOrder>>) => void;
+      vi.mocked(saveProjectOrder)
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+        )
+        .mockResolvedValueOnce({ sort_mode: "manual", ordered_project_ids: ["b", "a"] });
+      const { result, client } = setup();
+      const legacy = { id: null, name: "Legacy" };
+      client.setQueryData(["projects"], [...projects, legacy]);
+      act(() => result.current.mutate(null));
+      await waitFor(() => expect(saveProjectOrder).toHaveBeenCalledOnce());
+      act(() => result.current.mutate([legacy, ...[...projects].reverse()]));
+      await waitFor(() =>
+        expect(client.getQueryData(["projects"])).toEqual([legacy, ...[...projects].reverse()]),
+      );
+      client.setQueryData(
+        ["projects"],
+        [
+          { id: "replacement", name: "A" },
+          { ...projects[0], name: "Renamed" },
+          projects[1],
+          ...(deleted ? [] : [{ ...legacy, pending: "Deleting" }]),
+        ],
+      );
+      act(() => finish({ sort_mode: "alphabetical", ordered_project_ids: null }));
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      expect(resolveOrCreateProjectId).not.toHaveBeenCalled();
+      expect(saveProjectOrder).toHaveBeenLastCalledWith(["b", "a"]);
+    },
+  );
+
+  it.each(["alphabetical", "manual"] as const)(
+    "restores %s after an uncached save fails",
+    async (sort_mode) => {
+      let fail!: (error: Error) => void;
+      vi.mocked(saveProjectOrder).mockReturnValueOnce(
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+      );
+      const { result, client } = setup();
+      client.removeQueries({ queryKey: ["projects"] });
+      const preference = { sort_mode, ordered_project_ids: ["b", "a"] };
+      client.setQueryData(["project-order"], preference);
+      act(() => result.current.mutate(projects));
+      await waitFor(() => expect(saveProjectOrder).toHaveBeenCalledOnce());
+      client.setQueryData(["projects"], [...projects, { id: "c", name: "C" }].reverse());
+      act(() => fail(new Error("offline")));
+      await waitFor(() => expect(result.current.isError).toBe(true));
+      expect(client.getQueryData(["projects"])).toEqual([
+        ...(sort_mode === "manual" ? [...projects].reverse() : projects),
+        { id: "c", name: "C" },
+      ]);
+      expect(client.getQueryData(["project-order"])).toEqual(preference);
+    },
+  );
 
   it.each([false, true])(
     "resets without promoting folders (projects uncached: %s)",

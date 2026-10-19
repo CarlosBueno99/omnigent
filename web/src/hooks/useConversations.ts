@@ -56,7 +56,7 @@ import {
   readPinnedConversationIds,
   setLegacyPinnedConversationId,
 } from "@/shell/sidebarNav";
-import { apiErrorFromResponse, stopSession } from "@/lib/sessionsApi";
+import { ApiError, apiErrorFromResponse, stopSession } from "@/lib/sessionsApi";
 import { isStaleCursorError, useRestartOnStaleCursor } from "@/lib/staleCursor";
 import { sessionRoutingHostId, setSessionHost, setSessionParent } from "@/lib/sessionHost";
 import {
@@ -1568,7 +1568,7 @@ export function useBulkStopSessions() {
  * block the rest.
  */
 export function useBulkMoveToProject() {
-  const move = useMoveToProject();
+  const move = useMoveToProject({ silent: true });
   const mutation = useMutation({
     mutationFn: async ({ ids, project }: { ids: string[]; project: string }) => {
       const results = await Promise.allSettled(ids.map((id) => move.mutateAsync({ id, project })));
@@ -2444,7 +2444,7 @@ function overlayProjectMembership(
  */
 const movingProjectSessions = new WeakMap<QueryClient, Set<string>>();
 
-export function useMoveToProject() {
+export function useMoveToProject({ silent = false } = {}) {
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -2520,7 +2520,7 @@ export function useMoveToProject() {
       return { row, projectName, folders };
     },
     onError: (error, { id }, previous) => {
-      if (!previous) toast.error("Couldn't move session", { description: error.message });
+      if (!silent) toast.error("Couldn't move session", { description: error.message });
       if (!previous?.row) return;
       const current = findCachedConversationRow(queryClient, id) ?? previous.row;
       const { [PROJECT_LABEL_KEY]: _project, ...labels } = current.labels;
@@ -2625,7 +2625,8 @@ async function fetchAllProjectSessionIds(project: string): Promise<string[]> {
     // cursor (`after`), so these awaits can't be parallelized.
     // eslint-disable-next-line no-await-in-loop
     const res = await authenticatedFetch(`/v1/sessions?${params.toString()}`);
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    // eslint-disable-next-line no-await-in-loop
+    if (!res.ok) throw await apiErrorFromResponse(res);
     // eslint-disable-next-line no-await-in-loop
     const page = (await res.json()) as ConversationsPage;
     for (const conv of page.data) ids.push(conv.id);
@@ -2724,6 +2725,15 @@ async function archiveAndUnfileConversation(id: string): Promise<Conversation> {
   return (await res.json()) as Conversation;
 }
 
+function projectRetryOptions(error: Error, accepted: boolean, retry: () => void) {
+  if (
+    !accepted ||
+    (error instanceof ApiError && error.status < 500 && ![408, 429].includes(error.status))
+  )
+    return {};
+  return { duration: Infinity, action: { label: "Retry", onClick: retry } };
+}
+
 /**
  * Delete a project: archive AND unfile every member session, then delete the
  * first-class `projects` row (when the folder has one). Sessions are never
@@ -2787,8 +2797,7 @@ export function useDeleteProject() {
           error instanceof BulkConversationMutationError
             ? `${error.succeeded.length} sessions archived; ${error.failed.length} failed. Retry to finish the remaining work.`
             : error.message,
-        duration: Infinity,
-        action: { label: "Retry", onClick: () => mutation.mutate(variables) },
+        ...projectRetryOptions(error, !!context, () => mutation.mutate(variables)),
       });
     },
     onSettled: () => {
@@ -2807,7 +2816,7 @@ export function useDeleteProject() {
 /**
  * Create an empty first-class project (`POST /v1/projects`). This is the
  * capability the label model can't express — a project with no members. The
- * server rejects duplicate names (409); a durable toast retains the draft for retry.
+ * server rejects duplicate names (409); transient errors retain the draft for retry.
  */
 export function useCreateProject() {
   const queryClient = useQueryClient();
@@ -2828,8 +2837,7 @@ export function useCreateProject() {
       if (context) replaceProjectSummary(queryClient, variables.name, context.previous);
       toast.error(`Couldn't create “${variables.name}”`, {
         description: error.message,
-        duration: Infinity,
-        action: { label: "Retry", onClick: () => mutation.mutate(variables) },
+        ...projectRetryOptions(error, !!context, () => mutation.mutate(variables)),
       });
     },
     onSettled: () => {
@@ -2993,28 +3001,24 @@ export function useRenameProject() {
           : `Couldn't rename “${variables.oldName}”`,
         {
           description: error.message,
-          duration: Infinity,
-          action: {
-            label: "Retry",
-            onClick: () => {
-              const name = partial
-                ? (queryClient
-                    .getQueryData<ProjectSummary[]>(["projects"])
-                    ?.find((item) => item.id === partial.projectId)?.name ?? variables.newName)
-                : variables.oldName;
-              mutation.mutate(
-                partial
-                  ? {
-                      ...variables,
-                      id: partial.projectId,
-                      oldName: name,
-                      newName: name,
-                      memberProjectName: variables.memberProjectName ?? variables.oldName,
-                    }
-                  : variables,
-              );
-            },
-          },
+          ...projectRetryOptions(partial?.failure ?? error, !!context, () => {
+            const name = partial
+              ? (queryClient
+                  .getQueryData<ProjectSummary[]>(["projects"])
+                  ?.find((item) => item.id === partial.projectId)?.name ?? variables.newName)
+              : variables.oldName;
+            mutation.mutate(
+              partial
+                ? {
+                    ...variables,
+                    id: partial.projectId,
+                    oldName: name,
+                    newName: name,
+                    memberProjectName: variables.memberProjectName ?? variables.oldName,
+                  }
+                : variables,
+            );
+          }),
         },
       );
     },
@@ -3080,16 +3084,18 @@ export function useUpdateProjectConfig() {
         .getQueryData<ProjectSummary[]>(["projects"])
         ?.find((item) => item.name === name);
       if (summary) replaceProjectSummary(queryClient, name, { ...summary, id: projectId });
-      const pendingConfig = queryClient.getQueryData<ProjectConfig>([
-        "project-config",
-        cachedId ?? name,
-      ]);
+      const pendingConfig = queryClient.getQueryData<ProjectConfig>(
+        cachedId ? ["project-config", cachedId] : ["project-config", "legacy", name],
+      );
       queryClient.setQueryData(["project-config", projectId], pendingConfig ?? config);
       return apiUpdateProjectConfig(projectId, pendingConfig ?? config);
     },
     onMutate: async ({ id, name, config, fields }) => {
       const context = await beginProjectWrite(queryClient, name, { pending: "Saving" });
-      const configKey = ["project-config", id ?? context.previous?.id ?? name];
+      const projectId = id ?? context.previous?.id;
+      const configKey = projectId
+        ? ["project-config", projectId]
+        : ["project-config", "legacy", name];
       await queryClient.cancelQueries({ queryKey: configKey });
       const previousConfig = queryClient.getQueryData<ProjectConfig>(configKey);
       const next = fields
@@ -3128,11 +3134,12 @@ export function useUpdateProjectConfig() {
       }
       toast.error(`Couldn't save settings for “${variables.name}”`, {
         description: error.message,
-        duration: Infinity,
-        action: { label: "Retry", onClick: () => mutation.mutate(variables) },
+        ...projectRetryOptions(error, !!context, () => mutation.mutate(variables)),
       });
     },
-    onSettled: () => {
+    onSettled: (_data, _error, _variables, context) => {
+      if (context?.configKey.length === 3)
+        queryClient.removeQueries({ queryKey: context.configKey, exact: true });
       void queryClient.invalidateQueries({ queryKey: ["project-config"] });
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
     },
