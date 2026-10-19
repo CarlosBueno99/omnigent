@@ -11549,6 +11549,15 @@ def _wrap_phrase(pane: str, phrase: str, wrapped: str) -> str:
             _wrap_phrase(_PRESS_ENTER_NOTICE_PANE, "Esc to cancel", "Esc to\n  cancel"),
             "Welcome to Claude Code 2.1",
         ),
+        # Any keypress hint in the footer qualifies, not only the first one.
+        (
+            _wrap_phrase(
+                _PRESS_ENTER_NOTICE_PANE,
+                "Press Enter to continue · Esc to cancel",
+                "Esc to exit · Press Enter to continue",
+            ),
+            "Welcome to Claude Code 2.1",
+        ),
     ],
     ids=[
         "mcp-single",
@@ -11558,6 +11567,7 @@ def _wrap_phrase(pane: str, phrase: str, wrapped: str) -> str:
         "folder-trust",
         "press-enter",
         "press-enter-wrapped-footer",
+        "press-enter-after-esc-hint",
     ],
 )
 def test_terminal_dialog_headline_names_startup_dialogs(pane: str, headline: str) -> None:

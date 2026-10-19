@@ -5692,24 +5692,24 @@ def _user_prompt_visible(pane: str) -> bool:
         return False
     lines = [line for line in pane.splitlines() if line.strip()]
     rules = [i for i, line in enumerate(lines) if _is_box_rule(line)]
-    # The body stays newline-joined so transcript below the box cannot cross-
-    # match a dialog phrase; only the footer tail below the last rule is
-    # collapsed, since a narrow pane wraps "Enter to … · Esc to …" across rows.
-    if len(rules) >= 2:
-        body = "\n".join(lines[rules[-2] + 1 : rules[-1]])
-        footer = _collapse_whitespace(lines[rules[-1] + 1 :])
-    else:
-        body = "\n".join(lines)
-        footer = ""
+    region = "\n".join(lines[rules[-2] + 1 :] if len(rules) >= 2 else lines)
+    # A narrow pane wraps the footer ("Esc to" / "cancel"). Only the rows below
+    # the last rule are joined, so wrapped transcript text can't form a phrase.
+    footer = _collapse_whitespace(lines[rules[-1] + 1 :]) if rules else ""
     return (
         _auto_mode_billing_prompt_matches(pane, _AUTO_MODE_BILLING_CONSENT)
-        or "Do you want to " in body
-        or "Yes, and don't ask again" in body
-        or (
-            any(hint in footer for hint in ("Enter to select", "Enter to submit"))
-            and "Esc to cancel" in footer
-        )
+        or "Do you want to " in region
+        or "Yes, and don't ask again" in region
+        or any(_select_footer_shown(text) for text in (region, footer))
         or _plan_approval_dialog_visible(lines, rules)
+    )
+
+
+def _select_footer_shown(text: str) -> bool:
+    """Whether *text* carries a selection dialog's "Enter to … · Esc to cancel" hints."""
+    return (
+        any(hint in text for hint in ("Enter to select", "Enter to submit"))
+        and "Esc to cancel" in text
     )
 
 
@@ -6303,12 +6303,11 @@ def _terminal_dialog_headline(pane: str) -> str | None:
     lines = [line for line in pane.splitlines() if line.strip()]
     last_rule = max((i for i, line in enumerate(lines) if _is_box_rule(line)), default=None)
     if last_rule is not None:
-        # A narrow pane wraps the footer below the last rule, so collapse line
-        # breaks and keep only the matched footer phrase: a trailing "press
-        # enter" elsewhere in the region must not loosen the check below.
+        # Collapse wrapped footer rows and keep only the matched hints, so other
+        # "press enter" text in the region can't qualify a selector-less notice.
         region = lines[last_rule + 1 :]
-        footer_match = _DIALOG_FOOTER_RE.search(_collapse_whitespace(region))
-        footer = footer_match.group(0) if footer_match is not None else None
+        hints = _DIALOG_FOOTER_RE.finditer(_collapse_whitespace(region))
+        footer = " · ".join(hint.group(0) for hint in hints) or None
     else:
         # No framing rule: this is the bare transcript tail. Match the footer
         # within a single line, or wrapped output quoting a footer phrase could

@@ -107,7 +107,32 @@ _PERMISSION = """\
 │   3. No, and tell Claude what to do differently (esc)      │
 ╰──────────────────────────────────────────────────────────╯
 """
+# A permission prompt whose question sits below a framed preview (an edit's
+# diff between dashed rules), so the last two rules enclose only the preview.
+_PERMISSION_BELOW_PREVIEW = """\
+────────────────────────────────────────────────────────────────────────────────
+ Edit file
+ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  1 -    return 1
+  1 +    return 2
+ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to make this edit to parser.py?
+ ❯ 1. Yes
+   2. Yes, allow all edits during this session (shift+tab)
+   3. No, and tell Claude what to do differently (esc)
+"""
 _COMPOSER = "\n──────────────────────────────\n❯\n──────────────────────────────\n"
+
+
+def _opening_rule_scrolled_off(pane: str) -> str:
+    """Return *pane* as a short terminal shows it, cut below the dialog's opening rule."""
+    lines = pane.splitlines(keepends=True)
+    opening = next(index for index, line in enumerate(lines) if line.startswith("─"))
+    return "".join(lines[opening + 1 :])
+
+
+_QUESTION_SHORT_PANE = _opening_rule_scrolled_off(_QUESTION)
+_QUESTION_SHORT_NARROW_PANE = _opening_rule_scrolled_off(_QUESTION_NARROW_PANE)
 
 
 @pytest.fixture
@@ -146,9 +171,23 @@ def test_live_hook_protects_a_prompt_even_during_a_torn_capture(
         _QUESTION,
         _QUESTION.replace("Enter to select", "Space to select · Enter to submit"),
         _QUESTION_NARROW_PANE,
+        _QUESTION_SHORT_PANE,
+        _QUESTION_SHORT_NARROW_PANE,
         _PERMISSION,
+        _PERMISSION_BELOW_PREVIEW,
         _PLAN_APPROVAL,
         _PLAN_APPROVAL_EXIT_PLAN_MODE,
+    ],
+    ids=[
+        "question",
+        "question-enter-to-submit",
+        "question-narrow",
+        "question-short",
+        "question-short-narrow",
+        "permission",
+        "permission-below-preview",
+        "plan-approval",
+        "exit-plan-mode",
     ],
 )
 @pytest.mark.parametrize("operation", ["message", "settings"])
@@ -195,44 +234,29 @@ def test_plan_dialog_words_in_the_transcript_are_not_a_plan_dialog(
     assert not bridge.has_pending_user_prompt(native_bridge)
 
 
-# Unframed transcript where a decision phrase or footer only wraps across rows.
-# Collapsing whole-pane whitespace would cross-match it as a live prompt.
+# Transcript where a decision phrase or footer only wraps across rows, unframed
+# or below a finished tool-output box. Neither is a live prompt.
 _DECISION_PHRASE_WRAPPED_IN_TRANSCRIPT = (
     "● I can set that up. Do you want\nto configure the deploy target now?\n",
     "● The picker that opens next uses Enter to\nselect an option and Esc to\ncancel.\n",
+    "╭──────────────────────────────╮\n"
+    "│ Running pytest -q             │\n"
+    "╰──────────────────────────────╯\n"
+    "● Next I will set things up. Do you want\n"
+    "to configure the deploy target now?\n",
 )
 
 
 @pytest.mark.parametrize(
     "transcript",
     _DECISION_PHRASE_WRAPPED_IN_TRANSCRIPT,
-    ids=["do-you-want-to", "enter-to-select-esc-to-cancel"],
+    ids=["do-you-want-to", "enter-to-select-esc-to-cancel", "below-a-tool-box"],
 )
 def test_decision_phrase_wrapping_in_the_transcript_is_not_a_prompt(
     native_bridge: Path, monkeypatch: pytest.MonkeyPatch, transcript: str
 ) -> None:
-    """Without a dialog frame, a phrase that only wraps across rows is not a prompt."""
+    """A phrase that only wraps across transcript rows is not a prompt."""
     monkeypatch.setattr(bridge, "_capture_pane", lambda *_: transcript)
-    assert not bridge.has_pending_user_prompt(native_bridge)
-
-
-# A finished tool-output box (two rules) with assistant text wrapping a decision
-# phrase below it. The phrase sits past the closing rule, so framing rules above
-# must not let it read as a live dialog.
-_WRAPPED_DECISION_BELOW_TOOL_BOX = (
-    "╭──────────────────────────────╮\n"
-    "│ Running pytest -q             │\n"
-    "╰──────────────────────────────╯\n"
-    "● Next I will set things up. Do you want\n"
-    "to configure the deploy target now?\n"
-)
-
-
-def test_wrapped_decision_phrase_below_a_tool_box_is_not_a_prompt(
-    native_bridge: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A phrase wrapping below a framed tool box is transcript, not a dialog."""
-    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: _WRAPPED_DECISION_BELOW_TOOL_BOX)
     assert not bridge.has_pending_user_prompt(native_bridge)
 
 
@@ -276,8 +300,18 @@ def test_question_appearing_after_readiness_prevents_paste(
     [
         _QUESTION,
         _QUESTION_NARROW_PANE,
+        _QUESTION_SHORT_PANE,
+        _QUESTION_SHORT_NARROW_PANE,
         _PLAN_APPROVAL,
         _PLAN_APPROVAL_EXIT_PLAN_MODE,
+    ],
+    ids=[
+        "question",
+        "question-narrow",
+        "question-short",
+        "question-short-narrow",
+        "plan-approval",
+        "exit-plan-mode",
     ],
 )
 def test_question_appearing_during_readiness_does_not_become_a_terminal_timeout(
