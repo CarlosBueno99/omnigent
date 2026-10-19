@@ -11,6 +11,7 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from tests._helpers.polling import poll_until
+from tests.e2e.conftest import get_mock_requests
 from tests.e2e_ui.chat.test_always_steer import _record_message_posts, _wait_for
 from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm, set_fallback_mock_llm
 from tests.e2e_ui.messages.test_message_render_parity import (
@@ -38,8 +39,7 @@ def _session_status(base_url: str, session_id: str) -> str | None:
 
 
 def _model_requests_containing(mock_url: str, text: str) -> int:
-    requests = httpx.get(f"{mock_url}/mock/requests", timeout=10.0).json()["requests"]
-    return sum(1 for body in requests if text in json.dumps(body))
+    return sum(1 for body in get_mock_requests(mock_url) if text in json.dumps(body))
 
 
 @pytest.mark.nightly
