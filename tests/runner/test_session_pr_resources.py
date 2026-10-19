@@ -47,7 +47,18 @@ def test_explicit_repo_is_used_for_all_pr_reads(
     def gh(args: list[str], **_kwargs: object) -> tuple[int, str, str]:
         calls.append(args)
         if args[:2] == ["pr", "view"]:
-            return 0, json.dumps({"number": 42, "title": "Second repository", "state": "OPEN"}), ""
+            return (
+                0,
+                json.dumps(
+                    {
+                        "number": 42,
+                        "title": "Second repository",
+                        "state": "OPEN",
+                        "headRepository": {"nameWithOwner": "fork/two"},
+                    }
+                ),
+                "",
+            )
         if args[:2] == ["pr", "diff"]:
             return 0, "second-repo-patch", ""
         return 0, json.dumps([{"filename": "second.py", "status": "added"}]), ""
@@ -60,6 +71,7 @@ def test_explicit_repo_is_used_for_all_pr_reads(
     monkeypatch.setattr(pr_resource, "_git_output", forbidden_git)
     info = github.github_info(tracked, session_id="session", pr_url=B)
     assert info["pr"]["title"] == "Second repository"
+    assert info["pr"]["head_repository_url"] == "https://github.com/fork/two"
     assert {pr["url"] for pr in info["prs"]} == {A, B}
     assert (
         github.github_changed_files(tracked, session_id="session", pr_url=B)["data"][0]["path"]
@@ -92,7 +104,7 @@ def test_titles_include_unselected_prs_and_are_cached_between_polls(
         B: "Second",
     }
     assert [call[-1] for call in calls] == [
-        github._PR_VIEW_FIELDS + ",headRefOid,baseRefOid",
+        github._PR_VIEW_FIELDS + ",headRefOid,baseRefOid,headRepository",
         "title",
     ]
     registry = SessionPrRegistry("session")

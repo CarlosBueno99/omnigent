@@ -276,6 +276,16 @@ def _pr_payload(
     }
     refs = _object(mr.get("diff_refs"))
     author = _object(mr.get("author"))
+    source_project = mr.get("source_project_id")
+    head_repository_url = None
+    if isinstance(source_project, int):
+        if source_project == mr.get("target_project_id"):
+            head_repository_url = f"https://{ref.host}/{ref.repository}"
+        else:
+            try:
+                head_repository_url = client.object(f"projects/{source_project}").get("web_url")
+            except ValueError:
+                warnings.append("GitLab source project is unavailable; file links are hidden.")
     return {
         "number": ref.number,
         "url": ref.url,
@@ -287,6 +297,7 @@ def _pr_payload(
         "base_ref": mr.get("target_branch"),
         "head_ref": mr.get("source_branch"),
         "head_sha": refs.get("head_sha") or mr.get("sha"),
+        "head_repository_url": head_repository_url,
         "base_sha": refs.get("base_sha"),
         "body": mr.get("description"),
         "comments": comments,

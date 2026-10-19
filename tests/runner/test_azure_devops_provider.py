@@ -365,6 +365,7 @@ def test_workspace_info_shows_the_branch_pr_without_legacy_fields(
         "base_ref": "main",
         "head_ref": "feature",
         "head_sha": HEAD,
+        "head_repository_url": "https://dev.azure.com/contoso/web/_git/app",
         "base_sha": BASE,
         "checks": NO_CHECKS,
         "body": "## Summary\n\nAdds CI.",

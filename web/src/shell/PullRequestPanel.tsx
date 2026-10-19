@@ -28,6 +28,16 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled } from "@/lib/capabilities";
 import { useSession } from "@/hooks/useSession";
 import { isEditorLevel } from "@/lib/permissionsApi";
+import { useViewerId } from "@/hooks/useViewerId";
+import { copyText } from "@/lib/clipboard";
+import { toast } from "sonner";
+import {
+  patchLines,
+  prLocalKey,
+  readViewedFiles,
+  pullRequestFileUrl,
+  type PatchLine,
+} from "./pullRequestReview";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -408,6 +418,8 @@ function PullRequestFileSection({
   registerRef,
   collapsed,
   onToggleCollapsed,
+  actions,
+  match,
 }: {
   file: PullRequestChangedFile;
   /** Parsed per-file diff from the whole-PR patch; absent for binary/unparsed. */
@@ -417,10 +429,16 @@ function PullRequestFileSection({
   /** Whether this file's diff is hidden. Lifted so the toolbar can drive all. */
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  actions?: React.ReactNode;
+  match?: PatchLine;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [seen, setSeen] = useState(false);
   const [showLargeDiff, setShowLargeDiff] = useState(false);
+  const scrollToMatch = useCallback(
+    (node: HTMLElement | null) => node?.scrollIntoView({ block: "center" }),
+    [],
+  );
 
   useEffect(() => {
     registerRef(file.path, ref.current);
@@ -452,42 +470,48 @@ function PullRequestFileSection({
 
   return (
     <div ref={ref} data-github-file={file.path}>
-      <button
-        type="button"
-        onClick={onToggleCollapsed}
-        aria-expanded={!collapsed}
-        title={renamedFrom ? `${renamedFrom} → ${file.path}` : file.path}
-        className="group sticky top-0 z-10 flex w-full cursor-pointer items-center gap-2 border-b border-border bg-secondary px-3 py-1.5 text-left dark:bg-muted"
-      >
-        <ToggleIcon
-          aria-hidden="true"
-          className="size-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
-        />
-        <StatusIcon aria-hidden className={cn("size-3.5 shrink-0", meta.className)} />
-        <span className="min-w-0 flex-1 truncate text-ui">
-          {renamedFrom ? (
-            <>
-              <span className="text-muted-foreground">{renamedFrom}</span>
-              <span className="text-muted-foreground"> → </span>
-              <span className="font-medium">{file.path}</span>
-            </>
-          ) : (
-            <>
-              {dir && <span className="text-muted-foreground">{dir}</span>}
-              <span className="font-medium">{name}</span>
-            </>
-          )}
-        </span>
-        <DiffStat file={file} />
-      </button>
+      <div className="sticky top-0 z-10 flex flex-wrap items-center border-b border-border bg-secondary dark:bg-muted">
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          aria-expanded={!collapsed}
+          title={renamedFrom ? `${renamedFrom} → ${file.path}` : file.path}
+          className="group flex min-w-0 flex-1 basis-40 cursor-pointer items-center gap-2 px-3 py-1.5 text-left"
+        >
+          <ToggleIcon
+            aria-hidden="true"
+            className="size-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
+          />
+          <StatusIcon aria-hidden className={cn("size-3.5 shrink-0", meta.className)} />
+          <span className="min-w-0 flex-1 truncate text-ui">
+            {renamedFrom ? (
+              <>
+                <span className="text-muted-foreground">{renamedFrom}</span>
+                <span className="text-muted-foreground"> → </span>
+                <span className="font-medium">{file.path}</span>
+              </>
+            ) : (
+              <>
+                {dir && <span className="text-muted-foreground">{dir}</span>}
+                <span className="font-medium">{name}</span>
+              </>
+            )}
+          </span>
+          <DiffStat file={file} />
+        </button>
+        {actions}
+      </div>
       {collapsed ? null : pureRename ? (
         <div className="p-4 text-ui text-muted-foreground">File renamed without changes.</div>
-      ) : !seen ? (
+      ) : !seen && !match ? (
         <div className="flex items-center justify-center gap-2 p-6 text-ui text-muted-foreground">
           <Loader2Icon className="size-4 animate-spin" />
           Loading diff…
         </div>
-      ) : fileDiff && fileDiff.unifiedLineCount > LARGE_DIFF_THRESHOLD && !showLargeDiff ? (
+      ) : fileDiff &&
+        fileDiff.unifiedLineCount > LARGE_DIFF_THRESHOLD &&
+        !showLargeDiff &&
+        !match ? (
         <div className="flex items-center gap-3 p-4 text-ui text-muted-foreground">
           Large diff — {fileDiff.unifiedLineCount.toLocaleString()} lines
           <button
@@ -499,7 +523,24 @@ function PullRequestFileSection({
           </button>
         </div>
       ) : fileDiff ? (
-        <FileDiff fileDiff={fileDiff} options={options} disableWorkerPool />
+        <FileDiff
+          fileDiff={fileDiff}
+          options={options}
+          disableWorkerPool
+          selectedLines={match ? { start: match.line, end: match.line, side: match.side } : null}
+          lineAnnotations={
+            match ? [{ lineNumber: match.line, side: match.side, metadata: undefined }] : undefined
+          }
+          renderAnnotation={() => (
+            <mark
+              key={`${match?.side}:${match?.line}`}
+              ref={scrollToMatch}
+              className="block px-2 text-xs"
+            >
+              Search match: {match?.text}
+            </mark>
+          )}
+        />
       ) : (
         <div className="p-4 text-ui text-muted-foreground">
           No text diff available for this file.
@@ -1394,6 +1435,30 @@ function PullRequestPanelDetails({
   const hasPr = !!info.data?.pr;
   const changes = usePullRequestChangedFiles(conversationId, hasPr, prUrl, revision);
   const prDiff = usePullRequestDiff(conversationId, hasPr, prUrl, revision);
+  const managed = isFeatureEnabled(useServerInfo(), "pull_request_management");
+  const viewer = useViewerId();
+  const viewedKey = managed && headSha ? prLocalKey("viewed", viewer, prUrl, headSha) : null;
+  const [viewed, setViewed] = useState(() => ({
+    key: viewedKey,
+    paths: readViewedFiles(viewedKey),
+  }));
+  const viewedPaths = viewed.key === viewedKey ? viewed.paths : readViewedFiles(viewedKey);
+  const [hideViewed, setHideViewed] = useState(false);
+  const [pathFilter, setPathFilter] = useState("");
+  const [search, setSearch] = useState("");
+  const [matchIndex, setMatchIndex] = useState(0);
+  const toggleViewed = (path: string) => {
+    if (!viewedKey) return;
+    const paths = new Set(viewedPaths);
+    if (paths.has(path)) paths.delete(path);
+    else paths.add(path);
+    setViewed({ key: viewedKey, paths });
+    try {
+      localStorage.setItem(viewedKey, JSON.stringify([...paths]));
+    } catch {
+      toast.error("Viewed files could not be saved on this device.");
+    }
+  };
 
   // Summary (checks + PR body), Comments, and Changes (the stacked diff).
   // Summary is the landing tab — like GitHub's PR page opening on the
@@ -1417,7 +1482,14 @@ function PullRequestPanelDetails({
   const files = useMemo<PullRequestChangedFile[]>(() => changes.data?.data ?? [], [changes.data]);
   // The sidebar groups the flat file list into a compacted folder tree (the
   // diff scroll below stays linear, in file order).
-  const fileTree = useMemo(() => buildSidebarTree(files), [files]);
+  const visibleFiles = managed
+    ? files.filter(
+        (file) =>
+          file.path.toLowerCase().includes(pathFilter.toLowerCase()) &&
+          (!hideViewed || !viewedPaths.has(file.path)),
+      )
+    : files;
+  const fileTree = buildSidebarTree(visibleFiles);
 
   // Per-file collapse is lifted here so the toolbar's "expand/collapse all" can
   // drive every section; a path in the set is collapsed.
@@ -1476,6 +1548,18 @@ function PullRequestPanelDetails({
     }
     return { filesByPath: map, parseError: undefined };
   }, [prDiff.data]);
+  const searchableLines = useMemo(
+    () => (managed ? patchLines(filesByPath.values()) : []),
+    [managed, filesByPath],
+  );
+  const matches = useMemo(
+    () =>
+      search
+        ? searchableLines.filter((line) => line.text.toLowerCase().includes(search.toLowerCase()))
+        : [],
+    [searchableLines, search],
+  );
+  const match = matches.length ? matches[matchIndex % matches.length] : undefined;
 
   // Expand-context loader: fetch a file's full old/new content on demand when
   // the reader expands unchanged regions.
@@ -1795,6 +1879,79 @@ function PullRequestPanelDetails({
         {/* Changes: a controls row, then the sidebar (jump-to-file) + one scroll
             of all files' diffs. */}
         <TabsContent value="changes" className="flex min-h-0 flex-1 flex-col">
+          {managed && (
+            <div className="space-y-2 border-b border-border p-2 text-xs">
+              <Input
+                type="search"
+                aria-label="Filter changed file paths"
+                placeholder="Filter file paths…"
+                value={pathFilter}
+                onChange={(event) => setPathFilter(event.target.value)}
+              />
+              <div className="flex items-center gap-1">
+                <Input
+                  type="search"
+                  aria-label="Find in fetched patch"
+                  placeholder="Find in fetched patch…"
+                  value={search}
+                  onChange={(event) => {
+                    setSearch(event.target.value);
+                    setMatchIndex(0);
+                    setPathFilter("");
+                    setHideViewed(false);
+                  }}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!matches.length}
+                  aria-label="Previous patch match"
+                  onClick={() => {
+                    setMatchIndex((matchIndex + matches.length - 1) % matches.length);
+                    setPathFilter("");
+                    setHideViewed(false);
+                  }}
+                >
+                  ↑
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!matches.length}
+                  aria-label="Next patch match"
+                  onClick={() => {
+                    setMatchIndex((matchIndex + 1) % matches.length);
+                    setPathFilter("");
+                    setHideViewed(false);
+                  }}
+                >
+                  ↓
+                </Button>
+              </div>
+              {search && (
+                <p role="status">
+                  {matches.length
+                    ? `${(matchIndex % matches.length) + 1} of ${matches.length} matching lines`
+                    : "No matches in the fetched patch"}
+                  {match && ` · ${match.path}:${match.line}`}
+                </p>
+              )}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span>
+                  {files.filter((file) => viewedPaths.has(file.path)).length}/{files.length} files
+                  viewed
+                </span>
+                <label className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={hideViewed}
+                    onChange={(event) => setHideViewed(event.target.checked)}
+                  />
+                  Hide viewed files
+                </label>
+              </div>
+            </div>
+          )}
           {(changes.data?.has_more || changes.data?.warning) && (
             <p
               role="status"
@@ -1920,16 +2077,60 @@ function PullRequestPanelDetails({
                     "No changes vs base."
                   )}
                 </PanelMessage>
+              ) : visibleFiles.length === 0 ? (
+                <PanelMessage>No files match the current filters.</PanelMessage>
               ) : (
-                files.map((file) => (
+                visibleFiles.map((file) => (
                   <PullRequestFileSection
                     key={file.path}
                     file={file}
                     fileDiff={filesByPath.get(file.path)}
                     options={diffOptions}
                     registerRef={registerRef}
-                    collapsed={collapsedPaths.has(file.path)}
+                    collapsed={match?.path === file.path ? false : collapsedPaths.has(file.path)}
                     onToggleCollapsed={() => toggleOne(file.path)}
+                    match={match?.path === file.path ? match : undefined}
+                    actions={
+                      managed && (
+                        <div className="flex shrink-0 items-center gap-1 pr-2">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            aria-label={`Copy path ${file.path}`}
+                            onClick={() =>
+                              void copyText(file.path).then(
+                                () => toast.success("Path copied"),
+                                () => toast.error("Could not copy path"),
+                              )
+                            }
+                          >
+                            Copy
+                          </Button>
+                          {file.status !== "deleted" &&
+                            pullRequestFileUrl(pr, data.provider, file.path) && (
+                              <a
+                                className="text-xs underline"
+                                href={pullRequestFileUrl(pr, data.provider, file.path)}
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label={`Open ${file.path} at this revision`}
+                              >
+                                Open
+                              </a>
+                            )}
+                          <label className="flex items-center gap-1 text-xs">
+                            <input
+                              type="checkbox"
+                              aria-label={`Viewed ${file.path}`}
+                              disabled={!viewedKey}
+                              checked={viewedPaths.has(file.path)}
+                              onChange={() => toggleViewed(file.path)}
+                            />
+                            Viewed
+                          </label>
+                        </div>
+                      )
+                    }
                   />
                 ))
               )}

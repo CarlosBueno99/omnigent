@@ -96,6 +96,7 @@ export interface PullRequest {
    *  fine-grained personal access tokens), so `checks` is empty. Absent means supported. */
   checks_supported?: boolean;
   head_sha?: string;
+  head_repository_url?: string;
   base_sha?: string;
   /** PR description (GitHub-flavored markdown); null when empty. Optional: a
    *  host predating the Summary tab omits it, so treat undefined as none. */

@@ -82,8 +82,11 @@ vi.mock("@/hooks/usePullRequests", async (importOriginal) => ({
 // stubbed to yield the files configured on `state` (name + optional rename
 // metadata), matching the whole-PR patch.
 vi.mock("@pierre/diffs", () => ({
-  parsePatchFiles: vi.fn(() => [{ files: state.parsedFiles }]),
+  parsePatchFiles: vi.fn(() => [
+    { files: state.parsedFiles.map((entry) => ({ ...entry, hunks: [] })) },
+  ]),
 }));
+vi.mock("@/hooks/useViewerId", () => ({ useViewerId: () => "reviewer" }));
 vi.mock("@pierre/diffs/react", () => ({
   FileDiff: ({ fileDiff }: { fileDiff: { name: string } }) => (
     <div data-testid="diff" data-path={fileDiff.name} />

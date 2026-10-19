@@ -91,6 +91,8 @@ def api(monkeypatch: pytest.MonkeyPatch, mr: dict, change: dict) -> Mock:
     api = Mock(spec=GitLabClient)
 
     def object_response(path: str, **query):
+        if path == "projects/20":
+            return {"id": 20, "web_url": "https://gitlab.com/fork/sub/project"}
         if path == "projects/fork%2Fsub%2Fproject":
             return {"id": 20, "forked_from_project": {"web_url": mr["web_url"].split("/-/")[0]}}
         if "/repository/files/" in path:
@@ -165,6 +167,7 @@ def test_workspace_fork_mr_keeps_target_identity_and_details(root: str, api: Moc
     pr = info["pr"]
     assert pr["number"] == 7 and pr["state"] == "OPEN" and pr["is_draft"]
     assert (pr["head_sha"], pr["base_sha"]) == (HEAD, BASE)
+    assert pr["head_repository_url"] == "https://gitlab.com/fork/sub/project"
     assert pr["comments"] == [
         {
             "author": "reviewer",
@@ -180,10 +183,28 @@ def test_workspace_fork_mr_keeps_target_identity_and_details(root: str, api: Moc
     api.object.assert_any_call("projects/team%2Fsub%2Fproject/merge_requests/7")
 
 
+def test_deleted_fork_hides_file_links_without_hiding_mr(root: str, api: Mock) -> None:
+    original = api.object.side_effect
+
+    def response(path: str, **query):
+        if path == "projects/20":
+            raise ValueError("Source project was deleted")
+        return original(path, **query)
+
+    api.object.side_effect = response
+    info = module.PULL_REQUESTS.reference_info(root, ref())
+    assert info["pr"]["url"] == URL
+    assert info["pr"]["head_repository_url"] is None
+    assert any("file links are hidden" in warning for warning in info["warnings"])
+
+
 def test_explicit_reference_keeps_live_branch_and_uses_iid(root: str, api: Mock) -> None:
     info = module.PULL_REQUESTS.reference_info(root, ref())
     assert info["branch"] == "feature" and info["pr"]["number"] == 7
-    api.object.assert_called_once_with("projects/team%2Fsub%2Fproject/merge_requests/7")
+    assert [call.args[0] for call in api.object.call_args_list] == [
+        "projects/team%2Fsub%2Fproject/merge_requests/7",
+        "projects/20",
+    ]
 
 
 @pytest.mark.parametrize("remote_project", ["team/sub/project", "Team/Sub/Project"])
@@ -448,7 +469,10 @@ def test_explicit_reference_bypasses_unavailable_workspace_inference(
 ) -> None:
     info = module.PULL_REQUESTS.reference_info(root, ref())
     assert info["auth"]["authenticated"] and info["pr"]["url"] == URL and not info["warnings"]
-    api.object.assert_called_once_with("projects/team%2Fsub%2Fproject/merge_requests/7")
+    assert [call.args[0] for call in api.object.call_args_list] == [
+        "projects/team%2Fsub%2Fproject/merge_requests/7",
+        "projects/20",
+    ]
     assert module.PULL_REQUESTS.changed_files(root, ref())["data"][0]["path"] == "src/new.py"
     assert "@@" in module.PULL_REQUESTS.pr_diff(root, ref())["patch"]
     assert file_diff(root)["after"] == "new\n"

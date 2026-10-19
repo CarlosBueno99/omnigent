@@ -809,7 +809,7 @@ def _reference_info(root: str, reference: PullRequestRef) -> dict[str, Any]:
     info["selected_account"] = preferred or next(
         (a["login"] for a in info["accounts"] if a.get("active")), None
     )
-    data = _pr_json(root, reference, _PR_VIEW_FIELDS + ",headRefOid,baseRefOid")
+    data = _pr_json(root, reference, _PR_VIEW_FIELDS + ",headRefOid,baseRefOid,headRepository")
     if data is None:
         return info
     author = data.get("author")
@@ -826,6 +826,12 @@ def _reference_info(root: str, reference: PullRequestRef) -> dict[str, Any]:
         "base_ref": data.get("baseRefName"),
         "head_ref": data.get("headRefName"),
         "head_sha": data.get("headRefOid"),
+        "head_repository_url": (
+            f"https://{reference.host}/{data['headRepository']['nameWithOwner']}"
+            if isinstance(data.get("headRepository"), dict)
+            and data["headRepository"].get("nameWithOwner")
+            else None
+        ),
         "base_sha": data.get("baseRefOid"),
         **_checks_fields(data),
         "body": data.get("body") or None,

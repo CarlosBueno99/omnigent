@@ -264,6 +264,82 @@ def test_pr_diff_retry_keeps_associations(
     page.screenshot(path=str(tmp_path / f"pr-retry-{entry}-recovered.png"))
 
 
+def test_flagged_patch_search_and_viewed_files(
+    page: Page, seeded_session: tuple[str, str], tmp_path: Path
+) -> None:
+    base_url, session_id = seeded_session
+    revision = "head-one"
+    _stub_github(page)
+
+    def capabilities(route: Route) -> None:
+        response = fetch_with_retry(route)
+        data = response.json()
+        data["features"]["pull_request_management"] = True
+        route.fulfill(response=response, json=data)
+
+    def info(route: Route) -> None:
+        route.fulfill(
+            json={
+                **_INFO,
+                "provider": "github",
+                "selected_pr_url": _INFO["pr"]["url"],
+                "tracking_available": True,
+                "pr": {
+                    **_INFO["pr"],
+                    "head_sha": revision,
+                    "head_repository_url": "https://github.com/acme/app",
+                },
+            }
+        )
+
+    page.route("**/v1/info", capabilities)
+    page.route(re.compile(r"/resources/github(?:\?|$)"), info)
+    page.route(
+        re.compile(r"/resources/github/prs$"),
+        lambda route: route.fulfill(
+            json={
+                "prs": [
+                    {
+                        "url": _INFO["pr"]["url"],
+                        "number": _PR_NUMBER,
+                        "repository": "acme/app",
+                        "host": "example.com",
+                        "relationship": "attached",
+                    }
+                ]
+            }
+        ),
+    )
+    page.goto(f"{base_url}/c/{session_id}")
+    page.get_by_test_id("composer-pr-link").click()
+    panel = page.get_by_role("complementary", name="Workspace")
+    panel.get_by_role("tablist", name="Pull request").get_by_role("tab", name="Changes").click()
+    panel.get_by_role("searchbox", name="Filter changed file paths").fill("main.py")
+    expect(panel.locator('[data-github-file="README.md"]')).to_have_count(0)
+    panel.get_by_role("button", name="Collapse all diffs").click()
+    panel.get_by_role("searchbox", name="Find in fetched patch").fill("added line")
+    expect(panel.get_by_text("Search match: added line", exact=False)).to_be_visible()
+    expect(
+        panel.get_by_role("link", name="Open src/app/main.py at this revision")
+    ).to_have_attribute("href", "https://github.com/acme/app/blob/head-one/src/app/main.py")
+    panel.get_by_role("checkbox", name="Viewed src/app/main.py", exact=True).check()
+    expect(panel.get_by_text("1/2 files viewed")).to_be_visible()
+    page.screenshot(path=str(tmp_path / "pr-search-viewed.png"))
+    page.reload()
+    panel.get_by_role("tablist", name="Pull request").get_by_role("tab", name="Changes").click()
+    expect(
+        panel.get_by_role("checkbox", name="Viewed src/app/main.py", exact=True)
+    ).to_be_checked()
+    panel.get_by_role("checkbox", name="Hide viewed files").check()
+    expect(panel.locator('[data-github-file="src/app/main.py"]')).to_have_count(0)
+    revision = "head-two"
+    page.reload()
+    panel.get_by_role("tablist", name="Pull request").get_by_role("tab", name="Changes").click()
+    expect(
+        panel.get_by_role("checkbox", name="Viewed src/app/main.py", exact=True)
+    ).not_to_be_checked()
+
+
 @pytest.mark.parametrize(
     "viewport_width",
     [1280, pytest.param(390, marks=pytest.mark.browser_context_args(has_touch=True))],
