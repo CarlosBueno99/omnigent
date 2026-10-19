@@ -8678,12 +8678,26 @@ def test_bedrock_config_for_native_claude_resolves_auth_command() -> None:
     assert cfg is not None
     assert cfg.env["AWS_BEARER_TOKEN_BEDROCK"] == "minted-bedrock-token"
     assert cfg.api_key_helper is None
-    # The probe passes settings in argv, so the minted token stays env-only.
+    # The pinned endpoint and its bearer share one precedence level.
     settings_env = claude_native.build_native_claude_settings_env(cfg)
-    assert "AWS_BEARER_TOKEN_BEDROCK" not in settings_env
+    assert settings_env["AWS_BEARER_TOKEN_BEDROCK"] == "minted-bedrock-token"
     assert settings_env["ANTHROPIC_BEDROCK_BASE_URL"] == "https://gw.example/bedrock"
     assert settings_env["CLAUDE_CODE_USE_BEDROCK"] == "1"
     assert settings_env["ANTHROPIC_BASE_URL"] == ""
+
+
+def test_claude_settings_file_args_uses_a_removed_owner_only_file() -> None:
+    """Credential-bearing settings reach Claude Code through a private file."""
+    with claude_native.claude_settings_file_args({}) as empty_args:
+        assert empty_args == ()
+    with claude_native.claude_settings_file_args({"env": {"TOKEN": "secret"}}) as settings_args:
+        flag, path_text = settings_args
+        settings_path = Path(path_text)
+        assert flag == "--settings"
+        assert settings_path.stat().st_mode & 0o777 == 0o600
+        assert settings_path.parent.stat().st_mode & 0o777 == 0o700
+        assert json.loads(settings_path.read_text()) == {"env": {"TOKEN": "secret"}}
+    assert not settings_path.parent.exists()
 
 
 def test_bedrock_config_for_native_claude_keeps_betas_under_use_gateway(
@@ -10788,12 +10802,13 @@ async def test_probe_claude_model_options_runs_the_harness_under_the_launch_env(
 
     Speed env vars ride along, the nonessential-traffic kill-switch is
     stripped (Claude treats it as covering the probe's own runs), and the
-    apiKeyHelper and routing env are delivered via ``--settings`` — so the
-    enumeration answers for the session the user would actually get.
+    apiKeyHelper and routing env are delivered via a private ``--settings``
+    file — so the enumeration answers for the session the user would get.
     """
     monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
     monkeypatch.setenv("CLAUDECODE", "1")
     captured: dict[str, Any] = {}
+    spawned_settings: list[tuple[list[str], Path, int, dict[str, Any]]] = []
 
     class _FakeProcess:
         returncode = 0
@@ -10805,6 +10820,15 @@ async def test_probe_claude_model_options_runs_the_harness_under_the_launch_env(
             )
 
     async def _fake_exec(command: str, *args: str, **kwargs: Any) -> _FakeProcess:
+        settings_path = Path(args[args.index("--settings") + 1])
+        spawned_settings.append(
+            (
+                list(args),
+                settings_path,
+                settings_path.stat().st_mode & 0o777,
+                json.loads(settings_path.read_text()),
+            )
+        )
         if "command" not in captured:
             # The first spawn is the enumeration run; per-alias resolution
             # runs reuse the same launch env.
@@ -10815,18 +10839,26 @@ async def test_probe_claude_model_options_runs_the_harness_under_the_launch_env(
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
 
-    probe = await claude_native.probe_claude_model_options(_gateway_probe_config())
+    probe = await claude_native.probe_claude_model_options(
+        _gateway_probe_config(AWS_BEARER_TOKEN_BEDROCK="bedrock-secret")
+    )
 
     assert probe is not None
     assert probe.alias_rows == [{"id": "opus", "model": "opus", "displayName": "opus"}]
     args = captured["args"]
     assert args[:3] == ["-p", "--input-format", "stream-json"]
     assert "--strict-mcp-config" in args and "--no-session-persistence" in args
-    settings_payload = json.loads(args[args.index("--settings") + 1])
-    assert settings_payload["apiKeyHelper"] == "printf token"
-    # User settings.json env cannot redirect the probe to another endpoint.
-    assert settings_payload["env"]["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
-    assert settings_payload["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == ""
+    assert len(spawned_settings) == 2
+    assert len({settings_path for _, settings_path, _, _ in spawned_settings}) == 1
+    for spawn_args, settings_path, mode, settings_payload in spawned_settings:
+        assert mode == 0o600
+        assert not settings_path.exists()
+        assert not any("printf token" in arg or "bedrock-secret" in arg for arg in spawn_args)
+        assert settings_payload["apiKeyHelper"] == "printf token"
+        # User settings.json env cannot redirect the probe or replace its credential.
+        assert settings_payload["env"]["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
+        assert settings_payload["env"]["AWS_BEARER_TOKEN_BEDROCK"] == "bedrock-secret"
+        assert settings_payload["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == ""
     env = captured["env"]
     assert env["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
     assert env["DISABLE_TELEMETRY"] == "1"

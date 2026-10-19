@@ -85,18 +85,18 @@ class _RecordingServer:
 
 
 @pytest.fixture
-def workspaces(
+def claude_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[
-    tuple[_RecordingServer, _RecordingServer, claude_native.ClaudeNativeUcodeConfig, Path]
-]:
-    """Workspace A configured in Omnigent; workspace B pinned in Claude Code's user settings."""
+) -> Iterator[tuple[_RecordingServer, _RecordingServer, Path, Path, Path]]:
+    """Isolated Claude Code and Omnigent config with loopback workspaces A and B."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     config_dir = tmp_path / "claude-config"
     config_dir.mkdir()
     for key in tuple(os.environ):
-        if key.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "DATABRICKS_")) or key == "CLAUDECODE":
+        if key.startswith(("ANTHROPIC_", "AWS_", "CLAUDE_CODE_", "DATABRICKS_")) or (
+            key == "CLAUDECODE"
+        ):
             monkeypatch.delenv(key)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
@@ -117,55 +117,29 @@ def workspaces(
     )
     with _RecordingServer() as workspace_a, _RecordingServer() as workspace_b:
         config_home = isolate_provider_resolution(monkeypatch, tmp_path / "omnigent-config")
-        (config_home / "config.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "providers": {
-                        "workspace-a": {
-                            "kind": "key",
-                            "default": ["anthropic"],
-                            "anthropic": {
-                                "base_url": workspace_a.url,
-                                "api_key": "token-workspace-a",
-                                "models": {"default": "claude-sonnet-4-20250514"},
-                            },
-                        }
-                    }
-                }
-            )
-        )
-        (config_dir / "settings.json").write_text(
-            json.dumps(
-                {
-                    "env": {
-                        "ANTHROPIC_BASE_URL": workspace_b.url,
-                        "ANTHROPIC_DEFAULT_OPUS_MODEL": "ws-b-opus",
-                        "ANTHROPIC_DEFAULT_SONNET_MODEL": "ws-b-sonnet",
-                        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ws-b-haiku",
-                        "ANTHROPIC_CUSTOM_HEADERS": f"{_OTHER_WORKSPACE_HEADER}: secret-b",
-                    },
-                    "apiKeyHelper": "printf %s token-workspace-b",
-                }
-            )
-        )
-        claude_config = claude_native.resolve_native_claude_config(spec=None)
-        assert claude_config is not None
-        assert claude_config.env["ANTHROPIC_BASE_URL"] == workspace_a.url
-        yield workspace_a, workspace_b, claude_config, workspace
+        yield workspace_a, workspace_b, workspace, config_dir, config_home
 
 
-async def test_picker_catalog_omits_models_pinned_by_another_workspace(workspaces) -> None:
-    _, _, claude_config, _ = workspaces
+def _resolve_conflicting_config(
+    config_home: Path,
+    config_dir: Path,
+    provider: dict[str, object],
+    user_settings: dict[str, object],
+) -> claude_native.ClaudeNativeUcodeConfig:
+    """Configure workspace A in Omnigent and conflicting user settings in Claude Code."""
+    (config_home / "config.yaml").write_text(
+        yaml.safe_dump({"providers": {"workspace-a": provider}})
+    )
+    (config_dir / "settings.json").write_text(json.dumps(user_settings))
+    claude_config = claude_native.resolve_native_claude_config(spec=None)
+    assert claude_config is not None
+    return claude_config
 
-    rows = await claude_native.claude_model_catalog(claude_config)
 
-    assert rows is not None
-    listed = {str(row.get("model")) for row in rows}
-    assert not listed & _OTHER_WORKSPACE_MODELS, f"picker rows: {rows}"
-
-
-def test_terminal_launch_sends_turns_to_configured_provider(workspaces) -> None:
-    workspace_a, workspace_b, claude_config, workspace = workspaces
+def _run_terminal_turn(
+    claude_config: claude_native.ClaudeNativeUcodeConfig, workspace: Path
+) -> str:
+    """Run one print-mode turn through the native terminal launch spec."""
     bridge_dir = bridge.prepare_bridge_dir(uuid.uuid4().hex, workspace=workspace)
     request = claude_native._claude_terminal_request(
         ("-p", "Say hello.", "--max-turns", "1", "--output-format", "json"),
@@ -174,7 +148,6 @@ def test_terminal_launch_sends_turns_to_configured_provider(workspaces) -> None:
         claude_config=claude_config,
     )
     spec = request["spec"]
-
     result = subprocess.run(
         [spec["command"], *spec["args"]],
         env={**os.environ, **spec["env"]},
@@ -184,7 +157,57 @@ def test_terminal_launch_sends_turns_to_configured_provider(workspaces) -> None:
         text=True,
         timeout=120,
     )
-    diagnostics = f"returncode={result.returncode} stderr={result.stderr[-2000:]}"
+    return f"returncode={result.returncode} stderr={result.stderr[-2000:]}"
+
+
+@pytest.fixture
+def workspaces(
+    claude_home: tuple[_RecordingServer, _RecordingServer, Path, Path, Path],
+) -> tuple[_RecordingServer, _RecordingServer, claude_native.ClaudeNativeUcodeConfig, Path]:
+    """Workspace A configured in Omnigent; workspace B pinned in Claude Code's user settings."""
+    workspace_a, workspace_b, workspace, config_dir, config_home = claude_home
+    claude_config = _resolve_conflicting_config(
+        config_home,
+        config_dir,
+        {
+            "kind": "key",
+            "default": ["anthropic"],
+            "anthropic": {
+                "base_url": workspace_a.url,
+                "api_key": "token-workspace-a",
+                "models": {"default": "claude-sonnet-4-20250514"},
+            },
+        },
+        {
+            "env": {
+                "ANTHROPIC_BASE_URL": workspace_b.url,
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "ws-b-opus",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "ws-b-sonnet",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ws-b-haiku",
+                "ANTHROPIC_CUSTOM_HEADERS": f"{_OTHER_WORKSPACE_HEADER}: secret-b",
+            },
+            "apiKeyHelper": "printf %s token-workspace-b",
+        },
+    )
+    assert claude_config.env["ANTHROPIC_BASE_URL"] == workspace_a.url
+    return workspace_a, workspace_b, claude_config, workspace
+
+
+async def test_picker_catalog_omits_models_pinned_by_another_workspace(workspaces) -> None:
+    _, _, claude_config, _ = workspaces
+
+    rows = await claude_native.claude_model_catalog(claude_config)
+
+    assert rows is not None
+    listed = {str(row.get("model")) for row in rows}
+    assert "claude-sonnet-4-20250514" in listed, f"picker rows: {rows}"
+    assert not listed & _OTHER_WORKSPACE_MODELS, f"picker rows: {rows}"
+
+
+def test_terminal_launch_sends_turns_to_configured_provider(workspaces) -> None:
+    workspace_a, workspace_b, claude_config, workspace = workspaces
+
+    diagnostics = _run_terminal_turn(claude_config, workspace)
 
     assert workspace_a.requests, f"workspace B received: {workspace_b.requests}; {diagnostics}"
     assert not workspace_b.requests, f"workspace B received: {workspace_b.requests}"
@@ -197,3 +220,40 @@ def test_terminal_launch_sends_turns_to_configured_provider(workspaces) -> None:
     assert not any(request["other_workspace_header"] for request in workspace_a.requests), (
         f"workspace A received: {workspace_a.requests}"
     )
+
+
+def test_bedrock_terminal_launch_keeps_the_configured_bearer(
+    claude_home: tuple[_RecordingServer, _RecordingServer, Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_a, workspace_b, workspace, config_dir, config_home = claude_home
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    claude_config = _resolve_conflicting_config(
+        config_home,
+        config_dir,
+        {
+            "kind": "bedrock",
+            "default": ["anthropic"],
+            "anthropic": {
+                "base_url": workspace_a.url,
+                "api_key": "bedrock-token-a",
+                "models": {"default": "us.anthropic.claude-sonnet-4-20250514-v1:0"},
+            },
+        },
+        {
+            "env": {
+                "CLAUDE_CODE_USE_BEDROCK": "1",
+                "ANTHROPIC_BEDROCK_BASE_URL": workspace_b.url,
+                "AWS_BEARER_TOKEN_BEDROCK": "bedrock-token-b",
+            },
+        },
+    )
+    assert claude_config.env["ANTHROPIC_BEDROCK_BASE_URL"] == workspace_a.url
+
+    diagnostics = _run_terminal_turn(claude_config, workspace)
+
+    assert workspace_a.requests, f"workspace B received: {workspace_b.requests}; {diagnostics}"
+    assert not workspace_b.requests, f"workspace B received: {workspace_b.requests}"
+    assert {request["credential"] for request in workspace_a.requests} == {
+        "Bearer bedrock-token-a"
+    }, f"workspace A received: {workspace_a.requests}"
