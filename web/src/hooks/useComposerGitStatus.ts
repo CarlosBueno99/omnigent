@@ -4,6 +4,8 @@ import { usePullRequestInfo } from "@/hooks/usePullRequests";
 import { matchWorktree } from "@/hooks/useHostWorktrees";
 import { useSessionWorktrees } from "@/hooks/useSessionWorktrees";
 import { gitProviderCopy } from "@/lib/gitProviders";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { isFeatureEnabled } from "@/lib/capabilities";
 
 /** How much we actually know about the session's checked-out branch. */
 export type ComposerBranchState =
@@ -68,7 +70,8 @@ export function useComposerGitStatus({
   creationBranch?: string | null;
 }): ComposerGitStatus {
   const worktrees = useSessionWorktrees(sessionId, hostId, workspace);
-  const github = usePullRequestInfo(sessionId ?? undefined, { details: !!workspace });
+  const managed = isFeatureEnabled(useServerInfo(), "pull_request_management");
+  const github = usePullRequestInfo(sessionId ?? undefined, { details: !managed || !!workspace });
   const info = github.data;
   const result = worktrees.data;
 

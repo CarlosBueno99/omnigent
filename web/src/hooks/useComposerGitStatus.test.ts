@@ -7,6 +7,10 @@ import { useComposerGitStatus } from "./useComposerGitStatus";
 
 const useSessionWorktreesMock = vi.fn();
 const usePullRequestInfoMock = vi.fn();
+const feature = vi.hoisted(() => ({ managed: false }));
+vi.mock("@/lib/CapabilitiesContext", () => ({
+  useServerInfo: () => ({ features: { pull_request_management: feature.managed } }),
+}));
 
 vi.mock("@/hooks/useSessionWorktrees", () => ({
   useSessionWorktrees: (
@@ -16,7 +20,8 @@ vi.mock("@/hooks/useSessionWorktrees", () => ({
   ) => useSessionWorktreesMock(sessionId, hostId, workspace),
 }));
 vi.mock("@/hooks/usePullRequests", () => ({
-  usePullRequestInfo: (id: string | undefined) => usePullRequestInfoMock(id),
+  usePullRequestInfo: (id: string | undefined, options: { details: boolean }) =>
+    usePullRequestInfoMock(id, options),
 }));
 
 function wt(overrides: Partial<HostWorktree>): HostWorktree {
@@ -59,6 +64,7 @@ function run(args: Partial<Parameters<typeof useComposerGitStatus>[0]> = {}) {
 }
 
 afterEach(() => {
+  feature.managed = false;
   useSessionWorktreesMock.mockReset();
   usePullRequestInfoMock.mockReset();
 });
@@ -71,6 +77,16 @@ const FORGE_DISPLAY = {
 };
 
 describe("useComposerGitStatus", () => {
+  it.each([false, true])(
+    "only skips workspace-free detail lookups in managed mode: %s",
+    (managed) => {
+      feature.managed = managed;
+      setWorktrees(undefined);
+      setGithub(undefined);
+      run({ workspace: null });
+      expect(usePullRequestInfoMock).toHaveBeenCalledWith("conv-1", { details: !managed });
+    },
+  );
   it("reports the live checkout branch of the main worktree", () => {
     setWorktrees({ status: "ok", worktrees: [wt({ branch: "main", is_main: true })] });
     setGithub(undefined);
