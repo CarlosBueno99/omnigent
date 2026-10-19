@@ -17,7 +17,7 @@ UV_FROZEN=1 OMNIGENT_FEATURES=claude_osc_status omnidev
 ```
 
 Run this from a fresh terminal. Open the exact **ui** URL printed by omnidev.
-Keep the supervisor running; `q` or Ctrl-C stops its server, host and frontend.
+Keep the supervisor running; use the shutdown steps below before toggling flags.
 The pod has its own Omnigent config and database. It inherits your existing
 provider credentials and Claude machine settings. `UV_FROZEN=1` preserves the
 candidate's dependency lock when omnidev launches subprocesses.
@@ -96,7 +96,18 @@ for this live smoke.
 
 ## Flag-off control and cleanup
 
-Quit omnidev, wait for shutdown, then restart from the same worktree:
+Quit omnidev with `q` or Ctrl-C. Then stop any detached host for this pod before
+restarting. In the command below, replace the URL with the exact **server** URL
+printed by this pod (not the frontend URL):
+
+```sh
+UV_FROZEN=1 omnidev omnigent host stop --server http://localhost:6781 --daemon-only
+```
+
+The local supervisor left detached host/runner helpers during verification, so
+this explicit, server-scoped stop matters: a reused daemon could retain the old
+feature setting. Do not use `omnigent stop` or `host stop --all`; those affect
+other running environments. Then restart from the same worktree:
 
 ```sh
 UV_FROZEN=1 OMNIGENT_FEATURES= omnidev
@@ -108,12 +119,12 @@ in quiet status: the legacy status-file path can also be accurate, so a visible
 difference is not required. The automated flag-off control additionally checks
 that no OSC relay status file exists.
 
-To re-enable, quit and rerun the flag-on command, then start another fresh
+To re-enable, repeat the shutdown steps and rerun the flag-on command, then start another fresh
 session. This is a startup flag, not a hot switch; existing terminals retain
 their launch configuration. These commands change only this pod's launch
 environment. No release default or global rollout setting changes.
 
-Stop the pod when finished. Keep the scratch workspace and logs until any
+Repeat the shutdown steps when finished. Keep the scratch workspace and logs until any
 failure is understood. Record the branch/commit, CLI version, actual model,
 flag, entry point, prompt, expected/observed status, and a short recording or
 screenshot for failures. Compare the session's `GET /v1/sessions/<id>` status
