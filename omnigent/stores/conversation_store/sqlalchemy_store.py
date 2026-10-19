@@ -3063,8 +3063,8 @@ class SqlAlchemyConversationStore(ConversationStore):
                     )
                     .exists()
                 )
-                # Read as separate queries rather than one ``ORDER BY title_match``
-                # so each keeps the recency-index walk that stops at the limit.
+                # Separate queries keep each tier on the sort index instead of
+                # sorting every match. Sparse title matches still scan all titles.
                 match_tiers = [title_match, and_(~title_match, content_match)]
             if project is not None:
                 # Dual-read by project NAME: a session is "in <name>" if it has

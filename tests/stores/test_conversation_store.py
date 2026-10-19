@@ -1886,9 +1886,10 @@ def _seed_ranked_search(store: SqlAlchemyConversationStore) -> dict[str, str]:
     return ids
 
 
+@pytest.mark.parametrize("sort_by", ["created_at", "updated_at"])
 @pytest.mark.parametrize("order", ["desc", "asc"])
 def test_list_conversations_search_ranks_title_matches_first(
-    conversation_store: SqlAlchemyConversationStore, order: str
+    conversation_store: SqlAlchemyConversationStore, order: str, sort_by: str
 ) -> None:
     """
     Title matches come before newer content-only matches, each group in order.
@@ -1896,14 +1897,33 @@ def test_list_conversations_search_ranks_title_matches_first(
     A session matching in both its title and its content is a title match and
     is listed once; an untitled session can only be a content match.
     """
+    from sqlalchemy import update as sa_update
+
+    from omnigent.db.db_models import SqlConversation as _Conv
+
     ids = _seed_ranked_search(conversation_store)
     title_tier = [ids["both"], ids["title_old"]]
     content_tier = [ids["content_new"], ids["content_old"]]
+    if sort_by == "updated_at":
+        # Update the oldest-created sessions last so the two sort keys disagree.
+        with conversation_store._conv_session("test_setup") as session:
+            for offset, conv_id in enumerate(
+                ids[role] for role in ("title_old", "content_old", "both", "content_new")
+            ):
+                session.execute(
+                    sa_update(_Conv)
+                    .where(_Conv.id == conv_id)
+                    .values(updated_at=2_100_000_000 - offset)
+                )
+        title_tier.reverse()
+        content_tier.reverse()
     if order == "asc":
         title_tier.reverse()
         content_tier.reverse()
 
-    page = conversation_store.list_conversations(search_query="deploy", order=order)
+    page = conversation_store.list_conversations(
+        search_query="deploy", order=order, sort_by=sort_by
+    )
 
     assert [c.id for c in page.data] == title_tier + content_tier
     assert page.has_more is False
