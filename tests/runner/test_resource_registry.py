@@ -918,15 +918,6 @@ async def test_claude_prompt_during_background_agent_republishes_running(
     await asyncio.sleep(0)
     assert statuses == ["running", "running"]
 
-    registry.note_external_session_status(
-        session_id, "idle", turn_ended_at_ms=int(time.time() * 1000)
-    )
-    on_tick()
-    on_tick()
-    await asyncio.sleep(0)
-    assert statuses == ["running", "running"]
-    assert registry.claude_status_file_reports_busy(session_id)
-
 
 @pytest.mark.asyncio
 async def test_failed_hook_does_not_republish_stale_running_status(

@@ -445,11 +445,23 @@ async def test_native_pane_idle_after_mid_turn_follow_up_releases_pin() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_background_agent_pins_idle_shutdown_after_stop(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("turn_ended_at_ms", "published_after_stop"),
+    [
+        (2000, ["running", "idle"]),
+        (True, ["running", "running"]),
+        ("2000", ["running", "running"]),
+    ],
+    ids=["stop-time", "bool-time-ignored", "string-time-ignored"],
+)
+async def test_claude_background_agent_pins_idle_shutdown_after_stop(
+    tmp_path: Path, turn_ended_at_ms: object, published_after_stop: list[str]
+) -> None:
     """A background agent still running after Claude's ``Stop`` keeps the runner up.
 
-    The session reads idle so follow-ups are not queued, but Claude's status
-    file stays ``busy`` until the agent finishes.
+    With a valid ``Stop`` time the session reads idle so follow-ups are not
+    queued; a malformed time re-syncs the busy file as running. Either way
+    Claude's status file stays ``busy`` until the agent finishes.
     """
     from tests.runner.conftest import _runner_client
 
@@ -457,7 +469,8 @@ async def test_claude_background_agent_pins_idle_shutdown_after_stop(tmp_path: P
     app = await _native_app_with_session(conv_id, harness="claude-native")
     status_file = tmp_path / "sessions" / "1.json"
     status_file.parent.mkdir()
-    record = {"pid": 1, "sessionId": "s", "kind": "interactive", "statusUpdatedAt": 1000}
+    # A 1 ms stamp would read idle if ``True`` were taken as a 1 ms Stop time.
+    record = {"pid": 1, "sessionId": "s", "kind": "interactive", "statusUpdatedAt": 1}
     status_file.write_text(json.dumps({**record, "status": "busy"}), encoding="utf-8")
     published: list[str] = []
     poller = SessionStatusPoller(
@@ -472,9 +485,9 @@ async def test_claude_background_agent_pins_idle_shutdown_after_stop(tmp_path: P
         assert created.status_code == 201, created.text
         await _post_status(client, conv_id, "running")
         poller.tick()
-        await _post_status(client, conv_id, "idle", turn_ended_at_ms=2000)
+        await _post_status(client, conv_id, "idle", turn_ended_at_ms=turn_ended_at_ms)
         poller.tick()
-        assert published == ["running", "idle"]
+        assert published == published_after_stop
         assert app.state.has_active_work() is True
 
         status_file.write_text(

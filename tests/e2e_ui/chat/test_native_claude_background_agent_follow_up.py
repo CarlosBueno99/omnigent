@@ -25,6 +25,7 @@ _SUB_AGENT_HOLD_S = 150.0
 # Spans many 0.2s status-file polls, so a held busy cannot flip idle back to running.
 _IDLE_STABLE_S = 2.0
 _IDLE_SETTLE_TIMEOUT_S = 30.0
+_WORKER_START_TIMEOUT_S = 30.0
 
 
 def _user_text_seen(mock_llm_server_url: str, token: str) -> bool:
@@ -137,7 +138,12 @@ def test_follow_up_is_delivered_while_background_agent_runs(
     expect(page.locator(_ASSISTANT, has_text=launch_reply).first).to_be_visible(
         timeout=_FIRST_TURN_TIMEOUT_MS
     )
-    assert _user_text_seen(mock_llm_server_url, worker_token), "background sub-agent never started"
+    # The worker's first model request races the parent's reply request.
+    deadline = time.monotonic() + _WORKER_START_TIMEOUT_S
+    while not _user_text_seen(mock_llm_server_url, worker_token):
+        if time.monotonic() > deadline:
+            pytest.fail("background sub-agent never started")
+        time.sleep(0.2)
     _wait_for_stable_idle(base_url, session_id)
 
     _send(page, f"{follow_up_token} Reply to this follow-up.")
