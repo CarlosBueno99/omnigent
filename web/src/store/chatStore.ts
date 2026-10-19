@@ -49,12 +49,18 @@ import type {
   ElicitationBlock,
   ErrorBlock,
   MessageContentBlock,
+  MessageSource,
   TextDone,
   ToolGroup,
   UserMessageBlock,
 } from "@/lib/blocks";
 import { userInputElicitationKey } from "@/lib/askUserQuestion";
-import { LIVE_ITEM_PREFIX, PENDING_FILE_PREFIX, structuredErrorFields } from "@/lib/blocks";
+import {
+  LIVE_ITEM_PREFIX,
+  PENDING_FILE_PREFIX,
+  messageSourceFromWire,
+  structuredErrorFields,
+} from "@/lib/blocks";
 import { BlockStream } from "@/lib/blockStream";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
 import { isMessageItem, type ConversationItem, type MessageItem } from "@/lib/conversationItems";
@@ -7047,6 +7053,7 @@ function committedContentFor(
  *   promoted from one, so the rendered bubble keeps the same React key
  *   across the swap (no remount/flink). Omit for foreign/TUI messages
  *   that had no optimistic predecessor — they mount fresh.
+ * @param source - The sending session when another session's agent sent it.
  */
 function committedUserBlock(
   itemId: string,
@@ -7054,6 +7061,7 @@ function committedUserBlock(
   stableKey?: string,
   createdBy?: string,
   createdAtS?: number,
+  source?: MessageSource,
 ): UserMessageBlock {
   return {
     type: "user_message",
@@ -7074,6 +7082,7 @@ function committedUserBlock(
     },
     content,
     stableKey,
+    ...(source !== undefined ? { source } : {}),
   };
 }
 
@@ -7879,6 +7888,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       //      client).
       applyToConversation((s) => {
         const eventContent = userContentFromEvent(event);
+        const source = messageSourceFromWire(event.data);
         const pendingHead = s.pendingUserMessages[0];
         // Bare envelopes typed in the terminal must not consume unrelated web input.
         const unmatchedEnvelope =
@@ -7958,6 +7968,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
                   matched.tempId,
                   event.createdBy ?? matched.author,
                   matched.createdAtS,
+                  source,
                 ),
               ],
             };
@@ -7994,6 +8005,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
                 head.tempId,
                 event.createdBy ?? head.author,
                 head.createdAtS,
+                source,
               ),
             ],
           };
@@ -8005,7 +8017,14 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         return {
           blocks: [
             ...s.blocks,
-            committedUserBlock(event.itemId, eventContent, undefined, event.createdBy),
+            committedUserBlock(
+              event.itemId,
+              eventContent,
+              undefined,
+              event.createdBy,
+              undefined,
+              source,
+            ),
           ],
         };
       });

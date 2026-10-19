@@ -305,6 +305,11 @@ class MessageData(BaseModel):
     :param user_authored: Confirmed or conservatively preserved user input;
         prevents legacy content cleanup from hiding literal agent markup.
     :param subagent_return_id: Native task id of an explicitly completed child.
+    :param source_session_id: Session whose agent sent this user message into
+        a child session, e.g. ``"conv_parent123"``. The server keeps it only
+        for a message the parent's runner sent to that parent's child.
+    :param source_agent_name: Display name of the agent in
+        ``source_session_id``, stamped by the server, e.g. ``"Claude"``.
     """
 
     role: Literal["user", "assistant"]
@@ -316,6 +321,8 @@ class MessageData(BaseModel):
     subagent_return_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     interrupted: bool = Field(default=False, exclude_if=lambda value: value is False)
     stream_message_id: str | None = None
+    source_session_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_agent_name: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("content")
     @classmethod

@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bubble } from "@/lib/renderItems";
@@ -285,6 +286,44 @@ describe("UserBubble literal text", () => {
     expect(screen.getByText("<code>").tagName).toBe("CODE");
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
     expect(screen.getByTestId("message-bubble")).toHaveTextContent("<exact lines>");
+  });
+});
+
+describe("UserBubble message source", () => {
+  it("names and links the agent session that sent the message", () => {
+    render(
+      <MemoryRouter>
+        <BubbleView
+          bubble={{
+            kind: "user",
+            itemId: "user_sent",
+            content: [{ type: "input_text", text: "Run the tests" }],
+            source: { sessionId: "conv_parent", agentName: "Claude" },
+          }}
+          isLastAssistant={false}
+        />
+      </MemoryRouter>,
+    );
+
+    const label = screen.getByTestId("message-source");
+    expect(label).toHaveTextContent("From Claude");
+    expect(label).toHaveAttribute("href", "/c/conv_parent");
+    expect(screen.getByTestId("message-bubble")).toContainElement(label);
+  });
+
+  it("shows no sender on a message a person typed", () => {
+    render(
+      <BubbleView
+        bubble={{
+          kind: "user",
+          itemId: "user_typed",
+          content: [{ type: "input_text", text: "Run the tests" }],
+        }}
+        isLastAssistant={false}
+      />,
+    );
+
+    expect(screen.queryByTestId("message-source")).toBeNull();
   });
 });
 

@@ -92,3 +92,48 @@ async def test_native_authorship_survives_delivery_and_retries(
     await _persist_external_conversation_item(conv.id, conv, body, store, created_by=author)
     assert [row["pending_id"] for row in pending_inputs.snapshot_for(conv.id)] == pending
     assert len(store.list_items(conv.id, type="message").data) == 1
+
+
+@pytest.mark.parametrize(
+    "message_source",
+    [None, {"source_session_id": "conv_parent", "source_agent_name": "Claude"}],
+    ids=["typed", "agent-sent"],
+)
+@pytest.mark.asyncio
+async def test_native_drain_applies_only_the_queued_message_source(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    message_source: dict[str, str] | None,
+) -> None:
+    """The pending entry, not the transcript forwarder, decides who sent the message."""
+    content = [{"type": "input_text", "text": "Do the task"}]
+    forged = {"source_session_id": "conv_forged", "source_agent_name": "Mallory"}
+    body = SessionEventInput.model_validate(
+        {
+            "type": "external_conversation_item",
+            "data": {
+                "item_type": "message",
+                "item_data": {"role": "user", "content": content, **forged},
+                "response_id": "resp_native",
+            },
+        }
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="Child")
+    pending_inputs.record(conv.id, content, message_source=message_source)
+    publish = Mock()
+    monkeypatch.setattr("omnigent.runtime.session_stream.publish", publish)
+
+    await _persist_external_conversation_item(conv.id, conv, body, store)
+
+    [item] = store.list_items(conv.id, type="message").data
+    expected = message_source or {"source_session_id": None, "source_agent_name": None}
+    assert item.data.source_session_id == expected["source_session_id"]
+    assert item.data.source_agent_name == expected["source_agent_name"]
+    [receipt] = [
+        call.args[1]["data"]
+        for call in publish.call_args_list
+        if call.args[1]["type"] == "session.input.consumed"
+    ]
+    assert receipt["data"].get("source_session_id") == expected["source_session_id"]
+    assert receipt["data"].get("source_agent_name") == expected["source_agent_name"]
