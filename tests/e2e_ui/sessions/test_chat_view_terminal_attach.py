@@ -13,7 +13,7 @@ from tests._helpers.polling import poll_until
 from tests.e2e_ui.messages.test_message_render_parity import _select_view_mode
 
 _TERMINAL_READY_TIMEOUT_S = 120
-# Observed Chat-view attach dials landed 1-2 s after the session opened.
+# Long enough to catch an attach dialed after the terminal inventory loads.
 _CHAT_VIEW_HOLD_MS = 10_000
 _SHOWN_TERMINAL = (
     '[data-testid="main-terminal-view"][data-visible="true"] [data-testid="terminal-view"]'

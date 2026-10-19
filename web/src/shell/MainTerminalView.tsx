@@ -41,9 +41,9 @@ interface MainTerminalViewProps {
    */
   initialTerminalKey?: string | null;
   /**
-   * False while the surface is mounted but hidden. Its WS attach stays
-   * open as a tmux client, and a user-shell selection resets to the agent
-   * terminal so the next reveal shows the agent pane. Default true.
+   * False while mounted but hidden. No caller does this: a hidden attach
+   * still resizes the shared tmux window, so ChatPage mounts this view only
+   * while Terminal view is shown. Default true.
    */
   visible?: boolean;
   /**

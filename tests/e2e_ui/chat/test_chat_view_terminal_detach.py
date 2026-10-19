@@ -100,8 +100,9 @@ def terminal_scrollbar_session(live_server: str) -> Iterator[tuple[str, str, str
                 ).raise_for_status()
             yield live_server, session_id, other_session_id
         finally:
-            for created_id in created:
-                client.delete(f"/v1/sessions/{created_id}").raise_for_status()
+            responses = [client.delete(f"/v1/sessions/{created_id}") for created_id in created]
+            for response in responses:
+                response.raise_for_status()
 
 
 class _TerminalMock:
