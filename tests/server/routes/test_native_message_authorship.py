@@ -10,7 +10,10 @@ import pytest
 from omnigent.harnesses.claude_native.bridge import read_transcript_items_since
 from omnigent.harnesses.claude_native.forwarder import _external_conversation_item_event
 from omnigent.runtime import pending_inputs
-from omnigent.server.routes._sessions.orchestration import _persist_external_conversation_item
+from omnigent.server.routes._sessions.orchestration import (
+    _persist_external_conversation_item,
+    _settle_undelivered_native_input,
+)
 from omnigent.server.schemas import SessionEventInput
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 
@@ -150,3 +153,57 @@ async def test_native_drain_applies_only_the_queued_message_source(
     ]
     assert receipt["data"].get("source_session_id") == expected["source_session_id"]
     assert receipt["data"].get("source_agent_name") == expected["source_agent_name"]
+
+
+@pytest.mark.parametrize("failure", ["reported_undelivered", "skipped_by_later_mirror"])
+@pytest.mark.asyncio
+async def test_native_failure_paths_keep_the_queued_message_source(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """A parent's message the harness never recorded still names its sender."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="Child")
+    lost = [{"type": "input_text", "text": "Agent task"}]
+    stable_id = "7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d"
+    pending_inputs.record(conv.id, lost, stable_id=stable_id, message_source=_PARENT_SOURCE)
+    publish = Mock()
+    monkeypatch.setattr("omnigent.runtime.session_stream.publish", publish)
+
+    if failure == "reported_undelivered":
+        await _settle_undelivered_native_input(store, conv.id, "resp_failed", stable_id)
+    else:
+        typed = [{"type": "input_text", "text": "Do the task"}]
+        pending_inputs.record(conv.id, typed)
+        body = SessionEventInput.model_validate(
+            {
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": "message",
+                    "item_data": {"role": "user", "content": typed},
+                    "response_id": "resp_native",
+                    "source_id": "claude:typed:0",
+                },
+            }
+        )
+        await _persist_external_conversation_item(conv.id, conv, body, store)
+        [error] = store.list_items(conv.id, type="error").data
+        assert error.data.code == "native_prompt_not_recorded"
+
+    assert pending_inputs.snapshot_for(conv.id) == []
+    messages = store.list_items(conv.id, type="message").data
+    sources = {
+        message.data.content[0]["text"]: (
+            message.data.source_session_id,
+            message.data.source_agent_name,
+        )
+        for message in messages
+    }
+    assert sources.pop("Agent task") == ("conv_parent", "Claude")
+    assert set(sources.values()) <= {(None, None)}
+    [receipt] = [
+        call.args[1]["data"]["data"]
+        for call in publish.call_args_list
+        if call.args[1]["type"] == "session.input.consumed"
+        and call.args[1]["data"]["data"]["content"] == lost
+    ]
+    assert {key: receipt.get(key) for key in _PARENT_SOURCE} == _PARENT_SOURCE

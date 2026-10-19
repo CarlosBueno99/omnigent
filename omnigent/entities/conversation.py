@@ -307,7 +307,8 @@ class MessageData(BaseModel):
     :param subagent_return_id: Native task id of an explicitly completed child.
     :param source_session_id: Session whose agent sent this user message into
         a child session, e.g. ``"conv_parent123"``. The server keeps it only
-        for a message the parent's runner sent to that parent's child.
+        for a message the parent's runner sent to that parent's child; a
+        single-user server, with no other caller to forge it, skips that proof.
     :param source_agent_name: Display name of the agent in
         ``source_session_id``, stamped by the server, e.g. ``"Claude"``.
     """

@@ -26,6 +26,7 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
 from omnigent.server.auth import LEVEL_EDIT
 from omnigent.server.routes._auth_helpers import attribution_user
+from omnigent.server.routes._sessions.helpers import _runner_token_binds
 from omnigent.server.routes.sessions import _build_new_item
 from omnigent.server.schemas import SessionEventInput
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
@@ -574,6 +575,37 @@ def _seed_parent_and_child(db_uri: str, agent_id: str) -> tuple[str, str]:
     return parent.id, child.id
 
 
+@pytest.fixture()
+def _stub_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accept forwarded messages without a live runner."""
+    from omnigent.server.routes import sessions as sessions_mod
+
+    async def _stub(*_: Any, **__: Any) -> _CaptureRunnerClient:
+        return _CaptureRunnerClient()
+
+    monkeypatch.setattr(sessions_mod, "_get_runner_client", _stub)
+    monkeypatch.setattr(sessions_mod, "_ensure_runner_relay_ready", _noop_relay_ready)
+
+
+@pytest.mark.parametrize(
+    "token,runner_id,allow_list,binds",
+    [
+        (_RUNNER_BINDING_TOKEN, token_bound_runner_id(_RUNNER_BINDING_TOKEN), None, True),
+        (_RUNNER_BINDING_TOKEN, "runner_elsewhere", None, False),
+        ("pool-token", "runner_elsewhere", frozenset({"pool-token"}), True),
+        ("other-token", None, frozenset({"pool-token"}), False),
+        (" ", None, frozenset({" "}), False),
+        (None, None, None, False),
+    ],
+    ids=["bound", "bound-elsewhere", "allow-listed", "not-allow-listed", "blank", "missing"],
+)
+def test_runner_token_binds(
+    token: str | None, runner_id: str | None, allow_list: frozenset[str] | None, binds: bool
+) -> None:
+    """A runner token speaks for a session when allow-listed or bound to its runner."""
+    assert _runner_token_binds(token, runner_id, allow_list) is binds
+
+
 def _agent_message(text: str, **source: str) -> dict[str, Any]:
     """Return a user message event body carrying the given sender fields."""
     return {
@@ -586,20 +618,13 @@ def _agent_message(text: str, **source: str) -> dict[str, Any]:
     }
 
 
+@pytest.mark.usefixtures("_stub_runner")
 @pytest.mark.asyncio
 async def test_post_event_keeps_parent_runner_message_source(
     auth_client: httpx.AsyncClient,
     db_uri: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The parent's runner may name the parent as sender; the server names its agent."""
-    from omnigent.server.routes import sessions as sessions_mod
-
-    async def _stub(*_: Any, **__: Any) -> _CaptureRunnerClient:
-        return _CaptureRunnerClient()
-
-    monkeypatch.setattr(sessions_mod, "_get_runner_client", _stub)
-    monkeypatch.setattr(sessions_mod, "_ensure_runner_relay_ready", _noop_relay_ready)
     agent = await create_test_agent(auth_client, name="claude-native-ui", user="alice@example.com")
     parent_id, child_id = _seed_parent_and_child(db_uri, agent["id"])
     runner_headers = _bind_runner(db_uri, parent_id)
@@ -621,21 +646,14 @@ async def test_post_event_keeps_parent_runner_message_source(
 
 
 @pytest.mark.parametrize("claim", ["no_runner_proof", "not_the_parent", "parent_on_other_runner"])
+@pytest.mark.usefixtures("_stub_runner")
 @pytest.mark.asyncio
 async def test_post_event_drops_unverified_message_source(
     auth_client: httpx.AsyncClient,
     db_uri: str,
-    monkeypatch: pytest.MonkeyPatch,
     claim: str,
 ) -> None:
     """A sender claim without the parent's runner proof is dropped, not rejected."""
-    from omnigent.server.routes import sessions as sessions_mod
-
-    async def _stub(*_: Any, **__: Any) -> _CaptureRunnerClient:
-        return _CaptureRunnerClient()
-
-    monkeypatch.setattr(sessions_mod, "_get_runner_client", _stub)
-    monkeypatch.setattr(sessions_mod, "_ensure_runner_relay_ready", _noop_relay_ready)
     agent = await create_test_agent(auth_client, user="alice@example.com")
     parent_id, child_id = _seed_parent_and_child(db_uri, agent["id"])
     conv_store = SqlAlchemyConversationStore(db_uri)
@@ -664,21 +682,14 @@ async def test_post_event_drops_unverified_message_source(
 
 
 @pytest.mark.parametrize("runner_proof", [True, False])
+@pytest.mark.usefixtures("_stub_runner")
 @pytest.mark.asyncio
 async def test_initial_items_keep_only_verified_message_source(
     auth_client: httpx.AsyncClient,
     db_uri: str,
-    monkeypatch: pytest.MonkeyPatch,
     runner_proof: bool,
 ) -> None:
     """``sys_session_create``'s first message keeps its sender only with the parent's proof."""
-    from omnigent.server.routes import sessions as sessions_mod
-
-    async def _stub(*_: Any, **__: Any) -> _CaptureRunnerClient:
-        return _CaptureRunnerClient()
-
-    monkeypatch.setattr(sessions_mod, "_get_runner_client", _stub)
-    monkeypatch.setattr(sessions_mod, "_ensure_runner_relay_ready", _noop_relay_ready)
     agent = await create_test_agent(auth_client, user="alice@example.com")
     parent_id, _ = _seed_parent_and_child(db_uri, agent["id"])
     runner_headers = _bind_runner(db_uri, parent_id) if runner_proof else {}
