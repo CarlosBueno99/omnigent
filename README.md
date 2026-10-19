@@ -311,10 +311,12 @@ OMNIGENT_SESSION_ENV_PASSTHROUGH=TERMINAL_PANE_SOCKET,TOOL_TOKEN omnigent claude
 
 The values go only to the runner this command launches, through an owner-only
 file the local daemon deletes at launch. They aren't sent to the server or
-stored. A session whose runner is already running keeps its original values, and
-a runner the server relaunches later (for example, after an idle timeout) starts
-without them. Names starting with `OMNIGENT` and `RUNNER_SERVER_URL` are rejected.
-Forwarding isn't available on Windows yet.
+stored. They become part of that runner's environment, so the agent and any
+stdio MCP server that declares `env` inherit them too. A session whose runner is
+already running keeps its original values, and a runner the server relaunches
+later (for example, after an idle timeout) starts without them. Names starting
+with `OMNIGENT` and `RUNNER_SERVER_URL` are rejected. Forwarding isn't
+available on Windows yet.
 
 </details>
 
