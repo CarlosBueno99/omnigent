@@ -130,6 +130,8 @@ def test_terminal_fallback_prompt_receives_no_injected_keystrokes(
         "● Captured pane:\n  ──────────────────────────────\n  ❯ 1. Yes\n"
         "  Enter to confirm · Esc to cancel\n",
         "● Captured pane:\n────────────\n  ❯ 1. Yes\n  Enter to confirm · Esc to cancel\n",
+        "──────────────────────────────\n  Teach auto mode about your environment?\n"
+        "Enter to confirm · Esc to cancel\n",
     ],
 )
 def test_decision_text_above_a_ready_composer_does_not_block_delivery(
