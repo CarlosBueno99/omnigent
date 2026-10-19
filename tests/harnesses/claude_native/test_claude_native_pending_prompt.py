@@ -117,7 +117,14 @@ def test_terminal_fallback_prompt_receives_no_injected_keystrokes(
 
 
 @pytest.mark.parametrize(
-    "pane", [_QUESTION, _PERMISSION, "❯ 1. refactor X\n● Press Enter to continue.\n"]
+    "pane",
+    [
+        _QUESTION,
+        _PERMISSION,
+        "❯ 1. refactor X\n● Press Enter to continue.\n",
+        "──────────────────────────────\n❯ 1. Yes\n  2. Not now\n"
+        "Enter to confirm · Esc to cancel\n● Mock LLM response\n",
+    ],
 )
 def test_decision_text_above_a_ready_composer_does_not_block_delivery(
     native_bridge: Path, monkeypatch: pytest.MonkeyPatch, pane: str
