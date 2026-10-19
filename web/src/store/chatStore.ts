@@ -6681,7 +6681,13 @@ export async function pumpStreamEvents(
           activeResponse: { responseId: block.responseId, state: "streaming", error: null },
           status: "streaming",
         });
-        const adopted = adoptCompactionSpinners(get().blocks, block.responseId);
+        // A native wrapper response only delivers input; one sent while the
+        // agent is busy is a steer, not the turn that compacts.
+        const steersBusyNativeAgent =
+          get().isNativeTerminalSession && get().sessionStatus === "running";
+        const adopted = steersBusyNativeAgent
+          ? null
+          : adoptCompactionSpinners(get().blocks, block.responseId);
         if (adopted !== null) set({ blocks: adopted });
         continue;
       }

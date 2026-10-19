@@ -19191,6 +19191,33 @@ describe("chatStore — compaction spinner follows its turn", () => {
     });
     expect(spinnerIds()).toEqual([]);
   });
+
+  it.each([
+    { outcome: "keeps", agent: "busy", agentStatus: "running", remaining: ["resp_compact_input"] },
+    { outcome: "clears", agent: "idle", agentStatus: "idle", remaining: [] },
+  ])(
+    "$outcome a native compaction spinner when a message reaches the $agent agent",
+    async ({ agentStatus, remaining }) => {
+      // A native runner wraps each delivered message in a short response; the
+      // native CLI compacts outside those wrappers.
+      const { sink, controller } = startPump("conv_native_compact");
+      useChatStore.setState({ isNativeTerminalSession: true });
+      const agentStatusEvent = (status: string) =>
+        sse("session.status", { conversation_id: "conv_native_compact", status });
+      sink.push(turnEvent("response.in_progress", "resp_compact_input"));
+      sink.push(turnEvent("response.completed", "resp_compact_input"));
+      sink.push(agentStatusEvent("running"));
+      sink.push(sse("response.compaction.in_progress", {}));
+      sink.push(agentStatusEvent(agentStatus));
+      sink.push(turnEvent("response.in_progress", "resp_next_input"));
+      sink.push(turnEvent("response.completed", "resp_next_input"));
+      await tick();
+
+      expect(spinnerIds()).toEqual(remaining);
+
+      controller.abort();
+    },
+  );
 });
 
 describe("chatStore — origin-wide stream slots", () => {
