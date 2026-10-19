@@ -226,11 +226,30 @@ def test_codex_resume_permission_params_parse_legacy_flags() -> None:
     }
 
 
-def test_codex_resume_permission_params_ignore_bypass_after_terminator() -> None:
-    """A positional bypass token after ``--`` keeps the stored permission profile."""
-    assert codex_native_app_server._codex_resume_permission_params(
-        ['-c=default_permissions=":workspace"', "--", "--dangerously-bypass-approvals-and-sandbox"]
-    ) == {"permissions": ":workspace"}
+@pytest.mark.parametrize(
+    ("launch_args", "expected"),
+    [
+        pytest.param(
+            [
+                '-c=default_permissions=":workspace"',
+                "--",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ],
+            {"permissions": ":workspace"},
+            id="positional-bypass-keeps-profile",
+        ),
+        pytest.param(
+            codex_native_app_server.codex_bypass_launch_args(["--", "--approve-for-me"]),
+            {"approvalPolicy": "never", "sandbox": "danger-full-access"},
+            id="label-bypass-with-positional-approve-for-me",
+        ),
+    ],
+)
+def test_codex_resume_permission_params_ignore_flags_after_terminator(
+    launch_args: list[str], expected: dict[str, str]
+) -> None:
+    """Tokens after ``--`` are positional, not permission flags."""
+    assert codex_native_app_server._codex_resume_permission_params(launch_args) == expected
 
 
 def test_codex_resume_permission_params_repairs_legacy_full_access_profile() -> None:

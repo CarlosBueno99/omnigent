@@ -706,7 +706,7 @@ describe("ForkSessionDialog", () => {
     });
   });
 
-  function mockCodexSource(labels: Record<string, string>) {
+  function mockCodexSource(labels: Partial<Record<string, string>>) {
     setAgents(AVAILABLE_AGENTS, "codex-native");
     useSessionMock.mockReturnValue({
       session: { harness: "codex-native", labels, terminalLaunchArgs: ["--search"] },
@@ -740,6 +740,21 @@ describe("ForkSessionDialog", () => {
       expect(forkSessionMock.mock.calls[0][1]?.config).toEqual(config);
     },
   );
+
+  it("does not carry a source's Codex bypass to a different agent", async () => {
+    mockCodexSource({ "omnigent.codex_native.bypass_sandbox": "1" });
+    renderDialog();
+
+    expect(screen.getByTestId("fork-session-codex-bypass-banner")).toBeInTheDocument();
+    openAgentSelect();
+    fireEvent.click(screen.getByTestId("fork-session-agent-option-ag_codex_native"));
+    expect(screen.queryByTestId("fork-session-codex-bypass-banner")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+    await waitFor(() => expect(forkSessionMock).toHaveBeenCalledTimes(1));
+    expect(forkSessionMock.mock.calls[0][1]).toMatchObject({ agentId: "ag_codex_native" });
+    expect(forkSessionMock.mock.calls[0][1]?.config).toEqual({});
+  });
 
   it("drops a seeded Codex bypass when a sandboxed approval is picked", async () => {
     mockCodexSource({ "omnigent.codex_native.bypass_sandbox": "1" });

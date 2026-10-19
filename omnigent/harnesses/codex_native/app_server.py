@@ -4382,6 +4382,7 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
     typed_params: CodexParams = {}
     args = normalize_codex_permission_launch_args(terminal_launch_args)
     bypass = False
+    approve_for_me = False
     index = 0
     while index < len(args):
         arg = args[index]
@@ -4391,6 +4392,8 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
         if arg == "--dangerously-bypass-approvals-and-sandbox":
             bypass = True
             typed_params.update(approvalPolicy="never", sandbox="danger-full-access")
+        elif arg == "--approve-for-me":
+            approve_for_me = True
         elif arg in {"--ask-for-approval", "-a", "--sandbox", "-s"}:
             if index + 1 < len(args):
                 value = args[index + 1]
@@ -4410,7 +4413,7 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
             key, _, value = arg.split("=", 1)[1].partition("=")
             _set_codex_resume_config_param(params, key, value)
         index += 1
-    if "--approve-for-me" in args:
+    if approve_for_me:
         if "sandbox" in typed_params:
             raise ValueError("--approve-for-me conflicts with sandbox and bypass flags")
         params.update(
