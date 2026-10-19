@@ -193,6 +193,8 @@ def test_claude_terminal_request_default_launch_is_unwrapped(tmp_path, monkeypat
     spec = body["spec"]
     assert spec["command"] == "claude"
     assert spec["args"][:2] == ["--resume", "s"]
+    # Claude's own login keeps honouring the user's settings.json env.
+    assert "env" not in _load_invocation_settings(spec["args"])
 
 
 def test_claude_terminal_request_launcher_plugin_wraps(tmp_path, monkeypatch) -> None:
@@ -284,6 +286,26 @@ def test_claude_terminal_request_injects_claude_config(tmp_path, monkeypatch) ->
     assert settings["apiKeyHelper"] == "printf %s sk-sentinel-do-not-use"
     assert "hooks" in settings
     assert "modelOverrides" not in settings
+    # A user settings.json env block outranks the process env, so routing is
+    # pinned in the command-line settings and unset owned keys are blanked.
+    assert settings["env"] == {
+        "ANTHROPIC_BASE_URL": "https://example.databricks.com/ai-gateway/anthropic",
+        "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "900000",
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+        "ANTHROPIC_BEDROCK_BASE_URL": "",
+        "CLAUDE_CODE_USE_BEDROCK": "",
+        "CLAUDE_CODE_USE_VERTEX": "",
+        "ANTHROPIC_MODEL": "",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION": "",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "",
+        "ANTHROPIC_SMALL_FAST_MODEL": "",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_AUTH_TOKEN": "",
+    }
 
 
 def test_native_config_does_not_infer_overrides_from_routable_models() -> None:
@@ -8653,6 +8675,12 @@ def test_bedrock_config_for_native_claude_resolves_auth_command() -> None:
     assert cfg is not None
     assert cfg.env["AWS_BEARER_TOKEN_BEDROCK"] == "minted-bedrock-token"
     assert cfg.api_key_helper is None
+    # The probe passes settings in argv, so the minted token stays env-only.
+    settings_env = claude_native.build_native_claude_settings_env(cfg)
+    assert "AWS_BEARER_TOKEN_BEDROCK" not in settings_env
+    assert settings_env["ANTHROPIC_BEDROCK_BASE_URL"] == "https://gw.example/bedrock"
+    assert settings_env["CLAUDE_CODE_USE_BEDROCK"] == "1"
+    assert settings_env["ANTHROPIC_BASE_URL"] == ""
 
 
 def test_bedrock_config_for_native_claude_keeps_betas_under_use_gateway(
@@ -10757,8 +10785,8 @@ async def test_probe_claude_model_options_runs_the_harness_under_the_launch_env(
 
     Speed env vars ride along, the nonessential-traffic kill-switch is
     stripped (Claude treats it as covering the probe's own runs), and the
-    apiKeyHelper is delivered via ``--settings`` — so the enumeration
-    answers for the session the user would actually get.
+    apiKeyHelper and routing env are delivered via ``--settings`` — so the
+    enumeration answers for the session the user would actually get.
     """
     monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
     monkeypatch.setenv("CLAUDECODE", "1")
@@ -10792,7 +10820,10 @@ async def test_probe_claude_model_options_runs_the_harness_under_the_launch_env(
     assert args[:3] == ["-p", "--input-format", "stream-json"]
     assert "--strict-mcp-config" in args and "--no-session-persistence" in args
     settings_payload = json.loads(args[args.index("--settings") + 1])
-    assert settings_payload == {"apiKeyHelper": "printf token"}
+    assert settings_payload["apiKeyHelper"] == "printf token"
+    # User settings.json env cannot redirect the probe to another endpoint.
+    assert settings_payload["env"]["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
+    assert settings_payload["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == ""
     env = captured["env"]
     assert env["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
     assert env["DISABLE_TELEMETRY"] == "1"

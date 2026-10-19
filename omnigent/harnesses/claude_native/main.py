@@ -269,6 +269,25 @@ _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV = CUSTOM_MODEL_OPTION_ENV_VAR
 _ANTHROPIC_CUSTOM_MODEL_OPTION_NAME_ENV = CUSTOM_MODEL_OPTION_NAME_ENV_VAR
 _UCODE_CLAUDE_CUSTOM_TIER = LEGACY_CUSTOM_SLOT_ROW_ID
 _UCODE_CLAUDE_CUSTOM_TIER_LABEL = "Sonnet 5"
+# Endpoint and model keys a resolved launch config owns; see
+# build_native_claude_settings_env. The raw Bedrock token is never pinned
+# there because the probe and title runs pass those settings in argv.
+_CLAUDE_SETTINGS_OWNED_ROUTING_ENV: tuple[str, ...] = (
+    _UCODE_CLAUDE_BASE_URL_ENV,
+    _ANTHROPIC_BEDROCK_BASE_URL_ENV,
+    _CLAUDE_CODE_USE_BEDROCK_ENV,
+    "CLAUDE_CODE_USE_VERTEX",
+    _ANTHROPIC_MODEL_ENV,
+    *_UCODE_CLAUDE_TIER_TO_ENV.values(),
+    _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV,
+    _ANTHROPIC_CUSTOM_MODEL_OPTION_NAME_ENV,
+    "ANTHROPIC_SMALL_FAST_MODEL",
+)
+# Credentials that would replace the config's apiKeyHelper token.
+_CLAUDE_SETTINGS_HELPER_CREDENTIAL_ENV: tuple[str, ...] = (
+    _ANTHROPIC_API_KEY_ENV,
+    "ANTHROPIC_AUTH_TOKEN",
+)
 _DEFAULT_UCODE_AUTH_REFRESH_INTERVAL_MS = 900_000
 _SESSION_LABELS = {
     "omnigent.ui": "terminal",
@@ -948,8 +967,14 @@ def _claude_model_probe_invocation(
             *extra_args,
         ]
     )
+    probe_settings: dict[str, object] = {}
     if claude_config is not None and claude_config.api_key_helper:
-        args.extend(("--settings", json.dumps({"apiKeyHelper": claude_config.api_key_helper})))
+        probe_settings["apiKeyHelper"] = claude_config.api_key_helper
+    settings_env = build_native_claude_settings_env(claude_config)
+    if settings_env:
+        probe_settings["env"] = settings_env
+    if probe_settings:
+        args.extend(("--settings", json.dumps(probe_settings)))
     command, launch_args = resolve_claude_launch("claude", args)
     env = dict(os.environ)
     env.update(build_native_claude_terminal_env(claude_config))
@@ -1314,7 +1339,7 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
         ambient_gateway = managed_base_url or os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV)
     return fingerprint_of(
         "claude-native",
-        "control-picker-v3",
+        "control-picker-v4",
         sorted(claude_config.env.items()) if claude_config is not None else None,
         claude_config.api_key_helper if claude_config is not None else None,
         claude_config.model if claude_config is not None else None,
@@ -1552,6 +1577,40 @@ def build_native_claude_terminal_env(
                 "Claude Code via the helper, not the environment."
             )
     return terminal_env
+
+
+def build_native_claude_settings_env(
+    claude_config: ClaudeNativeUcodeConfig | None,
+) -> dict[str, str]:
+    """
+    Build the ``env`` block for Claude Code's command-line ``--settings``.
+
+    Claude Code applies a user ``settings.json`` ``env`` block (which ``ucode``
+    writes) over the process env, so routing passed only through the process
+    env can be silently redirected to another endpoint while Omnigent's
+    ``apiKeyHelper`` still supplies this provider's credential. The
+    command-line settings layer outranks user and project settings, so the
+    config's routing is pinned there. Endpoint, model and credential keys the
+    config leaves unset are blanked so they cannot leak in from those files.
+
+    :param claude_config: The resolved launch config, or ``None`` (Claude's own
+        login, which keeps honouring the user's settings).
+    :returns: Settings ``env`` entries, e.g. ``{"ANTHROPIC_BASE_URL":
+        "https://example.com", "ANTHROPIC_DEFAULT_OPUS_MODEL": ""}``; empty for
+        ``None``.
+    """
+    if claude_config is None:
+        return {}
+    owned_keys = [*_CLAUDE_SETTINGS_OWNED_ROUTING_ENV]
+    if claude_config.api_key_helper:
+        owned_keys.extend(_CLAUDE_SETTINGS_HELPER_CREDENTIAL_ENV)
+    settings_env = dict.fromkeys(owned_keys, "")
+    settings_env.update(
+        (key, value)
+        for key, value in claude_config.env.items()
+        if key != _AWS_BEARER_TOKEN_BEDROCK_ENV
+    )
+    return settings_env
 
 
 def _mark_startup_step(
@@ -6466,6 +6525,7 @@ def _claude_terminal_request(
         ap_auth_headers=ap_auth_headers,
         api_key_helper=claude_config.api_key_helper if claude_config is not None else None,
         model_overrides=claude_config.model_overrides if claude_config is not None else None,
+        settings_env=build_native_claude_settings_env(claude_config),
         append_system_prompt=append_system_prompt,
         allowed_tools=allowed_tools,
     )

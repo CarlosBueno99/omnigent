@@ -515,6 +515,9 @@ async def test_claude_native_title_uses_tool_free_print_mode(
     assert args[args.index("--output-format") + 1] == "text"
     assert args[args.index("--model") + 1] == "claude-sonnet-4-6"
     settings = json.loads(args[args.index("--settings") + 1])
+    settings_env = settings.pop("env")
+    assert settings_env["ANTHROPIC_BASE_URL"] == "https://gateway.example/anthropic"
+    assert settings_env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == ""
     assert settings == {
         "apiKeyHelper": "printf token",
         "modelOverrides": {

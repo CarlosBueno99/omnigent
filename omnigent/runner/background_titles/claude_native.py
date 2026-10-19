@@ -27,6 +27,7 @@ async def generate_background_title(context: BackgroundTitleContext) -> str | No
         validate_claude_hook_interpreter_compatibility,
     )
     from omnigent.harnesses.claude_native.main import (
+        build_native_claude_settings_env,
         build_native_claude_terminal_env,
         resolve_native_claude_config,
     )
@@ -70,6 +71,7 @@ async def generate_background_title(context: BackgroundTitleContext) -> str | No
             settings["apiKeyHelper"] = claude_config.api_key_helper
         if claude_config.model_overrides:
             settings["modelOverrides"] = claude_config.model_overrides
+        settings["env"] = build_native_claude_settings_env(claude_config)
     if settings:
         args.extend(("--settings", json.dumps(settings)))
 
