@@ -78,6 +78,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PullRequestActions } from "./PullRequestActions";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MessageResponse } from "@/components/ai-elements/message";
 import {
@@ -858,7 +859,7 @@ function PullRequestSummaryTab({
         </h3>
         {body ? (
           <div className="text-ui break-words">
-            <MessageResponse>{body}</MessageResponse>
+            <MessageResponse mode="static">{body}</MessageResponse>
           </div>
         ) : (
           <p className="text-ui text-muted-foreground italic">No description provided.</p>
@@ -1103,7 +1104,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
               "github-info",
               "github-changed-files",
               "github-pr-diff",
-              ...(managed ? ["session-prs"] : []),
+              ...(managed ? ["session-prs", "pr-write-access"] : []),
             ].map((key) => queryClient.invalidateQueries({ queryKey: [key, conversationId] })),
           );
         } finally {
@@ -1859,6 +1860,14 @@ function PullRequestPanelDetails({
 
         {/* Summary: reviewers, CI checks, and the PR description. */}
         <TabsContent value="summary" className="min-h-0 flex-1 overflow-y-auto">
+          {managed && info.data?.provider === "github" && viewer && (
+            <PullRequestActions
+              key={`${viewer}:${pr.url}`}
+              conversationId={conversationId}
+              pr={pr}
+              viewer={viewer}
+            />
+          )}
           <PullRequestSummaryTab
             reviewers={pr.reviewers}
             checks={checks}

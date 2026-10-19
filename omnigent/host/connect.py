@@ -3756,6 +3756,18 @@ class HostProcess:
             from omnigent.runner.session_prs import SessionPrRegistry
 
             return SessionPrRegistry(str(params["session_id"])).sync(params)
+        if op in ("github_write-access", "github_edit"):
+            from omnigent.runner.pr_mutations import edit_pr, pr_write_access
+
+            if op == "github_write-access":
+                return pr_write_access(
+                    workspace, session_id=str(params["session_id"]), pr_url=str(params["pr_url"])
+                )
+            return edit_pr(
+                workspace,
+                session_id=str(params["session_id"]),
+                changes=cast("dict[str, object]", params["changes"]),
+            )
         if op == "github_set_preference":
             return pr_resource.set_pr_preference(
                 workspace,

@@ -264,11 +264,16 @@ def test_pr_diff_retry_keeps_associations(
     page.screenshot(path=str(tmp_path / f"pr-retry-{entry}-recovered.png"))
 
 
-def test_flagged_patch_search_and_viewed_files(
-    page: Page, seeded_session: tuple[str, str], tmp_path: Path
+@pytest.mark.parametrize("mobile", [False, True])
+def test_flagged_pr_review_and_actions(
+    page: Page, seeded_session: tuple[str, str], tmp_path: Path, mobile: bool
 ) -> None:
     base_url, session_id = seeded_session
     revision = "head-one"
+    pr = dict(_INFO["pr"])
+    writes: list[dict[str, str]] = []
+    reject_save = True
+    page.set_viewport_size({"width": 390 if mobile else 1280, "height": 900})
     _stub_github(page)
 
     def capabilities(route: Route) -> None:
@@ -285,15 +290,38 @@ def test_flagged_patch_search_and_viewed_files(
                 "selected_pr_url": _INFO["pr"]["url"],
                 "tracking_available": True,
                 "pr": {
-                    **_INFO["pr"],
+                    **pr,
                     "head_sha": revision,
                     "head_repository_url": "https://github.com/acme/app",
                 },
             }
         )
 
+    def edit(route: Route) -> None:
+        changes = route.request.post_data_json
+        writes.append(changes)
+        if reject_save:
+            route.fulfill(status=400, json={"detail": "Save failed. Refresh before retrying."})
+            return
+        for field in ("title", "body"):
+            if field in changes:
+                pr[field] = changes[field]
+        if "reviewer" in changes:
+            pr["reviewers"] = [
+                *pr["reviewers"],
+                {"login": changes["reviewer"], "kind": "user", "state": "PENDING"},
+            ]
+        route.fulfill(json={"updated": True})
+
     page.route("**/v1/info", capabilities)
     page.route(re.compile(r"/resources/github(?:\?|$)"), info)
+    page.route(
+        re.compile(r"/resources/github/write-access\?"),
+        lambda route: route.fulfill(
+            json={"actor": "octocat", "can_edit": True, "can_request_reviewers": True}
+        ),
+    )
+    page.route(re.compile(r"/resources/github/edit$"), edit)
     page.route(
         re.compile(r"/resources/github/prs$"),
         lambda route: route.fulfill(
@@ -312,7 +340,11 @@ def test_flagged_patch_search_and_viewed_files(
     )
     page.goto(f"{base_url}/c/{session_id}")
     page.get_by_test_id("composer-pr-link").click()
-    panel = page.get_by_role("complementary", name="Workspace")
+    panel = (
+        page.get_by_test_id("github-panel-drawer")
+        if mobile
+        else page.get_by_role("complementary", name="Workspace")
+    )
     panel.get_by_role("tablist", name="Pull request").get_by_role("tab", name="Changes").click()
     panel.get_by_role("searchbox", name="Filter changed file paths").fill("main.py")
     expect(panel.locator('[data-github-file="README.md"]')).to_have_count(0)
@@ -326,6 +358,8 @@ def test_flagged_patch_search_and_viewed_files(
     expect(panel.get_by_text("1/2 files viewed")).to_be_visible()
     page.screenshot(path=str(tmp_path / "pr-search-viewed.png"))
     page.reload()
+    if mobile:
+        page.get_by_test_id("composer-pr-link").click()
     panel.get_by_role("tablist", name="Pull request").get_by_role("tab", name="Changes").click()
     expect(
         panel.get_by_role("checkbox", name="Viewed src/app/main.py", exact=True)
@@ -334,10 +368,53 @@ def test_flagged_patch_search_and_viewed_files(
     expect(panel.locator('[data-github-file="src/app/main.py"]')).to_have_count(0)
     revision = "head-two"
     page.reload()
+    if mobile:
+        page.get_by_test_id("composer-pr-link").click()
     panel.get_by_role("tablist", name="Pull request").get_by_role("tab", name="Changes").click()
     expect(
         panel.get_by_role("checkbox", name="Viewed src/app/main.py", exact=True)
     ).not_to_be_checked()
+
+    panel.get_by_role("tablist", name="Pull request").get_by_role("tab", name="Summary").click()
+    expect(panel.get_by_text("Acting as @octocat (host GitHub account)")).to_be_visible()
+    panel.get_by_role("button", name="Edit description").click()
+    panel.get_by_role("textbox", name="PR description").fill(
+        "## Recovered draft\n\nKeep this text."
+    )
+    page.reload()
+    if mobile:
+        page.get_by_test_id("composer-pr-link").click()
+    expect(panel.get_by_role("textbox", name="PR description")).to_have_value(
+        "## Recovered draft\n\nKeep this text."
+    )
+    panel.get_by_role("button", name="Save", exact=True).click()
+    expect(panel.get_by_role("alert")).to_contain_text("Save failed")
+    expect(panel.get_by_role("textbox", name="PR description")).to_have_value(
+        "## Recovered draft\n\nKeep this text."
+    )
+    reject_save = False
+    panel.get_by_role("button", name="Save", exact=True).click()
+    expect(panel.get_by_text("PR updated.")).to_be_visible()
+    expect(panel.get_by_role("heading", name="Recovered draft")).to_be_visible()
+    assert writes[-1] == {
+        "pr_url": pr["url"],
+        "expected_actor": "octocat",
+        "body": "## Recovered draft\n\nKeep this text.",
+    }
+    panel.get_by_role("button", name="Edit title").click()
+    panel.get_by_role("textbox", name="PR title").fill("Reviewed title")
+    panel.get_by_role("button", name="Save", exact=True).click()
+    expect(panel.get_by_role("textbox", name="PR title")).to_have_count(0)
+    assert writes[-1] == {
+        "pr_url": pr["url"],
+        "expected_actor": "octocat",
+        "title": "Reviewed title",
+    }
+    panel.get_by_role("textbox", name="Reviewer username").fill("new-reviewer")
+    panel.get_by_role("button", name="Request reviewer").click()
+    expect(panel.get_by_text("Reviewer requested.")).to_be_visible()
+    expect(panel.get_by_role("listitem", name="new-reviewer: Pending")).to_be_visible()
+    page.screenshot(path=str(tmp_path / "pr-edited-reviewer-requested.png"))
 
 
 @pytest.mark.parametrize(

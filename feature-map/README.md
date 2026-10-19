@@ -142,6 +142,9 @@ user-visible behavior. It then uses exactly these four H2 sections in order:
 - [GitLab merge requests](./gitlab.md) covers the shared MR panel, composer,
   Canvas links, and native tracking.
 
+- [Pull request management](./pull-requests.md) covers linking, review progress,
+  GitHub edits and reviewer requests, and desktop/mobile entry points.
+
 - [Azure DevOps pull requests](./azure-devops.md) covers the shared panel,
   composer, associations, partial results, and Canvas links.
 
@@ -171,7 +174,8 @@ map an area, remove it here in the same change.
 - Files and the workspace browser: `tests/e2e_ui/files/`, `tests/browser_ui/files/`
 - Comments: `tests/e2e_ui/comments/`
 - Sharing and session permissions: `tests/e2e_ui/collaboration/`
-- GitHub integration: `tests/e2e_ui/github/`
+- GitHub integration: `tests/e2e_ui/github/` (PR management is mapped; native
+  tracking and account setup remain unmapped)
 - Scheduled tasks: `tests/e2e_ui/scheduled/`
 - In-app browser: `tests/e2e_ui/browser/` (session cookie sharing is covered in
   Sessions; other browser behavior remains unmapped)

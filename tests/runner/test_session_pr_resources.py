@@ -87,6 +87,92 @@ def test_explicit_repo_is_used_for_all_pr_reads(
     assert calls[3][-2:] == ["-R", "github.com/example/two"]
 
 
+async def test_pr_writes_pin_actor_and_only_send_requested_fields(
+    tracked: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.runner.pr_mutations import PullRequestEdit, edit_pr, pr_write_access
+
+    calls: list[list[str]] = []
+    actor, allowed, fail = "owner", True, False
+
+    def gh(args: list[str], *, token: str | None = None, **_kwargs: object):
+        calls.append(args)
+        if args[:2] == ["auth", "token"]:
+            return 0, "test-credential\n", ""
+        assert token == "test-credential"
+        if "--method" in args:
+            return (1 if fail else 0), "{}", ""
+        payload = {
+            "user": {"login": actor},
+            "repos/example/two": {"permissions": {"push": allowed}},
+            "repos/example/two/pulls/42": {"user": {"login": "someone"}, "state": "open"},
+        }[args[-1]]
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(github, "_gh", gh)
+    assert pr_write_access(tracked, session_id="session", pr_url=B) == {
+        "actor": "owner",
+        "can_edit": True,
+        "can_request_reviewers": True,
+    }
+    base = {"pr_url": B, "expected_actor": "owner"}
+    for change, method, fields in [
+        ({"title": "New title"}, "PATCH", ["title=New title"]),
+        ({"body": ""}, "PATCH", ["body="]),
+        ({"reviewer": "a-reviewer"}, "POST", ["reviewers[]=a-reviewer"]),
+    ]:
+        assert edit_pr(tracked, session_id="session", changes={**base, **change})["updated"]
+        assert calls[-1][-4:] == ["--method", method, "-f", fields[0]]
+        assert calls[-1][3].startswith("repos/example/two/pulls/42")
+
+    from omnigent.host.connect import HostProcess
+
+    changes = {**base, "title": "Through transport"}
+    for operation, params in [("edit", {"changes": changes}), ("write-access", {"pr_url": B})]:
+        host_result = HostProcess._dispatch_fs_write_op(
+            tracked, f"github_{operation}", {"session_id": "session", **params}
+        )
+        app = create_runner_app(
+            runner_workspace=Path(tracked),
+            server_client=NullServerClient(),  # type: ignore[arg-type]
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://runner"
+        ) as client:
+            response = await client.post(
+                f"/v1/sessions/session/resources/github/{operation}", json=params
+            )
+        assert response.status_code == 200, response.text
+        assert response.json() == host_result
+
+    for change in ({}, {"title": " "}, {"reviewer": "@bad"}, {"body": "x", "reviewer": "ok"}):
+        with pytest.raises(ValueError):
+            PullRequestEdit.model_validate({**base, **change})
+
+    for actor, allowed, message in [
+        ("changed", True, "account changed"),
+        ("owner", False, "cannot perform"),
+    ]:
+        calls.clear()
+        with pytest.raises(ValueError, match=message):
+            edit_pr(tracked, session_id="session", changes={**base, "title": "New"})
+        assert all("--method" not in call for call in calls)
+
+    actor, allowed, fail = "owner", True, True
+    calls.clear()
+    with pytest.raises(ValueError, match="Refresh the PR before retrying"):
+        edit_pr(tracked, session_id="session", changes={**base, "body": "Keep draft"})
+    assert sum("--method" in call for call in calls) == 1
+
+    calls.clear()
+    monkeypatch.setattr(github, "_pr_token", lambda *_: None)
+    monkeypatch.setattr(github, "_in_sandbox", lambda: False)
+    monkeypatch.setattr(github._config, "github_account_preference", lambda _: "missing")
+    with pytest.raises(ValueError, match="selected GitHub account is unavailable"):
+        pr_write_access(tracked, session_id="session", pr_url=B)
+    assert calls == []
+
+
 def test_titles_include_unselected_prs_and_are_cached_between_polls(
     tracked: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

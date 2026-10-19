@@ -38,6 +38,8 @@ workspace: only the owner's workspace-relative reads reach the runner marked
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -359,6 +361,70 @@ async def test_pr_info_only_synchronizes_for_editors(
     assert response.status_code == 200
     assert bool(runner_client.posts) is can_sync
     update.assert_not_called()  # Empty provider payloads don't require a database write.
+
+
+@pytest.mark.asyncio
+async def test_pr_writes_require_flag_session_owner_and_host_owner(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.server.feature_flags import Feature, FeatureFlags
+
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "0")
+    url = "https://github.com/acme/app/pull/1"
+    base = "/v1/sessions/conv_share/resources/github"
+    payload = {"pr_url": url, "expected_actor": "octocat", "body": ""}
+    owner = {"X-Forwarded-Email": "real-owner@example.com"}
+    assert (await client.post(f"{base}/edit", headers=owner, json=payload)).status_code == 404
+    app.state.feature_flags = FeatureFlags(frozenset({Feature.PULL_REQUEST_MANAGEMENT}))
+    for user in ("viewer", "owner", "manager", "admin"):
+        headers = {"X-Forwarded-Email": f"{user}@example.com"}
+        assert (
+            await client.post(f"{base}/edit", headers=headers, json=payload)
+        ).status_code == 403
+        assert (
+            await client.get(f"{base}/write-access", headers=headers, params={"pr_url": url})
+        ).status_code == 403
+    assert runner_client.posts == []
+    assert (await client.post(f"{base}/edit", headers=owner, json=payload)).status_code == 403
+
+    get_conversation = _StubConversationStore.get_conversation
+    monkeypatch.setattr(
+        _StubConversationStore,
+        "get_conversation",
+        lambda self, session: replace(get_conversation(self, session), host_id="host"),
+    )
+    app.state.host_store = SimpleNamespace(get_host=lambda _: SimpleNamespace(user_id="other"))
+    assert (await client.post(f"{base}/edit", headers=owner, json=payload)).status_code == 403
+    assert runner_client.posts == []
+    app.state.host_store = SimpleNamespace(
+        get_host=lambda _: SimpleNamespace(user_id="real-owner@example.com")
+    )
+    monkeypatch.setattr(
+        _StubConversationStore,
+        "get_pull_requests",
+        lambda *_: {"prs": [{"url": url, "provider": "github"}]},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _StubConversationStore, "update_pull_requests", lambda *_, **__: None, raising=False
+    )
+    assert (
+        await client.post(
+            f"{base}/edit",
+            headers=owner,
+            json={**payload, "pr_url": "https://github.com/acme/app/pull/2"},
+        )
+    ).status_code == 400
+    assert runner_client.posts == []
+    assert (
+        await client.get(f"{base}/write-access", headers=owner, params={"pr_url": url})
+    ).status_code == 200
+    assert runner_client.posts[-1] == (f"{base}/write-access", {"pr_url": url})
+    assert (await client.post(f"{base}/edit", headers=owner, json=payload)).status_code == 200
+    assert runner_client.posts[-1] == (f"{base}/edit", {"changes": payload})
 
 
 @pytest.mark.asyncio

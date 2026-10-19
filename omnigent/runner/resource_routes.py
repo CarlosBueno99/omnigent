@@ -1380,6 +1380,25 @@ def register_resource_routes(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/v1/sessions/{session_id}/resources/github/write-access")
+    @app.post("/v1/sessions/{session_id}/resources/github/edit")
+    async def github_write_operation(session_id: str, request: Request) -> dict[str, Any]:
+        from omnigent.runner.pr_mutations import edit_pr, pr_write_access
+
+        operation = request.url.path.rsplit("/", 1)[-1]
+        root = await _github_workspace_root(session_id)
+        params = await request.json()
+        try:
+            if operation == "write-access":
+                return await asyncio.to_thread(
+                    pr_write_access, root, session_id=session_id, pr_url=params["pr_url"]
+                )
+            return await asyncio.to_thread(
+                edit_pr, root, session_id=session_id, changes=params["changes"]
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/v1/sessions/{session_id}/resources/github/preferences")
     async def set_github_preference_route(session_id: str, request: Request) -> JSONResponse:
         body = await request.json()

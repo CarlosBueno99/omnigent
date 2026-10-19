@@ -51,6 +51,7 @@ from omnigent.server.auth import (
     LEVEL_OWNER,
     LEVEL_READ,
     AuthProvider,
+    local_single_user_enabled,
 )
 from omnigent.server.feature_flags import Feature, FeatureFlags
 from omnigent.server.host_registry import HostRegistry
@@ -2977,6 +2978,94 @@ def register_resources_routes(
             "prs": page,
             "next_cursor": page[-1]["url"] if len(remaining) > limit else None,
         }
+
+    async def authorize_pr_write(request: Request, session_id: str, pr_url: str) -> Conversation:
+        if not pr_management_enabled(request):
+            raise HTTPException(status_code=404, detail="PR management is disabled")
+        conv = await _validate_session(session_id, request, LEVEL_OWNER)
+        user = _get_user_id(request, auth_provider)
+        if not local_single_user_enabled() and (not user or permission_store is None):
+            raise HTTPException(
+                status_code=403, detail="Sign in as the session and host owner to edit PRs"
+            )
+        if user and permission_store:
+            grant = await asyncio.to_thread(
+                permission_store.get, user, conv.root_conversation_id or conv.id
+            )
+            if grant is None or grant.level < LEVEL_OWNER:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only the session owner may use its host's GitHub credentials",
+                )
+        if user and conv.host_id:
+            store = getattr(request.app.state, "host_store", None)
+            host = await asyncio.to_thread(store.get_host, conv.host_id) if store else None
+            if host is None or host.user_id != user:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only the execution host's owner may use its GitHub credentials",
+                )
+        elif not local_single_user_enabled():
+            raise HTTPException(
+                status_code=403, detail="Connect your own execution host to edit PRs"
+            )
+        state = await asyncio.to_thread(conversation_store.get_pull_requests, session_id)
+        if not any(
+            entry["url"] == pr_url and entry["provider"] == "github" for entry in state["prs"]
+        ):
+            raise HTTPException(status_code=400, detail="Select a linked GitHub PR")
+        await sync_prs(session_id, conv)
+        return conv
+
+    async def pr_write_call(
+        session_id: str, conv: Conversation, operation: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            status, result = await _proxy_post_to_runner(
+                session_id, f"/v1/sessions/{session_id}/resources/github/{operation}", params, conv
+            )
+        except OmnigentError as exc:
+            if exc.code != ErrorCode.RUNNER_UNAVAILABLE:
+                raise
+            result = await _write_workspace_via_host(
+                session_id,
+                conv,
+                op=f"github_{operation}",
+                host_params={**params, "session_id": session_id},
+            )
+            if result is None:
+                raise
+            return result
+        if status >= 400:
+            raise HTTPException(
+                status_code=status,
+                detail=result.get("detail")
+                or result.get("error", {}).get("message")
+                or "GitHub action failed",
+            )
+        return result
+
+    @router.get("/sessions/{session_id}/resources/github/write-access", response_model=None)
+    async def get_pr_write_access(
+        request: Request, session_id: str, pr_url: str
+    ) -> dict[str, Any]:
+        conv = await authorize_pr_write(request, session_id, pr_url)
+        return await pr_write_call(session_id, conv, "write-access", {"pr_url": pr_url})
+
+    @router.post("/sessions/{session_id}/resources/github/edit", response_model=None)
+    async def edit_session_pr(request: Request, session_id: str) -> dict[str, Any]:
+        from pydantic import ValidationError
+
+        from omnigent.runner.pr_mutations import PullRequestEdit
+
+        try:
+            changes = PullRequestEdit.model_validate(await request.json())
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=exc.errors()[0]["msg"]) from exc
+        conv = await authorize_pr_write(request, session_id, changes.pr_url)
+        return await pr_write_call(
+            session_id, conv, "edit", {"changes": changes.model_dump(exclude_none=True)}
+        )
 
     @router.get(
         "/sessions/{session_id}/resources/github",
