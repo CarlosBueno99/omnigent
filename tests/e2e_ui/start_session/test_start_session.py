@@ -1649,8 +1649,7 @@ async def _drive_managed_remembers_host(base_url: str, session_id: str) -> None:
             await page.get_by_test_id(f"new-chat-landing-host-{host_id}").click()
             await expect(chip).to_have_attribute("aria-label", re.compile(host_display_name))
 
-            # Reload: the host must be restored, NOT reverted to the sandbox —
-            # the exact regression this change fixes.
+            # Reload: the picked host must be restored, not reverted to the sandbox.
             await page.goto(f"{base_url}/")
             await page.get_by_test_id("new-chat-landing-input").wait_for(
                 state="visible", timeout=30_000

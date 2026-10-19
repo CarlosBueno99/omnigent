@@ -7205,6 +7205,27 @@ describe("NewChatLandingScreen", () => {
     ).not.toContain("No hosts");
   });
 
+  it.each<{
+    state: string;
+    hosts: Host[] | undefined;
+    queryState: Partial<ReturnType<typeof useHosts>>;
+  }>([
+    { state: "every host is offline", hosts: [host("offline")], queryState: {} },
+    {
+      state: "the host list fails to load",
+      hosts: undefined,
+      queryState: { status: "error", isPending: false, isLoading: false, isError: true },
+    },
+  ])("falls back to the sandbox when $state", async ({ hosts, queryState }) => {
+    mockHosts(hosts, queryState);
+    renderLanding({ managed_sandboxes_enabled: true });
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "New Sandbox",
+      ),
+    );
+  });
+
   it("switching between a host and the sandbox swaps the workspace chrome", async () => {
     localStorage.setItem("omnigent:last-host-choice", "__sandbox__");
     renderLanding({ managed_sandboxes_enabled: true });
