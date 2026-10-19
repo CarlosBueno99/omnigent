@@ -227,6 +227,37 @@ describe.each([true, false])("Mermaid fullscreen (embedded=%s)", (embedded) => {
     expect(overlayDiagram()?.outerHTML).toBe((await inlineDiagram()).outerHTML);
   }, 15_000);
 
+  it.each([
+    ["replace it", false],
+    ["reopen after it is dismissed", true],
+  ])(
+    "does not let a superseded click %s",
+    async (_case, dismissBeforeDrawn) => {
+      const replies = (withDrawing: boolean) => (
+        <MermaidFullscreenProvider>
+          <MessageResponse>{"```mermaid\nflowchart LR\n  Gamma --> Delta\n```"}</MessageResponse>
+          {withDrawing && <MessageResponse>{markdown}</MessageResponse>}
+        </MermaidFullscreenProvider>
+      );
+      const { rerender } = render(replies(false), { container: root });
+      await inlineDiagram();
+      rerender(replies(true));
+      const [drawnButton, drawingButton] = screen.getAllByTitle("View fullscreen");
+      expect(root.querySelectorAll(`.chat-mermaid ${diagramSelector}`)).toHaveLength(1);
+      fireEvent.click(drawingButton);
+      fireEvent.click(drawnButton);
+      expect(overlayDiagram()?.textContent).toContain("Gamma");
+      if (dismissBeforeDrawn) fireEvent.keyDown(window, { key: "Escape" });
+
+      const bothDrawn = () =>
+        expect(root.querySelectorAll(`.chat-mermaid ${diagramSelector}`)).toHaveLength(2);
+      await waitFor(bothDrawn, { timeout: 10_000 });
+      if (dismissBeforeDrawn) expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
+      else expect(overlayDiagram()?.textContent).toContain("Gamma");
+    },
+    15_000,
+  );
+
   it("keeps the diagram open when a settled reply remounts its block", async () => {
     const reply = (mode: "streaming" | "static") => (
       <MermaidFullscreenProvider>

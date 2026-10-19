@@ -39,7 +39,8 @@ export function isMermaidPre(children: ReactNode): boolean {
 // A click that lands while Streamdown is still drawing the diagram opens it once drawn.
 const DIAGRAM_RENDER_WAIT_MS = 5_000;
 
-const MermaidFullscreenContext = createContext<((svgMarkup: string) => void) | null>(null);
+// Opens the block's diagram, or waits for it to draw; returns a cancel for that wait.
+const MermaidFullscreenContext = createContext<((block: HTMLElement) => () => void) | null>(null);
 
 function MermaidFullscreenOverlay({
   onClose,
@@ -105,9 +106,42 @@ export function MermaidFullscreenProvider({
     setOpenedForKey(resetKey);
     setSvgMarkup(null);
   }
-  const close = useCallback(() => setSvgMarkup(null), []);
+  // Only the latest click may open a diagram once it draws.
+  const cancelPendingRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => cancelPendingRef.current?.(), [resetKey]);
+
+  const openDiagram = useCallback((block: HTMLElement) => {
+    cancelPendingRef.current?.();
+    // The rendered diagram is Mermaid's own <svg id="mermaid-…"> — scope to it so
+    // we don't clone a toolbar/zoom-control icon (all 16×16 <svg>s in the block).
+    const findDiagram = () => block.querySelector('svg[id^="mermaid-"]');
+    const diagram = findDiagram();
+    if (diagram) {
+      setSvgMarkup(diagram.outerHTML);
+      return () => {};
+    }
+    const observer = new MutationObserver(() => {
+      const rendered = findDiagram();
+      if (!rendered) return;
+      cancelWait();
+      setSvgMarkup(rendered.outerHTML);
+    });
+    const timer = window.setTimeout(() => cancelWait(), DIAGRAM_RENDER_WAIT_MS);
+    const cancelWait = () => {
+      observer.disconnect();
+      window.clearTimeout(timer);
+      if (cancelPendingRef.current === cancelWait) cancelPendingRef.current = null;
+    };
+    observer.observe(block, { childList: true, subtree: true });
+    cancelPendingRef.current = cancelWait;
+    return cancelWait;
+  }, []);
+  const close = useCallback(() => {
+    cancelPendingRef.current?.();
+    setSvgMarkup(null);
+  }, []);
   return (
-    <MermaidFullscreenContext.Provider value={setSvgMarkup}>
+    <MermaidFullscreenContext.Provider value={openDiagram}>
       {children}
       {svgMarkup != null && <MermaidFullscreenOverlay onClose={close} svgMarkup={svgMarkup} />}
     </MermaidFullscreenContext.Provider>
@@ -116,37 +150,15 @@ export function MermaidFullscreenProvider({
 
 // Reuse the sanitized inline SVG without rerunning Mermaid or copying toolbar icons.
 function MermaidFullscreenButton({ blockRef }: { blockRef: RefObject<HTMLDivElement | null> }) {
-  const open = useContext(MermaidFullscreenContext);
+  const openDiagram = useContext(MermaidFullscreenContext);
   const cancelWaitRef = useRef<(() => void) | null>(null);
   useEffect(() => () => cancelWaitRef.current?.(), []);
 
   const openFullscreen = useCallback(() => {
     const block = blockRef.current;
-    if (!block || !open) return;
-    cancelWaitRef.current?.();
-    // The rendered diagram is Mermaid's own <svg id="mermaid-…"> — scope to it so
-    // we don't clone a toolbar/zoom-control icon (all 16×16 <svg>s in the block).
-    const findDiagram = () => block.querySelector('svg[id^="mermaid-"]');
-    const diagram = findDiagram();
-    if (diagram) {
-      open(diagram.outerHTML);
-      return;
-    }
-    const observer = new MutationObserver(() => {
-      const rendered = findDiagram();
-      if (!rendered) return;
-      cancelWait();
-      open(rendered.outerHTML);
-    });
-    const timer = window.setTimeout(() => cancelWait(), DIAGRAM_RENDER_WAIT_MS);
-    const cancelWait = () => {
-      observer.disconnect();
-      window.clearTimeout(timer);
-      cancelWaitRef.current = null;
-    };
-    observer.observe(block, { childList: true, subtree: true });
-    cancelWaitRef.current = cancelWait;
-  }, [blockRef, open]);
+    if (!block || !openDiagram) return;
+    cancelWaitRef.current = openDiagram(block);
+  }, [blockRef, openDiagram]);
 
   return (
     <Button
