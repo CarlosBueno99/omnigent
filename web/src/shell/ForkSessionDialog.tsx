@@ -438,9 +438,9 @@ function ForkRunConfig({
             : ["--permission-mode", permission];
       }
     } else if (hasApproval && isCodex && mode === CODEX_NATIVE_BYPASS_APPROVAL_VALUE) {
-      // Bypass is a LABEL, not launch args: clear any preset flags and set
-      // the dedicated opt-in the server turns into the bypass label.
-      value.terminalLaunchArgs = [];
+      // Bypass is a LABEL, not launch args. A pick clears preset flags; an
+      // untouched seed keeps the source's inherited args.
+      if (touched.mode) value.terminalLaunchArgs = [];
       value.codexBypassSandbox = true;
     } else if (hasApproval && touched.mode) {
       value.terminalLaunchArgs =

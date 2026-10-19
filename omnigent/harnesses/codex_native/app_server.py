@@ -4381,6 +4381,7 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
     params: CodexParams = {}
     typed_params: CodexParams = {}
     args = normalize_codex_permission_launch_args(terminal_launch_args)
+    bypass = False
     index = 0
     while index < len(args):
         arg = args[index]
@@ -4388,6 +4389,7 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
             break
         value: str | None = None
         if arg == "--dangerously-bypass-approvals-and-sandbox":
+            bypass = True
             typed_params.update(approvalPolicy="never", sandbox="danger-full-access")
         elif arg in {"--ask-for-approval", "-a", "--sandbox", "-s"}:
             if index + 1 < len(args):
@@ -4415,7 +4417,7 @@ def _codex_resume_permission_params(terminal_launch_args: Sequence[str] | None) 
             approvalsReviewer="auto_review", approvalPolicy="on-request", sandbox="workspace-write"
         )
     params.update(typed_params)
-    if "--dangerously-bypass-approvals-and-sandbox" in args:
+    if bypass:
         # A profile written back while the thread ran sandboxed must not undo bypass.
         params.pop("permissions", None)
     elif "permissions" in params:
