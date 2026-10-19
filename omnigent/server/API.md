@@ -1123,17 +1123,26 @@ Request body matches `SessionEventInput`:
       - "external_session_prs"
                                 — internal PR association snapshot. Payload:
                                   `{prs: [...], updated_at_ns: integer}`.
+                                  Requires the session owner or bound runner.
+                                  Revisions are positive 64-bit nanosecond
+                                  timestamps, at most five minutes in the future.
                                   Stores at most 100 entries / 128 KiB, validates
                                   HTTPS identities. Session detail and list
                                   responses expose the saved `pull_requests`.
                                   Older revisions are ignored; empty clears.
-                                  Unversioned reports only backfill absent data.
+                                  Unversioned reports remain provisional until a
+                                  versioned report or explicit user update;
+                                  empty legacy reports do not erase saved links.
+                                  Rejected reports return saved associations
+                                  while preserving the live provider context.
       - "external_session_pr_snapshot"
                                 — internal PR panel cache update. Payload:
                                   `{pr_url, captured_at_ns, info?, changes?, diff?}`.
+                                  Requires the session owner or bound runner.
                                   The PR must already belong to the session.
                                   Capture time is a positive 64-bit nanosecond
-                                  timestamp. Each resource keeps its latest
+                                  timestamp, at most five minutes in the future.
+                                  Each resource keeps its latest
                                   capture; newer head/base revisions invalidate
                                   older file lists and patches. Returns
                                   `{queued: false, saved: boolean}`.

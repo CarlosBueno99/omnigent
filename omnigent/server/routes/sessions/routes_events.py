@@ -1079,8 +1079,10 @@ def register_events_routes(
         if body.type in {
             _EXTERNAL_CODEX_APPROVAL_MODE_CHANGE_TYPE,
             _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,
+            _EXTERNAL_SESSION_PRS_TYPE,
+            _EXTERNAL_SESSION_PR_SNAPSHOT_TYPE,
         } and not _has_bound_runner_authority(request, conv):
-            # Owner-authenticated local forwarders also report native settings.
+            # Owner-authenticated local forwarders also report native metadata.
             await _require_access_and_level(
                 user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
             )

@@ -313,7 +313,7 @@ def test_restore_preserves_server_rows_and_keeps_unversioned_local_state(tmp_pat
     server_snapshot = source.snapshot()
     assert server_snapshot is not None
     remote_revision = server_snapshot[0] + 1_000_000_000
-    monkeypatch.setattr(session_prs.time, "time_ns", lambda: 1)
+    monkeypatch.setattr(session_prs.time, "time_ns", lambda: server_snapshot[0] - 60_000_000_000)
     target.restore(entries, updated_at_ns=remote_revision)
     assert target.list() == source.list()
     restored = target.snapshot()
@@ -326,6 +326,23 @@ def test_restore_preserves_server_rows_and_keeps_unversioned_local_state(tmp_pat
     empty.restore(entries)
     assert empty.snapshot() is not None
     assert empty.list() == []
+
+
+@pytest.mark.parametrize("revision", [True, 2**63, "future"])
+def test_restore_rejects_invalid_revision_before_creating_or_replacing_registry(
+    tmp_path, revision
+):
+    registry = SessionPrRegistry("session", root=tmp_path / "registry")
+    if revision == "future":
+        revision = session_prs.time.time_ns() + 3_600_000_000_000
+    with pytest.raises(ValueError):
+        registry.restore([], updated_at_ns=revision)
+    assert not registry.path.parent.exists()
+    registry.record([PullRequestRef.from_url(URL)], relationship="created", source="test")
+    original = registry.snapshot()
+    with pytest.raises(ValueError):
+        registry.restore([], updated_at_ns=revision)
+    assert registry.snapshot() == original
 
 
 def test_newer_server_snapshot_restores_returning_host_and_preserves_removals(tmp_path):

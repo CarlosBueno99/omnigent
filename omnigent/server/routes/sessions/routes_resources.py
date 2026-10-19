@@ -3000,9 +3000,9 @@ def register_resources_routes(
     # ``/resources/github`` is not captured as a resource id. The diff route
     # lives on ``file_read_router`` (gzip) above.
 
-    def _can_use_saved_pr_snapshot(
+    def _saved_pr_fallback_reason(
         exc: OmnigentError | HTTPException, conv: Conversation, pr_url: str | None
-    ) -> bool:
+    ) -> str | None:
         offline = (
             exc.code == ErrorCode.RUNNER_UNAVAILABLE
             if isinstance(exc, OmnigentError)
@@ -3010,12 +3010,16 @@ def register_resources_routes(
             and exc.detail
             in ("no runner available for resource access", "runner resource endpoint unavailable")
         )
-        return offline or (
+        if offline:
+            return "workspace_offline"
+        if (
             isinstance(exc, HTTPException)
             and exc.status_code in (400, 502)
             and exc.detail == "This pull request is not associated with the session"
             and any(pr["url"] == pr_url for pr in conv.session_pull_requests or [])
-        )
+        ):
+            return "provider_unavailable"
+        return None
 
     def _associated_pr_url(conv: Conversation, pr_url: str | None) -> str | None:
         prs = conv.session_pull_requests or []
@@ -3038,6 +3042,7 @@ def register_resources_routes(
             return
         if (
             payload.get("available") is False
+            or payload.get("cached")
             or payload.get("warning")
             or payload.get("warnings")
             or payload.get("unavailable_reason")
@@ -3083,7 +3088,7 @@ def register_resources_routes(
             )
         except (OmnigentError, HTTPException) as exc:
             if (
-                not _can_use_saved_pr_snapshot(exc, conv, selected)
+                _saved_pr_fallback_reason(exc, conv, selected) is None
                 or conv.session_pull_requests is None
             ):
                 raise
@@ -3101,6 +3106,7 @@ def register_resources_routes(
         payload: dict[str, Any],
         *,
         user_update: bool = False,
+        pr_url: str | None = None,
     ) -> dict[str, Any]:
         if payload.get("tracking_available") is True and "prs" in payload:
             try:
@@ -3115,11 +3121,49 @@ def register_resources_routes(
                     await asyncio.to_thread(
                         prune_session_pr_snapshots, conversation_store, artifact_store, session_id
                     )
-            except (TypeError, ValueError):
-                _logger.warning("Cannot save legacy PR metadata for session %s", session_id)
+            except (TypeError, ValueError) as exc:
+                _logger.warning(
+                    "Cannot save PR metadata for session %s (%s)", session_id, type(exc).__name__
+                )
+                return payload
+            persisted = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if persisted is not None and persisted.session_pull_requests is not None:
+                prs = _session_prs_for_display(persisted.session_pull_requests) or []
+                urls = {pr["url"] for pr in prs}
+                live_pr = payload.get("pr")
+                live_url = live_pr.get("url") if isinstance(live_pr, dict) else None
+                selected = next(
+                    (
+                        url
+                        for url in (pr_url, payload.get("selected_pr_url"), live_url)
+                        if isinstance(url, str) and url in urls
+                    ),
+                    prs[0]["url"] if prs else None,
+                )
+                payload = {**payload, "prs": prs, "selected_pr_url": selected}
+                if persisted.session_pull_requests_updated_at_ns is None:
+                    payload.pop("prs_updated_at_ns", None)
+                else:
+                    payload["prs_updated_at_ns"] = persisted.session_pull_requests_updated_at_ns
+                if live_url != selected or selected is None:
+                    payload["pr"] = None
+                if selected is not None and payload.get("pr") is None:
+                    cached = await asyncio.to_thread(
+                        load_session_pr_snapshot, artifact_store, persisted, selected, "info"
+                    )
+                    if isinstance(cached.get("pr"), dict):
+                        payload = {
+                            **cached,
+                            **payload,
+                            "pr": cached["pr"],
+                            "cached": True,
+                            "cached_at": cached["cached_at"],
+                        }
         return payload
 
-    async def _saved_session_pr_info(conv: Conversation, pr_url: str | None) -> dict[str, Any]:
+    async def _saved_session_pr_info(
+        conv: Conversation, pr_url: str | None, *, reason: str
+    ) -> dict[str, Any]:
         prs = _session_prs_for_display(conv.session_pull_requests) or []
         selected = (
             next((pr for pr in prs if pr["url"] == pr_url), None)
@@ -3141,7 +3185,7 @@ def register_resources_routes(
             **cached,
             "object": "session.github.info",
             "available": False,
-            "reason": "workspace_offline",
+            "reason": reason,
             "provider": selected["provider"] if selected else None,
             "provider_display": selected.get("provider_display") if selected else None,
             "prs": prs,
@@ -3186,20 +3230,11 @@ def register_resources_routes(
                 runner_path=f"/v1/sessions/{session_id}/resources/github",
             )
         except (OmnigentError, HTTPException) as exc:
-            if (
-                not _can_use_saved_pr_snapshot(exc, conv, pr_url)
-                or conv.session_pull_requests is None
-            ):
+            reason = _saved_pr_fallback_reason(exc, conv, pr_url)
+            if reason is None or conv.session_pull_requests is None:
                 raise
-            return await _saved_session_pr_info(conv, pr_url)
-        if (
-            conv.session_pull_requests
-            and payload.get("tracking_available") is True
-            and payload.get("prs") == []
-            and payload.get("prs_updated_at_ns") is None
-        ):
-            return await _saved_session_pr_info(conv, pr_url)
-        await _save_session_prs(session_id, payload)
+            return await _saved_session_pr_info(conv, pr_url, reason=reason)
+        payload = await _save_session_prs(session_id, payload, pr_url=pr_url)
         selected = payload.get("selected_pr_url") or (payload.get("pr") or {}).get("url")
         revision = payload.get("prs_updated_at_ns")
         if type(revision) is int:

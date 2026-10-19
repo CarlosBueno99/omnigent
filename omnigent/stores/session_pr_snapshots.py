@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from omnigent.db.db_models import current_workspace_id
+from omnigent.stores.conversation_store.session_prs import validate_session_pr_revision
 
 if TYPE_CHECKING:
     from omnigent.entities.conversation import Conversation
@@ -19,7 +20,6 @@ if TYPE_CHECKING:
 MAX_PR_INFO_BYTES = 512 * 1024
 MAX_PR_CHANGES_BYTES = 512 * 1024
 MAX_PR_DIFF_BYTES = 5 * 1024 * 1024
-MAX_PR_CAPTURE_NS = (1 << 63) - 1
 PR_SNAPSHOT_KINDS = frozenset({"info", "changes", "diff"})
 _logger = logging.getLogger(__name__)
 
@@ -256,8 +256,7 @@ def save_session_pr_snapshots(
     snapshots: dict[str, Any],
 ) -> bool:
     """Write immutable blobs before atomically publishing newer per-resource references."""
-    if type(captured_at_ns) is not int or not 0 < captured_at_ns <= MAX_PR_CAPTURE_NS:
-        raise ValueError("PR snapshot captured_at_ns must be a positive 64-bit integer")
+    validate_session_pr_revision(captured_at_ns)
     if (
         not isinstance(pr_url, str)
         or not pr_url

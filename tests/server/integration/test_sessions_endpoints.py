@@ -16,6 +16,7 @@ import asyncio
 import json
 import math
 import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
@@ -9397,12 +9398,25 @@ async def test_session_prs_persist_before_ack_and_survive_removal_replay(
         assert (
             next(row for row in listed if row["id"] == session["id"])["pull_requests"] == expected
         )
-    for data in ({}, {"prs": "bad"}, {"prs": prs, "updated_at_ns": -1}):
+    for data in (
+        {},
+        {"prs": "bad"},
+        *(
+            {"prs": prs, "updated_at_ns": revision}
+            for revision in (-1, True, 2**80, time.time_ns() + 600_000_000_000)
+        ),
+    ):
         rejected = await client.post(
             path + "/events", json={"type": "external_session_prs", "data": data}
         )
         assert rejected.status_code == 400, rejected.text
     assert (await client.get(path)).json()["pull_requests"] == []
+    accepted = await client.post(
+        path + "/events",
+        json={"type": "external_session_prs", "data": {"prs": prs, "updated_at_ns": 3}},
+    )
+    assert accepted.status_code == 202, accepted.text
+    assert (await client.get(path)).json()["pull_requests"] == display_prs
 
 
 async def test_session_pr_snapshots_serve_saved_details_comments_and_diffs(
@@ -9499,6 +9513,11 @@ async def test_session_pr_snapshots_serve_saved_details_comments_and_diffs(
         {},
         {"pr_url": prs[0]["url"], "captured_at_ns": True, "diff": {"patch": "bad"}},
         {"pr_url": prs[0]["url"], "captured_at_ns": 10**30, "diff": {"patch": "bad"}},
+        {
+            "pr_url": prs[0]["url"],
+            "captured_at_ns": time.time_ns() + 600_000_000_000,
+            "diff": {"patch": "bad"},
+        },
         {"pr_url": prs[0]["url"], "captured_at_ns": 4, "info": {"pr": {"url": prs[1]["url"]}}},
     ):
         rejected = await client.post(
@@ -9564,6 +9583,9 @@ async def test_live_pr_resources_save_links_and_explicit_removal(
         "prs": prs,
         "prs_updated_at_ns": 1,
         "pr": {**prs[0], "body": "Live description"},
+        "repo": {"name_with_owner": "example/project"},
+        "branch": "feature",
+        "base_ref": "main",
     }
     offline = False
     runner_status = 200
@@ -9606,7 +9628,17 @@ async def test_live_pr_resources_save_links_and_explicit_removal(
         legacy = await client.get(path + "/resources/github")
         assert legacy.status_code == 200, legacy.text
         assert (await client.get(path)).json()["pull_requests"] is None
+        payload["prs"] = []
+        payload.pop("prs_updated_at_ns")
+        assert (await client.get(path + "/resources/github")).json()["prs"] == []
         payload["prs"] = prs
+        created = await client.get(path + "/resources/github")
+        assert created.status_code == 200, created.text
+        assert (await client.get(path)).json()["pull_requests"] == display_prs
+        offline = True
+        assert (await client.get(path + "/resources/github")).json()["prs"] == display_prs
+        offline = False
+        payload["prs_updated_at_ns"] = 1
         response = await client.get(path + "/resources/github")
         assert response.status_code == 200, response.text
         assert (await client.get(path)).json()["pull_requests"] == display_prs
@@ -9621,12 +9653,27 @@ async def test_live_pr_resources_save_links_and_explicit_removal(
         payload.pop("prs_updated_at_ns")
         missing_registry = await client.get(path + "/resources/github")
         assert missing_registry.json()["prs"] == display_prs
-        assert missing_registry.json()["reason"] == "workspace_offline"
+        assert missing_registry.json()["available"] is True
+        assert missing_registry.json().get("reason") != "workspace_offline"
+        assert missing_registry.json()["repo"] == payload["repo"]
+        assert missing_registry.json()["branch"] == "feature"
+        assert missing_registry.json()["base_ref"] == "main"
+        payload.update(pr=None, available=False, reason="provider_unavailable")
+        failed_provider = await client.get(path + "/resources/github")
+        assert failed_provider.json()["cached"] is True
+        assert failed_provider.json()["reason"] == "provider_unavailable"
+        assert failed_provider.json()["pr"]["body"] == "Live description"
+        assert (await client.get(path + "/resources/github")).json()[
+            "cached_at"
+        ] == failed_provider.json()["cached_at"]
+        payload.update(pr={**prs[0], "body": "Live description"}, available=True)
+        payload.pop("reason")
         payload["error"] = {"message": "This pull request is not associated with the session"}
         runner_status = 400
         selected = await client.get(path + "/resources/github", params={"pr_url": prs[0]["url"]})
         assert selected.status_code == 200, selected.text
         assert selected.json()["selected_pr_url"] == prs[0]["url"]
+        assert selected.json()["reason"] == "provider_unavailable"
         for endpoint in ("/diff", "/changes"):
             restored = await client.get(path + "/resources/github" + endpoint)
             assert restored.status_code == 200, restored.text
@@ -9657,6 +9704,13 @@ async def test_live_pr_resources_save_links_and_explicit_removal(
         )
         assert removed.status_code == 200, removed.text
         assert (await client.get(path)).json()["pull_requests"] == []
+        payload["prs"] = prs
+        for revision in (None, 1):
+            if revision is not None:
+                payload["prs_updated_at_ns"] = revision
+            stale = await client.get(path + "/resources/github")
+            assert stale.json()["prs"] == [] and stale.json()["pr"] is None
+            assert stale.json()["selected_pr_url"] is None
         payload.update(prs=prs, prs_updated_at_ns=2)
         await client.get(path + "/resources/github")
         payload.update(prs=[], prs_updated_at_ns=3)

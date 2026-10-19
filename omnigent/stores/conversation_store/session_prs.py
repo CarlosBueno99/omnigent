@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, model_validator
+
+
+def validate_session_pr_revision(value: object) -> int:
+    """Reject revisions that could pin a session ahead of its runners' clocks."""
+    if type(value) is not int or not 0 < value <= 2**63 - 1:
+        raise ValueError("Pull request revision must be a positive 64-bit integer")
+    if value > time.time_ns() + 5 * 60 * 1_000_000_000:
+        raise ValueError("Pull request revision must not be more than five minutes in the future")
+    return value
 
 
 class _PullRequestSnapshot(BaseModel):

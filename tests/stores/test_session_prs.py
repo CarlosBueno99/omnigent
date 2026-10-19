@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 
@@ -52,15 +53,23 @@ def test_pr_metadata_preserves_other_state_and_rejects_stale_reports(conversatio
     assert not store.set_session_prs(conversation.id, [], updated_at_ns=10)
     assert store.get_conversation(conversation.id).session_pull_requests == [PR]
     assert store.get_conversation(conversation.id).session_pull_requests_updated_at_ns == 11
-    with pytest.raises(ValueError):
-        store.set_session_prs(conversation.id, [PR], updated_at_ns=True)
+    for revision in (True, 2**80, time.time_ns() + 600_000_000_000):
+        with pytest.raises(ValueError):
+            store.set_session_prs(conversation.id, [], updated_at_ns=revision)
+    assert store.get_conversation(conversation.id).session_pull_requests == [PR]
+    assert store.set_session_prs(conversation.id, [], updated_at_ns=12)
 
 
-def test_legacy_pr_report_only_backfills_missing_metadata(conversation_store):
+def test_legacy_pr_reports_evolve_until_an_authoritative_update(conversation_store):
     conversation = conversation_store.create_conversation()
+    assert conversation_store.set_session_prs(conversation.id, [])
     assert conversation_store.set_session_prs(conversation.id, [PR])
     assert not conversation_store.set_session_prs(conversation.id, [])
+    assert conversation_store.set_session_prs(conversation.id, [{**PR, "title": "New title"}])
+    assert conversation_store.set_session_prs(conversation.id, [], user_update=True)
+    assert not conversation_store.set_session_prs(conversation.id, [PR])
     assert conversation_store.set_session_prs(conversation.id, [], updated_at_ns=1)
+    assert not conversation_store.set_session_prs(conversation.id, [PR])
     assert conversation_store.get_conversation(conversation.id).session_pull_requests == []
 
 
@@ -155,11 +164,18 @@ def test_pr_panel_snapshots_keep_latest_resources_and_clean_removed_blobs(
         5_500_000_000,
         {"diff": {"patch": "old head"}},
     )
-    for timestamp in (True, -1, 10**30):
-        with pytest.raises(ValueError, match="64-bit"):
+    for timestamp in (True, -1, 10**30, time.time_ns() + 600_000_000_000):
+        with pytest.raises(ValueError):
             save_session_pr_snapshots(
                 store, artifacts, conversation.id, PR["url"], timestamp, {"info": info}
             )
+        with pytest.raises(ValueError):
+            store.set_session_pr_snapshot(
+                conversation.id, PR["url"], timestamp, {"info": "invalid"}
+            )
+    assert save_session_pr_snapshots(
+        store, artifacts, conversation.id, PR["url"], 7_000_000_000, {"info": info}
+    )
     store.set_session_prs(conversation.id, [], updated_at_ns=2)
     prune_session_pr_snapshots(store, artifacts, conversation.id)
     assert store.get_conversation(conversation.id).session_pr_snapshots == {}

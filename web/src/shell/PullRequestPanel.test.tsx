@@ -716,11 +716,16 @@ describe("PullRequestPanel", () => {
     expect(screen.queryByTestId("diff")).toBeNull();
   });
 
-  it.each([1, 2])("offers the stored PR in the empty state with %i GitHub accounts", (count) => {
+  it.each([
+    { count: 1, cached: false },
+    { count: 2, cached: false },
+    { count: 2, cached: true },
+  ])("offers the stored PR with $count accounts (cached: $cached)", ({ count, cached }) => {
     const url = "https://github.com/acme/app/pull/6000";
     const info = state.info!.data!;
     info.pr = null;
     info.repo = null;
+    info.cached = cached;
     info.tracking_available = true;
     info.selected_pr_url = url;
     info.prs = [
@@ -743,6 +748,7 @@ describe("PullRequestPanel", () => {
     const account = screen.queryByRole("combobox", { name: "GitHub account" });
     if (count > 1) {
       expect(emptyState).toContainElement(account);
+      expect(account).toBeEnabled();
       expect(
         account!.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
@@ -1698,69 +1704,92 @@ describe("session PR selection", () => {
     expect(resourceRevision()).not.toBe(savedRevision);
   });
 
-  it("reads saved summary, comments, and patches while only live actions are disabled", () => {
-    const pr = state.info!.data!.pr!;
-    const cachedAt = 1_700_000_000;
-    state.info!.data = {
-      ...state.info!.data!,
-      cached: true,
-      cached_at: cachedAt,
-      available: false,
-      reason: "workspace_offline",
-      gh_available: false,
-      authenticated: false,
-      repo: null,
-      tracking_available: true,
-      selected_pr_url: pr.url,
-      prs: [
-        {
-          url: pr.url,
-          host: "example.com",
-          repository: "acme/app",
-          number: pr.number,
-          relationship: "created",
-        },
-      ],
-      pr: {
-        ...pr,
-        body: "Saved description",
-        body_partial: true,
-        comments: [
-          { author: "reviewer", body: "Saved review comment", created_at: null, url: null },
+  it.each([
+    { available: false, reason: "workspace_offline", offline: true },
+    { available: true, reason: undefined, offline: false },
+    { available: false, reason: "provider_unavailable", offline: false },
+  ] as const)(
+    "reads saved resources with available=$available, reason=$reason",
+    ({ available, reason, offline }) => {
+      const pr = state.info!.data!.pr!;
+      const cachedAt = 1_700_000_000;
+      state.info!.data = {
+        ...state.info!.data!,
+        cached: true,
+        cached_at: cachedAt,
+        available,
+        reason,
+        gh_available: false,
+        authenticated: false,
+        repo: null,
+        tracking_available: true,
+        selected_pr_url: pr.url,
+        prs: [
+          {
+            url: pr.url,
+            host: "example.com",
+            repository: "acme/app",
+            number: pr.number,
+            relationship: "created",
+          },
         ],
-        comments_partial: true,
-      },
-    };
-    state.changes!.data = { ...state.changes!.data!, cached: true, cached_at: cachedAt - 10 };
-    state.diff = { ...state.diff!, cached: true, cached_at: cachedAt - 20 };
-    renderPanel();
+        pr: {
+          ...pr,
+          body: "Saved description",
+          body_partial: true,
+          comments: [
+            { author: "reviewer", body: "Saved review comment", created_at: null, url: null },
+          ],
+          comments_partial: true,
+        },
+      };
+      state.changes!.data = { ...state.changes!.data!, cached: true, cached_at: cachedAt - 10 };
+      state.diff = { ...state.diff!, cached: true, cached_at: cachedAt - 20 };
+      renderPanel();
 
-    expect(screen.getByText("Saved description")).toBeVisible();
-    expect(screen.getByText(/The saved description is incomplete/)).toBeVisible();
-    const notice = screen.getByText(/Workspace offline/);
-    expect(notice).toHaveTextContent("Last synced");
-    expect(notice.querySelector("time")).toHaveAttribute("datetime", "2023-11-14T22:13:20.000Z");
-    expect(screen.getByRole("link", { name: /chore: dummy PR/ })).toHaveAttribute("href", pr.url);
-    for (const name of ["Refresh", "Link a PR", "Unlink PR"]) {
-      expect(screen.getByRole("button", { name })).toBeDisabled();
-    }
+      expect(screen.getByText("Saved description")).toBeVisible();
+      expect(screen.getByText(/The saved description is incomplete/)).toBeVisible();
+      const notice = screen.getByText(offline ? /Workspace offline/ : /Saved PR details/);
+      expect(notice).toHaveTextContent("Last synced");
+      expect(notice.querySelector("time")).toHaveAttribute("datetime", "2023-11-14T22:13:20.000Z");
+      if (!offline) expect(screen.queryByText(/Workspace offline/)).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /chore: dummy PR/ })).toHaveAttribute("href", pr.url);
+      for (const name of ["Refresh", "Link a PR", "Unlink PR"]) {
+        const button = screen.getByRole("button", { name });
+        if (offline) expect(button).toBeDisabled();
+        else expect(button).toBeEnabled();
+      }
+      if (!offline) {
+        fireEvent.click(screen.getByRole("button", { name: "Link a PR" }));
+        expect(screen.getByRole("textbox", { name: "Pull request URL" })).toBeEnabled();
+        expect(screen.getByRole("button", { name: "Link" })).toBeEnabled();
+        fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      }
 
-    fireEvent.mouseDown(screen.getByRole("tab", { name: /^Comments/ }));
-    expect(screen.getByText("Saved review comment")).toBeVisible();
-    expect(screen.getByText("Some comments are unavailable.")).toBeVisible();
+      fireEvent.mouseDown(screen.getByRole("tab", { name: /^Comments/ }));
+      expect(screen.getByText("Saved review comment")).toBeVisible();
+      expect(screen.getByText("Some comments are unavailable.")).toBeVisible();
 
-    fireEvent.mouseDown(screen.getByRole("tab", { name: "Changes" }));
-    expect(screen.getAllByTestId("diff")).toHaveLength(2);
-    for (const diff of screen.getAllByTestId("diff")) {
-      expect(diff).toHaveAttribute("data-can-expand-context", "false");
-    }
-    expect(screen.getByText(/Changed files · Last synced/)).toBeVisible();
-    expect(screen.getByText(/Diff · Last synced/)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Collapse all diffs" }));
-    expect(screen.queryByTestId("diff")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Expand all diffs" }));
-    expect(screen.getAllByTestId("diff")).toHaveLength(2);
-  });
+      fireEvent.mouseDown(screen.getByRole("tab", { name: "Changes" }));
+      expect(screen.getAllByTestId("diff")).toHaveLength(2);
+      for (const diff of screen.getAllByTestId("diff")) {
+        expect(diff).toHaveAttribute("data-can-expand-context", "false");
+      }
+      expect(screen.getByText(/Changed files · Last synced/)).toBeVisible();
+      expect(screen.getByText(/Diff · Last synced/)).toBeVisible();
+      expect(
+        screen.getByText(
+          offline
+            ? "Reconnect the workspace to expand unchanged file context."
+            : "Refresh PR details to expand unchanged file context.",
+        ),
+      ).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "Collapse all diffs" }));
+      expect(screen.queryByTestId("diff")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Expand all diffs" }));
+      expect(screen.getAllByTestId("diff")).toHaveLength(2);
+    },
+  );
 
   it.each(["not_synced", "too_large"])(
     "explains an unavailable saved info snapshot (%s)",
@@ -1780,7 +1809,7 @@ describe("session PR selection", () => {
         screen.getByText(
           reason === "too_large"
             ? /PR details was too large to save/
-            : /No offline snapshot is available for PR details/,
+            : /No saved snapshot is available for PR details/,
         ),
       ).toBeVisible();
       expect(screen.queryByText(/Last synced/)).not.toBeInTheDocument();
@@ -1815,14 +1844,14 @@ describe("session PR selection", () => {
         screen.getByText(
           reason === "too_large"
             ? /changed files was too large to save/
-            : /No offline snapshot is available for changed files/,
+            : /No saved snapshot is available for changed files/,
         ),
       ).toBeVisible();
       expect(
         screen.getByText(
           reason === "too_large"
             ? /the diff was too large to save/
-            : /No offline snapshot is available for the diff/,
+            : /No saved snapshot is available for the diff/,
         ),
       ).toBeVisible();
       expect(screen.queryByText("No changes vs base.")).not.toBeInTheDocument();

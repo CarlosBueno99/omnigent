@@ -117,11 +117,16 @@ from omnigent.stores.conversation_store.overrides import (
 from omnigent.stores.conversation_store.overrides import (
     encode_session_overrides as _encode_session_overrides,
 )
-from omnigent.stores.conversation_store.session_prs import validate_session_prs
+from omnigent.stores.conversation_store.session_prs import (
+    validate_session_pr_revision,
+    validate_session_prs,
+)
 
 _logger = logging.getLogger(__name__)
 
 _SESSION_TODOS_STATE_KEY = "_omnigent_native_plan_snapshot_v1"
+# ponytail: bounded PR metadata shares policy writes; split into dedicated rows
+# when write amplification warrants a schema migration. Panel content uses artifacts.
 _SESSION_PRS_STATE_KEY = "_omnigent_session_prs_v1"
 
 
@@ -1633,8 +1638,8 @@ class SqlAlchemyConversationStore(ConversationStore):
     ) -> bool:
         """Persist newer PRs; explicit user updates also accept unversioned hosts."""
         validated = validate_session_prs(prs)
-        if updated_at_ns is not None and (type(updated_at_ns) is not int or updated_at_ns <= 0):
-            raise ValueError("Pull request snapshot updated_at_ns must be a positive integer")
+        if updated_at_ns is not None:
+            validate_session_pr_revision(updated_at_ns)
 
         def write(session: Session) -> bool:
             query = select(SqlConversationMetadata).where(
@@ -1648,7 +1653,15 @@ class SqlAlchemyConversationStore(ConversationStore):
                 return False
             state, todos, previous = _decode_session_state(meta.session_state)
             if previous is not None and (
-                (updated_at_ns is None and not user_update)
+                (
+                    updated_at_ns is None
+                    and not user_update
+                    and (
+                        not previous.get("provisional", False)
+                        or (not validated and previous["prs"])
+                        or validated == previous["prs"]
+                    )
+                )
                 or (
                     updated_at_ns is not None
                     and (previous.get("updated_at_ns") or 0) >= updated_at_ns
@@ -1661,6 +1674,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 "updated_at_ns": updated_at_ns
                 if updated_at_ns is not None
                 else (previous or {}).get("updated_at_ns"),
+                "provisional": updated_at_ns is None and not user_update,
             }
             meta.session_state = _encode_session_state(state, todos, snapshot)
             return True
@@ -1678,10 +1692,9 @@ class SqlAlchemyConversationStore(ConversationStore):
         base_sha: str | None = None,
     ) -> tuple[bool, list[str]]:
         """Publish newer resources without reviving removed associations."""
-        from omnigent.stores.session_pr_snapshots import MAX_PR_CAPTURE_NS, PR_SNAPSHOT_KINDS
+        from omnigent.stores.session_pr_snapshots import PR_SNAPSHOT_KINDS
 
-        if type(captured_at_ns) is not int or not 0 < captured_at_ns <= MAX_PR_CAPTURE_NS:
-            raise ValueError("PR snapshot captured_at_ns must be a positive 64-bit integer")
+        validate_session_pr_revision(captured_at_ns)
         if not resource_keys or resource_keys.keys() - PR_SNAPSHOT_KINDS:
             raise ValueError("Unknown PR snapshot resource")
 

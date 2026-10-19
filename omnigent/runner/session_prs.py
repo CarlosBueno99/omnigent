@@ -138,6 +138,10 @@ class SessionPrRegistry:
         """Restore newer server metadata while keeping newer local observations replayable."""
         if entries is None:
             return
+        if updated_at_ns is not None:
+            from omnigent.stores.conversation_store.session_prs import validate_session_pr_revision
+
+            updated_at_ns = validate_session_pr_revision(updated_at_ns)
         references = [SessionPullRequest.model_validate(entry) for entry in entries]
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with FileLock(str(self.path) + ".lock", timeout=1):
