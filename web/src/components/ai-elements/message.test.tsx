@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setEmbedRoot } from "@/lib/host";
 import { MermaidPreview } from "@/shell/MermaidPreview";
+import { MermaidFullscreenProvider } from "./MermaidBlock";
 import { Reasoning, ReasoningContent } from "./reasoning";
 import { Message, MessageAction, MessageActions, MessageContent, MessageResponse } from "./message";
 
@@ -151,6 +152,42 @@ describe("MessageResponse", () => {
 describe.each([true, false])("Mermaid fullscreen (embedded=%s)", (embedded) => {
   const source = "flowchart LR\n  Alpha --> Beta";
   const markdown = `\`\`\`mermaid\n${source}\n\`\`\``;
+  const diagramSelector = 'svg[id^="mermaid-"]';
+  let root: HTMLDivElement;
+  let originalGetBBox: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    vi.stubGlobal("IntersectionObserver", VisibleIntersectionObserver);
+    // jsdom has no SVG layout; keep the real Mermaid renderer and supply its measurements.
+    originalGetBBox = Object.getOwnPropertyDescriptor(SVGElement.prototype, "getBBox");
+    Object.defineProperty(SVGElement.prototype, "getBBox", {
+      configurable: true,
+      value: () => ({ x: 0, y: 0, width: 100, height: 40 }),
+    });
+    root = document.createElement("div");
+    root.className = "omnigent-app";
+    document.body.appendChild(root);
+    setEmbedRoot(embedded ? root : null);
+  });
+
+  afterEach(() => {
+    cleanup();
+    root.remove();
+    if (originalGetBBox) Object.defineProperty(SVGElement.prototype, "getBBox", originalGetBBox);
+    else delete (SVGElement.prototype as { getBBox?: unknown }).getBBox;
+  });
+
+  async function inlineDiagram() {
+    const selector = `.chat-mermaid ${diagramSelector}`;
+    await waitFor(() => expect(root.querySelector(selector)).not.toBeNull(), { timeout: 10_000 });
+    return root.querySelector(selector)!;
+  }
+
+  function overlayDiagram() {
+    const overlay = screen.getByTitle("Exit fullscreen").parentElement!;
+    expect(overlay.parentElement).toBe(embedded ? root : document.body);
+    return overlay.querySelector(diagramSelector);
+  }
 
   it.each([
     ["chat", () => <MessageResponse>{markdown}</MessageResponse>],
@@ -166,48 +203,69 @@ describe.each([true, false])("Mermaid fullscreen (embedded=%s)", (embedded) => {
   ])(
     "opens and dismisses the diagram from %s",
     async (_surface, content) => {
-      vi.stubGlobal("IntersectionObserver", VisibleIntersectionObserver);
-      // jsdom has no SVG layout; keep the real Mermaid renderer and supply its measurements.
-      const originalGetBBox = Object.getOwnPropertyDescriptor(SVGElement.prototype, "getBBox");
-      Object.defineProperty(SVGElement.prototype, "getBBox", {
-        configurable: true,
-        value: () => ({ x: 0, y: 0, width: 100, height: 40 }),
-      });
-      const root = document.createElement("div");
-      root.className = "omnigent-app";
-      document.body.appendChild(root);
-      setEmbedRoot(embedded ? root : null);
-      try {
-        const { container } = render(content(), { container: root });
-        await waitFor(
-          () => {
-            expect(container.querySelector('svg[id^="mermaid-"]')).not.toBeNull();
-          },
-          { timeout: 10_000 },
-        );
-        const svg = container.querySelector('svg[id^="mermaid-"]')!;
-        expect(svg.textContent).toContain("Alpha");
-        expect(screen.getAllByTitle("View fullscreen")).toHaveLength(1);
-        fireEvent.click(screen.getByTitle("View fullscreen"));
-        const exit = screen.getByTitle("Exit fullscreen");
-        const overlay = exit.parentElement!;
-        expect(overlay.parentElement).toBe(embedded ? root : document.body);
-        expect(overlay.querySelector('svg[id^="mermaid-"]')?.outerHTML).toBe(svg.outerHTML);
-        fireEvent.click(exit);
-        expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
-        fireEvent.click(screen.getByTitle("View fullscreen"));
-        fireEvent.keyDown(window, { key: "Escape" });
-        expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
-      } finally {
-        cleanup();
-        root.remove();
-        if (originalGetBBox)
-          Object.defineProperty(SVGElement.prototype, "getBBox", originalGetBBox);
-        else delete (SVGElement.prototype as { getBBox?: unknown }).getBBox;
-      }
+      render(content(), { container: root });
+      const svg = await inlineDiagram();
+      expect(svg.textContent).toContain("Alpha");
+      expect(screen.getAllByTitle("View fullscreen")).toHaveLength(1);
+      fireEvent.click(screen.getByTitle("View fullscreen"));
+      expect(overlayDiagram()?.outerHTML).toBe(svg.outerHTML);
+      fireEvent.click(screen.getByTitle("Exit fullscreen"));
+      expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
+      fireEvent.click(screen.getByTitle("View fullscreen"));
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
     },
     15_000,
   );
+
+  it("opens a diagram clicked before it finishes drawing", async () => {
+    render(<MessageResponse>{markdown}</MessageResponse>, { container: root });
+    fireEvent.click(screen.getByTitle("View fullscreen"));
+    expect(root.querySelector(diagramSelector)).toBeNull();
+
+    await screen.findByTitle("Exit fullscreen", {}, { timeout: 10_000 });
+    expect(overlayDiagram()?.outerHTML).toBe((await inlineDiagram()).outerHTML);
+  }, 15_000);
+
+  it("keeps the diagram open when a settled reply remounts its block", async () => {
+    const reply = (mode: "streaming" | "static") => (
+      <MermaidFullscreenProvider>
+        <MessageResponse key={mode} mode={mode}>
+          {markdown}
+        </MessageResponse>
+      </MermaidFullscreenProvider>
+    );
+    const { rerender } = render(reply("streaming"), { container: root });
+    const streamed = await inlineDiagram();
+    fireEvent.click(screen.getByTitle("View fullscreen"));
+    const openDiagram = overlayDiagram()?.outerHTML;
+    expect(openDiagram).toBe(streamed.outerHTML);
+
+    rerender(reply("static"));
+    expect(streamed.isConnected).toBe(false);
+    expect(overlayDiagram()?.outerHTML).toBe(openDiagram);
+    await inlineDiagram();
+    expect(overlayDiagram()?.outerHTML).toBe(openDiagram);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
+  }, 15_000);
+
+  it("closes the diagram when the route changes", async () => {
+    const page = (path: string) => (
+      <MermaidFullscreenProvider resetKey={path}>
+        <MessageResponse>{markdown}</MessageResponse>
+      </MermaidFullscreenProvider>
+    );
+    const { rerender } = render(page("/c/first"), { container: root });
+    await inlineDiagram();
+    fireEvent.click(screen.getByTitle("View fullscreen"));
+    expect(overlayDiagram()).not.toBeNull();
+
+    rerender(page("/c/first"));
+    expect(overlayDiagram()).not.toBeNull();
+    rerender(page("/c/second"));
+    expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
+  }, 15_000);
 });
 
 it("preserves ordinary code fences in reasoning", () => {
