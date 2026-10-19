@@ -1866,6 +1866,86 @@ def test_list_conversations_search_query_content_only(
     assert page.data[0].id == conv.id
 
 
+def _seed_ranked_search(store: SqlAlchemyConversationStore) -> dict[str, str]:
+    """
+    Seed sessions where content-only "deploy" matches are newer than title ones.
+
+    :returns: Ids keyed by role, newest first: ``content_new`` (untitled),
+        ``both`` (title and content), ``content_old``, ``title_old``; plus the
+        non-matching ``neither``.
+    """
+    roles = ["neither", "content_new", "both", "content_old", "title_old"]
+    ids = {role: store.create_conversation().id for role in roles}
+    store.update_conversation(ids["both"], title="Deploy checklist")
+    store.update_conversation(ids["content_old"], title="General chat")
+    store.update_conversation(ids["title_old"], title="DEPLOY runbook")
+    store.update_conversation(ids["neither"], title="Unrelated")
+    for role in ("content_new", "both", "content_old"):
+        store.append(ids[role], [_user_message("please deploy the pipeline")])
+    _spread_created_at(store, [ids[role] for role in roles])
+    return ids
+
+
+@pytest.mark.parametrize("order", ["desc", "asc"])
+def test_list_conversations_search_ranks_title_matches_first(
+    conversation_store: SqlAlchemyConversationStore, order: str
+) -> None:
+    """
+    Title matches come before newer content-only matches, each group in order.
+
+    A session matching in both its title and its content is a title match and
+    is listed once; an untitled session can only be a content match.
+    """
+    ids = _seed_ranked_search(conversation_store)
+    title_tier = [ids["both"], ids["title_old"]]
+    content_tier = [ids["content_new"], ids["content_old"]]
+    if order == "asc":
+        title_tier.reverse()
+        content_tier.reverse()
+
+    page = conversation_store.list_conversations(search_query="deploy", order=order)
+
+    assert [c.id for c in page.data] == title_tier + content_tier
+    assert page.has_more is False
+
+
+def test_list_conversations_search_pages_through_ranked_tiers(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """
+    ``after`` and ``before`` cursors page across the title/content boundary.
+
+    Every match appears once, in ranked order, whichever tier the cursor is in.
+    """
+    ids = _seed_ranked_search(conversation_store)
+    ranked = [ids["both"], ids["title_old"], ids["content_new"], ids["content_old"]]
+
+    def _page(**kwargs: Any) -> tuple[list[str], bool]:
+        page = conversation_store.list_conversations(search_query="deploy", **kwargs)
+        return [c.id for c in page.data], page.has_more
+
+    assert _page(limit=1) == (ranked[:1], True)
+    # A title-tier cursor finishes its tier, then continues into content matches.
+    assert _page(limit=2, after=ranked[0]) == (ranked[1:3], True)
+    # A content-tier cursor stays in the content tier.
+    assert _page(limit=2, after=ranked[2]) == (ranked[3:], False)
+    assert _page(limit=10, before=ranked[3]) == (ranked[:3], False)
+    assert _page(limit=10, before=ranked[1]) == (ranked[:1], False)
+    assert _page(limit=10, after=ranked[0], before=ranked[3]) == (ranked[1:3], False)
+
+
+@pytest.mark.asyncio
+async def test_list_conversations_search_deleted_cursor_raises(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """A search cursor whose row was deleted raises instead of truncating."""
+    ids = _seed_ranked_search(conversation_store)
+    assert await conversation_store.delete_conversation(ids["title_old"])
+
+    with pytest.raises(StaleCursorError):
+        conversation_store.list_conversations(search_query="deploy", after=ids["title_old"])
+
+
 def test_list_conversations_search_snippet_on_content_match(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

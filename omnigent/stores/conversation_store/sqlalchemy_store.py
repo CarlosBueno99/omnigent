@@ -2811,7 +2811,10 @@ class SqlAlchemyConversationStore(ConversationStore):
             ``conversation_items.search_text`` contains the
             query. Implemented with the SQL ``LIKE`` operator
             (no FTS) so it works against both SQLite and
-            Postgres without extra extensions.
+            Postgres without extra extensions. Title matches are
+            listed before content-only matches; each group keeps
+            the ``sort_by``/``order`` ordering, and cursors page
+            through both groups in that sequence.
         :param include_archived: When ``False`` (default), exclude
             rows where ``archived`` is true. When ``True``, include
             archived rows alongside non-archived ones.
@@ -3029,6 +3032,11 @@ class SqlAlchemyConversationStore(ConversationStore):
                 stmt = stmt.where(SqlConversation.agent_id == agent_id)
             if title is not None:
                 stmt = stmt.where(SqlConversation.title == title)
+            # Ranked match groups for a search, read in order: title matches,
+            # then content-only matches. ``[None]`` is the single unfiltered
+            # group of a plain listing.
+            match_tiers: list[ColumnElement[bool] | None] = [None]
+            title_match: ColumnElement[bool] | None = None
             if search_query:
                 pattern = f"%{search_query.lower()}%"
                 title_match = func.lower(SqlConversation.title).like(pattern)
@@ -3055,7 +3063,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                     )
                     .exists()
                 )
-                stmt = stmt.where(or_(title_match, content_match))
+                # Read as separate queries rather than one ``ORDER BY title_match``
+                # so each keeps the recency-index walk that stops at the limit.
+                match_tiers = [title_match, and_(~title_match, content_match)]
             if project is not None:
                 # Dual-read by project NAME: a session is "in <name>" if it has
                 # EITHER the first-class membership (metadata.project_id → the
@@ -3148,31 +3158,43 @@ class SqlAlchemyConversationStore(ConversationStore):
                         )
                     )
                 )
-            if after:
-                stmt = self._apply_cursor(
-                    session,
-                    stmt,
-                    after,
-                    sort_col,
-                    is_desc,
-                    tiebreaker_col=self._tiebreaker_col,
-                    forward=True,
-                )
-            if before:
-                stmt = self._apply_cursor(
-                    session,
-                    stmt,
-                    before,
-                    sort_col,
-                    is_desc,
-                    tiebreaker_col=self._tiebreaker_col,
-                    forward=False,
-                )
-            stmt = stmt.order_by(
-                sort_fn(sort_col),
-                sort_fn(self._tiebreaker_col),  # insertion-order tiebreaker for timestamp ties
-            ).limit(limit + 1)
-            rows = list(session.execute(stmt).scalars().all())
+            # A cursor resumes inside its own tier: groups before an ``after``
+            # cursor's tier (or past a ``before`` cursor's tier) are skipped.
+            last_tier = len(match_tiers) - 1
+            after_tier = self._cursor_search_tier(session, after, title_match) if after else 0
+            before_tier = (
+                self._cursor_search_tier(session, before, title_match) if before else last_tier
+            )
+            rows: list[SqlConversation] = []
+            for tier_index, tier_filter in enumerate(match_tiers):
+                if tier_index < after_tier or tier_index > before_tier or len(rows) > limit:
+                    continue
+                tier_stmt = stmt if tier_filter is None else stmt.where(tier_filter)
+                if after and tier_index == after_tier:
+                    tier_stmt = self._apply_cursor(
+                        session,
+                        tier_stmt,
+                        after,
+                        sort_col,
+                        is_desc,
+                        tiebreaker_col=self._tiebreaker_col,
+                        forward=True,
+                    )
+                if before and tier_index == before_tier:
+                    tier_stmt = self._apply_cursor(
+                        session,
+                        tier_stmt,
+                        before,
+                        sort_col,
+                        is_desc,
+                        tiebreaker_col=self._tiebreaker_col,
+                        forward=False,
+                    )
+                tier_stmt = tier_stmt.order_by(
+                    sort_fn(sort_col),
+                    sort_fn(self._tiebreaker_col),  # insertion-order tiebreaker for timestamp ties
+                ).limit(limit + 1 - len(rows))
+                rows.extend(session.execute(tier_stmt).scalars().all())
             has_more = len(rows) > limit
             if has_more:
                 rows = rows[:limit]
@@ -3241,6 +3263,39 @@ class SqlAlchemyConversationStore(ConversationStore):
         if col is None:
             raise ValueError(f"invalid sort_by: {sort_by!r}")
         return col
+
+    @staticmethod
+    def _cursor_search_tier(
+        session: Session,
+        cursor_id: str,
+        title_match: ColumnElement[bool] | None,
+    ) -> int:
+        """
+        Return the search tier a page cursor belongs to.
+
+        Search results list title matches (tier 0) before content-only
+        matches (tier 1), so a cursor resumes in the tier of its own row.
+
+        :param session: Open conversation-DB session.
+        :param cursor_id: The conversation ID acting as the page cursor,
+            e.g. ``"conv_abc123"``.
+        :param title_match: The search's title predicate, or ``None`` for a
+            plain listing, which has a single tier.
+        :returns: ``0`` when the cursor row's title matches (or there is no
+            search), otherwise ``1``.
+        :raises StaleCursorError: If the cursor row no longer exists.
+        """
+        if title_match is None:
+            return 0
+        cursor_row = session.execute(
+            select(title_match).where(
+                SqlConversation.workspace_id == current_workspace_id(),
+                SqlConversation.id == cursor_id,
+            )
+        ).first()
+        if cursor_row is None:
+            raise StaleCursorError(cursor_id)
+        return 0 if cursor_row[0] else 1
 
     @staticmethod
     def _apply_cursor(
