@@ -143,7 +143,7 @@ def _install_fake_host(
             if frame_text is None:
                 return
             try:
-                frame = decode_host_frame(frame_text)
+                frame = decode_host_frame(frame_text.data)
             except Exception as exc:  # surface decode errors instead of stalling
                 cap.unexpected.append(exc)
                 _fail_all_pending(conn, f"undecodable host frame: {exc!r}")
