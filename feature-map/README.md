@@ -135,6 +135,8 @@ user-visible behavior. It then uses exactly these four H2 sections in order:
   authentication for project writes.
 - [Sessions](./sessions.md) covers the sidebar, whole-session and message forks,
   custom-agent targets, fork access checks, archive, reconnect, and resume.
+- [Session links](./session-links.md) covers human-approved directions, the
+  shared Links dialog, Canvas arrows, delegation and addressed replies.
 
 - [GitLab merge requests](./gitlab.md) covers the shared MR panel, composer,
   Canvas links, and native tracking.
