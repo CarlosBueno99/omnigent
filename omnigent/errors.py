@@ -257,6 +257,7 @@ class ErrorCode:
     # Keep the string equal to frames.HARNESS_NOT_CONFIGURED_ERROR_CODE —
     # the host's wire error code passes through as the API error code.
     HARNESS_NOT_CONFIGURED = "harness_not_configured"
+    REFRESH_UNSUPPORTED = "refresh_unsupported"
     WORKSPACE_MISSING = "workspace_missing"
     # Keep the string equal to frames.HOST_LOGIN_EXPIRED_ERROR_CODE —
     # the host's wire error code passes through as the API error code.
@@ -308,6 +309,7 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # can't satisfy it until the user runs `omnigent setup` there —
     # neither a 400 (input is fine) nor a 503 (a retry won't help).
     ErrorCode.HARNESS_NOT_CONFIGURED: 412,
+    ErrorCode.REFRESH_UNSUPPORTED: 409,
     ErrorCode.WORKSPACE_MISSING: 410,
     # 503: the host is reachable but can't launch runners until its operator
     # re-authenticates it; the API caller's own auth is fine, so this is not a
@@ -358,6 +360,7 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     ErrorCode.HARNESS_NOT_CONFIGURED: ErrorCategory.CONFIG,
     # The host's stored login lapsed; its operator must re-authenticate it.
     ErrorCode.HOST_LOGIN_EXPIRED: ErrorCategory.CONFIG,
+    ErrorCode.REFRESH_UNSUPPORTED: ErrorCategory.CONFIG,
     # The human deleted their own workspace on the host.
     ErrorCode.WORKSPACE_MISSING: ErrorCategory.USER,
     # The session's agent was deleted or rebound; the caller must recreate the
@@ -415,6 +418,7 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     ErrorCode.INVALID_INPUT: ErrorImpact.BENIGN,
     ErrorCode.ALREADY_EXISTS: ErrorImpact.BENIGN,
     ErrorCode.CONFLICT: ErrorImpact.BENIGN,
+    ErrorCode.REFRESH_UNSUPPORTED: ErrorImpact.BENIGN,
     ErrorCode.STALE_CURSOR: ErrorImpact.BENIGN,
 }
 
@@ -449,6 +453,7 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     # The host refuses before any runner process exists, at launch admission.
     ErrorCode.HOST_LOGIN_EXPIRED: ErrorPhase.RUNNER_LAUNCH,
     ErrorCode.HARNESS_NOT_CONFIGURED: ErrorPhase.HARNESS_SETUP,
+    ErrorCode.REFRESH_UNSUPPORTED: ErrorPhase.HARNESS_SETUP,
     ErrorCode.WORKSPACE_MISSING: ErrorPhase.HARNESS_SETUP,
     ErrorCode.SESSION_AGENT_MISSING: ErrorPhase.HARNESS_SETUP,
     ErrorCode.HARNESS_PROTOCOL_VIOLATION: ErrorPhase.TURN,
