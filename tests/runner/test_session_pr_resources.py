@@ -16,7 +16,7 @@ from filelock import Timeout as FileLockTimeout
 
 from omnigent.runner import create_runner_app, pr_resource
 from omnigent.runner import github_resource as github
-from omnigent.runner.session_prs import PullRequestRef, SessionPrRegistry
+from omnigent.runner.session_prs import PullRequestRef, SessionPrRegistry, SessionPullRequest
 from omnigent.workspace_fs import WorkspaceReader
 from tests.budgets import budget
 from tests.runner.helpers import NullServerClient
@@ -97,6 +97,7 @@ def test_titles_include_unselected_prs_and_are_cached_between_polls(
     ]
     registry = SessionPrRegistry("session")
     assert {pr.url: pr.title for pr in registry.list()} == {A: "First repository", B: "Second"}
+    assert [SessionPullRequest.model_validate(pr) for pr in info["prs"]] == registry.list()
     before = registry.path.read_bytes()
     github.github_info(tracked, session_id="session", pr_url=B)
     assert len(calls) == 3
@@ -106,6 +107,7 @@ def test_titles_include_unselected_prs_and_are_cached_between_polls(
     info = github.github_info(tracked, session_id="session", pr_url=B)
     assert {pr["url"]: pr["title"] for pr in info["prs"]}[B] == "Renamed second PR"
     assert {pr.url: pr.title for pr in registry.list()}[B] == "Renamed second PR"
+    assert [SessionPullRequest.model_validate(pr) for pr in info["prs"]] == registry.list()
     assert len(calls) == 4
 
 
@@ -379,6 +381,7 @@ def test_title_timeout_at_request_deadline_retries_after_short_backoff(
     entry = next(entry for entry in registry.list() if entry.url == A)
     assert entry.title_checked_at == wall_clock
     assert entry.title_lookup_timed_out
+    assert [SessionPullRequest.model_validate(pr) for pr in info["prs"]] == registry.list()
     assert github._pr_title_timed_out.get() is False
 
     wall_clock += pr_resource._PR_TITLE_TIMEOUT_RETRY_SECONDS - 0.1

@@ -337,6 +337,12 @@ def _session_prs_with_titles(
         {
             **entry.model_dump(),
             "title": titles.get(entry.url) or entry.title,
+            "title_checked_at": now if entry.url in titles else entry.title_checked_at,
+            "title_lookup_timed_out": (
+                entry.url in timed_out_urls
+                if entry.url in titles
+                else entry.title_lookup_timed_out
+            ),
             "provider_display": provider_display(entry.provider),
         }
         for entry in entries
