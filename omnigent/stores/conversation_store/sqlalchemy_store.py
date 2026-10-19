@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from pathlib import PureWindowsPath
 from typing import Any, Protocol, cast
@@ -2406,6 +2406,24 @@ class SqlAlchemyConversationStore(ConversationStore):
         conversation_id: str,
         items: list[NewConversationItem],
     ) -> list[ConversationItem]:
+        write = self.prepare_append(conversation_id, items)
+        return run_write_transaction(
+            self._conv_session_immediate, "append_conversation_items", write
+        )
+
+    def append_under_authority(
+        self, authority: Session, write: Callable[[Session], list[ConversationItem]]
+    ) -> list[ConversationItem]:
+        """Publish while metadata authorization remains locked, including single-DB SQLite."""
+        if authority.get_bind() is self._conv_engine:
+            return write(authority)
+        return run_write_transaction(
+            self._conv_session_immediate, "append_authorized_conversation_items", write
+        )
+
+    def prepare_append(
+        self, conversation_id: str, items: list[NewConversationItem]
+    ) -> Callable[[Session], list[ConversationItem]]:
         """
         Append items to a conversation.
 
@@ -2603,11 +2621,7 @@ class SqlAlchemyConversationStore(ConversationStore):
 
             return persisted
 
-        return run_write_transaction(
-            self._conv_session_immediate,
-            "append_conversation_items",
-            write,
-        )
+        return write
 
     def list_projects(
         self,
@@ -3485,11 +3499,28 @@ class SqlAlchemyConversationStore(ConversationStore):
             labels = _fetch_labels(ap_sess, conversation_id)
             return row, labels, reasoning_effort_changed, model_override_changed
 
-        ap_result = run_write_transaction(
-            self._conv_session_immediate,
-            "update_conversation",
-            update_ap,
-        )
+        if archived is None:
+            ap_result = run_write_transaction(
+                self._conv_session_immediate, "update_conversation", update_ap
+            )
+        else:
+            from omnigent.stores.session_link_store import SessionLinkStore, invalidate_link_epoch
+
+            def archive_under_authority(authority: Session):
+                invalidate_link_epoch(authority, conversation_id, blocked=archived)
+                if authority.get_bind() is self._conv_engine:
+                    return update_ap(authority)
+                return run_write_transaction(
+                    self._conv_session_immediate, "update_conversation", update_ap
+                )
+
+            ap_result = run_write_transaction(
+                self._session_immediate, "update_session_availability", archive_under_authority
+            )
+            if archived:
+                SessionLinkStore(self.storage_location).wait_for_handoffs(
+                    session_id=conversation_id
+                )
         if ap_result is None:
             return None
         row, labels, reasoning_effort_changed, model_override_changed = ap_result
@@ -3960,6 +3991,9 @@ class SqlAlchemyConversationStore(ConversationStore):
             return meta
 
         meta = run_write_transaction(self._session_immediate, "replace_runner_id", write)
+        from omnigent.stores.session_link_store import SessionLinkStore
+
+        SessionLinkStore(self.storage_location).wait_for_handoffs(session_id=conversation_id)
         with self._conv_session("replace_runner_id") as ap_sess:
             ap_row = ap_sess.get(SqlConversation, (current_workspace_id(), conversation_id))
             if ap_row is None:
@@ -3990,6 +4024,9 @@ class SqlAlchemyConversationStore(ConversationStore):
             return meta
 
         meta = run_write_transaction(self._session_immediate, "clear_runner_id", write)
+        from omnigent.stores.session_link_store import SessionLinkStore
+
+        SessionLinkStore(self.storage_location).wait_for_handoffs(session_id=conversation_id)
         with self._conv_session("clear_runner_id") as ap_sess:
             ap_row = ap_sess.get(SqlConversation, (current_workspace_id(), conversation_id))
             if ap_row is None:
@@ -4028,6 +4065,9 @@ class SqlAlchemyConversationStore(ConversationStore):
             return meta
 
         meta = run_write_transaction(self._session_immediate, "clear_host_binding", write)
+        from omnigent.stores.session_link_store import SessionLinkStore
+
+        SessionLinkStore(self.storage_location).wait_for_handoffs(session_id=conversation_id)
         with self._conv_session("clear_host_binding") as ap_sess:
             ap_row = ap_sess.get(SqlConversation, (current_workspace_id(), conversation_id))
             if ap_row is None:
@@ -5333,10 +5373,18 @@ class SqlAlchemyConversationStore(ConversationStore):
             ap_sess.delete(row)
             return subtree_ids
 
+        from omnigent.stores.session_link_store import SessionLinkStore, invalidate_link_epoch
+
+        def delete_under_authority(authority: Session):
+            invalidate_link_epoch(authority, conversation_id, blocked=True)
+            if authority.get_bind() is self._conv_engine:
+                return delete_ap(authority)
+            return run_write_transaction(
+                self._conv_session_immediate, "delete_conversation_rows", delete_ap
+            )
+
         ap_result = run_write_transaction(
-            self._conv_session_immediate,
-            "delete_conversation_rows",
-            delete_ap,
+            self._session_immediate, "delete_linked_session", delete_under_authority
         )
         if ap_result is None:
             return False
@@ -5373,5 +5421,9 @@ class SqlAlchemyConversationStore(ConversationStore):
             "delete_conversation_metadata",
             delete_metadata,
         )
+        import asyncio
 
+        await asyncio.to_thread(
+            SessionLinkStore(self.storage_location).wait_for_handoffs, session_id=conversation_id
+        )
         return True
