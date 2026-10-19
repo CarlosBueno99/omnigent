@@ -111,6 +111,28 @@ async def test_launch_or_reuse_daemon_runner_launches_when_unbound() -> None:
     assert launched["body"] == {"session_id": "conv_a", "workspace": "/work"}
 
 
+async def test_launch_or_reuse_daemon_runner_rejects_reserved_forwarded_names_before_launching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forwarded-name list that could replace runner wiring fails before any request."""
+    monkeypatch.setenv("OMNIGENT_SESSION_ENV_PASSTHROUGH", "ARCATERM_CAPABILITY,RUNNER_SERVER_URL")
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(f"{request.method} {request.url.path}")
+        return httpx.Response(200, json={"runner_id": "runner_new"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://e.com"
+    ) as client:
+        with pytest.raises(click.ClickException, match="RUNNER_SERVER_URL"):
+            await daemon_launch.launch_or_reuse_daemon_runner(
+                client, host_id="host_1", session_id="conv_a", workspace="/work"
+            )
+
+    assert requests == []
+
+
 async def test_launch_or_reuse_daemon_runner_clears_stale_binding() -> None:
     """
     A bound-but-offline runner is cleared before launching a fresh one.

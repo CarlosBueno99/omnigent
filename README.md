@@ -298,6 +298,25 @@ omnigent pi                          # Pi
 omnigent copilot                     # GitHub Copilot (SDK harness, via `omnigent run`)
 ```
 
+<details>
+<summary>Forward variables from your shell to one session</summary>
+
+Sessions run under the host daemon, which may have started from a different
+shell, so your terminal's variables don't reach the agent by default. To
+forward specific ones to the session you're launching, list their names:
+
+```bash
+OMNIGENT_SESSION_ENV_PASSTHROUGH=TERMINAL_PANE_SOCKET,TOOL_TOKEN omnigent claude
+```
+
+The values go only to that session's new runner, through an owner-only file the
+local daemon deletes at launch. They aren't sent to the server or stored. A
+session whose runner is already running keeps its original values, and a runner
+the server relaunches later (for example, after an idle timeout) starts without
+them. Names starting with `OMNIGENT` and `RUNNER_SERVER_URL` are rejected.
+
+</details>
+
 `omnigent agy` requires agy 1.1.13 or newer. When `GEMINI_API_KEY` is set,
 direct Gemini API authentication takes precedence over agy's saved OAuth login.
 

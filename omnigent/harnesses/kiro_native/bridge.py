@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 from omnigent._platform import stable_user_id
 from omnigent.harnesses.claude_native import bridge as claude_bridge
+from omnigent.inner.agent_env import forwarded_session_env_names
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -233,7 +234,8 @@ def build_kiro_native_terminal_env(
 ) -> dict[str, str]:
     """Build the allowlisted child environment for ``kiro-cli``."""
     env = os.environ if source_env is None else source_env
-    child = {key: env[key] for key in _CHILD_ENV_ALLOWLIST if env.get(key)}
+    allowed = (*_CHILD_ENV_ALLOWLIST, *forwarded_session_env_names(env))
+    child = {key: env[key] for key in allowed if env.get(key)}
     bridge_dir = prepare_bridge_dir(session_id)
     child[KIRO_NATIVE_BRIDGE_DIR_ENV_VAR] = str(bridge_dir)
     child[KIRO_ACP_RECORD_PATH_ENV_VAR] = str(acp_record_path(bridge_dir))

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import click
+import httpx
 import pytest
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus, InvalidURI
@@ -25,7 +26,7 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 from omnigent import debug_logging
-from omnigent.host import HOST_FATAL_EXIT_CODE
+from omnigent.host import HOST_FATAL_EXIT_CODE, daemon_launch
 from omnigent.host.connect import (
     HostConnectError,
     HostProcess,
@@ -908,6 +909,80 @@ async def test_handle_launch_spawns_subprocess(
 
     # Clean up the spawned sleep process (and its exit watcher).
     _cleanup_host(host)
+
+
+async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the launching CLI's session runner gets its named variables, never the server."""
+    host = _make_host_process()
+    host._auth_token_factory = lambda: "host-bootstrap-bearer"
+    host._auth_token_factory_resolved = True
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    forwarded_names = ("ARCATERM_CAPABILITY", "MACTERM_SOCKET", "ARCATERM_PROJECTS_ROOT")
+    monkeypatch.setenv("OMNIGENT_SESSION_ENV_PASSTHROUGH", " , ".join(forwarded_names))
+    monkeypatch.setenv("ARCATERM_CAPABILITY", "capability-for-pane-1")
+    monkeypatch.setenv("MACTERM_SOCKET", "/tmp/macterm-pane-1.sock")
+    monkeypatch.delenv("ARCATERM_PROJECTS_ROOT", raising=False)
+    launch_bodies: list[object] = []
+    spawned_envs: dict[str, dict[str, str]] = {}
+    original_popen = subprocess.Popen
+
+    async def _server(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        launch_bodies.append(body)
+        for name in ("OMNIGENT_SESSION_ENV_PASSTHROUGH", *forwarded_names):
+            monkeypatch.delenv(name, raising=False)
+        session_id = body["session_id"]
+
+        def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+            spawned_envs[session_id] = dict(kwargs["env"])  # type: ignore[call-overload]
+            return original_popen(
+                ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+
+        frame = HostLaunchRunnerFrame(
+            request_id=f"req_{session_id}",
+            binding_token=f"token_{session_id}",
+            workspace=body["workspace"],
+            session_id=session_id,
+        )
+        with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+            result = await host._handle_launch(frame)
+        assert result.status == "launched", result.error
+        return httpx.Response(200, json={"runner_id": result.runner_id})
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_server), base_url="https://server.example"
+        ) as client:
+            for session_id in ("conv_arcaterm", "conv_plain"):
+                await daemon_launch.launch_or_reuse_daemon_runner(
+                    client,
+                    host_id="host_test_connect",
+                    session_id=session_id,
+                    workspace=str(workspace),
+                    fresh=True,
+                )
+    finally:
+        _cleanup_host(host)
+
+    assert launch_bodies == [
+        {"session_id": "conv_arcaterm", "workspace": str(workspace)},
+        {"session_id": "conv_plain", "workspace": str(workspace)},
+    ]
+    arcaterm_env = spawned_envs["conv_arcaterm"]
+    assert arcaterm_env["ARCATERM_CAPABILITY"] == "capability-for-pane-1"
+    assert arcaterm_env["MACTERM_SOCKET"] == "/tmp/macterm-pane-1.sock"
+    assert "ARCATERM_PROJECTS_ROOT" not in arcaterm_env
+    assert (
+        arcaterm_env["OMNIGENT_RUNNER_SESSION_ENV_NAMES"] == "ARCATERM_CAPABILITY,MACTERM_SOCKET"
+    )
+    plain_env = spawned_envs["conv_plain"]
+    assert not {"ARCATERM_CAPABILITY", "MACTERM_SOCKET"} & plain_env.keys()
+    assert "OMNIGENT_RUNNER_SESSION_ENV_NAMES" not in plain_env
 
 
 @pytest.mark.parametrize("binding_token", ["token_xyz", "", "   "])
@@ -4292,6 +4367,27 @@ def test_build_runner_env_passthrough_extends_forwarded_set() -> None:
     assert env["MY_GATEWAY_URL"] == "https://llm.internal.example.com"
     # Anything unnamed stays behind the allowlist.
     assert "UNLISTED_SECRET" not in env
+
+
+def test_build_runner_env_session_env_bypasses_allowlist_and_overrides_daemon_values() -> None:
+    """Forwarded values bypass the allowlist and replace the daemon's own copies."""
+    env = _build_runner_env(
+        {"PATH": "/usr/bin", "SSH_AUTH_SOCK": "/tmp/daemon-agent.sock"},
+        server_url="http://server",
+        runner_id="runner_abc",
+        binding_token="tok",
+        workspace="/ws",
+        parent_pid=42,
+        session_env={
+            "SSH_AUTH_SOCK": "/tmp/pane-agent.sock",
+            "ARCATERM_CAPABILITY": "capability-for-pane-1",
+        },
+    )
+
+    assert env["SSH_AUTH_SOCK"] == "/tmp/pane-agent.sock"
+    assert env["ARCATERM_CAPABILITY"] == "capability-for-pane-1"
+    assert env["RUNNER_SERVER_URL"] == "http://server"
+    assert env["OMNIGENT_RUNNER_SESSION_ENV_NAMES"] == "ARCATERM_CAPABILITY,SSH_AUTH_SOCK"
 
 
 def test_dispatch_trace_context_reaches_runner_but_not_daemon(

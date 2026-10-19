@@ -53,6 +53,7 @@ from omnigent.harnesses.opencode_native.client import (
     OPENCODE_MIN_VERSION,
     OpenCodeClient,
 )
+from omnigent.inner.agent_env import forwarded_session_env_names
 
 _logger = logging.getLogger(__name__)
 
@@ -335,8 +336,8 @@ def filtered_server_env(
 
     Per-session XDG dirs isolate OpenCode's state from the user's global
     config; ``OPENCODE_SERVER_PASSWORD`` secures the loopback server. Only
-    provider/proxy env and operator-declared runner passthrough vars from the
-    parent are passed through.
+    provider/proxy env, operator-declared runner passthrough vars, and the
+    variables the launching CLI forwarded for this session are passed through.
 
     :param bridge_dir: Native OpenCode bridge directory.
     :param auth_secret: Server password for basic auth.
@@ -347,7 +348,7 @@ def filtered_server_env(
         name.strip()
         for name in os.environ.get(_RUNNER_ENV_PASSTHROUGH_ENV_VAR, "").split(",")
         if name.strip()
-    }
+    } | forwarded_session_env_names()
     env: dict[str, str] = {}
     for key, value in os.environ.items():
         if key in _ENV_OPENCODE_CONFIG_DENYLIST:
