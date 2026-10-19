@@ -294,6 +294,16 @@ def test_codex_resume_permission_params_repairs_legacy_full_access_profile() -> 
             ("--dangerously-bypass-approvals-and-sandbox",),
             {"approvalPolicy": "never", "sandbox": "danger-full-access"},
         ),
+        (
+            (
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-c",
+                'default_permissions=":workspace"',
+                "-c",
+                'approval_policy="on-request"',
+            ),
+            {"approvalPolicy": "never", "sandbox": "danger-full-access"},
+        ),
     ],
 )
 def test_remote_resume_applies_permissions_only_on_app_server(
