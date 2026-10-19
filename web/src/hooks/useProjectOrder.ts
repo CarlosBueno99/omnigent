@@ -42,12 +42,14 @@ export function useSaveProjectOrder() {
                 : item.name === project.name || item.previousName === project.name,
             )
           : project;
-        return latest && latest.pending !== "Deleting" ? [latest] : [];
+        return latest && latest.pending !== "Deleting" && !(latest.id === null && latest.pending)
+          ? [latest]
+          : [];
       });
       const ids = await Promise.all(
         remaining.map((project) => project.id ?? resolveOrCreateProjectId(project.name)),
       );
-      return saveProjectOrder(ids);
+      return saveProjectOrder([...new Set(ids)]);
     },
     onMutate: async (projects) => {
       await Promise.all([

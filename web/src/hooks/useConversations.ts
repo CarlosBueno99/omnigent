@@ -136,16 +136,28 @@ export class BulkConversationMutationError extends Error {
   readonly failed: string[];
   readonly succeeded: string[];
   readonly total: number;
+  readonly errors: Error[];
 
   constructor(
     action: string,
-    { failed, succeeded = [], total }: { failed: string[]; succeeded?: string[]; total: number },
+    {
+      failed,
+      succeeded = [],
+      total,
+      errors = [],
+    }: {
+      failed: string[];
+      succeeded?: string[];
+      total: number;
+      errors?: Error[];
+    },
   ) {
     super(`Failed to ${action} ${failed.length} of ${total} conversations`);
     this.name = "BulkConversationMutationError";
     this.failed = failed;
     this.succeeded = succeeded;
     this.total = total;
+    this.errors = errors;
   }
 }
 
@@ -1575,21 +1587,24 @@ export function useBulkMoveToProject() {
       const failed = ids.filter((_, index) => results[index].status === "rejected");
       const succeeded = ids.filter((_, index) => results[index].status === "fulfilled");
       if (failed.length)
-        throw new BulkConversationMutationError("move", { failed, succeeded, total: ids.length });
+        throw new BulkConversationMutationError("move", {
+          failed,
+          succeeded,
+          total: ids.length,
+          errors: results.flatMap((result) =>
+            result.status === "rejected" ? [result.reason] : [],
+          ),
+        });
       return { succeeded, failed };
     },
     onError: (error, variables) => {
       const failed = error instanceof BulkConversationMutationError ? error.failed : variables.ids;
-      toast.error(`Couldn't move ${failed.length} sessions`, {
+      toast.error(`Couldn't move ${failed.length} session${failed.length === 1 ? "" : "s"}`, {
         description:
-          error instanceof BulkConversationMutationError && error.succeeded.length > 0
-            ? "Other sessions stay in their new project."
-            : undefined,
-        duration: Infinity,
-        action: {
-          label: "Retry failed",
-          onClick: () => mutation.mutate({ ...variables, ids: failed }),
-        },
+          error instanceof BulkConversationMutationError
+            ? `${error.errors[0]?.message ?? error.message}${error.succeeded.length ? " Other sessions stay in their new project." : ""}`
+            : error.message,
+        ...projectRetryOptions(error, true, () => mutation.mutate({ ...variables, ids: failed })),
       });
     },
   });
@@ -2338,7 +2353,7 @@ export async function moveConversationToProject(
     // Clear the legacy label either way so the two representations don't diverge.
     body: JSON.stringify({ project_id: projectId, labels: { [PROJECT_LABEL_KEY]: "" } }),
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) throw await apiErrorFromResponse(res);
   return (await res.json()) as Conversation;
 }
 
@@ -2422,6 +2437,8 @@ function overlayProjectMembership(
   );
 }
 
+const movingProjectSessions = new WeakMap<QueryClient, Set<string>>();
+
 /**
  * Move a session to a project (or remove it from all projects when `project=""`).
  *
@@ -2442,8 +2459,6 @@ function overlayProjectMembership(
  * ordering are server-owned, and those refetches start after the PATCH commits
  * so they confirm the overlay. `onError` restores only the failed row's membership.
  */
-const movingProjectSessions = new WeakMap<QueryClient, Set<string>>();
-
 export function useMoveToProject({ silent = false } = {}) {
   const queryClient = useQueryClient();
 
@@ -2455,7 +2470,11 @@ export function useMoveToProject({ silent = false } = {}) {
       const moving = movingProjectSessions.get(queryClient) ?? new Set<string>();
       movingProjectSessions.set(queryClient, moving);
       if (moving.has(id))
-        throw new Error("This session is already moving. Try again when it finishes.");
+        throw new ApiError(
+          "This session is already moving. Try again when it finishes.",
+          409,
+          null,
+        );
       const current = findCachedConversationRow(queryClient, id);
       if (
         queryClient
@@ -2468,7 +2487,11 @@ export function useMoveToProject({ silent = false } = {}) {
                 item.name === current?.labels[PROJECT_LABEL_KEY]),
           )
       )
-        throw new Error("This project is still updating. Try again when it finishes.");
+        throw new ApiError(
+          "This project is still updating. Try again when it finishes.",
+          409,
+          null,
+        );
       moving.add(id);
       // `""` unfiles (no id needed); a file target must exist in the cached
       // projects list for the overlay to be truthful about the outcome — an
@@ -2517,7 +2540,15 @@ export function useMoveToProject({ silent = false } = {}) {
         labels,
         project === "" ? null : project,
       );
-      return { row, projectName, folders };
+      return {
+        row,
+        projectName,
+        folders: folders.map(([key, snapshot]) => ({
+          key,
+          snapshot,
+          optimistic: queryClient.getQueryData<ConversationsInfiniteData>(key),
+        })),
+      };
     },
     onError: (error, { id }, previous) => {
       if (!silent) toast.error("Couldn't move session", { description: error.message });
@@ -2526,14 +2557,25 @@ export function useMoveToProject({ silent = false } = {}) {
       const { [PROJECT_LABEL_KEY]: _project, ...labels } = current.labels;
       if (previous.row.labels[PROJECT_LABEL_KEY])
         labels[PROJECT_LABEL_KEY] = previous.row.labels[PROJECT_LABEL_KEY];
-      const folders = previous.folders?.map(([key, snapshot]) => ({
-        key,
-        snapshot,
-        currentRow: queryClient
-          .getQueryData<ConversationsInfiniteData>(key)
-          ?.pages.flatMap((page) => page.data)
-          .find((item) => item.id === id),
-      }));
+      const folders = previous.folders?.map(({ key, snapshot, optimistic }) => {
+        const data = queryClient.getQueryData<ConversationsInfiniteData>(key);
+        return {
+          key,
+          snapshot,
+          currentRow: data?.pages.flatMap((page) => page.data).find((item) => item.id === id),
+          unchangedPages:
+            data &&
+            optimistic &&
+            data.pages.length === optimistic.pages.length &&
+            data.pages.every(
+              (page, index) =>
+                page.first_id === optimistic.pages[index].first_id &&
+                page.last_id === optimistic.pages[index].last_id &&
+                page.has_more === optimistic.pages[index].has_more &&
+                data.pageParams[index] === optimistic.pageParams[index],
+            ),
+        };
+      });
       overlayProjectMembership(
         queryClient,
         current,
@@ -2541,7 +2583,9 @@ export function useMoveToProject({ silent = false } = {}) {
         labels,
         previous.projectName,
       );
-      for (const { key, snapshot, currentRow } of folders ?? []) {
+      for (const { key, snapshot, currentRow, unchangedPages } of folders ?? []) {
+        // A refreshed or paginated folder must reconcile instead of restoring old positions.
+        if (!unchangedPages) continue;
         queryClient.setQueryData<ConversationsInfiniteData>(key, (data) => {
           if (!data || !snapshot) return data;
           if (!snapshot.pages.some((page) => page.data.some((item) => item.id === id))) return data;
@@ -2721,14 +2765,19 @@ async function archiveAndUnfileConversation(id: string): Promise<Conversation> {
     // value removes the legacy label row, so the session is fully detached.
     body: JSON.stringify({ archived: true, project_id: "", labels: { [PROJECT_LABEL_KEY]: "" } }),
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) throw await apiErrorFromResponse(res);
   return (await res.json()) as Conversation;
 }
 
 function projectRetryOptions(error: Error, accepted: boolean, retry: () => void) {
+  const errors =
+    error instanceof BulkConversationMutationError && error.errors.length ? error.errors : [error];
   if (
     !accepted ||
-    (error instanceof ApiError && error.status < 500 && ![408, 429].includes(error.status))
+    errors.every(
+      (failure) =>
+        failure instanceof ApiError && failure.status < 500 && ![408, 429].includes(failure.status),
+    )
   )
     return {};
   return { duration: Infinity, action: { label: "Retry", onClick: retry } };
@@ -2781,6 +2830,9 @@ export function useDeleteProject() {
           failed,
           succeeded,
           total: ids.length,
+          errors: results.flatMap((result) =>
+            result.status === "rejected" ? [result.reason] : [],
+          ),
         });
       }
       // All members detached — remove the first-class container if present.
@@ -2795,7 +2847,7 @@ export function useDeleteProject() {
       toast.error(`Couldn't delete “${variables.name}”`, {
         description:
           error instanceof BulkConversationMutationError
-            ? `${error.succeeded.length} sessions archived; ${error.failed.length} failed. Retry to finish the remaining work.`
+            ? `${error.succeeded.length} sessions archived; ${error.failed.length} failed. ${error.errors[0]?.message ?? error.message}`
             : error.message,
         ...projectRetryOptions(error, !!context, () => mutation.mutate(variables)),
       });
@@ -2847,6 +2899,17 @@ export function useCreateProject() {
   return mutation;
 }
 
+class ProjectRenameError extends Error {
+  readonly projectId: string;
+  readonly failure: Error;
+
+  constructor(projectId: string, failure: Error) {
+    super(failure.message);
+    this.projectId = projectId;
+    this.failure = failure;
+  }
+}
+
 /**
  * Rename a project. A first-class project renames its row via
  * `PATCH /v1/projects/{id}`; a label-only folder (`id === null`) is promoted on
@@ -2859,17 +2922,6 @@ export function useCreateProject() {
  * members that were still matched by the legacy label don't get stranded in an
  * `oldName` folder, and nothing ends up matching two folders at once.
  */
-class ProjectRenameError extends Error {
-  readonly projectId: string;
-  readonly failure: Error;
-
-  constructor(projectId: string, failure: Error) {
-    super(failure.message);
-    this.projectId = projectId;
-    this.failure = failure;
-  }
-}
-
 export function useRenameProject() {
   const queryClient = useQueryClient();
   const mutation = useMutation({
@@ -2899,7 +2951,7 @@ export function useRenameProject() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ project_id: projectId, labels: { [PROJECT_LABEL_KEY]: "" } }),
             });
-            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            if (!res.ok) throw await apiErrorFromResponse(res);
             const row = findCachedConversationRow(queryClient, sid);
             if (row) {
               const { [PROJECT_LABEL_KEY]: _project, ...labels } = row.labels;
@@ -2913,6 +2965,9 @@ export function useRenameProject() {
             failed,
             succeeded: memberIds.filter((_, index) => results[index].status === "fulfilled"),
             total: memberIds.length,
+            errors: results.flatMap((result) =>
+              result.status === "rejected" ? [result.reason] : [],
+            ),
           });
         if (config) {
           const next = {
@@ -2956,10 +3011,9 @@ export function useRenameProject() {
           queryClient,
           row,
           id,
-          {
-            ...row.labels,
-            [PROJECT_LABEL_KEY]: newName,
-          },
+          id === null || row.labels[PROJECT_LABEL_KEY]
+            ? { ...row.labels, [PROJECT_LABEL_KEY]: newName }
+            : row.labels,
           newName,
         );
       return { ...context, rows };
@@ -2981,7 +3035,11 @@ export function useRenameProject() {
         for (const row of context.rows.values()) {
           if (partial && !failed?.has(row.id)) continue;
           const current = findCachedConversationRow(queryClient, row.id);
-          if (current?.labels[PROJECT_LABEL_KEY] === variables.newName) {
+          if (
+            current &&
+            (current.labels[PROJECT_LABEL_KEY] === variables.newName ||
+              (variables.id !== null && current.project_id === variables.id))
+          ) {
             const { [PROJECT_LABEL_KEY]: _project, ...labels } = current.labels;
             if (row.labels[PROJECT_LABEL_KEY])
               labels[PROJECT_LABEL_KEY] = row.labels[PROJECT_LABEL_KEY];

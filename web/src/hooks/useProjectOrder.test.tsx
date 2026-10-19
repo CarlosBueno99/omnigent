@@ -98,9 +98,9 @@ describe("saving project order", () => {
     },
   );
 
-  it.each([false, true])(
-    "promotes only surviving legacy folders (deleting: %s)",
-    async (deleting) => {
+  it.each([undefined, "Deleting", "Creating", "Saving"] as const)(
+    "promotes only idle legacy folders (pending: %s)",
+    async (pending) => {
       vi.mocked(resolveOrCreateProjectId).mockResolvedValue("legacy-id");
       vi.mocked(saveProjectOrder).mockResolvedValue({
         ordered_project_ids: ["legacy-id", "a"],
@@ -110,15 +110,36 @@ describe("saving project order", () => {
       const order = [{ id: null, name: "Legacy" }, projects[0]];
       client.setQueryData(
         ["projects"],
-        [{ ...order[0], pending: deleting ? "Deleting" : undefined }, projects[0]],
+        [
+          {
+            ...order[0],
+            pending,
+            ...(pending === "Saving" ? { name: "Renamed", previousName: "Legacy" } : {}),
+          },
+          projects[0],
+        ],
       );
       act(() => result.current.mutate(order));
       await waitFor(() => expect(result.current.isSuccess).toBe(true));
-      if (deleting) expect(resolveOrCreateProjectId).not.toHaveBeenCalled();
+      if (pending) expect(resolveOrCreateProjectId).not.toHaveBeenCalled();
       else expect(resolveOrCreateProjectId).toHaveBeenCalledWith("Legacy");
-      expect(saveProjectOrder).toHaveBeenCalledWith(deleting ? ["a"] : ["legacy-id", "a"]);
+      expect(saveProjectOrder).toHaveBeenCalledWith(pending ? ["a"] : ["legacy-id", "a"]);
     },
   );
+
+  it("deduplicates queued aliases when a deleted legacy name is reused", async () => {
+    const { result, client } = setup();
+    const queued = [{ id: null, name: "Legacy" }, projects[0]];
+    client.setQueryData(["projects"], [{ ...projects[0], name: "Legacy", pending: "Saving" }]);
+    vi.mocked(saveProjectOrder).mockResolvedValue({
+      sort_mode: "manual",
+      ordered_project_ids: ["a"],
+    });
+    act(() => result.current.mutate(queued));
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(resolveOrCreateProjectId).not.toHaveBeenCalled();
+    expect(saveProjectOrder).toHaveBeenCalledExactlyOnceWith(["a"]);
+  });
 
   it.each([false, true])(
     "rechecks queued projects before promotion (deletion finished: %s)",
