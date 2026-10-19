@@ -796,6 +796,90 @@ def test_record_hook_event_first_event_bootstraps_identity(tmp_path: Path) -> No
     assert read_claude_session_id(bridge_dir) == "claude-session"
 
 
+@pytest.mark.parametrize("updated_file", ["hook_identity", "model_vocabulary"])
+def test_bridge_writers_preserve_concurrent_identity_and_model_updates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, updated_file: str
+) -> None:
+    """A delayed writer must not replace another writer's newer bridge metadata."""
+    from tests.budgets import budget
+
+    bridge_dir = prepare_bridge_dir("conv_old", workspace=tmp_path)
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": "native_old",
+            "transcript_path": str(tmp_path / "old.jsonl"),
+        },
+    )
+    claude_native_bridge.record_model_vocabulary(
+        bridge_dir, launch_env=None, launch_model="model_old"
+    )
+    watched_path = bridge_dir / (
+        "state.json" if updated_file == "hook_identity" else "bridge.json"
+    )
+    first_read = threading.Event()
+    update_attempted = threading.Event()
+    update_finished = threading.Event()
+    writer_context = threading.local()
+    original_read = claude_native_bridge._read_json_file
+
+    def read_with_delayed_writer(path: Path) -> dict[str, Any]:
+        result = original_read(path)
+        if path == watched_path and getattr(writer_context, "delay", False):
+            writer_context.delay = False
+            first_read.set()
+            assert update_attempted.wait(timeout=budget(3.0))
+            # Expected to time out under correct locking: this bounded window only
+            # lets a buggy unlocked write complete and clobber state (final asserts).
+            update_finished.wait(timeout=0.5)
+        return result
+
+    monkeypatch.setattr(claude_native_bridge, "_read_json_file", read_with_delayed_writer)
+
+    def delayed_write() -> None:
+        writer_context.delay = True
+        if updated_file == "hook_identity":
+            record_hook_event(bridge_dir, {"hook_event_name": "Stop", "session_id": "native_old"})
+        else:
+            claude_native_bridge.write_active_session_id(bridge_dir, "conv_new")
+
+    def newer_write() -> None:
+        assert first_read.wait(timeout=budget(3.0))
+        update_attempted.set()
+        try:
+            if updated_file == "hook_identity":
+                record_hook_event(
+                    bridge_dir,
+                    {
+                        "hook_event_name": "SessionStart",
+                        "session_id": "native_new",
+                        "transcript_path": str(tmp_path / "new.jsonl"),
+                    },
+                )
+            else:
+                claude_native_bridge.record_model_vocabulary(
+                    bridge_dir, launch_env=None, launch_model="model_new"
+                )
+        finally:
+            update_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as writers:
+        delayed = writers.submit(delayed_write)
+        newer = writers.submit(newer_write)
+        delayed.result(timeout=budget(6.0))
+        newer.result(timeout=budget(6.0))
+
+    if updated_file == "hook_identity":
+        assert read_claude_session_id(bridge_dir) == "native_new"
+        assert read_transcript_path(bridge_dir) == tmp_path / "new.jsonl"
+        assert read_seen_claude_session_ids(bridge_dir) == {"native_old", "native_new"}
+        assert count_hook_events(bridge_dir) == 3
+    else:
+        assert claude_native_bridge.read_active_session_id(bridge_dir) == "conv_new"
+        assert read_launch_model(bridge_dir) == "model_new"
+
+
 def test_read_assistant_text_since_parses_claude_jsonl(tmp_path: Path) -> None:
     """
     Transcript parsing returns only assistant text after the cursor.
@@ -5717,6 +5801,22 @@ def test_cycleable_permission_modes_match_the_server_patch_vocabulary() -> None:
     ), "Bridge cycleable modes and the Sessions API's accepted modes must match."
 
 
+def test_readable_permission_modes_match_the_server_read_back_vocabulary() -> None:
+    """
+    Every footer the bridge can read is a mode the Sessions API accepts back.
+
+    The forwarder posts the parsed footer as ``external_permission_mode_change``;
+    a mode readable here but unknown there is rejected on every poll.
+    """
+    from omnigent.server.routes._sessions.common import (
+        _CLAUDE_NATIVE_READABLE_PERMISSION_MODES,
+    )
+
+    assert set(claude_native_bridge._PERMISSION_MODE_FOOTERS) == set(
+        _CLAUDE_NATIVE_READABLE_PERMISSION_MODES
+    ), "Bridge readable footers and the Sessions API's read-back modes must match."
+
+
 class _FakeModeCycleTmux:
     """
     Stand-in tmux whose pane renders Claude's permission-mode footer.
@@ -5749,6 +5849,7 @@ class _FakeModeCycleTmux:
         "plan": "⏸ plan mode on (shift+tab to cycle)",
         "auto": "⏵⏵ auto mode on (shift+tab to cycle)",
         "bypassPermissions": "⏵⏵ bypass permissions on (shift+tab to cycle)",
+        "dontAsk": "⏵⏵ don't ask on (shift+tab to cycle)",
     }
 
     def run(self, cmd: list[str], **kwargs: object) -> object:
@@ -5933,6 +6034,39 @@ def test_set_permission_mode_leaves_a_bypass_launched_pane(
     assert fake.presses == presses, f"Expected {presses} presses, got {fake.presses}."
 
 
+@pytest.mark.parametrize(
+    ("target", "presses"),
+    [("default", 1), ("acceptEdits", 2), ("plan", 3)],
+)
+def test_set_permission_mode_leaves_a_dont_ask_launched_pane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    presses: int,
+) -> None:
+    """
+    A session launched into don't-ask can still be switched to a cycle mode.
+
+    Like bypass, don't-ask is launch-only and not a switch target, but its
+    ``don't ask on`` footer must read as the current mode so the cycler has
+    a starting point. From don't-ask the TUI cycles don't ask → manual →
+    accept edits → plan and never returns to don't-ask.
+    """
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    fake = _FakeModeCycleTmux(["dontAsk", "default", "acceptEdits", "plan"], start="dontAsk")
+    monkeypatch.setattr("subprocess.run", fake.run)
+
+    got = claude_native_bridge.set_permission_mode(bridge_dir, mode=target, timeout_s=5.0)
+
+    assert got == target
+    assert fake.presses == presses, f"Expected {presses} presses, got {fake.presses}."
+
+
 @pytest.mark.parametrize("bad_mode", ["dontAsk", "bypassPermissions", "", "nonsense"])
 def test_set_permission_mode_rejects_non_cycleable_modes(
     tmp_path: Path,
@@ -6053,6 +6187,18 @@ def test_permission_mode_from_pane_ignores_a_mode_named_in_the_transcript() -> N
     )
 
     assert claude_native_bridge._permission_mode_from_pane(pane) == "default"
+
+
+def test_permission_mode_from_pane_reads_a_dont_ask_footer() -> None:
+    """The launch-only don't-ask footer reads as the current mode, like bypass."""
+    pane = (
+        "────────────────────────────────────────\n"
+        "❯ \n"
+        "────────────────────────────────────────\n"
+        "  ⏵⏵ don't ask on (shift+tab to cycle)\n"
+    )
+
+    assert claude_native_bridge._permission_mode_from_pane(pane) == "dontAsk"
 
 
 def test_permission_mode_from_pane_returns_none_without_a_footer() -> None:
