@@ -5,9 +5,9 @@ upstream server accepts (checked with ``GET /v1/me``); anything else is answered
 ``401`` here and never reaches the server. The unauthenticated bootstrap surface
 (``/v1/me``, ``/v1/info``) is exempt so a browser can reach the login UI, exactly
 as a real SSO front door redirects to its own login before the app loads.
-Accepted traffic is relayed unchanged,
-so a WebSocket authenticated at upgrade time stays open however long it lives —
-exactly how a long-lived host tunnel outlives the credential it connected with.
+Accepted traffic is relayed unchanged, so a WebSocket authenticated at upgrade
+time stays open however long it lives, as a long-lived host tunnel can outlive
+the credential it connected with.
 """
 
 from __future__ import annotations
@@ -28,9 +28,10 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect as ws_connect
+from websockets.frames import EXTERNAL_CLOSE_CODES
 
 from omnigent.host.identity import HOST_AUTH_REQUIRED_HEADER
-from tests._helpers.live_server import find_free_port
+from tests._helpers.live_server import reserve_port
 
 _HOP_BY_HOP = frozenset(
     {
@@ -61,19 +62,17 @@ _WS_HANDSHAKE_ONLY = frozenset(
 )
 _AUTH_HEADERS = ("authorization", "cookie")
 _UNAUTHORIZED_BODY = {"error": "Invalid Token"}
-# The unauthenticated bootstrap surface a browser needs to render the login UI,
-# passed through like a real SSO front door's own login page. The runner never
-# calls these; it hits the gated /token and /tunnel.
+# Ungated bootstrap routes the browser needs to render the login page.
 _UNGATED_V1 = frozenset({"/v1/me", "/v1/info"})
 
 
 def _sendable_close_code(code: int | None) -> int:
-    """Clamp a relayed WebSocket close code to one the peer accepts.
+    """Clamp a relayed WebSocket close code to one ``websockets`` will send.
 
-    1005/1006/1015 are reserved sentinels the stack sets internally and never
-    sends on the wire; relaying one raises, so fall back to a normal 1000 close.
+    Reserved codes such as 1005/1006 are set locally and never sent on the
+    wire; relaying one raises, so fall back to a normal 1000 close.
     """
-    if code is None or not (1000 <= code < 5000) or code in (1005, 1006, 1015):
+    if code is None or not (code in EXTERNAL_CLOSE_CODES or 3000 <= code < 5000):
         return 1000
     return code
 
@@ -100,12 +99,16 @@ class EdgeRequest:
 class AuthEdgeProxy:
     """Reverse proxy that gates ``/v1/*`` on a credential the upstream accepts.
 
-    :param upstream: Base URL of the real server, e.g. ``"http://127.0.0.1:8123"``.
+    The edge URL is known before the upstream starts, so the server can be
+    configured with it as its public base URL. The port stays bound until the
+    edge serves on it, so nothing else can claim it while the upstream boots.
     """
 
-    def __init__(self, upstream: str) -> None:
-        self._upstream = upstream.rstrip("/")
-        self._port = find_free_port()
+    def __init__(self) -> None:
+        self._upstream = ""
+        self._reservation = contextlib.ExitStack()
+        self._listener = self._reservation.enter_context(reserve_port())
+        self._port = int(self._listener.getsockname()[1])
         self.requests: list[EdgeRequest] = []
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
@@ -118,10 +121,12 @@ class AuthEdgeProxy:
 
     def rejections(self, path_suffix: str) -> list[EdgeRequest]:
         """Return the 401s the edge answered for paths ending in *path_suffix*."""
-        return [r for r in self.requests if r.status == 401 and r.path.endswith(path_suffix)]
+        # Snapshot: the edge's event-loop thread appends while tests read.
+        return [r for r in list(self.requests) if r.status == 401 and r.path.endswith(path_suffix)]
 
-    def start(self) -> str:
-        """Start serving in a background thread and return the edge URL."""
+    def start(self, upstream: str) -> str:
+        """Relay to *upstream* (e.g. ``"http://127.0.0.1:8123"``) and return the edge URL."""
+        self._upstream = upstream.rstrip("/")
 
         @contextlib.asynccontextmanager
         async def lifespan(_app: Starlette) -> AsyncIterator[None]:
@@ -145,7 +150,9 @@ class AuthEdgeProxy:
             app, host="127.0.0.1", port=self._port, log_level="warning", ws="websockets"
         )
         self._server = uvicorn.Server(config)
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread = threading.Thread(
+            target=self._server.run, kwargs={"sockets": [self._listener]}, daemon=True
+        )
         self._thread.start()
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
@@ -159,6 +166,7 @@ class AuthEdgeProxy:
             self._server.should_exit = True
         if self._thread is not None:
             self._thread.join(timeout=10)
+        self._reservation.close()
 
     async def _aclose_client(self) -> None:
         """Close the upstream probe/relay client on the server's own loop."""
@@ -173,9 +181,7 @@ class AuthEdgeProxy:
                 timeout=httpx.Timeout(30.0, read=None),
                 trust_env=False,
             )
-        # A real front door relays the client's own cookie and never injects one
-        # of its own; dropping any stored Set-Cookie keeps a login made through
-        # the edge from authenticating a later un-credentialed request.
+        # Forward only the caller's own cookies, never ones the relay client stored.
         self._client.cookies.clear()
         return self._client
 
@@ -215,8 +221,7 @@ class AuthEdgeProxy:
         try:
             upstream = await self._http().send(upstream_req, stream=True)
         except httpx.HTTPError as exc:
-            # Upstream unreachable or dropped mid-request; record it and fail
-            # cleanly so rejection/summary assertions point at the real cause.
+            # Record upstream failures so assertions report the real cause.
             self._record(request.method, path, 502, authorized)
             return JSONResponse({"error": f"edge upstream failure: {exc}"}, status_code=502)
         self._record(request.method, path, upstream.status_code, authorized)
@@ -259,28 +264,23 @@ class AuthEdgeProxy:
             )
             return
         except (OSError, TimeoutError, websockets.exceptions.WebSocketException) as exc:
-            # Upstream never completed the handshake (refused, timed out, or a
-            # protocol error); fail the upgrade instead of crashing the edge.
+            # Fail the upgrade rather than crash the edge when upstream refuses it.
             self._record("WS", path, 502, authorized)
             await websocket.send_denial_response(
                 Response(f"edge upstream connect failed: {exc}".encode(), status_code=502)
             )
             return
         self._record("WS", path, 101, authorized)
-        # Relay the server's auth-mode signal to the host, as a real front
-        # door forwards the upgrade response headers it receives upstream.
-        upstream_response = upstream.response
+        # Relay the server's auth-mode signal, as a real front door forwards the
+        # upgrade response headers it receives upstream.
         signalled = (
-            upstream_response.headers.get(HOST_AUTH_REQUIRED_HEADER)
-            if upstream_response is not None
+            upstream.response.headers.get(HOST_AUTH_REQUIRED_HEADER) if upstream.response else None
+        )
+        await websocket.accept(
+            headers=[(HOST_AUTH_REQUIRED_HEADER.encode(), signalled.encode())]
+            if signalled
             else None
         )
-        accept_headers = (
-            [(HOST_AUTH_REQUIRED_HEADER.encode(), signalled.encode())]
-            if signalled is not None
-            else []
-        )
-        await websocket.accept(headers=accept_headers)
 
         async def client_to_upstream() -> None:
             try:
