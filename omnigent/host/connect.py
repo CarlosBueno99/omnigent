@@ -460,9 +460,6 @@ except ValueError:
     _LIFECYCLE_POLL_INTERVAL_S = 60.0
 # Keep first startup tolerant of a cold server, but do not spend the library's
 # full default timeout on each reconnect after an established tunnel drops.
-# Delay between noticing a deleted runtime and retiring, so the launch's
-# failure reply reaches the server before the tunnel closes.
-_RUNTIME_GONE_RETIRE_DELAY_S = 2.0
 _INITIAL_CONNECT_OPEN_TIMEOUT_S = 10.0
 _RECONNECT_OPEN_TIMEOUT_S = 3.0
 # Consecutive handshake recycle failures before the prompt cadence gives way
@@ -1347,6 +1344,9 @@ class HostProcess:
         # Set when this host's own interpreter was deleted under it, so no new
         # runner can start; the host retires once its live runners are gone.
         self._runtime_gone = False
+        # Set only when that retirement fired, so a lifecycle loss from another
+        # cause keeps its own exit.
+        self._retired_for_runtime_gone = False
 
     def _tracked_runner_pids(self) -> set[int]:
         """Return child PIDs whose exit status still belongs to a process handle.
@@ -1472,7 +1472,6 @@ class HostProcess:
             self._runners.pop(rid)
         if dead:
             self._trigger_maintenance("runner_exited_during_reconnect")
-            self._schedule_runtime_gone_retire()
         return list(self._runners.keys())
 
     def _tunnel_url(self) -> str:
@@ -2294,7 +2293,6 @@ class HostProcess:
         # zygote-forked one — run them off the loop so a wedged zygote can't
         # freeze the daemon's control handler.
         await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
-        self._schedule_runtime_gone_retire()
         _logger.info("Stopped runner %s", frame.runner_id)
         print(
             f"  ↓ Runner stopped: {frame.runner_id}",
@@ -2482,7 +2480,7 @@ class HostProcess:
         try:
             await self._report_unexpected_exit(runner_id, handle)
         finally:
-            self._schedule_runtime_gone_retire()
+            await self._retire_if_runtime_gone()
 
     async def _report_unexpected_exit(self, runner_id: str, handle: _RunnerHandle) -> None:
         """Report a tracked runner's unexpected exit to the server.
@@ -4048,11 +4046,12 @@ class HostProcess:
             return
 
     def _note_runtime_gone(self) -> None:
-        """Record that this host's interpreter was deleted, then retire if idle.
+        """Record that this host's interpreter was deleted.
 
         Runners already running keep working (their interpreter stays mapped),
         but every new spawn fails, so the host can't serve a relaunch until it
-        is restarted on a fresh runtime.
+        is restarted on a fresh runtime. The caller retires the host once the
+        launch's failure reply has been sent.
 
         :returns: None.
         """
@@ -4071,40 +4070,36 @@ class HostProcess:
                     error_phase=ErrorPhase.RUNNER_LAUNCH.value,
                 ),
             )
-        self._schedule_runtime_gone_retire()
 
-    def _schedule_runtime_gone_retire(self) -> None:
-        """Recheck retirement shortly, once frames about the change have been sent.
-
-        Called whenever a runner stops being tracked, so the last one leaving
-        retires a host whose runtime is gone however it left.
-
-        :returns: None.
-        """
-        if self._runtime_gone:
-            asyncio.get_running_loop().call_later(
-                _RUNTIME_GONE_RETIRE_DELAY_S, self._retire_if_runtime_gone
-            )
-
-    def _retire_if_runtime_gone(self) -> None:
+    async def _retire_if_runtime_gone(self) -> None:
         """Retire the host once its runtime is gone and no runner is left.
 
-        Uses the lifecycle monitor's exit path, so :meth:`run` breaks out of
-        its serve loop and tears down cleanly; the entry point then exits with
-        :data:`HOST_RUNTIME_GONE_EXIT_CODE`.
+        Callers run this after sending the frames that report the change. The
+        tunnel closes gracefully, so those frames are flushed before the close;
+        :meth:`run` then breaks out of its serve loop and the entry point exits
+        with :data:`HOST_RUNTIME_GONE_EXIT_CODE`. While disconnected, or with an
+        exit report still parked, the next registration rechecks instead.
 
         :returns: None.
         """
-        if not self._runtime_gone or self._runners or self._lifecycle_lost.is_set():
+        ws = self._ws
+        if (
+            not self._runtime_gone
+            or self._runners
+            or self._lifecycle_lost.is_set()
+            or ws is None
+            or self._unreported_exits
+        ):
             return
         _logger.warning("Host runtime is gone and no runner is live; exiting for a restart.")
+        self._retired_for_runtime_gone = True
         self._lifecycle_lost.set()
-        self._abort_live_tunnel()
+        await ws.close()
 
     @property
     def runtime_gone(self) -> bool:
-        """Whether this host exited because its own interpreter was deleted."""
-        return self._runtime_gone and self._lifecycle_lost.is_set()
+        """Whether this host retired because its own interpreter was deleted."""
+        return self._retired_for_runtime_gone
 
     def _abort_live_tunnel(self) -> None:
         """Abort the live tunnel transport, if any, to break the serve loop.
@@ -4829,6 +4824,8 @@ class HostProcess:
                 await self._report_runner_exit(
                     runner_id, report.error, had_connected=report.had_connected
                 )
+            # Runners that died while disconnected may have been the last ones.
+            await self._retire_if_runtime_gone()
             print(
                 f"✓ Connected as {self._identity.name!r} "
                 f"({self._identity.host_id}), {len(hello.runners)} live runner(s). "
@@ -5085,10 +5082,12 @@ class HostProcess:
             finally:
                 completion.set_result(None)
             await self._send_text(ws, encode_host_frame(launch_result))
+            await self._retire_if_runtime_gone()
         elif isinstance(frame, HostStopRunnerFrame):
             async with self._runner_lifecycle_lock:
                 stop_result = await self._handle_stop(frame)
             await self._send_text(ws, encode_host_frame(stop_result))
+            await self._retire_if_runtime_gone()
         elif isinstance(frame, HostRunnerStatusFrame):
             await self._send_text(ws, encode_host_frame(await self._handle_runner_status(frame)))
         elif isinstance(frame, HostStatFrame):

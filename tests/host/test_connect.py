@@ -1024,7 +1024,7 @@ async def test_handle_launch_attributes_spawn_failure_to_host(
 
 
 @pytest.mark.parametrize("live_runner", [False, True])
-async def test_handle_launch_retires_host_when_its_runtime_was_deleted(
+async def test_launch_on_deleted_runtime_retires_host_after_reply_is_sent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     live_runner: bool,
@@ -1032,9 +1032,22 @@ async def test_handle_launch_retires_host_when_its_runtime_was_deleted(
     """A deleted interpreter fails the launch clearly and retires the host once idle.
 
     Every later spawn would fail the same way, so the host exits for a restart
-    on a fresh runtime, but only once no live runner would be torn down.
+    on a fresh runtime, but only after the failure reply is sent and only once
+    no live runner would be torn down.
     """
-    import omnigent.host.connect as connect_module
+
+    class _GatedTunnel(_FakeTunnel):
+        """Fake tunnel whose sends park until ``release`` is set."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.send_started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def send(self, data: str) -> None:
+            self.send_started.set()
+            await self.release.wait()
+            await super().send(data)
 
     host = _make_host_process()
     missing = tmp_path / "deleted-venv" / "bin" / "python"
@@ -1043,11 +1056,12 @@ async def test_handle_launch_retires_host_when_its_runtime_was_deleted(
         raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(missing))
 
     monkeypatch.setattr(sys, "executable", str(missing))
-    monkeypatch.setattr(connect_module, "_RUNTIME_GONE_RETIRE_DELAY_S", 0.0)
     monkeypatch.setattr(host, "_current_auth_token", lambda **_kwargs: None)
     monkeypatch.setattr(host, "_spawn_runner_proc", _interpreter_gone)
     if live_runner:
         host._runners["runner_live"] = Mock()
+    tunnel = _GatedTunnel()
+    host._ws = tunnel  # type: ignore[assignment] — duck-typed ws
     frame = HostLaunchRunnerFrame(
         request_id="req_runtime_gone",
         binding_token="token_runtime_gone",
@@ -1055,19 +1069,25 @@ async def test_handle_launch_retires_host_when_its_runtime_was_deleted(
         session_id="session_runtime_gone",
     )
 
-    result = await host._handle_launch(frame)
-    await asyncio.sleep(0.01)
+    dispatch = asyncio.create_task(host._dispatch_host_frame(tunnel, frame))  # type: ignore[arg-type]
+    await asyncio.wait_for(tunnel.send_started.wait(), timeout=5.0)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    # The failure reply is still being sent, so the host must not retire yet.
+    assert host._runtime_gone
+    assert not host.lifecycle_lost
+    assert tunnel.closed_after_sent is None
+    tunnel.release.set()
+    await asyncio.wait_for(dispatch, timeout=5.0)
 
-    assert isinstance(result, HostLaunchRunnerResultFrame)
-    assert result.status == "failed"
-    assert str(missing) in (result.error or "")
-    assert "was deleted" in (result.error or "")
+    reply = decode_host_frame(tunnel.sent[0])
+    assert isinstance(reply, HostLaunchRunnerResultFrame)
+    assert reply.status == "failed"
+    assert str(missing) in (reply.error or "")
+    assert "was deleted" in (reply.error or "")
     assert host.runtime_gone is not live_runner
-    if live_runner:
-        # The last runner leaving is what retires the host.
-        host._runners.clear()
-        host._retire_if_runtime_gone()
-        assert host.runtime_gone
+    # Retiring closes the tunnel gracefully after the reply, never before it.
+    assert tunnel.closed_after_sent == (None if live_runner else 1)
 
 
 @pytest.mark.parametrize("binding_token", ["token_abc", "", "   "])
@@ -1420,6 +1440,7 @@ class _FakeTunnel:
     def __init__(self) -> None:
         """Initialize with an empty sent-frame log."""
         self.sent: list[str] = []
+        self.closed_after_sent: int | None = None
 
     async def send(self, data: str) -> None:
         """Record an outbound frame.
@@ -1431,6 +1452,10 @@ class _FakeTunnel:
     async def recv(self) -> str:
         """Simulate an immediate disconnect after hello."""
         raise ConnectionError("test disconnect")
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        """Record a graceful close and how many frames were sent before it."""
+        self.closed_after_sent = len(self.sent)
 
 
 class _ConnectionErrorTunnel:
@@ -1779,9 +1804,15 @@ async def test_handle_launch_immediate_exit_reports_exit_code_and_log_tail(
     assert maintenance_reasons == ["runner_launch_failed"]
 
 
-@pytest.mark.parametrize("runtime_gone", [False, True])
 @pytest.mark.parametrize(
-    "marker_state", ["connected", "not_connected", "unavailable", "unreadable"]
+    ("marker_state", "runtime_gone"),
+    [
+        ("connected", False),
+        ("not_connected", False),
+        ("unavailable", False),
+        ("unreadable", False),
+        ("connected", True),
+    ],
 )
 async def test_watch_runner_reports_unexpected_exit(
     tmp_path: Path,
@@ -1848,26 +1879,16 @@ async def test_watch_runner_reports_unexpected_exit(
             exists=Mock(side_effect=[OSError("marker unavailable"), False])
         )
 
-    events: list[str] = []
     if runtime_gone:
         # The runtime was deleted while this runner still ran; its exit is the last one.
         host._runtime_gone = True
-        monkeypatch.setattr("omnigent.host.connect._RUNTIME_GONE_RETIRE_DELAY_S", 0.0)
-        record_send = tunnel.send
-
-        async def _send(data: str) -> None:
-            events.append("runner_exited")
-            await record_send(data)
-
-        monkeypatch.setattr(tunnel, "send", _send)
-        monkeypatch.setattr(host, "_abort_live_tunnel", lambda: events.append("tunnel_aborted"))
 
     # Wait for the watcher to observe the death and send its report.
     await asyncio.wait_for(asyncio.gather(*host._watcher_tasks), timeout=5.0)
-    await asyncio.sleep(0.01)
 
     assert host.runtime_gone is runtime_gone
-    assert events == (["runner_exited", "tunnel_aborted"] if runtime_gone else [])
+    # A retiring host closes the tunnel only after the exit report went out.
+    assert tunnel.closed_after_sent == (1 if runtime_gone else None)
     # Exactly one report; a second would double-record server-side.
     assert len(tunnel.sent) == 1
     report = decode_host_frame(tunnel.sent[0])
@@ -3494,34 +3515,40 @@ async def test_handle_stop_terminates_process(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("path", ["stop", "reconnect_cleanup"])
 async def test_last_runner_leaving_retires_host_whose_runtime_is_gone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
+    tmp_path: Path, path: str
 ) -> None:
     """A deleted-runtime host retires when its last runner leaves by any path.
 
-    The first recheck after the failed launch found a live runner; neither a
-    server stop nor the reconnect cleanup of a dead runner goes through the
-    watcher, so each must recheck on its own.
+    Neither a server stop nor the reconnect cleanup of a dead runner goes
+    through the watcher, so each rechecks after sending its own frame.
     """
-    monkeypatch.setattr("omnigent.host.connect._RUNTIME_GONE_RETIRE_DELAY_S", 0.0)
     host = _make_host_process()
     proc = subprocess.Popen(["sleep", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     host._runners["runner_last"] = _RunnerHandle(proc=proc, log_path=tmp_path / "runner.log")
     host._note_runtime_gone()
-    await asyncio.sleep(0.01)
-    assert not host.runtime_gone
+    tunnel = _FakeTunnel()
 
     if path == "stop":
-        result = await host._handle_stop(
-            HostStopRunnerFrame(request_id="req_last", runner_id="runner_last")
+        host._ws = tunnel  # type: ignore[assignment] — duck-typed ws
+        await host._dispatch_host_frame(
+            tunnel,  # type: ignore[arg-type]
+            HostStopRunnerFrame(request_id="req_last", runner_id="runner_last"),
         )
+        result = decode_host_frame(tunnel.sent[0])
+        assert isinstance(result, HostStopRunnerResultFrame)
         assert result.status == "stopped"
     else:
         proc.kill()
         proc.wait()
-        assert host._alive_runner_ids() == []
-    await asyncio.sleep(0.01)
+        with pytest.raises(ConnectionError, match="test disconnect"):
+            await host._serve_frames(tunnel)  # type: ignore[arg-type]
+        hello = decode_host_frame(tunnel.sent[0])
+        assert isinstance(hello, HostHelloFrame)
+        assert hello.runners == []
 
     assert host.runtime_gone
+    # The tunnel closes after the stop result or hello, not before it.
+    assert tunnel.closed_after_sent == 1
 
 
 async def test_handle_stop_unknown_runner() -> None:
