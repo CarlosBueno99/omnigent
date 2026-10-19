@@ -38,6 +38,7 @@ from omnigent.harnesses.claude_native.bridge import (
     _LOGIN_GUIDANCE,
     _build_tools,
     _claude_prompt_rendered,
+    _composer_row,
     _escape_slash_command_text,
     _escape_unsupported_slash_command,
     _hook_record_from_jsonl_record,
@@ -9212,8 +9213,8 @@ def test_claude_prompt_rendered_sees_prompt_under_truncated_label() -> None:
     assert _claude_prompt_rendered(pane) is True
 
 
-def test_claude_prompt_rendered_ignores_draft_line_trailing_off_in_a_glyph() -> None:
-    """Indented draft content cannot replace the composer's opening rule."""
+def test_claude_prompt_rendered_sees_prompt_over_a_draft_line_trailing_off_in_a_glyph() -> None:
+    """A draft line ending in a rule glyph does not hide the input box."""
     rule = "─" * 40
     pane = "\n".join(
         [
@@ -9226,6 +9227,274 @@ def test_claude_prompt_rendered_ignores_draft_line_trailing_off_in_a_glyph() -> 
         ]
     )
     assert _claude_prompt_rendered(pane) is True
+
+
+@pytest.mark.parametrize(
+    ("label_rows", "closing_rows"),
+    [
+        pytest.param(
+            [
+                " fix-the-billing-webhook-retry-backoff-path-and-document-",
+                "every-edge-case-we-hit-in-staging-this-week-before-the-re",
+                "lease-freeze ─",
+            ],
+            ["─" * 57, "─" * 57, "─" * 14],
+            id="ascii",
+        ),
+        pytest.param(
+            [
+                " 請求のWebhook再試行バックオフ経路を修正し、ステージング",
+                "で発生した全てのエッジケースを文書化する作業セッション ─",
+            ],
+            ["─" * 57, "─" * 55],
+            id="wide-chars",
+        ),
+    ],
+)
+def test_claude_prompt_rendered_sees_prompt_under_title_wider_than_pane(
+    label_rows: list[str], closing_rows: list[str]
+) -> None:
+    """
+    A title wider than the pane leaves no rule glyph left of the label.
+
+    Claude Code lets a ``/rename`` title overflow the opening rule instead
+    of shortening it, so the label wraps and the row directly above ``❯``
+    is the title's tail plus the trailing glyph; the closing rule wraps to
+    the same width. Captured from Claude Code 2.1.268 in a 57-column
+    browser terminal.
+    """
+    pane = "\n".join(
+        [
+            "  ⎿  Session renamed to: fix-the-billing-webhook-retry-ba",
+            "     ckoff-path-and-document-every-edge-case-we-hit-in-st",
+            "     aging-this-week-before-the-release-freeze",
+            *label_rows,
+            "❯",
+            *closing_rows,
+            "  ⏸ manual mode on",
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is True
+
+
+_PANE_WIDE_TITLE = (
+    "fix-the-billing-webhook-retry-backoff-path-and-document-every-edge-case-"
+    "we-hit-in-staging-this-week-before-the-release-freeze"
+)
+_WRAPPED_BOX_FOOTER = "  ⏸ manual mode on · ? for shortcuts · ← for agents"
+
+
+@pytest.mark.parametrize(
+    ("opening_rows", "closing_rows"),
+    [
+        pytest.param([f" {_PANE_WIDE_TITLE[:54]} ─"], ["─" * 57], id="fills-the-row"),
+        pytest.param([f" {_PANE_WIDE_TITLE[:55]}", "─"], ["─" * 57, "─"], id="one-column-over"),
+        pytest.param([f" {_PANE_WIDE_TITLE[:56]}", "─"], ["─" * 57, "──"], id="two-columns-over"),
+        pytest.param([_PANE_WIDE_TITLE[:57], "─"], ["─" * 57, "───"], id="three-columns-over"),
+        pytest.param(
+            [f" {_PANE_WIDE_TITLE[:56]}", f"{_PANE_WIDE_TITLE[56:64]} ─"],
+            ["─" * 57, "─" * 10],
+            id="ten-columns-over",
+        ),
+    ],
+)
+def test_claude_prompt_rendered_sees_prompt_under_title_overflowing_pane_by_a_few_columns(
+    opening_rows: list[str], closing_rows: list[str]
+) -> None:
+    """
+    The opening rule's glyph alone on a row still frames the input box.
+
+    Captured from Claude Code 2.1.268 in a 57-column pane. A title that
+    exactly fills the row leaves no leading glyph and no ``…``; one that
+    overflows by a column or three pushes the rule's single trailing glyph
+    onto its own row, and the closing rule wraps onto a stub too short to
+    read as a rule by itself.
+    """
+    pane = "\n".join(
+        [
+            "  ⎿  Session renamed to: fix-the-billing-webhook-retry-ba",
+            "     ckoff-path-and-document",
+            *opening_rows,
+            "❯ ",
+            *closing_rows,
+            _WRAPPED_BOX_FOOTER,
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is True
+    assert _occupying_surface(pane) is None
+
+
+def test_claude_prompt_rendered_sees_multiline_draft_in_a_box_wider_than_the_pane() -> None:
+    """A draft's indented continuation rows sit between ``❯`` and the wrapped closing rule."""
+    pane = "\n".join(
+        [
+            f" {_PANE_WIDE_TITLE[:56]}",
+            f"{_PANE_WIDE_TITLE[56:64]} ─",
+            "❯ first line of the draft",
+            "  second line of the draft",
+            "  third line",
+            "─" * 57,
+            "─" * 10,
+            _WRAPPED_BOX_FOOTER,
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is True
+    assert _occupying_surface(pane) is None
+
+
+def test_shell_mode_in_a_box_wider_than_the_pane_still_reads_as_shell_mode() -> None:
+    """The wrapped frame yields the composer row, so its mode glyph is still read."""
+    pane = "\n".join(
+        [
+            f" {_PANE_WIDE_TITLE[:55]}",
+            "─",
+            "!",
+            "─" * 57,
+            "─",
+            "  ! for shell mode",
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is False
+    assert _occupying_surface(pane) == "shell mode"
+
+
+def test_box_wider_than_the_pane_outranks_the_shortcuts_panel_row() -> None:
+    """
+    The composer is read upward from the closing rule before the row under it.
+
+    With no row of the opening rule reading as a rule, the row under the
+    lowest rule is the ``?`` panel's "! for shell mode" row while that panel
+    is open, so a free chat composer would read as shell mode. Shell mode in
+    the same box must still be reported.
+    """
+    panel = "  ! for shell mode        double tap esc to clear input"
+    title_rows = [f" {_PANE_WIDE_TITLE[:56]}", f"{_PANE_WIDE_TITLE[56:64]} ─"]
+    chat = "\n".join([*title_rows, "❯", "─" * 57, "─" * 10, panel])
+    shell = "\n".join([*title_rows, "!", "─" * 57, "─" * 10, panel])
+    assert _composer_row(chat) == "❯"
+    assert _claude_prompt_rendered(chat) is True
+    assert _occupying_surface(chat) is None
+    assert _composer_row(shell) == "!"
+    assert _occupying_surface(shell) == "shell mode"
+
+
+def test_history_search_in_a_box_wider_than_the_pane_still_reads_as_occupied() -> None:
+    """
+    The closing rule's wrapped stub does not hide the ctrl+r footer.
+
+    The footer region starts under the whole closing rule, stub included;
+    were the stub to lead the region, the footer's prefix would be missed
+    and the history search would read as a free composer.
+    """
+    pane = "\n".join(
+        [
+            "❯ hello history entry",
+            f" {_PANE_WIDE_TITLE[:55]}",
+            "─",
+            "❯ ",
+            "─" * 57,
+            "─",
+            "  search prompts:   ⏸ manual mode on · ← for agents",
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is False
+    assert _occupying_surface(pane) == "the prompt-history search"
+
+
+def test_permission_mode_reads_the_footer_below_a_wrapped_closing_rule() -> None:
+    """The footer region starts below the whole wrapped closing rule, stub included."""
+    pane = "\n".join(
+        [
+            f" {_PANE_WIDE_TITLE[:55]}",
+            "─",
+            "❯ ",
+            "─" * 57,
+            "─",
+            "  ⏸ plan mode on (shift+tab to cycle)",
+        ]
+    )
+    assert claude_native_bridge._permission_mode_from_pane(pane) == "plan"
+
+
+def test_claude_prompt_rendered_ignores_a_menu_row_above_a_rule() -> None:
+    """
+    A selected menu row directly above a rule is not a composer.
+
+    Reading a wrapped box upward from its closing rule needs the opening
+    rule's glyph on the row above the composer; a menu's rows carry none.
+    """
+    pane = "\n".join(
+        [
+            "Detected a custom API key in your environment",
+            "Do you want to use this API key?",
+            "  1. Yes",
+            "❯ 2. No (recommended)",
+            "─" * 57,
+            "  Enter to confirm · Esc to cancel",
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is False
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "  ⎿  the build output trails off here ─",
+        "Build cancelled ─",
+    ],
+    ids=["indented-transcript-row", "unindented-content-row"],
+)
+def test_claude_prompt_rendered_ignores_a_menu_row_under_a_glyph_terminated_line(row: str) -> None:
+    """
+    Content ending in ``─`` above a menu's selected row is not a wrapped rule.
+
+    A wrapped opening rule wraps the closing rule too, and the one shape that
+    keeps a single-row closing rule is a title one space in; an indented
+    transcript row or ordinary output at the pane edge is neither, so the
+    selected row under it does not become the composer even with a rule below.
+    """
+    pane = "\n".join(
+        [
+            row,
+            "❯ 2. No (recommended)",
+            "─" * 57,
+            "  Enter to confirm · Esc to cancel",
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is False
+
+
+@pytest.mark.parametrize(
+    "rule_rows",
+    [["─" * 40], ["───", "─" * 40], ["─", "─" * 40]],
+    ids=["single-rule", "divider-then-rule", "stub-then-rule"],
+)
+def test_claude_prompt_rendered_ignores_an_echoed_prompt_under_a_glyph_terminated_line(
+    rule_rows: list[str],
+) -> None:
+    """
+    An echoed prompt above a dialog's rule is not a composer.
+
+    A transcript line at the pane edge can end in a rule glyph, but a box
+    wider than the pane wraps its closing rule into rows no wider than the
+    first, and the one single-row shape is the title that exactly fills the
+    opening rule, one space in. A full-width line ending in ``─`` over a
+    scrollback ``❯`` above a dialog's rule is neither, with or without a
+    short divider or stray glyph row touching that rule.
+    """
+    pane = "\n".join(
+        [
+            "● build output trails off… ─",
+            "❯ old prompt echo",
+            *rule_rows,
+            "  Rewind",
+            "  Restore the code and/or conversation to the point before…",
+            "  ❯ (current)",
+            "  Enter to continue · Esc to cancel",
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is False
+    assert _occupying_surface(pane) == "an overlay"
 
 
 @pytest.mark.parametrize(

@@ -313,6 +313,14 @@ Cross-harness journeys:
   Machine-managed Claude settings require an isolated container for the mock
   provider. Older CLI renderers wrap this fixture's title and are skipped
   explicitly. Terminal-only input does not use the web delivery readiness gate.
+- **`chat-render`, Claude web delivery beneath a title wider than the terminal:**
+  `tests/e2e_ui/chat/test_claude_native_truncated_title_prompt.py::test_native_claude_composer_delivers_under_title_wider_than_terminal`
+  drives real Claude Code and tmux with scripted model replies in an ~820px
+  browser window, `/rename`s the session from the Terminal view to an ASCII or
+  wide-character title wider than the pane, then sends from web chat and
+  verifies the reply arrives with no error pill. Claude Code 2.1.268 wraps the
+  title and both box rules instead of clipping the title, so this covers the
+  wrapped frame regardless of the CLI's renderer.
 - **`chat-render`, Claude shell commands from the web composer:**
   `tests/browser_ui/chat/test_native_shell_settlement.py::test_shell_mirror_settles_its_bubble_before_the_next_prompt`
   drives the built SPA at desktop and phone widths with controlled backend

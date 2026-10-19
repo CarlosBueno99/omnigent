@@ -75,11 +75,21 @@ def test_web_message_reaches_claude_beneath_a_truncated_title(
     assert advert is not None
     tmux = ["tmux", "-S", advert["socket_path"]]
     target = advert["tmux_target"]
-    title = "Check resilient message delivery beneath a session title wider than the terminal " * 3
+    title = " ".join(
+        ["Check resilient message delivery beneath a session title wider than the terminal"] * 3
+    )
     subprocess.run(
         [*tmux, "send-keys", "-t", target, "-l", "/rename " + title], check=True, timeout=10
     )
-    time.sleep(0.5)
+    typed = "".join(title[-24:].split())
+    deadline = time.monotonic() + 10
+    while typed not in "".join(_pane_text(base_url, session_id).split()):
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                "the /rename draft never landed in the composer:\n"
+                + _pane_text(base_url, session_id)
+            )
+        time.sleep(0.2)
     subprocess.run([*tmux, "send-keys", "-t", target, "Enter"], check=True, timeout=10)
     subprocess.run(
         [*tmux, "resize-window", "-t", target, "-x", "72", "-y", "30"], check=True, timeout=10
@@ -124,23 +134,23 @@ def test_web_message_reaches_claude_beneath_a_truncated_title(
     )
     page.screenshot(path=str(proof / "delivered.png"), full_page=True)
     deadline = time.monotonic() + 30
-    while True:
+    items: list[dict[str, object]] = []
+    persisted = False
+    while not persisted and time.monotonic() < deadline:
         response = httpx.get(
             f"{base_url}/v1/sessions/{session_id}/items", params={"limit": 100}, timeout=10
         )
         response.raise_for_status()
         items = response.json()["data"]
-        if (
-            any(
-                item.get("role") == "assistant"
-                and "TRUNCATED_TITLE_DELIVERED" in json.dumps(item.get("content", []))
-                for item in items
-            )
-            or time.monotonic() >= deadline
-        ):
-            break
-        time.sleep(0.1)
+        persisted = any(
+            item.get("role") == "assistant"
+            and "TRUNCATED_TITLE_DELIVERED" in json.dumps(item.get("content", []))
+            for item in items
+        )
+        if not persisted:
+            time.sleep(0.1)
     (proof / "transcript.json").write_text(json.dumps(items, indent=2))
+    assert persisted, "the assistant reply was not persisted to the transcript within 30 s"
     assert not [item for item in items if item.get("type") == "error"]
     assert (
         sum(
