@@ -6097,8 +6097,10 @@ def _selection_dialog_above_composer(pane: str) -> bool:
     Return whether a selection dialog owns the keyboard above a framed composer.
 
     Claude Code draws some offers, such as auto-mode setup, above an input box
-    that stays framed. Only a band whose last row is the dialog footer and that
-    holds a numbered ``❯`` option counts; text above an earlier rule never does.
+    that stays framed. Only a short band between the dialog's own top rule and
+    the composer counts, and only when it ends in the dialog footer and holds a
+    numbered ``❯`` option; transcript text has no such rule, since Claude Code
+    renders a markdown rule as ``---``.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: ``True`` when such a dialog is live.
@@ -6108,13 +6110,15 @@ def _selection_dialog_above_composer(pane: str) -> bool:
     if row is None:
         return False
     opening_rule = row - 1
-    band_start = max(
-        (idx + 1 for idx in range(opening_rule) if _is_box_rule(non_empty[idx])),
-        default=0,
+    dialog_rule = next(
+        (idx for idx in range(opening_rule - 1, -1, -1) if _is_box_rule(non_empty[idx])),
+        None,
     )
-    band = non_empty[max(band_start, opening_rule - _DIALOG_SCAN_TAIL_LINES) : opening_rule]
+    if dialog_rule is None:
+        return False
+    band = non_empty[dialog_rule + 1 : opening_rule]
     return (
-        bool(band)
+        0 < len(band) <= _DIALOG_SCAN_TAIL_LINES
         and _DIALOG_FOOTER_RE.search(band[-1]) is not None
         and any(_NUMBERED_SELECTOR_RE.match(line.strip().lstrip("│ ")) for line in band)
     )

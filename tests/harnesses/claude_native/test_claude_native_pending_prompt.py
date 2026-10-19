@@ -116,7 +116,9 @@ def test_terminal_fallback_prompt_receives_no_injected_keystrokes(
     assert sent == []
 
 
-@pytest.mark.parametrize("pane", [_QUESTION, _PERMISSION])
+@pytest.mark.parametrize(
+    "pane", [_QUESTION, _PERMISSION, "❯ 1. refactor X\n● Press Enter to continue.\n"]
+)
 def test_decision_text_above_a_ready_composer_does_not_block_delivery(
     native_bridge: Path, monkeypatch: pytest.MonkeyPatch, pane: str
 ) -> None:
