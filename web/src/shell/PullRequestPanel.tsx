@@ -226,6 +226,7 @@ export type PullRequestPanelState =
   | { kind: "loading" }
   | { kind: "runner-offline" }
   | { kind: "sandbox-offline" }
+  | { kind: "workspace-offline" }
   | { kind: "error"; message: string }
   | { kind: "host-outdated" }
   | { kind: "unavailable" }
@@ -259,6 +260,7 @@ export function derivePullRequestPanelState(info: {
   }
   const data = info.data;
   if (!data || !data.available) {
+    if (data?.reason === "workspace_offline") return { kind: "workspace-offline" };
     if (data?.reason === "not_a_git_repo") return { kind: "not-a-git-repo" };
     if (data?.reason === "host_outdated") return { kind: "host-outdated" };
     if (data?.reason === "unsupported_remote") {
@@ -1075,15 +1077,16 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
     sessionId: string;
     data: Pick<
       PullRequestInfo,
-      "prs" | "tracking_available" | "selected_pr_url" | "provider" | "provider_display"
+      "prs" | "tracking_available" | "selected_pr_url" | "provider" | "provider_display" | "reason"
     >;
   }>();
   useEffect(() => {
     if (info.data) {
-      const { prs, tracking_available, selected_pr_url, provider, provider_display } = info.data;
+      const { prs, tracking_available, selected_pr_url, provider, provider_display, reason } =
+        info.data;
       setKnownAssociations({
         sessionId: conversationId,
-        data: { prs, tracking_available, selected_pr_url, provider, provider_display },
+        data: { prs, tracking_available, selected_pr_url, provider, provider_display, reason },
       });
     }
   }, [conversationId, info.data]);
@@ -1092,6 +1095,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
     info.data ??
     (knownAssociations?.sessionId === conversationId ? knownAssociations.data : undefined);
   const panelState = derivePullRequestPanelState(info);
+  const workspaceOffline = associations?.reason === "workspace_offline";
   // No provider is known without a payload, or in a non-git workspace (older hosts omit it).
   const copy = gitProviderCopy(
     associations && panelState.kind !== "not-a-git-repo" ? associations.provider : null,
@@ -1138,12 +1142,13 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
             aria-label="Pull request URL"
             type="url"
             required
+            disabled={workspaceOffline}
             value={url}
             onChange={(event) => setUrl(event.target.value)}
             placeholder={copy.prUrlPlaceholder}
             className="flex-1 focus-visible:ring-0"
           />
-          <Button type="submit" disabled={update.isPending}>
+          <Button type="submit" disabled={update.isPending || workspaceOffline}>
             Link
           </Button>
           <Button type="button" variant="outline" onClick={() => setLinking(false)}>
@@ -1254,13 +1259,17 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
             <div className="ml-auto flex shrink-0 items-center gap-1">
               {refreshButton}
               <TooltipProvider delayDuration={0}>
-                <IconButton label="Link a PR" onClick={() => setLinking(!linking)}>
+                <IconButton
+                  label="Link a PR"
+                  disabled={workspaceOffline}
+                  onClick={() => setLinking(!linking)}
+                >
                   <PlusIcon className="size-3.5" aria-hidden="true" />
                 </IconButton>
                 {selected && (
                   <IconButton
                     label="Unlink PR"
-                    disabled={update.isPending}
+                    disabled={update.isPending || workspaceOffline}
                     onClick={() =>
                       update.mutate(
                         { url: selected, action: "remove" },
@@ -1535,6 +1544,13 @@ function PullRequestPanelDetails({
       return (
         <PanelMessage>
           <p>The sandbox is offline. Send a message in the chat to start it again.</p>
+          {emptyStateAction}
+        </PanelMessage>
+      );
+    case "workspace-offline":
+      return (
+        <PanelMessage>
+          <p>The workspace is offline. Reconnect it to load current PR details.</p>
           {emptyStateAction}
         </PanelMessage>
       );

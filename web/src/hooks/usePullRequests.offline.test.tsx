@@ -31,8 +31,8 @@ function runnerUnavailableResponse(): Response {
   } as unknown as Response;
 }
 
-function Probe({ id }: { id: string }) {
-  usePullRequestInfo(id);
+function Probe({ id, poll = false }: { id: string; poll?: boolean }) {
+  usePullRequestInfo(id, { poll });
   return null;
 }
 
@@ -58,6 +58,46 @@ afterEach(() => {
 });
 
 describe("usePullRequestInfo runner-offline retry", () => {
+  it("loads saved associations with both runner and host offline without polling", async () => {
+    vi.useFakeTimers();
+    onlineMock.mockReturnValue(false);
+    hostOnlineMock.mockReturnValue(false);
+    const url = "https://github.com/acme/app/pull/42";
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: "session.github.info",
+          available: false,
+          reason: "workspace_offline",
+          tracking_available: true,
+          selected_pr_url: url,
+          prs: [
+            {
+              url,
+              host: "github.com",
+              repository: "acme/app",
+              number: 42,
+              relationship: "created",
+            },
+          ],
+        }),
+      ),
+    );
+    const client = new QueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <Probe id="conv_asleep" poll />
+      </QueryClientProvider>,
+    );
+
+    await vi.advanceTimersByTimeAsync(130_000);
+    expect(client.getQueryData(["github-info", "conv_asleep"])).toMatchObject({
+      selected_pr_url: url,
+      prs: [{ number: 42 }],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("stops retrying once the health poll shows nothing can serve the session", async () => {
     vi.useFakeTimers();
     // Page load: liveness hasn't answered when the first 503 lands.

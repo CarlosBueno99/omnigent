@@ -3177,6 +3177,17 @@ async def test_github_info_proxies_to_runner(client: httpx.AsyncClient) -> None:
     ) in fake_runner.calls
 
 
+def test_saved_prs_restore_each_provider_display() -> None:
+    from omnigent.server.routes._sessions.helpers import _session_prs_for_display
+
+    assert _session_prs_for_display(None) is None
+    prs = [{"provider": provider} for provider in ("github", "gitlab", "azure_devops")]
+    saved = _session_prs_for_display(prs)
+    assert saved is not None
+    assert [pr["provider_display"]["number_prefix"] for pr in saved] == ["#", "!", "!"]
+    assert all("provider_display" not in pr for pr in prs)
+
+
 @pytest.mark.asyncio
 async def test_github_changes_proxies_to_runner(client: httpx.AsyncClient) -> None:
     """GET /resources/github/changes proxies the PR file list to the runner."""
@@ -9044,6 +9055,7 @@ def offline_env_app(
     set_runner_router(_FakeRunnerRouter(_OfflineRunnerClient()))  # type: ignore[arg-type]
 
     application = FastAPI()
+    application.state.test_conversation = conv
 
     @application.exception_handler(OmnigentError)
     async def _handle(request: Request, exc: OmnigentError) -> JSONResponse:
@@ -9101,12 +9113,16 @@ async def test_offline_environment_advertises_the_same_reach_as_the_runner(
 
 @pytest.mark.asyncio
 async def test_github_info_falls_back_to_host_when_runner_offline(
+    offline_env_app: FastAPI,
     offline_env_client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GitHub info is served over the host tunnel when the runner is offline."""
     from omnigent.server.routes import _host_filesystem
 
+    conv = offline_env_app.state.test_conversation
+    conv.session_pull_requests = [{"url": "https://github.com/acme/app/pull/42"}]
+    conv.session_pull_requests_updated_at_ns = 123
     captured: dict[str, Any] = {}
 
     async def _fake_read(
@@ -9118,9 +9134,10 @@ async def test_github_info_falls_back_to_host_when_runner_offline(
         session_id: str,
         params: Any,
     ) -> dict[str, Any]:
-        del host_registry, host_conn, session_id, params
+        del host_registry, host_conn, session_id
         captured["op"] = op
         captured["workspace"] = workspace
+        captured["params"] = params
         return {
             "object": "session.github.info",
             "available": True,
@@ -9140,6 +9157,10 @@ async def test_github_info_falls_back_to_host_when_runner_offline(
     assert resp.json()["branch"] == "feature"
     assert captured["op"] == "github_info"
     assert captured["workspace"] == _OFFLINE_WORKSPACE
+    assert captured["params"] == {
+        "pull_requests": conv.session_pull_requests,
+        "pull_requests_updated_at_ns": 123,
+    }
 
 
 @pytest.mark.asyncio

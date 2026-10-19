@@ -8865,6 +8865,51 @@ async def test_handle_import_local_legacy_server_skips_only_unsafe_session(
     ]
 
 
+async def test_github_info_restores_server_prs_before_branch_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.runner.session_prs import PullRequestRef, SessionPrRegistry, SessionPullRequest
+
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    session_id = "restored-session"
+    urls = ["https://github.com/example/one/pull/42", "https://github.com/example/two/pull/99"]
+    saved_prs = [
+        SessionPullRequest(
+            **PullRequestRef.from_url(url).model_dump(),
+            relationship="created",
+            source="test",
+            first_seen_at=1,
+            last_seen_at=1,
+        ).model_dump()
+        for url in urls
+    ]
+    revision = 2_000_000_000_000_000_000
+
+    def discover_branch_pr(actual_session_id: str, pr_url: str | None) -> dict[str, object]:
+        assert actual_session_id == session_id
+        assert pr_url == urls[1]
+        registry = SessionPrRegistry(session_id)
+        assert {entry.url for entry in registry.list()} == set(urls)
+        registry.record(
+            [PullRequestRef.from_url(urls[0])], relationship="inferred", source="branch"
+        )
+        snapshot = registry.snapshot()
+        assert snapshot is not None and snapshot[0] > revision
+        return {"prs": [entry.url for entry in snapshot[1]]}
+
+    result = HostProcess._dispatch_fs_op(
+        SimpleNamespace(github_info=discover_branch_pr),
+        "github_info",
+        session_id,
+        {
+            "pr_url": urls[1],
+            "pull_requests": saved_prs,
+            "pull_requests_updated_at_ns": revision,
+        },
+    )
+    assert set(result["prs"]) == set(urls)
+
+
 async def test_dispatch_fs_write_op_routes_github_set_preference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

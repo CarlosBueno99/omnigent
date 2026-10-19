@@ -1667,6 +1667,46 @@ describe("derivePullRequestPanelState", () => {
 });
 
 describe("session PR selection", () => {
+  it("keeps saved PR selection and external links available while the workspace is offline", async () => {
+    const user = userEvent.setup();
+    const one = "https://github.com/acme/app/pull/42";
+    const two = "https://github.com/acme/app/pull/43";
+    state.info!.data = {
+      object: "session.github.info",
+      available: false,
+      reason: "workspace_offline",
+      tracking_available: true,
+      selected_pr_url: one,
+      prs: [one, two].map((url, index) => ({
+        url,
+        host: "github.com",
+        repository: "acme/app",
+        number: 42 + index,
+        relationship: "created",
+      })),
+    };
+    const { rerender } = renderPanel();
+
+    expect(screen.getByText(/The workspace is offline/)).toBeVisible();
+    expect(screen.getByRole("link", { name: "Open the PR on GitHub" })).toHaveAttribute(
+      "href",
+      one,
+    );
+    expect(screen.getByRole("button", { name: "Link a PR" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Unlink PR" })).toBeDisabled();
+    expect(usePullRequestChangedFiles).toHaveBeenLastCalledWith("conv_1", false, one, ":");
+    await user.click(screen.getByRole("combobox", { name: "Session pull request" }));
+    await user.click(screen.getByRole("option", { name: "acme/app #43" }));
+    expect(screen.getByRole("link", { name: "Open the PR on GitHub" })).toHaveAttribute(
+      "href",
+      two,
+    );
+    state.info = { isLoading: true, isFetching: true, error: null };
+    rerender(<PullRequestPanel conversationId="conv_1" />);
+    expect(screen.getByRole("button", { name: "Link a PR" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Unlink PR" })).toBeDisabled();
+  });
+
   it("keeps the selector and repository identity while PR details load or fail", async () => {
     const user = userEvent.setup();
     const one = "https://github.com/example/one/pull/42";

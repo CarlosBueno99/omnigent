@@ -144,10 +144,16 @@ export interface PullRequestCapabilities {
  *  - `no_os_env` — no workspace/filesystem to read (404 from a current host).
  *  - `unsupported_remote` — no supported provider serves the workspace's
  *    remote (see `remote_host`).
+ *  - `workspace_offline` — saved associations are available, but live details are not.
  *  - `host_outdated` — the host predates the `/resources/github` route and
  *    404s "Resource 'github' not found"; synthesized in {@link fetchPullRequestInfo}. */
 export type PullRequestUnavailableReason =
-  "not_a_git_repo" | "no_os_env" | "unsupported_remote" | "provider_unavailable" | "host_outdated";
+  | "not_a_git_repo"
+  | "no_os_env"
+  | "unsupported_remote"
+  | "provider_unavailable"
+  | "host_outdated"
+  | "workspace_offline";
 
 export interface PullRequestAssociation {
   url: string;
@@ -370,7 +376,7 @@ const PULL_REQUEST_POLL_MS = 5_000;
  */
 export function computePullRequestPollInterval(info: PullRequestInfo | undefined): number | false {
   // No usable info yet — an initial error, or a transient fetch failure with no
-  // cached data. Keep trying; runner-offline is gated off by `enabled`.
+  // cached data. Keep trying while workspace liveness permits polling.
   if (!info) return PULL_REQUEST_POLL_MS;
   // The mutations below seed the cache with raw payloads, so normalize here.
   const { auth } = normalizePullRequestInfo(info);
@@ -390,8 +396,7 @@ export function computePullRequestPollInterval(info: PullRequestInfo | undefined
 /**
  * Fetch GitHub context (repo, branch, base ref, PR + CI summary) for a session.
  *
- * Disabled when the runner is known offline. Retries the runner-offline case
- * with capped backoff so a cold-booting runner resolves before any error UI.
+ * Saved associations remain available from the server when the workspace is offline.
  *
  * Refetch is driven two ways, both harness-agnostic:
  *   - Turn end: a trailing invalidate on the focused session's active→idle
@@ -404,8 +409,7 @@ export function computePullRequestPollInterval(info: PullRequestInfo | undefined
  *     (setup fixed outside the app, CI progressing after the turn). Backgrounded
  *     tabs pause (`refetchIntervalInBackground: false`).
  *
- * Disabled when the runner is known offline. Retries the runner-offline case
- * with capped backoff so a cold-booting runner resolves before any error UI.
+ * Live polling and runner retries stop when the workspace is known offline.
  */
 export function usePullRequestInfo(
   rawConversationId: string | undefined,
@@ -424,16 +428,17 @@ export function usePullRequestInfo(
   return useQuery({
     queryKey: ["github-info", conversationId, ...(options?.prUrl ? [options.prUrl] : [])],
     queryFn: () => fetchPullRequestInfo(conversationId!, options?.prUrl),
-    enabled: !!conversationId && serveable !== false,
+    enabled: !!conversationId,
     retry,
     retryDelay: runnerOfflineRetryDelay,
     staleTime: 30_000,
-    refetchInterval: options?.poll
-      ? (query) =>
-          query.state.data?.tracking_available
-            ? 10_000
-            : computePullRequestPollInterval(query.state.data)
-      : false,
+    refetchInterval:
+      options?.poll && serveable !== false
+        ? (query) =>
+            query.state.data?.tracking_available
+              ? 10_000
+              : computePullRequestPollInterval(query.state.data)
+        : false,
     refetchIntervalInBackground: false,
   });
 }

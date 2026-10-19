@@ -35,6 +35,7 @@ from omnigent.entities import (
     NewConversationItem,
 )
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.git_providers import provider_display
 from omnigent.host.frames import HostHelloFrame
 from omnigent.llms.context_window import ModelPricing
 from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
@@ -9358,6 +9359,143 @@ async def test_post_external_session_todos_updates_snapshot(
     )
     assert resp.status_code in (200, 202), resp.text
     assert (await client.get(f"/v1/sessions/{session['id']}")).json()["todos"] == todos
+
+
+async def test_session_prs_persist_before_ack_and_survive_removal_replay(
+    client: httpx.AsyncClient,
+) -> None:
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    path = f"/v1/sessions/{session['id']}"
+    assert (await client.get(path)).json()["pull_requests"] is None
+    prs = [
+        {
+            "provider": "github",
+            "host": "github.com",
+            "repository": "example/project",
+            "number": 42,
+            "url": "https://github.com/example/project/pull/42",
+            "relationship": "created",
+            "source": "native_hook",
+            "first_seen_at": 1.0,
+            "last_seen_at": 2.0,
+            "title": "Saved change",
+        }
+    ]
+    display_prs = [{**pr, "provider_display": provider_display(pr["provider"])} for pr in prs]
+    for entries, revision, expected in ((prs, 1, display_prs), ([], 2, []), (prs, 1, [])):
+        response = await client.post(
+            path + "/events",
+            json={
+                "type": "external_session_prs",
+                "data": {"prs": entries, "updated_at_ns": revision},
+            },
+        )
+        assert response.status_code == 202, response.text
+        assert (await client.get(path)).json()["pull_requests"] == expected
+        listed = (await client.get("/v1/sessions")).json()["data"]
+        assert (
+            next(row for row in listed if row["id"] == session["id"])["pull_requests"] == expected
+        )
+    for data in ({}, {"prs": "bad"}, {"prs": prs, "updated_at_ns": -1}):
+        rejected = await client.post(
+            path + "/events", json={"type": "external_session_prs", "data": data}
+        )
+        assert rejected.status_code == 400, rejected.text
+    assert (await client.get(path)).json()["pull_requests"] == []
+
+
+async def test_live_pr_resources_save_links_and_explicit_removal(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.server.routes.sessions import routes_resources
+
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    path = f"/v1/sessions/{session['id']}"
+    prs = [
+        {
+            "provider": "github",
+            "host": "github.com",
+            "repository": "example/project",
+            "number": 42,
+            "url": "https://github.com/example/project/pull/42",
+            "relationship": "attached",
+            "source": "user",
+            "first_seen_at": 1.0,
+            "last_seen_at": 2.0,
+            "title": "Saved change",
+        }
+    ]
+    display_prs = [{**pr, "provider_display": provider_display(pr["provider"])} for pr in prs]
+    payload = {
+        "object": "session.github.info",
+        "tracking_available": True,
+        "available": True,
+        "prs": prs,
+        "prs_updated_at_ns": 1,
+    }
+    offline = False
+    runner_status = 200
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(runner_status, json=payload)),
+        base_url="http://runner",
+    ) as runner_client:
+
+        async def resolve(*args, **kwargs):
+            if offline:
+                raise OmnigentError("workspace offline", code=ErrorCode.RUNNER_UNAVAILABLE)
+            return runner_client
+
+        monkeypatch.setattr(routes_resources, "_get_runner_client_for_resource_access", resolve)
+        payload["prs"] = [{"url": prs[0]["url"]}]
+        legacy = await client.get(path + "/resources/github")
+        assert legacy.status_code == 200, legacy.text
+        assert (await client.get(path)).json()["pull_requests"] is None
+        payload["prs"] = prs
+        response = await client.get(path + "/resources/github")
+        assert response.status_code == 200, response.text
+        assert (await client.get(path)).json()["pull_requests"] == display_prs
+        payload.update(prs=[])
+        payload.pop("prs_updated_at_ns")
+        missing_registry = await client.get(path + "/resources/github")
+        assert missing_registry.json()["prs"] == display_prs
+        assert missing_registry.json()["reason"] == "workspace_offline"
+        payload["error"] = {"message": "This pull request is not associated with the session"}
+        runner_status = 400
+        selected = await client.get(path + "/resources/github", params={"pr_url": prs[0]["url"]})
+        assert selected.status_code == 200, selected.text
+        assert selected.json()["selected_pr_url"] == prs[0]["url"]
+        runner_status = 200
+        payload.pop("error")
+        payload.update(prs=prs, prs_updated_at_ns=1)
+        offline = True
+        saved = await client.get(path + "/resources/github")
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["reason"] == "workspace_offline"
+        assert saved.json()["prs"] == display_prs
+        assert saved.json()["selected_pr_url"] == prs[0]["url"]
+        unknown = await client.get(
+            path + "/resources/github", params={"pr_url": "https://github.com/other/repo/pull/1"}
+        )
+        assert unknown.status_code == 400
+        offline = False
+        payload.update(prs=[])
+        payload.pop("prs_updated_at_ns")
+        removed = await client.post(
+            path + "/resources/github/prs", json={"action": "remove", "url": prs[0]["url"]}
+        )
+        assert removed.status_code == 200, removed.text
+        assert (await client.get(path)).json()["pull_requests"] == []
+        payload.update(prs=prs, prs_updated_at_ns=2)
+        await client.get(path + "/resources/github")
+        payload.update(prs=[], prs_updated_at_ns=3)
+        assert (await client.get(path + "/resources/github")).json()["prs"] == []
+        assert (await client.get(path)).json()["pull_requests"] == []
+        offline = True
+        assert (await client.get(path + "/resources/github")).json()["prs"] == []
 
 
 async def test_post_external_session_todos_empty_list_clears_snapshot(

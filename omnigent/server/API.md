@@ -517,6 +517,19 @@ Fields:
     key in the existing compressed session-state metadata and updated by
     `external_session_todos` events. Empty before the first Plan update.
 
+  pull_requests (array or null, default `null`)
+    Saved PR associations (`provider`, `host`, `repository`, `number`, `url`,
+    `relationship`, `source`, first/last-seen timestamps, and optional `title`).
+    Available after the sandbox stops and across server restarts. `null` means
+    no snapshot has been reported; `[]` records an explicit clear. The GitHub
+    resource endpoint returns these links with `reason: "workspace_offline"`
+    when neither runner nor host can supply live details.
+
+  pull_requests_updated_at_ns (integer or null, session detail only)
+    Last acknowledged registry revision. Replacement runners retain this floor
+    when restoring PR metadata so reports from a host with a slower clock remain
+    newer than the saved snapshot.
+
   terminal_pending (boolean, default `false`)
     `true` while the runner is auto-creating the terminal for a
     terminal-first session (claude-native / codex-native), so the Web UI
@@ -1101,6 +1114,14 @@ Request body matches `SessionEventInput`:
                                   activeForm: string}]}`.
                                   Malformed items are dropped; item/text/byte
                                   bounds fail the request with 400.
+      - "external_session_prs"
+                                — internal PR association snapshot. Payload:
+                                  `{prs: [...], updated_at_ns: integer}`.
+                                  Stores at most 100 entries / 128 KiB, validates
+                                  HTTPS identities. Session detail and list
+                                  responses expose the saved `pull_requests`.
+                                  Older revisions are ignored; empty clears.
+                                  Unversioned reports only backfill absent data.
     The route validates `type` against the conversation entity's item
     discriminator map plus the documented control/internal event types.
     Unknown values fail loud with 400 — they are NOT silently enqueued.

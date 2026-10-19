@@ -598,6 +598,18 @@ async def test_read_grant_allows_get_but_blocks_post_events(
         f"LEVEL_EDIT."
     )
 
+    refused_pr_update = await auth_client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={"type": "external_session_prs", "data": {"prs": [], "updated_at_ns": 1}},
+        headers={"X-Forwarded-Email": "user-b"},
+    )
+    assert refused_pr_update.status_code == 403
+    snapshot = await auth_client.get(
+        f"/v1/sessions/{session_id}",
+        headers={"X-Forwarded-Email": "user-b"},
+    )
+    assert snapshot.json()["pull_requests"] is None
+
 
 async def test_edit_grant_blocked_from_stop_session_requires_owner(
     auth_client: httpx.AsyncClient,

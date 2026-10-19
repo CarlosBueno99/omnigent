@@ -117,16 +117,18 @@ from omnigent.stores.conversation_store.overrides import (
 from omnigent.stores.conversation_store.overrides import (
     encode_session_overrides as _encode_session_overrides,
 )
+from omnigent.stores.conversation_store.session_prs import validate_session_prs
 
 _logger = logging.getLogger(__name__)
 
 _SESSION_TODOS_STATE_KEY = "_omnigent_native_plan_snapshot_v1"
+_SESSION_PRS_STATE_KEY = "_omnigent_session_prs_v1"
 
 
 def _decode_session_state(
     value: str | None,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Split policy state from the reserved native Plan snapshot."""
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
+    """Split policy state from reserved session display snapshots."""
     state = json.loads(value) if value else {}
     if not isinstance(state, dict):
         raise TypeError("session_state must decode to an object")
@@ -135,18 +137,27 @@ def _decode_session_state(
     if raw_todos is not None:
         with suppress(TypeError, ValueError):
             todos = validate_session_todos(raw_todos)
-    return state, todos
+    raw_prs = state.pop(_SESSION_PRS_STATE_KEY, None)
+    prs = None
+    if isinstance(raw_prs, dict):
+        with suppress(TypeError, ValueError):
+            prs = {**raw_prs, "prs": validate_session_prs(raw_prs.get("prs"))}
+    return state, todos, prs
 
 
 def _encode_session_state(
     state: dict[str, Any],
     todos: list[dict[str, Any]] | None,
+    prs: dict[str, Any] | None,
 ) -> str:
-    """Serialize policy state while preserving an optional Plan snapshot."""
+    """Serialize policy state while preserving session display snapshots."""
     payload = dict(state)
     payload.pop(_SESSION_TODOS_STATE_KEY, None)
+    payload.pop(_SESSION_PRS_STATE_KEY, None)
     if todos:
         payload[_SESSION_TODOS_STATE_KEY] = todos
+    if prs is not None:
+        payload[_SESSION_PRS_STATE_KEY] = prs
     return json.dumps(payload, separators=(",", ":"))
 
 
@@ -208,7 +219,9 @@ def _to_conversation(
         callers pass the JOINed ``{key: value}`` map.
     :returns: A :class:`Conversation` dataclass instance.
     """
-    session_state, session_todos = _decode_session_state(meta.session_state if meta else None)
+    session_state, session_todos, session_prs = _decode_session_state(
+        meta.session_state if meta else None
+    )
     session_usage: dict[str, Any] = {}
     if meta and meta.session_usage:
         session_usage = json.loads(meta.session_usage)
@@ -232,6 +245,8 @@ def _to_conversation(
         session_state=session_state,
         session_usage=session_usage,
         session_todos=session_todos,
+        session_pull_requests=session_prs["prs"] if session_prs is not None else None,
+        session_pull_requests_updated_at_ns=(session_prs or {}).get("updated_at_ns"),
         reasoning_effort=overrides["reasoning_effort"],
         model_override=overrides["model_override"],
         inference_snapshot=(
@@ -1541,8 +1556,8 @@ class SqlAlchemyConversationStore(ConversationStore):
                 q = q.with_for_update()
             meta = session.scalars(q).first()
             if meta is not None:
-                _, todos = _decode_session_state(meta.session_state)
-                meta.session_state = _encode_session_state(state, todos)
+                _, todos, prs = _decode_session_state(meta.session_state)
+                meta.session_state = _encode_session_state(state, todos, prs)
 
         run_write_transaction(self._session_immediate, "set_session_state", write)
 
@@ -1601,11 +1616,54 @@ class SqlAlchemyConversationStore(ConversationStore):
             meta = session.scalars(q).first()
             if meta is None:
                 return False
-            state, _ = _decode_session_state(meta.session_state)
-            meta.session_state = _encode_session_state(state, validated)
+            state, _, prs = _decode_session_state(meta.session_state)
+            meta.session_state = _encode_session_state(state, validated, prs)
             return True
 
         return run_write_transaction(self._session_immediate, "set_session_todos", write)
+
+    def set_session_prs(
+        self,
+        conversation_id: str,
+        prs: list[dict[str, Any]],
+        *,
+        updated_at_ns: int | None = None,
+        user_update: bool = False,
+    ) -> bool:
+        """Persist newer PRs; explicit user updates also accept unversioned hosts."""
+        validated = validate_session_prs(prs)
+        if updated_at_ns is not None and (type(updated_at_ns) is not int or updated_at_ns <= 0):
+            raise ValueError("Pull request snapshot updated_at_ns must be a positive integer")
+
+        def write(session: Session) -> bool:
+            query = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                query = query.with_for_update()
+            meta = session.scalars(query).first()
+            if meta is None:
+                return False
+            state, todos, previous = _decode_session_state(meta.session_state)
+            if previous is not None and (
+                (updated_at_ns is None and not user_update)
+                or (
+                    updated_at_ns is not None
+                    and (previous.get("updated_at_ns") or 0) >= updated_at_ns
+                )
+            ):
+                return False
+            snapshot = {
+                "prs": validated,
+                "updated_at_ns": updated_at_ns
+                if updated_at_ns is not None
+                else (previous or {}).get("updated_at_ns"),
+            }
+            meta.session_state = _encode_session_state(state, todos, snapshot)
+            return True
+
+        return run_write_transaction(self._session_immediate, "set_session_prs", write)
 
     def set_conversation_project(
         self,

@@ -1272,7 +1272,7 @@ class ConversationStore(ABC):
         """
         Persist the full session-state snapshot for a conversation.
 
-        Replaces policy-visible state while preserving the internal Plan key
+        Replaces policy-visible state while preserving internal display snapshots
         in the existing conversation metadata JSON. Called by
         :meth:`PolicyEngine.apply_state_updates` after applying
         structured :class:`StateUpdate` operations to the hot
@@ -1314,6 +1314,17 @@ class ConversationStore(ABC):
         todos: list[dict[str, Any]],
     ) -> bool:
         """Persist the native Plan snapshot; empty clears, missing metadata returns false."""
+        raise NotImplementedError
+
+    def set_session_prs(
+        self,
+        conversation_id: str,
+        prs: list[dict[str, Any]],
+        *,
+        updated_at_ns: int | None = None,
+        user_update: bool = False,
+    ) -> bool:
+        """Persist newer PR associations; false for stale reports or missing metadata."""
         raise NotImplementedError
 
     @abstractmethod

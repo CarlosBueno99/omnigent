@@ -90,6 +90,7 @@ from omnigent.server.routes._sessions.helpers import (
     _raise_if_session_agent_missing_payload,
     _read_upload_capped,
     _require_filesystem_attachment_harness,
+    _session_prs_for_display,
     _stored_file_to_resource,
     require_filesystem_attachment_runtime,
 )
@@ -2993,6 +2994,47 @@ def register_resources_routes(
     # ``/resources/github`` is not captured as a resource id. The diff route
     # lives on ``file_read_router`` (gzip) above.
 
+    async def _save_session_prs(
+        session_id: str,
+        payload: dict[str, Any],
+        *,
+        user_update: bool = False,
+    ) -> dict[str, Any]:
+        if payload.get("tracking_available") is True and "prs" in payload:
+            try:
+                await asyncio.to_thread(
+                    conversation_store.set_session_prs,
+                    session_id,
+                    payload["prs"],
+                    updated_at_ns=payload.get("prs_updated_at_ns"),
+                    user_update=user_update,
+                )
+            except (TypeError, ValueError):
+                _logger.warning("Cannot save legacy PR metadata for session %s", session_id)
+        return payload
+
+    def _saved_session_pr_info(conv: Conversation, pr_url: str | None) -> dict[str, Any]:
+        prs = _session_prs_for_display(conv.session_pull_requests) or []
+        selected = (
+            next((pr for pr in prs if pr["url"] == pr_url), None)
+            if pr_url
+            else next(iter(prs), None)
+        )
+        if pr_url and selected is None:
+            raise HTTPException(
+                status_code=400, detail="This pull request is not associated with the session"
+            )
+        return {
+            "object": "session.github.info",
+            "available": False,
+            "reason": "workspace_offline",
+            "provider": selected["provider"] if selected else None,
+            "provider_display": selected.get("provider_display") if selected else None,
+            "prs": prs,
+            "selected_pr_url": selected["url"] if selected else None,
+            "tracking_available": True,
+        }
+
     @router.get(
         "/sessions/{session_id}/resources/github",
         response_model=None,
@@ -3005,23 +3047,56 @@ def register_resources_routes(
         """
         Return GitHub context (repo, branch, base ref, PR) for a session.
 
-        Proxies to the runner, which shells out to ``gh``/``git`` in the
-        workspace. Returns an ``available: false`` payload (200) when ``gh`` is
-        missing or the workspace is not a git repo.
+        Reads live provider details through the runner or host. When both are
+        offline, returns saved PR links without requiring the workspace.
 
         :param request: The incoming FastAPI request (for auth).
         :param session_id: Session/conversation identifier.
         :returns: The ``session.github.info`` object.
         """
         conv = await _validate_session(session_id, request, LEVEL_READ)
-        return await _fs_get_with_host_fallback(
-            session_id,
-            conv,
-            op="github_info",
-            host_params={"pr_url": pr_url} if pr_url else {},
-            runner_params={"pr_url": pr_url} if pr_url else None,
-            runner_path=f"/v1/sessions/{session_id}/resources/github",
-        )
+        host_params: dict[str, Any] = {"pr_url": pr_url} if pr_url else {}
+        if conv.session_pull_requests is not None:
+            host_params.update(
+                pull_requests=conv.session_pull_requests,
+                pull_requests_updated_at_ns=conv.session_pull_requests_updated_at_ns,
+            )
+        try:
+            payload = await _fs_get_with_host_fallback(
+                session_id,
+                conv,
+                op="github_info",
+                host_params=host_params,
+                runner_params={"pr_url": pr_url} if pr_url else None,
+                runner_path=f"/v1/sessions/{session_id}/resources/github",
+            )
+        except (OmnigentError, HTTPException) as exc:
+            offline = (
+                exc.code == ErrorCode.RUNNER_UNAVAILABLE
+                if isinstance(exc, OmnigentError)
+                else exc.status_code == 502
+                and exc.detail
+                in (
+                    "no runner available for resource access",
+                    "runner resource endpoint unavailable",
+                )
+            )
+            selection_missing = (
+                isinstance(exc, HTTPException)
+                and exc.detail == "This pull request is not associated with the session"
+                and any(pr["url"] == pr_url for pr in conv.session_pull_requests or [])
+            )
+            if not (offline or selection_missing) or conv.session_pull_requests is None:
+                raise
+            return _saved_session_pr_info(conv, pr_url)
+        if (
+            conv.session_pull_requests
+            and payload.get("tracking_available") is True
+            and payload.get("prs") == []
+            and payload.get("prs_updated_at_ns") is None
+        ):
+            return _saved_session_pr_info(conv, pr_url)
+        return await _save_session_prs(session_id, payload)
 
     @router.get(
         "/sessions/{session_id}/resources/github/changes",
@@ -3075,12 +3150,12 @@ def register_resources_routes(
             )
             if payload is None:
                 raise
-            return payload
+            return await _save_session_prs(session_id, payload, user_update=True)
         if status >= 400:
             raise HTTPException(
                 status_code=status, detail=result.get("detail", "Cannot update pull requests")
             )
-        return result
+        return await _save_session_prs(session_id, result, user_update=True)
 
     @router.post(
         "/sessions/{session_id}/resources/github/preferences",

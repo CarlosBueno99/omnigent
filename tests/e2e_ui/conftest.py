@@ -1158,6 +1158,7 @@ def live_server(
         server_process: subprocess.Popen[bytes],
         *,
         timeout_s: float = _HEALTH_TIMEOUT_S,
+        wait_for_runner: bool = True,
     ) -> tuple[bool, str]:
         """Wait until this server generation can route through the runner."""
         deadline = time.monotonic() + timeout_s
@@ -1168,6 +1169,8 @@ def live_server(
             try:
                 resp = httpx.get(f"{base_url}/health", timeout=2)
                 if resp.status_code == 200:
+                    if not wait_for_runner:
+                        return True, "ready"
                     status_resp = httpx.get(
                         f"{base_url}/v1/runners/{runner_id}/status",
                         timeout=2,
@@ -1225,7 +1228,7 @@ def live_server(
     # store (see :func:`seed_committed_turn`) instead of driving the LLM.
     _server_state["database_uri"] = f"sqlite:///{db_path}"
 
-    def _restart_server() -> None:
+    def _restart_server(*, wait_for_runner: bool = True) -> None:
         """Replace only the server process, preserving its runner and database."""
         nonlocal proc
         if proc.poll() is None:
@@ -1236,7 +1239,9 @@ def live_server(
                 proc.kill()
                 proc.wait(timeout=5)
         proc = _spawn_server()
-        ready, restart_error = _wait_until_ready(proc, timeout_s=120.0)
+        ready, restart_error = _wait_until_ready(
+            proc, timeout_s=120.0, wait_for_runner=wait_for_runner
+        )
         if not ready:
             log_text = log_path.read_text() if log_path.exists() else ""
             raise RuntimeError(

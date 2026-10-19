@@ -141,6 +141,7 @@ from omnigent.server.routes._sessions.common import (
     _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,
     _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE,
     _EXTERNAL_SESSION_INTERRUPTED_TYPE,
+    _EXTERNAL_SESSION_PRS_TYPE,
     _EXTERNAL_SESSION_STATUS_TYPE,
     _EXTERNAL_SESSION_STATUS_VALUES,
     _EXTERNAL_SESSION_SUPERSEDED_TYPE,
@@ -1162,6 +1163,7 @@ def register_events_routes(
             _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE,
             _EXTERNAL_SESSION_TITLE_TYPE,
             _EXTERNAL_SESSION_TODOS_TYPE,
+            _EXTERNAL_SESSION_PRS_TYPE,
             _EXTERNAL_SUBAGENT_START_TYPE,
             _EXTERNAL_ACP_SUBAGENT_START_TYPE,
             _EXTERNAL_CODEX_SUBAGENT_START_TYPE,
@@ -2376,6 +2378,23 @@ def register_events_routes(
                 body,
                 conversation_store,
             )
+            return {"queued": False}
+        if body.type == _EXTERNAL_SESSION_PRS_TYPE:
+            prs = body.data.get("prs")
+            if not isinstance(prs, list):
+                raise OmnigentError(
+                    "external_session_prs requires data.prs to be a list",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            try:
+                await asyncio.to_thread(
+                    conversation_store.set_session_prs,
+                    session_id,
+                    prs,
+                    updated_at_ns=body.data.get("updated_at_ns"),
+                )
+            except (TypeError, ValueError) as exc:
+                raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
             return {"queued": False}
         if body.type == _EXTERNAL_SESSION_TODOS_TYPE:
             await _handle_external_session_todos(session_id, body, conversation_store)
