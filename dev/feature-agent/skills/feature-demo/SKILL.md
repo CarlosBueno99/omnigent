@@ -29,8 +29,8 @@ the per-surface mechanics, and captioning. Use the CUJ ID as the facet and
   (`OMNIGENT_RUNNER_ID` is set), strip the inherited runner variables as the
   guide describes, and retry before reporting a blocker.
 
-Never commit recordings; upload them to the PR as described in
-`feature-publish`.
+Never commit recordings, and never upload them to the PR. The demos live on
+the Linear ticket; `feature-publish` says how they get there.
 
 ## When a recording can't be made
 
@@ -42,7 +42,7 @@ drive it as usual. For that CUJ:
 - set `recording_blocker` to the specific blocker, with the command and error;
 - write `manual_test`: step-by-step instructions a human can follow to test the
   journey, including setup, the inputs to give, and what they should see;
-- put both in the PR's Demo section in place of the clip.
+- put both in that CUJ's entry in the PR's Demo section.
 
 The outcome is then `partially_implemented`, with that CUJ's recording in
 `remaining_work`. Only declare clips you actually produced. Then load
