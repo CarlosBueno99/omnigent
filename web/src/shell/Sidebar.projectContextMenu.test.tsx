@@ -10,7 +10,7 @@ const PROJECT_ID = "p_sprint42";
 
 const mocks = vi.hoisted(() => ({
   renameProject: {
-    mutateAsync: vi.fn(() => Promise.resolve(PROJECT_ID)),
+    mutate: vi.fn(),
     isPending: false,
     isError: false,
     error: null,
@@ -193,12 +193,13 @@ describe("project folder header context menu", () => {
     fireEvent.click(screen.getByTestId("rename-project-confirm"));
 
     await waitFor(() =>
-      expect(mocks.renameProject.mutateAsync).toHaveBeenCalledWith({
+      expect(mocks.renameProject.mutate).toHaveBeenCalledWith({
         id: PROJECT_ID,
         oldName: PROJECT_NAME,
         newName: "Sprint 43",
       }),
     );
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("drives Project settings from the context menu", () => {
@@ -217,10 +218,8 @@ describe("project folder header context menu", () => {
     fireEvent.click(screen.getByTestId("delete-project"));
     fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
 
-    expect(mocks.deleteProject.mutate).toHaveBeenCalledWith(
-      { id: PROJECT_ID, name: PROJECT_NAME },
-      expect.anything(),
-    );
+    expect(mocks.deleteProject.mutate).toHaveBeenCalledWith({ id: PROJECT_ID, name: PROJECT_NAME });
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("keeps New session reachable when a touch opens the menu on hover-capable hardware", () => {

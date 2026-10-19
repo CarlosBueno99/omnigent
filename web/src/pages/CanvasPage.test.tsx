@@ -778,19 +778,34 @@ describe("CanvasPage", () => {
     expect(readCanvasLayout(null).positions).toEqual({ conv_1: { x: 7, y: 7 } });
   });
 
-  it("selects a project created from the tab strip once the list includes it", () => {
-    vi.mocked(conversationsHook.useProjects).mockReturnValue(projectsStub([]));
-    const { rerender } = renderPage();
-    fireEvent.click(screen.getByRole("button", { name: "New project" }));
-    expect(screen.getByRole("tab", { name: "Main" })).toHaveAttribute("aria-selected", "true");
+  it.each([false, true])(
+    "promotes a pending project without overriding later navigation (%s)",
+    (navigateAway) => {
+      vi.mocked(conversationsHook.useProjects).mockReturnValue(projectsStub([]));
+      const { rerender } = renderPage();
+      fireEvent.click(screen.getByRole("button", { name: "New project" }));
+      expect(screen.getByRole("tab", { name: "Main" })).toHaveAttribute("aria-selected", "true");
 
-    vi.mocked(conversationsHook.useProjects).mockReturnValue(
-      projectsStub([{ id: "proj_release", name: "Release" }]),
-    );
-    rerender(pageTree());
-    expect(screen.getByRole("tab", { name: "Release" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("No sessions in Release")).toBeInTheDocument();
-  });
+      vi.mocked(conversationsHook.useProjects).mockReturnValue(
+        projectsStub([{ id: null, name: "Release", pending: "Creating" }]),
+      );
+      rerender(pageTree());
+      expect(screen.getByRole("tab", { name: /Release/ })).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByRole("status")).toHaveTextContent("Creating");
+      if (navigateAway) fireEvent.click(screen.getByRole("tab", { name: "Main" }));
+      vi.mocked(conversationsHook.useProjects).mockReturnValue(
+        projectsStub([{ id: "proj_release", name: "Release" }]),
+      );
+      rerender(pageTree());
+      expect(screen.getByRole("tab", { name: navigateAway ? "Main" : "Release" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(screen.getByTestId("location")).toHaveTextContent(
+        navigateAway ? "/canvas" : "/canvas?canvas=proj_release",
+      );
+    },
+  );
 
   it("shows an initial error with retry, then a quiet banner once cards exist", () => {
     const refresh = vi.fn(async () => undefined);

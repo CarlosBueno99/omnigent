@@ -39,6 +39,7 @@ const {
   projectsMock,
   projectRowsRef,
   moveToProjectSpy,
+  bulkMoveToProjectSpy,
   deleteProjectSpy,
   renameProjectSpy,
   createProjectSpy,
@@ -54,6 +55,7 @@ const {
   projectsMock: [] as string[],
   projectRowsRef: { current: undefined as { id: string; name: string }[] | undefined },
   moveToProjectSpy: vi.fn(),
+  bulkMoveToProjectSpy: vi.fn(),
   deleteProjectSpy: vi.fn(),
   renameProjectSpy: vi.fn(),
   createProjectSpy: vi.fn(),
@@ -154,6 +156,11 @@ vi.mock("@/hooks/useConversations", async () => {
       };
     },
     useMoveToProject: () => ({ mutate: moveToProjectSpy }),
+    useBulkMoveToProject: () => ({
+      mutate: bulkMoveToProjectSpy,
+      isPending: false,
+      isError: false,
+    }),
     useDeleteProject: () => ({ mutate: deleteProjectSpy, isPending: false, isError: false }),
     useRenameProject: () => ({ mutate: renameProjectSpy, isPending: false, isError: false }),
     useCreateProject: () => ({ mutate: createProjectSpy, isPending: false, isError: false }),
@@ -306,6 +313,7 @@ beforeEach(() => {
   projectsMock.length = 0;
   projectRowsRef.current = undefined;
   moveToProjectSpy.mockReset();
+  bulkMoveToProjectSpy.mockReset();
   deleteProjectSpy.mockReset();
   fetchProjectSessionIdsMock.mockReset();
   fetchProjectSessionIdsMock.mockResolvedValue([]);
@@ -2486,10 +2494,26 @@ describe("Sidebar project sections", () => {
     // delete with the folder's { id, name }.
     expect(screen.getByText(/all of its sessions/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
-    expect(deleteProjectSpy).toHaveBeenCalledWith(
-      { id: "p_Customer X", name: "Customer X" },
-      expect.anything(),
-    );
+    expect(deleteProjectSpy).toHaveBeenCalledWith({ id: "p_Customer X", name: "Customer X" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("exits bulk selection as soon as a project move is submitted", async () => {
+    projectsMock.push("Work");
+    mockConversations([conv("one", "Claude Code"), conv("two", "Claude Code")]);
+    renderSidebar();
+    fireEvent.click(screen.getByTestId("toggle-selection-mode"));
+    fireEvent.click(screen.getByRole("link", { name: "one" }));
+    fireEvent.click(screen.getByRole("link", { name: "two" }));
+    fireEvent.pointerDown(screen.getByTestId("bulk-move-to-project"), {
+      button: 0,
+      ctrlKey: false,
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Work" }));
+    expect(bulkMoveToProjectSpy).toHaveBeenCalledTimes(1);
+    const [move] = bulkMoveToProjectSpy.mock.calls[0];
+    expect({ ...move, ids: [...move.ids].sort() }).toEqual({ ids: ["one", "two"], project: "Work" });
+    expect(screen.queryByRole("button", { name: "Exit selection mode" })).toBeNull();
   });
 
   it("offers a desktop New session shortcut while keeping the touch menu accessible", async () => {

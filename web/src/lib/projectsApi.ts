@@ -10,7 +10,8 @@
 // camelCase-friendly, but the project shape is already flat snake_case-free
 // (`id`, `name`), so no boundary conversion is needed.
 
-import { authenticatedFetch } from "./identity";
+import { authenticatedFetch, getCurrentUserId } from "./identity";
+import { getOmnigentHostGeneration } from "./host";
 import { apiErrorFromResponse } from "./sessionsApi";
 
 /**
@@ -98,14 +99,27 @@ export async function getProject(id: string): Promise<Project> {
  * Create a project, optionally with initial `config` defaults. Rejects with the
  * server's message on a duplicate name (409) so callers can surface it inline.
  */
-export async function createProject(name: string, config?: ProjectConfig): Promise<Project> {
-  const res = await authenticatedFetch("/v1/projects", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config ? { name, config } : { name }),
-  });
-  if (!res.ok) throw new Error(await readError(res));
-  return (await res.json()) as Project;
+const pendingProjectCreates = new Map<string, Promise<Project>>();
+
+export function createProject(name: string, config?: ProjectConfig): Promise<Project> {
+  const key = JSON.stringify([getOmnigentHostGeneration(), getCurrentUserId(), name]);
+  const pending = pendingProjectCreates.get(key);
+  if (pending) return pending;
+  const request = (async () => {
+    const res = await authenticatedFetch("/v1/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config ? { name, config } : { name }),
+    });
+    if (!res.ok) throw new Error(await readError(res));
+    return (await res.json()) as Project;
+  })();
+  pendingProjectCreates.set(key, request);
+  const clear = () => {
+    pendingProjectCreates.delete(key);
+  };
+  void request.then(clear, clear);
+  return request;
 }
 
 /** Rename a project (O(1) — members reference the id, not the name string). */

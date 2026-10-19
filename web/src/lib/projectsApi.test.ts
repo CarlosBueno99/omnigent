@@ -44,6 +44,24 @@ describe("listProjects", () => {
 });
 
 describe("createProject", () => {
+  it("shares an in-flight creation with dependent filing and releases it after failure", async () => {
+    let reject!: (error: Error) => void;
+    fetchMock.mockReturnValueOnce(
+      new Promise<Response>((_resolve, fail) => {
+        reject = fail;
+      }),
+    );
+    const first = createProject("Pending", { icon: "🔥" });
+    const dependent = createProject("Pending");
+    expect(dependent).toBe(first);
+    const settled = Promise.allSettled([first, dependent]);
+    reject(new Error("offline"));
+    expect((await settled).map((item) => item.status)).toEqual(["rejected", "rejected"]);
+    fetchMock.mockResolvedValueOnce(mockResponse({ id: "real", name: "Pending" }));
+    expect(await createProject("Pending")).toMatchObject({ id: "real" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("POSTs the name and returns the project", async () => {
     fetchMock.mockResolvedValueOnce(mockResponse({ id: "p_1", name: "New" }));
     const result = await createProject("New");

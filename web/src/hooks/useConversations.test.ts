@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConversationsInfiniteData } from "@/lib/sessionListCache";
 import type { Session } from "@/lib/types";
 import { ApiError } from "@/lib/sessionsApi";
+import { toast } from "sonner";
 import * as identity from "@/lib/identity";
 import { useSessionUpdatesConnected } from "./useSessionUpdatesConnected";
 import {
@@ -24,6 +25,8 @@ import {
   undoArchiveConversations,
   useConversations,
   useDeleteProject,
+  useCreateProject,
+  useBulkMoveToProject,
   useProjects,
   useProjectConfig,
   useProjectSessions,
@@ -67,6 +70,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   clearSessionTombstones();
   // Same for the recently-created keep-alive.
@@ -3069,7 +3073,7 @@ describe("useMoveToProject", () => {
     expect(row.project_id).toBe("p_before");
     expect(row.labels).toEqual({ keep: "me" });
     // The overlay dropped the row from its old folder's pages; the rollback
-    // must put it back (wholesale snapshot restore, not a field revert).
+    // must put it back without replacing other rows' concurrent changes.
     const folder = queryClient.getQueryData<ConversationsInfiniteData>([
       "project-sessions",
       "Before folder",
@@ -3701,4 +3705,302 @@ it("uses the configured API page size for archived initial loads and pagination"
   expect(calls[1].get("after")).toBe(first.last_id);
   unmount();
   client.clear();
+});
+
+describe("background project mutations", () => {
+  function setup() {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    client.setQueryData(["projects"], [{ id: "work", name: "Work", icon: "📁" }]);
+    return { client, wrapper };
+  }
+
+  it("reserves a rename target before another project can claim it", async () => {
+    let finish!: (response: Response) => void;
+    fetchMock.mockReturnValue(
+      new Promise<Response>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { client, wrapper } = setup();
+    client.setQueryData(
+      ["projects"],
+      [
+        { id: "work", name: "Work" },
+        { id: "other", name: "Other" },
+      ],
+    );
+    const { result } = renderHook(() => useRenameProject(), { wrapper });
+    act(() => {
+      result.current.mutate({ id: "work", oldName: "Work", newName: "Same" });
+      result.current.mutate({ id: "other", oldName: "Other", newName: "Same" });
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(client.getQueryData(["projects"])).toEqual([
+      expect.objectContaining({ id: "work", name: "Same", pending: "Saving" }),
+      { id: "other", name: "Other" },
+    ]);
+    fetchMock.mockResolvedValue(mockResponse({ data: [], has_more: false }));
+    act(() => finish(mockResponse({ id: "work", name: "Same" })));
+    await waitFor(() => expect(client.isMutating()).toBe(0));
+  });
+
+  it("keeps one pending project across a stale refresh and recovers a failed create after unmount", async () => {
+    let reject!: (error: Error) => void;
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
+      init?.method === "POST"
+        ? new Promise<Response>((_resolve, fail) => {
+            reject = fail;
+          })
+        : Promise.resolve(mockResponse([{ id: "work", name: "Work" }])),
+    );
+    const notification = vi.spyOn(toast, "error");
+    const { client, wrapper } = setup();
+    const list = renderHook(() => useProjects(), { wrapper });
+    const create = renderHook(() => useCreateProject(), { wrapper });
+    act(() => create.result.current.mutate({ name: "New", icon: "🔥" }));
+    await waitFor(() => expect(reject).toBeTypeOf("function"));
+    expect(list.result.current.data).toContainEqual({
+      id: null,
+      name: "New",
+      icon: "🔥",
+      pending: "Creating",
+    });
+    await act(async () => {
+      await list.result.current.refetch();
+    });
+    expect(list.result.current.data?.filter((project) => project.name === "New")).toHaveLength(1);
+    create.unmount();
+    act(() => reject(new Error("offline")));
+    await waitFor(() =>
+      expect(notification).toHaveBeenCalledWith(
+        expect.stringContaining("New"),
+        expect.objectContaining({ action: expect.objectContaining({ label: "Retry" }) }),
+      ),
+    );
+    expect(client.getQueryData(["projects"])).toEqual([{ id: "work", name: "Work" }]);
+    notification.mockRestore();
+  });
+
+  it("promotes a pending create immediately without waiting for a list refresh", async () => {
+    let resolve!: (response: Response) => void;
+    fetchMock.mockReturnValue(
+      new Promise<Response>((done) => {
+        resolve = done;
+      }),
+    );
+    const { client, wrapper } = setup();
+    const { result } = renderHook(() => useCreateProject(), { wrapper });
+    act(() => result.current.mutate({ name: "New", icon: "🔥" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    act(() => resolve(mockResponse({ id: "new-id", name: "New", config: { icon: "🔥" } })));
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(client.getQueryData(["projects"])).toEqual([
+      { id: "work", name: "Work", icon: "📁" },
+      { id: "new-id", name: "New", icon: "🔥" },
+    ]);
+  });
+
+  it("recovers a settings submission after unmount without overwriting another dialog's keys", async () => {
+    let reject!: (error: Error) => void;
+    fetchMock.mockReturnValueOnce(
+      new Promise<Response>((_resolve, fail) => {
+        reject = fail;
+      }),
+    );
+    const notification = vi.spyOn(toast, "error");
+    const { client, wrapper } = setup();
+    client.setQueryData(["project-config", "work"], { icon: "📁", workspace: "/old" });
+    const { result, unmount } = renderHook(() => useUpdateProjectConfig(), { wrapper });
+    act(() =>
+      result.current.mutate({
+        id: "work",
+        name: "Work",
+        config: { icon: "📁", workspace: "/new" },
+        fields: ["workspace"],
+      }),
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(client.getQueryData(["project-config", "work"])).toEqual({
+      icon: "📁",
+      workspace: "/new",
+    });
+    unmount();
+    act(() => reject(new Error("offline")));
+    await waitFor(() => expect(notification).toHaveBeenCalled());
+    expect(client.getQueryData(["project-config", "work"])).toEqual({
+      icon: "📁",
+      workspace: "/old",
+    });
+    client.setQueryData(["project-config", "work"], { icon: "🔥", workspace: "/old" });
+    fetchMock.mockResolvedValue(
+      mockResponse({ id: "work", name: "Work", config: { icon: "🔥", workspace: "/new" } }),
+    );
+    const options = notification.mock.calls.at(-1)?.[1];
+    const action = options?.action;
+    if (!action || typeof action !== "object" || !("onClick" in action))
+      throw new Error("Missing retry action");
+    act(() => action.onClick({} as never));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+      config: { icon: "🔥", workspace: "/new" },
+    });
+    await waitFor(() => expect(client.isMutating()).toBe(0));
+    notification.mockRestore();
+  });
+
+  it("keeps a successful legacy rename when the later icon save fails", async () => {
+    let rejectIcon!: (error: Error) => void;
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ id: "promoted", name: "Renamed" }))
+      .mockResolvedValueOnce(mockResponse({ data: [], has_more: false }))
+      .mockReturnValueOnce(
+        new Promise<Response>((_resolve, reject) => {
+          rejectIcon = reject;
+        }),
+      );
+    const notification = vi.spyOn(toast, "error");
+    const { client, wrapper } = setup();
+    client.setQueryData(["projects"], [{ id: null, name: "Legacy", icon: "📁" }]);
+    const { result, unmount } = renderHook(() => useRenameProject(), { wrapper });
+    act(() =>
+      result.current.mutate({
+        id: null,
+        oldName: "Legacy",
+        newName: "Renamed",
+        config: { icon: "🔥", host_id: "host" },
+      }),
+    );
+    await waitFor(() => expect(rejectIcon).toBeTypeOf("function"));
+    expect(client.getQueryData(["projects"])).toEqual([
+      expect.objectContaining({ name: "Renamed", icon: "🔥", pending: "Saving" }),
+    ]);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    unmount();
+    act(() => rejectIcon(new Error("icon failed")));
+    await waitFor(() => expect(notification).toHaveBeenCalled());
+    expect(client.getQueryData(["projects"])).toEqual([
+      { id: "promoted", name: "Renamed", icon: "📁" },
+    ]);
+    expect(notification).toHaveBeenCalledWith(
+      expect.stringContaining("was renamed"),
+      expect.anything(),
+    );
+    notification.mockRestore();
+  });
+
+  it("moves optimistic defaults to a promoted project's id and rolls them back after failure", async () => {
+    let reject!: (error: Error) => void;
+    fetchMock.mockResolvedValueOnce(mockResponse({ id: "work", name: "Work" })).mockReturnValueOnce(
+      new Promise<Response>((_resolve, fail) => {
+        reject = fail;
+      }),
+    );
+    const { client, wrapper } = setup();
+    client.setQueryData(["projects"], [{ id: null, name: "Work" }]);
+    const { result, unmount } = renderHook(() => useUpdateProjectConfig(), { wrapper });
+    act(() =>
+      result.current.mutate({
+        id: null,
+        name: "Work",
+        config: { workspace: "/new" },
+        fields: ["workspace"],
+      }),
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(client.getQueryData(["project-config", "work"])).toEqual({ workspace: "/new" });
+    unmount();
+    act(() => reject(new Error("offline")));
+    await waitFor(() => expect(client.isMutating()).toBe(0));
+    expect(client.getQueryData(["projects"])).toEqual([{ id: "work", name: "Work" }]);
+    expect(client.getQueryData(["project-config", "work"])).toEqual({});
+  });
+
+  it("keeps successful project archives completed when another member fails", async () => {
+    let failMember!: (response: Response) => void;
+    const succeeded = conversation({ id: "one", project_id: null, archived: true });
+    fetchMock.mockImplementation((url: string) => {
+      if (url.startsWith("/v1/sessions?"))
+        return Promise.resolve(
+          mockResponse({ data: [{ id: "one" }, { id: "two" }], has_more: false }),
+        );
+      if (url.endsWith("/one")) return Promise.resolve(mockResponse(succeeded));
+      return new Promise<Response>((resolve) => {
+        failMember = resolve;
+      });
+    });
+    const { client, wrapper } = setup();
+    client.setQueryData(PINNED_CONVERSATIONS_KEY, {
+      conversations: [succeeded],
+      filterHonored: true,
+    });
+    client.setQueryData(
+      ["conversations", "", true],
+      infinitePage([
+        conversation({ id: "one", project_id: "work" }),
+        conversation({ id: "two", project_id: "work" }),
+      ]),
+    );
+    const { result, unmount } = renderHook(() => useDeleteProject(), { wrapper });
+    act(() => result.current.mutate({ id: "work", name: "Work" }));
+    await waitFor(() => expect(failMember).toBeTypeOf("function"));
+    expect(client.getQueryData(["projects"])).toEqual([
+      expect.objectContaining({ pending: "Deleting" }),
+    ]);
+    unmount();
+    act(() => failMember(mockResponse({}, { ok: false, status: 403 })));
+    await waitFor(() => expect(client.isMutating()).toBe(0));
+    const rows = client.getQueryData<ConversationsInfiniteData>(["conversations", "", true])!
+      .pages[0].data;
+    expect(rows.find((row) => row.id === "one")).toMatchObject({
+      archived: true,
+      project_id: null,
+    });
+    expect(rows.find((row) => row.id === "two")).toMatchObject({ project_id: "work" });
+    expect(
+      client.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY)?.conversations,
+    ).toEqual([]);
+    expect(client.getQueryData(["projects"])).toEqual([{ id: "work", name: "Work", icon: "📁" }]);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
+  });
+
+  it("moves every selected row immediately and restores only failed rows after unmount", async () => {
+    const finish = new Map<string, (response: Response) => void>();
+    fetchMock.mockImplementation((url: string) =>
+      url === "/v1/projects"
+        ? Promise.resolve(mockResponse({ data: [{ id: "work", name: "Work" }] }))
+        : new Promise<Response>((resolve) => {
+            finish.set(url, resolve);
+          }),
+    );
+    const { client, wrapper } = setup();
+    client.setQueryData(
+      ["conversations", "", false],
+      infinitePage([
+        conversation({ id: "one", labels: { omni_project: "Before" } }),
+        conversation({ id: "two", labels: { omni_project: "Before" } }),
+      ]),
+    );
+    const { result, unmount } = renderHook(() => useBulkMoveToProject(), { wrapper });
+    act(() => result.current.mutate({ ids: ["one", "two"], project: "Work" }));
+    await waitFor(() => expect(finish.size).toBe(2));
+    const rows = () =>
+      client.getQueryData<ConversationsInfiniteData>(["conversations", "", false])!.pages[0].data;
+    expect(rows().map((row) => row.project_id)).toEqual(["work", "work"]);
+    unmount();
+    act(() =>
+      finish.get("/v1/sessions/one")!(
+        mockResponse(conversation({ id: "one", project_id: "work" })),
+      ),
+    );
+    await waitFor(() => expect(client.isMutating({ mutationKey: ["move-to-project"] })).toBe(1));
+    act(() => finish.get("/v1/sessions/two")!(mockResponse({}, { ok: false, status: 500 })));
+    await waitFor(() => expect(client.isMutating()).toBe(0));
+    expect(rows()[0]).toMatchObject({ project_id: "work", labels: {} });
+    expect(rows()[1].labels).toEqual({ omni_project: "Before" });
+  });
 });

@@ -1,4 +1,5 @@
 import { useContext, useEffect, useRef } from "react";
+import { toast } from "sonner";
 import { useViewerId } from "./useViewerId";
 import { SidebarConfigContext, sidebarConfig } from "@/lib/sidebarConfig";
 import { revokePermission } from "@/lib/permissionsApi";
@@ -1567,30 +1568,29 @@ export function useBulkStopSessions() {
  * block the rest.
  */
 export function useBulkMoveToProject() {
-  const queryClient = useQueryClient();
-  return useMutation({
+  const move = useMoveToProject();
+  const mutation = useMutation({
     mutationFn: async ({ ids, project }: { ids: string[]; project: string }) => {
-      const results = await Promise.allSettled(
-        ids.map((id) => moveConversationToProject(id, project)),
-      );
-      const failed: string[] = [];
-      for (let i = 0; i < results.length; i++) {
-        if (results[i].status === "rejected") failed.push(ids[i]);
-      }
-      if (failed.length > 0) {
-        throw new BulkConversationMutationError("move", { failed, total: ids.length });
-      }
-      return results
-        .filter((r): r is PromiseFulfilledResult<Conversation> => r.status === "fulfilled")
-        .map((r) => r.value);
+      const results = await Promise.allSettled(ids.map((id) => move.mutateAsync({ id, project })));
+      const failed = ids.filter((_, index) => results[index].status === "rejected");
+      const succeeded = ids.filter((_, index) => results[index].status === "fulfilled");
+      if (failed.length)
+        throw new BulkConversationMutationError("move", { failed, succeeded, total: ids.length });
+      return { succeeded, failed };
     },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: ["conversations"] });
-      void queryClient.invalidateQueries({ queryKey: ["projects"] });
-      void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
-      void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
+    onError: (error, variables) => {
+      const failed = error instanceof BulkConversationMutationError ? error.failed : variables.ids;
+      toast.error(`Couldn't move ${failed.length} sessions`, {
+        description: `Failed: ${failed.join(", ")}. Other sessions stay in their new project.`,
+        duration: Infinity,
+        action: {
+          label: "Retry failed",
+          onClick: () => mutation.mutate({ ...variables, ids: failed }),
+        },
+      });
     },
   });
+  return mutation;
 }
 
 // ── Pinned hooks ──────────────────────────────────────────────────────────────
@@ -2115,6 +2115,8 @@ export { PROJECT_LABEL_KEY };
 export interface ProjectSummary {
   id: string | null;
   name: string;
+  pending?: "Creating" | "Saving" | "Deleting";
+  previousName?: string;
   /** Chosen emoji icon (a unicode grapheme), or null/absent for the default
       folder glyph. Sourced from the project's `config.icon`. */
   icon?: string | null;
@@ -2126,15 +2128,80 @@ export interface ProjectSummary {
  * label-projects (id=null), unioned by name and sorted.
  */
 export function useProjects() {
+  const queryClient = useQueryClient();
   return useQuery<ProjectSummary[]>({
     queryKey: ["projects"],
     queryFn: async ({ signal }) => {
       const res = await authenticatedFetch("/v1/sessions/projects", { signal });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      return (await res.json()) as ProjectSummary[];
+      const incoming = (await res.json()) as ProjectSummary[];
+      const current = queryClient.getQueryData<ProjectSummary[]>(["projects"]) ?? [];
+      const pending = current.filter((project) => project.pending);
+      const names = new Set(pending.flatMap((project) => [project.name, project.previousName]));
+      const merged = incoming.filter((project) => !names.has(project.name));
+      for (const project of pending) merged.splice(current.indexOf(project), 0, project);
+      if (queryClient.isMutating({ mutationKey: ["project-order"] })) {
+        const ranks = new Map(current.map((project, index) => [project.name, index]));
+        merged.sort(
+          (left, right) => (ranks.get(left.name) ?? Infinity) - (ranks.get(right.name) ?? Infinity),
+        );
+      }
+      return merged;
     },
     staleTime: 30_000,
   });
+}
+
+function replaceProjectSummary(
+  client: QueryClient,
+  name: string,
+  project: ProjectSummary | undefined,
+) {
+  client.setQueryData<ProjectSummary[]>(["projects"], (current = []) => {
+    const index = current.findIndex((item) => item.name === name);
+    if (index < 0) return project ? [...current, project] : current;
+    return current.flatMap((item, position) =>
+      position === index ? (project ? [project] : []) : [item],
+    );
+  });
+}
+
+async function beginProjectWrite(
+  client: QueryClient,
+  name: string,
+  patch: Partial<ProjectSummary>,
+) {
+  await client.cancelQueries({ queryKey: ["projects"] });
+  const projects = client.getQueryData<ProjectSummary[]>(["projects"]) ?? [];
+  const previous = projects.find((item) => item.name === name);
+  if (previous?.pending)
+    throw new Error(
+      `“${name}” is still ${previous.pending.toLowerCase()}. Try again when it finishes.`,
+    );
+  const target = patch.name ?? name;
+  if (
+    projects.some(
+      (item) =>
+        (item !== previous || patch.pending === "Creating") &&
+        (item.name === target || item.previousName === target),
+    )
+  )
+    throw new Error(`A project named “${target}” already exists.`);
+  replaceProjectSummary(client, name, { id: null, name, ...previous, ...patch });
+  return { previous };
+}
+
+function finishProjectWrite(
+  client: QueryClient,
+  name: string,
+  patch: Partial<ProjectSummary> = {},
+) {
+  const project = client
+    .getQueryData<ProjectSummary[]>(["projects"])
+    ?.find((item) => item.name === name);
+  if (!project) return;
+  const { pending: _pending, previousName: _previousName, ...confirmed } = project;
+  replaceProjectSummary(client, name, { ...confirmed, ...patch });
 }
 
 /**
@@ -2272,6 +2339,86 @@ export async function moveConversationToProject(
   return (await res.json()) as Conversation;
 }
 
+// Update membership everywhere, preserving deep rows until another loaded
+// window or target folder can display them.
+function overlayProjectMembership(
+  queryClient: QueryClient,
+  row: Conversation,
+  projectId: string | null | undefined,
+  labels: Record<string, string>,
+  targetProjectName: string | null,
+) {
+  const id = row.id;
+  const itemsById = new Map<string, SessionListWireItem>([
+    [id, { id, project_id: projectId, labels }],
+  ]);
+  // Each sort has its own loaded window; the inactive sort may hold different rows.
+  const windowSorts = new Set<SessionSortBy>();
+  for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
+    queryKey: ["conversations"],
+  })) {
+    const { data: next, found } = mergeItemsIntoPages(
+      data,
+      itemsById,
+      filtersFromConversationQueryKey(key),
+      undefined,
+    );
+    if (found.has(id)) windowSorts.add(key[5] === "created_at" ? "created_at" : "updated_at");
+    if (next !== data) queryClient.setQueryData(key, next);
+  }
+  // Target folder cache: overlay the row's fields if already present, and
+  // insert a deep row (outside the flat window) into the first page.
+  const visibleSorts = new Set(windowSorts);
+  if (targetProjectName !== null) {
+    for (const [targetKey, targetData] of queryClient.getQueriesData<ConversationsInfiniteData>({
+      queryKey: ["project-sessions", targetProjectName],
+    })) {
+      if (!targetData) continue;
+      const sortBy = targetKey[2] === "created_at" ? "created_at" : "updated_at";
+      const { data: merged, found } = mergeItemsIntoPages(
+        targetData,
+        itemsById,
+        PROJECT_FOLDER_FILTERS,
+        undefined,
+      );
+      let next = merged ?? targetData;
+      const [first, ...rest] = next.pages;
+      if (!found.has(id) && !windowSorts.has(sortBy) && first) {
+        next = {
+          ...next,
+          pages: [
+            { ...first, data: [{ ...row, project_id: projectId, labels }, ...first.data] },
+            ...rest,
+          ],
+        };
+      }
+      if (next !== targetData) queryClient.setQueryData(targetKey, next);
+      if (found.has(id) || first !== undefined) visibleSorts.add(sortBy);
+    }
+  }
+  for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
+    queryKey: ["project-sessions"],
+  })) {
+    const sortBy = key[2] === "created_at" ? "created_at" : "updated_at";
+    if (key[1] === targetProjectName || !visibleSorts.has(sortBy)) continue;
+    const { data: next, removed } = removeIdsFromPages(data, new Set([id]));
+    if (removed) queryClient.setQueryData(key, next);
+  }
+  queryClient.setQueryData<Conversation | null>(["conversation-backfill", id], (old) =>
+    old ? { ...old, project_id: projectId, labels } : old,
+  );
+  queryClient.setQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY, (old) =>
+    old
+      ? {
+          ...old,
+          conversations: old.conversations.map((item) =>
+            item.id === id ? { ...item, project_id: projectId, labels } : item,
+          ),
+        }
+      : old,
+  );
+}
+
 /**
  * Move a session to a project (or remove it from all projects when `project=""`).
  *
@@ -2290,90 +2437,36 @@ export async function moveConversationToProject(
  *
  * `onSuccess` still invalidates: membership pagination, project counts, and
  * ordering are server-owned, and those refetches start after the PATCH commits
- * so they confirm (not clobber) the overlay. `onError` restores the snapshot.
+ * so they confirm the overlay. `onError` restores only the failed row's membership.
  */
+const movingProjectSessions = new WeakMap<QueryClient, Set<string>>();
+
 export function useMoveToProject() {
   const queryClient = useQueryClient();
 
-  // Write a membership (project_id + labels) onto the row in every list cache
-  // that may hold it, plus the pinned-row backfill cache. Fields are overlaid
-  // in place. Folder-page membership is a move: the target folder's cache
-  // gains the row when nothing else could render it there (a row outside the
-  // flat window has no other source — the sidebar unions folder pages with
-  // the window's members), and folders the row just left drop it, but only
-  // while it stays visible somewhere else — a briefly-stale old folder beats
-  // the row vanishing from the sidebar until the reconcile refetches land.
-  const overlayMembership = (
-    row: Conversation,
-    projectId: string | null | undefined,
-    labels: Record<string, string>,
-    targetProjectName: string | null,
-  ) => {
-    const id = row.id;
-    const itemsById = new Map<string, SessionListWireItem>([
-      [id, { id, project_id: projectId, labels }],
-    ]);
-    // Each sort has its own loaded window; the inactive sort may hold different rows.
-    const windowSorts = new Set<SessionSortBy>();
-    for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
-      queryKey: ["conversations"],
-    })) {
-      const { data: next, found } = mergeItemsIntoPages(
-        data,
-        itemsById,
-        filtersFromConversationQueryKey(key),
-        undefined,
-      );
-      if (found.has(id)) windowSorts.add(key[5] === "created_at" ? "created_at" : "updated_at");
-      if (next !== data) queryClient.setQueryData(key, next);
-    }
-    // Target folder cache: overlay the row's fields if already present, and
-    // insert a deep row (outside the flat window) into the first page.
-    const visibleSorts = new Set(windowSorts);
-    if (targetProjectName !== null) {
-      for (const [targetKey, targetData] of queryClient.getQueriesData<ConversationsInfiniteData>({
-        queryKey: ["project-sessions", targetProjectName],
-      })) {
-        if (!targetData) continue;
-        const sortBy = targetKey[2] === "created_at" ? "created_at" : "updated_at";
-        const { data: merged, found } = mergeItemsIntoPages(
-          targetData,
-          itemsById,
-          PROJECT_FOLDER_FILTERS,
-          undefined,
-        );
-        let next = merged ?? targetData;
-        const [first, ...rest] = next.pages;
-        if (!found.has(id) && !windowSorts.has(sortBy) && first) {
-          next = {
-            ...next,
-            pages: [
-              { ...first, data: [{ ...row, project_id: projectId, labels }, ...first.data] },
-              ...rest,
-            ],
-          };
-        }
-        if (next !== targetData) queryClient.setQueryData(targetKey, next);
-        if (found.has(id) || first !== undefined) visibleSorts.add(sortBy);
-      }
-    }
-    for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
-      queryKey: ["project-sessions"],
-    })) {
-      const sortBy = key[2] === "created_at" ? "created_at" : "updated_at";
-      if (key[1] === targetProjectName || !visibleSorts.has(sortBy)) continue;
-      const { data: next, removed } = removeIdsFromPages(data, new Set([id]));
-      if (removed) queryClient.setQueryData(key, next);
-    }
-    queryClient.setQueryData<Conversation | null>(["conversation-backfill", id], (old) =>
-      old ? { ...old, project_id: projectId, labels } : old,
-    );
-  };
-
   return useMutation({
+    mutationKey: ["move-to-project"],
     mutationFn: ({ id, project }: { id: string; project: string }) =>
       moveConversationToProject(id, project),
     onMutate: async ({ id, project }) => {
+      const moving = movingProjectSessions.get(queryClient) ?? new Set<string>();
+      movingProjectSessions.set(queryClient, moving);
+      if (moving.has(id))
+        throw new Error("This session is already moving. Try again when it finishes.");
+      const current = findCachedConversationRow(queryClient, id);
+      if (
+        queryClient
+          .getQueryData<ProjectSummary[]>(["projects"])
+          ?.some(
+            (item) =>
+              item.pending &&
+              (item.name === project ||
+                (item.id !== null && item.id === current?.project_id) ||
+                item.name === current?.labels[PROJECT_LABEL_KEY]),
+          )
+      )
+        throw new Error("This project is still updating. Try again when it finishes.");
+      moving.add(id);
       // `""` unfiles (no id needed); a file target must exist in the cached
       // projects list for the overlay to be truthful about the outcome — an
       // uncached name (brand-new project) has no folder to regroup into.
@@ -2383,7 +2476,7 @@ export function useMoveToProject() {
           : (queryClient
               .getQueryData<ProjectSummary[]>(["projects"])
               ?.find((p) => p.name === project) ?? undefined);
-      if (target === undefined) return undefined;
+      if (target === undefined) return { row: undefined, projectName: null };
       // Cancel in-flight list refetches so a response that started before the
       // overlay can't resolve after it and snap the row back to its old spot.
       await Promise.all([
@@ -2391,18 +2484,19 @@ export function useMoveToProject() {
         queryClient.cancelQueries({ queryKey: ["project-sessions"] }),
       ]);
       const row = findCachedConversationRow(queryClient, id);
-      if (!row) return undefined;
-      // Wholesale snapshots for rollback: the overlay also drops the row from
-      // other folders' pages, which a field-level revert couldn't restore.
-      const previous = {
-        conversations: queryClient.getQueriesData<ConversationsInfiniteData>({
-          queryKey: ["conversations"],
-        }),
-        projectSessions: queryClient.getQueriesData<ConversationsInfiniteData>({
-          queryKey: ["project-sessions"],
-        }),
-        backfill: queryClient.getQueryData<Conversation | null>(["conversation-backfill", id]),
-      };
+      if (!row) return { row: undefined, projectName: null };
+      const folders = queryClient.getQueriesData<ConversationsInfiniteData>({
+        queryKey: ["project-sessions"],
+      });
+      const projectName =
+        row.labels[PROJECT_LABEL_KEY] ||
+        queryClient
+          .getQueryData<ProjectSummary[]>(["projects"])
+          ?.find((item) => item.id === row.project_id)?.name ||
+        (folders.find(([, data]) =>
+          data?.pages.some((page) => page.data.some((item) => item.id === id)),
+        )?.[0][1] as string | undefined) ||
+        null;
       const baseLabels = Object.fromEntries(
         Object.entries(row.labels).filter(([labelKey]) => labelKey !== PROJECT_LABEL_KEY),
       );
@@ -2413,16 +2507,70 @@ export function useMoveToProject() {
         target !== null && target.id === null
           ? { ...baseLabels, [PROJECT_LABEL_KEY]: project }
           : baseLabels;
-      overlayMembership(row, target?.id ?? null, labels, project === "" ? null : project);
-      return previous;
+      overlayProjectMembership(
+        queryClient,
+        row,
+        target?.id ?? null,
+        labels,
+        project === "" ? null : project,
+      );
+      return { row, projectName, folders };
     },
     onError: (_err, { id }, previous) => {
-      if (previous === undefined) return;
-      for (const [key, data] of [...previous.conversations, ...previous.projectSessions]) {
-        if (data !== undefined) queryClient.setQueryData(key, data);
-      }
-      if (previous.backfill !== undefined) {
-        queryClient.setQueryData(["conversation-backfill", id], previous.backfill);
+      if (!previous?.row) return;
+      const current = findCachedConversationRow(queryClient, id) ?? previous.row;
+      const { [PROJECT_LABEL_KEY]: _project, ...labels } = current.labels;
+      if (previous.row.labels[PROJECT_LABEL_KEY])
+        labels[PROJECT_LABEL_KEY] = previous.row.labels[PROJECT_LABEL_KEY];
+      const folders = previous.folders?.map(([key, snapshot]) => ({
+        key,
+        snapshot,
+        currentRow: queryClient
+          .getQueryData<ConversationsInfiniteData>(key)
+          ?.pages.flatMap((page) => page.data)
+          .find((item) => item.id === id),
+      }));
+      overlayProjectMembership(
+        queryClient,
+        current,
+        previous.row.project_id,
+        labels,
+        previous.projectName,
+      );
+      for (const { key, snapshot, currentRow } of folders ?? []) {
+        queryClient.setQueryData<ConversationsInfiniteData>(key, (data) => {
+          if (!data || !snapshot) return data;
+          if (!snapshot.pages.some((page) => page.data.some((item) => item.id === id))) return data;
+          return {
+            ...data,
+            pages: data.pages.map((page, index) => {
+              const oldPage = snapshot.pages[index];
+              const position = oldPage?.data.findIndex((item) => item.id === id) ?? -1;
+              const rows = page.data.filter((item) => item.id !== id);
+              if (position >= 0) {
+                const saved = oldPage.data[position];
+                const { [PROJECT_LABEL_KEY]: _label, ...otherLabels } =
+                  currentRow?.labels ?? saved.labels;
+                rows.splice(position, 0, {
+                  ...(currentRow ?? saved),
+                  project_id: saved.project_id,
+                  labels: {
+                    ...otherLabels,
+                    ...(saved.labels[PROJECT_LABEL_KEY]
+                      ? { [PROJECT_LABEL_KEY]: saved.labels[PROJECT_LABEL_KEY] }
+                      : {}),
+                  },
+                });
+              }
+              return {
+                ...page,
+                data: rows,
+                first_id: oldPage?.first_id === id ? id : page.first_id,
+                last_id: oldPage?.last_id === id ? id : page.last_id,
+              };
+            }),
+          };
+        });
       }
     },
     onSuccess: (updated, { project }) => {
@@ -2439,12 +2587,13 @@ export function useMoveToProject() {
           old?.map((p) => (p.name === project && p.id === null ? { ...p, id: confirmedId } : p)),
         );
       }
+    },
+    onSettled: (_data, _error, { id }, context) => {
+      if (context) movingProjectSessions.get(queryClient)?.delete(id);
+      if (queryClient.isMutating({ mutationKey: ["move-to-project"] }) > 1) return;
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
-      // Moving into/out of a project changes both folders' paginated lists.
       void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
-      // Moving an archived session relabels which project owns it, shifting the
-      // archived-view picker's option set.
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
     },
   });
@@ -2583,10 +2732,23 @@ async function archiveAndUnfileConversation(id: string): Promise<Conversation> {
  */
 export function useDeleteProject() {
   const queryClient = useQueryClient();
-  return useMutation({
+  const mutation = useMutation({
+    onMutate: ({ name }: ProjectSummary) =>
+      beginProjectWrite(queryClient, name, { pending: "Deleting" }),
     mutationFn: async ({ id, name }: ProjectSummary) => {
       const ids = await fetchAllProjectSessionIds(name);
-      const results = await Promise.allSettled(ids.map((sid) => archiveAndUnfileConversation(sid)));
+      const results = await Promise.allSettled(
+        ids.map(async (sid) => {
+          if (movingProjectSessions.get(queryClient)?.has(sid))
+            throw new Error("Session is moving");
+          const updated = await archiveAndUnfileConversation(sid);
+          expireSessionsArchiving(markSessionsArchiving([sid]), [sid]);
+          overlayProjectMembership(queryClient, updated, null, updated.labels, null);
+          overlayArchivedIntoCaches(queryClient, sid, true);
+          dropFromPinnedCache(queryClient, [sid]);
+          return updated;
+        }),
+      );
       const succeeded: string[] = [];
       const failed: string[] = [];
       for (let i = 0; i < results.length; i++) {
@@ -2613,6 +2775,18 @@ export function useDeleteProject() {
       if (id !== null) await apiDeleteProject(id);
       return { succeeded, failed };
     },
+    onSuccess: (_data, { name }) => replaceProjectSummary(queryClient, name, undefined),
+    onError: (error, variables, context) => {
+      if (context) finishProjectWrite(queryClient, variables.name);
+      toast.error(`Couldn't delete “${variables.name}”`, {
+        description:
+          error instanceof BulkConversationMutationError
+            ? `${error.succeeded.length} sessions archived; ${error.failed.length} failed (${error.failed.join(", ")}). Retry to finish the remaining work.`
+            : error.message,
+        duration: Infinity,
+        action: { label: "Retry", onClick: () => mutation.mutate(variables) },
+      });
+    },
     onSettled: () => {
       // Refresh regardless of partial failure so the sidebar reflects whatever
       // was actually archived.
@@ -2623,23 +2797,42 @@ export function useDeleteProject() {
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
     },
   });
+  return mutation;
 }
 
 /**
  * Create an empty first-class project (`POST /v1/projects`). This is the
  * capability the label model can't express — a project with no members. The
- * server rejects a duplicate name (409); the error message is surfaced to the
- * caller for inline display.
+ * server rejects duplicate names (409); a durable toast retains the draft for retry.
  */
 export function useCreateProject() {
   const queryClient = useQueryClient();
-  return useMutation({
+  const mutation = useMutation({
     mutationFn: ({ name, icon }: { name: string; icon?: string }) =>
       apiCreateProject(name, icon ? { icon } : undefined),
-    onSuccess: () => {
+    onMutate: ({ name, icon }) =>
+      beginProjectWrite(queryClient, name, { icon, pending: "Creating" }),
+    onSuccess: (project, { name }) => {
+      replaceProjectSummary(queryClient, name, {
+        id: project.id,
+        name: project.name,
+        icon: project.config?.icon,
+      });
+      queryClient.setQueryData(["project-config", project.id], project.config ?? {});
+    },
+    onError: (error, variables, context) => {
+      if (context) replaceProjectSummary(queryClient, variables.name, context.previous);
+      toast.error(`Couldn't create “${variables.name}”`, {
+        description: error.message,
+        duration: Infinity,
+        action: { label: "Retry", onClick: () => mutation.mutate(variables) },
+      });
+    },
+    onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
     },
   });
+  return mutation;
 }
 
 /**
@@ -2654,60 +2847,178 @@ export function useCreateProject() {
  * members that were still matched by the legacy label don't get stranded in an
  * `oldName` folder, and nothing ends up matching two folders at once.
  */
+class ProjectRenameError extends Error {
+  readonly projectId: string;
+  readonly failure: Error;
+
+  constructor(projectId: string, failure: Error) {
+    super(failure.message);
+    this.projectId = projectId;
+    this.failure = failure;
+  }
+}
+
 export function useRenameProject() {
   const queryClient = useQueryClient();
-  return useMutation({
+  const mutation = useMutation({
     mutationFn: async ({
       id,
       oldName,
       newName,
+      config,
+      memberProjectName,
     }: {
       id: string | null;
       oldName: string;
       newName: string;
+      config?: ProjectConfig;
+      memberProjectName?: string;
     }) => {
-      // The target project id: rename the existing row (first-class), or
-      // create one on demand (label-only folder being promoted).
-      let projectId: string;
-      if (id !== null) {
-        await apiRenameProject(id, newName);
-        projectId = id;
-      } else {
-        projectId = (await apiCreateProject(newName)).id;
-      }
-      // Reconcile the folder's members either way. During the dual-read
-      // transition a member can still sit in the oldName folder via the legacy
-      // omni_project label; re-file each onto project_id and clear that label so
-      // the rename is coherent for both membership representations and nothing
-      // is left behind in an oldName folder.
-      const memberIds = await fetchAllProjectSessionIds(oldName);
-      await Promise.all(
-        memberIds.map(async (sid) => {
-          const res = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sid)}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              project_id: projectId,
-              labels: { [PROJECT_LABEL_KEY]: "" },
-            }),
+      const projectId = id ?? (await apiCreateProject(newName)).id;
+      if (id !== null && oldName !== newName) await apiRenameProject(id, newName);
+      try {
+        const memberIds = await fetchAllProjectSessionIds(memberProjectName ?? oldName);
+        const results = await Promise.allSettled(
+          memberIds.map(async (sid) => {
+            if (movingProjectSessions.get(queryClient)?.has(sid))
+              throw new Error("Session is moving");
+            const res = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sid)}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ project_id: projectId, labels: { [PROJECT_LABEL_KEY]: "" } }),
+            });
+            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            const row = findCachedConversationRow(queryClient, sid);
+            if (row) {
+              const { [PROJECT_LABEL_KEY]: _project, ...labels } = row.labels;
+              overlayProjectMembership(queryClient, row, projectId, labels, newName);
+            }
+          }),
+        );
+        const failed = memberIds.filter((_, index) => results[index].status === "rejected");
+        if (failed.length)
+          throw new BulkConversationMutationError("move", {
+            failed,
+            succeeded: memberIds.filter((_, index) => results[index].status === "fulfilled"),
+            total: memberIds.length,
           });
-          // Surface a failed re-file: a resolved-but-4xx/5xx response would
-          // otherwise report success while leaving members behind.
-          if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        }),
-      );
-      // Return the resolved id so a caller promoting a label-only folder can
-      // target the just-created row for a follow-up write instead of passing
-      // the stale `null` and re-creating it (which 409s on the duplicate name).
-      return projectId;
+        if (config) {
+          const next = {
+            ...(queryClient.getQueryData<ProjectConfig>(["project-config", projectId]) ?? config),
+          };
+          delete next.icon;
+          if (config.icon !== undefined) next.icon = config.icon;
+          const updated = await apiUpdateProjectConfig(projectId, next);
+          queryClient.setQueryData(["project-config", projectId], updated.config ?? {});
+        }
+        return projectId;
+      } catch (error) {
+        throw new ProjectRenameError(projectId, error as Error);
+      }
     },
-    onSuccess: () => {
+    onMutate: async ({ id, oldName, newName, config }) => {
+      const context = await beginProjectWrite(queryClient, oldName, {
+        id,
+        name: newName,
+        previousName: oldName,
+        pending: "Saving",
+        ...(config ? { icon: config.icon } : {}),
+      });
+      await queryClient.cancelQueries({ queryKey: ["conversations"] });
+      await queryClient.cancelQueries({ queryKey: ["project-sessions"] });
+      const rows = new Map<string, Conversation>();
+      const lists = [
+        ...queryClient.getQueriesData<ConversationsInfiniteData>({ queryKey: ["conversations"] }),
+        ...queryClient.getQueriesData<ConversationsInfiniteData>({
+          queryKey: ["project-sessions"],
+        }),
+      ];
+      for (const [, data] of lists)
+        for (const page of data?.pages ?? [])
+          for (const row of page.data) {
+            if ((id !== null && row.project_id === id) || row.labels[PROJECT_LABEL_KEY] === oldName)
+              rows.set(row.id, row);
+          }
+      for (const row of rows.values())
+        overlayProjectMembership(
+          queryClient,
+          row,
+          id,
+          {
+            ...row.labels,
+            [PROJECT_LABEL_KEY]: newName,
+          },
+          newName,
+        );
+      return { ...context, rows };
+    },
+    onSuccess: (id, { newName }) => finishProjectWrite(queryClient, newName, { id }),
+    onError: (error, variables, context) => {
+      const partial = error instanceof ProjectRenameError ? error : undefined;
+      if (context) {
+        if (partial)
+          finishProjectWrite(queryClient, variables.newName, {
+            id: partial.projectId,
+            icon: context.previous?.icon,
+          });
+        else replaceProjectSummary(queryClient, variables.newName, context.previous);
+        const failed =
+          partial?.failure instanceof BulkConversationMutationError
+            ? new Set(partial.failure.failed)
+            : null;
+        for (const row of context.rows.values()) {
+          if (partial && failed && !failed.has(row.id)) continue;
+          const current = findCachedConversationRow(queryClient, row.id);
+          if (current?.labels[PROJECT_LABEL_KEY] === variables.newName) {
+            overlayProjectMembership(
+              queryClient,
+              current,
+              row.project_id,
+              { ...current.labels, [PROJECT_LABEL_KEY]: row.labels[PROJECT_LABEL_KEY] ?? "" },
+              variables.oldName,
+            );
+          }
+        }
+      }
+      toast.error(
+        partial
+          ? `“${variables.newName}” was renamed, but some changes failed`
+          : `Couldn't rename “${variables.oldName}”`,
+        {
+          description: error.message,
+          duration: Infinity,
+          action: {
+            label: "Retry",
+            onClick: () => {
+              const name = partial
+                ? (queryClient
+                    .getQueryData<ProjectSummary[]>(["projects"])
+                    ?.find((item) => item.id === partial.projectId)?.name ?? variables.newName)
+                : variables.oldName;
+              mutation.mutate(
+                partial
+                  ? {
+                      ...variables,
+                      id: partial.projectId,
+                      oldName: name,
+                      newName: name,
+                      memberProjectName: variables.memberProjectName ?? variables.oldName,
+                    }
+                  : variables,
+              );
+            },
+          },
+        },
+      );
+    },
+    onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
     },
   });
+  return mutation;
 }
 
 /**
@@ -2717,9 +3028,18 @@ export function useRenameProject() {
  * `id` is `null` (a label-only folder has no first-class row to read).
  */
 export function useProjectConfig(id: string | null) {
+  const queryClient = useQueryClient();
   return useQuery<ProjectConfig>({
     queryKey: ["project-config", id],
-    queryFn: async () => (await apiGetProject(id as string)).config ?? {},
+    queryFn: async () => {
+      const confirmed = (await apiGetProject(id as string)).config ?? {};
+      const pending = queryClient
+        .getQueryData<ProjectSummary[]>(["projects"])
+        ?.some((project) => project.id === id && project.pending === "Saving");
+      return pending
+        ? (queryClient.getQueryData<ProjectConfig>(["project-config", id]) ?? confirmed)
+        : confirmed;
+    },
     enabled: id !== null,
     staleTime: 30_000,
   });
@@ -2733,7 +3053,7 @@ export function useProjectConfig(id: string | null) {
  */
 export function useUpdateProjectConfig() {
   const queryClient = useQueryClient();
-  return useMutation({
+  const mutation = useMutation({
     mutationFn: async ({
       id,
       name,
@@ -2742,30 +3062,73 @@ export function useUpdateProjectConfig() {
       id: string | null;
       name: string;
       config: ProjectConfig;
+      fields?: (keyof ProjectConfig)[];
     }) => {
-      const projectId = id ?? (await apiCreateProject(name)).id;
-      return apiUpdateProjectConfig(projectId, config);
+      const cachedId =
+        id ??
+        queryClient.getQueryData<ProjectSummary[]>(["projects"])?.find((item) => item.name === name)
+          ?.id;
+      const projectId = cachedId ?? (await apiCreateProject(name)).id;
+      const summary = queryClient
+        .getQueryData<ProjectSummary[]>(["projects"])
+        ?.find((item) => item.name === name);
+      if (summary) replaceProjectSummary(queryClient, name, { ...summary, id: projectId });
+      const pendingConfig = queryClient.getQueryData<ProjectConfig>([
+        "project-config",
+        cachedId ?? name,
+      ]);
+      queryClient.setQueryData(["project-config", projectId], pendingConfig ?? config);
+      return apiUpdateProjectConfig(projectId, pendingConfig ?? config);
     },
-    onSuccess: (project) => {
-      // Seed the fresh config into the cache (not just invalidate) so the
-      // composer's prefill reads the just-saved defaults on the very next visit
-      // — the prefill settles once and would otherwise latch onto the stale
-      // cached value during the 30s staleTime window while a refetch is still
-      // in flight.
+    onMutate: async ({ id, name, config, fields }) => {
+      const context = await beginProjectWrite(queryClient, name, { pending: "Saving" });
+      const configKey = ["project-config", id ?? context.previous?.id ?? name];
+      await queryClient.cancelQueries({ queryKey: configKey });
+      const previousConfig = queryClient.getQueryData<ProjectConfig>(configKey);
+      const next = fields
+        ? {
+            ...Object.fromEntries(
+              Object.entries(previousConfig ?? config).filter(
+                ([key]) => !fields.includes(key as keyof ProjectConfig),
+              ),
+            ),
+            ...Object.fromEntries(
+              fields.flatMap((key) => (config[key] === undefined ? [] : [[key, config[key]]])),
+            ),
+          }
+        : config;
+      queryClient.setQueryData(configKey, next);
+      const project = queryClient
+        .getQueryData<ProjectSummary[]>(["projects"])
+        ?.find((item) => item.name === name);
+      if (project) replaceProjectSummary(queryClient, name, { ...project, icon: next.icon });
+      return { ...context, previousConfig, configKey };
+    },
+    onSuccess: (project, { name }) => {
       queryClient.setQueryData<ProjectConfig>(["project-config", project.id], project.config ?? {});
-      // Upsert the projects list too, so a just-promoted label-only folder
-      // resolves to its NEW first-class id immediately (name → id is how the
-      // composer keys the config lookup); a stale `id: null` would resolve the
-      // config to `{}` and drop the saved defaults on that first visit.
-      queryClient.setQueryData<ProjectSummary[]>(["projects"], (prev) => {
-        if (!prev) return prev;
-        const summary = { id: project.id, name: project.name, icon: project.config?.icon };
-        return prev.some((p) => p.name === project.name)
-          ? prev.map((p) => (p.name === project.name ? summary : p))
-          : [...prev, summary];
+      finishProjectWrite(queryClient, name, { id: project.id, icon: project.config?.icon });
+    },
+    onError: (error, variables, context) => {
+      if (context) {
+        const promoted = queryClient
+          .getQueryData<ProjectSummary[]>(["projects"])
+          ?.find((item) => item.name === variables.name);
+        if (promoted?.id && !context.previous?.id) {
+          finishProjectWrite(queryClient, variables.name, { icon: context.previous?.icon });
+          queryClient.setQueryData(["project-config", promoted.id], context.previousConfig ?? {});
+        } else replaceProjectSummary(queryClient, variables.name, context.previous);
+        queryClient.setQueryData(context.configKey, context.previousConfig ?? {});
+      }
+      toast.error(`Couldn't save settings for “${variables.name}”`, {
+        description: error.message,
+        duration: Infinity,
+        action: { label: "Retry", onClick: () => mutation.mutate(variables) },
       });
+    },
+    onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["project-config"] });
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
     },
   });
+  return mutation;
 }
