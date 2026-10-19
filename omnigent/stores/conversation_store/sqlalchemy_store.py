@@ -3177,6 +3177,12 @@ class SqlAlchemyConversationStore(ConversationStore):
                 if tier_index < after_tier or tier_index > before_tier:
                     continue
                 tier_stmt = stmt if tier_filter is None else stmt.where(tier_filter)
+                if tier_filter is not None:
+                    # A cursor renamed after its tier was read could otherwise
+                    # land in an unbounded tier and be listed again.
+                    for cursor_id in (after, before):
+                        if cursor_id:
+                            tier_stmt = tier_stmt.where(SqlConversation.id != cursor_id)
                 if after and tier_index == after_tier:
                     tier_stmt = self._apply_cursor(
                         session,
@@ -3199,7 +3205,10 @@ class SqlAlchemyConversationStore(ConversationStore):
                     )
                 tier_stmts.append((tier_index, tier_stmt))
             rows: list[SqlConversation]
-            if len(tier_stmts) == 1:
+            if not tier_stmts:
+                # An ``after`` cursor ranked past its ``before`` cursor: no rows.
+                rows = []
+            elif len(tier_stmts) == 1:
                 rows = list(
                     session.execute(
                         tier_stmts[0][1]

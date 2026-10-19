@@ -1952,6 +1952,48 @@ def test_list_conversations_search_pages_through_ranked_tiers(
     assert _page(limit=10, before=ranked[3]) == (ranked[:3], False)
     assert _page(limit=10, before=ranked[1]) == (ranked[:1], False)
     assert _page(limit=10, after=ranked[0], before=ranked[3]) == (ranked[1:3], False)
+    # Inverted cursors across tiers select nothing, as within one tier.
+    assert _page(limit=10, after=ranked[2], before=ranked[0]) == ([], False)
+    assert _page(limit=10, after=ranked[3], before=ranked[2]) == ([], False)
+
+
+@pytest.mark.parametrize(
+    ("direction", "cursor_role", "new_title", "classified_tier"),
+    [
+        # Classified as a title match, then renamed into the content tier.
+        ("after", "both", "General plan", 0),
+        # Classified as content-only, then renamed into the title tier.
+        ("before", "content_new", "Deploy plan", 1),
+    ],
+)
+def test_list_conversations_search_never_returns_a_reclassified_cursor(
+    conversation_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    direction: str,
+    cursor_role: str,
+    new_title: str,
+    classified_tier: int,
+) -> None:
+    """
+    A cursor renamed between its tier lookup and the page read stays excluded.
+
+    The stale classification puts the renamed cursor in a tier with no cursor
+    bound, so only an explicit exclusion keeps it off its own next page.
+    """
+    ids = _seed_ranked_search(conversation_store)
+    cursor_id = ids[cursor_role]
+    conversation_store.update_conversation(cursor_id, title=new_title)
+    monkeypatch.setattr(
+        SqlAlchemyConversationStore,
+        "_cursor_search_tier",
+        staticmethod(lambda *_args: classified_tier),
+    )
+
+    page = conversation_store.list_conversations(
+        search_query="deploy", limit=10, **{direction: cursor_id}
+    )
+
+    assert cursor_id not in [c.id for c in page.data]
 
 
 @pytest.mark.asyncio
