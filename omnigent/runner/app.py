@@ -2129,6 +2129,21 @@ def create_runner_app(
         _session_init_envelopes.pop(session_id, None)
         return None
 
+    async def _rebind_claude_bridge(session_id: str, bridge_id: str) -> None:
+        """Point a session's cached init labels and harness at its new Claude bridge.
+
+        :param session_id: Session whose terminal launch moved its bridge dir.
+        :param bridge_id: The bridge id the new pane was launched under.
+        """
+        from omnigent.harnesses.claude_native.bridge import BRIDGE_ID_LABEL_KEY
+
+        cached = _session_init_envelopes.get(session_id)
+        if cached is not None:
+            cached[1].snapshot.labels[BRIDGE_ID_LABEL_KEY] = bridge_id
+        # The next turn respawns the harness with the new bridge dir.
+        if process_manager is not None:
+            await process_manager.release(session_id)
+
     async def _load_session_init_context(
         body: _JsonObject,
         *,
@@ -2216,6 +2231,7 @@ def create_runner_app(
             FileTooLarge,
             InvalidPath,
             PathUnreachable,
+            PermissionDenied,
             UnsupportedMediaType,
         )
 
@@ -2229,6 +2245,8 @@ def create_runner_app(
             # available without a second round trip.
             status = 403
             error["reachable_roots"] = exc.reachable_roots
+        elif isinstance(exc, PermissionDenied):
+            status = 403
         elif isinstance(exc, InvalidPath):
             status = 400
         elif isinstance(exc, DirectoryNotEmpty):
@@ -2707,6 +2725,7 @@ def create_runner_app(
                 server_client=server_client,
                 event_dispatcher=getattr(app.state, "runner_event_dispatcher", None),
                 ensure_comment_relay=_ensure_comment_relay_started,
+                rebind_bridge=_rebind_claude_bridge,
             )
             _launch_pre: Callable[[bool], Awaitable[PreLaunchResult]] | None = None
             _launch_build: (
@@ -3618,18 +3637,9 @@ def create_runner_app(
         # Resolve the directory and read its state from one label lookup, so a
         # caller clearing or idling the bridge acts on the same one the state
         # came from; a second lookup can fall back to conv id and pick another.
-        from omnigent.harnesses.codex_native.bridge import (
-            CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
-            bridge_dir_for_bridge_id,
-            read_bridge_state,
-        )
+        from omnigent.harnesses.codex_native.bridge import read_bridge_state
 
-        labels = await _session_labels_for_runner_spawn(
-            server_client=server_client,
-            session_id=conv_id,
-        )
-        bridge_id = labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY) or conv_id
-        bridge_dir = bridge_dir_for_bridge_id(bridge_id)
+        bridge_dir = await _codex_native_bridge_dir_for_session(conv_id)
         state = read_bridge_state(bridge_dir)
         if state is None:
             _logger.log(
@@ -3664,9 +3674,8 @@ def create_runner_app(
         """
         Bridge directory for a codex-native session.
 
-        Same resolution as :func:`_codex_native_bridge_state_for_session` — the
-        bridge id label when present, else the conversation id — so a request
-        written here lands in the directory the forwarder polls.
+        Prefer the bridge id label, then the runner's latest launch directory,
+        so a failed label callback still reaches the directory the forwarder polls.
 
         :param conv_id: Conversation id, e.g. ``"conv_abc123"``.
         :returns: The session's bridge directory.
@@ -3680,7 +3689,12 @@ def create_runner_app(
             server_client=server_client,
             session_id=conv_id,
         )
-        return bridge_dir_for_bridge_id(labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY) or conv_id)
+        bridge_id = labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY)
+        return (
+            bridge_dir_for_bridge_id(bridge_id)
+            if bridge_id
+            else _native_runtime.codex_native_bridge_dir(conv_id)
+        )
 
     codex_goal_runner = CodexGoalRunner(
         bridge_state_for_session=_codex_native_bridge_state_for_session,
@@ -7265,6 +7279,7 @@ def create_runner_app(
         _pi_terminal_ensure_locks=_pi_terminal_ensure_locks,
         _publish_event=_publish_event,
         _qwen_terminal_ensure_locks=_qwen_terminal_ensure_locks,
+        _rebind_claude_bridge=_rebind_claude_bridge,
         _record_session_claude_launch_config=_record_session_claude_launch_config,
         _repl_terminal_ensure_locks=_repl_terminal_ensure_locks,
         _repop_pending_cost_popup_on_attach=_repop_pending_cost_popup_on_attach,
