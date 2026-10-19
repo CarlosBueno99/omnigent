@@ -284,7 +284,9 @@ does not send a message; enter a question and send when ready.
 
 **Desktop browser:** choose **+ → Browser** in the Workspace panel or press
 ⌘/Ctrl+Alt+B. Agent browser requests and chat links with in-app opening enabled
-create or select a closable Browser soft tab automatically.
+create or select a closable Browser soft tab automatically. A chat link to a
+session on the connected server instead opens that session in the current
+window, whether or not in-app opening is enabled.
 
 **Desktop recent sessions:** hold Control and press Tab to open the five most
 recent sessions. Continue pressing Tab (or Shift+Tab) to cycle, release Control

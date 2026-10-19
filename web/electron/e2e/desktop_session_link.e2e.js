@@ -1,5 +1,5 @@
 // Run after building web: node --test e2e/desktop_session_link.e2e.js
-// OMNIGENT_PYTHON selects the backend; give an absolute path because it starts in a temp dir.
+// OMNIGENT_PYTHON selects the backend; use an absolute path since the backend runs with cwd=tmpDir.
 
 "use strict";
 
@@ -47,8 +47,13 @@ it(
 
       const sessionLink = window.locator(`a[href="${targetUrl}"]`);
       await sessionLink.waitFor({ timeout: 60_000 });
-      await window.waitForTimeout(1_500);
+      // Send replaces the Interrupt button once the reply has finished streaming.
+      await window
+        .getByTestId("composer-action-row")
+        .getByRole("button", { name: "Send", exact: true })
+        .waitFor({ timeout: 30_000 });
       await sessionLink.click();
+      // Let the assertion below report both the window path and any external open.
       await window.waitForURL(targetUrl, { timeout: 5_000 }).catch(() => {});
 
       const openedExternally = await electronApp.evaluate(() => globalThis.fakeBrowserOpened);
@@ -63,9 +68,11 @@ it(
       // Stop the screen capture first so the clip ends on the opened session, not teardown.
       await desktop?.stopDisplayCapture();
       await desktop?.electronApp.close().catch(() => {});
-      console.log(saveRecording(recordDir, "session-link"));
       await backend?.close();
+      console.log(saveRecording(recordDir, "session-link"));
       if (desktop) fs.rmSync(desktop.userDataDir, { recursive: true, force: true });
+      if (process.env.OMNIGENT_DESKTOP_RECORD_DIR)
+        fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   },
 );
