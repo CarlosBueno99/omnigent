@@ -8,6 +8,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -36,11 +37,34 @@ export function isMermaidPre(children: ReactNode): boolean {
   );
 }
 
+export function extractCodeText(children: ReactNode): string {
+  if (typeof children === "string" || typeof children === "number") {
+    return String(children);
+  }
+
+  if (Array.isArray(children)) {
+    return children.map(extractCodeText).join("");
+  }
+
+  if (isValidElement(children)) {
+    const props = children.props as { children?: ReactNode; code?: unknown };
+    if (typeof props.code === "string") {
+      return props.code;
+    }
+    return extractCodeText(props.children);
+  }
+
+  return "";
+}
+
 // A click that lands while Streamdown is still drawing the diagram opens it once drawn.
 const DIAGRAM_RENDER_WAIT_MS = 5_000;
 
-// Opens the block's diagram, or waits for it to draw; returns a cancel for that wait.
-const MermaidFullscreenContext = createContext<((block: HTMLElement) => () => void) | null>(null);
+type MermaidFullscreen = {
+  open: (block: HTMLElement, source: string) => void;
+  adoptPendingOpen: (block: HTMLElement, source: string) => void;
+};
+const MermaidFullscreenContext = createContext<MermaidFullscreen | null>(null);
 
 function MermaidFullscreenOverlay({
   onClose,
@@ -107,58 +131,85 @@ export function MermaidFullscreenProvider({
     setSvgMarkup(null);
   }
   // Only the latest click may open a diagram once it draws.
-  const cancelPendingRef = useRef<(() => void) | null>(null);
-  useEffect(() => () => cancelPendingRef.current?.(), [resetKey]);
+  const pendingRef = useRef<{
+    block: HTMLElement;
+    deadline: number;
+    source: string;
+    stop: () => void;
+  } | null>(null);
+  const cancelPending = useCallback(() => {
+    pendingRef.current?.stop();
+    pendingRef.current = null;
+  }, []);
+  useEffect(() => cancelPending, [resetKey, cancelPending]);
 
-  const openDiagram = useCallback((block: HTMLElement) => {
-    cancelPendingRef.current?.();
-    // The rendered diagram is Mermaid's own <svg id="mermaid-…"> — scope to it so
-    // we don't clone a toolbar/zoom-control icon (all 16×16 <svg>s in the block).
-    const findDiagram = () => block.querySelector('svg[id^="mermaid-"]');
-    const diagram = findDiagram();
-    if (diagram) {
-      setSvgMarkup(diagram.outerHTML);
-      return () => {};
-    }
-    const observer = new MutationObserver(() => {
-      const rendered = findDiagram();
-      if (!rendered) return;
-      cancelWait();
-      setSvgMarkup(rendered.outerHTML);
-    });
-    const timer = window.setTimeout(() => cancelWait(), DIAGRAM_RENDER_WAIT_MS);
-    const cancelWait = () => {
-      observer.disconnect();
-      window.clearTimeout(timer);
-      if (cancelPendingRef.current === cancelWait) cancelPendingRef.current = null;
-    };
-    observer.observe(block, { childList: true, subtree: true });
-    cancelPendingRef.current = cancelWait;
-    return cancelWait;
-  }, []);
+  const openWhenDrawn = useCallback(
+    (block: HTMLElement, source: string, deadline: number) => {
+      cancelPending();
+      // The rendered diagram is Mermaid's own <svg id="mermaid-…"> — scope to it so
+      // we don't clone a toolbar/zoom-control icon (all 16×16 <svg>s in the block).
+      const findDiagram = () => block.querySelector('svg[id^="mermaid-"]');
+      const diagram = findDiagram();
+      if (diagram) {
+        setSvgMarkup(diagram.outerHTML);
+        return;
+      }
+      const observer = new MutationObserver(() => {
+        const rendered = findDiagram();
+        if (!rendered) return;
+        cancelPending();
+        setSvgMarkup(rendered.outerHTML);
+      });
+      const timer = window.setTimeout(cancelPending, deadline - Date.now());
+      observer.observe(block, { childList: true, subtree: true });
+      const stop = () => {
+        observer.disconnect();
+        window.clearTimeout(timer);
+      };
+      pendingRef.current = { block, deadline, source, stop };
+    },
+    [cancelPending],
+  );
+  const fullscreen = useMemo<MermaidFullscreen>(
+    () => ({
+      open: (block, source) => openWhenDrawn(block, source, Date.now() + DIAGRAM_RENDER_WAIT_MS),
+      // A settled reply remounts its blocks; the replacement takes over a click still waiting.
+      adoptPendingOpen: (block, source) => {
+        const pending = pendingRef.current;
+        if (pending && pending.source === source && !pending.block.isConnected) {
+          openWhenDrawn(block, source, pending.deadline);
+        }
+      },
+    }),
+    [openWhenDrawn],
+  );
   const close = useCallback(() => {
-    cancelPendingRef.current?.();
+    cancelPending();
     setSvgMarkup(null);
-  }, []);
+  }, [cancelPending]);
   return (
-    <MermaidFullscreenContext.Provider value={openDiagram}>
+    <MermaidFullscreenContext.Provider value={fullscreen}>
       {children}
       {svgMarkup != null && <MermaidFullscreenOverlay onClose={close} svgMarkup={svgMarkup} />}
     </MermaidFullscreenContext.Provider>
   );
 }
 
-// Reuse the sanitized inline SVG without rerunning Mermaid or copying toolbar icons.
-function MermaidFullscreenButton({ blockRef }: { blockRef: RefObject<HTMLDivElement | null> }) {
-  const openDiagram = useContext(MermaidFullscreenContext);
-  const cancelWaitRef = useRef<(() => void) | null>(null);
-  useEffect(() => () => cancelWaitRef.current?.(), []);
+function MermaidFullscreenButton({
+  blockRef,
+  source,
+}: {
+  blockRef: RefObject<HTMLDivElement | null>;
+  source: string;
+}) {
+  const fullscreen = useContext(MermaidFullscreenContext);
+  useEffect(() => {
+    if (blockRef.current) fullscreen?.adoptPendingOpen(blockRef.current, source);
+  }, [blockRef, fullscreen, source]);
 
   const openFullscreen = useCallback(() => {
-    const block = blockRef.current;
-    if (!block || !openDiagram) return;
-    cancelWaitRef.current = openDiagram(block);
-  }, [blockRef, openDiagram]);
+    if (blockRef.current) fullscreen?.open(blockRef.current, source);
+  }, [blockRef, fullscreen, source]);
 
   return (
     <Button
@@ -183,7 +234,7 @@ export function MermaidBlock({ block }: { block: ReactNode }) {
     <div ref={blockRef} className="chat-mermaid relative">
       {block}
       <div className="absolute top-2 right-2 z-20 flex items-center rounded-md border border-sidebar bg-sidebar/80 px-1.5 py-1 supports-[backdrop-filter]:bg-sidebar/70 supports-[backdrop-filter]:backdrop-blur">
-        <MermaidFullscreenButton blockRef={blockRef} />
+        <MermaidFullscreenButton blockRef={blockRef} source={extractCodeText(block)} />
       </div>
     </div>
   );

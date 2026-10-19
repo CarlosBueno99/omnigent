@@ -1,8 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setEmbedRoot } from "@/lib/host";
 import { MermaidPreview } from "@/shell/MermaidPreview";
-import { MermaidFullscreenProvider } from "./MermaidBlock";
+import { MermaidBlock, MermaidFullscreenProvider } from "./MermaidBlock";
 import { Reasoning, ReasoningContent } from "./reasoning";
 import { Message, MessageAction, MessageActions, MessageContent, MessageResponse } from "./message";
 
@@ -183,6 +183,14 @@ describe.each([true, false])("Mermaid fullscreen (embedded=%s)", (embedded) => {
     return root.querySelector(selector)!;
   }
 
+  const settlingReply = (mode: "streaming" | "static") => (
+    <MermaidFullscreenProvider>
+      <MessageResponse key={mode} mode={mode}>
+        {markdown}
+      </MessageResponse>
+    </MermaidFullscreenProvider>
+  );
+
   function overlayDiagram() {
     const overlay = screen.getByTitle("Exit fullscreen").parentElement!;
     expect(overlay.parentElement).toBe(embedded ? root : document.body);
@@ -227,6 +235,36 @@ describe.each([true, false])("Mermaid fullscreen (embedded=%s)", (embedded) => {
     expect(overlayDiagram()?.outerHTML).toBe((await inlineDiagram()).outerHTML);
   }, 15_000);
 
+  it("opens a diagram clicked before its settled reply finishes drawing", async () => {
+    const { rerender } = render(settlingReply("streaming"), { container: root });
+    const clickedBlock = root.querySelector(".chat-mermaid");
+    fireEvent.click(screen.getByTitle("View fullscreen"));
+    rerender(settlingReply("static"));
+    expect(clickedBlock?.isConnected).toBe(false);
+    expect(root.querySelector(diagramSelector)).toBeNull();
+
+    await screen.findByTitle("Exit fullscreen", {}, { timeout: 10_000 });
+    expect(overlayDiagram()?.outerHTML).toBe((await inlineDiagram()).outerHTML);
+  }, 15_000);
+
+  it.each([
+    [4_999, true],
+    [5_000, false],
+  ])("opens a diagram drawn %i ms after its click: %s", async (elapsedMs, opens) => {
+    vi.useFakeTimers();
+    try {
+      render(<MermaidBlock block={<pre>{source}</pre>} />, { container: root });
+      fireEvent.click(screen.getByTitle("View fullscreen"));
+      act(() => vi.advanceTimersByTime(elapsedMs));
+      const lateDiagram = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      lateDiagram.id = "mermaid-late";
+      await act(async () => root.querySelector(".chat-mermaid")!.append(lateDiagram));
+      expect(screen.queryByTitle("Exit fullscreen") != null).toBe(opens);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     ["replace it", false],
     ["reopen after it is dismissed", true],
@@ -259,20 +297,13 @@ describe.each([true, false])("Mermaid fullscreen (embedded=%s)", (embedded) => {
   );
 
   it("keeps the diagram open when a settled reply remounts its block", async () => {
-    const reply = (mode: "streaming" | "static") => (
-      <MermaidFullscreenProvider>
-        <MessageResponse key={mode} mode={mode}>
-          {markdown}
-        </MessageResponse>
-      </MermaidFullscreenProvider>
-    );
-    const { rerender } = render(reply("streaming"), { container: root });
+    const { rerender } = render(settlingReply("streaming"), { container: root });
     const streamed = await inlineDiagram();
     fireEvent.click(screen.getByTitle("View fullscreen"));
     const openDiagram = overlayDiagram()?.outerHTML;
     expect(openDiagram).toBe(streamed.outerHTML);
 
-    rerender(reply("static"));
+    rerender(settlingReply("static"));
     expect(streamed.isConnected).toBe(false);
     expect(overlayDiagram()?.outerHTML).toBe(openDiagram);
     await inlineDiagram();
