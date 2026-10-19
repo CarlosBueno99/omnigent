@@ -323,9 +323,10 @@ Cross-harness journeys:
   drives real Claude Code and tmux with scripted model replies in an ~820px
   browser window, `/rename`s the session from the Terminal view to an ASCII or
   wide-character title wider than the pane, then sends from web chat and
-  verifies the reply arrives with no error pill. Claude Code 2.1.268 wraps the
-  title and both box rules instead of clipping the title, so this covers the
-  wrapped frame regardless of the CLI's renderer.
+  verifies the reply arrives with no error pill. It accepts either title frame:
+  Claude Code before 2.1.296 (including the CI pin) wraps the title and both
+  box rules, so the wrapped frame is what it covers in CI; newer releases clip
+  the title.
 - **`chat-render`, Claude shell commands from the web composer:**
   `tests/browser_ui/chat/test_native_shell_settlement.py::test_shell_mirror_settles_its_bubble_before_the_next_prompt`
   drives the built SPA at desktop and phone widths with controlled backend

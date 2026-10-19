@@ -6009,10 +6009,11 @@ def _composer_row(pane: str) -> str | None:
     terminal), the lowest rule is the opening one and the row under it is
     the composer.
 
-    Wrapped rules are read as bands (:func:`_rule_bands`), and the box is
+    Wrapped rules are read as bands (:func:`_rule_bands`). The box is first
     searched upward from the closing band
-    (:func:`_composer_row_above_closing_rule`) before the row below it is
-    considered. A dialog's footer below the frame overrides all of this
+    (:func:`_composer_row_above_closing_rule`): when its title wraps the
+    frame, the band above may be an earlier rule in the transcript. A
+    dialog's footer below the frame overrides all of this
     (:func:`_is_dialog_option_row`).
 
     :param pane: Captured pane text from :func:`_capture_pane`.
@@ -6023,8 +6024,9 @@ def _composer_row(pane: str) -> str | None:
     bands = _rule_bands(non_empty)
     if not bands:
         return None
-    row = _composer_glyph_row(non_empty, bands[-2][1] + 1) if len(bands) >= 2 else None
-    row = row or _composer_row_above_closing_rule(non_empty, bands[-1])
+    row = _composer_row_above_closing_rule(non_empty, bands[-1])
+    if row is None and len(bands) >= 2:
+        row = _composer_glyph_row(non_empty, bands[-2][1] + 1)
     row = row or _composer_glyph_row(non_empty, bands[-1][1] + 1)
     if row is None or _is_dialog_option_row(row, non_empty):
         return None
@@ -6072,7 +6074,8 @@ def _composer_row_above_closing_rule(
     shape that keeps a single-row closing rule is a title that exactly fills
     the opening rule, one space in (:func:`_is_edge_aligned_title_row`). An
     echoed prompt under a transcript line that happens to end in a rule
-    glyph meets neither condition.
+    glyph meets neither condition, and a dialog's selector and footer below
+    the rule (a rewind dialog under a wrapped divider) rule the box out.
 
     :param lines: Non-empty pane rows, in order.
     :param closing_rule: ``(first, last)`` row span of the closing rule.
@@ -6089,6 +6092,11 @@ def _composer_row_above_closing_rule(
     if not _is_rule_tail(above):
         return None
     if not _is_wrapped_rule(lines, closing_rule) and not _is_edge_aligned_title_row(above):
+        return None
+    below = lines[closing_rule[1] + 1 :]
+    if any(_DIALOG_FOOTER_RE.search(line) for line in below) and any(
+        line.strip().lstrip("│ ").startswith(_CLAUDE_PROMPT_GLYPH) for line in below
+    ):
         return None
     return lines[idx]
 

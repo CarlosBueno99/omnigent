@@ -9426,10 +9426,15 @@ def test_claude_prompt_rendered_sees_multiline_draft_in_a_box_wider_than_the_pan
     assert _occupying_surface(pane) is None
 
 
-def test_shell_mode_in_a_box_wider_than_the_pane_still_reads_as_shell_mode() -> None:
-    """The wrapped frame yields the composer row, so its mode glyph is still read."""
-    pane = "\n".join(
+# An earlier rule and an echoed prompt above the box, from the transcript.
+_STALE_PROMPT_ROWS = ["─" * 57, "❯ earlier prompt"]
+
+
+def _wide_shell_box(prefix: list[str]) -> str:
+    """A shell-mode box whose title wraps the frame, under *prefix* rows."""
+    return "\n".join(
         [
+            *prefix,
             f" {_PANE_WIDE_TITLE[:55]}",
             "─",
             "!",
@@ -9438,8 +9443,53 @@ def test_shell_mode_in_a_box_wider_than_the_pane_still_reads_as_shell_mode() -> 
             "  ! for shell mode",
         ]
     )
+
+
+@pytest.mark.parametrize(
+    "prefix", [[], _STALE_PROMPT_ROWS], ids=["box-only", "stale-prompt-above"]
+)
+def test_shell_mode_in_a_box_wider_than_the_pane_still_reads_as_shell_mode(
+    prefix: list[str],
+) -> None:
+    """
+    The wrapped frame yields the composer row, so its mode glyph is still read.
+
+    The box is read before an earlier rule, so a prompt echoed under that rule
+    can't stand in for the live composer.
+    """
+    pane = _wide_shell_box(prefix)
     assert _claude_prompt_rendered(pane) is False
     assert _occupying_surface(pane) == "shell mode"
+
+
+def test_inject_user_message_does_not_paste_into_shell_mode_under_a_stale_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message never lands in a wrapped shell-mode box, whatever the transcript above holds."""
+    monkeypatch.setattr(claude_native_bridge, "time", _VirtualClock())
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    writes: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(
+                returncode=0, stdout=_wide_shell_box(_STALE_PROMPT_ROWS), stderr=""
+            )
+        if "list-panes" not in cmd:
+            writes.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    with pytest.raises(claude_native_bridge.ClaudeTerminalDialog, match="shell mode"):
+        inject_user_message(bridge_dir, content="hi", timeout_s=0.3)
+    assert not [cmd for cmd in writes if "load-buffer" in cmd or "paste-buffer" in cmd]
 
 
 def test_box_wider_than_the_pane_outranks_the_shortcuts_panel_row() -> None:
@@ -9589,8 +9639,8 @@ def test_inject_user_message_does_not_paste_into_a_menu_under_a_clipped_title(
 
 @pytest.mark.parametrize(
     "rule_rows",
-    [["─" * 40], ["───", "─" * 40], ["─", "─" * 40]],
-    ids=["single-rule", "divider-then-rule", "stub-then-rule"],
+    [["─" * 40], ["───", "─" * 40], ["─", "─" * 40], ["─" * 40, "─"]],
+    ids=["single-rule", "divider-then-rule", "stub-then-rule", "rule-then-stub"],
 )
 def test_claude_prompt_rendered_ignores_an_echoed_prompt_under_a_glyph_terminated_line(
     rule_rows: list[str],
@@ -9603,7 +9653,8 @@ def test_claude_prompt_rendered_ignores_an_echoed_prompt_under_a_glyph_terminate
     first, and the one single-row shape is the title that exactly fills the
     opening rule, one space in. A full-width line ending in ``─`` over a
     scrollback ``❯`` above a dialog's rule is neither, with or without a
-    short divider or stray glyph row touching that rule.
+    short divider or stray glyph row touching that rule. A dialog's selector
+    and footer below a rule that does wrap still make the pane a dialog.
     """
     pane = "\n".join(
         [
