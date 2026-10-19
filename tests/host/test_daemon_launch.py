@@ -418,3 +418,25 @@ def test_daemon_poll_intervals_open_tight_then_hold_at_the_cadence() -> None:
     # Reaching "ready" on the third probe must cost less than the old flat
     # cadence would have spent getting there.
     assert sum(first_ten[:2]) < 2 * daemon_launch.DAEMON_POLL_INTERVAL_S
+
+
+async def test_launch_warns_when_an_older_peer_leaves_forwarded_values_unconsumed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("OMNIGENT_SESSION_ENV_PASSTHROUGH", "ARCATERM_CAPABILITY")
+    monkeypatch.setenv("ARCATERM_CAPABILITY", "capability-for-pane-1")
+
+    def older_server(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"runner_id": "runner_from_older_server"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(older_server), base_url="http://test"
+    ) as client:
+        runner_id = await daemon_launch.launch_or_reuse_daemon_runner(
+            client, host_id="host_x", session_id="conv_x", workspace="/tmp", fresh=True
+        )
+
+    assert runner_id == "runner_from_older_server"
+    stderr = capsys.readouterr().err
+    assert "too old to forward OMNIGENT_SESSION_ENV_PASSTHROUGH" in stderr
+    assert "capability-for-pane-1" not in stderr

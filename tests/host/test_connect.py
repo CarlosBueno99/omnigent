@@ -911,9 +911,27 @@ async def test_handle_launch_spawns_subprocess(
     _cleanup_host(host)
 
 
+def _relayed_launch_frame(body: dict[str, str], request_id: str) -> HostLaunchRunnerFrame:
+    """Return the launch frame a host receives for a CLI's ``POST /v1/hosts/{id}/runners``."""
+    frame = decode_host_frame(
+        encode_host_frame(
+            HostLaunchRunnerFrame(
+                request_id=request_id,
+                binding_token=f"token_{request_id}",
+                workspace=body["workspace"],
+                session_id=body["session_id"],
+                session_env_handoff_id=body.get("session_env_handoff_id"),
+            )
+        )
+    )
+    assert isinstance(frame, HostLaunchRunnerFrame)
+    return frame
+
+
 async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Only the launching CLI's session runner gets its named variables, never the server."""
     host = _make_host_process()
@@ -926,13 +944,13 @@ async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
     monkeypatch.setenv("ARCATERM_CAPABILITY", "capability-for-pane-1")
     monkeypatch.setenv("MACTERM_SOCKET", "/tmp/macterm-pane-1.sock")
     monkeypatch.delenv("ARCATERM_PROJECTS_ROOT", raising=False)
-    launch_bodies: list[object] = []
+    launch_requests: list[bytes] = []
     spawned_envs: dict[str, dict[str, str]] = {}
     original_popen = subprocess.Popen
 
     async def _server(request: httpx.Request) -> httpx.Response:
+        launch_requests.append(request.content)
         body = json.loads(request.content)
-        launch_bodies.append(body)
         for name in ("OMNIGENT_SESSION_ENV_PASSTHROUGH", *forwarded_names):
             monkeypatch.delenv(name, raising=False)
         session_id = body["session_id"]
@@ -943,12 +961,7 @@ async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
                 ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
 
-        frame = HostLaunchRunnerFrame(
-            request_id=f"req_{session_id}",
-            binding_token=f"token_{session_id}",
-            workspace=body["workspace"],
-            session_id=session_id,
-        )
+        frame = _relayed_launch_frame(body, f"req_{session_id}")
         with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
             result = await host._handle_launch(frame)
         assert result.status == "launched", result.error
@@ -969,10 +982,12 @@ async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
     finally:
         _cleanup_host(host)
 
-    assert launch_bodies == [
-        {"session_id": "conv_arcaterm", "workspace": str(workspace)},
-        {"session_id": "conv_plain", "workspace": str(workspace)},
-    ]
+    assert "too old" not in capsys.readouterr().err
+    assert not any(b"capability-for-pane-1" in content for content in launch_requests)
+    arcaterm_body, plain_body = (json.loads(content) for content in launch_requests)
+    assert arcaterm_body.pop("session_env_handoff_id")
+    assert arcaterm_body == {"session_id": "conv_arcaterm", "workspace": str(workspace)}
+    assert plain_body == {"session_id": "conv_plain", "workspace": str(workspace)}
     arcaterm_env = spawned_envs["conv_arcaterm"]
     assert arcaterm_env["ARCATERM_CAPABILITY"] == "capability-for-pane-1"
     assert arcaterm_env["MACTERM_SOCKET"] == "/tmp/macterm-pane-1.sock"
@@ -985,7 +1000,6 @@ async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
     assert "OMNIGENT_RUNNER_SESSION_ENV_NAMES" not in plain_env
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="same-session launch lock needs fcntl")
 async def test_concurrent_cli_launches_of_one_session_give_the_runner_its_own_launchs_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1023,12 +1037,7 @@ async def test_concurrent_cli_launches_of_one_session_give_the_runner_its_own_la
                 ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
 
-        frame = HostLaunchRunnerFrame(
-            request_id="req_shared",
-            binding_token="token_shared",
-            workspace=body["workspace"],
-            session_id=body["session_id"],
-        )
+        frame = _relayed_launch_frame(body, "req_shared")
         with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
             result = await host._handle_launch(frame)
         assert result.status == "launched", result.error
@@ -1062,6 +1071,68 @@ async def test_concurrent_cli_launches_of_one_session_give_the_runner_its_own_la
     assert len(launch_bodies) == 2
     (runner_env,) = spawned_envs
     assert runner_env["ARCATERM_CAPABILITY"] == "capability-for-pane-a"
+
+
+async def test_launch_frame_the_server_gave_up_on_cannot_take_the_next_launchs_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out launch's frame that reaches the host late gets none of the retry's values."""
+    host = _make_host_process()
+    host._auth_token_factory = lambda: "host-bootstrap-bearer"
+    host._auth_token_factory_resolved = True
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    monkeypatch.setenv("OMNIGENT_SESSION_ENV_PASSTHROUGH", "ARCATERM_CAPABILITY")
+    monkeypatch.setenv("ARCATERM_CAPABILITY", "capability-for-pane-a")
+    delayed_frames: list[HostLaunchRunnerFrame] = []
+    spawned_envs: dict[str, dict[str, str]] = {}
+    original_popen = subprocess.Popen
+
+    async def _run_on_host(frame: HostLaunchRunnerFrame) -> HostLaunchRunnerResultFrame:
+        def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+            spawned_envs[frame.request_id] = dict(kwargs["env"])  # type: ignore[call-overload]
+            return original_popen(
+                ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+
+        with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+            result = await host._handle_launch(frame)
+        assert result.status == "launched", result.error
+        return result
+
+    async def _server(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if not delayed_frames:
+            delayed_frames.append(_relayed_launch_frame(body, "req_timed_out"))
+            return httpx.Response(504, json={"detail": "timed out waiting for host launch"})
+        monkeypatch.delenv("ARCATERM_CAPABILITY")
+        await _run_on_host(delayed_frames[0])
+        result = await _run_on_host(_relayed_launch_frame(body, "req_retry"))
+        return httpx.Response(200, json={"runner_id": result.runner_id})
+
+    async def _launch(client: httpx.AsyncClient) -> str:
+        return await daemon_launch.launch_or_reuse_daemon_runner(
+            client,
+            host_id="host_test_connect",
+            session_id="conv_shared",
+            workspace=str(workspace),
+            fresh=True,
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_server), base_url="https://server.example"
+        ) as client:
+            with pytest.raises(click.ClickException, match="504"):
+                await _launch(client)
+            monkeypatch.setenv("ARCATERM_CAPABILITY", "capability-for-pane-b")
+            await _launch(client)
+    finally:
+        _cleanup_host(host)
+
+    assert "ARCATERM_CAPABILITY" not in spawned_envs["req_timed_out"]
+    assert spawned_envs["req_retry"]["ARCATERM_CAPABILITY"] == "capability-for-pane-b"
 
 
 @pytest.mark.parametrize("binding_token", ["token_xyz", "", "   "])

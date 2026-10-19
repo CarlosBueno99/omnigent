@@ -11,7 +11,10 @@ implements them separately, so a fix for one harness does not reach the others.
 
 - `launch-web`: pick the harness in the new-session composer and start a session.
 - `launch-cli`: `omnigent <name>` starts the harness in the user's terminal with
-  an Omnigent session behind it.
+  an Omnigent session behind it. With `OMNIGENT_SESSION_ENV_PASSTHROUGH=NAME,...`
+  the named shell variables reach only the new runner that command launches; a
+  reused live runner keeps its launch values, and a later server-driven restart
+  starts without them.
 - `needs-auth`: a harness without usable credentials is shown as needing
   sign-in, with a repair hint, instead of failing after launch. A harness the
   host has not configured can be hidden from the picker.

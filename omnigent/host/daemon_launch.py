@@ -21,7 +21,12 @@ import click
 import httpx
 
 from omnigent.harnesses.claude_native.bridge import url_component
-from omnigent.host.session_env import requested_session_env, session_env_handoff
+from omnigent.host.session_env import (
+    SESSION_ENV_PASSTHROUGH_ENV_VAR,
+    requested_session_env,
+    session_env_handoff,
+    session_env_handoff_pending,
+)
 from omnigent.process_logging import display_log_path, process_log_dir
 
 # Steady-state poll cadence while waiting for a daemon-spawned runner to
@@ -290,16 +295,26 @@ async def launch_or_reuse_daemon_runner(
     # high-latency / reconnecting setups start reliably. Bounded, so a
     # genuinely-offline host still fails reasonably fast.
     _RETRY_DELAYS_S = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.0, 3.0)  # ~16.5s budget
-    async with session_env_handoff(session_id, session_env):
+    with session_env_handoff(session_id, session_env) as handoff_id:
+        launch_body = {"session_id": session_id, "workspace": workspace}
+        if handoff_id is not None:
+            launch_body["session_env_handoff_id"] = handoff_id
         for attempt in range(len(_RETRY_DELAYS_S) + 1):
             if attempt:
                 await asyncio.sleep(_RETRY_DELAYS_S[attempt - 1])
             resp = await client.post(
                 f"/v1/hosts/{url_component(host_id)}/runners",
-                json={"session_id": session_id, "workspace": workspace},
+                json=launch_body,
                 timeout=60.0,
             )
             if resp.status_code < 400:
+                if handoff_id is not None and session_env_handoff_pending(session_id, handoff_id):
+                    click.echo(
+                        f"Warning: the server or host daemon is too old to forward "
+                        f"{SESSION_ENV_PASSTHROUGH_ENV_VAR} variables; the runner "
+                        f"started without them.",
+                        err=True,
+                    )
                 break
             transient = resp.status_code == 409 and "offline" in error_text(resp).lower()
             if not (transient and attempt < len(_RETRY_DELAYS_S)):

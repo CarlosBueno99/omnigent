@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import stat
@@ -22,6 +21,7 @@ from omnigent.host.session_env import (
 )
 
 _POSIX_ONLY = pytest.mark.skipif(IS_WINDOWS, reason="POSIX file ownership and modes")
+_PLANTED_LAUNCH = "planted-launch"
 
 
 @pytest.fixture(autouse=True)
@@ -36,12 +36,8 @@ def _handoff_files(data_dir: Path) -> list[Path]:
     return sorted(directory.iterdir()) if directory.exists() else []
 
 
-def _handoffs(data_dir: Path) -> list[Path]:
-    return [path for path in _handoff_files(data_dir) if path.suffix == ".json"]
-
-
 def _plant_handoff(session_id: str, payload: object, mode: int = 0o600) -> Path:
-    path = _handoff_path(session_id)
+    path = _handoff_path(session_id, _PLANTED_LAUNCH)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
     os.chmod(path, mode)
@@ -70,7 +66,13 @@ def test_requested_session_env_is_empty_without_a_list() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN", "omnigent_data_dir", "RUNNER_SERVER_URL", "BAD-NAME"],
+    [
+        "OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN",
+        "omnigent_data_dir",
+        "RUNNER_SERVER_URL",
+        "Runner_Server_Url",
+        "BAD-NAME",
+    ],
 )
 def test_requested_session_env_rejects_runner_wiring_and_malformed_names(name: str) -> None:
     source = {SESSION_ENV_PASSTHROUGH_ENV_VAR: f"ARCATERM_CAPABILITY,{name}", name: "value-secret"}
@@ -82,22 +84,32 @@ def test_requested_session_env_rejects_runner_wiring_and_malformed_names(name: s
     assert "value-secret" not in excinfo.value.message
 
 
-async def test_daemon_consumes_the_handoff_once(_data_dir: Path) -> None:
+def test_daemon_consumes_only_its_own_launchs_handoff_once(_data_dir: Path) -> None:
     values = {"ARCATERM_CAPABILITY": "capability-for-pane-1"}
 
-    async with session_env_handoff("conv_a", values):
-        assert consume_session_env_handoff("conv_b") == {}
-        assert consume_session_env_handoff("conv_a") == values
-        assert consume_session_env_handoff("conv_a") == {}
-        assert _handoffs(_data_dir) == []
+    with session_env_handoff("conv_a", values) as handoff_id:
+        assert handoff_id
+        assert consume_session_env_handoff("conv_b", handoff_id) == {}
+        assert consume_session_env_handoff("conv_a", "another-launch") == {}
+        assert consume_session_env_handoff("conv_a", None) == {}
+        assert len(_handoff_files(_data_dir)) == 1
+        assert consume_session_env_handoff("conv_a", handoff_id) == values
+        assert consume_session_env_handoff("conv_a", handoff_id) == {}
+        assert _handoff_files(_data_dir) == []
     assert _handoff_files(_data_dir) == []
 
 
+def test_launch_without_values_hands_off_nothing(_data_dir: Path) -> None:
+    with session_env_handoff("conv_a", {}) as handoff_id:
+        assert handoff_id is None
+        assert _handoff_files(_data_dir) == []
+
+
 @_POSIX_ONLY
-async def test_handoff_is_owner_only_and_removed_when_the_launch_fails(_data_dir: Path) -> None:
+def test_handoff_is_owner_only_and_removed_when_the_launch_fails(_data_dir: Path) -> None:
     with pytest.raises(RuntimeError):
-        async with session_env_handoff("conv_a", {"ARCATERM_CAPABILITY": "capability-for-pane-1"}):
-            (path,) = _handoffs(_data_dir)
+        with session_env_handoff("conv_a", {"ARCATERM_CAPABILITY": "capability-for-pane-1"}):
+            (path,) = _handoff_files(_data_dir)
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
             assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
             assert "conv_a" not in path.name
@@ -106,39 +118,39 @@ async def test_handoff_is_owner_only_and_removed_when_the_launch_fails(_data_dir
     assert _handoff_files(_data_dir) == []
 
 
-async def test_launch_without_values_clears_a_handoff_left_by_a_crashed_launch(
+def test_abandoned_handoff_is_left_alone_by_later_launches_until_it_expires(
     _data_dir: Path,
 ) -> None:
-    _plant_handoff("conv_a", {"ARCATERM_CAPABILITY": "crashed-pane"})
+    killed_cli = session_env_handoff("conv_a", {"ARCATERM_CAPABILITY": "killed-pane"})
+    killed_cli.__enter__()
+    (abandoned,) = _handoff_files(_data_dir)
 
-    async with session_env_handoff("conv_a", {}):
-        assert _handoffs(_data_dir) == []
-        assert consume_session_env_handoff("conv_a") == {}
+    assert consume_session_env_handoff("conv_a", None) == {}
+    with session_env_handoff("conv_a", {"ARCATERM_CAPABILITY": "new-pane"}) as handoff_id:
+        assert consume_session_env_handoff("conv_a", handoff_id) == {
+            "ARCATERM_CAPABILITY": "new-pane"
+        }
+    assert _handoff_files(_data_dir) == [abandoned]
+
+    old = time.time() - 3600
+    os.utime(abandoned, (old, old))
+    assert consume_session_env_handoff("conv_a", None) == {}
     assert _handoff_files(_data_dir) == []
 
 
-@_POSIX_ONLY
-async def test_concurrent_launches_of_one_session_each_hand_off_their_own_values(
+def test_overlapping_launches_of_one_session_each_hand_off_their_own_values(
     _data_dir: Path,
 ) -> None:
-    second_entered = asyncio.Event()
-
-    async def second_launch() -> dict[str, str]:
-        async with session_env_handoff("conv_a", {"ARCATERM_CAPABILITY": "second-pane"}):
-            second_entered.set()
-            return consume_session_env_handoff("conv_a")
-
-    async with session_env_handoff("conv_a", {"ARCATERM_CAPABILITY": "first-pane"}):
-        second = asyncio.create_task(second_launch())
-        await asyncio.sleep(0.3)
-        assert not second_entered.is_set()
-        async with session_env_handoff("conv_b", {"ARCATERM_CAPABILITY": "other-session"}):
-            assert consume_session_env_handoff("conv_b") == {
-                "ARCATERM_CAPABILITY": "other-session"
-            }
-        assert consume_session_env_handoff("conv_a") == {"ARCATERM_CAPABILITY": "first-pane"}
-
-    assert await asyncio.wait_for(second, timeout=5) == {"ARCATERM_CAPABILITY": "second-pane"}
+    with (
+        session_env_handoff("conv_a", {"ARCATERM_CAPABILITY": "first-pane"}) as first,
+        session_env_handoff("conv_a", {"ARCATERM_CAPABILITY": "second-pane"}) as second,
+    ):
+        assert consume_session_env_handoff("conv_a", second) == {
+            "ARCATERM_CAPABILITY": "second-pane"
+        }
+        assert consume_session_env_handoff("conv_a", first) == {
+            "ARCATERM_CAPABILITY": "first-pane"
+        }
     assert _handoff_files(_data_dir) == []
 
 
@@ -148,7 +160,7 @@ def test_consume_ignores_and_removes_a_handoff_other_users_can_read(
 ) -> None:
     _plant_handoff("conv_a", {"ARCATERM_CAPABILITY": "leaked"}, mode=0o644)
 
-    assert consume_session_env_handoff("conv_a") == {}
+    assert consume_session_env_handoff("conv_a", _PLANTED_LAUNCH) == {}
     assert _handoff_files(_data_dir) == []
     assert "readable by other users" in caplog.text
     assert "leaked" not in caplog.text
@@ -162,7 +174,7 @@ def test_consume_ignores_and_removes_a_handoff_owned_by_another_user(
     daemon_uid = os.getuid() + 1
     monkeypatch.setattr(os, "getuid", lambda: daemon_uid)
 
-    assert consume_session_env_handoff("conv_a") == {}
+    assert consume_session_env_handoff("conv_a", _PLANTED_LAUNCH) == {}
     assert _handoff_files(_data_dir) == []
     assert "owned by another user" in caplog.text
 
@@ -176,7 +188,7 @@ def test_consume_ignores_a_symlinked_handoff(_data_dir: Path, tmp_path: Path) ->
     path.unlink()
     path.symlink_to(target)
 
-    assert consume_session_env_handoff("conv_a") == {}
+    assert consume_session_env_handoff("conv_a", _PLANTED_LAUNCH) == {}
     assert _handoff_files(_data_dir) == []
     assert target.exists()
 
@@ -186,7 +198,7 @@ def test_consume_ignores_a_handoff_left_by_an_earlier_cli(_data_dir: Path) -> No
     old = time.time() - 3600
     os.utime(path, (old, old))
 
-    assert consume_session_env_handoff("conv_a") == {}
+    assert consume_session_env_handoff("conv_a", _PLANTED_LAUNCH) == {}
     assert _handoff_files(_data_dir) == []
 
 
@@ -199,7 +211,7 @@ def test_any_daemon_launch_removes_expired_handoffs_of_other_sessions(_data_dir:
         os.utime(path, (old, old))
     waiting = _plant_handoff("conv_c", {"ARCATERM_CAPABILITY": "launching-pane"})
 
-    assert consume_session_env_handoff("conv_a") == {}
+    assert consume_session_env_handoff("conv_a", _PLANTED_LAUNCH) == {}
 
     assert _handoff_files(_data_dir) == [waiting]
 
@@ -215,7 +227,7 @@ def test_consume_keeps_only_forwardable_string_values(_data_dir: Path) -> None:
         },
     )
 
-    assert consume_session_env_handoff("conv_a") == {
+    assert consume_session_env_handoff("conv_a", _PLANTED_LAUNCH) == {
         "ARCATERM_CAPABILITY": "capability-for-pane-1"
     }
 
@@ -224,5 +236,5 @@ def test_consume_ignores_a_malformed_handoff(_data_dir: Path) -> None:
     path = _plant_handoff("conv_a", {})
     path.write_text("{not json", encoding="utf-8")
 
-    assert consume_session_env_handoff("conv_a") == {}
+    assert consume_session_env_handoff("conv_a", _PLANTED_LAUNCH) == {}
     assert _handoff_files(_data_dir) == []

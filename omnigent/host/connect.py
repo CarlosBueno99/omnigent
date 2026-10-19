@@ -1949,7 +1949,9 @@ class HostProcess:
             initialize=False,
         )
         session_env = (
-            await asyncio.to_thread(consume_session_env_handoff, frame.session_id)
+            await asyncio.to_thread(
+                consume_session_env_handoff, frame.session_id, frame.session_env_handoff_id
+            )
             if frame.session_id
             else {}
         )

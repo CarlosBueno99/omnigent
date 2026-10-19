@@ -4,24 +4,25 @@ The host daemon is shared by every session on the machine, so its own
 environment cannot carry values that belong to one terminal, such as a
 terminal multiplexer's pane socket or a short-lived capability token. A
 launching CLI names those variables in :data:`SESSION_ENV_PASSTHROUGH_ENV_VAR`;
-their values travel to the local daemon through an owner-only file that the
-daemon removes as soon as it launches that session's runner. They never go
-through the server, the session database, or the host's own environment.
+their values travel to the local daemon through an owner-only file that only
+the launch request naming its handoff ID consumes. The server relays that
+opaque ID, never the values, which stay out of the session database and the
+host's own environment.
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import stat
 import tempfile
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import click
@@ -40,7 +41,6 @@ _RESERVED_EXACT = frozenset({"RUNNER_SERVER_URL"})
 _RESERVED_PREFIX = "OMNIGENT"
 # A launch reaches the daemon within seconds; an older file outlived its CLI.
 _HANDOFF_MAX_AGE_S = 300.0
-_LAUNCH_LOCK_POLL_S = 0.05
 
 
 def _handoff_dir() -> Path:
@@ -49,8 +49,9 @@ def _handoff_dir() -> Path:
     return data_dir() / "session-env"
 
 
-def _handoff_path(session_id: str) -> Path:
-    return _handoff_dir() / f"{hashlib.sha256(session_id.encode()).hexdigest()}.json"
+def _handoff_path(session_id: str, handoff_id: str) -> Path:
+    key = hashlib.sha256(f"{session_id}\0{handoff_id}".encode()).hexdigest()
+    return _handoff_dir() / f"{key}.json"
 
 
 def is_forwardable_name(name: str) -> bool:
@@ -62,7 +63,7 @@ def is_forwardable_name(name: str) -> bool:
     return (
         _NAME_PATTERN.fullmatch(name) is not None
         and not name.upper().startswith(_RESERVED_PREFIX)
-        and name not in _RESERVED_EXACT
+        and name.upper() not in _RESERVED_EXACT
     )
 
 
@@ -93,46 +94,43 @@ def requested_session_env(source: Mapping[str, str] | None = None) -> dict[str, 
     return {name: env[name] for name in names if name in env}
 
 
-@contextlib.asynccontextmanager
-async def session_env_handoff(session_id: str, values: Mapping[str, str]) -> AsyncIterator[None]:
-    """Hold this CLI's launch of *session_id* and offer *values* to its daemon.
+@contextlib.contextmanager
+def session_env_handoff(session_id: str, values: Mapping[str, str]) -> Iterator[str | None]:
+    """Offer *values* to the daemon's launch of *session_id* for this request.
 
-    Concurrent launches of one session take turns on a per-session lock, so
-    each launch's file is the one the daemon consumes for it; this needs
-    ``fcntl`` and is skipped on Windows. The file exists only while the body
-    runs; the daemon consumes it when it launches the runner, and this
-    removes it if the launch never happened.
+    The file is keyed by the session and a fresh, non-secret handoff ID that
+    the launch request carries to the daemon, so only that launch's runner can
+    consume it. The file exists only while the body runs.
 
     :param session_id: Session whose runner should receive *values*.
-    :param values: Forwarded variables from :func:`requested_session_env`;
-        empty still clears any file a crashed launch left behind.
+    :param values: Forwarded variables from :func:`requested_session_env`.
+    :returns: The handoff ID to send with the launch request, or ``None`` when
+        there is nothing to forward.
     """
-    directory = _handoff_dir()
-    path = _handoff_path(session_id)
-    lock_path = path.with_suffix(".lock")
-    lock_fd: int | None = None
-    usable = True
-    try:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        lock_fd = await _acquire_launch_lock(lock_path)
-    except OSError:
-        if values:
-            raise
-        _logger.debug("Launching without the session env lock", exc_info=True)
-        usable = False
-    if not usable:
-        yield
+    if not values:
+        yield None
         return
+    directory = _handoff_dir()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _remove_expired_handoffs(directory)
+    handoff_id = secrets.token_urlsafe(16)
+    path = _handoff_path(session_id, handoff_id)
     try:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(path)
-        if values:
-            _write_handoff(directory, path, values)
-        yield
+        _write_handoff(directory, path, values)
+        yield handoff_id
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)
-        _release_launch_lock(lock_path, lock_fd)
+
+
+def session_env_handoff_pending(session_id: str, handoff_id: str) -> bool:
+    """Return whether the daemon has not consumed this launch's handoff.
+
+    :param session_id: Session the handoff was written for.
+    :param handoff_id: ID yielded by :func:`session_env_handoff`.
+    :returns: ``True`` while the file is still waiting.
+    """
+    return os.path.lexists(_handoff_path(session_id, handoff_id))
 
 
 def _write_handoff(directory: Path, path: Path, values: Mapping[str, str]) -> None:
@@ -146,46 +144,19 @@ def _write_handoff(directory: Path, path: Path, values: Mapping[str, str]) -> No
             os.unlink(temp_name)
 
 
-async def _acquire_launch_lock(path: Path) -> int | None:
-    try:
-        import fcntl
-    except ImportError:
-        return None
-    while True:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(fd)
-            await asyncio.sleep(_LAUNCH_LOCK_POLL_S)
-            continue
-        except BaseException:
-            os.close(fd)
-            raise
-        # The previous holder unlinks the lock file on release; retry on a new one.
-        with contextlib.suppress(FileNotFoundError):
-            if os.path.samestat(os.fstat(fd), os.stat(path)):
-                return fd
-        os.close(fd)
-
-
-def _release_launch_lock(path: Path, fd: int | None) -> None:
-    if fd is None:
-        return
-    with contextlib.suppress(FileNotFoundError):
-        os.unlink(path)
-    os.close(fd)
-
-
-def consume_session_env_handoff(session_id: str) -> dict[str, str]:
-    """Read and remove the forwarded variables waiting for *session_id*.
+def consume_session_env_handoff(session_id: str, handoff_id: str | None) -> dict[str, str]:
+    """Read and remove the forwarded variables waiting for one launch.
 
     :param session_id: Session the daemon is launching a runner for.
+    :param handoff_id: Handoff ID the launch request carried, or ``None`` for
+        a launch no CLI handed values to, such as a server-driven restart.
     :returns: Forwarded variables, or ``{}`` when none are waiting or the file
         is not a fresh, owner-only regular file.
     """
-    path = _handoff_path(session_id)
-    _remove_expired_handoffs(path.parent)
+    _remove_expired_handoffs(_handoff_dir())
+    if not handoff_id:
+        return {}
+    path = _handoff_path(session_id, handoff_id)
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
@@ -240,8 +211,6 @@ def _remove_expired_handoffs(directory: Path) -> None:
         _logger.warning("Cannot scan session env handoffs in %s: %s", directory, exc)
         return
     for entry in entries:
-        if entry.name.endswith(".lock"):
-            continue
         with contextlib.suppress(OSError):
             if entry.stat(follow_symlinks=False).st_mtime < cutoff:
                 os.unlink(entry.path)

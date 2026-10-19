@@ -282,6 +282,9 @@ class HostLaunchRunnerFrame:
         :data:`HARNESS_NOT_CONFIGURED_ERROR_CODE` when not.
         ``None`` (older server, or no resolvable harness) skips
         the check — fail open.
+    :param session_env_handoff_id: Opaque ID of the launching CLI's local
+        forwarded-environment handoff, e.g. ``"3qA0x_7Kp2..."``. ``None`` when
+        no CLI handed values to this launch, as for a server-driven restart.
     """
 
     request_id: str
@@ -290,6 +293,7 @@ class HostLaunchRunnerFrame:
     session_id: str | None = None
     harness: str | None = None
     inference_config: dict[str, Any] | None = None
+    session_env_handoff_id: str | None = None
 
 
 @dataclass
@@ -1401,6 +1405,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "session_id": frame.session_id,
                 "harness": frame.harness,
                 "inference_config": frame.inference_config,
+                "session_env_handoff_id": frame.session_env_handoff_id,
             }
         )
     if isinstance(frame, HostLaunchRunnerResultFrame):
@@ -2295,6 +2300,7 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
         session_id=_optional_nullable_str(msg, "session_id"),
         harness=_optional_nullable_str(msg, "harness"),
         inference_config=inference_config,
+        session_env_handoff_id=_optional_nullable_str(msg, "session_env_handoff_id"),
     )
 
 
