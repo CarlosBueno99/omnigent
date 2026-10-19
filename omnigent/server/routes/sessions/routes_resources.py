@@ -1255,10 +1255,13 @@ def register_resources_routes(
     async def _caller_owns_session(session_id: str, request: Request) -> bool:
         """Return whether the requester holds owner-level access.
 
-        The direct-attach token bypasses live server policy, so only owners
-        receive it. Edit collaborators use the revocable server relay even
-        when shell access is enabled for them. Disabled permissions preserve
-        single-user behavior.
+        Non-raising variant of the owner gate used for optional
+        enrichment: an interactive (write) attach requires owner level
+        (see ``terminal_attach._authorize_terminal_attach``), so the
+        direct-attach token — which grants write attach without a
+        server-side check — may only be disclosed to owners. Mirrors
+        the relay's permissions-disabled behavior: no permission store
+        means single-user mode, where the caller is the owner.
 
         :param session_id: Session/conversation identifier.
         :param request: The incoming request carrying auth context.
@@ -2909,8 +2912,11 @@ def register_resources_routes(
         """
         Execute a shell command in an environment.
 
-        The server's shell policy requires owner access by default; admins
-        can also allow collaborators with edit access to run commands.
+        Owner-only. A command has no path to inspect, so unlike the
+        filesystem proxy there is no workspace-relative form that could
+        be opened to collaborators: any command reaches the owner's own
+        machine, the same boundary ``_browse_level`` closes for absolute
+        paths, and it passes no policy or approval gate on the way.
 
         :param session_id: Session/conversation identifier.
         :param environment_id: Environment resource id.
@@ -2926,7 +2932,7 @@ def register_resources_routes(
             path,
             body,
             request=request,
-            required_level=shell_write_level(request),
+            required_level=LEVEL_OWNER,
             environment_id=environment_id,
             publish_invalidation=False,
         )

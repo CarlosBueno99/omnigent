@@ -192,7 +192,7 @@ class ServerInfoResponse(BaseModel):
     sharing_mode: Literal["on", "read_only", "restricted_read_only", "off"]
     public_sharing_enabled: bool
     public_sharing_max_level: Literal["read", "edit"] = "read"
-    shell_owner_only: bool = True
+    shell_owner_only: bool = False
     server_version: str
     smart_routing_enabled: bool
     smart_routing_sources: SmartRoutingSourcesInfo
@@ -1489,11 +1489,11 @@ def create_app(
     :param server_config: Resolved non-secret server settings. The optional
         ``session_title_instructions`` string augments the isolated automatic
         title prompt. ``None`` loads the standard server config.
-    :param shell_owner_only: Require owner access to start shells, send shell
-        commands and type into terminals (default true). ``None`` reads
+    :param shell_owner_only: Require owner access to start shells and send
+        shell commands through chat or MCP (default false). ``None`` reads
         ``OMNIGENT_SHELL_OWNER_ONLY`` with an admin-editable file override;
-        a static bool or callable is deployment-managed. Disabling permits
-        editors; viewers remain read-only.
+        a static bool or callable is deployment-managed. Interactive terminal
+        attaches and environment shell execution always require owner access.
     :param base_path: Public URL prefix the server is served under by a
         reverse proxy, e.g. ``"/proxy/6767"`` (code-server port proxy).
         ``None`` reads ``OMNIGENT_WEB_BASE_PATH``; empty/``"/"`` is a normal

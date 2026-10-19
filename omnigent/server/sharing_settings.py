@@ -15,7 +15,7 @@ redeploy:
 - which *new* sessions start public: ``OMNIGENT_DEFAULT_PUBLIC_SESSIONS`` →
   ``<data_dir>/default_public_sessions`` (``off`` / ``sandbox`` / ``all``);
 - owner-only shell access: ``OMNIGENT_SHELL_OWNER_ONLY`` →
-  ``<data_dir>/shell_owner_only`` (``on`` / ``off``, default on).
+  ``<data_dir>/shell_owner_only`` (``on`` / ``off``, default off).
 
 A missing, empty, or unreadable file means "no override recorded", so the caller
 falls back to the env-var default; an unrecognized value is likewise ignored
@@ -250,8 +250,9 @@ def write_public_sharing_override(enabled: bool) -> None:
 
 
 def shell_owner_only_env_default() -> bool:
-    """Only an explicit falsy value permits editors to use shells."""
-    return os.environ.get("OMNIGENT_SHELL_OWNER_ONLY", "").strip().lower() not in _PUBLIC_FALSY
+    """Preserve editor shell access unless a non-falsy policy is configured."""
+    raw = os.environ.get("OMNIGENT_SHELL_OWNER_ONLY", "").strip().lower()
+    return bool(raw) and raw not in _PUBLIC_FALSY
 
 
 def read_shell_owner_only_override() -> bool | None:

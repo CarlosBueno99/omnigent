@@ -427,9 +427,7 @@ async def test_attach_terminal_allows_owner_for_interactive_proxy() -> None:
     assert b"whoami\n" in conn.received
 
 
-async def test_attach_terminal_edit_grant_denied_write_allowed_read_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_attach_terminal_edit_grant_denied_write_allowed_read_only() -> None:
     """A non-owner edit collaborator cannot type but may observe.
 
     A terminal is a single shared PTY whose keystrokes carry no
@@ -480,37 +478,14 @@ async def test_attach_terminal_edit_grant_denied_write_allowed_read_only(
         "/v1/sessions/conv_alice/resources/terminals/terminal_bash_s1/attach?read_only=true"
     ]
 
-    app.state.shell_owner_only = False
-    editable_conn = _FakeRunnerWSConn(wait_close_after=2)
-    original_send = editable_conn.send
 
-    async def restrict_after_first_input(data: bytes | str) -> None:
-        await original_send(data)
-        app.state.shell_owner_only = True
-
-    monkeypatch.setattr(editable_conn, "send", restrict_after_first_input)
-    set_runner_ws_factory(_FakeRunnerWSFactory(editable_conn))
-    with TestClient(app).websocket_connect(
-        "/v1/sessions/conv_alice/resources/terminals/terminal_bash_s1/attach",
-        headers={"X-Forwarded-Email": "bob@example.com"},
-    ) as ws:
-        ws.send_bytes(b"allowed before restriction\n")
-        ws.send_bytes(b"blocked after restriction\n")
-        with pytest.raises(WebSocketDisconnect) as exc_info:
-            ws.receive_bytes()
-    assert exc_info.value.code == 1008
-    assert editable_conn.received == [b"allowed before restriction\n"]
-
-
-@pytest.mark.parametrize("owner_only", [True, False])
-async def test_attach_terminal_read_grant_only_allows_read_only_proxy(owner_only: bool) -> None:
+async def test_attach_terminal_read_grant_only_allows_read_only_proxy() -> None:
     """Read-level users may observe read-only terminals but cannot type."""
     conv_store = _StubConversationStore()
     conv_store.add("conv_alice")
     perm_store = _StubPermissionStore()
     perm_store.add_grant("viewer@example.com", "conv_alice", LEVEL_READ)
     app = FastAPI()
-    app.state.shell_owner_only = owner_only
     app.include_router(
         create_terminal_attach_router(
             auth_provider=UnifiedAuthProvider(source="header"),
@@ -709,10 +684,8 @@ async def test_attach_terminal_local_fallback_uses_control_mode(
         socket_path: str,
         tmux_target: str,
         read_only: bool,
-        authorize_input: object,
     ) -> None:
         del websocket
-        assert callable(authorize_input)
         calls.append((socket_path, tmux_target, read_only))
 
     monkeypatch.setattr(

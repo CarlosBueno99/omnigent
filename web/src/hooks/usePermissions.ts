@@ -90,7 +90,7 @@ export function useCanEdit(conversationId: string): boolean {
 export function useCanUseShell(permissionLevel: number | null): boolean {
   const owner = isOwnerLevel(permissionLevel);
   const editor = isEditorLevel(permissionLevel);
-  const { data: ownerOnly = true } = useShellOwnerOnly(!owner && editor);
+  const { data: ownerOnly = false } = useShellOwnerOnly(!owner && editor);
   return owner || (editor && !ownerOnly);
 }
 

@@ -38,12 +38,12 @@ import { COMPOSER_SEND_SHORTCUT_STORAGE_KEY } from "@/lib/composerSendShortcutPr
 import { composerContextToLabels } from "@/lib/composerContextAdapters";
 import { CHAT_COLUMN_WIDTH } from "./chatLayout";
 
-const shellPolicy = vi.hoisted(() => ({ ownerOnly: true }));
+const shellPolicy = vi.hoisted(() => ({ ownerOnly: false }));
 vi.mock("@/hooks/useSharing", () => ({
   useShellOwnerOnly: () => ({ data: shellPolicy.ownerOnly }),
 }));
 afterEach(() => {
-  shellPolicy.ownerOnly = true;
+  shellPolicy.ownerOnly = false;
 });
 
 // Composer reads workspace files via a TanStack query hook (for "@"-file
@@ -288,6 +288,7 @@ describe("Composer shell access", () => {
   });
 
   it("keeps an editor's native shell command draft while allowing ordinary chat", () => {
+    shellPolicy.ownerOnly = true;
     const props = composerProps({ permissionLevel: 2, isNativeWrapper: true });
     render(<Composer {...props} />);
     fireEvent.change(textarea(), { target: { value: "!pwd" } });

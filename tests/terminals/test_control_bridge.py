@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import WebSocketDisconnect
@@ -1026,26 +1025,19 @@ async def test_native_pbcopy_uses_consent_transport_not_host_clipboard(
 
 @pytest.mark.skipif(not _HAS_TMUX, reason="tmux not installed")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("read_only", [True, False])
-async def test_control_bridge_read_only_drops_input(read_only: bool) -> None:
-    """Read-only and revoked write access cannot inject bytes into the pane."""
+async def test_control_bridge_read_only_drops_input() -> None:
+    """read_only=True must not inject typed bytes into the pane."""
     sock, target = await _new_private_tmux("cat")
     await asyncio.sleep(0.2)
 
     ws = _FakeWebSocket(inbound=[{"type": "websocket.receive", "bytes": b"should-not-appear\r"}])
-    authorize_input = AsyncMock(return_value=False)
     task = asyncio.create_task(
         bridge_tmux_control_to_websocket(
-            ws,
-            socket_path=str(sock),
-            tmux_target=target,
-            read_only=read_only,
-            authorize_input=authorize_input,
+            ws, socket_path=str(sock), tmux_target=target, read_only=True
         )
     )
     await asyncio.sleep(0.8)
     assert b"should-not-appear" not in b"".join(ws.sent)
-    assert authorize_input.await_count == (0 if read_only else 1)
 
     tmux = shutil.which("tmux")
     assert tmux

@@ -38,7 +38,7 @@ import {
   readDefaultWorkspaceTab,
   readPinnedWorkspaceTabs,
 } from "@/lib/workspaceTabPreferences";
-import { isEditorLevel } from "@/lib/permissionsApi";
+import { isEditorLevel, isOwnerLevel } from "@/lib/permissionsApi";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -1626,7 +1626,7 @@ function WorkspacePanelImpl({
             <RailTerminalView
               conversationId={conversationId}
               terminalKey={selectedTerminalKey}
-              readOnly={!canUseShell}
+              readOnly={!isOwnerLevel(permissionLevel)}
               autoFocus={autoFocusSelectedTerminal}
             />
           ) : selectedFilePath !== null ? (

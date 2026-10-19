@@ -68,6 +68,7 @@ async def test_gateway_checks_session_permissions_before_backend(
 @pytest.mark.parametrize(
     "owner_only,caller,proof,expected",
     [
+        (None, "bob@example.test", "", 200),
         (True, "bob@example.test", "", 403),
         (False, "bob@example.test", "", 200),
         (True, "alice@example.test", "", 200),
@@ -93,7 +94,10 @@ async def test_direct_mcp_shell_calls_follow_shell_policy(
     get_conversation_store().set_runner_id(
         session_id, token_bound_runner_id("shell-runner-binding")
     )
-    auth_app.state.shell_owner_only = lambda: owner_only
+    if owner_only is None:
+        del auth_app.state.shell_owner_only
+    else:
+        auth_app.state.shell_owner_only = lambda: owner_only
     auth_app.state.runner_tunnel_tokens = frozenset({"allowlisted-runner-token"})
     execute = AsyncMock(return_value=JSONResponse({"result": {"content": []}}))
     monkeypatch.setattr(routes_agent, "_handle_mcp_tools_call", execute)

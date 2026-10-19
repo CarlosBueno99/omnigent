@@ -146,7 +146,7 @@ describe("useCanUseShell", () => {
     [4, true, true],
     [4, false, true],
     [null, true, true],
-    [2, undefined, false],
+    [2, undefined, true],
   ])("level %s with owner-only %s permits shell access %s", (level, ownerOnly, expected) => {
     vi.mocked(useShellOwnerOnly).mockReturnValue({ data: ownerOnly } as ReturnType<
       typeof useShellOwnerOnly

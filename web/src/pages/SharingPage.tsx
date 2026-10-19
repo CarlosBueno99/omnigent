@@ -147,7 +147,7 @@ export function SharingPage() {
   const publicMaxEditable = state?.public_sharing_max_level_editable ?? false;
   const defaultPublic = state?.default_public_sessions ?? "off";
   const defaultPublicEditable = state?.default_public_sessions_editable ?? false;
-  const shellOwnerOnly = state?.shell_owner_only ?? true;
+  const shellOwnerOnly = state?.shell_owner_only ?? false;
   const shellOwnerOnlyEditable = state?.shell_owner_only_editable ?? false;
   // Settings a higher-level one overrides are greyed out and show their
   // effective value; the saved value returns once the blocker is lifted.
@@ -254,8 +254,9 @@ export function SharingPage() {
                     className="flex-1"
                     description={
                       <>
-                        Only session owners can start shells, send shell commands, or type in
-                        terminals. Turn off to also allow editors. Viewers always remain read-only.
+                        When enabled, only session owners can start shells or send shell commands.
+                        When off, existing permissions apply. Terminal input always requires session
+                        ownership.
                         {!shellOwnerOnlyEditable && (
                           <span className="mt-1 block">
                             Managed by this deployment and can&apos;t be changed here.

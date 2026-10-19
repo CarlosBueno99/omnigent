@@ -22,7 +22,7 @@ export interface SharingState {
   /** False when the deployment manages this default itself (not file-backed). */
   default_public_sessions_editable: boolean;
   default_public_sessions_options: DefaultPublicSessions[];
-  /** Whether shell commands and terminal input require session ownership. */
+  /** Whether starting shells and sending shell commands require session ownership. */
   shell_owner_only?: boolean;
   /** False when the deployment manages shell access itself (not file-backed). */
   shell_owner_only_editable?: boolean;
@@ -53,11 +53,11 @@ export function useShellOwnerOnly(enabled: boolean) {
     queryFn: async (): Promise<boolean> => {
       try {
         const response = await authenticatedFetch("/v1/info");
-        if (!response.ok) return true;
+        if (!response.ok) return false;
         const info = await response.json();
-        return info.shell_owner_only !== false;
+        return info.shell_owner_only === true;
       } catch {
-        return true;
+        return false;
       }
     },
   });
@@ -115,7 +115,7 @@ export function useSetSharing() {
       // Reflect the new value immediately, then revalidate.
       queryClient.setQueryData(QUERY_KEY, data);
       queryClient.setQueryData(PUBLIC_MAX_LEVEL_QUERY_KEY, data.public_sharing_max_level ?? "read");
-      queryClient.setQueryData(SHELL_OWNER_ONLY_QUERY_KEY, data.shell_owner_only !== false);
+      queryClient.setQueryData(SHELL_OWNER_ONLY_QUERY_KEY, data.shell_owner_only === true);
       void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
     },
   });

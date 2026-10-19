@@ -60,19 +60,19 @@ describe("public sharing ceiling", () => {
 });
 
 describe("shell owner-only policy", () => {
-  it.each([undefined, null, "off", 0, true])(
-    "requires ownership for an absent or invalid %s capability",
+  it.each([undefined, null, "off", 0, false])(
+    "defaults off for an absent or invalid %s capability",
     async (value) => {
       fetchMock.mockResolvedValue(new Response(JSON.stringify({ shell_owner_only: value })));
       const { result } = renderHook(() => useShellOwnerOnly(true), { wrapper: wrapper() });
-      await waitFor(() => expect(result.current.data).toBe(true));
+      await waitFor(() => expect(result.current.data).toBe(false));
     },
   );
 
-  it("fails closed on a network error", async () => {
+  it("retains existing permissions on a network error", async () => {
     fetchMock.mockRejectedValue(new Error("offline"));
     const { result } = renderHook(() => useShellOwnerOnly(true), { wrapper: wrapper() });
-    await waitFor(() => expect(result.current.data).toBe(true));
+    await waitFor(() => expect(result.current.data).toBe(false));
   });
 
   it("updates shell access immediately after an admin change and on refresh", async () => {

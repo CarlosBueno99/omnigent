@@ -52,9 +52,18 @@ silently at the server *and* the runner. The tmux control-mode client is not
 attached with ``-r``: tmux >= 3.7 would then reject the harness's own
 ``send-keys`` whenever the viewer is the most recently active client.
 
-Interactive attaches require owner access by default. Administrators can
-allow edit collaborators through the server's shell policy. Terminal bytes
-still run as the session owner and carry no per-user attribution.
+Write attach is owner-only
+--------------------------
+
+A terminal is a single shared PTY driving one process that runs as the
+session owner. Raw keystroke bytes carry no per-user identity, so input
+typed by anyone other than the owner would be acted on — and, for the
+agent's TUI, persisted into conversation history — as if the owner typed
+it. To keep that attribution honest, an *interactive* (write) attach
+requires ``LEVEL_OWNER``; non-owners can only attach read-only and drive
+the agent through the chat composer, which carries the real sender's
+identity. This holds uniformly for the agent's own terminal and for
+user-launched shells, since both attach through this route.
 """
 
 from __future__ import annotations
@@ -62,7 +71,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
 from typing import Final
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, WebSocketException
@@ -75,8 +83,8 @@ from omnigent.runtime import (
     get_terminal_registry,
 )
 from omnigent.server._runner_ws_tunnel import WrongReplicaWSError
-from omnigent.server.auth import LEVEL_READ, AuthProvider
-from omnigent.server.routes._auth_helpers import require_access, shell_write_level
+from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, AuthProvider
+from omnigent.server.routes._auth_helpers import require_access
 from omnigent.stores import ConversationStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.terminals.control_bridge import bridge_tmux_control_to_websocket
@@ -113,7 +121,8 @@ def create_terminal_attach_router(
         attach behaves as before for single-user/local deployments.
     :param permission_store: Optional session permission store. When
         provided, a read-only attach requires read access and an
-        interactive attach follows the server's shell policy.
+        interactive (write) attach requires owner access — only the
+        session owner may type into the shared PTY.
     :param conversation_store: Conversation store used by permission checks.
     :returns: An :class:`APIRouter` carrying the attach route.
     """
@@ -143,7 +152,7 @@ def create_terminal_attach_router(
             resolve_terminal_entry_by_resource_id,
         )
 
-        authorized_level = await _authorize_terminal_attach(
+        await _authorize_terminal_attach(
             websocket,
             session_id=session_id,
             read_only=read_only,
@@ -151,24 +160,6 @@ def create_terminal_attach_router(
             permission_store=permission_store,
             conversation_store=conversation_store,
         )
-
-        async def authorize_input() -> bool:
-            nonlocal authorized_level
-            if not read_only and authorized_level < shell_write_level(websocket):
-                try:
-                    authorized_level = await _authorize_terminal_attach(
-                        websocket,
-                        session_id=session_id,
-                        read_only=False,
-                        auth_provider=auth_provider,
-                        permission_store=permission_store,
-                        conversation_store=conversation_store,
-                    )
-                except WebSocketException as exc:
-                    await websocket.close(code=exc.code, reason=exc.reason)
-                    return False
-            return True
-
         await websocket.accept()
         _logger.info(
             "terminal attach connected for session %s terminal %s",
@@ -223,9 +214,7 @@ def create_terminal_attach_router(
                     },
                 ):
                     async with runner_cm as runner_ws:
-                        await _shuttle_ws_frames(
-                            websocket, runner_ws, authorize_input=authorize_input
-                        )
+                        await _shuttle_ws_frames(websocket, runner_ws)
             except _RunnerWSClosed as closed:
                 code = (
                     closed.code
@@ -282,7 +271,6 @@ def create_terminal_attach_router(
                 socket_path=str(entry.instance.socket_path),
                 tmux_target=entry.instance.tmux_target,
                 read_only=read_only,
-                authorize_input=authorize_input,
             )
 
     return router
@@ -296,20 +284,28 @@ async def _authorize_terminal_attach(
     auth_provider: AuthProvider | None,
     permission_store: PermissionStore | None,
     conversation_store: ConversationStore | None,
-) -> int:
+) -> None:
     """
     Authorize a terminal-attach WebSocket before accepting it.
 
-    Read-only attaches require read access. Interactive attaches follow the
-    live server shell policy. Disabled permissions preserve single-user/dev
-    behavior.
+    Interactive attaches write bytes to the shared PTY, which runs as the
+    session owner and (for the agent's TUI) persists input into history
+    under the owner's identity. Raw keystrokes carry no per-user
+    attribution, so an interactive attach requires ``LEVEL_OWNER`` — only
+    the owner can drive the terminal. Read-only attaches still expose
+    terminal output, so read access is the minimum; non-owners attach
+    read-only and send input through the chat composer (which carries the
+    real sender's identity). When permissions are disabled
+    (``permission_store is None``), preserve the existing
+    single-user/dev behavior.
 
     :param websocket: The incoming FastAPI :class:`WebSocket`, used to
         resolve the caller's identity via *auth_provider*.
     :param session_id: Session/conversation identifier the attach
         targets, e.g. ``"conv_abc123"``.
     :param read_only: ``True`` for a view-only attach (requires
-        ``LEVEL_READ``); ``False`` follows the server shell policy.
+        ``LEVEL_READ``); ``False`` for an interactive write attach
+        (requires ``LEVEL_OWNER``).
     :param auth_provider: Provider used to resolve the caller's user id
         from the WebSocket handshake. Required when *permission_store*
         is set.
@@ -317,14 +313,12 @@ async def _authorize_terminal_attach(
         all checks (single-user/dev mode).
     :param conversation_store: Conversation store consulted by the
         access check. Required when *permission_store* is set.
-    :returns: The permission level authorized for this connection.
     :raises WebSocketException: With ``WS_1008_POLICY_VIOLATION`` when
         auth is misconfigured, the caller is unauthenticated, or the
         caller lacks the required level for the requested mode.
     """
-    required_level = LEVEL_READ if read_only else shell_write_level(websocket)
     if permission_store is None:
-        return required_level
+        return
     if auth_provider is None or conversation_store is None:
         raise WebSocketException(
             code=status.WS_1008_POLICY_VIOLATION,
@@ -338,6 +332,7 @@ async def _authorize_terminal_attach(
             reason="authentication required",
         )
 
+    required_level = LEVEL_READ if read_only else LEVEL_OWNER
     try:
         await require_access(
             user_id,
@@ -360,7 +355,6 @@ async def _authorize_terminal_attach(
             code=status.WS_1008_POLICY_VIOLATION,
             reason="not authorized",
         ) from exc
-    return required_level
 
 
 class _RunnerWSClosed(Exception):
@@ -372,12 +366,7 @@ class _RunnerWSClosed(Exception):
         self.reason = reason
 
 
-async def _shuttle_ws_frames(
-    browser_ws: WebSocket,
-    runner_ws: object,
-    *,
-    authorize_input: Callable[[], Awaitable[bool]] | None = None,
-) -> None:
+async def _shuttle_ws_frames(browser_ws: WebSocket, runner_ws: object) -> None:
     """
     Forward frames between *browser_ws* (FastAPI) and *runner_ws*
     (websockets client connection) until either side closes.
@@ -411,8 +400,6 @@ async def _shuttle_ws_frames(
                 if text is not None:
                     await runner_ws.send(text)  # type: ignore[attr-defined]
                 elif data is not None:
-                    if authorize_input is not None and not await authorize_input():
-                        return
                     await runner_ws.send(data)  # type: ignore[attr-defined]
         except WebSocketDisconnect:
             return

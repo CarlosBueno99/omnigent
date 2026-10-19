@@ -1667,7 +1667,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
   // Hidden overlays retain layout so FitAddon geometry stays stable; the chat
   // surface unmounts while Terminal is shown.
   const mountTerminal = shouldMountTerminalSurface(conversationId, terminalFirst);
-  const terminalReadOnly = !useCanUseShell(permissionLevel);
+  const terminalReadOnly = !isOwnerLevel(permissionLevel);
   const [warmTerminals, setWarmTerminals] = useState<WarmTerminalEntry[]>([]);
   useEffect(() => {
     if (!mountTerminal || !conversationId) return;

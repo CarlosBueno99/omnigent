@@ -352,15 +352,15 @@ async def test_shell_policy_is_admin_only_live_and_persisted(db_uri: str, tmp_pa
             ).status_code == status
     async with _client(app, _ADMIN) as admin:
         initial = (await admin.get("/v1/sharing")).json()
-        assert initial["shell_owner_only"] is True
+        assert initial["shell_owner_only"] is False
         assert initial["shell_owner_only_editable"] is True
-        for enabled in (False, True, False):
+        for enabled in (True, False, True):
             updated = await admin.put("/v1/sharing", json={"shell_owner_only": enabled})
             assert updated.status_code == 200
             assert updated.json()["shell_owner_only"] is enabled
             assert (await admin.get("/v1/info")).json()["shell_owner_only"] is enabled
     restarted = _admin_app(db_uri, tmp_path)
-    assert restarted.state.shell_owner_only() is False
+    assert restarted.state.shell_owner_only() is True
 
 
 @pytest.mark.asyncio
@@ -388,6 +388,9 @@ async def test_managed_shell_policy_is_live_and_rejects_partial_updates(
 def test_shell_policy_env_and_invalid_override_fail_closed(
     db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    assert _build_app(db_uri, tmp_path).state.shell_owner_only() is False
+    monkeypatch.setenv("OMNIGENT_SHELL_OWNER_ONLY", " ")
+    assert _build_app(db_uri, tmp_path).state.shell_owner_only() is False
     monkeypatch.setenv("OMNIGENT_SHELL_OWNER_ONLY", "typo")
     assert _build_app(db_uri, tmp_path).state.shell_owner_only() is True
     monkeypatch.setenv("OMNIGENT_SHELL_OWNER_ONLY", "off")

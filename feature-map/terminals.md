@@ -13,9 +13,10 @@ reattach when the session moves to another host.
   and returns to chat with the terminal's content kept. States: starting up
   (no Resume action), stopped (Resume offered), connected.
 - `user-shell`: open a shell, type into it, and close it.
-- `shell-access`: admins can require owner access for shell creation, shell
-  commands and terminal typing under Settings → Sharing → Shell access (on by
-  default). When off, editors can use shells; readers can only watch.
+- `shell-access`: admins can require owner access for shell creation/transfers,
+  native `!` commands and direct session-MCP shell tools under Settings → Sharing
+  → Shell access. Off by default preserves editor access. Interactive terminal
+  input and the environment shell API stay owner-only in both modes.
 - `scrollback`: scroll back with the mouse wheel (including programs that track
   the mouse), by touch on phones, and by keyboard.
 - `reconnect`: after the terminal connection drops, the terminal shows that it
@@ -56,10 +57,11 @@ with their own terminal retain the switcher.
 
 **Shell access:** admins open Settings → Sharing → Shell access and toggle
 "Only owners can use shells". The setting applies to desktop and phone shell
-menus, the new-shell shortcut, terminal typing, the environment shell API,
-direct shell-tool calls through session MCP, and native shell commands sent with
-`!` in chat. Editors can still send ordinary chat messages while owner-only
-access is on.
+menus, the new-shell shortcut, shell transfers, direct shell-tool calls through
+session MCP, and native shell commands sent with `!` in chat. It starts off,
+preserving existing editor access to those actions. Editors can still send
+ordinary chat messages when it is on. Interactive terminal input and the
+environment shell API always require ownership; viewers remain read-only.
 
 **After the session moves:** open the host badge, choose "Switch host…", pick
 another host, then look at both the terminal strip and the agent terminal.
@@ -98,13 +100,16 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
   `tests/e2e_ui/shells/test_new_shell.py::test_new_shell_accepts_typed_command`.
   Closing a shell has no e2e coverage: close its tab, confirm, and expect the
   tab to disappear.
-- **`shell-access`:** no dedicated UI e2e test. As an admin, toggle "Only owners
-  can use shells", reload Settings and expect it to persist. As an editor in
-  a shared session, check shell menus, Ctrl/⌘+Alt+T, terminal typing and `!pwd`
-  in chat: restricted while on, allowed while off. An already-open editor
-  terminal must stop accepting input when the admin turns the restriction on.
-  Repeat the shell-menu check on a phone. Owners retain access and readers
-  stay read-only in both modes. Server policy persistence and admin checks:
+- **`shell-access`:** no dedicated UI e2e test. Use an isolated multi-user
+  instance with an admin, a session owner, an editor and a viewer; the default
+  single-user repro instance hides Sharing. With no saved setting or environment
+  override, expect "Only owners can use shells" to start off. As an editor,
+  check shell menus, Ctrl/⌘+Alt+T and `!pwd` in native chat: allowed while off,
+  restricted after the admin turns it on. Repeat the shell-menu check on a
+  phone. Turn it off, reload Settings and expect it to persist. Owners retain
+  access and viewers stay read-only in both modes. Verify that editor terminal
+  input and environment shell execution stay blocked in both modes, while the
+  owner can still type into a terminal. Server policy persistence and admin checks:
   `tests/server/routes/test_sessions_sharing_mode.py::test_shell_policy_is_admin_only_live_and_persisted`.
 - **`agent-terminal-view`, `user-shell`, keyboard:** no e2e coverage; component
   tests `web/src/hooks/useViewModeToggleHotkey.test.tsx` and

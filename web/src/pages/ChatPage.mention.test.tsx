@@ -12,7 +12,7 @@ import { useChatStore } from "@/store/chatStore";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { WorkspaceFile } from "@/hooks/useWorkspaceChangedFiles";
 
-vi.mock("@/hooks/useSharing", () => ({ useShellOwnerOnly: () => ({ data: true }) }));
+vi.mock("@/hooks/useSharing", () => ({ useShellOwnerOnly: () => ({ data: false }) }));
 
 // Drill-down "@"-mention browses one directory at a time, so the test stubs
 // both sources: the root listing (useWorkspaceAllFiles) and the per-directory

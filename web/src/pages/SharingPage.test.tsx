@@ -54,7 +54,7 @@ function state(overrides: Partial<SharingState> = {}): SharingState {
     default_public_sessions: "off",
     default_public_sessions_editable: true,
     default_public_sessions_options: ["off", "sandbox", "all"],
-    shell_owner_only: true,
+    shell_owner_only: false,
     shell_owner_only_editable: true,
     ...overrides,
   };
@@ -290,12 +290,12 @@ describe("SharingPage", () => {
       expect(setModeMutate).not.toHaveBeenCalled();
     });
 
-    it("defaults to owner-only and read-only with an older server", async () => {
+    it("defaults off and disables changes with an older server", async () => {
       setSharingState(state({ shell_owner_only: undefined, shell_owner_only_editable: undefined }));
 
       renderPage();
       const toggle = await screen.findByRole("switch", { name: "Only owners can use shells" });
-      expect(toggle).toBeChecked();
+      expect(toggle).not.toBeChecked();
       expect(toggle).toBeDisabled();
     });
 

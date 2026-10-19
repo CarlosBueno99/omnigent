@@ -60,8 +60,7 @@ interface TerminalsPanelProps {
   fluid?: boolean;
   /**
    * When true, attach terminals read-only — the viewer can watch but
-   * not type. Follows the server's shell-access policy and the viewer's
-   * session permissions.
+   * not type. Only session owners may type into terminals.
    */
   readOnly?: boolean;
 }

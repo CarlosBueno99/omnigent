@@ -2689,7 +2689,7 @@ export function AppShell() {
                   // No neighbor to resize against (chat is hidden, FilesPanel
                   // owns its own width) — grow via flex-1.
                   fluid={panelOpen}
-                  readOnly={!canUseShell}
+                  readOnly={!isOwnerLevel(permissionLevel)}
                   onClose={() => setPanelInitialKey(null)}
                 />
               )}

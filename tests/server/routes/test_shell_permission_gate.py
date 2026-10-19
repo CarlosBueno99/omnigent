@@ -450,13 +450,15 @@ async def test_live_shell_policy_controls_commands_and_terminals(
         return None, kwargs["conv"]
 
     monkeypatch.setattr(routes_resources, "ensure_runner_connected", connected)
-    policy = [True]
-    app.state.shell_owner_only = lambda: policy[0]
-    for owner_only in (True, False, True):
-        policy[0] = owner_only
+    policy = [False]
+    for owner_only in (None, True, False, True):
+        if owner_only is not None:
+            policy[0] = owner_only
+            app.state.shell_owner_only = lambda: policy[0]
         runner_client.posts.clear()
         response = await client.post(path, json=body, headers={"X-Forwarded-Email": caller})
-        allowed = level >= (LEVEL_OWNER if owner_only else LEVEL_EDIT)
+        required_level = LEVEL_OWNER if owner_only or path == _SHELL_PATH else LEVEL_EDIT
+        allowed = level >= required_level
         assert response.status_code == (200 if allowed else 403), response.text
         assert bool(runner_client.posts) is allowed
 
@@ -464,6 +466,7 @@ async def test_live_shell_policy_controls_commands_and_terminals(
 @pytest.mark.parametrize(
     "session_id,owner_only,caller,text,expected",
     [
+        ("conv_native", None, "owner@example.com", "!echo hi", 202),
         ("conv_native", True, "owner@example.com", " \n!echo hi", 403),
         ("conv_native", False, "owner@example.com", "!echo hi", 202),
         ("conv_native", True, "real-owner@example.com", "!echo hi", 202),
@@ -477,12 +480,13 @@ async def test_native_shell_input_is_authorized_before_durable_enqueue(
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
     session_id: str,
-    owner_only: bool,
+    owner_only: bool | None,
     caller: str,
     text: str,
     expected: int,
 ) -> None:
-    app.state.shell_owner_only = owner_only
+    if owner_only is not None:
+        app.state.shell_owner_only = owner_only
     enqueue = AsyncMock(return_value=SimpleNamespace(id="saved_input"))
     app.state.startup_inputs = SimpleNamespace(
         accepts=AsyncMock(return_value=True), enqueue=enqueue
@@ -502,10 +506,12 @@ async def test_native_shell_input_is_authorized_before_durable_enqueue(
 
 @pytest.mark.parametrize("role", [None, "assistant", "invalid"])
 async def test_native_shell_input_cannot_bypass_owner_gate_with_role(
+    app: FastAPI,
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
     role: str | None,
 ) -> None:
+    app.state.shell_owner_only = True
     data: dict[str, Any] = {"content": [{"type": "input_text", "text": "!echo hi"}]}
     if role is not None:
         data["role"] = role

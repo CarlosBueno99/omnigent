@@ -49,8 +49,10 @@ vi.mock("@/components/BrowserPane/BrowserPane", () => ({
 // echoing the terminal id it was asked to attach so we can prove the right
 // shell tab surfaced.
 vi.mock("@/components/blocks/TerminalView", () => ({
-  TerminalView: ({ terminalId }: { terminalId: string }) => (
-    <div data-testid="terminal-view-stub">{terminalId}</div>
+  TerminalView: ({ terminalId, readOnly }: { terminalId: string; readOnly: boolean }) => (
+    <div data-testid="terminal-view-stub" data-read-only={String(readOnly)}>
+      {terminalId}
+    </div>
   ),
 }));
 vi.mock("@/hooks/useTerminals", async (importOriginal) => ({
@@ -70,6 +72,7 @@ vi.mock("@/components/chat/SideChatPane", () => ({
   ),
 }));
 const isMobileMock = vi.hoisted(() => vi.fn(() => false));
+const shellPolicy = vi.hoisted(() => ({ ownerOnly: false }));
 vi.mock("@/hooks/useIsMobileViewport", () => ({ useIsMobileViewport: () => isMobileMock() }));
 
 const useTerminalsMock = vi.mocked(useTerminals);
@@ -81,6 +84,7 @@ afterEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
   isMobileMock.mockReturnValue(false);
+  shellPolicy.ownerOnly = false;
   Reflect.deleteProperty(window, "omnigentDesktop");
   useTerminalsMock.mockReturnValue({ terminals: [], isLoading: false, error: null });
   useCreateTerminalMock.mockReturnValue({
@@ -118,6 +122,7 @@ function renderWorkspace(
     resizing?: boolean;
     inert?: boolean;
     mobileSideChatsOpen?: boolean;
+    permissionLevel?: number | null;
   } = {},
 ) {
   const openFileViewer = vi.fn();
@@ -169,7 +174,7 @@ function renderWorkspace(
         onCloseTerminal={onCloseTerminal}
         maximized={overrides.maximized ?? false}
         onToggleMaximized={onToggleMaximized}
-        permissionLevel={null}
+        permissionLevel={overrides.permissionLevel ?? null}
         filesPanelSort={"recent" as ChangedSort}
         onSortChange={vi.fn()}
         filesPanelShowHidden={false}
@@ -558,21 +563,36 @@ describe("WorkspacePanel shell tabs", () => {
     expect(shellTab).not.toHaveClass("h-[32px]");
   });
 
-  it("surfaces the active shell's xterm in the content slot", async () => {
-    useTerminalsMock.mockReturnValue({ terminals: [term], isLoading: false, error: null });
-    renderWorkspace({
-      openTerminals: [termKey],
-      selectedTerminalKey: termKey,
-    });
+  it.each([
+    [1, false],
+    [2, false],
+    [2, true],
+    [4, false],
+    [4, true],
+  ])(
+    "surfaces the active shell with owner-only input at level %i, restriction %s",
+    async (level, ownerOnly) => {
+      shellPolicy.ownerOnly = ownerOnly;
+      useTerminalsMock.mockReturnValue({ terminals: [term], isLoading: false, error: null });
+      renderWorkspace({
+        openTerminals: [termKey],
+        selectedTerminalKey: termKey,
+        permissionLevel: level,
+      });
 
-    // The selected shell tab owns the single content slot — its terminal id is
-    // attached, and neither the files scope view nor a file viewer mounts.
-    // findByTestId waits for the lazy TerminalView chunk to resolve through
-    // its Suspense boundary.
-    expect(await screen.findByTestId("terminal-view-stub")).toHaveTextContent("terminal_zsh_s1");
-    expect(screen.queryByTestId("files-panel-stub")).toBeNull();
-    expect(screen.queryByTestId("file-viewer-stub")).toBeNull();
-  });
+      // The selected shell tab owns the single content slot — its terminal id is
+      // attached, and neither the files scope view nor a file viewer mounts.
+      // findByTestId waits for the lazy TerminalView chunk to resolve through
+      // its Suspense boundary.
+      expect(await screen.findByTestId("terminal-view-stub")).toHaveTextContent("terminal_zsh_s1");
+      expect(screen.getByTestId("terminal-view-stub")).toHaveAttribute(
+        "data-read-only",
+        String(level < 4),
+      );
+      expect(screen.queryByTestId("files-panel-stub")).toBeNull();
+      expect(screen.queryByTestId("file-viewer-stub")).toBeNull();
+    },
+  );
 
   it("activates a shell via openTerminalTab when its tab body is clicked", () => {
     useTerminalsMock.mockReturnValue({ terminals: [term], isLoading: false, error: null });
@@ -1305,4 +1325,6 @@ describe("WorkspacePanel panel picker", () => {
     expect(onRightRailTabChange).toHaveBeenCalledWith("sidechat");
   });
 });
-vi.mock("@/hooks/useSharing", () => ({ useShellOwnerOnly: () => ({ data: true }) }));
+vi.mock("@/hooks/useSharing", () => ({
+  useShellOwnerOnly: () => ({ data: shellPolicy.ownerOnly }),
+}));

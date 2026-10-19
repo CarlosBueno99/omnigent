@@ -43,12 +43,14 @@ BOB = "bob@test.com"
 
 @pytest.mark.parametrize("policy", [None, True, False, "false"])
 @pytest.mark.parametrize("live", [False, True])
-def test_shell_write_level_fails_closed_except_explicit_false(policy: object, live: bool) -> None:
+def test_shell_write_level_defaults_to_edit_and_fails_closed_for_invalid_policy(
+    policy: object, live: bool
+) -> None:
     app = FastAPI()
     if policy is not None:
         app.state.shell_owner_only = (lambda: policy) if live else policy
     request = Request({"type": "http", "app": app})
-    assert shell_write_level(request) == (LEVEL_EDIT if policy is False else LEVEL_OWNER)
+    assert shell_write_level(request) == (LEVEL_EDIT if policy in (None, False) else LEVEL_OWNER)
 
 
 def _session_agent(

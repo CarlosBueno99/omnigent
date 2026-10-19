@@ -51,8 +51,8 @@ interface MainTerminalViewProps {
   visible?: boolean;
   /**
    * When true, attach every terminal (agent TUI and user shells)
-   * read-only — the viewer can watch but not type. Follows the server's
-   * shell-access policy and the viewer's session permissions.
+   * read-only — the viewer can watch but not type. Only session owners
+   * may type into terminals.
    */
   readOnly?: boolean;
   /** Known runner-tunnel state for the active session. */

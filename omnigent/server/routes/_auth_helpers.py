@@ -47,8 +47,8 @@ _LEVEL_NAMES = {1: "read", 2: "edit", 3: "manage", 4: "owner"}
 
 
 def shell_write_level(connection: HTTPConnection) -> int:
-    """Minimum access for shell commands and interactive terminal controls."""
-    owner_only = getattr(connection.app.state, "shell_owner_only", True)
+    """Minimum access for starting terminals and sending chat or MCP shell input."""
+    owner_only = getattr(connection.app.state, "shell_owner_only", False)
     owner_only = owner_only() if callable(owner_only) else owner_only
     return LEVEL_EDIT if owner_only is False else LEVEL_OWNER
 
