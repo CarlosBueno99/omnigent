@@ -604,6 +604,19 @@ async def test_read_grant_allows_get_but_blocks_post_events(
         headers={"X-Forwarded-Email": "user-b"},
     )
     assert refused_pr_update.status_code == 403
+    refused_snapshot = await auth_client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "external_session_pr_snapshot",
+            "data": {
+                "pr_url": "https://github.com/example/project/pull/42",
+                "captured_at_ns": 3_000_000_000,
+                "diff": {"patch": "blocked"},
+            },
+        },
+        headers={"X-Forwarded-Email": "user-b"},
+    )
+    assert refused_snapshot.status_code == 403
     snapshot = await auth_client.get(
         f"/v1/sessions/{session_id}",
         headers={"X-Forwarded-Email": "user-b"},

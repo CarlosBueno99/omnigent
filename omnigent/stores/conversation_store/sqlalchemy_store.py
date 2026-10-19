@@ -247,6 +247,7 @@ def _to_conversation(
         session_todos=session_todos,
         session_pull_requests=session_prs["prs"] if session_prs is not None else None,
         session_pull_requests_updated_at_ns=(session_prs or {}).get("updated_at_ns"),
+        session_pr_snapshots=(session_prs or {}).get("snapshots", {}),
         reasoning_effort=overrides["reasoning_effort"],
         model_override=overrides["model_override"],
         inference_snapshot=(
@@ -1655,6 +1656,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             ):
                 return False
             snapshot = {
+                **(previous or {}),
                 "prs": validated,
                 "updated_at_ns": updated_at_ns
                 if updated_at_ns is not None
@@ -1664,6 +1666,106 @@ class SqlAlchemyConversationStore(ConversationStore):
             return True
 
         return run_write_transaction(self._session_immediate, "set_session_prs", write)
+
+    def set_session_pr_snapshot(
+        self,
+        conversation_id: str,
+        pr_url: str,
+        captured_at_ns: int,
+        resource_keys: dict[str, str],
+        *,
+        head_sha: str | None = None,
+        base_sha: str | None = None,
+    ) -> tuple[bool, list[str]]:
+        """Publish newer resources without reviving removed associations."""
+        from omnigent.stores.session_pr_snapshots import MAX_PR_CAPTURE_NS, PR_SNAPSHOT_KINDS
+
+        if type(captured_at_ns) is not int or not 0 < captured_at_ns <= MAX_PR_CAPTURE_NS:
+            raise ValueError("PR snapshot captured_at_ns must be a positive 64-bit integer")
+        if not resource_keys or resource_keys.keys() - PR_SNAPSHOT_KINDS:
+            raise ValueError("Unknown PR snapshot resource")
+
+        def write(session: Session) -> tuple[bool, list[str]]:
+            query = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                query = query.with_for_update()
+            meta = session.scalars(query).first()
+            if meta is None:
+                return False, list(resource_keys.values())
+            state, todos, prs = _decode_session_state(meta.session_state)
+            association = next(
+                (pr for pr in (prs or {}).get("prs", []) if pr["url"] == pr_url), None
+            )
+            if association is None or captured_at_ns < int(
+                association["last_seen_at"] * 1_000_000_000
+            ):
+                return False, list(resource_keys.values())
+            assert prs is not None
+            snapshots = prs.setdefault("snapshots", {})
+            resources = snapshots.setdefault(pr_url, {})
+            previous_info = resources.get("info")
+            if previous_info is not None and previous_info["captured_at_ns"] > captured_at_ns:
+                return False, list(resource_keys.values())
+            obsolete: list[str] = []
+            if (
+                "info" in resource_keys
+                and previous_info is not None
+                and captured_at_ns > previous_info["captured_at_ns"]
+                and (head_sha or base_sha)
+                and (previous_info.get("head_sha"), previous_info.get("base_sha"))
+                != (head_sha, base_sha)
+            ):
+                for kind in ("changes", "diff"):
+                    if kind in resources:
+                        obsolete.append(resources.pop(kind)["key"])
+            saved = False
+            for kind, key in resource_keys.items():
+                previous = resources.get(kind)
+                if previous is not None and previous["captured_at_ns"] >= captured_at_ns:
+                    obsolete.append(key)
+                    continue
+                if previous is not None:
+                    obsolete.append(previous["key"])
+                resources[kind] = {"key": key, "captured_at_ns": captured_at_ns}
+                if kind == "info":
+                    resources[kind].update(head_sha=head_sha, base_sha=base_sha)
+                saved = True
+            if saved:
+                meta.session_state = _encode_session_state(state, todos, prs)
+            return saved, obsolete
+
+        return run_write_transaction(self._session_immediate, "set_session_pr_snapshot", write)
+
+    def prune_session_pr_snapshots(self, conversation_id: str) -> list[str]:
+        def write(session: Session) -> list[str]:
+            query = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                query = query.with_for_update()
+            meta = session.scalars(query).first()
+            if meta is None:
+                return []
+            state, todos, prs = _decode_session_state(meta.session_state)
+            if prs is None:
+                return []
+            associated = {pr["url"] for pr in prs["prs"]}
+            snapshots = prs.get("snapshots", {})
+            obsolete = [
+                resource["key"]
+                for url in list(snapshots)
+                if url not in associated
+                for resource in snapshots.pop(url).values()
+            ]
+            if obsolete:
+                meta.session_state = _encode_session_state(state, todos, prs)
+            return obsolete
+
+        return run_write_transaction(self._session_immediate, "prune_session_pr_snapshots", write)
 
     def set_conversation_project(
         self,

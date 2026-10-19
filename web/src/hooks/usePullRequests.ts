@@ -97,6 +97,8 @@ export interface PullRequest {
   /** PR description (GitHub-flavored markdown); null when empty. Optional: a
    *  host predating the Summary tab omits it, so treat undefined as none. */
   body?: string | null;
+  /** The saved description exceeds the snapshot limit and contains only a prefix. */
+  body_partial?: boolean;
   /** Top-level PR comments GitHub shows by default; absent from an older host. */
   comments?: PullRequestComment[];
   comments_partial?: boolean;
@@ -171,15 +173,24 @@ function prQuery(prUrl?: string): string {
   return prUrl ? `?${new URLSearchParams({ pr_url: prUrl })}` : "";
 }
 
-export interface PullRequestInfo {
+export interface PullRequestCacheMetadata {
+  /** This response is a server snapshot; live workspace actions are unavailable. */
+  cached?: boolean;
+  /** When this resource was saved, in Unix seconds; absent if never synced. */
+  cached_at?: number | null;
+}
+
+export interface PullRequestInfo extends PullRequestCacheMetadata {
   object: "session.github.info";
   prs?: PullRequestAssociation[];
   selected_pr_url?: string;
   tracking_available?: boolean;
-  /** False only when this isn't a git repo (see reason); the diff needs one. */
+  /** Whether live PR resources are available; saved content may still exist when false. */
   available: boolean;
   /** Why unavailable — see {@link PullRequestUnavailableReason}. */
   reason?: PullRequestUnavailableReason;
+  unavailable_reason?: string;
+  message?: string;
   /** The remote's host, sent with reason `unsupported_remote`. */
   remote_host?: string;
   /** Git provider id ("github", ...). `null` means no provider is
@@ -266,11 +277,13 @@ export type PullRequestChangedFile = Omit<WorkspaceChangedFile, "status"> & {
   status: WorkspaceChangedFile["status"] | "renamed";
 };
 
-export interface PullRequestChangedFilesResult {
+export interface PullRequestChangedFilesResult extends PullRequestCacheMetadata {
   available: boolean;
   data: PullRequestChangedFile[];
   has_more?: boolean;
   warning?: string;
+  unavailable_reason?: string;
+  message?: string;
 }
 
 export interface PullRequestFileDiffResponse {
@@ -501,8 +514,8 @@ async function fetchPullRequestChangedFiles(
     throw new RunnerOfflineError();
   }
   if (!res.ok) throw await errorFromResponse(res);
-  const json = (await res.json()) as Omit<PullRequestChangedFilesResult, "available">;
-  return { ...json, available: true };
+  const json = (await res.json()) as PullRequestChangedFilesResult;
+  return { ...json, available: json.available ?? true };
 }
 
 /**
@@ -519,11 +532,14 @@ export function usePullRequestChangedFiles(
   const serveable = useWorkspaceServeable(conversationId);
   const retry = useRunnerOfflineRetry(serveable !== false);
   return useQuery({
-    queryKey: ["github-changed-files", conversationId, ...(prUrl ? [prUrl, revision] : [])],
+    queryKey: [
+      "github-changed-files",
+      conversationId,
+      ...(prUrl || revision ? [prUrl, revision] : []),
+    ],
     queryFn: () => fetchPullRequestChangedFiles(conversationId!, prUrl),
-    // Only a PR has files to show — skip the call in every no-PR / unavailable
-    // / unauthenticated state (the panel shows an empty state instead).
-    enabled: !!conversationId && hasPr && serveable !== false,
+    // A saved or live PR can have files; the server handles offline snapshots.
+    enabled: !!conversationId && hasPr,
     retry,
     retryDelay: runnerOfflineRetryDelay,
     staleTime: 30_000,
@@ -560,7 +576,7 @@ export async function fetchPullRequestFileContents(
   return (await res.json()) as PullRequestFileDiffResponse;
 }
 
-export interface PullRequestDiffResponse {
+export interface PullRequestDiffResponse extends PullRequestCacheMetadata {
   object: "session.github.pr_diff";
   /** Available text diffs as one unified patch; listed files without a patch
    *  get a per-file fallback in the panel. */
@@ -588,7 +604,7 @@ async function fetchPullRequestDiff(
  * Fetch the whole PR as one unified diff patch. The panel parses it
  * client-side into per-file diffs, so the entire PR renders from a single
  * call. Enabled only when a PR exists (pass `hasPr` from {@link usePullRequestInfo});
- * disabled when the runner is known offline.
+ * Server snapshots remain readable while the runner is offline.
  */
 export function usePullRequestDiff(
   conversationId: string | undefined,
@@ -599,9 +615,9 @@ export function usePullRequestDiff(
   const serveable = useWorkspaceServeable(conversationId);
   const retry = useRunnerOfflineRetry(serveable !== false);
   return useQuery({
-    queryKey: ["github-pr-diff", conversationId, ...(prUrl ? [prUrl, revision] : [])],
+    queryKey: ["github-pr-diff", conversationId, ...(prUrl || revision ? [prUrl, revision] : [])],
     queryFn: () => fetchPullRequestDiff(conversationId!, prUrl),
-    enabled: !!conversationId && hasPr && serveable !== false,
+    enabled: !!conversationId && hasPr,
     retry,
     retryDelay: runnerOfflineRetryDelay,
     staleTime: 30_000,

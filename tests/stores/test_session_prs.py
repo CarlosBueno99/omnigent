@@ -1,6 +1,18 @@
+import json
+
 import pytest
 
+from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.session_prs import validate_session_prs
+from omnigent.stores.session_pr_snapshots import (
+    MAX_PR_DIFF_BYTES,
+    MAX_PR_INFO_BYTES,
+    load_session_pr_snapshot,
+    prune_session_pr_snapshots,
+    sanitize_pr_snapshot,
+    save_session_pr_snapshots,
+    session_pr_snapshot_keys,
+)
 
 PR = {
     "provider": "github",
@@ -74,3 +86,190 @@ def test_pr_snapshot_validation_strips_private_fields_and_supports_private_hosts
     for value in (None, {}, [PR] * 101, [{**PR, "title": "字" * 4096}] * 20):
         with pytest.raises(ValueError):
             validate_session_prs(value)
+
+
+def test_pr_panel_snapshots_keep_latest_resources_and_clean_removed_blobs(
+    conversation_store, tmp_path
+):
+    store = conversation_store
+    artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
+    conversation = store.create_conversation()
+    store.set_session_prs(conversation.id, [PR], updated_at_ns=1)
+    info = {"pr": {**PR, "body": "Description", "comments": [{"body": "Comment"}]}}
+    assert save_session_pr_snapshots(
+        store,
+        artifacts,
+        conversation.id,
+        PR["url"],
+        3_000_000_000,
+        {"info": info, "diff": {"patch": "first patch"}},
+    )
+    saved = store.get_conversation(conversation.id)
+    first_keys = session_pr_snapshot_keys(saved)
+    store.set_session_state(conversation.id, {"count": 2})
+    store.set_session_todos(
+        conversation.id, [{"content": "Keep", "status": "pending", "activeForm": "Keeping"}]
+    )
+    assert (
+        store.get_conversation(conversation.id).session_pr_snapshots == saved.session_pr_snapshots
+    )
+    assert store.fork_conversation(conversation.id).session_pr_snapshots == {}
+    assert save_session_pr_snapshots(
+        store,
+        artifacts,
+        conversation.id,
+        PR["url"],
+        5_000_000_000,
+        {"diff": {"patch": "new patch"}},
+    )
+    assert not artifacts.exists(first_keys[1])
+    assert not save_session_pr_snapshots(
+        store,
+        artifacts,
+        conversation.id,
+        PR["url"],
+        4_000_000_000,
+        {"diff": {"patch": "stale patch"}},
+    )
+    saved = store.get_conversation(conversation.id)
+    assert load_session_pr_snapshot(artifacts, saved, PR["url"], "diff")["patch"] == "new patch"
+    cached_info = load_session_pr_snapshot(artifacts, saved, PR["url"], "info")
+    assert cached_info["pr"]["comments"][0]["body"] == "Comment"
+    assert cached_info["cached_at"] == 3
+    assert len(list((tmp_path / "artifacts").rglob("*.json"))) == 2
+    info["pr"]["head_sha"] = "new-head"
+    assert save_session_pr_snapshots(
+        store, artifacts, conversation.id, PR["url"], 6_000_000_000, {"info": info}
+    )
+    assert (
+        load_session_pr_snapshot(
+            artifacts, store.get_conversation(conversation.id), PR["url"], "diff"
+        )["unavailable_reason"]
+        == "not_synced"
+    )
+    assert not save_session_pr_snapshots(
+        store,
+        artifacts,
+        conversation.id,
+        PR["url"],
+        5_500_000_000,
+        {"diff": {"patch": "old head"}},
+    )
+    for timestamp in (True, -1, 10**30):
+        with pytest.raises(ValueError, match="64-bit"):
+            save_session_pr_snapshots(
+                store, artifacts, conversation.id, PR["url"], timestamp, {"info": info}
+            )
+    store.set_session_prs(conversation.id, [], updated_at_ns=2)
+    prune_session_pr_snapshots(store, artifacts, conversation.id)
+    assert store.get_conversation(conversation.id).session_pr_snapshots == {}
+    assert not list((tmp_path / "artifacts").rglob("*.json"))
+    assert not save_session_pr_snapshots(
+        store,
+        artifacts,
+        conversation.id,
+        PR["url"],
+        6_000_000_000,
+        {"info": info},
+    )
+    store.set_session_prs(conversation.id, [{**PR, "last_seen_at": 10}], updated_at_ns=3)
+    assert not save_session_pr_snapshots(
+        store,
+        artifacts,
+        conversation.id,
+        PR["url"],
+        9_000_000_000,
+        {"info": info},
+    )
+    assert (
+        load_session_pr_snapshot(
+            artifacts, store.get_conversation(conversation.id), PR["url"], "info"
+        )["unavailable_reason"]
+        == "not_synced"
+    )
+    assert not list((tmp_path / "artifacts").rglob("*.json"))
+
+
+def test_pr_panel_snapshots_are_bounded_and_strip_host_configuration():
+    info = {
+        "auth": {"token": "secret", "accounts": [{"login": "private"}]},
+        "accounts": [{"token": "secret"}],
+        "selected_account": "private",
+        "pr": {
+            **PR,
+            "body": "Description",
+            "checks": {
+                "runs": [
+                    {
+                        "name": "test",
+                        "bucket": "passing",
+                        "url": "https://ci.test/job?token=secret",
+                    }
+                ]
+            },
+            "comments": [
+                {
+                    "body": "字" * 20_000,
+                    "url": "https://github.com/example/project/pull/42#issuecomment-1",
+                    "token": "secret",
+                }
+            ]
+            * 100,
+        },
+    }
+    shaped = sanitize_pr_snapshot("info", info, PR["url"])
+    encoded = json.dumps(shaped, ensure_ascii=False, separators=(",", ":")).encode()
+    assert len(encoded) <= MAX_PR_INFO_BYTES
+    assert b"secret" not in encoded and b"accounts" not in encoded
+    assert shaped["pr"]["body"] == "Description"
+    assert shaped["pr"]["comments_partial"] is True
+    assert shaped["pr"]["checks"]["runs"][0]["url"] == "https://ci.test/job"
+    assert (
+        sanitize_pr_snapshot("diff", {"patch": "x" * MAX_PR_DIFF_BYTES}, PR["url"])[
+            "unavailable_reason"
+        ]
+        == "too_large"
+    )
+    assert (
+        sanitize_pr_snapshot("changes", {"data": [{"path": "file"}] * 2001}, PR["url"])[
+            "unavailable_reason"
+        ]
+        == "too_large"
+    )
+    with pytest.raises(ValueError, match="associated pull request"):
+        sanitize_pr_snapshot("info", info, PR["url"] + "0")
+    nullable = sanitize_pr_snapshot(
+        "info",
+        {
+            "pr": {
+                **PR,
+                "title": None,
+                "state": None,
+                "reviewers": [{"login": None, "state": {}}],
+                "comments": [
+                    {
+                        "body": None,
+                        "url": "https://dev.azure.com/org/repo/pullrequest/42?discussionId=5&token=secret",
+                    }
+                ],
+                "checks": {
+                    "runs": [
+                        {
+                            "name": None,
+                            "bucket": "pending",
+                            "url": "https://dev.azure.com/org/project/_build/results?buildId=7&token=secret",
+                        }
+                    ]
+                },
+            }
+        },
+        PR["url"],
+    )["pr"]
+    assert nullable["title"] == "Pull request #42" and nullable["state"] == "UNKNOWN"
+    assert nullable["reviewers"] == [] and nullable["comments"][0]["body"] == ""
+    assert nullable["comments"][0]["url"].endswith("?discussionId=5")
+    assert nullable["checks"]["runs"][0]["url"].endswith("?buildId=7")
+    files = sanitize_pr_snapshot(
+        "changes", {"data": [{"path": "test.py", "status": "unknown"}]}, PR["url"]
+    )["data"]
+    assert files[0]["status"] == "modified" and files[0]["lines_added"] is None

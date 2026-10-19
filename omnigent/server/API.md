@@ -523,7 +523,13 @@ Fields:
     Available after the sandbox stops and across server restarts. `null` means
     no snapshot has been reported; `[]` records an explicit clear. The GitHub
     resource endpoint returns these links with `reason: "workspace_offline"`
-    when neither runner nor host can supply live details.
+    when neither runner nor host can supply live details. If saved, the same
+    endpoint includes PR summary, comments, checks and reviewers; `/changes`
+    and `/diff` return saved file lists and patches. Each saved response includes
+    `cached: true` and `cached_at` (Unix seconds). Missing or oversized content
+    uses `unavailable_reason: "not_synced" | "too_large"`. Full-file context
+    expansion still requires the workspace. Snapshot bodies and artifact keys
+    are excluded from session detail/list responses.
 
   pull_requests_updated_at_ns (integer or null, session detail only)
     Last acknowledged registry revision. Replacement runners retain this floor
@@ -1122,6 +1128,24 @@ Request body matches `SessionEventInput`:
                                   responses expose the saved `pull_requests`.
                                   Older revisions are ignored; empty clears.
                                   Unversioned reports only backfill absent data.
+      - "external_session_pr_snapshot"
+                                — internal PR panel cache update. Payload:
+                                  `{pr_url, captured_at_ns, info?, changes?, diff?}`.
+                                  The PR must already belong to the session.
+                                  Capture time is a positive 64-bit nanosecond
+                                  timestamp. Each resource keeps its latest
+                                  capture; newer head/base revisions invalidate
+                                  older file lists and patches. Returns
+                                  `{queued: false, saved: boolean}`.
+                                  Sanitized payloads use the artifact store;
+                                  only references live in existing session
+                                  metadata. Info and changes are capped at
+                                  512 KiB each; patches at 5 MiB. Oversized
+                                  comments are trimmed with `comments_partial`;
+                                  descriptions use `body_partial` when truncated.
+                                  Credentials and host account configuration
+                                  are excluded. Detached PRs and deleted
+                                  sessions release their saved artifacts.
     The route validates `type` against the conversation entity's item
     discriminator map plus the documented control/internal event types.
     Unknown values fail loud with 400 — they are NOT silently enqueued.

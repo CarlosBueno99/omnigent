@@ -15,7 +15,11 @@ vi.mock("@/store/chatStore", () => ({
 
 import { useSessionHostOnline, useSessionRunnerOnline } from "@/hooks/RunnerHealthProvider";
 import { useChatStore } from "@/store/chatStore";
-import { usePullRequestInfo } from "./usePullRequests";
+import {
+  usePullRequestChangedFiles,
+  usePullRequestDiff,
+  usePullRequestInfo,
+} from "./usePullRequests";
 
 const onlineMock = vi.mocked(useSessionRunnerOnline);
 const hostOnlineMock = vi.mocked(useSessionHostOnline);
@@ -31,8 +35,18 @@ function runnerUnavailableResponse(): Response {
   } as unknown as Response;
 }
 
-function Probe({ id, poll = false }: { id: string; poll?: boolean }) {
+function Probe({
+  id,
+  poll = false,
+  details = false,
+}: {
+  id: string;
+  poll?: boolean;
+  details?: boolean;
+}) {
   usePullRequestInfo(id, { poll });
+  usePullRequestChangedFiles(id, details);
+  usePullRequestDiff(id, details);
   return null;
 }
 
@@ -58,6 +72,57 @@ afterEach(() => {
 });
 
 describe("usePullRequestInfo runner-offline retry", () => {
+  it.each([undefined, "not_synced", "too_large"])(
+    "reads saved changes and diff while offline (%s)",
+    async (reason) => {
+      vi.useFakeTimers();
+      onlineMock.mockReturnValue(false);
+      hostOnlineMock.mockReturnValue(false);
+      const changes = {
+        available: !reason,
+        data: [],
+        cached: true,
+        cached_at: 1_700_000_000,
+        ...(reason ? { unavailable_reason: reason } : {}),
+      };
+      const diff = {
+        object: "session.github.pr_diff",
+        patch: reason ? "" : "saved patch",
+        cached: true,
+        cached_at: 1_700_000_000,
+        ...(reason ? { unavailable_reason: reason } : {}),
+      };
+      fetchMock.mockImplementation(
+        async (input: string) =>
+          new Response(
+            JSON.stringify(
+              input.endsWith("/changes")
+                ? changes
+                : input.endsWith("/diff")
+                  ? diff
+                  : {
+                      object: "session.github.info",
+                      available: false,
+                      reason: "workspace_offline",
+                      cached: true,
+                    },
+            ),
+          ),
+      );
+      const client = new QueryClient();
+      render(
+        <QueryClientProvider client={client}>
+          <Probe id="conv_saved" details poll />
+        </QueryClientProvider>,
+      );
+
+      await vi.advanceTimersByTimeAsync(130_000);
+      expect(client.getQueryData(["github-changed-files", "conv_saved"])).toEqual(changes);
+      expect(client.getQueryData(["github-pr-diff", "conv_saved"])).toEqual(diff);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    },
+  );
+
   it("loads saved associations with both runner and host offline without polling", async () => {
     vi.useFakeTimers();
     onlineMock.mockReturnValue(false);

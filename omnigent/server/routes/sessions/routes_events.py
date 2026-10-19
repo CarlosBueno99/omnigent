@@ -141,6 +141,7 @@ from omnigent.server.routes._sessions.common import (
     _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,
     _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE,
     _EXTERNAL_SESSION_INTERRUPTED_TYPE,
+    _EXTERNAL_SESSION_PR_SNAPSHOT_TYPE,
     _EXTERNAL_SESSION_PRS_TYPE,
     _EXTERNAL_SESSION_STATUS_TYPE,
     _EXTERNAL_SESSION_STATUS_VALUES,
@@ -294,6 +295,13 @@ from omnigent.stores.conversation_store import (
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.host_store import host_is_live
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.stores.session_pr_snapshots import (
+    PR_SNAPSHOT_KINDS,
+    delete_pr_snapshot_blobs,
+    prune_session_pr_snapshots,
+    save_session_pr_snapshots,
+    session_pr_snapshot_keys,
+)
 from omnigent.telemetry import emit as _tel_emit
 from omnigent.telemetry.anon import anon_user_id as _tel_anon_user_id
 from omnigent.telemetry.events import SessionDeletedEvent as _TelSessionDeletedEvent
@@ -1164,6 +1172,7 @@ def register_events_routes(
             _EXTERNAL_SESSION_TITLE_TYPE,
             _EXTERNAL_SESSION_TODOS_TYPE,
             _EXTERNAL_SESSION_PRS_TYPE,
+            _EXTERNAL_SESSION_PR_SNAPSHOT_TYPE,
             _EXTERNAL_SUBAGENT_START_TYPE,
             _EXTERNAL_ACP_SUBAGENT_START_TYPE,
             _EXTERNAL_CODEX_SUBAGENT_START_TYPE,
@@ -2387,15 +2396,40 @@ def register_events_routes(
                     code=ErrorCode.INVALID_INPUT,
                 )
             try:
-                await asyncio.to_thread(
+                saved = await asyncio.to_thread(
                     conversation_store.set_session_prs,
                     session_id,
                     prs,
                     updated_at_ns=body.data.get("updated_at_ns"),
                 )
+                if saved:
+                    await asyncio.to_thread(
+                        prune_session_pr_snapshots, conversation_store, artifact_store, session_id
+                    )
             except (TypeError, ValueError) as exc:
                 raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
             return {"queued": False}
+        if body.type == _EXTERNAL_SESSION_PR_SNAPSHOT_TYPE:
+            pr_url = body.data.get("pr_url")
+            captured_at_ns = body.data.get("captured_at_ns")
+            if not isinstance(pr_url, str) or type(captured_at_ns) is not int:
+                raise OmnigentError(
+                    "PR snapshots require pr_url and captured_at_ns",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            try:
+                saved = await asyncio.to_thread(
+                    save_session_pr_snapshots,
+                    conversation_store,
+                    artifact_store,
+                    session_id,
+                    pr_url,
+                    captured_at_ns,
+                    {kind: body.data[kind] for kind in PR_SNAPSHOT_KINDS if kind in body.data},
+                )
+            except (TypeError, ValueError) as exc:
+                raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
+            return {"queued": False, "saved": saved}
         if body.type == _EXTERNAL_SESSION_TODOS_TYPE:
             await _handle_external_session_todos(session_id, body, conversation_store)
             return {"queued": False}
@@ -3560,9 +3594,18 @@ def register_events_routes(
                 )
         _interrupt_fenced_sessions.discard(session_id)
         _intentional_stop_sessions.pop(session_id, None)
+        snapshot_keys: list[str] = []
+        if artifact_store is not None:
+            for deleted_id in (session_id, *descendant_ids):
+                deleted_conv = await asyncio.to_thread(
+                    conversation_store.get_conversation, deleted_id
+                )
+                if deleted_conv is not None:
+                    snapshot_keys.extend(session_pr_snapshot_keys(deleted_conv))
         deleted = await conversation_store.delete_conversation(session_id)
         if not deleted:
             raise _session_not_found()
+        await asyncio.to_thread(delete_pr_snapshot_blobs, artifact_store, snapshot_keys)
         # A relay still inside an offline runner's reconnect grace must not
         # fail the deleted turns when that grace expires.
         _cancel_runner_relays([session_id, *descendant_ids])

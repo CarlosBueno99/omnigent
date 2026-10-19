@@ -250,6 +250,7 @@ class Conversation:
     session_todos: list[dict[str, Any]] = field(default_factory=list)
     session_pull_requests: list[dict[str, Any]] | None = None
     session_pull_requests_updated_at_ns: int | None = None
+    session_pr_snapshots: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     reasoning_effort: str | None = None
     model_override: str | None = None
     inference_snapshot: dict[str, Any] | None = None

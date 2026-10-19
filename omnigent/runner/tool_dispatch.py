@@ -6859,7 +6859,7 @@ async def execute_tool(
             successful=not output.startswith("Error:"),
             source="runner_shell",
         )
-        await sync_session_prs(conversation_id, server_client)
+        await sync_session_prs(conversation_id, server_client, workspace=runner_workspace)
     return output
 
 

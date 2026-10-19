@@ -38,7 +38,12 @@ async def restore_session_prs(
         )
 
 
-async def sync_session_prs(session_id: str, server_client: httpx.AsyncClient | None) -> None:
+async def sync_session_prs(
+    session_id: str,
+    server_client: httpx.AsyncClient | None,
+    *,
+    workspace: Path | None = None,
+) -> None:
     """Await server acknowledgement without letting metadata failures break a tool call."""
     if server_client is None:
         return
@@ -51,21 +56,26 @@ async def sync_session_prs(session_id: str, server_client: httpx.AsyncClient | N
                 return
             updated_at_ns, entries = snapshot
             acknowledged = _acknowledged.setdefault(server_client, LRUCache(maxsize=1024))
-            if acknowledged.get(registry.path) == updated_at_ns:
-                return
-            response = await server_client.post(
-                f"/v1/sessions/{session_id}/events",
-                json={
-                    "type": "external_session_prs",
-                    "data": {
-                        "prs": [entry.model_dump() for entry in entries],
-                        "updated_at_ns": updated_at_ns,
+            if acknowledged.get(registry.path) != updated_at_ns:
+                response = await server_client.post(
+                    f"/v1/sessions/{session_id}/events",
+                    json={
+                        "type": "external_session_prs",
+                        "data": {
+                            "prs": [entry.model_dump() for entry in entries],
+                            "updated_at_ns": updated_at_ns,
+                        },
                     },
-                },
-                timeout=5.0,
-            )
-            response.raise_for_status()
-            acknowledged[registry.path] = updated_at_ns
+                    timeout=5.0,
+                )
+                response.raise_for_status()
+                acknowledged[registry.path] = updated_at_ns
+            if entries:
+                from omnigent.runner.session_pr_snapshot_sync import schedule_session_pr_snapshots
+
+                schedule_session_pr_snapshots(
+                    session_id, server_client, registry, workspace=workspace
+                )
         except Exception:  # noqa: BLE001 — the local snapshot remains available for retry
             _logger.warning(
                 "Failed to sync session PRs", extra={"session_id": session_id}, exc_info=True

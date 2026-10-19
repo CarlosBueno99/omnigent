@@ -4,15 +4,224 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import httpx
+import pytest
 from filelock import FileLock
 
-from omnigent.runner import session_prs
+from omnigent.runner import session_pr_snapshot_sync, session_prs
 from omnigent.runner.session_pr_sync import restore_session_prs, sync_session_prs
 from omnigent.runner.session_prs import PullRequestRef, SessionPrRegistry
 
 URL = "https://github.com/example/repo/pull/42"
+
+
+@pytest.mark.parametrize("revision_change", [None, "head_sha", "base_sha", "unavailable"])
+async def test_snapshot_enrichment_is_background_and_retries_without_provider_refetch(
+    tmp_path, monkeypatch, revision_change
+) -> None:
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(session_pr_snapshot_sync, "_RETRY_SECONDS", 0)
+    registry = SessionPrRegistry("session")
+    registry.record([PullRequestRef.from_url(URL)], relationship="created", source="test")
+    started = threading.Event()
+    proceed = threading.Event()
+    provider_roots: list[str] = []
+    reports: list[dict] = []
+    snapshots: list[dict] = []
+    revision = {"head_sha": "head-1", "base_sha": "base-1"}
+
+    class Facet:
+        def reference_info(self, root, entry):
+            provider_roots.append(root)
+            started.set()
+            assert proceed.wait(5)
+            if revision_change == "unavailable" and len(provider_roots) == 2:
+                return {"pr": None}
+            return {
+                "object": "session.github.info",
+                "provider": "github",
+                "selected_pr_url": entry.url,
+                "auth": {"token": "must-not-upload"},
+                "pr": {
+                    "number": entry.number,
+                    "url": entry.url,
+                    "title": "Created without opening the panel",
+                    "body": "Saved description",
+                    "comments": [{"body": "Saved comment", "author": "reviewer"}],
+                    **revision,
+                },
+            }
+
+        def changed_files(self, root, entry):
+            return {"object": "list", "data": [{"path": "app.py"}], "has_more": False}
+
+        def pr_diff(self, root, entry):
+            if revision_change in revision:
+                revision[revision_change] = "revision-2"
+            return {"object": "session.github.pr_diff", "patch": "+saved change"}
+
+    monkeypatch.setattr("omnigent.git_providers.load_facet", lambda *_args: Facet())
+
+    def receive(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.url.path == "/v1/sessions/session"
+            return httpx.Response(200, json={"id": "session", "workspace": str(tmp_path)})
+        body = json.loads(request.content)
+        reports.append(body)
+        if body["type"] == "external_session_pr_snapshot":
+            snapshots.append(body["data"])
+            return httpx.Response(503 if len(snapshots) == 1 else 200, json={"saved": True})
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(receive), base_url="http://server"
+    ) as client:
+        await sync_session_prs("session", client)
+        task = session_pr_snapshot_sync._tasks[(client, registry.path)]
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            assert not task.done()
+            assert [report["type"] for report in reports] == ["external_session_prs"]
+        finally:
+            proceed.set()
+        await task
+        if revision_change is not None:
+            assert snapshots == []
+            await sync_session_prs("session", client)
+            await session_pr_snapshot_sync._tasks[(client, registry.path)]
+        reads_before_retry = 2 if revision_change is None else 4
+        assert len(snapshots) == 1
+        assert provider_roots == [str(tmp_path)] * reads_before_retry
+        await sync_session_prs("session", client)
+        await session_pr_snapshot_sync._tasks[(client, registry.path)]
+        assert snapshots[0] == snapshots[1]
+        assert provider_roots == [str(tmp_path)] * reads_before_retry
+        assert snapshots[1]["info"]["pr"]["head_sha"] == revision["head_sha"]
+        assert snapshots[1]["info"]["pr"]["base_sha"] == revision["base_sha"]
+        assert snapshots[1]["info"]["pr"]["body"] == "Saved description"
+        assert snapshots[1]["info"]["pr"]["comments"][0]["body"] == "Saved comment"
+        assert "auth" not in snapshots[1]["info"]
+        assert snapshots[1]["changes"]["data"][0]["path"] == "app.py"
+        assert snapshots[1]["diff"]["patch"] == "+saved change"
+        await sync_session_prs("session", client)
+        await session_pr_snapshot_sync._tasks[(client, registry.path)]
+        assert len(snapshots) == 2
+        registry.record([PullRequestRef.from_url(URL)], relationship="worked_on", source="test")
+        await sync_session_prs("session", client)
+        await session_pr_snapshot_sync._tasks[(client, registry.path)]
+        assert len(snapshots) == 3
+        assert len(provider_roots) == reads_before_retry + 2
+        assert snapshots[-1]["captured_at_ns"] > snapshots[0]["captured_at_ns"]
+
+
+@pytest.mark.parametrize("reattach", [False, True])
+async def test_pending_snapshot_cannot_restore_removed_or_reattached_pr(
+    tmp_path, monkeypatch, reattach
+) -> None:
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    registry = SessionPrRegistry("session")
+    registry.record([PullRequestRef.from_url(URL)], relationship="created", source="test")
+    started = threading.Event()
+    proceed = threading.Event()
+    reports: list[dict] = []
+
+    def read_resources(*_args):
+        started.set()
+        assert proceed.wait(5)
+        return {"diff": {"object": "session.github.pr_diff", "patch": "+old change"}}
+
+    monkeypatch.setattr(session_pr_snapshot_sync, "_read_resources", read_resources)
+
+    def receive(request: httpx.Request) -> httpx.Response:
+        reports.append(json.loads(request.content))
+        return httpx.Response(200, json={"saved": True})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(receive), base_url="http://server"
+    ) as client:
+        await sync_session_prs("session", client, workspace=tmp_path)
+        task = session_pr_snapshot_sync._tasks[(client, registry.path)]
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            registry.remove(URL)
+            if reattach:
+                registry.record(
+                    [PullRequestRef.from_url(URL)], relationship="attached", source="user"
+                )
+            await sync_session_prs("session", client, workspace=tmp_path)
+        finally:
+            proceed.set()
+        await task
+    assert all(report["type"] == "external_session_prs" for report in reports)
+
+
+@pytest.mark.parametrize("source", ["session", "isolated_runner", "missing"])
+async def test_snapshot_workspace_uses_session_or_runner_mapping_only(
+    tmp_path, monkeypatch, source
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OMNIGENT_RUNNER_WORKSPACE", raising=False)
+    monkeypatch.delenv("OMNIGENT_RUNNER_ISOLATE_SESSION", raising=False)
+    metadata = {"id": "session"}
+    expected = None
+    if source == "session":
+        expected = tmp_path / "selected"
+        metadata["workspace"] = str(expected)
+        monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path / "different"))
+    elif source == "isolated_runner":
+        monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(tmp_path))
+        monkeypatch.setenv("OMNIGENT_RUNNER_ISOLATE_SESSION", "1")
+        expected = tmp_path / "session"
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=metadata)),
+        base_url="http://server",
+    ) as client:
+        assert await session_pr_snapshot_sync._workspace("session", client, None) == expected
+
+
+async def test_snapshot_provider_concurrency_is_bounded_across_sessions(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    started = threading.Event()
+    proceed = threading.Event()
+    count_lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def read_resources(*_args):
+        nonlocal active, peak
+        with count_lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 4:
+                started.set()
+        try:
+            assert proceed.wait(5)
+            return {}
+        finally:
+            with count_lock:
+                active -= 1
+
+    monkeypatch.setattr(session_pr_snapshot_sync, "_read_resources", read_resources)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={})),
+        base_url="http://server",
+    ) as client:
+        tasks = []
+        for index in range(6):
+            session_id = f"session-{index}"
+            registry = SessionPrRegistry(session_id)
+            registry.record([PullRequestRef.from_url(URL)], relationship="created", source="test")
+            await sync_session_prs(session_id, client, workspace=tmp_path)
+            tasks.append(session_pr_snapshot_sync._tasks[(client, registry.path)])
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            assert peak == 4
+        finally:
+            proceed.set()
+        await asyncio.gather(*tasks)
+    assert peak == 4
 
 
 async def test_sync_retries_failure_skips_missing_and_publishes_final_removal(

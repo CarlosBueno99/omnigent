@@ -1,35 +1,29 @@
-"""PR links survive the real runner stopping and a fresh server process.
+"""Cached PR details survive real runner shutdown and a fresh server process.
 
-Own environment: the test stops its fixture runner and restarts its server.
-The model and gh creation response are scripted; the tool, tracking, API,
-database, browser, and process lifecycle are real.
+Own environment: reuse the GraphQL creation fixture's isolated server/runner.
+Only the model and GitHub responses are scripted; capture, storage and UI are real.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import signal
-import time
-from collections.abc import Callable
+import shlex
 from pathlib import Path
-from typing import cast
 
 import httpx
 import pytest
 from playwright.sync_api import Page, expect
+from sqlalchemy import create_engine, select
 
-from tests.e2e_ui.conftest import (
-    _server_state,
-    configure_mock_llm,
-    open_right_rail,
-    set_fallback_mock_llm,
-)
-from tests.e2e_ui.github.test_pr_read_comment_no_association import (
-    _CREATE_COMMAND,
-    _PR_URL,
-    pr_probe_runner_id,  # noqa: F401
-    pr_probe_session,  # noqa: F401
+from omnigent.db.db_models import SqlConversationMetadata
+from tests._helpers.polling import poll_until
+from tests._helpers.server_runner import ServerRunner
+from tests.e2e_ui.conftest import configure_mock_llm, open_right_rail, set_fallback_mock_llm
+from tests.e2e_ui.github.test_graphql_pr_display import (
+    _QUERY,
+    _TITLE,
+    _URL,
+    pr_session,  # noqa: F401
 )
 
 
@@ -37,14 +31,23 @@ from tests.e2e_ui.github.test_pr_read_comment_no_association import (
 @pytest.mark.parametrize("mobile", [False, True], ids=["desktop", "mobile"])
 def test_created_pr_survives_runner_and_server_shutdown(
     page: Page,
-    pr_probe_session: tuple[str, str, str, Path, Path],  # noqa: F811
+    pr_session: tuple[str, str, str, Path, ServerRunner],  # noqa: F811
     mock_llm_server_url: str,
-    _recover_shared_runner: Callable[[], None],
     mobile: bool,
     tmp_path: Path,
 ) -> None:
-    base_url, session_id, model, stub, worktree = pr_probe_session
-    command = _CREATE_COMMAND.format(stub=stub, worktree=worktree)
+    base_url, session_id, model, binary, stack = pr_session
+    command = shlex.join(
+        [
+            str(binary / "gh"),
+            "api",
+            "graphql",
+            "-f",
+            f"query={_QUERY}",
+            "--jq",
+            ".data.createPullRequest.pullRequest",
+        ]
+    )
     reply = "Created the pull request."
     configure_mock_llm(
         mock_llm_server_url,
@@ -74,15 +77,31 @@ def test_created_pr_survives_runner_and_server_shutdown(
         },
         timeout=30,
     ).raise_for_status()
-    deadline = time.monotonic() + 60
-    while True:
+
+    def turn_finished() -> bool:
         snapshot = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10).json()
-        if reply in json.dumps(snapshot) and snapshot["status"] == "idle":
-            break
-        assert time.monotonic() < deadline, json.dumps(snapshot, indent=2)
-        time.sleep(0.1)
-    # Captured before any browser or PR-resource request can backfill metadata.
-    reported_prs = snapshot.get("pull_requests")
+        return reply in json.dumps(snapshot) and snapshot["status"] == "idle"
+
+    poll_until(turn_finished, timeout_s=60, interval_s=0.1)
+
+    database = create_engine(f"sqlite:///{stack.root / 'chat.db'}")
+
+    def snapshot_saved() -> bool:
+        # Read fixture storage directly so no PR-resource GET can backfill the cache.
+        with database.connect() as connection:
+            raw = connection.scalar(
+                select(SqlConversationMetadata.session_state).where(
+                    SqlConversationMetadata.id == session_id
+                )
+            )
+        state = json.loads(raw or "{}").get("_omnigent_session_prs_v1", {})
+        resources = state.get("snapshots", {}).get(_URL, {})
+        return all(kind in resources for kind in ("info", "changes", "diff"))
+
+    try:
+        poll_until(snapshot_saved, timeout_s=30, interval_s=0.1)
+    finally:
+        database.dispose()
     if mobile:
         page.set_viewport_size({"width": 390, "height": 844})
     else:
@@ -98,54 +117,56 @@ def test_created_pr_survives_runner_and_server_shutdown(
     if not mobile:
         open_right_rail(page)
         page.get_by_role("tab", name="Pull Requests").click()
-        expect(page.get_by_role("combobox", name="Session pull request")).to_be_visible()
-    page.screenshot(path=str(tmp_path / "online.png"))
+        expect(page.get_by_text("Created from the active session checkout.")).to_be_visible()
+    page.screenshot(path=str(tmp_path / "online.png"), animations="disabled")
 
-    os.kill(int(_server_state["runner_pid"]), signal.SIGKILL)
-    try:
-        deadline = time.monotonic() + 30
-        while (
-            httpx.get(f"{base_url}/health", params={"session_id": session_id})
-            .json()
-            .get("session", {})
-            .get("runner_online")
-        ):
-            assert time.monotonic() < deadline
-            time.sleep(0.1)
-        # Navigation discards the QueryClient and its previously fetched PR data.
-        page.goto("about:blank")
-        page.goto(f"{base_url}/c/{session_id}")
-        chip = page.get_by_test_id("composer-pr-link")
-        expect(chip).to_have_accessible_name("#42", timeout=30_000)
-        chip.click()
-        link = page.get_by_role("link", name="Open the PR on GitHub")
-        expect(link).to_have_attribute("href", _PR_URL)
-        expect(page.get_by_text("The workspace is offline.", exact=False)).to_be_visible()
-        assert reported_prs and reported_prs[0]["url"] == _PR_URL
-        page.screenshot(path=str(tmp_path / "runner-offline.png"))
+    assert stack.runner is not None
+    stack.runner.kill()
+    stack.runner.wait(timeout=10)
+    stack.runner = None
+    poll_until(
+        lambda: (
+            not httpx.get(f"{base_url}/v1/runners/{stack.runner_id}/status").json().get("online")
+        ),
+        timeout_s=30,
+        interval_s=0.1,
+    )
+    # A new page load discards all previously fetched browser data.
+    page.goto("about:blank")
+    page.goto(f"{base_url}/c/{session_id}")
+    page.get_by_test_id("composer-pr-link").click()
+    expect(page.get_by_role("link", name=f"{_TITLE} #42")).to_have_attribute("href", _URL)
+    expect(page.get_by_text("Created from the active session checkout.")).to_be_visible()
+    expect(page.get_by_text("Last synced", exact=False).first).to_be_visible()
+    page.screenshot(path=str(tmp_path / "offline-summary.png"), animations="disabled")
+    tabs = page.get_by_role("tablist", name="Pull request")
+    tabs.get_by_role("tab", name="Comments 1", exact=True).click()
+    expect(page.get_by_text("Ready for review.")).to_be_visible()
+    page.screenshot(path=str(tmp_path / "offline-comments.png"), animations="disabled")
+    tabs.get_by_role("tab", name="Changes", exact=True).click()
+    expect(page.get_by_text('print("Hello from the saved PR")', exact=False).first).to_be_visible()
+    page.screenshot(path=str(tmp_path / "offline-diff.png"), animations="disabled")
 
-        cast(Callable[..., None], _server_state["restart_server"])(wait_for_runner=False)
-        page.reload()
-        expect(page.get_by_test_id("composer-pr-link")).to_have_accessible_name("#42")
-        page.get_by_test_id("composer-pr-link").click()
-        expect(page.get_by_role("link", name="Open the PR on GitHub")).to_have_attribute(
-            "href", _PR_URL
-        )
-        response = httpx.get(f"{base_url}/v1/sessions/{session_id}/resources/github")
+    stack.restart_server()
+    page.reload()
+    page.get_by_test_id("composer-pr-link").click()
+    tabs.get_by_role("tab", name="Summary", exact=True).click()
+    expect(page.get_by_text("Created from the active session checkout.")).to_be_visible()
+    page.screenshot(path=str(tmp_path / "server-restarted.png"), animations="disabled")
+    for suffix in ("", "/changes", "/diff"):
+        response = httpx.get(f"{base_url}/v1/sessions/{session_id}/resources/github{suffix}")
         response.raise_for_status()
-        assert response.json()["prs"][0]["url"] == _PR_URL
-        page.screenshot(path=str(tmp_path / "server-restarted.png"))
-        if not mobile:
-            page.get_by_test_id("sidebar-conversation-list").get_by_text(
-                "Create a pull request.", exact=True
-            ).hover()
-            expect(page.get_by_test_id("session-tooltip-pr")).to_contain_text("#42")
-            page.screenshot(path=str(tmp_path / "sidebar.png"))
-            page.goto(f"{base_url}/canvas")
-            canvas_link = page.get_by_test_id("session-card").get_by_role(
-                "link", name="Open pull request #42"
-            )
-            expect(canvas_link).to_have_attribute("href", _PR_URL)
-            page.screenshot(path=str(tmp_path / "canvas.png"))
-    finally:
-        _recover_shared_runner()
+        assert response.json()["cached"] is True
+        assert response.json()["cached_at"] > 0
+    if not mobile:
+        page.get_by_test_id("sidebar-conversation-list").get_by_text(
+            "Create a pull request.", exact=True
+        ).hover()
+        expect(page.get_by_test_id("session-tooltip-pr")).to_contain_text("#42")
+        page.screenshot(path=str(tmp_path / "sidebar.png"), animations="disabled")
+        page.goto(f"{base_url}/canvas")
+        canvas_link = page.get_by_test_id("session-card").get_by_role(
+            "link", name="Open pull request #42"
+        )
+        expect(canvas_link).to_have_attribute("href", _URL)
+        page.screenshot(path=str(tmp_path / "canvas.png"), animations="disabled")

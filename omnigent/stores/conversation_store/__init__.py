@@ -1327,6 +1327,23 @@ class ConversationStore(ABC):
         """Persist newer PR associations; false for stale reports or missing metadata."""
         raise NotImplementedError
 
+    def set_session_pr_snapshot(
+        self,
+        conversation_id: str,
+        pr_url: str,
+        captured_at_ns: int,
+        resource_keys: dict[str, str],
+        *,
+        head_sha: str | None = None,
+        base_sha: str | None = None,
+    ) -> tuple[bool, list[str]]:
+        """Publish newer associated PR resources; return saved status and obsolete blob keys."""
+        raise NotImplementedError
+
+    def prune_session_pr_snapshots(self, conversation_id: str) -> list[str]:
+        """Remove snapshots for detached PRs and return their blob keys for cleanup."""
+        raise NotImplementedError
+
     @abstractmethod
     def set_conversation_project(
         self,

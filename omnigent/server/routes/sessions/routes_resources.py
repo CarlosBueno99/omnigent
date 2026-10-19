@@ -7,6 +7,7 @@ import contextlib
 import functools
 import mimetypes
 import ntpath
+import time
 import urllib.parse
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -108,6 +109,11 @@ from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.stores.session_pr_snapshots import (
+    load_session_pr_snapshot,
+    prune_session_pr_snapshots,
+    save_session_pr_snapshots,
+)
 
 
 class _RunnerStreamResponse(StreamingResponse):
@@ -2670,12 +2676,12 @@ def register_resources_routes(
         :returns: JSON with the ``patch`` text.
         """
         conv = await _authorize_browse_read(session_id, request)
-        return await _fs_get_with_host_fallback(
+        return await _pr_resource_with_snapshot(
             session_id,
             conv,
+            kind="diff",
+            pr_url=pr_url,
             op="github_pr_diff",
-            host_params={"pr_url": pr_url} if pr_url else {},
-            runner_params={"pr_url": pr_url} if pr_url else None,
             runner_path=f"/v1/sessions/{session_id}/resources/github/diff",
         )
 
@@ -2994,6 +3000,102 @@ def register_resources_routes(
     # ``/resources/github`` is not captured as a resource id. The diff route
     # lives on ``file_read_router`` (gzip) above.
 
+    def _can_use_saved_pr_snapshot(
+        exc: OmnigentError | HTTPException, conv: Conversation, pr_url: str | None
+    ) -> bool:
+        offline = (
+            exc.code == ErrorCode.RUNNER_UNAVAILABLE
+            if isinstance(exc, OmnigentError)
+            else exc.status_code == 502
+            and exc.detail
+            in ("no runner available for resource access", "runner resource endpoint unavailable")
+        )
+        return offline or (
+            isinstance(exc, HTTPException)
+            and exc.status_code in (400, 502)
+            and exc.detail == "This pull request is not associated with the session"
+            and any(pr["url"] == pr_url for pr in conv.session_pull_requests or [])
+        )
+
+    def _associated_pr_url(conv: Conversation, pr_url: str | None) -> str | None:
+        prs = conv.session_pull_requests or []
+        if pr_url is not None:
+            if not any(pr["url"] == pr_url for pr in prs):
+                raise HTTPException(
+                    status_code=400, detail="This pull request is not associated with the session"
+                )
+            return pr_url
+        return prs[0]["url"] if prs else None
+
+    async def _cache_pr_resource(
+        session_id: str,
+        pr_url: str | None,
+        kind: str,
+        payload: dict[str, Any],
+        captured_at_ns: int,
+    ) -> None:
+        if artifact_store is None or pr_url is None:
+            return
+        if (
+            payload.get("available") is False
+            or payload.get("warning")
+            or payload.get("warnings")
+            or payload.get("unavailable_reason")
+            or payload.get("has_more")
+        ):
+            return
+        if kind == "info" and not isinstance(payload.get("pr"), dict):
+            return
+        try:
+            await asyncio.to_thread(
+                save_session_pr_snapshots,
+                conversation_store,
+                artifact_store,
+                session_id,
+                pr_url,
+                captured_at_ns,
+                {kind: payload},
+            )
+        except Exception:
+            _logger.warning(
+                "Could not cache PR %s for session %s", kind, session_id, exc_info=True
+            )
+
+    async def _pr_resource_with_snapshot(
+        session_id: str,
+        conv: Conversation,
+        *,
+        kind: str,
+        pr_url: str | None,
+        op: str,
+        runner_path: str,
+    ) -> dict[str, Any]:
+        captured_at_ns = time.time_ns()
+        selected = pr_url or next((pr["url"] for pr in conv.session_pull_requests or []), None)
+        try:
+            payload = await _fs_get_with_host_fallback(
+                session_id,
+                conv,
+                op=op,
+                runner_path=runner_path,
+                host_params={"pr_url": selected} if selected else {},
+                runner_params={"pr_url": selected} if selected else None,
+            )
+        except (OmnigentError, HTTPException) as exc:
+            if (
+                not _can_use_saved_pr_snapshot(exc, conv, selected)
+                or conv.session_pull_requests is None
+            ):
+                raise
+            selected = _associated_pr_url(conv, pr_url)
+            if selected is None:
+                raise
+            return await asyncio.to_thread(
+                load_session_pr_snapshot, artifact_store, conv, selected, kind
+            )
+        await _cache_pr_resource(session_id, selected, kind, payload, captured_at_ns)
+        return payload
+
     async def _save_session_prs(
         session_id: str,
         payload: dict[str, Any],
@@ -3002,18 +3104,22 @@ def register_resources_routes(
     ) -> dict[str, Any]:
         if payload.get("tracking_available") is True and "prs" in payload:
             try:
-                await asyncio.to_thread(
+                saved = await asyncio.to_thread(
                     conversation_store.set_session_prs,
                     session_id,
                     payload["prs"],
                     updated_at_ns=payload.get("prs_updated_at_ns"),
                     user_update=user_update,
                 )
+                if saved:
+                    await asyncio.to_thread(
+                        prune_session_pr_snapshots, conversation_store, artifact_store, session_id
+                    )
             except (TypeError, ValueError):
                 _logger.warning("Cannot save legacy PR metadata for session %s", session_id)
         return payload
 
-    def _saved_session_pr_info(conv: Conversation, pr_url: str | None) -> dict[str, Any]:
+    async def _saved_session_pr_info(conv: Conversation, pr_url: str | None) -> dict[str, Any]:
         prs = _session_prs_for_display(conv.session_pull_requests) or []
         selected = (
             next((pr for pr in prs if pr["url"] == pr_url), None)
@@ -3024,7 +3130,15 @@ def register_resources_routes(
             raise HTTPException(
                 status_code=400, detail="This pull request is not associated with the session"
             )
+        cached = (
+            await asyncio.to_thread(
+                load_session_pr_snapshot, artifact_store, conv, selected["url"], "info"
+            )
+            if selected
+            else {}
+        )
         return {
+            **cached,
             "object": "session.github.info",
             "available": False,
             "reason": "workspace_offline",
@@ -3055,6 +3169,7 @@ def register_resources_routes(
         :returns: The ``session.github.info`` object.
         """
         conv = await _validate_session(session_id, request, LEVEL_READ)
+        captured_at_ns = time.time_ns()
         host_params: dict[str, Any] = {"pr_url": pr_url} if pr_url else {}
         if conv.session_pull_requests is not None:
             host_params.update(
@@ -3071,32 +3186,26 @@ def register_resources_routes(
                 runner_path=f"/v1/sessions/{session_id}/resources/github",
             )
         except (OmnigentError, HTTPException) as exc:
-            offline = (
-                exc.code == ErrorCode.RUNNER_UNAVAILABLE
-                if isinstance(exc, OmnigentError)
-                else exc.status_code == 502
-                and exc.detail
-                in (
-                    "no runner available for resource access",
-                    "runner resource endpoint unavailable",
-                )
-            )
-            selection_missing = (
-                isinstance(exc, HTTPException)
-                and exc.detail == "This pull request is not associated with the session"
-                and any(pr["url"] == pr_url for pr in conv.session_pull_requests or [])
-            )
-            if not (offline or selection_missing) or conv.session_pull_requests is None:
+            if (
+                not _can_use_saved_pr_snapshot(exc, conv, pr_url)
+                or conv.session_pull_requests is None
+            ):
                 raise
-            return _saved_session_pr_info(conv, pr_url)
+            return await _saved_session_pr_info(conv, pr_url)
         if (
             conv.session_pull_requests
             and payload.get("tracking_available") is True
             and payload.get("prs") == []
             and payload.get("prs_updated_at_ns") is None
         ):
-            return _saved_session_pr_info(conv, pr_url)
-        return await _save_session_prs(session_id, payload)
+            return await _saved_session_pr_info(conv, pr_url)
+        await _save_session_prs(session_id, payload)
+        selected = payload.get("selected_pr_url") or (payload.get("pr") or {}).get("url")
+        revision = payload.get("prs_updated_at_ns")
+        if type(revision) is int:
+            captured_at_ns = max(captured_at_ns, revision)
+        await _cache_pr_resource(session_id, selected, "info", payload, captured_at_ns)
+        return payload
 
     @router.get(
         "/sessions/{session_id}/resources/github/changes",
@@ -3115,12 +3224,12 @@ def register_resources_routes(
         :returns: Flat list of changed files with ``status`` and line counts.
         """
         conv = await _authorize_browse_read(session_id, request)
-        return await _fs_get_with_host_fallback(
+        return await _pr_resource_with_snapshot(
             session_id,
             conv,
+            kind="changes",
+            pr_url=pr_url,
             op="github_changes",
-            host_params={"pr_url": pr_url} if pr_url else {},
-            runner_params={"pr_url": pr_url} if pr_url else None,
             runner_path=f"/v1/sessions/{session_id}/resources/github/changes",
         )
 
