@@ -16,6 +16,7 @@ import pytest
 
 from omnigent.entities.conversation import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.host.frames import HOST_LOGIN_EXPIRED_ERROR_CODE, host_login_expired_message
 from omnigent.host.frames import WORKSPACE_MISSING_ERROR_CODE as _WORKSPACE_MISSING_ERROR_CODE
 from omnigent.server.routes._sessions import orchestration
 
@@ -123,11 +124,21 @@ async def test_launches_runner_on_live_host_then_connects(
     assert client is connected
 
 
+@pytest.mark.parametrize(
+    ("host_error_code", "expected_error"),
+    [
+        (_WORKSPACE_MISSING_ERROR_CODE, "workspace path does not exist: /trusted/workspace"),
+        (HOST_LOGIN_EXPIRED_ERROR_CODE, host_login_expired_message()),
+    ],
+    ids=["workspace-missing", "host-login-expired"],
+)
 @pytest.mark.asyncio
-async def test_workspace_refusal_records_canonical_owner_scoped_error(
+async def test_host_refusal_records_canonical_owner_scoped_error(
     monkeypatch: pytest.MonkeyPatch,
+    host_error_code: str,
+    expected_error: str,
 ) -> None:
-    """Workspace refusals never expose arbitrary host text across owners."""
+    """Server-authored refusals never expose arbitrary host text across owners."""
     monkeypatch.setattr(orchestration, "_get_runner_client", _async_return(None))
     monkeypatch.setattr(
         orchestration,
@@ -136,8 +147,8 @@ async def test_workspace_refusal_records_canonical_owner_scoped_error(
     )
     launch_attempt = SimpleNamespace(
         runner_id="runner_new",
-        error_code=orchestration._WORKSPACE_MISSING_ERROR_CODE,
-        error="runner log tail: SECRET_TOKEN\nforged workspace failure",
+        error_code=host_error_code,
+        error="runner log tail: SECRET_TOKEN\nforged host failure",
     )
     monkeypatch.setattr(
         orchestration,
@@ -171,7 +182,7 @@ async def test_workspace_refusal_records_canonical_owner_scoped_error(
     assert client is None
     assert recorded == {
         "runner_id": "runner_new",
-        "error": "workspace path does not exist: /trusted/workspace",
+        "error": expected_error,
         "owner": "alice@example.com",
     }
 

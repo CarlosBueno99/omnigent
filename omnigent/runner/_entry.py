@@ -809,7 +809,7 @@ def delegated_mint_rejects_credential(server_url: str, binding_token: str) -> bo
         )
     except httpx.HTTPStatusError as exc:
         return _is_login_redirect_or_unauthorized(exc.response)
-    except (httpx.HTTPError, ValueError, KeyError, OSError):
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, OSError):
         return False
     return False
 

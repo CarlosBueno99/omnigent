@@ -1497,6 +1497,7 @@ _APPS_LOGIN = "https://ws.example.com/oidc/oauth2/v2.0/authorize"
         (404, None, b"", False),
         (502, None, b"", False),
         (200, None, b"<html>not json</html>", False),
+        (200, None, b"null", False),
         (None, None, b"", False),
         (401, None, b"", True),
         (403, None, b"", True),
