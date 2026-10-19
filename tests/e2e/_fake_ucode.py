@@ -57,14 +57,7 @@ def configure(targets: list[tuple[str, str | None]], agents: list[str]) -> int:
         name = _save_profile(url, requested)
         print(f"Select workspace: {name}  {url}")
         print(f"Profile {name} was successfully saved")
-        workspaces[url] = {
-            "workspace": url,
-            "available_tools": agents,
-            "agents": {
-                agent: {"auth_command": f"databricks auth token --host {url} --profile {name}"}
-                for agent in agents
-            },
-        }
+        workspaces[url] = {"workspace": url}
         state["current_workspace"] = url
         print(f"Configuration\n  Workspace: {url}\n  Coding Agents: {', '.join(agents)}")
     state["workspaces"] = workspaces
@@ -78,34 +71,12 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="ug", description="fake ucode for tests")
     sub = parser.add_subparsers(dest="command", required=True)
     conf = sub.add_parser("configure")
-    # The two real invocations: ``--workspaces <urls>`` from interactive setup and
-    # ``--profiles <names>`` from the headless sandbox boot.
-    conf.add_argument("--workspaces", default=None)
-    conf.add_argument("--profiles", default=None)
+    conf.add_argument("--workspaces", required=True)
     conf.add_argument("--agents", default="claude,codex,pi")
     conf.add_argument("--profile", default=None)
-    for flag in (
-        "--enable-fable",
-        "--skip-validate",
-        "--skip-upgrade",
-        "--skip-unavailable",
-        "--use-pat",
-    ):
-        conf.add_argument(flag, action="store_true")
     args = parser.parse_args(argv)
     agents = [a for a in args.agents.split(",") if a]
-    targets: list[tuple[str, str | None]] = []
-    if args.profiles:
-        cfg = _read_cfg()
-        for name in args.profiles.split(","):
-            host = cfg.get(name, "host", fallback=None) if name else None
-            if not host:
-                parser.error(f"profile {name!r} has no host in ~/.databrickscfg")
-            targets.append((host, name))
-    elif args.workspaces:
-        targets = [(u, args.profile) for u in args.workspaces.split(",") if u]
-    else:
-        parser.error("configure needs --workspaces or --profiles")
+    targets = [(url, args.profile) for url in args.workspaces.split(",") if url]
     return configure(targets, agents)
 
 

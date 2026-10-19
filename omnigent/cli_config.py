@@ -1358,6 +1358,8 @@ def _databricks_workspace_drift_notice(config: dict[str, Any]) -> str | None:  #
     """Warn when ucode's current workspace differs from every configured
     Databricks profile. Sessions route through the configured profile, not
     ucode's current_workspace, so return ``None`` when they agree."""
+    import configparser
+
     from omnigent.onboarding.databricks_config import (
         get_workspace_url_for_profile,
         normalize_workspace_url,
@@ -1365,22 +1367,26 @@ def _databricks_workspace_drift_notice(config: dict[str, Any]) -> str | None:  #
     from omnigent.onboarding.provider_config import DATABRICKS_KIND, load_providers
     from omnigent.onboarding.ucode_state import read_current_ucode_state
 
-    ucode_state = read_current_ucode_state()
-    if ucode_state is None or not ucode_state.workspace_url:
-        return None
-    # Hostnames are case-insensitive: a mixed-case ~/.databrickscfg host must
-    # not read as drift from ucode's lowercase copy of the same workspace.
-    ucode_url = normalize_workspace_url(ucode_state.workspace_url).lower()
+    def _comparable(url: str) -> str:
+        # Like the Databricks SDK: a bare host means https, and port 443 is implicit.
+        origin = normalize_workspace_url(url if "://" in url else f"https://{url}")
+        return origin.lower().removesuffix(":443")
 
     configured: list[tuple[str, bool, str]] = []
-    for entry in load_providers(config).values():
-        if entry.kind != DATABRICKS_KIND or not entry.profile:
-            continue
-        host = get_workspace_url_for_profile(entry.profile)
-        if host:
-            configured.append(
-                (entry.profile, entry.default, normalize_workspace_url(host).lower())
-            )
+    # Advisory only: undecodable or malformed ucode/profile files must not block setup.
+    try:
+        ucode_state = read_current_ucode_state()
+        if ucode_state is None or not ucode_state.workspace_url:
+            return None
+        ucode_url = _comparable(ucode_state.workspace_url)
+        for entry in load_providers(config).values():
+            if entry.kind != DATABRICKS_KIND or not entry.profile:
+                continue
+            host = get_workspace_url_for_profile(entry.profile)
+            if host:
+                configured.append((entry.profile, entry.default, _comparable(host)))
+    except (ValueError, configparser.Error):
+        return None
     if not configured:
         return None
     if any(url == ucode_url for _profile, _default, url in configured):

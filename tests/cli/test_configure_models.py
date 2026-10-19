@@ -1503,19 +1503,30 @@ def test_databricks_drift_notice_flags_ucode_switch(tmp_path, monkeypatch) -> No
     )
 
 
-def test_databricks_drift_notice_ignores_host_case(tmp_path, monkeypatch) -> None:
-    """A mixed-case profile host still matches ucode's lowercase workspace URL."""
+@pytest.mark.parametrize(
+    ("profile_host", "drifted"),
+    [
+        ("https://Workspace-A.cloud.databricks.com", False),
+        ("workspace-a.cloud.databricks.com", False),
+        ("https://workspace-a.cloud.databricks.com:443", False),
+        ("https://workspace-a.cloud.databricks.com/browse?o=1", False),
+        ("http://workspace-a.cloud.databricks.com", True),
+        ("https://workspace-a.cloud.databricks.com:8443", True),
+    ],
+)
+def test_databricks_drift_notice_compares_hosts_like_the_sdk(
+    tmp_path, monkeypatch, profile_host: str, drifted: bool
+) -> None:
+    """Host case, a missing https scheme, port 443 and a path do not count as
+    drift; a different scheme or port does."""
     from omnigent.cli_config import _databricks_workspace_drift_notice
 
     _seed_ucode_and_databrickscfg(
-        tmp_path,
-        monkeypatch,
-        cfg_profiles={"ai_devtools": "https://Workspace-A.cloud.databricks.com"},
-        ucode_current=_WS_A,
+        tmp_path, monkeypatch, cfg_profiles={"ai_devtools": profile_host}, ucode_current=_WS_A
     )
     config = {"providers": {"databricks": {"kind": "databricks", "profile": "ai_devtools"}}}
 
-    assert _databricks_workspace_drift_notice(config) is None
+    assert (_databricks_workspace_drift_notice(config) is not None) is drifted
 
 
 def test_databricks_drift_notice_names_the_default_profile(tmp_path, monkeypatch) -> None:
@@ -1629,6 +1640,69 @@ def test_overview_banner_warns_on_databricks_ucode_drift(
     assert expected in rendered, result.output
     assert rendered.index(expected) < rendered.index("Configure harnesses")
     assert overview_styles == ["bold yellow"]
+
+
+_DATABRICKS_PROVIDER = {
+    "databricks": {"kind": "databricks", "default": True, "profile": "ai_devtools"}
+}
+_KEY_PROVIDER = {
+    "anthropic": {
+        "kind": "key",
+        "default": True,
+        "anthropic": {
+            "base_url": "https://api.anthropic.com",
+            "api_key_ref": "keychain:anthropic",
+            "models": {"default": "claude-sonnet-4-6"},
+        },
+    }
+}
+
+
+@pytest.mark.parametrize(
+    ("state_bytes", "cfg_bytes", "providers"),
+    [
+        pytest.param(
+            b'{"current_workspace": "\xff"}', None, _KEY_PROVIDER, id="state-invalid-utf8"
+        ),
+        pytest.param(
+            None,
+            b"[ai_devtools]\nhost = https://a.example\n# \xff\n",
+            _DATABRICKS_PROVIDER,
+            id="profile-invalid-utf8",
+        ),
+        pytest.param(
+            None,
+            b"[ai_devtools]\nhost = https://a.example/%zz\n",
+            _DATABRICKS_PROVIDER,
+            id="profile-bad-interpolation",
+        ),
+        pytest.param(
+            None,
+            b"[ai_devtools]\nhost = https://[a.example\n",
+            _DATABRICKS_PROVIDER,
+            id="profile-invalid-ipv6-host",
+        ),
+    ],
+)
+def test_overview_opens_when_drift_inputs_are_unreadable(
+    isolated_config, tmp_path, monkeypatch, state_bytes, cfg_bytes, providers
+) -> None:
+    """Damaged ucode state or profile files skip the drift warning instead of
+    stopping ``omni setup`` before the overview renders."""
+    _seed_ucode_and_databrickscfg(
+        tmp_path, monkeypatch, cfg_profiles={"ai_devtools": _WS_A}, ucode_current=_WS_B
+    )
+    if state_bytes is not None:
+        (tmp_path / ".ucode" / "state.json").write_bytes(state_bytes)
+    if cfg_bytes is not None:
+        (tmp_path / ".databrickscfg").write_bytes(cfg_bytes)
+    with open(os.path.join(isolated_config, "config.yaml"), "w") as f:
+        yaml.safe_dump({"providers": providers}, f)
+
+    result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input="q\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Configure harnesses" in result.output
 
 
 def test_configure_harnesses_add_databricks_normalizes_url_and_persists(
