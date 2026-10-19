@@ -985,6 +985,85 @@ async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
     assert "OMNIGENT_RUNNER_SESSION_ENV_NAMES" not in plain_env
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="same-session launch lock needs fcntl")
+async def test_concurrent_cli_launches_of_one_session_give_the_runner_its_own_launchs_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second terminal resuming the same session cannot swap in its values mid-launch."""
+    host = _make_host_process()
+    host._auth_token_factory = lambda: "host-bootstrap-bearer"
+    host._auth_token_factory_resolved = True
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    monkeypatch.setenv("OMNIGENT_SESSION_ENV_PASSTHROUGH", "ARCATERM_CAPABILITY")
+    monkeypatch.setenv("ARCATERM_CAPABILITY", "capability-for-pane-a")
+    launch_bodies: list[object] = []
+    spawned_envs: list[dict[str, str]] = []
+    first_launch_reached_server = asyncio.Event()
+    server_session_lock = asyncio.Lock()
+    original_popen = subprocess.Popen
+
+    async def _server(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        launch_bodies.append(body)
+        async with server_session_lock:
+            if spawned_envs:
+                return httpx.Response(400, json={"detail": "session already has a runner bound"})
+            return await _launch_on_host(body)
+
+    async def _launch_on_host(body: dict[str, str]) -> httpx.Response:
+        first_launch_reached_server.set()
+        await asyncio.sleep(0.5)
+        monkeypatch.delenv("ARCATERM_CAPABILITY", raising=False)
+
+        def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+            spawned_envs.append(dict(kwargs["env"]))  # type: ignore[call-overload]
+            return original_popen(
+                ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+
+        frame = HostLaunchRunnerFrame(
+            request_id="req_shared",
+            binding_token="token_shared",
+            workspace=body["workspace"],
+            session_id=body["session_id"],
+        )
+        with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+            result = await host._handle_launch(frame)
+        assert result.status == "launched", result.error
+        return httpx.Response(200, json={"runner_id": result.runner_id})
+
+    def _launch(client: httpx.AsyncClient) -> asyncio.Task[str]:
+        return asyncio.create_task(
+            daemon_launch.launch_or_reuse_daemon_runner(
+                client,
+                host_id="host_test_connect",
+                session_id="conv_shared",
+                workspace=str(workspace),
+                fresh=True,
+            )
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_server), base_url="https://server.example"
+        ) as client:
+            first = _launch(client)
+            await asyncio.wait_for(first_launch_reached_server.wait(), timeout=10)
+            monkeypatch.setenv("ARCATERM_CAPABILITY", "capability-for-pane-b")
+            second = _launch(client)
+            results = await asyncio.gather(first, second, return_exceptions=True)
+    finally:
+        _cleanup_host(host)
+
+    assert isinstance(results[0], str)
+    assert isinstance(results[1], click.ClickException)
+    assert len(launch_bodies) == 2
+    (runner_env,) = spawned_envs
+    assert runner_env["ARCATERM_CAPABILITY"] == "capability-for-pane-a"
+
+
 @pytest.mark.parametrize("binding_token", ["token_xyz", "", "   "])
 async def test_handle_launch_fails_for_bad_workspace(
     caplog: pytest.LogCaptureFixture,
