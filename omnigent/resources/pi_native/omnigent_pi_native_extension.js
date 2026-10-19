@@ -1674,20 +1674,8 @@ module.exports = function (pi) {
     if (changed) await publishTaskList();
   }
 
-  // Cumulative session token usage. Pi reports PER-MESSAGE counts (one
-  // assistant message per LLM call); session billing is their SUM — each call
-  // is billed for the full context it re-sent, so summing per-message inputs is
-  // the correct cumulative input. The server applies vendor pricing to these
-  // cumulative totals and republishes a ``session.usage`` event (the SAME
-  // contract claude-native / codex-native / cursor-native use), so the web
-  // Session-cost badge + per-model token breakdown light up with no
-  // server/frontend changes. Dedup by message fingerprint so a re-emitted
-  // ``message_end`` / ``turn_end`` / ``agent_end`` carrying the same assistant
-  // message never double-counts. ``usageModel`` tracks the latest message's
-  // model (mirrors a mid-session model switch). ``lastPostedUsageKey`` dedups
-  // the POST itself so a flush with no new tokens is skipped. The set restarts
-  // empty after a relaunch; safe, since the restored baseline already subsumes
-  // every pre-relaunch message's usage.
+  // Sum usage once per assistant message; repeated events must not double-count.
+  // Restored totals cover pre-relaunch messages, and the POST key skips unchanged totals.
   const countedUsageMessages = new Set();
   let cumulativeInputTokens = 0;
   let cumulativeOutputTokens = 0;
@@ -1762,9 +1750,7 @@ module.exports = function (pi) {
     await postEvent(config, { type: "external_session_usage", data });
   }
 
-  // A relaunched Pi process (idle reap, crash, resume) restarts these counters
-  // at 0; its first flush then lands below the server's monotonic peak and is
-  // dropped as a no-op, freezing the usage display until the baseline grows.
+  // Restore the baseline after relaunch so new usage exceeds the server's prior peak.
   function usageStatePath() {
     if (!config || !config.bridgeDir) return null;
     return path.join(config.bridgeDir, "cumulative_usage.json");
@@ -1788,9 +1774,7 @@ module.exports = function (pi) {
       );
       fs.renameSync(tmp, statePath);
     } catch (_err) {
-      // Best-effort: a failed persist only risks a one-time undercount on the
-      // next relaunch, never a crash or a wrong (clawed-back) total. Drop the
-      // temp file so a failed rename does not strand it in the bridge dir.
+      // Persistence is best-effort; remove a temp file left by a failed rename.
       try {
         fs.unlinkSync(tmp);
       } catch (_cleanupErr) {}
@@ -1816,9 +1800,8 @@ module.exports = function (pi) {
     if (cacheRead > cumulativeCacheReadTokens) cumulativeCacheReadTokens = cacheRead;
     if (!usageModel && typeof saved.model === "string" && saved.model)
       usageModel = saved.model;
-    // Leave lastPostedUsageKey empty so session_start re-asserts this baseline:
-    // a failed pre-exit flush can leave the server behind, and re-posting an
-    // already-recorded total is a no-op under the server's grow-only clamp.
+    // Repost the baseline on session_start in case the last flush failed.
+    // The server's grow-only clamp makes duplicate reports harmless.
   }
 
   function rememberContext(ctx) {
@@ -2120,9 +2103,7 @@ module.exports = function (pi) {
         data: { model: startupModel },
       });
     }
-    // Re-assert the restored baseline last, after input_ready and the inbox
-    // poller are up, so a hung usage POST cannot delay readiness; the grow-only
-    // clamp makes re-posting an already-held baseline a no-op.
+    // Publish readiness before usage so a hung POST cannot delay input handling.
     await postSessionUsage();
     // Readiness is not turn completion: a queued prompt may already be running.
     // Only agent_end publishes idle so startup cannot complete a child task.

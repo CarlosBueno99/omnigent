@@ -164,47 +164,53 @@ def _run_extension_script(node: str, extension_path: Path, script: str) -> None:
 
 
 def _usage_test_preamble() -> str:
-    """Shared Node harness: load the extension with a mocked fetch + Pi.
-
-    Exposes ``postedEvents`` (parsed request bodies), ``handlers`` (the
-    registered Pi event handlers), and a ``ctx`` stub.
-    """
+    """Load the extension with a real checkpoint directory and mocked Pi/HTTP edges."""
     return r"""
 const assert = require("assert").strict;
+const fs = require("fs");
 const path = require("path");
-
 const extensionPath = process.argv[1];
-const configPath = path.join(require("os").tmpdir(), `pi-usage-${process.pid}.json`);
-require("fs").writeFileSync(
-  configPath,
-  JSON.stringify({
-    serverUrl: "http://omnigent.test",
-    sessionId: "session-1",
-    authHeaders: { authorization: "Bearer test" },
-  }),
-);
+const root = fs.mkdtempSync(path.join(require("os").tmpdir(), "pi-usage-"));
+process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }));
+const bridgeDir = path.join(root, "bridge");
+const inboxDir = path.join(root, "inbox");
+fs.mkdirSync(bridgeDir);
+fs.mkdirSync(inboxDir);
+const statePath = path.join(bridgeDir, "cumulative_usage.json");
+const configPath = path.join(root, "config.json");
+fs.writeFileSync(configPath, JSON.stringify({
+  serverUrl: "http://omnigent.test", sessionId: "session-1", bridgeDir, inboxDir,
+  authHeaders: { authorization: "Bearer test" },
+}));
 process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
-
 const postedEvents = [];
 global.fetch = async (_url, request) => {
   postedEvents.push(JSON.parse(request.body));
   return { ok: true };
 };
 global.setInterval = () => ({ fakeInterval: true });
-
-const handlers = {};
-const pi = {
-  registerCommand() {},
-  on(eventName, handler) {
-    handlers[eventName] = handler;
-  },
+function launchExtension() {
+  delete require.cache[require.resolve(extensionPath)];
+  const handlers = {};
+  require(extensionPath)({
+    registerCommand() {},
+    on(name, handler) { handlers[name] = handler; },
+  });
+  return handlers;
+}
+const handlers = launchExtension();
+const ctx = {
+  sessionManager: { getSessionId: () => "native-session-1" },
+  ui: { setTitle() {}, setStatus() {}, notify() {} },
 };
-require(extensionPath)(pi);
-
-const ctx = { ui: { setTitle() {}, setStatus() {}, notify() {} } };
-
 function usageEvents() {
   return postedEvents.filter((e) => e.type === "external_session_usage");
+}
+async function recordUsage(handlers, timestamp, input, output) {
+  await handlers.message_end({ message: {
+    role: "assistant", model: "databricks-claude-sonnet-4-6", timestamp,
+    usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output },
+  }}, ctx);
 }
 """
 
@@ -435,240 +441,65 @@ def test_distinct_messages_with_identical_usage_are_not_collapsed(
 
 
 def test_usage_baseline_survives_native_restart() -> None:
-    """A relaunched Pi process restarts its cumulative counters at 0, so its first
-    flush falls below the server peak and is clamped; assert the baseline advances.
-    """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is required for the pi-native extension e2e test")
-    extension_path = (
-        Path(__file__).resolve().parents[3]
-        / "omnigent"
-        / "resources"
-        / "pi_native"
-        / "omnigent_pi_native_extension.js"
-    )
-
-    script = r"""
-const assert = require("assert").strict;
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
-
-const extensionPath = process.argv[1];
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-usage-restart-"));
-const bridgeDir = path.join(root, "bridge");
-const inboxDir = path.join(root, "inbox");
-fs.mkdirSync(bridgeDir, { recursive: true });
-fs.mkdirSync(inboxDir, { recursive: true });
-
-const configPath = path.join(root, "config.json");
-fs.writeFileSync(
-  configPath,
-  JSON.stringify({
-    serverUrl: "http://omnigent.test",
-    sessionId: "session-1",
-    inboxDir,
-    bridgeDir,
-    authHeaders: { authorization: "Bearer test" },
-  }),
-);
-process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
-
-const postedEvents = [];
-global.fetch = async (_url, request) => {
-  postedEvents.push(JSON.parse(request.body));
-  return { ok: true };
-};
-global.setInterval = () => ({ fakeInterval: true });
-
-const ctx = {
-  sessionManager: { getSessionId: () => "native-session-1" },
-  ui: { setTitle() {}, setStatus() {}, notify() {} },
-};
-
-function usageEvents() {
-  return postedEvents.filter((e) => e.type === "external_session_usage");
-}
-
-// Load a fresh copy of the extension, mimicking a relaunched Pi process whose
-// in-memory cumulative counters start back at 0.
-function launchExtension() {
-  delete require.cache[require.resolve(extensionPath)];
-  const handlers = {};
-  const pi = {
-    registerCommand() {},
-    on(eventName, handler) {
-      handlers[eventName] = handler;
-    },
-  };
-  require(extensionPath)(pi);
-  return handlers;
-}
-
+    """A fresh extension restores its checkpoint before accumulating the next turn."""
+    script = (
+        _usage_test_preamble()
+        + r"""
 (async () => {
-  // A long conversation accrues a high cumulative total that the extension
-  // flushes to the server AND persists to the bridge dir.
-  const first = launchExtension();
-  await first.session_start({}, ctx);
-  await first.message_end(
-    {
-      message: {
-        role: "assistant",
-        model: "databricks-claude-sonnet-4-6",
-        timestamp: 1000,
-        usage: { input: 150000, output: 30000, cacheRead: 0, cacheWrite: 0, totalTokens: 180000 },
-      },
-    },
-    ctx,
-  );
 
-  const beforeRestart = usageEvents();
-  assert.equal(beforeRestart.length, 1, JSON.stringify(postedEvents));
-  assert.equal(beforeRestart[0].data.cumulative_input_tokens, 150000);
-  assert.equal(beforeRestart[0].data.cumulative_output_tokens, 30000);
-
-  // Relaunch: a brand-new process restores and re-asserts the baseline on
-  // session_start, then reports one short post-restart turn.
+  await handlers.session_start({}, ctx);
+  await recordUsage(handlers, 1000, 150000, 30000);
+  const saved = JSON.parse(fs.readFileSync(statePath));
+  assert.equal(saved.cumulative_input_tokens, 150000);
+  assert.equal(saved.cumulative_output_tokens, 30000);
   postedEvents.length = 0;
-  const second = launchExtension();
-  await second.session_start({}, ctx);
-  await second.message_end(
-    {
-      message: {
-        role: "assistant",
-        model: "databricks-claude-sonnet-4-6",
-        timestamp: 2000,
-        usage: { input: 900, output: 250, cacheRead: 0, cacheWrite: 0, totalTokens: 1150 },
-      },
-    },
-    ctx,
-  );
-
-  const afterRestart = usageEvents();
-  // session_start re-asserts the restored baseline (so an idle resume or a
-  // failed pre-exit flush still reaches the server), then the new turn advances
-  // it: two posts, the first re-asserting 150000/30000.
-  assert.equal(afterRestart.length, 2, JSON.stringify(postedEvents));
-  assert.equal(afterRestart[0].data.cumulative_input_tokens, 150000, JSON.stringify(postedEvents));
-  assert.equal(afterRestart[0].data.cumulative_output_tokens, 30000, JSON.stringify(postedEvents));
-  const data = afterRestart[afterRestart.length - 1].data;
-  // Totals must advance from the restored baseline: 150000 + 900 / 30000 + 250.
-  assert.equal(data.cumulative_input_tokens, 150900, JSON.stringify(data));
-  assert.equal(data.cumulative_output_tokens, 30250, JSON.stringify(data));
-  assert.equal(data.model, "databricks-claude-sonnet-4-6");
-})().catch((error) => {
-  console.error(error && error.stack ? error.stack : error);
-  process.exit(1);
-});"""
-    _run_extension_script(node, extension_path, script)
+  const resumed = launchExtension();
+  await resumed.session_start({}, ctx);
+  await recordUsage(resumed, 2000, 900, 250);
+  assert.deepEqual(usageEvents().map(({data}) => [
+    data.cumulative_input_tokens, data.cumulative_output_tokens, data.model,
+  ]), [
+    [150000, 30000, "databricks-claude-sonnet-4-6"],
+    [150900, 30250, "databricks-claude-sonnet-4-6"],
+  ]);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+    result = _run_node(script, str(_extension_path()))
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_session_start_readiness_not_blocked_by_hung_usage_post() -> None:
-    """A stalled baseline re-assertion POST must not wedge session startup.
-
-    ``session_start`` restores a persisted baseline and re-asserts it to the
-    server, but does so only after ``input_ready`` is written and the inbox
-    poller is armed. A server that accepts the connection and never responds can
-    therefore stall that POST without blocking readiness: ``input_ready`` still
-    appears, so queued messages can be delivered.
-    """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is required for the pi-native extension e2e test")
-    extension_path = (
-        Path(__file__).resolve().parents[3]
-        / "omnigent"
-        / "resources"
-        / "pi_native"
-        / "omnigent_pi_native_extension.js"
-    )
-
-    script = r"""
-const assert = require("assert").strict;
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
-
-const extensionPath = process.argv[1];
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-usage-hang-"));
-const bridgeDir = path.join(root, "bridge");
-const inboxDir = path.join(root, "inbox");
-fs.mkdirSync(bridgeDir, { recursive: true });
-fs.mkdirSync(inboxDir, { recursive: true });
-
-// A persisted baseline the resumed process must re-assert, so postSessionUsage
-// actually fires a POST instead of returning early on zero totals.
-fs.writeFileSync(
-  path.join(bridgeDir, "cumulative_usage.json"),
-  JSON.stringify({
-    cumulative_input_tokens: 150000,
-    cumulative_output_tokens: 30000,
-    cumulative_cache_read_input_tokens: 0,
-    model: "databricks-claude-sonnet-4-6",
-  }),
-);
-
-const configPath = path.join(root, "config.json");
-fs.writeFileSync(
-  configPath,
-  JSON.stringify({
-    serverUrl: "http://omnigent.test",
-    sessionId: "session-1",
-    inboxDir,
-    bridgeDir,
-    authHeaders: { authorization: "Bearer test" },
-  }),
-);
-process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
-
-// The usage re-assertion POST never settles; every other startup POST resolves.
-let usagePostAttempted = false;
-global.fetch = async (_url, request) => {
-  const body = JSON.parse(request.body);
-  if (body.type === "external_session_usage") {
-    usagePostAttempted = true;
-    return new Promise(() => {});
-  }
-  return { ok: true };
-};
-global.setInterval = () => ({ fakeInterval: true });
-
-const handlers = {};
-const pi = {
-  registerCommand() {},
-  on(eventName, handler) {
-    handlers[eventName] = handler;
-  },
-};
-require(extensionPath)(pi);
-
-const ctx = {
-  sessionManager: { getSessionId: () => "native-session-1" },
-  ui: { setTitle() {}, setStatus() {}, notify() {} },
-};
-
+    """Readiness and inbox polling precede a stalled checkpoint POST."""
+    script = (
+        _usage_test_preamble()
+        + r"""
 (async () => {
-  // Fire session_start WITHOUT awaiting: its final re-assertion POST never
-  // resolves, but readiness must already be established by then.
-  const starting = handlers.session_start({}, ctx);
-  starting.catch(() => {});
-  const readyPath = path.join(bridgeDir, "input_ready");
-  const deadline = Date.now() + 5000;
-  while ((!fs.existsSync(readyPath) || !usagePostAttempted) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  assert.ok(
-    fs.existsSync(readyPath),
-    "input_ready must be written before the baseline POST so a hung POST cannot wedge startup",
-  );
-  assert.ok(usagePostAttempted, "the baseline re-assertion POST should have been attempted");
-  process.exit(0);
-})().catch((error) => {
-  console.error(error && error.stack ? error.stack : error);
-  process.exit(1);
-});"""
-    _run_extension_script(node, extension_path, script)
+
+  fs.writeFileSync(statePath, JSON.stringify({
+    cumulative_input_tokens: 150000, cumulative_output_tokens: 30000,
+    cumulative_cache_read_input_tokens: 0, model: "databricks-claude-sonnet-4-6",
+  }));
+  let usagePostAttempted = false;
+  let polling = false;
+  global.setInterval = () => { polling = true; return {}; };
+  global.fetch = async (_url, request) => {
+    if (JSON.parse(request.body).type === "external_session_usage") {
+      usagePostAttempted = true;
+      return new Promise(() => {});
+    }
+    return { ok: true };
+  };
+  handlers.session_start({}, ctx).catch(error => { console.error(error); process.exit(1); });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(usagePostAttempted);
+  assert.ok(fs.existsSync(path.join(bridgeDir, "input_ready")));
+  assert.ok(polling);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+    result = _run_node(script, str(_extension_path()))
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_agent_end_dedupes_real_shaped_messages_by_timestamp(
@@ -726,227 +557,49 @@ def test_agent_end_dedupes_real_shaped_messages_by_timestamp(
 
 
 def test_restore_ignores_malformed_persisted_state() -> None:
-    """A corrupt ``cumulative_usage.json`` (e.g. a crash mid-write) is ignored on
-    restore: the counters start fresh, session_start re-asserts nothing, and the
-    first real turn posts only its own total with no crash.
-    """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is required for the pi-native extension e2e test")
-    extension_path = (
-        Path(__file__).resolve().parents[3]
-        / "omnigent"
-        / "resources"
-        / "pi_native"
-        / "omnigent_pi_native_extension.js"
-    )
-
-    script = r"""
-const assert = require("assert").strict;
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
-
-const extensionPath = process.argv[1];
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-usage-malformed-"));
-const bridgeDir = path.join(root, "bridge");
-const inboxDir = path.join(root, "inbox");
-fs.mkdirSync(bridgeDir, { recursive: true });
-fs.mkdirSync(inboxDir, { recursive: true });
-// A truncated/garbage state file left by a crash mid-write.
-fs.writeFileSync(path.join(bridgeDir, "cumulative_usage.json"), "{not-json");
-
-const configPath = path.join(root, "config.json");
-fs.writeFileSync(
-  configPath,
-  JSON.stringify({
-    serverUrl: "http://omnigent.test",
-    sessionId: "session-1",
-    inboxDir,
-    bridgeDir,
-    authHeaders: { authorization: "Bearer test" },
-  }),
-);
-process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
-
-const postedEvents = [];
-global.fetch = async (_url, request) => {
-  postedEvents.push(JSON.parse(request.body));
-  return { ok: true };
-};
-global.setInterval = () => ({ fakeInterval: true });
-
-const handlers = {};
-const pi = {
-  registerCommand() {},
-  on(eventName, handler) {
-    handlers[eventName] = handler;
-  },
-};
-require(extensionPath)(pi);
-
-const ctx = {
-  sessionManager: { getSessionId: () => "native-session-1" },
-  ui: { setTitle() {}, setStatus() {}, notify() {} },
-};
-
-function usageEvents() {
-  return postedEvents.filter((e) => e.type === "external_session_usage");
-}
-
+    """A truncated checkpoint does not contaminate the next usage report."""
+    script = (
+        _usage_test_preamble()
+        + r"""
 (async () => {
-  // Restore must swallow the parse error and start the counters at 0, so
-  // session_start has no baseline to re-assert (no usage POST yet).
-  await handlers.session_start({}, ctx);
-  assert.equal(usageEvents().length, 0, JSON.stringify(postedEvents));
 
-  // The next turn posts only its own total, uncontaminated by the bad file.
-  await handlers.message_end(
-    {
-      message: {
-        role: "assistant",
-        model: "databricks-claude-sonnet-4-6",
-        timestamp: 1,
-        usage: { input: 500, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 600 },
-      },
-    },
-    ctx,
-  );
-  const usage = usageEvents();
-  assert.equal(usage.length, 1, JSON.stringify(postedEvents));
-  assert.equal(usage[0].data.cumulative_input_tokens, 500, JSON.stringify(usage[0].data));
-  assert.equal(usage[0].data.cumulative_output_tokens, 100, JSON.stringify(usage[0].data));
-})().catch((error) => {
-  console.error(error && error.stack ? error.stack : error);
-  process.exit(1);
-});"""
-    _run_extension_script(node, extension_path, script)
+  fs.writeFileSync(statePath, "{not-json");
+  await handlers.session_start({}, ctx);
+  assert.equal(usageEvents().length, 0);
+  await recordUsage(handlers, 1000, 500, 100);
+  assert.deepEqual(usageEvents().map(({data}) => [
+    data.cumulative_input_tokens, data.cumulative_output_tokens,
+  ]), [[500, 100]]);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+    result = _run_node(script, str(_extension_path()))
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_restore_never_lowers_a_higher_live_total() -> None:
-    """A stale/lower persisted total must never claw a higher live total down.
-
-    The restore is raise-only: if the counters already hold a higher total than
-    the saved file (e.g. a stale or partially clobbered state), restore keeps the
-    live total, and a follow-up turn advances from it rather than from the stale
-    lower value.
-    """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is required for the pi-native extension e2e test")
-    extension_path = (
-        Path(__file__).resolve().parents[3]
-        / "omnigent"
-        / "resources"
-        / "pi_native"
-        / "omnigent_pi_native_extension.js"
-    )
-
-    script = r"""
-const assert = require("assert").strict;
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
-
-const extensionPath = process.argv[1];
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-usage-stale-"));
-const bridgeDir = path.join(root, "bridge");
-const inboxDir = path.join(root, "inbox");
-fs.mkdirSync(bridgeDir, { recursive: true });
-fs.mkdirSync(inboxDir, { recursive: true });
-const statePath = path.join(bridgeDir, "cumulative_usage.json");
-
-const configPath = path.join(root, "config.json");
-fs.writeFileSync(
-  configPath,
-  JSON.stringify({
-    serverUrl: "http://omnigent.test",
-    sessionId: "session-1",
-    inboxDir,
-    bridgeDir,
-    authHeaders: { authorization: "Bearer test" },
-  }),
-);
-process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
-
-const postedEvents = [];
-global.fetch = async (_url, request) => {
-  postedEvents.push(JSON.parse(request.body));
-  return { ok: true };
-};
-global.setInterval = () => ({ fakeInterval: true });
-
-const handlers = {};
-const pi = {
-  registerCommand() {},
-  on(eventName, handler) {
-    handlers[eventName] = handler;
-  },
-};
-require(extensionPath)(pi);
-
-const ctx = {
-  sessionManager: { getSessionId: () => "native-session-1" },
-  ui: { setTitle() {}, setStatus() {}, notify() {} },
-};
-
-function usageEvents() {
-  return postedEvents.filter((e) => e.type === "external_session_usage");
-}
-
+    """A stale checkpoint cannot lower the live cumulative total."""
+    script = (
+        _usage_test_preamble()
+        + r"""
 (async () => {
+
   await handlers.session_start({}, ctx);
-  await handlers.message_end(
-    {
-      message: {
-        role: "assistant",
-        model: "databricks-claude-sonnet-4-6",
-        timestamp: 1000,
-        usage: { input: 150000, output: 30000, cacheRead: 0, cacheWrite: 0, totalTokens: 180000 },
-      },
-    },
-    ctx,
-  );
-  assert.equal(usageEvents().length, 1, JSON.stringify(postedEvents));
-
-  // A stale/lower total appears on disk while this process already holds a
-  // higher live total (older process or a partially clobbered write).
-  fs.writeFileSync(
-    statePath,
-    JSON.stringify({
-      cumulative_input_tokens: 100000,
-      cumulative_output_tokens: 20000,
-      cumulative_cache_read_input_tokens: 0,
-      model: "databricks-claude-sonnet-4-6",
-    }),
-  );
-
-  postedEvents.length = 0;
-  // Restore runs again: the raise-only guard must keep the higher live total.
+  await recordUsage(handlers, 1000, 150000, 30000);
+  fs.writeFileSync(statePath, JSON.stringify({
+    cumulative_input_tokens: 100000, cumulative_output_tokens: 20000,
+    cumulative_cache_read_input_tokens: 0, model: "databricks-claude-sonnet-4-6",
+  }));
   await handlers.session_start({}, ctx);
-  // A follow-up turn advances from the retained 150000 baseline (150000 + 500),
-  // proving the stale lower file never clawed the live counters down to 100000.
-  await handlers.message_end(
-    {
-      message: {
-        role: "assistant",
-        model: "databricks-claude-sonnet-4-6",
-        timestamp: 2000,
-        usage: { input: 500, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 600 },
-      },
-    },
-    ctx,
-  );
-
-  const after = usageEvents();
-  const data = after[after.length - 1].data;
-  assert.equal(data.cumulative_input_tokens, 150500, JSON.stringify(data));
-  assert.equal(data.cumulative_output_tokens, 30100, JSON.stringify(data));
-})().catch((error) => {
-  console.error(error && error.stack ? error.stack : error);
-  process.exit(1);
-});"""
-    _run_extension_script(node, extension_path, script)
+  await recordUsage(handlers, 2000, 500, 100);
+  const data = usageEvents().at(-1).data;
+  assert.equal(data.cumulative_input_tokens, 150500);
+  assert.equal(data.cumulative_output_tokens, 30100);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+    result = _run_node(script, str(_extension_path()))
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _extension_path() -> Path:
@@ -4152,7 +3805,6 @@ def test_native_auth_errors_are_correlated_and_redacted(tmp_path: Path) -> None:
         + "\nconst authDir = "
         + json.dumps(str(tmp_path))
         + r""";
-const fs = require("fs");
 const crypto = require("crypto");
 process.env.OMNIGENT_PI_NATIVE_AUTH_DIR = authDir;
 const id = crypto.createHash("sha256").update("omnigent").digest("hex").slice(0, 16);
