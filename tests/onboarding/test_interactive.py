@@ -15,6 +15,7 @@ so the tests that need one stand up a pty (see :func:`_select_over_pty`).
 from __future__ import annotations
 
 import io
+import os
 import sys
 
 import pytest
@@ -121,17 +122,13 @@ def test_select_fallback_prints_status_above_title(
     """Numbered fallbacks keep the status line the raw-termios menu shows."""
     monkeypatch.setattr(sys.stdin, "isatty", lambda: stdin_is_tty)
     monkeypatch.setattr(interactive, "IS_WINDOWS", is_windows)
-    if raw_mode_fails:
-        import termios
-
-        def _no_raw_mode(_fd: int) -> list[object]:
-            raise termios.error("raw mode unavailable")
-
-        monkeypatch.setattr(sys.stdin, "fileno", lambda: 0)
-        monkeypatch.setattr(termios, "tcgetattr", _no_raw_mode)
     _feed(monkeypatch, ["1"])
 
-    interactive.select("Pick one", ["alpha"], status="⚠ drift", status_style="bold yellow")
+    with open(os.devnull, "rb") as not_a_terminal:
+        if raw_mode_fails:
+            # tcgetattr raises termios.error for a stdin that is not a terminal.
+            monkeypatch.setattr(sys.stdin, "fileno", not_a_terminal.fileno)
+        interactive.select("Pick one", ["alpha"], status="⚠ drift", status_style="bold yellow")
 
     out = capsys.readouterr().out
     assert "⚠ drift" in out
@@ -516,8 +513,9 @@ def test_render_menu_compact_truncates_long_description_to_one_line() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_render_menu_status_is_green_unless_a_style_is_given() -> None:
+def test_render_menu_status_is_green_unless_a_style_is_given(monkeypatch) -> None:
     """The status line keeps its green default; ``status_style`` overrides it."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
     kwargs = {"descriptions": None, "width": 80, "selectable": [True, True]}
     saved = interactive._render_menu("Pick", ["a", "b"], 0, status="✓ saved", **kwargs)
     drift = interactive._render_menu(

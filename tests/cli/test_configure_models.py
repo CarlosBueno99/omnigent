@@ -1674,6 +1674,9 @@ _INVALID_UTF8_UCODE_STATE = b'{"current_workspace": "\xff"}'
         pytest.param(
             None, b"[ai_devtools]\nhost = https://[a.example\n", id="profile-invalid-ipv6-host"
         ),
+        pytest.param(
+            None, b"[ai_devtools]\nhost = https://a.example:notaport\n", id="profile-invalid-port"
+        ),
     ],
 )
 def test_databricks_drift_notice_skips_unreadable_inputs(
@@ -1691,6 +1694,24 @@ def test_databricks_drift_notice_skips_unreadable_inputs(
         (tmp_path / ".databrickscfg").write_bytes(cfg_bytes)
 
     assert _databricks_workspace_drift_notice({"providers": _DATABRICKS_PROVIDER}) is None
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="needs POSIX directory permissions"
+)
+def test_databricks_drift_notice_skips_an_untraversable_ucode_dir(tmp_path, monkeypatch) -> None:
+    """A ``~/.ucode`` directory the user cannot enter skips the advisory instead of raising."""
+    from omnigent.cli_config import _databricks_workspace_drift_notice
+
+    _seed_ucode_and_databrickscfg(
+        tmp_path, monkeypatch, cfg_profiles={"ai_devtools": _WS_A}, ucode_current=_WS_B
+    )
+    ucode_dir = tmp_path / ".ucode"
+    ucode_dir.chmod(0o000)
+    try:
+        assert _databricks_workspace_drift_notice({"providers": _DATABRICKS_PROVIDER}) is None
+    finally:
+        ucode_dir.chmod(0o700)
 
 
 def test_overview_opens_when_ucode_state_is_unreadable(

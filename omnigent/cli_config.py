@@ -1359,6 +1359,7 @@ def _databricks_workspace_drift_notice(config: dict[str, Any]) -> str | None:  #
     Databricks profile. Sessions route through the configured profile, not
     ucode's current_workspace, so return ``None`` when they agree."""
     import configparser
+    from urllib.parse import urlparse
 
     from omnigent.onboarding.databricks_config import (
         get_workspace_url_for_profile,
@@ -1369,11 +1370,12 @@ def _databricks_workspace_drift_notice(config: dict[str, Any]) -> str | None:  #
 
     def _comparable(url: str) -> str:
         # Like the Databricks SDK: a bare host means https, and port 443 is implicit.
-        origin = normalize_workspace_url(url if "://" in url else f"https://{url}")
-        return origin.lower().removesuffix(":443")
+        origin = normalize_workspace_url(url if "://" in url else f"https://{url}").lower()
+        # Reading .port raises ValueError for a malformed port.
+        return origin.removesuffix(":443") if urlparse(origin).port == 443 else origin
 
     configured: list[tuple[str, bool, str]] = []
-    # Advisory only: undecodable or malformed ucode/profile files must not block setup.
+    # Advisory only: unreadable or malformed ucode/profile files must not block setup.
     try:
         ucode_state = read_current_ucode_state()
         if ucode_state is None or not ucode_state.workspace_url:
@@ -1385,7 +1387,7 @@ def _databricks_workspace_drift_notice(config: dict[str, Any]) -> str | None:  #
             host = get_workspace_url_for_profile(entry.profile)
             if host:
                 configured.append((entry.profile, entry.default, _comparable(host)))
-    except (ValueError, configparser.Error):
+    except (OSError, ValueError, configparser.Error):
         return None
     if not configured:
         return None
