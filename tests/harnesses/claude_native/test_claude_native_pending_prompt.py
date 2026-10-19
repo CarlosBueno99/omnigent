@@ -97,6 +97,7 @@ def test_live_hook_protects_a_prompt_even_during_a_torn_capture(
         _AUTO_MODE_SETUP_OFFER,
         # A wide-character session title shortens the composer's opening rule as a string.
         _AUTO_MODE_SETUP_OFFER.replace("─" * 80 + "\n❯", "─" * 73 + " 会话 ─\n❯"),
+        _AUTO_MODE_SETUP_OFFER.replace("─" * 80 + "\n❯\n" + "─" * 80, "─" * 73 + " 会话 ─\n❯"),
     ],
 )
 @pytest.mark.parametrize("operation", ["message", "settings"])

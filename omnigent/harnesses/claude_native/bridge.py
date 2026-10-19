@@ -6126,8 +6126,11 @@ def _selection_dialog_above_composer(pane: str) -> bool:
 
 
 def _rule_span(line: str) -> tuple[int, int]:
-    """Return a pane line's starting column and its width without surrounding blanks."""
-    return len(line) - len(line.lstrip()), len(line.strip())
+    """Return a pane line's starting column and its display width without surrounding blanks."""
+    # Imported here so the per-tool-call hooks that import this module stay free of rich.
+    from rich.cells import cell_len
+
+    return len(line) - len(line.lstrip()), cell_len(line.strip())
 
 
 def _claude_prompt_rendered(pane: str) -> bool:
