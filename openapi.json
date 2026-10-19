@@ -4094,7 +4094,7 @@
                 "type": "null"
               }
             ],
-            "description": "Display name of the agent in `source_session_id`, stamped by the server, e.g. `\"Claude Code\"`.",
+            "description": "Display name of the agent in `source_session_id`, stamped by the server, e.g. `\"Claude\"`.",
             "title": "Source Agent Name"
           },
           "source_session_id": {
