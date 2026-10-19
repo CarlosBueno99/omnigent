@@ -8,6 +8,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -59,6 +60,9 @@ export function extractCodeText(children: ReactNode): string {
 
 // A click that lands while Streamdown is still drawing the diagram opens it once drawn.
 const DIAGRAM_RENDER_WAIT_MS = 5_000;
+
+const blockPosition = (block: HTMLElement) =>
+  Array.from((block.getRootNode() as ParentNode).querySelectorAll(".chat-mermaid")).indexOf(block);
 
 type MermaidFullscreen = {
   open: (block: HTMLElement, source: string) => void;
@@ -134,6 +138,7 @@ export function MermaidFullscreenProvider({
   const pendingRef = useRef<{
     block: HTMLElement;
     deadline: number;
+    position: number;
     source: string;
     stop: () => void;
   } | null>(null);
@@ -141,7 +146,7 @@ export function MermaidFullscreenProvider({
     pendingRef.current?.stop();
     pendingRef.current = null;
   }, []);
-  useEffect(() => cancelPending, [resetKey, cancelPending]);
+  useLayoutEffect(() => cancelPending, [resetKey, cancelPending]);
 
   const openWhenDrawn = useCallback(
     (block: HTMLElement, source: string, deadline: number) => {
@@ -161,27 +166,35 @@ export function MermaidFullscreenProvider({
         setSvgMarkup(rendered.outerHTML);
       });
       const timer = window.setTimeout(cancelPending, deadline - Date.now());
+      const onKey = (event: KeyboardEvent) => {
+        if (event.key === "Escape") cancelPending();
+      };
       observer.observe(block, { childList: true, subtree: true });
+      window.addEventListener("keydown", onKey);
       const stop = () => {
         observer.disconnect();
         window.clearTimeout(timer);
+        window.removeEventListener("keydown", onKey);
       };
-      pendingRef.current = { block, deadline, source, stop };
+      pendingRef.current = { block, deadline, position: blockPosition(block), source, stop };
     },
     [cancelPending],
   );
   const fullscreen = useMemo<MermaidFullscreen>(
     () => ({
       open: (block, source) => openWhenDrawn(block, source, Date.now() + DIAGRAM_RENDER_WAIT_MS),
-      // A settled reply remounts its blocks; the replacement takes over a click still waiting.
-      // A streaming fence only grows, so match the last source seen minus its trailing newline.
+      // A settled reply remounts its blocks in place; the replacement takes over a click still
+      // waiting. A streaming fence only grows, so match the last source seen minus its newline.
       adoptPendingOpen: (block, source) => {
         const pending = pendingRef.current;
-        if (pending?.block === block) pending.source = source;
-        else if (
+        if (pending?.block === block) {
+          pending.position = blockPosition(block);
+          pending.source = source;
+        } else if (
           pending &&
           !pending.block.isConnected &&
-          source.startsWith(pending.source.trimEnd())
+          source.startsWith(pending.source.trimEnd()) &&
+          blockPosition(block) === pending.position
         ) {
           openWhenDrawn(block, source, pending.deadline);
         }

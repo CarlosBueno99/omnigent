@@ -1,3 +1,4 @@
+import type { RenderResult } from "@testing-library/react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setEmbedRoot } from "@/lib/host";
@@ -253,30 +254,51 @@ describe.each([true, false])("Mermaid fullscreen (embedded=%s)", (embedded) => {
     expect(overlayDiagram()?.outerHTML).toBe((await inlineDiagram()).outerHTML);
   }, 15_000);
 
-  it("opens a diagram clicked while its fence was still streaming", async () => {
-    const clicked = "flowchart LR\n  Alpha --> Gamma";
-    const reply = (mode: "streaming" | "static", clickedSoFar: string) => (
-      <MermaidFullscreenProvider>
-        <MessageResponse key={mode} mode={mode}>
-          {`${markdown}\n\n\`\`\`mermaid\n${clickedSoFar}${mode === "static" ? "\n```" : ""}`}
-        </MessageResponse>
-      </MermaidFullscreenProvider>
-    );
-    const { rerender } = render(reply("streaming", "flowchart LR\n  Alpha"), { container: root });
-    const clickedBlock = root.querySelectorAll(".chat-mermaid")[1];
-    fireEvent.click(screen.getAllByTitle("View fullscreen")[1]);
-    rerender(reply("streaming", "flowchart LR\n  Alpha --> G"));
-    expect(clickedBlock.isConnected).toBe(true);
-    rerender(reply("static", clicked));
-    expect(clickedBlock.isConnected).toBe(false);
-    expect(root.querySelector(diagramSelector)).toBeNull();
+  it.each([
+    [
+      "while its fence was still streaming",
+      ["flowchart LR\n  Alpha", "flowchart LR\n  Alpha --> G"],
+      false,
+    ],
+    ["when an earlier diagram starts with the streamed part", ["flowchart LR\n  Alpha"], false],
+    [
+      "before a diagram above it unmounted",
+      ["flowchart LR\n  Alpha", "flowchart LR\n  Alpha --> G"],
+      true,
+    ],
+  ] as const)(
+    "opens a diagram clicked %s",
+    async (_case, [clickedFirst, ...clickedLater], startsWithRowAbove) => {
+      const clicked = "flowchart LR\n  Alpha --> Gamma";
+      const reply = (mode: "streaming" | "static", clickedSoFar: string, withRowAbove = false) => (
+        <MermaidFullscreenProvider>
+          {withRowAbove && <MessageResponse>{markdown}</MessageResponse>}
+          <MessageResponse key={mode} mode={mode}>
+            {`${markdown}\n\n\`\`\`mermaid\n${clickedSoFar}${mode === "static" ? "\n```" : ""}`}
+          </MessageResponse>
+        </MermaidFullscreenProvider>
+      );
+      const { rerender } = render(reply("streaming", clickedFirst, startsWithRowAbove), {
+        container: root,
+      });
+      const clickedBlock = Array.from(root.querySelectorAll(".chat-mermaid")).at(-1)!;
+      fireEvent.click(screen.getAllByTitle("View fullscreen").at(-1)!);
+      for (const clickedSoFar of clickedLater) {
+        rerender(reply("streaming", clickedSoFar));
+        expect(clickedBlock.isConnected).toBe(true);
+      }
+      rerender(reply("static", clicked));
+      expect(clickedBlock.isConnected).toBe(false);
+      expect(root.querySelector(diagramSelector)).toBeNull();
 
-    await screen.findByTitle("Exit fullscreen", {}, { timeout: 10_000 });
-    const drawn = () => root.querySelectorAll(`.chat-mermaid ${diagramSelector}`);
-    await waitFor(() => expect(drawn()).toHaveLength(2), { timeout: 10_000 });
-    expect(overlayDiagram()?.textContent).toContain("Gamma");
-    expect(overlayDiagram()?.outerHTML).toBe(drawn()[1].outerHTML);
-  }, 15_000);
+      await screen.findByTitle("Exit fullscreen", {}, { timeout: 10_000 });
+      const drawn = () => root.querySelectorAll(`.chat-mermaid ${diagramSelector}`);
+      await waitFor(() => expect(drawn()).toHaveLength(2), { timeout: 10_000 });
+      expect(overlayDiagram()?.textContent).toContain("Gamma");
+      expect(overlayDiagram()?.outerHTML).toBe(drawn()[1].outerHTML);
+    },
+    15_000,
+  );
 
   it.each([
     [4_999, true],
@@ -354,14 +376,21 @@ describe.each([true, false])("Mermaid fullscreen (embedded=%s)", (embedded) => {
     expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
   }, 15_000);
 
-  it("does not open a diagram clicked before a route change once it draws", async () => {
-    const { rerender } = render(page("/c/first"), { container: root });
-    fireEvent.click(screen.getByTitle("View fullscreen"));
-    rerender(page("/c/second"));
-    await inlineDiagram();
-    await act(async () => {});
-    expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
-  }, 15_000);
+  it.each([
+    ["a route change", (rerender: RenderResult["rerender"]) => rerender(page("/c/second"))],
+    ["Escape", () => fireEvent.keyDown(window, { key: "Escape" })],
+  ])(
+    "does not open a diagram clicked before %s once it draws",
+    async (_cancellation, cancel) => {
+      const { rerender } = render(page("/c/first"), { container: root });
+      fireEvent.click(screen.getByTitle("View fullscreen"));
+      cancel(rerender);
+      await inlineDiagram();
+      await act(async () => {});
+      expect(screen.queryByTitle("Exit fullscreen")).toBeNull();
+    },
+    15_000,
+  );
 });
 
 it("preserves ordinary code fences in reasoning", () => {
