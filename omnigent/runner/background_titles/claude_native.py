@@ -76,12 +76,8 @@ async def generate_background_title(context: BackgroundTitleContext) -> str | No
     with claude_settings_file_args(settings) as settings_args:
         command, launch_args = resolve_claude_launch("claude", [*args, *settings_args])
         if command == "claude":
-            # Mirrors the check in _auto_create_claude_terminal: this bare
-            # "claude" is resolved against this process's PATH by
-            # create_subprocess_exec's env=... below, so validate the same
-            # binary that will actually run. Degrades to a skipped title
-            # (like the config-resolution fallback above) rather than raising,
-            # since a background title is best-effort, not session-critical.
+            # Validate the PATH-resolved binary that will run; a mismatch skips
+            # this best-effort title instead of failing the session.
             resolved_claude = resolve_cli_binary("claude")
             if resolved_claude is not None:
                 try:
