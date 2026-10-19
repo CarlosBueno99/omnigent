@@ -18,7 +18,7 @@
 
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createRef } from "react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
 import { Editor } from "@tiptap/core";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -221,21 +221,34 @@ describe("TableHandles — context menu", () => {
 });
 
 describe("TableHandles — embedded portal target", () => {
-  it("portals grips, grip menus and the context menu into the embed root", () => {
+  it("portals grips, menus and overlays into the embed root", () => {
     // WHY: managed CSS is scoped under the embed root; body-level portals
     // render unstyled, so the table controls become invisible and unusable.
     const embedRoot = document.createElement("div");
     document.body.appendChild(embedRoot);
+    onTestFinished(() => embedRoot.remove());
     setEmbedRoot(embedRoot);
     renderHandles();
+    // Any portal into <body> would add a direct child beyond these.
+    const bodyChildren = Array.from(document.body.children);
 
     const rowMenu = openRowMenu(1);
-    expect(embedRoot).toContainElement(screen.getByRole("button", { name: "Row options" }));
     expect(embedRoot).toContainElement(screen.getByRole("button", { name: "Column options" }));
     expect(embedRoot).toContainElement(rowMenu);
 
+    // Hovering the grip shows the selection overlay; dragging it shows the
+    // ghost, target and drop-indicator overlays.
+    const rowGrip = screen.getByRole("button", { name: "Row options" });
+    expect(embedRoot).toContainElement(rowGrip);
+    fireEvent.mouseEnter(rowGrip);
+    fireEvent.mouseDown(rowGrip, { clientX: 0, clientY: 0 });
+    fireEvent.mouseMove(document, { clientX: 0, clientY: 40 });
+    expect(Array.from(document.body.children)).toEqual(bodyChildren);
+    expect(embedRoot.childElementCount).toBeGreaterThan(3);
+    fireEvent.mouseUp(document, { clientX: 0, clientY: 40 });
+
     fireEvent.contextMenu(rows()[1].cells[1], { bubbles: true, clientX: 10, clientY: 10 });
     expect(embedRoot).toContainElement(screen.getByText("Delete table"));
-    embedRoot.remove();
+    expect(Array.from(document.body.children)).toEqual(bodyChildren);
   });
 });
