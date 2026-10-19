@@ -15,6 +15,7 @@ import click
 import httpx
 import pytest
 
+from omnigent._platform import IS_WINDOWS
 from omnigent.cli_auth import OMNIGENT_SLICE_KEY_HEADER
 from omnigent.host import daemon_launch
 from omnigent.host.daemon_launch import (
@@ -420,6 +421,7 @@ def test_daemon_poll_intervals_open_tight_then_hold_at_the_cadence() -> None:
     assert sum(first_ten[:2]) < 2 * daemon_launch.DAEMON_POLL_INTERVAL_S
 
 
+@pytest.mark.skipif(IS_WINDOWS, reason="Session env forwarding is disabled on Windows")
 async def test_launch_warns_when_an_older_peer_leaves_forwarded_values_unconsumed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

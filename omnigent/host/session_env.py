@@ -76,7 +76,8 @@ def requested_session_env(source: Mapping[str, str] | None = None) -> dict[str, 
 
     :param source: Environment to read. Defaults to ``os.environ``.
     :returns: Mapping of each requested, present name to its value.
-    :raises click.ClickException: If a listed name is malformed or reserved.
+    :raises click.ClickException: If a listed name is malformed or reserved,
+        or if there are values to forward on Windows.
     """
     env = os.environ if source is None else source
     names = [
@@ -91,7 +92,14 @@ def requested_session_env(source: Mapping[str, str] | None = None) -> dict[str, 
             f"to a runner: {', '.join(rejected)}. Use variable names that do not "
             f"start with {_RESERVED_PREFIX} and are not RUNNER_SERVER_URL."
         )
-    return {name: env[name] for name in names if name in env}
+    values = {name: env[name] for name in names if name in env}
+    if values and IS_WINDOWS:
+        raise click.ClickException(
+            f"{SESSION_ENV_PASSTHROUGH_ENV_VAR} is not supported on Windows, where the "
+            "file that hands the values to the host daemon cannot be restricted to your "
+            "account. Unset it to launch without forwarding."
+        )
+    return values
 
 
 @contextlib.contextmanager
@@ -191,11 +199,12 @@ def consume_session_env_handoff(session_id: str, handoff_id: str | None) -> dict
 def _handoff_problem(info: os.stat_result) -> str | None:
     if not stat.S_ISREG(info.st_mode):
         return "not a regular file"
-    if not IS_WINDOWS:
-        if info.st_uid != os.getuid():
-            return "owned by another user"
-        if info.st_mode & 0o077:
-            return "readable by other users"
+    if IS_WINDOWS:
+        return "owner-only access cannot be verified on Windows"
+    if info.st_uid != os.getuid():
+        return "owned by another user"
+    if info.st_mode & 0o077:
+        return "readable by other users"
     if time.time() - info.st_mtime > _HANDOFF_MAX_AGE_S:
         return "stale"
     return None

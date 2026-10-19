@@ -20,7 +20,9 @@ from omnigent.host.session_env import (
     session_env_handoff,
 )
 
-_POSIX_ONLY = pytest.mark.skipif(IS_WINDOWS, reason="POSIX file ownership and modes")
+_POSIX_ONLY = pytest.mark.skipif(
+    IS_WINDOWS, reason="Forwarding relies on POSIX file ownership and modes"
+)
 _PLANTED_LAUNCH = "planted-launch"
 
 
@@ -84,6 +86,7 @@ def test_requested_session_env_rejects_runner_wiring_and_malformed_names(name: s
     assert "value-secret" not in excinfo.value.message
 
 
+@_POSIX_ONLY
 def test_daemon_consumes_only_its_own_launchs_handoff_once(_data_dir: Path) -> None:
     values = {"ARCATERM_CAPABILITY": "capability-for-pane-1"}
 
@@ -118,6 +121,7 @@ def test_handoff_is_owner_only_and_removed_when_the_launch_fails(_data_dir: Path
     assert _handoff_files(_data_dir) == []
 
 
+@_POSIX_ONLY
 def test_abandoned_handoff_is_left_alone_by_later_launches_until_it_expires(
     _data_dir: Path,
 ) -> None:
@@ -138,6 +142,7 @@ def test_abandoned_handoff_is_left_alone_by_later_launches_until_it_expires(
     assert _handoff_files(_data_dir) == []
 
 
+@_POSIX_ONLY
 def test_overlapping_launches_of_one_session_each_hand_off_their_own_values(
     _data_dir: Path,
 ) -> None:
@@ -164,6 +169,36 @@ def test_consume_ignores_and_removes_a_handoff_other_users_can_read(
     assert _handoff_files(_data_dir) == []
     assert "readable by other users" in caplog.text
     assert "leaked" not in caplog.text
+
+
+def test_windows_launch_refuses_values_before_writing_any(
+    _data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("omnigent.host.session_env.IS_WINDOWS", True)
+    permissive_dir = _data_dir / "session-env"
+    permissive_dir.mkdir(parents=True)
+    os.chmod(permissive_dir, 0o777)
+    listed = {SESSION_ENV_PASSTHROUGH_ENV_VAR: "ARCATERM_CAPABILITY,MACTERM_SOCKET"}
+
+    with pytest.raises(click.ClickException) as excinfo:
+        requested_session_env({**listed, "ARCATERM_CAPABILITY": "value-secret"})
+
+    assert "not supported on Windows" in excinfo.value.message
+    assert "value-secret" not in excinfo.value.message
+    assert requested_session_env(listed) == {}
+    assert _handoff_files(_data_dir) == []
+
+
+def test_windows_daemon_ignores_and_removes_a_handoff_it_cannot_verify(
+    _data_dir: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _plant_handoff("conv_a", {"ARCATERM_CAPABILITY": "capability-from-elsewhere"})
+    monkeypatch.setattr("omnigent.host.session_env.IS_WINDOWS", True)
+
+    assert consume_session_env_handoff("conv_a", _PLANTED_LAUNCH) == {}
+    assert _handoff_files(_data_dir) == []
+    assert "cannot be verified on Windows" in caplog.text
+    assert "capability-from-elsewhere" not in caplog.text
 
 
 @_POSIX_ONLY
@@ -216,6 +251,7 @@ def test_any_daemon_launch_removes_expired_handoffs_of_other_sessions(_data_dir:
     assert _handoff_files(_data_dir) == [waiting]
 
 
+@_POSIX_ONLY
 def test_consume_keeps_only_forwardable_string_values(_data_dir: Path) -> None:
     _plant_handoff(
         "conv_a",

@@ -314,6 +314,7 @@ file the local daemon deletes at launch. They aren't sent to the server or
 stored. A session whose runner is already running keeps its original values, and
 a runner the server relaunches later (for example, after an idle timeout) starts
 without them. Names starting with `OMNIGENT` and `RUNNER_SERVER_URL` are rejected.
+Forwarding isn't available on Windows yet.
 
 </details>
 

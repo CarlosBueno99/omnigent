@@ -911,6 +911,11 @@ async def test_handle_launch_spawns_subprocess(
     _cleanup_host(host)
 
 
+_FORWARDS_SESSION_ENV = pytest.mark.skipif(
+    sys.platform == "win32", reason="Session env forwarding is disabled on Windows"
+)
+
+
 def _relayed_launch_frame(body: dict[str, str], request_id: str) -> HostLaunchRunnerFrame:
     """Return the launch frame a host receives for a CLI's ``POST /v1/hosts/{id}/runners``."""
     frame = decode_host_frame(
@@ -928,6 +933,7 @@ def _relayed_launch_frame(body: dict[str, str], request_id: str) -> HostLaunchRu
     return frame
 
 
+@_FORWARDS_SESSION_ENV
 async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1000,6 +1006,7 @@ async def test_cli_launch_forwards_named_shell_env_to_only_that_sessions_runner(
     assert "OMNIGENT_RUNNER_SESSION_ENV_NAMES" not in plain_env
 
 
+@_FORWARDS_SESSION_ENV
 async def test_concurrent_cli_launches_of_one_session_give_the_runner_its_own_launchs_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1073,6 +1080,7 @@ async def test_concurrent_cli_launches_of_one_session_give_the_runner_its_own_la
     assert runner_env["ARCATERM_CAPABILITY"] == "capability-for-pane-a"
 
 
+@_FORWARDS_SESSION_ENV
 async def test_launch_frame_the_server_gave_up_on_cannot_take_the_next_launchs_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
