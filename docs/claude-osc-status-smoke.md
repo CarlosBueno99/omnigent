@@ -2,7 +2,7 @@
 
 Smoke branch: `omni-12244-manual-smoke`. Production code is identical to
 PR [#10259](https://github.com/omnigent-ai/omnigent/pull/10259) at
-`6dbbe5908`; this branch only adds this recipe.
+`b18eff810`; this branch only adds this recipe.
 Allow about 10–15 minutes. Use **Claude Code / claude-native**, with Claude
 2.1.295 or newer, and your existing live provider credentials.
 
