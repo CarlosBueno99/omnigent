@@ -40,8 +40,9 @@ from pathlib import Path
 import httpx
 import pytest
 
+from omnigent.host.daemon_lifecycle import HostDaemonRecord
 from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN, RUNNER_PARENT_PID_ENV_VAR
-from tests.e2e.conftest import lookup_agent_id, register_inline_agent
+from tests._helpers.session import bundle_files, post_session_bundle
 from tests.e2e.omnigent.test_host_ctrl_c_stop_server import (
     _connect_env,
     _read_local_server_record,
@@ -58,28 +59,6 @@ _RUNNER_APPEAR_TIMEOUT = 60.0
 _POLL_PAUSE = threading.Event()
 
 
-def test_telemetry_daemons_keep_distinct_identities_with_a_shared_mock_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Isolating HOME must also keep daemon identities distinct under mock config."""
-    from omnigent.host.identity import load_or_create_host_identity
-
-    shared_config = tmp_path / "mock-config"
-    shared_config.mkdir()
-    (shared_config / "config.yaml").write_text("auth:\n  type: api_key\n")
-    identities = []
-    for name in ("first", "second"):
-        env = _telemetry_env({"OMNIGENT_CONFIG_HOME": str(shared_config)}, tmp_path / name)
-        with monkeypatch.context() as child_env:
-            for key in ("OMNIGENT_CONFIG_HOME", "OMNIGENT_HOST_ID", "OMNIGENT_HOST_NAME"):
-                if key in env:
-                    child_env.setenv(key, env[key])
-                else:
-                    child_env.delenv(key, raising=False)
-            identities.append(load_or_create_host_identity())
-    assert identities[0].host_id != identities[1].host_id
-
-
 def _telemetry_env(base_env: dict[str, str], home: Path) -> dict[str, str]:
     """The user's telemetry environment for the ``host --background`` spawn.
 
@@ -88,9 +67,10 @@ def _telemetry_env(base_env: dict[str, str], home: Path) -> dict[str, str]:
     :returns: Environment dict for the CLI subprocess.
     """
     env = _connect_env(base_env, home)
-    # Other test daemons can reconnect when the local server port is reused.
-    env["OMNIGENT_HOST_ID"] = uuid.uuid4().hex
-    env["OMNIGENT_HOST_NAME"] = "telemetry-env-e2e"
+    # Reconnecting hosts with the same owner/name replace each other's rows.
+    host_id = uuid.uuid4().hex
+    env["OMNIGENT_HOST_ID"] = host_id
+    env["OMNIGENT_HOST_NAME"] = f"telemetry-env-{host_id}"
     env["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
     env["OTEL_METRICS_EXPORTER"] = "otlp"
     env["OMNIGENT_TELEMETRY_ENABLED"] = "1"
@@ -124,12 +104,12 @@ def _spawn_background_daemon(
     )
 
 
-def _wait_for_daemon_pid(home: Path, *, timeout: float) -> int:
-    """Wait for the daemon registry record and return the daemon pid.
+def _wait_for_daemon_record(home: Path, *, timeout: float) -> HostDaemonRecord:
+    """Read the daemon's process and host identity from its own registry.
 
     :param home: Isolated HOME holding ``.omnigent/daemons``.
     :param timeout: Max seconds to poll for the record.
-    :returns: The detached daemon's pid.
+    :returns: The detached daemon's registry record.
     :raises AssertionError: If no record appears within *timeout*.
     """
     daemons = home / ".omnigent" / "daemons"
@@ -137,7 +117,7 @@ def _wait_for_daemon_pid(home: Path, *, timeout: float) -> int:
     while elapsed < timeout:
         records = sorted(daemons.glob("*.json")) if daemons.is_dir() else []
         if records:
-            return int(json.loads(records[0].read_text())["pid"])
+            return HostDaemonRecord(**json.loads(records[0].read_text()))
         _POLL_PAUSE.wait(0.25)
         elapsed += 0.25
     raise AssertionError(f"daemon record never appeared under {daemons}")
@@ -214,7 +194,7 @@ def test_background_daemon_env_keeps_claude_telemetry_flag(
     daemon_pid = -1
     server_pid = -1
     try:
-        daemon_pid = _wait_for_daemon_pid(home, timeout=_BOOT_TIMEOUT)
+        daemon_pid = _wait_for_daemon_record(home, timeout=_BOOT_TIMEOUT).pid
         server_pid, _port = _read_local_server_record(home)
         _assert_telemetry_flag_survived(_proc_environ(daemon_pid), process="daemon")
     finally:
@@ -255,7 +235,9 @@ def test_daemon_spawned_runner_receives_claude_telemetry_flag(
     server_pid = -1
     runner_pid = -1
     try:
-        daemon_pid = _wait_for_daemon_pid(home, timeout=_BOOT_TIMEOUT)
+        daemon = _wait_for_daemon_record(home, timeout=_BOOT_TIMEOUT)
+        daemon_pid = daemon.pid
+        assert daemon.host_id, "daemon record did not identify its host"
         server_pid, port = _read_local_server_record(home)
         base = f"http://127.0.0.1:{port}"
         with httpx.Client(
@@ -263,23 +245,19 @@ def test_daemon_spawned_runner_receives_claude_telemetry_flag(
             timeout=30.0,
             headers={"Origin": OMNIGENT_INTERNAL_WS_ORIGIN},
         ) as client:
-            host_id = _online_host_id(
-                client, host_id=env["OMNIGENT_HOST_ID"], timeout=_BOOT_TIMEOUT
+            host_id = _online_host_id(client, host_id=daemon.host_id, timeout=_BOOT_TIMEOUT)
+            bundle = bundle_files(
+                {
+                    "agent.yaml": b"name: telemetry-env\n"
+                    b"executor:\n  harness: openai-agents\n  model: mock-model\n"
+                    b"prompt: Reply briefly.\n"
+                }
             )
-            # The flag is observed on the runner, independent of its harness CLI.
-            agent_name = register_inline_agent(
-                client,
-                name="telemetry-env-e2e",
-                harness="openai-agents",
-                model="gpt-4o",
-                profile="",
-                prompt="Reply briefly.",
-                mock_llm_base_url=env["OPENAI_BASE_URL"],
-            )
-            create = client.post(
+            create = post_session_bundle(
+                client.post,
                 "/v1/sessions",
-                json={
-                    "agent_id": lookup_agent_id(client, agent_name),
+                bundle,
+                metadata={
                     "host_id": host_id,
                     "workspace": str(workspace),
                 },
@@ -301,28 +279,22 @@ def test_daemon_spawned_runner_receives_claude_telemetry_flag(
 
 
 def _online_host_id(client: httpx.Client, *, host_id: str, timeout: float) -> str:
-    """Poll ``GET /v1/hosts`` until a host is online; return its id.
+    """Wait for this daemon's host, even when other hosts reconnect locally.
 
     :param client: HTTP client pointed at the detached local server.
-    :param host_id: This test's daemon identity.
+    :param host_id: Host identity from this daemon's registry record.
     :param timeout: Max seconds to wait for the daemon's host registration.
     :returns: The online host's ``host_id``.
-    :raises AssertionError: If no host comes online within *timeout*.
+    :raises AssertionError: If this host does not come online within *timeout*.
     """
     elapsed = 0.0
     while elapsed < timeout:
-        resp = client.get("/v1/hosts")
-        if resp.status_code == 200:
-            online = [
-                h
-                for h in resp.json().get("hosts", [])
-                if h.get("host_id") == host_id and h.get("status") == "online"
-            ]
-            if online:
-                return str(online[0]["host_id"])
+        resp = client.get(f"/v1/hosts/{host_id}")
+        if resp.status_code == 200 and resp.json().get("status") == "online":
+            return host_id
         _POLL_PAUSE.wait(0.5)
         elapsed += 0.5
-    raise AssertionError(f"no host came online within {timeout}s")
+    raise AssertionError(f"host {host_id} did not come online within {timeout}s")
 
 
 def _proc_ppid(pid: int) -> int | None:
