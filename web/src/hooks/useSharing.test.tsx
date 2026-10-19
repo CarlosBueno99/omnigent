@@ -61,7 +61,7 @@ describe("public sharing ceiling", () => {
 
 describe("shell owner-only policy", () => {
   it.each([undefined, null, "off", 0, false])(
-    "defaults off for an absent or invalid %s capability",
+    "keeps the restriction off when shell_owner_only is %s",
     async (value) => {
       fetchMock.mockResolvedValue(new Response(JSON.stringify({ shell_owner_only: value })));
       const { result } = renderHook(() => useShellOwnerOnly(true), { wrapper: wrapper() });

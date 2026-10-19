@@ -5825,6 +5825,11 @@
             "title": "Sharing Mode",
             "type": "string"
           },
+          "shell_owner_only": {
+            "default": false,
+            "title": "Shell Owner Only",
+            "type": "boolean"
+          },
           "single_user": {
             "title": "Single User",
             "type": "boolean"
@@ -8885,6 +8890,17 @@
               }
             ],
             "title": "Sharing Mode"
+          },
+          "shell_owner_only": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shell Owner Only"
           }
         },
         "title": "SetSharingRequest",

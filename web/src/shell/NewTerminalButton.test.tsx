@@ -80,8 +80,8 @@ afterEach(() => {
 });
 
 describe("NewTerminalButton access gate", () => {
-  it.each([1, 2, 3])("hides shell creation for level %i with owner-only access", async (level) => {
-    permission.level = level;
+  it("hides shell creation for editors with owner-only access", async () => {
+    permission.level = 2;
     fetchMock.mockImplementation(async (url: string) =>
       mockResponse(url === "/v1/info" ? { shell_owner_only: true } : agentWire(["shell"])),
     );

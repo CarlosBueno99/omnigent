@@ -1524,7 +1524,7 @@ def register_resources_routes(
                 "'target_session_id' is required",
                 code=ErrorCode.INVALID_INPUT,
             )
-        await _validate_session(target_session_id, request, LEVEL_EDIT)
+        await _validate_session(target_session_id, request, shell_write_level(request))
 
         path = f"/v1/sessions/{session_id}/resources/terminals/{terminal_id}/transfer"
         status, payload = await _proxy_post_to_runner(

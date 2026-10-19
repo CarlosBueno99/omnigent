@@ -301,6 +301,8 @@ def app(runner_globals_reset: None, runner_client: _RecordingRunnerClient) -> Fa
     perm_store.add_grant("owner@example.com", "conv_open", LEVEL_EDIT)
     perm_store.add_grant("viewer@example.com", "conv_open", LEVEL_READ)
     perm_store.add_grant("real-owner@example.com", "conv_open", LEVEL_OWNER)
+    perm_store.add_grant("source-owner@example.com", "conv_share", LEVEL_OWNER)
+    perm_store.add_grant("source-owner@example.com", "conv_open", LEVEL_EDIT)
     perm_store.add_admin("admin@example.com")
     set_runner_router(_FakeRunnerRouter(runner_client))  # type: ignore[arg-type]
 
@@ -463,6 +465,23 @@ async def test_live_shell_policy_controls_commands_and_terminals(
         assert bool(runner_client.posts) is allowed
 
 
+@pytest.mark.parametrize("owner_only", [True, False])
+async def test_terminal_transfer_requires_shell_access_on_destination(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    owner_only: bool,
+) -> None:
+    app.state.shell_owner_only = owner_only
+    response = await client.post(
+        "/v1/sessions/conv_share/resources/terminals/terminal_claude_main/transfer",
+        json={"target_session_id": "conv_open"},
+        headers={"X-Forwarded-Email": "source-owner@example.com"},
+    )
+    assert response.status_code == (403 if owner_only else 200), response.text
+    assert bool(runner_client.posts) is not owner_only
+
+
 @pytest.mark.parametrize(
     "session_id,owner_only,caller,text,expected",
     [
@@ -521,6 +540,25 @@ async def test_native_shell_input_cannot_bypass_owner_gate_with_role(
         headers={"X-Forwarded-Email": "owner@example.com"},
     )
     assert response.status_code == 403, response.text
+    assert runner_client.posts == []
+
+
+@pytest.mark.parametrize("session_id", ["conv_native", "conv_share"])
+@pytest.mark.parametrize("content", [5, True])
+async def test_shell_policy_preserves_invalid_message_content_validation(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    session_id: str,
+    content: int | bool,
+) -> None:
+    app.state.shell_owner_only = True
+    response = await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={"type": "message", "data": {"role": "user", "content": content}},
+        headers={"X-Forwarded-Email": "owner@example.com"},
+    )
+    assert response.status_code == 400, response.text
     assert runner_client.posts == []
 
 

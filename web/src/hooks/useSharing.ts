@@ -49,7 +49,7 @@ export function useShellOwnerOnly(enabled: boolean) {
     queryKey: SHELL_OWNER_ONLY_QUERY_KEY,
     enabled,
     staleTime: 0,
-    refetchInterval: 5_000,
+    refetchInterval: 30_000,
     queryFn: async (): Promise<boolean> => {
       try {
         const response = await authenticatedFetch("/v1/info");

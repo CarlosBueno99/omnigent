@@ -1037,8 +1037,9 @@ def register_events_routes(
         user_id, conv = await _authorized_conversation(request, session_id)
         if (
             body.type == "message"
-            and _extract_user_text_from_event(body).lstrip().startswith("!")
             and _is_native_terminal_session(conv)
+            and isinstance(body.data.get("content"), list)
+            and _extract_user_text_from_event(body).lstrip().startswith("!")
         ):
             await _require_access(
                 user_id,
