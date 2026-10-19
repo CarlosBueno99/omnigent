@@ -9520,24 +9520,12 @@ def test_claude_prompt_rendered_ignores_a_menu_row_above_a_rule() -> None:
     assert _claude_prompt_rendered(pane) is False
 
 
-@pytest.mark.parametrize(
-    "row",
-    [
-        "  ⎿  the build output trails off here ─",
-        "Build cancelled ─",
-    ],
-    ids=["indented-transcript-row", "unindented-content-row"],
-)
-def test_claude_prompt_rendered_ignores_a_menu_row_under_a_glyph_terminated_line(row: str) -> None:
-    """
-    Content ending in ``─`` above a menu's selected row is not a wrapped rule.
+_CLIPPED_TITLE_ROW = " Retry failed billing webhook deliveries with exponential backoff … ─"
 
-    A wrapped opening rule wraps the closing rule too, and the one shape that
-    keeps a single-row closing rule is a title one space in; an indented
-    transcript row or ordinary output at the pane edge is neither, so the
-    selected row under it does not become the composer even with a rule below.
-    """
-    pane = "\n".join(
+
+def _menu_under(row: str) -> str:
+    """A menu's selected row under *row*, with a rule and the menu's footer below."""
+    return "\n".join(
         [
             row,
             "❯ 2. No (recommended)",
@@ -9545,7 +9533,58 @@ def test_claude_prompt_rendered_ignores_a_menu_row_under_a_glyph_terminated_line
             "  Enter to confirm · Esc to cancel",
         ]
     )
-    assert _claude_prompt_rendered(pane) is False
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "  ⎿  the build output trails off here ─",
+        "Build cancelled ─",
+        _CLIPPED_TITLE_ROW,
+    ],
+    ids=["indented-transcript-row", "unindented-content-row", "clipped-title-row"],
+)
+def test_claude_prompt_rendered_ignores_a_menu_row_under_a_glyph_terminated_line(row: str) -> None:
+    """
+    Content ending in ``─`` above a menu's selected row does not make it the composer.
+
+    A wrapped opening rule wraps the closing rule too, and the one shape that
+    keeps a single-row closing rule is a title one space in; an indented
+    transcript row or ordinary output at the pane edge is neither. A row that
+    does read as a rule, such as a clipped title, still leaves a numbered
+    option above a dialog footer a menu.
+    """
+    assert _claude_prompt_rendered(_menu_under(row)) is False
+
+
+def test_inject_user_message_does_not_paste_into_a_menu_under_a_clipped_title(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A menu's selected row under a clipped title is not an input box to paste into."""
+    monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_native_bridge, "time", _VirtualClock())
+    monkeypatch.setattr(claude_native_bridge, "_TMUX_READY_SLOW_BOOT_TIMEOUT_S", 0.5)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    writes: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=_menu_under(_CLIPPED_TITLE_ROW), stderr="")
+        if "list-panes" not in cmd:
+            writes.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    with pytest.raises(claude_native_bridge.ClaudePromptTimeout):
+        inject_user_message(bridge_dir, content="hi", timeout_s=0.3)
+    assert not [cmd for cmd in writes if "load-buffer" in cmd or "paste-buffer" in cmd]
 
 
 @pytest.mark.parametrize(

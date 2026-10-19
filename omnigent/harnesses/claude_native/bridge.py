@@ -308,6 +308,8 @@ _DIALOG_FOOTER_RE = re.compile(
     r"enter to (confirm|continue)|press enter to continue|esc to (cancel|exit|reject)",
     re.IGNORECASE,
 )
+# The selected row of a numbered option list, e.g. "❯ 1. Yes".
+_NUMBERED_SELECTOR_ROW_RE = re.compile(r"❯\s*\d+\.")
 # Lines scanned for a dialog when no box rule anchors the region.
 _DIALOG_SCAN_TAIL_LINES = 15
 _CLAUDE_READY_POLL_INTERVAL_S = 0.15
@@ -6010,7 +6012,8 @@ def _composer_row(pane: str) -> str | None:
     Wrapped rules are read as bands (:func:`_rule_bands`), and the box is
     searched upward from the closing band
     (:func:`_composer_row_above_closing_rule`) before the row below it is
-    considered.
+    considered. A dialog's footer below the frame overrides all of this
+    (:func:`_is_dialog_option_row`).
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: The row's text, e.g. ``"❯ fix the bug"`` or ``"!"`` in shell
@@ -6020,14 +6023,12 @@ def _composer_row(pane: str) -> str | None:
     bands = _rule_bands(non_empty)
     if not bands:
         return None
-    if len(bands) >= 2:
-        row = _composer_glyph_row(non_empty, bands[-2][1] + 1)
-        if row is not None:
-            return row
-    row = _composer_row_above_closing_rule(non_empty, bands[-1])
-    if row is not None:
-        return row
-    return _composer_glyph_row(non_empty, bands[-1][1] + 1)
+    row = _composer_glyph_row(non_empty, bands[-2][1] + 1) if len(bands) >= 2 else None
+    row = row or _composer_row_above_closing_rule(non_empty, bands[-1])
+    row = row or _composer_glyph_row(non_empty, bands[-1][1] + 1)
+    if row is None or _is_dialog_option_row(row, non_empty):
+        return None
+    return row
 
 
 def _composer_glyph_row(lines: list[str], idx: int) -> str | None:
@@ -6036,6 +6037,23 @@ def _composer_glyph_row(lines: list[str], idx: int) -> str | None:
         return None
     row = lines[idx]
     return row if row.strip()[:1] in _COMPOSER_MODE_GLYPHS else None
+
+
+def _is_dialog_option_row(row: str, lines: list[str]) -> bool:
+    """
+    Return whether *row* is a dialog's selected option rather than the composer.
+
+    A numbered option over a dialog footer is a menu whatever rule sits above
+    it, e.g. ``"❯ 2. No (recommended)"`` over "Enter to confirm · Esc to cancel".
+
+    :param row: The candidate composer row.
+    :param lines: Non-empty pane rows, in order.
+    :returns: ``True`` when the footer below the frame belongs to a dialog.
+    """
+    if not _NUMBERED_SELECTOR_ROW_RE.match(row.strip()):
+        return False
+    footer = _rows_below_last_rule(lines, _DIALOG_SCAN_TAIL_LINES)
+    return any(_DIALOG_FOOTER_RE.search(line) for line in footer)
 
 
 def _composer_row_above_closing_rule(

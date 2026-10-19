@@ -18,6 +18,7 @@ from omnigent.onboarding.ambient import CLAUDE_CODE_MANAGED_SETTINGS_PATHS
 from tests.e2e_ui.conftest import set_fallback_mock_llm
 from tests.e2e_ui.messages.test_message_render_parity import _ensure_chat_view, _send
 from tests.e2e_ui.messages.test_native_claude_render_parity import (
+    _CLAUDE_MOCK_MODEL,
     _open_terminal_view,
     _pane_text,
     _tmux_advert,
@@ -63,6 +64,7 @@ def test_web_message_reaches_claude_beneath_a_truncated_title(
     _wait_terminal_connected(page)
     _ensure_chat_view(page)
     set_fallback_mock_llm(mock_llm_server_url, "default", "BASELINE_TITLE_READY")
+    set_fallback_mock_llm(mock_llm_server_url, _CLAUDE_MOCK_MODEL, "BASELINE_TITLE_READY")
     _send(page, "Reply with BASELINE_TITLE_READY.")
     expect(
         page.locator('[data-testid="message-bubble"][data-role="assistant"]')
@@ -120,6 +122,7 @@ def test_web_message_reaches_claude_beneath_a_truncated_title(
     ).strip()
 
     set_fallback_mock_llm(mock_llm_server_url, "default", "TRUNCATED_TITLE_DELIVERED")
+    set_fallback_mock_llm(mock_llm_server_url, _CLAUDE_MOCK_MODEL, "TRUNCATED_TITLE_DELIVERED")
     _send(page, "Reply with TRUNCATED_TITLE_DELIVERED.")
     reply = page.locator('[data-testid="message-bubble"][data-role="assistant"]').filter(
         has_text="TRUNCATED_TITLE_DELIVERED"
