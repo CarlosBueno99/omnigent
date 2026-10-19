@@ -11,6 +11,7 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from tests._helpers.polling import poll_until
+from tests.e2e_ui.chat.test_always_steer import _record_message_posts, _wait_for
 from tests.e2e_ui.conftest import configure_mock_llm, reset_mock_llm, set_fallback_mock_llm
 from tests.e2e_ui.messages.test_message_render_parity import (
     _ASSISTANT,
@@ -98,11 +99,18 @@ def test_web_compact_keeps_progress_visible_and_delivers_followup(
     compacted = page.get_by_text("Conversation compacted")
     expect(compacting).to_be_visible(timeout=10_000)
 
+    posts = _record_message_posts(page, session_id)
     composer.click()
     page.keyboard.type(marker, delay=40)
     composer.press("Enter")
-    if not always_steer:
+    if always_steer:
+        _wait_for(page, lambda: marker in posts, timeout_s=10.0)
+        assert time.monotonic() - compaction_requested < _COMPACT_DELAY_S
+        assert not compacted.is_visible(), "follow-up was sent only after compaction"
+        expect(page.locator(_QUEUED_STRIP)).to_have_count(0)
+    else:
         expect(page.locator(_QUEUED_STRIP)).to_contain_text(marker, timeout=5_000)
+        assert marker not in posts
 
     while (elapsed := time.monotonic() - compaction_requested) < _COMPACT_DELAY_S - 1:
         assert compacting.is_visible() or compacted.is_visible(), (
