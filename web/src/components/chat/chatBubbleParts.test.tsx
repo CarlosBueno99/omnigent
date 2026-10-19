@@ -291,11 +291,12 @@ describe("UserBubble literal text", () => {
 
 describe("UserBubble message source", () => {
   it.each([
-    ["conv_parent", "/c/conv_parent"],
-    ["conv/../settings?tab=1#x", "/c/conv%2F..%2Fsettings%3Ftab%3D1%23x"],
-  ])("names and links the agent session %s that sent the message", (sessionId, href) => {
+    ["conv_parent", "/c/conv_child", "/c/conv_parent"],
+    ["conv/../settings?tab=1#x", "/c/conv_child", "/c/conv%2F..%2Fsettings%3Ftab%3D1%23x"],
+    ["conv_parent", "/c/conv_child?debug=1&file=a.ts", "/c/conv_parent?debug=1"],
+  ])("names and links the agent session %s from %s", (sessionId, current, href) => {
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[current]}>
         <BubbleView
           bubble={{
             kind: "user",

@@ -57,7 +57,8 @@ import { BrandLogo } from "@/components/BrandLogo";
 import { cn } from "@/lib/utils";
 import { mentionItemPath, type MentionItem } from "@/lib/composerMentions";
 import type { ImageContentBlock, MessageContentBlock, MessageSource } from "@/lib/blocks";
-import { Link } from "@/lib/routing";
+import { Link, useLocation } from "@/lib/routing";
+import { sessionNavigationSearch } from "@/lib/sessionNavigation";
 import {
   attachmentLabel,
   ELICITATION_RESPONSE_PREFIX,
@@ -713,9 +714,10 @@ function useCopyMessageLink(messageId: string | null): {
 
 /** Names the agent session that sent a user message, linking back to it. */
 function MessageSourceLabel({ source }: { source: MessageSource }) {
+  const search = sessionNavigationSearch(useLocation().search);
   return (
     <Link
-      to={`/c/${encodeURIComponent(source.sessionId)}`}
+      to={{ pathname: `/c/${encodeURIComponent(source.sessionId)}`, search }}
       data-testid="message-source"
       className="flex items-center gap-1 pb-1 text-[11px] leading-4 text-muted-foreground hover:text-foreground hover:underline"
     >

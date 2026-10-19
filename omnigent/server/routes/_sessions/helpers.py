@@ -8052,6 +8052,8 @@ def _extract_persistent_item_from_sse(
             item_type,
         )
         return None
+    if isinstance(data, MessageData):
+        data = data.without_source()
 
     return NewConversationItem(
         type=item_type,

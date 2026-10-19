@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import time
@@ -10,6 +11,7 @@ import uuid
 import httpx
 import pytest
 from playwright.sync_api import Locator, Page, expect
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from tests._helpers.session import bundle_files
 from tests.e2e_ui.conftest import (
@@ -56,7 +58,9 @@ def _text(item: dict) -> str:
 def _approve_pending(page: Page) -> None:
     cards = page.locator(_APPROVAL_CARD)
     if cards.count():
-        cards.first.get_by_role("button", name="Approve", exact=True).click()
+        # The card may resolve after count(); the next poll retries any still pending.
+        with contextlib.suppress(PlaywrightTimeoutError):
+            cards.first.get_by_role("button", name="Approve", exact=True).click(timeout=2_000)
 
 
 def _wait_reply(page: Page, base_url: str, session_id: str, marker: str, reply: str) -> None:
@@ -122,10 +126,10 @@ def _scripted_call(name: str, call_id: str, arguments: dict, reply: str) -> list
 def _unlabeled_rendering(page: Page, text: str, sender: re.Pattern[str]) -> str | None:
     message = page.locator(_MESSAGE, has_text=text).first
     expect(message).to_be_visible(timeout=60_000)
-    rendered = message.inner_text()
-    if sender.search(rendered.replace(text, "")):
+    label = message.get_by_test_id("message-source")
+    if label.count() and sender.search(label.inner_text()):
         return None
-    return f"{message.get_attribute('data-role')!r} bubble {rendered!r}"
+    return f"{message.get_attribute('data-role')!r} bubble {message.inner_text()!r}"
 
 
 @pytest.mark.nightly
