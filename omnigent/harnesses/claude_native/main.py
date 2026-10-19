@@ -1585,19 +1585,15 @@ def build_native_claude_settings_env(
     """
     Build the ``env`` block for Claude Code's command-line ``--settings``.
 
-    Claude Code applies a user ``settings.json`` ``env`` block (which ``ucode``
-    writes) over the process env, so routing passed only through the process
-    env can be silently redirected to another endpoint while Omnigent's
-    ``apiKeyHelper`` still supplies this provider's credential. The
-    command-line settings layer outranks user and project settings, so the
-    config's routing is pinned there. Endpoint, model and credential keys the
-    config leaves unset are blanked so they cannot leak in from those files.
+    A user ``settings.json`` ``env`` block (as ``ucode`` writes) overrides the
+    process env, so it could send this provider's ``apiKeyHelper`` token to
+    another endpoint. Command-line settings outrank user and project settings;
+    owned keys the config leaves unset are blanked there.
 
     :param claude_config: The resolved launch config, or ``None`` (Claude's own
         login, which keeps honouring the user's settings).
-    :returns: Settings ``env`` entries, e.g. ``{"ANTHROPIC_BASE_URL":
-        "https://example.com", "ANTHROPIC_DEFAULT_OPUS_MODEL": ""}``; empty for
-        ``None``.
+    :returns: e.g. ``{"ANTHROPIC_BASE_URL": "https://example.com",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": ""}``; empty for ``None``.
     """
     if claude_config is None:
         return {}
