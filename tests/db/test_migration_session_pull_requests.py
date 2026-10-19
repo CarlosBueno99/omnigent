@@ -2,6 +2,7 @@
 
 from importlib import import_module
 
+import pytest
 import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
@@ -19,6 +20,23 @@ def test_session_pull_requests_column_round_trip_and_retry(db_uri: str) -> None:
     session = store.create_conversation(title="Keep this session")
     engine = get_or_create_engine(db_uri)
     table_name = "omnigent_conversation_metadata"
+    # Fresh CockroachDB bootstraps from the ORM and stamps head without Alembic.
+    assert "pull_requests" in {
+        column["name"] for column in sa.inspect(engine).get_columns(table_name)
+    }
+    table = sa.Table(table_name, sa.MetaData(), autoload_with=engine)
+    with engine.begin() as connection:
+        connection.execute(table.update().values(task_summary="Preserve metadata"))
+
+    def assert_byte_limit() -> None:
+        for value in (None, b"x" * 16_383):
+            with engine.begin() as connection:
+                connection.execute(table.update().values(pull_requests=value))
+                assert connection.scalar(sa.select(table.c.pull_requests)) == value
+        with pytest.raises(sa.exc.DBAPIError), engine.begin() as connection:
+            connection.execute(table.update().values(pull_requests=b"x" * 16_384))
+
+    assert_byte_limit()
 
     def run(direction: str) -> None:
         with engine.connect() as connection:
@@ -36,14 +54,17 @@ def test_session_pull_requests_column_round_trip_and_retry(db_uri: str) -> None:
     run("upgrade")
     columns = {column["name"]: column for column in sa.inspect(engine).get_columns(table_name)}
     assert columns["pull_requests"]["nullable"]
-    table = sa.Table(table_name, sa.MetaData(), autoload_with=engine)
+    assert_byte_limit()
     with engine.begin() as connection:
-        assert connection.scalar(sa.select(table.c.pull_requests)) is None
         connection.execute(table.update().values(pull_requests=b"preserve on retry"))
     run("upgrade")
     with engine.connect() as connection:
         assert connection.scalar(sa.select(table.c.pull_requests)) == b"preserve on retry"
     run("downgrade")
     run("upgrade")
+    with engine.connect() as connection:
+        assert connection.execute(
+            sa.select(table.c.task_summary, table.c.pull_requests)
+        ).one() == ("Preserve metadata", None)
     restored = store.get_conversation(session.id)
     assert restored is not None and restored.title == "Keep this session"
