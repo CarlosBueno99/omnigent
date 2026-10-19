@@ -106,7 +106,12 @@ def _seed_title_and_content_matches(
         f"{base_url}/v1/sessions/{title_session_id}", json={"title": title_match}, timeout=10.0
     ).raise_for_status()
     content_titles = ["Sprint retro notes", "Weekly team sync"]
-    for session_id, title in zip(content_session_ids, content_titles, strict=True):
+    for index, (session_id, title) in enumerate(
+        zip(content_session_ids, content_titles, strict=True)
+    ):
+        if index:
+            # Distinct whole-second timestamps keep the newest-first order exact.
+            time.sleep(1.1)
         httpx.patch(
             f"{base_url}/v1/sessions/{session_id}", json={"title": title}, timeout=10.0
         ).raise_for_status()
@@ -121,8 +126,6 @@ def _seed_title_and_content_matches(
             },
             timeout=10.0,
         ).raise_for_status()
-        # Distinct whole-second timestamps keep the newest-first order exact.
-        time.sleep(1.1)
     deadline = time.monotonic() + 30
     while True:
         response = httpx.get(

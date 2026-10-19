@@ -1966,6 +1966,58 @@ async def test_list_conversations_search_deleted_cursor_raises(
         conversation_store.list_conversations(search_query="deploy", after=ids["title_old"])
 
 
+def test_list_conversations_search_inaccessible_cursor_reads_as_stale(
+    conversation_store: SqlAlchemyConversationStore, db_uri: str
+) -> None:
+    """
+    A search cursor outside the caller's listing raises like a deleted one.
+
+    Private and revoked sessions give the same outcome whether or not their
+    title matches, so a cursor cannot probe another user's session titles.
+    """
+    ids = _seed_ranked_search(conversation_store)
+    private_title = conversation_store.create_conversation(title="Deploy notes").id
+    perms = _acl_perms(db_uri)
+    perms.grant("alice@example.com", ids["both"], 4)
+    for conv_id in (ids["title_old"], ids["content_new"]):
+        perms.grant("alice@example.com", conv_id, 4)
+        assert perms.revoke("alice@example.com", conv_id)
+
+    visible = conversation_store.list_conversations(
+        search_query="deploy", accessible_by="alice@example.com"
+    )
+    assert [c.id for c in visible.data] == [ids["both"]]
+    for cursor_id in (private_title, ids["content_old"], ids["title_old"], ids["content_new"]):
+        for direction in ("after", "before"):
+            with pytest.raises(StaleCursorError):
+                conversation_store.list_conversations(
+                    search_query="deploy",
+                    accessible_by="alice@example.com",
+                    **{direction: cursor_id},
+                )
+
+
+def test_list_conversations_search_reads_ranked_tiers_in_one_statement(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """
+    Both search tiers come from one statement, so they share one snapshot.
+
+    Separate tier reads let a session renamed between them appear twice or
+    not at all.
+    """
+    _seed_ranked_search(conversation_store)
+
+    statements = _captured_sql(
+        conversation_store,
+        lambda: conversation_store.list_conversations(search_query="deploy"),
+    )
+
+    tier_reads = [s for s in statements if "lower(conversations.title)" in s.lower()]
+    assert len(tier_reads) == 1
+    assert "UNION ALL" in tier_reads[0].upper()
+
+
 def test_list_conversations_search_snippet_on_content_match(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
