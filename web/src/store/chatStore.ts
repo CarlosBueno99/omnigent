@@ -6158,6 +6158,17 @@ function isLiveProvisionalBlock(b: AnyBlock): boolean {
   return b.ctx.itemId?.startsWith(LIVE_ITEM_PREFIX) ?? false;
 }
 
+// Append a promoted send, keeping the first user message above a reply
+// preview that streamed before it was acknowledged.
+function withPromotedUserBlock(blocks: AnyBlock[], user: UserMessageBlock): AnyBlock[] {
+  let at = blocks.length;
+  while (at > 0 && isLiveProvisionalBlock(blocks[at - 1]!)) at -= 1;
+  if (at === blocks.length || blocks.some((b) => b.type === "user_message")) {
+    return [...blocks, user];
+  }
+  return [...blocks.slice(0, at), user, ...blocks.slice(at)];
+}
+
 /** Suppress future chunks for a provisional preview that is no longer valid. */
 function ignoreLivePreview(block: AnyBlock | undefined, ignoredMessageIds: Set<string>): void {
   const itemId = block?.ctx.itemId;
@@ -8174,8 +8185,8 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
               ],
               // stableKey = the optimistic bubble's temp id → the
               // promoted bubble keeps the same React key (no remount).
-              blocks: [
-                ...s.blocks,
+              blocks: withPromotedUserBlock(
+                s.blocks,
                 committedUserBlock(
                   event.itemId,
                   content,
@@ -8183,7 +8194,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
                   event.createdBy ?? matched.author,
                   matched.createdAtS,
                 ),
-              ],
+              ),
             };
           }
         }
@@ -8210,8 +8221,8 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
             pendingUserMessages: s.pendingUserMessages.slice(1),
             // stableKey = the popped optimistic bubble's temp id so the
             // promoted bubble keeps the same React key (no remount/flink).
-            blocks: [
-              ...s.blocks,
+            blocks: withPromotedUserBlock(
+              s.blocks,
               committedUserBlock(
                 event.itemId,
                 content,
@@ -8219,7 +8230,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
                 event.createdBy ?? head.author,
                 head.createdAtS,
               ),
-            ],
+            ),
           };
         }
 

@@ -62,6 +62,7 @@ import {
   imagePreview,
   isTextBlock,
   keyedAttachments,
+  LIVE_ITEM_PREFIX,
 } from "@/lib/blocks";
 import { type Bubble, type RenderItem, bubblesEqual } from "@/lib/renderItems";
 import { getCurrentAuthorId } from "@/lib/identity";
@@ -271,10 +272,26 @@ function liftAboveCreateRoutingChips(committed: Bubble[], end: number): number {
   return start === 0 ? start : end;
 }
 
+// A reply preview that streams before any user message is committed can only
+// answer the oldest pending send.
+function endsWithOpeningReplyPreview(committed: Bubble[]): boolean {
+  const last = committed.at(-1);
+  return (
+    last?.kind === "assistant" &&
+    last.items.length > 0 &&
+    last.items.every((item) => item.itemId?.startsWith(LIVE_ITEM_PREFIX) ?? false) &&
+    !committed.some((bubble) => bubble.kind === "user")
+  );
+}
+
 // Place optimistic pending user bubbles into the committed timeline, keeping
 // the prompt above a trailing REQUEST-phase card or create-time routing chip.
 export function mergePendingBubbles(committed: Bubble[], pending: Bubble[]): Bubble[] {
   if (pending.length === 0) return committed;
+  if (endsWithOpeningReplyPreview(committed)) {
+    const at = liftAboveCreateRoutingChips(committed, committed.length - 1);
+    return [...committed.slice(0, at), pending[0]!, ...committed.slice(at), ...pending.slice(1)];
+  }
   let insertAt = committed.length;
   while (insertAt > 0 && isStandaloneElicitationBubble(committed[insertAt - 1]!)) {
     insertAt -= 1;

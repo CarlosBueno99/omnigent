@@ -33,6 +33,7 @@ import type {
 import type { ConversationItem, MessageItem } from "@/lib/conversationItems";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
 import { buildBubbles } from "@/lib/renderItems";
+import { buildPendingBubbles, mergePendingBubbles } from "@/components/chat/chatBubbleParts";
 import { getSessionSlim, INITIAL_WINDOW_ITEMS, SESSION_HISTORY_PAGE_SIZE } from "@/lib/sessionsApi";
 import { SSE_STALL_TIMEOUT_MS } from "@/lib/sse";
 import { serializeReplyDraft, type StoredReplyDraft } from "@/lib/replyDraft";
@@ -16367,6 +16368,114 @@ describe("chatStore — live delta streaming (claude-native)", () => {
     expect(textIdx).toBeGreaterThanOrEqual(0);
     expect(textIdx).toBeGreaterThan(elicitIdx2);
     expect(provisional()).toBeUndefined();
+
+    controller.abort();
+  });
+
+  it("keeps a just-sent message above its reply when the preview beats the input ack", async () => {
+    const prompt = "what should I check next?";
+    const reply = "Start with the server log.";
+    useChatStore.setState({
+      conversationId: "conv_live_order",
+      blocks: [],
+      isNativeTerminalSession: true,
+      sessionStatus: "running",
+      pendingUserMessages: [
+        {
+          tempId: "pend_q",
+          pendingId: "pending_q",
+          posted: true,
+          content: [{ type: "input_text", text: prompt }],
+        },
+      ],
+    });
+    const { sink, controller } = startPump("conv_live_order");
+    // Same composition as Transcript: committed bubbles, then pending ones.
+    const renderedOrder = () => {
+      const state = useChatStore.getState();
+      return mergePendingBubbles(
+        buildBubbles(state.blocks, state.activeResponse),
+        buildPendingBubbles(state.pendingUserMessages, null),
+      ).map((bubble) => bubble.kind);
+    };
+
+    const orders: Record<string, string[]> = {};
+    sink.push(nativeDelta("m_q", 0, reply, true));
+    await tick();
+    expect(provisional()?.fullText).toBe(reply);
+    orders.preview = renderedOrder();
+
+    sink.push(
+      sse("session.input.consumed", {
+        data: {
+          item_id: "item_q",
+          type: "message",
+          cleared_pending_id: "pending_q",
+          data: { role: "user", content: [{ type: "input_text", text: prompt }] },
+        },
+      }),
+    );
+    await tick();
+    expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+    orders.consumed = renderedOrder();
+
+    sink.push(messageDone("ci_q", "resp_q", reply, "m_q"));
+    await tick();
+    expect(provisional()).toBeUndefined();
+    orders.done = renderedOrder();
+
+    expect(orders).toEqual({
+      preview: ["user", "assistant"],
+      consumed: ["user", "assistant"],
+      done: ["user", "assistant"],
+    });
+
+    controller.abort();
+  });
+
+  it("lifts only the opening send above an early preview when the ack has no pending id", async () => {
+    const pending = (tempId: string) => ({
+      tempId,
+      pendingId: `pending_${tempId}`,
+      posted: true,
+      content: [{ type: "input_text" as const, text: tempId }],
+    });
+    useChatStore.setState({
+      conversationId: "conv_live_fifo",
+      blocks: [],
+      isNativeTerminalSession: true,
+      sessionStatus: "running",
+      pendingUserMessages: [pending("first")],
+    });
+    const { sink, controller } = startPump("conv_live_fifo");
+    const consumed = (itemId: string, text: string) =>
+      sse("session.input.consumed", {
+        data: {
+          item_id: itemId,
+          type: "message",
+          data: { role: "user", content: [{ type: "input_text", text }] },
+        },
+      });
+    const blockOrder = () =>
+      useChatStore
+        .getState()
+        .blocks.filter((b) => b.type === "user_message" || b.type === "text_done")
+        .map((b) => (b.type === "user_message" ? "user" : (b.ctx.itemId ?? "")));
+
+    sink.push(nativeDelta("m_1", 0, "One.", true));
+    sink.push(consumed("item_1", "first"));
+    await tick();
+    expect(blockOrder()).toEqual(["user", "live:m_1"]);
+
+    sink.push(messageDone("ci_1", "resp_1", "One.", "m_1"));
+    await tick();
+    useChatStore.setState({ pendingUserMessages: [pending("second")] });
+    // Once a prompt is committed, an earlier preview may answer it, so the
+    // next ack keeps arrival order.
+    sink.push(nativeDelta("m_2", 0, "Two.", true));
+    sink.push(consumed("item_2", "second"));
+    await tick();
+    expect(blockOrder()).toEqual(["user", "ci_1", "live:m_2", "user"]);
 
     controller.abort();
   });

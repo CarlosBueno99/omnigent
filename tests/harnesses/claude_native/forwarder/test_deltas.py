@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,11 @@ import omnigent.harnesses.claude_native.forwarder as forwarder
 from omnigent.harnesses.claude_native.bridge import (
     ClaudeMessageDelta,
     prepare_bridge_dir,
+    record_hook_event,
+)
+from tests.harnesses.claude_native.forwarder._support import (
+    _get_recorded_request,
+    _start_recording_server,
 )
 
 
@@ -389,3 +396,210 @@ async def test_post_external_output_text_delta_sends_expected_payload(tmp_path: 
             },
         )
     ]
+
+
+def _posted_event_types(request: dict[str, Any]) -> list[str]:
+    """
+    Return the event types in one recorded ``/events`` POST, batch or single.
+
+    :param request: Request recorded by ``_start_recording_server``.
+    :returns: Event types in body order, e.g. ``["external_output_text_delta"]``.
+    """
+    body = request["body"]
+    events = body if isinstance(body, list) else [body]
+    return [event.get("type") for event in events]
+
+
+async def _event_types_through_first_delta(server: Any) -> list[str]:
+    """
+    Collect posted event types up to and including the first streamed delta.
+
+    :param server: Recording server from ``_start_recording_server``.
+    :returns: Event types in arrival order.
+    """
+    types: list[str] = []
+    while "external_output_text_delta" not in types:
+        types.extend(_posted_event_types(await _get_recorded_request(server)))
+    return types
+
+
+def _user_prompt_line(text: str) -> str:
+    """
+    Serialize one Claude transcript user-prompt record.
+
+    :param text: Prompt text, e.g. ``"what next?"``.
+    :returns: JSONL line including the trailing newline.
+    """
+    record = {"type": "user", "uuid": f"user-{text}", "message": {"role": "user", "content": text}}
+    return json.dumps(record) + "\n"
+
+
+def _start_turn_files(bridge_dir: Path, transcript_path: Path, *, submit: bool) -> None:
+    """
+    Write a Claude session start, an optional prompt submit, and a reply's first chunk.
+
+    :param bridge_dir: Bridge directory.
+    :param transcript_path: Claude transcript path recorded on the hooks.
+    :param submit: Whether to record a ``UserPromptSubmit`` hook.
+    :returns: None.
+    """
+    transcript_path.touch()
+    hook = {"session_id": "claude-session", "transcript_path": str(transcript_path)}
+    record_hook_event(bridge_dir, {"hook_event_name": "SessionStart", **hook})
+    if submit:
+        record_hook_event(bridge_dir, {"hook_event_name": "UserPromptSubmit", **hook})
+    _write_deltas_file(
+        bridge_dir, [{"message_id": "m1", "index": 0, "final": False, "delta": "Start "}]
+    )
+
+
+async def _stop_forwarder(task: asyncio.Task[None], server: Any, thread: Any) -> None:
+    """
+    Cancel the forwarder loop and stop its recording server.
+
+    :param task: Running ``forward_claude_transcript_to_session`` task.
+    :param server: Recording server.
+    :param thread: Server thread.
+    :returns: None.
+    """
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5.0)
+
+
+def _forwarder_task(base_url: str, bridge_dir: Path) -> asyncio.Task[None]:
+    """
+    Start the forwarder loop against a recording server.
+
+    :param base_url: Recording server URL.
+    :param bridge_dir: Bridge directory to tail.
+    :returns: The running loop task.
+    """
+    return asyncio.create_task(
+        forwarder.forward_claude_transcript_to_session(
+            base_url=base_url,
+            headers={},
+            session_id="conv_order",
+            bridge_dir=bridge_dir,
+            agent_name="claude-native-ui",
+            start_at_end=False,
+            poll_interval_s=0.01,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_prompt_reaches_session_before_reply_chunk_read_in_same_poll(
+    tmp_path: Path,
+) -> None:
+    """A prompt and its reply's first chunk visible together post prompt-first."""
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    _start_turn_files(bridge_dir, transcript_path, submit=False)
+    transcript_path.write_text(_user_prompt_line("what next?"), encoding="utf-8")
+    server, thread, base_url = _start_recording_server()
+    task = _forwarder_task(base_url, bridge_dir)
+    try:
+        types = await _event_types_through_first_delta(server)
+    finally:
+        await _stop_forwarder(task, server, thread)
+
+    assert "external_conversation_item" in types
+    assert types.index("external_conversation_item") < types.index("external_output_text_delta")
+
+
+@pytest.mark.asyncio
+async def test_reply_chunk_waits_for_a_submitted_prompt_recorded_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude can stream a reply before recording its prompt; the chunk waits."""
+    monkeypatch.setattr(forwarder, "_PROMPT_RECORD_WAIT_S", 30.0, raising=False)
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    _start_turn_files(bridge_dir, transcript_path, submit=True)
+    server, thread, base_url = _start_recording_server()
+    task = _forwarder_task(base_url, bridge_dir)
+    try:
+        await asyncio.sleep(0.3)
+        held = [request["body"] for request in list(server.requests.queue)]
+        with transcript_path.open("a", encoding="utf-8") as handle:
+            handle.write(_user_prompt_line("what next?"))
+        types = await _event_types_through_first_delta(server)
+    finally:
+        await _stop_forwarder(task, server, thread)
+
+    assert all(
+        "external_output_text_delta" not in _posted_event_types({"body": body}) for body in held
+    )
+    assert "external_conversation_item" in types
+    assert types.index("external_conversation_item") < types.index("external_output_text_delta")
+
+
+@pytest.mark.asyncio
+async def test_reply_chunk_posts_after_bounded_wait_without_prompt_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A submit that never produces a prompt item delays the preview only briefly."""
+    monkeypatch.setattr(forwarder, "_PROMPT_RECORD_WAIT_S", 0.2, raising=False)
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    _start_turn_files(bridge_dir, transcript_path, submit=True)
+    server, thread, base_url = _start_recording_server()
+    started = time.monotonic()
+    task = _forwarder_task(base_url, bridge_dir)
+    try:
+        types = await _event_types_through_first_delta(server)
+        waited_s = time.monotonic() - started
+    finally:
+        await _stop_forwarder(task, server, thread)
+
+    assert "external_conversation_item" not in types
+    assert waited_s >= 0.2
+
+
+def _chunk(message_id: str, index: int) -> ClaudeMessageDelta:
+    """
+    Build one streamed chunk.
+
+    :param message_id: Claude message id, e.g. ``"m1"``.
+    :param index: Chunk index within the message.
+    :returns: The chunk.
+    """
+    return ClaudeMessageDelta(message_id=message_id, index=index, final=False, delta="x")
+
+
+def test_prompt_order_gate_holds_only_new_messages_until_prompt_forwarded() -> None:
+    """The gate holds a new message, never one already streaming, until release."""
+    gate = forwarder._PromptOrderGate()
+    streaming = {("m1", 0): None}
+    assert not gate.holds([_chunk("m2", 0)], streaming)
+
+    gate.note_submit(time.time())
+    assert gate.holds([_chunk("m2", 0)], streaming)
+    assert gate.holds([_chunk("m1", 1), _chunk("m2", 0)], streaming)
+    assert not gate.holds([_chunk("m1", 1)], streaming)
+
+    gate.note_prompt_forwarded()
+    assert not gate.holds([_chunk("m2", 0)], streaming)
+
+
+def test_prompt_order_gate_ignores_submits_already_forwarded_or_unknown() -> None:
+    """A re-read or untimestamped submit does not restart the wait."""
+    gate = forwarder._PromptOrderGate()
+    submitted_at = time.time()
+    gate.note_prompt_forwarded()
+    gate.note_submit(submitted_at - 1.0)
+    gate.note_submit(None)
+    assert not gate.holds([_chunk("m2", 0)], {})
+
+
+def test_prompt_order_gate_releases_after_wait_bound() -> None:
+    """The wait expires so a prompt that never appears cannot stall previews."""
+    gate = forwarder._PromptOrderGate()
+    gate.note_submit(time.time())
+    gate.noticed_at -= forwarder._PROMPT_RECORD_WAIT_S
+    assert not gate.holds([_chunk("m2", 0)], {})
+    assert gate.submitted_at is None
