@@ -79,6 +79,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { downloadWorkspaceFile, useFileContent } from "@/hooks/useFileContent";
+import { isVideoFile } from "@/lib/video";
 import { useFileDiff } from "@/hooks/useFileDiff";
 import {
   type Comment,
@@ -301,6 +302,8 @@ function useToolbarOverflow(actionsKey: string): {
 interface FileViewerProps {
   position?: FilePosition;
   open: boolean;
+  /** Media visibility is independent of the mounted editor and its navigation guard. */
+  mediaActive?: boolean;
   conversationId: string;
   path: string;
   onClose: () => void;
@@ -319,6 +322,8 @@ interface FileViewerProps {
    * when the viewer is embedded inside the inline right panel.
    */
   frameless?: boolean;
+  /** The same frameless viewer fills the mobile viewport without remounting. */
+  mobileOverlay?: boolean;
   /** Only the active viewport mounts the diff editor and synchronizes the URL. */
   viewport?: "desktop" | "mobile";
   /** Called when the user presses Escape to close the active file tab. */
@@ -355,6 +360,7 @@ export function FileViewer(props: FileViewerProps) {
 function FileViewerBody({
   position,
   open,
+  mediaActive = true,
   conversationId,
   path,
   onClose,
@@ -362,6 +368,7 @@ function FileViewerBody({
   onNavigateTo,
   permissionLevel,
   frameless,
+  mobileOverlay = false,
   viewport,
   onCommentsOpenChange,
   sort = "recent",
@@ -398,10 +405,10 @@ function FileViewerBody({
   // (useIOSViewportLock) — which only resizes flow content inside .app-shell —
   // doesn't lift it above the soft keyboard. Pad the overlay's bottom by the
   // keyboard inset so the comments panel and its (auto-focused) textarea stay
-  // visible. No-op off iOS / with the keyboard closed. Not needed frameless
-  // (embedded in the desktop aside, never a fixed overlay).
-  const keyboardInset = useIOSNativeKeyboardInset(!frameless && open);
-  const fileQuery = useFileContent(conversationId, path);
+  // visible. No-op off iOS / with the keyboard closed or in the desktop rail.
+  const keyboardInset = useIOSNativeKeyboardInset((!frameless || mobileOverlay) && open);
+  // Video playback reads the complete binary on demand, never the capped JSON preview.
+  const fileQuery = useFileContent(conversationId, isVideoFile(path) ? null : path);
   const changedFiles = useWorkspaceChangedFiles(conversationId);
 
   // Build the navigable file list from all changed files (including deleted),
@@ -686,6 +693,7 @@ function FileViewerBody({
   // them (Monaco would otherwise render the base64 payload as garbage text).
   const isImage = isImageFile(path, fileQuery.data?.content_type);
   const isPdf = isPdfFile(path, fileQuery.data?.content_type);
+  const isVideo = isVideoFile(path, fileQuery.data?.content_type);
   // 3D models render through CodeViewer's <ModelViewer> — like images and PDFs,
   // they have no meaningful source/diff/preview text representation, so diff is
   // suppressed and they always resolve to the (viewer-owning) source surface.
@@ -697,6 +705,7 @@ function FileViewerBody({
   const isDiffAvailable =
     !isImage &&
     !isPdf &&
+    !isVideo &&
     !isModel &&
     (changedFiles.data?.data.some((f) => f.path === path) ?? false);
   const isDeletedFile =
@@ -718,13 +727,14 @@ function FileViewerBody({
   const [diffActive, setDiffActive] = useState(
     () => initialDiffRef.current || persistedPrefsRef.current.diffActive,
   );
-  const requestedDiff = open && isActiveViewport && diffActive && !isImage && !isPdf && !isModel;
+  const requestedDiff =
+    open && isActiveViewport && diffActive && !isImage && !isPdf && !isVideo && !isModel;
   // A saved preference also applies to unchanged files; only explicit links skip discovery.
   const linkedDiff =
     requestedDiff &&
     linkedFileRef.current?.conversationId === conversationId &&
     linkedFileRef.current?.path === path;
-  const diffQuery = useFileDiff(conversationId, path, { requested: linkedDiff });
+  const diffQuery = useFileDiff(conversationId, isVideo ? null : path, { requested: linkedDiff });
   const prepareDiff =
     requestedDiff &&
     (isDiffAvailable || (linkedDiff && changedFiles.data === undefined && !changedFiles.isError));
@@ -875,7 +885,13 @@ function FileViewerBody({
   // would swallow the browser's find-in-page with no find widget to show.
   const isMonacoFindSurface =
     diffViewActive ||
-    (lang !== "markdown" && viewMode !== "preview" && !isImage && !isPdf && !isModel && !isBinary);
+    (lang !== "markdown" &&
+      viewMode !== "preview" &&
+      !isImage &&
+      !isPdf &&
+      !isVideo &&
+      !isModel &&
+      !isBinary);
   // Cmd+F must open find-in-file only while the file viewer is the surface the
   // user is working in. The viewer stays mounted beside the chat, so `open`
   // alone can't tell them apart, and reading `document.activeElement` at
@@ -1202,7 +1218,7 @@ function FileViewerBody({
       onSelect: () => revealInFileManager(revealTarget),
     });
   }
-  if (!isDeletedFile && fileQuery.data) {
+  if (!isDeletedFile && (fileQuery.data || isVideo)) {
     settingsMenu.push({
       key: "download",
       label: "Download file",
@@ -1268,7 +1284,7 @@ function FileViewerBody({
     // path-aware title reserve). Each shifts the constants the effect reads.
     [
       toolbarActions.map((a) => a.key).join(","),
-      `back:${!frameless}`,
+      `back:${!frameless || mobileOverlay}`,
       `chip:${saveStatus !== "idle"}`,
       `nav:${showNavButtons}`,
       `path:${path}`,
@@ -1394,7 +1410,7 @@ function FileViewerBody({
               overlay only. On desktop the viewer is embedded in the tabbed
               Files rail, where tabs (and their x buttons) own open/close, so
               the back button would be a redundant "exit viewer" mode. */}
-          {!frameless && (
+          {(!frameless || mobileOverlay) && (
             <div ref={toolbarBackRef} className="shrink-0">
               <TooltipProvider>
                 <Tooltip>
@@ -1687,6 +1703,7 @@ function FileViewerBody({
               onSetActiveSelection={handleSetActiveSelection}
               pendingBodyRef={pendingBodyRef}
               panelOpen={open}
+              mediaActive={open && isActiveViewport && mediaActive}
               searchOpen={searchOpen}
               setSearchOpen={setSearchOpen}
               searchFocusNonce={searchFocusNonce}
@@ -1808,7 +1825,11 @@ function FileViewerBody({
       <div
         ref={setViewerRoot}
         data-testid="file-viewer"
-        className="flex flex-col flex-1 min-h-0 overflow-hidden bg-card"
+        style={{ paddingBottom: keyboardInset || undefined }}
+        className={cn(
+          "flex flex-col flex-1 min-h-0 overflow-hidden bg-card",
+          mobileOverlay && "fixed inset-0 z-50 shadow-lg",
+        )}
       >
         {innerContent}
       </div>
