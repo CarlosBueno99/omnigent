@@ -5,8 +5,8 @@ Revises: nf12ab34cd56
 Create Date: 2026-10-20 00:00:00.000000
 
 Adds an optional ``project_id`` (Uuid16, nullable) column to
-``scheduled_tasks``. When set, the fire path files each spawned session into
-that first-class project. Rerunnable: an upgrade replayed over a schema that
+``scheduled_tasks``, naming the first-class project that fired sessions will
+be filed into. Rerunnable: an upgrade replayed over a schema that
 already has the column leaves it in place.
 """
 
