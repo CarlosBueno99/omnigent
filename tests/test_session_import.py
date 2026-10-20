@@ -1582,6 +1582,34 @@ def test_codex_import_by_rotated_native_omnigent_id_reaches_current_thread(
         load_local_session("codex", original_session_id)
 
 
+@pytest.mark.parametrize("newest_index", [0, 1])
+def test_codex_import_by_native_omnigent_id_prefers_newest_mapped_rollout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    newest_index: int,
+) -> None:
+    """When several bridges record one Omnigent id, the newest mapped rollout is imported."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "bridge-root")
+    omnigent_session_id = "5b6c7d8e9f0a41b2c3d4e5f6a7b8c9d0"
+    thread_ids = ("019f7777-0001-7000-8000-000000000025", "019f7777-0001-7000-8000-000000000026")
+    for index, thread_id in enumerate(thread_ids):
+        codex_home = _write_codex_native_bridge_state(
+            codex_native_bridge.bridge_dir_for_bridge_id(f"bridge-{index}"),
+            session_id=omnigent_session_id,
+            thread_id=thread_id,
+        )
+        rollout = _write_codex_rollout(codex_home, thread_id, first_message=f"thread {index}")
+        modified_at = 20 if index == newest_index else 10
+        os.utime(rollout, (modified_at, modified_at))
+
+    imported = load_local_session("codex", omnigent_session_id)
+
+    assert imported.external_session_id == thread_ids[newest_index]
+    assert _codex_item_texts(imported) == [f"thread {newest_index}"]
+
+
 @pytest.mark.parametrize(
     "corrupt_state", ["1" * 5000, "[" * 200_000], ids=["oversized-integer", "deep-nesting"]
 )
