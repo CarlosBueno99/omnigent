@@ -86,7 +86,7 @@ describe(
     after(async () => {
       try {
         await desktop?.electronApp.close().catch(() => {});
-        await desktop?.stopDisplayCapture();
+        await desktop?.stopDisplayCapture().catch(() => {});
         if (recordDir) saveRecording(recordDir, "browser-dropdown-actions");
       } finally {
         await Promise.all([fixture?.close(), server?.close()]);
@@ -136,6 +136,29 @@ describe(
       }, "Radix options in snapshot");
       await perform("click", { ref: refFor(opened, "option", "canary") });
       await eventually(async () => /Environment: canary/.test(await fieldState()), "Radix value");
+    });
+
+    it("returns from a click whose press navigates away", async () => {
+      // A silent message channel delays the release until after the navigation commits.
+      await page.evaluate(() => {
+        window.MessageChannel = class {
+          port1 = { close() {} };
+          port2 = { postMessage() {} };
+        };
+        const leave = document.createElement("div");
+        leave.id = "leave";
+        leave.textContent = "Leave";
+        leave.addEventListener("mousedown", () => location.assign("/left"));
+        document.body.append(leave);
+      });
+      const result = await Promise.race([
+        perform("click", { selector: "#leave" }),
+        new Promise((resolve) => {
+          setTimeout(resolve, 10_000, "still pending after 10s");
+        }),
+      ]);
+      assert.equal(result, "ok");
+      await eventually(() => page.url().endsWith("/left"), "navigated page");
     });
   },
 );

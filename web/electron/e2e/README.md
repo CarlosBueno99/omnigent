@@ -130,7 +130,8 @@ instruction to chat. No instruction bar should appear below the browser URL.
 a real desktop browser view. Its React fixture has a combobox that opens on
 mousedown, a native select and a Radix Select. Each must open and choose an
 option by ref, and the snapshot must list native options with the selected one
-marked. Build the SPA, then run from `web/electron`:
+marked. A click whose press navigates the page must still return. Build the SPA,
+then run from `web/electron`:
 
 ```sh
 OMNIGENT_PW_NO_SANDBOX=1 xvfb-run -a node --test e2e/desktop_browser_dropdowns.e2e.js

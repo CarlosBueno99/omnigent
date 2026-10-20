@@ -10,6 +10,9 @@ function jsNumber(n) {
   return JSON.stringify(n);
 }
 
+const SELECT_ROLE_JS = `    if (tag === 'select' && (el.multiple || el.size > 1)) return 'listbox';
+`;
+
 // A nested select names nothing: its option text would otherwise flood the name.
 const SELECT_NAME_JS = `    if (tag === 'select') {
       const label = depth === 0 && el.labels && el.labels[0];
@@ -20,6 +23,8 @@ const SELECT_NAME_JS = `    if (tag === 'select') {
 const SELECT_OPTIONS_JS = `    if (el instanceof HTMLSelectElement) {
       for (const option of el.options) {
         if (window.getComputedStyle(option).display === 'none') continue;
+        const group = option.parentElement;
+        if (group instanceof HTMLOptGroupElement && window.getComputedStyle(group).display === 'none') continue;
         const ref = ++nextRef;
         window.__omni_refs__.set(ref, new WeakRef(option));
         const name = option.label.trim().slice(0, 80);
@@ -80,7 +85,7 @@ const snapshotScript = (listSelectOptions) => `(() => {
       return 'textbox';
     }
     if (isHeading(tag)) return 'heading';
-    if (TAG_ROLE[tag]) return TAG_ROLE[tag];
+${listSelectOptions ? SELECT_ROLE_JS : ""}    if (TAG_ROLE[tag]) return TAG_ROLE[tag];
     if (el.hasAttribute && (el.hasAttribute('tabindex') || el.hasAttribute('onclick'))) return 'generic';
     return null;
   }
@@ -203,7 +208,9 @@ const CLICK_JS = `
     }
     return 'ok';
   }
-  if (el.matches(':disabled')) throw new Error('Element is disabled');
+  if (el.matches(':disabled') || el.closest('button, select, textarea')?.matches(':disabled')) {
+    throw new Error('Element is disabled');
+  }
   const rect = el.getBoundingClientRect();
   const mouse = {
     bubbles: true, cancelable: true, composed: true, view: window, button: 0, detail: 1,
@@ -218,15 +225,24 @@ const CLICK_JS = `
     if (focusable) focusable.focus({ preventScroll: true });
     else document.activeElement?.blur();
   }
-  // Let the page commit the press, e.g. render a menu, before the release. A message
-  // task is not throttled in a hidden view; the timer only covers a broken channel.
-  await new Promise((resolve) => {
+  // Let the page commit the press, e.g. render a menu, before the release. A message task is
+  // not throttled in a hidden view; the timer covers a broken channel. A press that navigates
+  // ends the click, since a promise pending across page teardown never settles executeJavaScript.
+  const left = await new Promise((resolve) => {
     const channel = new MessageChannel();
-    const done = () => { clearTimeout(timer); channel.port1.close(); resolve(); };
-    const timer = setTimeout(done, 1000);
-    channel.port1.onmessage = done;
+    const done = (navigated) => {
+      clearTimeout(timer);
+      channel.port1.close();
+      window.removeEventListener('pagehide', leave);
+      resolve(navigated);
+    };
+    const leave = () => done(true);
+    const timer = setTimeout(done, 1000, false);
+    window.addEventListener('pagehide', leave);
+    channel.port1.onmessage = () => done(false);
     channel.port2.postMessage(null);
   });
+  if (left) return 'ok';
   el.dispatchEvent(new PointerEvent('pointerup', pointer));
   if (pressed) el.dispatchEvent(new MouseEvent('mouseup', mouse));
   if (el.click) el.click(); else el.dispatchEvent(new MouseEvent('click', mouse));

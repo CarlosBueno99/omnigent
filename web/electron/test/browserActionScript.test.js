@@ -87,8 +87,10 @@ it("lists native select options under their labelled select and chooses one by r
   const dom = openPage(
     '<label for="account">Account</label><select id="account"><option>dev</option>' +
       "<option selected>staging</option><option disabled>prod</option>" +
-      "<option hidden>retired</option></select>" +
-      "<label>Region <select multiple><option>us</option><option selected>eu</option></select></label>",
+      '<option hidden>retired</option><optgroup label="Old" hidden><option>legacy</option></optgroup>' +
+      '<optgroup label="Locked" disabled><option>sealed</option></optgroup></select>' +
+      "<label>Region <select multiple><option>us</option><option selected>eu</option></select></label>" +
+      "<label>Frozen <select disabled><option>on</option><option selected>off</option></select></label>",
   );
   try {
     const { window } = dom;
@@ -101,25 +103,33 @@ it("lists native select options under their labelled select and chooses one by r
         '  - option "dev" [ref=3]',
         '  - option "staging" [ref=4] [selected]',
         '  - option "prod" [ref=5] [disabled]',
-        '- label "Region" [ref=6]',
-        '  - combobox "Region" [ref=7]',
-        '    - option "us" [ref=8]',
-        '    - option "eu" [ref=9] [selected]',
+        '  - option "sealed" [ref=6] [disabled]',
+        '- label "Region" [ref=7]',
+        '  - listbox "Region" [ref=8]',
+        '    - option "us" [ref=9]',
+        '    - option "eu" [ref=10] [selected]',
+        '- label "Frozen" [ref=11]',
+        '  - combobox "Frozen" [ref=12]',
+        '    - option "on" [ref=13]',
+        '    - option "off" [ref=14] [selected]',
       ].join("\n"),
     );
-    const [account, region] = window.document.querySelectorAll("select");
+    const [account, region, frozen] = window.document.querySelectorAll("select");
     const events = [];
     for (const type of ["input", "change", "click"])
       window.document.addEventListener(type, (event) => events.push(`${type}:${event.target.id}`));
     const click = (ref) => window.eval(buildBrowserActionScript("click", { ref }));
     await click(3);
     await assert.rejects(click(5), /Element is disabled/);
+    await assert.rejects(click(6), /Element is disabled/);
+    await assert.rejects(click(13), /Element is disabled/);
+    assert.equal(frozen.value, "off");
     await click(3);
     assert.equal(account.value, "dev");
     assert.equal(window.document.activeElement, account);
     assert.deepEqual(events, ["input:account", "change:account"]);
-    await click(8);
     await click(9);
+    await click(10);
     assert.deepEqual(
       [...region.selectedOptions].map((option) => option.value),
       ["us"],
@@ -133,7 +143,8 @@ it("presses, moves focus and releases across a task before clicking", async () =
   const dom = openPage(
     '<div id="menu"><input id="query"></div><div id="trigger" role="button">Env</div>' +
       '<button id="off" disabled>Off</button><svg><g id="icon" role="button"></g></svg>' +
-      '<div id="plain">Plain</div><button id="save"><span id="save-icon">S</span></button>',
+      '<div id="plain">Plain</div><button id="save"><span id="save-icon">S</span></button>' +
+      '<button id="locked" disabled><span id="locked-icon">L</span></button>',
   );
   try {
     const { window } = dom;
@@ -198,9 +209,13 @@ it("presses, moves focus and releases across a task before clicking", async () =
       "click:trigger",
     ]);
     log.length = 0;
-    await assert.rejects(
-      window.eval(buildBrowserActionScript("click", { selector: "#off" })),
-      /Element is disabled/,
+    await Promise.all(
+      ["#off", "#locked-icon"].map((selector) =>
+        assert.rejects(
+          window.eval(buildBrowserActionScript("click", { selector })),
+          /Element is disabled/,
+        ),
+      ),
     );
     assert.deepEqual(log, []);
     assert.equal((await click("#icon")).at(-1), "click:icon");
@@ -215,18 +230,29 @@ it("presses, moves focus and releases across a task before clicking", async () =
   }
 });
 
-it("finishes a click when the page's message channel never delivers", async () => {
-  const dom = openPage('<button id="save">Save</button>');
+it("ends a click when its press leaves the page and when the message channel never delivers", async () => {
+  const dom = openPage('<button id="save">Save</button><a id="leave" href="/next">Leave</a>');
   try {
     const { window } = dom;
     window.MessageChannel = class {
       port1 = { close() {} };
       port2 = { postMessage() {} };
     };
-    const clicks = [];
-    window.document.addEventListener("click", (event) => clicks.push(event.target.id));
-    assert.equal(await window.eval(buildBrowserActionScript("click", { selector: "#save" })), "ok");
-    assert.deepEqual(clicks, ["save"]);
+    const events = [];
+    for (const type of ["mousedown", "mouseup", "click"])
+      window.document.addEventListener(type, (event) => events.push(`${type}:${event.target.id}`));
+    const click = (selector) => window.eval(buildBrowserActionScript("click", { selector }));
+
+    const leaving = click("#leave");
+    await new Promise((resolve) => {
+      setImmediate(resolve);
+    });
+    window.dispatchEvent(new window.Event("pagehide"));
+    assert.equal(await leaving, "ok");
+    assert.deepEqual(events.splice(0), ["mousedown:leave"]);
+
+    assert.equal(await click("#save"), "ok");
+    assert.deepEqual(events, ["mousedown:save", "mouseup:save", "click:save"]);
   } finally {
     dom.window.close();
   }
