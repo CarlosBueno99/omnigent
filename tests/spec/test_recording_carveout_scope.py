@@ -95,11 +95,13 @@ def test_symptom_captured_from_a_terminal_pane_must_be_filmed() -> None:
     lanes = _normalized(_DEV / "recording-lanes.md")
 
     assert "Judge the surface by where the symptom shows, not where the defect" in instructions
+    assert "including a leaked pane the app can no longer open" in instructions
     assert "or a screenshot), stamp the facet `terminal` and film it" in instructions
     assert "A symptom seen in a terminal pane must be filmed" in instructions
     assert "of the symptom in your evidence rules this reason out" in instructions
     assert "A pane capture that shows the symptom means the facet must be filmed" in lanes
     assert "`tmux -S <socket> attach -r -t <target>`" in lanes
+    assert "end a `before` clip on a `Wait` for the symptom's text" in lanes
     assert "Do not claim there is no visible surface when your own pane capture" in lanes
 
 

@@ -410,8 +410,9 @@ journey, not a workaround for it.
 
 **Stamp each sub-symptom with the user-facing surface it shows on.** Alongside
 the verdict you will give each facet (Step 2), record where a user *sees* the
-failure: `web` (the web SPA), `terminal` (a TUI or shell pane rendered inside
-the app — a native-harness pane, an embedded shell), `cli` (a command-line
+failure: `web` (the web SPA), `terminal` (a TUI or shell pane the app renders —
+a native-harness pane, an embedded shell — including a leaked pane the app can
+no longer open), `cli` (a command-line
 surface outside the app: the `omnigent` CLI, the REPL, a host daemon's output),
 `desktop` (a failure in the Electron desktop shell itself — the setup/connect
 page, a native dialog, the window/popup policy — not the SPA it hosts), or

@@ -261,8 +261,9 @@ when the defect is a runner-side leak or a failed background request. When the
 app can no longer open the pane (for example, a leaked pane whose session was
 deleted), author a VHS tape as in the `cli` section that attaches a read-only
 tmux client with the socket and target your probe used:
-`tmux -S <socket> attach -r -t <target>`. End on a `Wait` for the symptom's
-text, and caption that the clip attaches to the pane outside the app.
+`tmux -S <socket> attach -r -t <target>`. Caption that the clip attaches to
+the pane outside the app, and end a `before` clip on a `Wait` for the
+symptom's text.
 
 **For a native-harness pane** (claude/codex/cursor/goose/hermes/kiro/… — the bug
 is in a real harness CLI's output), don't hand-roll the launch: the existing
