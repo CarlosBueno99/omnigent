@@ -1090,6 +1090,7 @@ def test_registration_timeout_keeps_hint_when_server_answered_then_dropped(
     message = str(excinfo.value)
     assert "did not register with the server at http://127.0.0.1:59999" in message
     assert suppresses_recovery_hint(excinfo.value) is False
+    assert isinstance(excinfo.value, cli._HostRegistrationPending)
 
 
 def test_registration_timeout_keeps_stale_host_hint_when_server_answers(
