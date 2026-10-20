@@ -2,20 +2,15 @@
 
 The collapsed-sidebar "Open sidebar" toggle (chat header,
 top-left) arms a 400ms dwell-to-peek timer on hover. Once the timer fires, the
-peek card mounts as a floating overlay (``aside.is-peek``, z-50) that covers
-the toggle while still visually imperceptible (200ms fade/slide-in). A user
-who hovers the toggle and clicks "fast, before any preview shows up" — i.e.
-between the timer firing and the card becoming visible — has their click
-swallowed by the invisible card: it lands on whatever sidebar content sits
-under the pointer (the brand link, which navigates to ``/``, or the search
-button) instead of the toggle. The sidebar never pins open; once the pointer
-moves away the peek dismisses and the sidebar is collapsed again.
+peek card mounts as a floating overlay (``aside.is-peek``, z-50) that fades and
+slides in over 200ms. A user who hovers the toggle and clicks — before, during,
+or after that fade-in — must reach the toggle, not sidebar content in the card
+(the brand link navigates to ``/``). Otherwise the sidebar never pins open, and
+once the pointer moves away the peek dismisses and the sidebar collapses again.
 
-The failing test drives that exact journey with real pointer events and
-asserts the user-level contract: a click on the toggle's location pins the
-sidebar open and keeps the user on their session. The companion test guards
-the already-working genuinely-fast click (before the 400ms timer fires), and a
-third test covers the click that lands once the card is fully visible.
+The tests drive that journey with real pointer events at several click times
+and assert the user-level contract: a click on the toggle's location pins the
+sidebar open and keeps the user on their session.
 
 Pure client-side interaction on the seeded session page — no LLM turn.
 """
@@ -28,12 +23,14 @@ _CONVERSATIONS = 'aside[aria-label="Conversations"]'
 _PEEK_CARD = "aside.conversations-sidebar.is-peek"
 # Park spot well away from the sidebar, the header, and the peek card.
 _PARK = (900, 500)
-# The dwell-to-peek delay in ChatHeader.tsx (onPeekSidebar) is 400ms; the peek
+# The dwell-to-peek delay in SidebarOpenButton.tsx (onPeekSidebar) is 400ms; the peek
 # card then fades/slides in over 200ms. Clicking ~60ms after the timer fires
 # lands squarely in the "peek mounted but not yet visible" window the report
 # describes as "before any preview shows up".
 _JUST_PAST_PEEK_DELAY_MS = 460
 _WELL_BEFORE_PEEK_DELAY_MS = 120
+# A human press lasts ~100-200ms, long enough to span the end of the fade-in.
+_HUMAN_PRESS_MS = 150
 # By 600ms the card's entry animation has ended and it takes pointer events.
 _AFTER_PEEK_VISIBLE_MS = 800
 
@@ -54,7 +51,7 @@ def _collapse_sidebar(page: Page) -> None:
     page.wait_for_timeout(700)
 
 
-def _hover_toggle_then_click(page: Page, dwell_ms: int) -> bool:
+def _hover_toggle_then_click(page: Page, dwell_ms: int, press_ms: int = 0) -> bool:
     """Hover the "Open sidebar" toggle for ``dwell_ms``, then click its spot.
 
     Uses raw mouse events at the toggle's recorded coordinates — exactly what
@@ -75,6 +72,8 @@ def _hover_toggle_then_click(page: Page, dwell_ms: int) -> bool:
     page.wait_for_timeout(dwell_ms)
     peek_mounted = page.locator(_PEEK_CARD).count() > 0
     page.mouse.down()
+    if press_ms:
+        page.wait_for_timeout(press_ms)
     page.mouse.up()
     return peek_mounted
 
@@ -151,13 +150,33 @@ def test_click_before_peek_delay_opens_sidebar(
     )
 
 
+def test_press_spanning_peek_fade_in_still_opens_sidebar(
+    page: Page,
+    seeded_session: tuple[str, str],
+) -> None:
+    """A human-length press that starts before the preview is visible must open the sidebar."""
+    base_url, session_id = seeded_session
+    page.set_viewport_size({"width": 1280, "height": 800})
+    page.goto(f"{base_url}/c/{session_id}")
+    expect(page.get_by_role("complementary", name="Workspace")).to_be_visible(timeout=30_000)
+
+    _collapse_sidebar(page)
+    peek_mounted = _hover_toggle_then_click(
+        page, _JUST_PAST_PEEK_DELAY_MS, press_ms=_HUMAN_PRESS_MS
+    )
+    _assert_sidebar_pinned_open(
+        page,
+        session_id,
+        f"pressed {_JUST_PAST_PEEK_DELAY_MS}ms after hover for {_HUMAN_PRESS_MS}ms; "
+        f"peek card mounted at press time: {peek_mounted}",
+    )
+
+
 def test_click_after_peek_card_appears_opens_sidebar(
     page: Page,
     seeded_session: tuple[str, str],
 ) -> None:
-    """Clicking the toggle's spot once the hover-preview is fully visible still pins the sidebar.
-
-    The card floats below the chat header, so the click must reach the toggle, not the card."""
+    """Clicking the toggle's spot once the preview is visible must still open the sidebar."""
     base_url, session_id = seeded_session
     page.set_viewport_size({"width": 1280, "height": 800})
     page.goto(f"{base_url}/c/{session_id}")

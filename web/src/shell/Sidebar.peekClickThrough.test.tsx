@@ -1,11 +1,10 @@
 import { conversation as conv, conversationPage } from "@/test/sidebarMockHelpers";
 import { SidebarDataProvider } from "@/hooks/useSidebarData";
 // Behaviour tests for the peek card's entry window: while the card is still
-// fading in it is (nearly) invisible yet already covers the header toggle
-// whose hover armed it, so it must stay click-through — otherwise a fast
-// click aimed at the toggle lands on invisible sidebar content (the brand
-// link navigates the user to "/"). The card takes the pointer over only once
-// its entry animation completes.
+// fading in it is (nearly) invisible, so it must stay click-through — otherwise
+// a click aimed at what still shows beneath it lands on invisible sidebar
+// content (the brand link navigates the user to "/"). The card takes the
+// pointer over only once its entry animation completes.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -87,7 +86,7 @@ afterEach(() => {
 });
 
 describe("peek card entry window", () => {
-  it("starts click-through so the toggle underneath keeps the click", () => {
+  it("starts click-through while it fades in", () => {
     renderSidebar({ open: false, peek: true });
 
     expect(card()).toHaveClass("pointer-events-none");

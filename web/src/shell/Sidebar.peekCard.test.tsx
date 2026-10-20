@@ -1,9 +1,9 @@
-import { conversation as conv, conversationPage } from "@/test/sidebarMockHelpers";
-import { SidebarDataProvider } from "@/hooks/useSidebarData";
 // The desktop peek card floats below the chat header so it never covers the
 // "Open sidebar" toggle whose hover armed it: once the card is visible, a click
 // on the toggle's spot must still reach the toggle, not the card's brand link.
 
+import { conversation as conv, conversationPage } from "@/test/sidebarMockHelpers";
+import { SidebarDataProvider } from "@/hooks/useSidebarData";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";

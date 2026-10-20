@@ -933,9 +933,8 @@ function SidebarImpl({
   }, [keyboardInset]);
 
   // While the peek card's entry animation is still fading it in, the card is
-  // (nearly) invisible yet already covers the toggle whose hover armed it —
-  // taking pointer events then would swallow a click aimed at that toggle,
-  // landing it on whatever sidebar content sits under the pointer instead.
+  // (nearly) invisible — taking pointer events then would swallow a click aimed
+  // at the content still showing beneath it, landing it on sidebar content.
   // Stay click-through until the composed entry animation completes.
   // Children's animations bubble too, so only the card's own end unlocks it.
   const [peekInteractive, setPeekInteractive] = useState(false);
@@ -1065,9 +1064,7 @@ function SidebarImpl({
           // card never covers the "Open sidebar" toggle whose hover armed it.
           peek &&
             "is-peek md:absolute md:inset-x-2 md:top-12 md:bottom-2 p-0 md:max-w-[400px] ring-1 ring-border rounded-xl md:shadow-xl animate-in fade-in slide-in-from-left-4 duration-200 ease-out",
-          // Click-through while fading in (see peekInteractive above): the
-          // click falls through to the header toggle underneath, which pins
-          // the sidebar open — what the user aimed for.
+          // Click-through while fading in (see peekInteractive above).
           peek && !prefersReducedMotion && !peekInteractive && "pointer-events-none",
         )}
         style={
