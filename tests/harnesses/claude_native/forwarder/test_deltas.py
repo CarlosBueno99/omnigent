@@ -16,6 +16,7 @@ import pytest
 import omnigent.harnesses.claude_native.forwarder as forwarder
 from omnigent.harnesses.claude_native.bridge import (
     ClaudeMessageDelta,
+    MessageDeltaReadResult,
     prepare_bridge_dir,
     record_hook_event,
 )
@@ -516,14 +517,29 @@ async def test_reply_chunk_waits_for_a_submitted_prompt_recorded_after_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Claude can stream a reply before recording its prompt; the chunk waits."""
-    monkeypatch.setattr(forwarder, "_PROMPT_RECORD_WAIT_S", 30.0, raising=False)
+    monkeypatch.setattr(forwarder, "_PROMPT_RECORD_WAIT_S", 30.0)
+    chunk_reads = 0
+    read_deltas = forwarder._read_available_deltas
+
+    async def counting_read(
+        bridge_dir: Path, state: forwarder.DeltaForwardState
+    ) -> MessageDeltaReadResult:
+        nonlocal chunk_reads
+        result = await read_deltas(bridge_dir, state)
+        chunk_reads += bool(result.deltas)
+        return result
+
+    monkeypatch.setattr(forwarder, "_read_available_deltas", counting_read)
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     _start_turn_files(bridge_dir, transcript_path, submit=True)
     server, thread, base_url = _start_recording_server()
     task = _forwarder_task(base_url, bridge_dir)
     try:
-        await asyncio.sleep(0.3)
+        # A second read of the same chunk means the first poll finished without posting it.
+        deadline = time.monotonic() + 10.0
+        while chunk_reads < 2 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
         held = [request["body"] for request in list(server.requests.queue)]
         with transcript_path.open("a", encoding="utf-8") as handle:
             handle.write(_user_prompt_line("what next?"))
@@ -531,6 +547,7 @@ async def test_reply_chunk_waits_for_a_submitted_prompt_recorded_after_it(
     finally:
         await _stop_forwarder(task, server, thread)
 
+    assert chunk_reads >= 2
     assert all(
         "external_output_text_delta" not in _posted_event_types({"body": body}) for body in held
     )
@@ -543,7 +560,7 @@ async def test_reply_chunk_posts_after_bounded_wait_without_prompt_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A submit that never produces a prompt item delays the preview only briefly."""
-    monkeypatch.setattr(forwarder, "_PROMPT_RECORD_WAIT_S", 0.2, raising=False)
+    monkeypatch.setattr(forwarder, "_PROMPT_RECORD_WAIT_S", 0.2)
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     _start_turn_files(bridge_dir, transcript_path, submit=True)
@@ -558,6 +575,37 @@ async def test_reply_chunk_posts_after_bounded_wait_without_prompt_record(
 
     assert "external_conversation_item" not in types
     assert waited_s >= 0.2
+
+
+@pytest.mark.asyncio
+async def test_subagent_prompt_submit_does_not_hold_the_reply_chunk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a main-session submit holds a preview; a subagent's prompt does not."""
+    monkeypatch.setattr(forwarder, "_PROMPT_RECORD_WAIT_S", 30.0)
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    _start_turn_files(bridge_dir, transcript_path, submit=False)
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "claude-session",
+            "transcript_path": str(transcript_path),
+            "agent_id": "agent-1",
+        },
+    )
+    server, thread, base_url = _start_recording_server()
+    started = time.monotonic()
+    task = _forwarder_task(base_url, bridge_dir)
+    try:
+        types = await _event_types_through_first_delta(server)
+        waited_s = time.monotonic() - started
+    finally:
+        await _stop_forwarder(task, server, thread)
+
+    assert "external_conversation_item" not in types
+    assert waited_s < 10.0
 
 
 def _chunk(message_id: str, index: int) -> ClaudeMessageDelta:
@@ -599,7 +647,11 @@ def test_prompt_order_gate_ignores_submits_already_forwarded_or_unknown() -> Non
 def test_prompt_order_gate_releases_after_wait_bound() -> None:
     """The wait expires so a prompt that never appears cannot stall previews."""
     gate = forwarder._PromptOrderGate()
-    gate.note_submit(time.time())
+    submitted_at = time.time()
+    gate.note_submit(submitted_at)
     gate.noticed_at -= forwarder._PROMPT_RECORD_WAIT_S
     assert not gate.holds([_chunk("m2", 0)], {})
     assert gate.submitted_at is None
+
+    gate.note_submit(submitted_at)
+    assert not gate.holds([_chunk("m3", 0)], {})

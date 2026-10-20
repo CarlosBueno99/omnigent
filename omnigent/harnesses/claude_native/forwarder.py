@@ -830,7 +830,8 @@ class _PromptOrderGate:
         ``UserPromptSubmit`` whose prompt item has not been forwarded, or
         ``None`` when no prompt is outstanding.
     :param noticed_at: Monotonic time that submit was first read.
-    :param forwarded_at: Wall-clock time a prompt item was last forwarded.
+    :param forwarded_at: Wall-clock time up to which submits are settled: a
+        prompt item was forwarded, or that submit's wait expired.
     """
 
     submitted_at: float | None = None
@@ -866,6 +867,7 @@ class _PromptOrderGate:
         if self.submitted_at is None:
             return False
         if time.monotonic() - self.noticed_at >= _PROMPT_RECORD_WAIT_S:
+            self.forwarded_at = max(self.forwarded_at, self.submitted_at)
             self.submitted_at = None
             return False
         return any((delta.message_id, 0) not in seen_keys for delta in deltas)

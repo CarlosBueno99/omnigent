@@ -62,9 +62,13 @@ import {
   imagePreview,
   isTextBlock,
   keyedAttachments,
-  LIVE_ITEM_PREFIX,
 } from "@/lib/blocks";
-import { type Bubble, type RenderItem, bubblesEqual } from "@/lib/renderItems";
+import {
+  type Bubble,
+  type RenderItem,
+  bubblesEqual,
+  opensWithEarlyReplyPreviews,
+} from "@/lib/renderItems";
 import { getCurrentAuthorId } from "@/lib/identity";
 import { QueryClientContext } from "@tanstack/react-query";
 import { ApiError, continueFailedTurn, retrySession } from "@/lib/sessionsApi";
@@ -272,42 +276,17 @@ function liftAboveCreateRoutingChips(committed: Bubble[], end: number): number {
   return start === 0 ? start : end;
 }
 
-function isLiveReplyPreview(bubble: Bubble): boolean {
-  return (
-    bubble.kind === "assistant" &&
-    bubble.items.length > 0 &&
-    bubble.items.every((item) => item.itemId?.startsWith(LIVE_ITEM_PREFIX) ?? false)
-  );
-}
-
-function isInputBubble(bubble: Bubble): boolean {
-  return (
-    bubble.kind === "user" ||
-    (bubble.kind === "assistant" && bubble.items.some((item) => item.kind === "slash_command"))
-  );
-}
-
-// Start of the trailing reply previews that streamed before the session's first
-// input, or -1. Only the oldest pending send can have started them.
-function openingReplyPreviewStart(committed: Bubble[], hasMoreHistory: boolean): number {
-  if (hasMoreHistory || committed.some(isInputBubble)) return -1;
-  let start = committed.length;
-  while (start > 0 && isLiveReplyPreview(committed[start - 1]!)) start -= 1;
-  return start === committed.length ? -1 : start;
-}
-
 // Place optimistic pending user bubbles into the committed timeline, keeping
 // the prompt above a trailing REQUEST-phase card or create-time routing chip.
+// `liftOldest` puts the oldest send above reply previews that streamed before it.
 export function mergePendingBubbles(
   committed: Bubble[],
   pending: Bubble[],
-  hasMoreHistory = false,
+  liftOldest = opensWithEarlyReplyPreviews(committed, false),
 ): Bubble[] {
   if (pending.length === 0) return committed;
-  const previewStart = openingReplyPreviewStart(committed, hasMoreHistory);
-  if (previewStart >= 0) {
-    const at = liftAboveCreateRoutingChips(committed, previewStart);
-    return [...committed.slice(0, at), pending[0]!, ...committed.slice(at), ...pending.slice(1)];
+  if (liftOldest) {
+    return [pending[0]!, ...committed, ...pending.slice(1)];
   }
   let insertAt = committed.length;
   while (insertAt > 0 && isStandaloneElicitationBubble(committed[insertAt - 1]!)) {

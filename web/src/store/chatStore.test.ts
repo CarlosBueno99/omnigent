@@ -32,7 +32,7 @@ import type {
 } from "@/lib/blocks";
 import type { ConversationItem, MessageItem } from "@/lib/conversationItems";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
-import { buildBubbles } from "@/lib/renderItems";
+import { buildBubbles, opensWithEarlyReplyPreviews } from "@/lib/renderItems";
 import { buildPendingBubbles, mergePendingBubbles } from "@/components/chat/chatBubbleParts";
 import { getSessionSlim, INITIAL_WINDOW_ITEMS, SESSION_HISTORY_PAGE_SIZE } from "@/lib/sessionsApi";
 import { SSE_STALL_TIMEOUT_MS } from "@/lib/sse";
@@ -16482,6 +16482,28 @@ describe("chatStore — live delta streaming (claude-native)", () => {
 
   it.each([
     { history: "an empty session", hasMoreHistory: false, earlier: [], lifted: true },
+    {
+      history: "a create-time routing chip",
+      hasMoreHistory: false,
+      earlier: [
+        {
+          type: "routing_decision",
+          ctx: {
+            agent: null,
+            depth: 0,
+            turn: 0,
+            timestamp: 0,
+            responseId: "routing_0",
+            itemId: "rd_0",
+          },
+          routing: { scope: "session" },
+          model: "databricks-claude-opus-4-8",
+          applied: true,
+          rationale: "hard turn",
+        },
+      ] satisfies AnyBlock[],
+      lifted: true,
+    },
     // A paged window may hide the prompt those previews answer.
     { history: "paged history", hasMoreHistory: true, earlier: [], lifted: false },
     {
@@ -16502,6 +16524,19 @@ describe("chatStore — live delta streaming (claude-native)", () => {
           name: "effort",
           arguments: "high",
           output: null,
+        },
+      ] satisfies AnyBlock[],
+      lifted: false,
+    },
+    {
+      history: "an agent greeting",
+      hasMoreHistory: false,
+      earlier: [
+        {
+          type: "text_done",
+          ctx: { agent: null, depth: 0, turn: 0, timestamp: 0, responseId: "resp_0", itemId: "a0" },
+          fullText: "Hi!",
+          hasCodeBlocks: false,
         },
       ] satisfies AnyBlock[],
       lifted: false,
@@ -16552,11 +16587,12 @@ describe("chatStore — live delta streaming (claude-native)", () => {
         labels.filter((label) => label === "sent" || label.startsWith("live:"));
       const renderedOrder = () => {
         const state = useChatStore.getState();
+        const built = buildBubbles(state.blocks, state.activeResponse);
         return sentAndPreviews(
           mergePendingBubbles(
-            buildBubbles(state.blocks, state.activeResponse),
+            built,
             buildPendingBubbles(state.pendingUserMessages, null),
-            state.hasMoreHistory,
+            opensWithEarlyReplyPreviews(built, state.hasMoreHistory),
           ).flatMap((bubble) => {
             if (bubble.kind === "user") return bubble.shellCommand ? [] : ["sent"];
             return bubble.kind === "assistant" ? bubble.items.map((item) => item.itemId ?? "") : [];
@@ -16594,6 +16630,44 @@ describe("chatStore — live delta streaming (claude-native)", () => {
       controller.abort();
     },
   );
+
+  it("lifts only the oldest send above early previews when a later send is acked first", async () => {
+    const pending = (tempId: string) => ({
+      tempId,
+      pendingId: `pending_${tempId}`,
+      posted: true,
+      content: [{ type: "input_text" as const, text: tempId }],
+    });
+    useChatStore.setState({
+      conversationId: "conv_live_later",
+      blocks: [],
+      isNativeTerminalSession: true,
+      sessionStatus: "running",
+      pendingUserMessages: [pending("first"), pending("second")],
+    });
+    const { sink, controller } = startPump("conv_live_later");
+
+    sink.push(nativeDelta("m_a", 0, "One.", false));
+    sink.push(
+      sse("session.input.consumed", {
+        data: {
+          item_id: "item_second",
+          type: "message",
+          cleared_pending_id: "pending_second",
+          data: { role: "user", content: [{ type: "input_text", text: "second" }] },
+        },
+      }),
+    );
+    await tick();
+    expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual(["first"]);
+    expect(
+      useChatStore
+        .getState()
+        .blocks.map((b) => (b.type === "user_message" ? b.stableKey : b.ctx.itemId)),
+    ).toEqual(["live:m_a", "second"]);
+
+    controller.abort();
+  });
 
   it("reconciles each preview independently across a multi-message turn", async () => {
     useChatStore.setState({

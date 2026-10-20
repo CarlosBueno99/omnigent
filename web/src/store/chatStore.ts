@@ -58,7 +58,7 @@ import { LIVE_ITEM_PREFIX, PENDING_FILE_PREFIX, structuredErrorFields } from "@/
 import { BlockStream } from "@/lib/blockStream";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
 import { isMessageItem, type ConversationItem, type MessageItem } from "@/lib/conversationItems";
-import { buildBubbles } from "@/lib/renderItems";
+import { buildBubbles, sessionOpensWithEarlyReplyPreviews } from "@/lib/renderItems";
 import { emitBrowserActionRequest } from "@/lib/browserActionBus";
 import {
   ApiError,
@@ -6158,23 +6158,14 @@ function isLiveProvisionalBlock(b: AnyBlock): boolean {
   return b.ctx.itemId?.startsWith(LIVE_ITEM_PREFIX) ?? false;
 }
 
-function isInputBlock(b: AnyBlock): boolean {
-  return b.type === "user_message" || b.type === "slash_command" || b.type === "terminal_command";
-}
-
-// Append a promoted send, keeping the session's first input above a reply
-// preview that streamed before it was acknowledged.
-function withPromotedUserBlock(
-  blocks: AnyBlock[],
-  user: UserMessageBlock,
-  hasMoreHistory: boolean,
-): AnyBlock[] {
-  let at = blocks.length;
-  while (at > 0 && isLiveProvisionalBlock(blocks[at - 1]!)) at -= 1;
-  if (at === blocks.length || hasMoreHistory || blocks.some(isInputBlock)) {
-    return [...blocks, user];
-  }
-  return [...blocks.slice(0, at), user, ...blocks.slice(at)];
+// Append a promoted send. The oldest send goes above reply previews that streamed
+// before it was acknowledged, where mergePendingBubbles showed it.
+function withPromotedUserBlock(s: ChatState, user: UserMessageBlock, oldest: boolean): AnyBlock[] {
+  const lift =
+    oldest && sessionOpensWithEarlyReplyPreviews(s.blocks, s.activeResponse, s.hasMoreHistory);
+  const at = lift ? s.blocks.findIndex(isLiveProvisionalBlock) : -1;
+  if (at < 0) return [...s.blocks, user];
+  return [...s.blocks.slice(0, at), user, ...s.blocks.slice(at)];
 }
 
 /** Suppress future chunks for a provisional preview that is no longer valid. */
@@ -8194,7 +8185,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
               // stableKey = the optimistic bubble's temp id → the
               // promoted bubble keeps the same React key (no remount).
               blocks: withPromotedUserBlock(
-                s.blocks,
+                s,
                 committedUserBlock(
                   event.itemId,
                   content,
@@ -8202,7 +8193,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
                   event.createdBy ?? matched.author,
                   matched.createdAtS,
                 ),
-                s.hasMoreHistory,
+                idx === 0,
               ),
             };
           }
@@ -8231,7 +8222,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
             // stableKey = the popped optimistic bubble's temp id so the
             // promoted bubble keeps the same React key (no remount/flink).
             blocks: withPromotedUserBlock(
-              s.blocks,
+              s,
               committedUserBlock(
                 event.itemId,
                 content,
@@ -8239,7 +8230,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
                 event.createdBy ?? head.author,
                 head.createdAtS,
               ),
-              s.hasMoreHistory,
+              true,
             ),
           };
         }

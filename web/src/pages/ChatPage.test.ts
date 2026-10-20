@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Bubble, RenderItem } from "@/lib/renderItems";
 import type { RoutingScope } from "@/lib/routingDecision";
-import type { ToolExecution } from "@/lib/blocks";
+import { LIVE_ITEM_PREFIX, type ToolExecution } from "@/lib/blocks";
 import type { ServerInfo } from "@/lib/capabilities";
 import type { Session } from "@/lib/types";
 import {
@@ -558,11 +558,11 @@ const routingChipBubble = (id: string, scope: RoutingScope): Bubble => ({
 });
 const livePreviewBubble = (messageId: string): Bubble => ({
   kind: "assistant",
-  responseId: `live:${messageId}`,
-  stableId: `live:${messageId}`,
+  responseId: `${LIVE_ITEM_PREFIX}${messageId}`,
+  stableId: `${LIVE_ITEM_PREFIX}${messageId}`,
   lifecycle: "completed",
   error: null,
-  items: [{ kind: "text", itemId: `live:${messageId}`, text: "Start", final: false }],
+  items: [{ kind: "text", itemId: `${LIVE_ITEM_PREFIX}${messageId}`, text: "Start", final: false }],
 });
 const bubbleIds = (bubbles: Bubble[]): string[] =>
   bubbles.map((b) => (b.kind === "assistant" ? b.stableId : b.itemId));
@@ -654,40 +654,10 @@ describe("mergePendingBubbles", () => {
     expect(bubbleIds(merged)).toEqual(["pend_1", "rd_create", "live:m1", "pend_2"]);
   });
 
-  it("lifts the oldest send above every opening reply preview", () => {
-    const merged = mergePendingBubbles(
-      [livePreviewBubble("m1"), livePreviewBubble("m2")],
-      [userBubble("pend_1")],
-    );
-    expect(bubbleIds(merged)).toEqual(["pend_1", "live:m1", "live:m2"]);
-  });
-
-  it("does NOT lift a send above a preview while older history is unloaded", () => {
-    // A paged window may hide the prompt that the preview answers.
-    const merged = mergePendingBubbles([livePreviewBubble("m1")], [userBubble("pend_1")], true);
+  it("follows the caller's session-wide decision over the visible bubbles", () => {
+    // A side chat hides inherited turns, so its visible bubbles alone can look like an opening.
+    const merged = mergePendingBubbles([livePreviewBubble("m1")], [userBubble("pend_1")], false);
     expect(bubbleIds(merged)).toEqual(["live:m1", "pend_1"]);
-  });
-
-  it("does NOT lift a send above a preview that follows an earlier command", () => {
-    const command: Bubble = {
-      kind: "assistant",
-      responseId: "resp_0",
-      stableId: "resp_0",
-      lifecycle: "completed",
-      error: null,
-      items: [
-        {
-          kind: "slash_command",
-          itemId: "sc_0",
-          slashKind: "command",
-          name: "effort",
-          arguments: "high",
-          output: null,
-        },
-      ],
-    };
-    const merged = mergePendingBubbles([command, livePreviewBubble("m1")], [userBubble("pend_1")]);
-    expect(bubbleIds(merged)).toEqual(["resp_0", "live:m1", "pend_1"]);
   });
 
   it("does NOT lift a send above a preview once a prompt is on the timeline", () => {
@@ -698,9 +668,10 @@ describe("mergePendingBubbles", () => {
     expect(bubbleIds(merged)).toEqual(["u1", "a1", "live:m2", "pend_1"]);
   });
 
-  it("does NOT lift a send above committed assistant text", () => {
-    const merged = mergePendingBubbles([assistantText("a0")], [userBubble("pend_1")]);
-    expect(bubbleIds(merged)).toEqual(["a0", "pend_1"]);
+  it("does NOT lift a send above a preview that continues committed assistant text", () => {
+    const committed = [assistantText("a0"), livePreviewBubble("m1")];
+    const merged = mergePendingBubbles(committed, [userBubble("pend_1")]);
+    expect(bubbleIds(merged)).toEqual(["a0", "live:m1", "pend_1"]);
   });
 
   it("does NOT reorder for a tool_call-phase elicitation (message already committed)", () => {
