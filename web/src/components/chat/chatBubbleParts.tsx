@@ -278,7 +278,7 @@ function liftAboveCreateRoutingChips(committed: Bubble[], end: number): number {
 
 // Place optimistic pending user bubbles into the committed timeline, keeping
 // the prompt above a trailing REQUEST-phase card or create-time routing chip.
-// `liftOldest` puts the oldest send above reply previews that streamed before it.
+// `liftOldest` lifts the oldest send above earlier previews; the default assumes a full session.
 export function mergePendingBubbles(
   committed: Bubble[],
   pending: Bubble[],

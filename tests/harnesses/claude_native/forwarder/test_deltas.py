@@ -655,3 +655,48 @@ def test_prompt_order_gate_releases_after_wait_bound() -> None:
 
     gate.note_submit(submitted_at)
     assert not gate.holds([_chunk("m3", 0)], {})
+
+
+@pytest.mark.parametrize(
+    ("content", "skip_user_messages"),
+    [
+        ("skipped prompt", True),
+        (
+            "<command-name>/model</command-name>\n<command-message>model</command-message>\n"
+            "<command-args>example-model</command-args>",
+            False,
+        ),
+        ("<bash-input>pwd</bash-input>", False),
+    ],
+    ids=["skipped_user_message", "slash_command", "terminal_command"],
+)
+@pytest.mark.asyncio
+async def test_forwarding_a_prompt_item_releases_the_gate_without_waiting(
+    tmp_path: Path, content: str, skip_user_messages: bool
+) -> None:
+    """Each prompt-like item a submit can produce releases a held preview."""
+    transcript_path = tmp_path / "session.jsonl"
+    record = {"type": "user", "uuid": "prompt-1", "message": {"role": "user", "content": content}}
+    transcript_path.write_text(json.dumps(record) + "\n")
+    gate = forwarder._PromptOrderGate()
+    gate.note_submit(time.time())
+    assert gate.holds([_chunk("m2", 0)], {})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(202, json={})),
+        base_url="http://test",
+    ) as client:
+        await forwarder._forward_available_items(
+            client=client,
+            session_id="conv_x",
+            bridge_dir=tmp_path / "bridge",
+            agent_name="test-agent",
+            state=forwarder.TranscriptForwardState(transcript_path, 0),
+            retry_tracker=forwarder._PostRetryTracker(),
+            dedupe=forwarder._ForwardDedupeState(),
+            skip_user_messages=skip_user_messages,
+            prompt_gate=gate,
+        )
+
+    assert gate.submitted_at is None
+    assert not gate.holds([_chunk("m2", 0)], {})

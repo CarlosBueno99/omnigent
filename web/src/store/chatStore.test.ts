@@ -16646,25 +16646,52 @@ describe("chatStore — live delta streaming (claude-native)", () => {
       pendingUserMessages: [pending("first"), pending("second")],
     });
     const { sink, controller } = startPump("conv_live_later");
-
-    sink.push(nativeDelta("m_a", 0, "One.", false));
-    sink.push(
+    const ack = (tempId: string) =>
       sse("session.input.consumed", {
         data: {
-          item_id: "item_second",
+          item_id: `item_${tempId}`,
           type: "message",
-          cleared_pending_id: "pending_second",
-          data: { role: "user", content: [{ type: "input_text", text: "second" }] },
+          cleared_pending_id: `pending_${tempId}`,
+          data: { role: "user", content: [{ type: "input_text", text: tempId }] },
         },
-      }),
-    );
-    await tick();
-    expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual(["first"]);
-    expect(
+      });
+    const renderedOrder = () => {
+      const state = useChatStore.getState();
+      const built = buildBubbles(state.blocks, state.activeResponse);
+      return mergePendingBubbles(
+        built,
+        buildPendingBubbles(state.pendingUserMessages, null),
+        opensWithEarlyReplyPreviews(built, state.hasMoreHistory),
+      ).flatMap((bubble) => {
+        if (bubble.kind === "user") {
+          const text = bubble.content[0];
+          return text?.type === "input_text" ? [text.text] : [];
+        }
+        return bubble.kind === "assistant" ? bubble.items.map((item) => item.itemId ?? "") : [];
+      });
+    };
+    const blockOrder = () =>
       useChatStore
         .getState()
-        .blocks.map((b) => (b.type === "user_message" ? b.stableKey : b.ctx.itemId)),
-    ).toEqual(["live:m_a", "second"]);
+        .blocks.map((b) => (b.type === "user_message" ? b.stableKey : b.ctx.itemId));
+
+    sink.push(nativeDelta("m_a", 0, "One.", false));
+    await tick();
+    expect(renderedOrder()).toEqual(["first", "live:m_a", "second"]);
+
+    // An out-of-order ack means the oldest send was not matched first, so
+    // nothing ties the previews to it: placement falls back to arrival order.
+    sink.push(ack("second"));
+    await tick();
+    expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual(["first"]);
+    expect(blockOrder()).toEqual(["live:m_a", "second"]);
+    expect(renderedOrder()).toEqual(["live:m_a", "second", "first"]);
+
+    sink.push(ack("first"));
+    await tick();
+    expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+    expect(blockOrder()).toEqual(["live:m_a", "second", "first"]);
+    expect(renderedOrder()).toEqual(["live:m_a", "second", "first"]);
 
     controller.abort();
   });
