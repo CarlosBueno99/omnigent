@@ -741,12 +741,6 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # Keep host and spawned-runner routing decisions aligned when the
         # host-slice-key kill switch is explicitly disabled.
         "OMNIGENT_HOST_SLICE_KEY_ENABLED",
-        # Arcaterm version string for identifying sessions launched from Arcaterm.
-        # Exported by the Arcaterm terminal, e.g. ``"1.16.0"``. When present,
-        # codex model providers targeting the Databricks AI Gateway will send it
-        # in the ``Databricks-Arcaterm`` header for traffic identification and
-        # client-side policy enforcement. Not a secret (a semantic version string).
-        "ARCATERM_VERSION",
     }
     # Windows system / profile constants (SYSTEMROOT is mandatory for Winsock,
     # USERPROFILE for Path.home(), etc.); a no-op on POSIX. See _platform.
