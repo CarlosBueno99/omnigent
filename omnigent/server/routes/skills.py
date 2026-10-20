@@ -10,7 +10,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from omnigent.entities import Agent
-from omnigent.errors import OmnigentError
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.host.frames import HostSkillsFrame, HostSkillsResultFrame, encode_host_frame
 from omnigent.runtime.agent_cache import AgentCache
@@ -19,6 +18,7 @@ from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.routes._auth_helpers import require_access_and_level, require_user
 from omnigent.server.routes._host_launch import host_absent_error, resolve_host_owner
 from omnigent.server.routes._session_create_validation import validate_session_agent
+from omnigent.server.routes._sessions.helpers import _resolve_subagent_spec
 from omnigent.server.schemas import SkillSummary
 from omnigent.spec.types import AgentSpec
 from omnigent.stores import AgentStore, ConversationStore
@@ -154,8 +154,8 @@ def create_skills_router(
         ):
             spec = await _load_session_spec(agent_cache, session_agent, sub_agent_name)
             if spec is not None:
-                # The host's separate bundle download can fail (for example, after its
-                # credentials expire); bundled skills are merged from the server's copy below.
+                # Scan only the workspace and merge bundled skills from the server's copy;
+                # skills found only by extracting the bundle on the host, e.g. plugins, are lost.
                 _logger.warning(
                     "host %s could not discover skills for session %s (%s); "
                     "scanning its workspace without the bundle",
@@ -208,18 +208,21 @@ async def _load_session_spec(
     """Resolve a session's effective spec from the server's copy of its bundle."""
     if agent_cache is None:
         return None
+    if sub_agent_name:
+        return await asyncio.to_thread(
+            _resolve_subagent_spec,
+            agent=agent,
+            sub_agent_name=sub_agent_name,
+            agent_cache=agent_cache,
+        )
     try:
         loaded = await asyncio.to_thread(
             agent_cache.load, agent.id, agent.bundle_location, expand_env=agent.operator_authored
         )
-    except (KeyError, ValueError, OSError, OmnigentError):
+    except Exception:  # noqa: BLE001
         _logger.warning("could not load agent %s for skill discovery", agent.id, exc_info=True)
         return None
-    if not sub_agent_name or loaded.spec.name == sub_agent_name:
-        return loaded.spec
-    from omnigent.runtime.workflow import _find_spec_by_name
-
-    return _find_spec_by_name(loaded.spec, sub_agent_name)
+    return loaded.spec
 
 
 async def request_host_skills(
