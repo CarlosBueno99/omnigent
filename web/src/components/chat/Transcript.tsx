@@ -15,7 +15,7 @@ import { getCurrentAuthorId } from "@/lib/identity";
 import { hasCommandModifier } from "@/lib/hotkeys";
 import { isSystemUserContent } from "@/lib/systemMessage";
 import { isTerminalCommandInput } from "@/lib/blocks";
-import { useLiveSteeringHarnessIds } from "@/lib/agentLabels";
+import { readsFollowUpsOnNextTurn, useLiveSteeringHarnessIds } from "@/lib/agentLabels";
 import {
   type Bubble,
   type BubbleCache,
@@ -55,13 +55,13 @@ import {
   computeIsTurnActive,
   computeIsWorking,
   extractUserText,
+  isBackgroundTasksOnly,
   isSystemBubble,
   mergePendingBubbles,
   reorderCommittedRequestElicitations,
   shouldShowWorkingIndicator,
   stripGatedSubagentRoutingChips,
   stripPendingElicitations,
-  workingIndicatorPaints,
 } from "@/components/chat/chatBubbleParts";
 import { SCROLL_RESTORE_BUDGET_MS } from "@/shell/useScrollRestore";
 
@@ -141,11 +141,11 @@ function TranscriptImpl({
   const sessionHarness = useChatStore((s) => s.sessionHarness);
   const isNativeTerminalSession = useChatStore((s) => s.isNativeTerminalSession);
   const liveSteeringHarnesses = useLiveSteeringHarnessIds();
-  const placeNextTurnFollowUps =
-    !isNativeTerminalSession &&
-    sessionHarness !== null &&
-    liveSteeringHarnesses !== null &&
-    !liveSteeringHarnesses.has(sessionHarness);
+  const placeNextTurnFollowUps = readsFollowUpsOnNextTurn(
+    sessionHarness,
+    liveSteeringHarnesses,
+    isNativeTerminalSession,
+  );
 
   // Build bubbles once per blocks/activeResponse change. Per-surface reuse
   // cache so a streaming append rebuilds only the active bubble, reusing the
@@ -317,18 +317,15 @@ function TranscriptImpl({
   // a marker row would reserve blank space in the virtualized list.
   const workingIndicatorRenders =
     showWorkingIndicator &&
-    workingIndicatorPaints(
+    !isBackgroundTasksOnly(
       backgroundTaskCount,
       blockedOn,
       computeIsTurnActive(sessionStatus, status === "streaming"),
     );
-  // A message steered in behind the still-active turn is POSTed and promoted to
-  // a bubble below that turn; carry the live Working… indicator on a marker row
-  // beside the active turn so it is not read as the follow-up being processed.
+  // Keep Working… with the running turn, above a follow-up sent mid-turn.
   const workingInsert = useMemo(
-    () =>
-      workingIndicatorInsertIndex(display.streamBubbles, activeResponse, workingIndicatorRenders),
-    [display.streamBubbles, activeResponse, workingIndicatorRenders],
+    () => workingIndicatorInsertIndex(display.streamBubbles, workingIndicatorRenders),
+    [display.streamBubbles, workingIndicatorRenders],
   );
   const streamBubblesWithWorking = useMemo<Bubble[]>(() => {
     if (workingInsert === -1) return display.streamBubbles;
@@ -442,9 +439,9 @@ function TranscriptImpl({
                     </MessageContent>
                   </Message>
                 ))}
-                {/* Working… shimmer, lit for the whole busy turn. When a steered
-                follow-up pushes the shimmer onto a marker row inside the list,
-                only the stable aria-live announcement stays at the tail. */}
+                {/* Working… shimmer, lit for the whole busy turn. When it moves to
+                a marker row above a waiting follow-up, only the aria-live
+                announcement stays at the tail. */}
                 {showWorkingIndicator &&
                   (workingInsert === -1 ? (
                     <WorkingIndicator />

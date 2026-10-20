@@ -169,6 +169,8 @@ export type Bubble =
       pending?: boolean;
       /** Pending input sent mid-turn that the agent hasn't read yet. */
       awaitingAgent?: boolean;
+      /** Sent during the still-running turn; the harness reads it on its next turn. */
+      waitingForNextTurn?: boolean;
       content: MessageContentBlock[];
       /** Shell input is literal command text, not Markdown or attachment markers. */
       shellCommand?: string;
@@ -243,7 +245,7 @@ export type Bubble =
     }
   | {
       // The live-turn Working… indicator, carried as its own row so it can sit
-      // with the active turn rather than below a follow-up steered in behind it.
+      // with the running turn, above a follow-up waiting for the next turn.
       kind: "working";
       /** Fixed sentinel so the marker shares the union's itemId shape. */
       itemId: "working";
@@ -272,8 +274,9 @@ const REASONING_BLOCK_TYPES = new Set(["reasoning_start", "reasoning_chunk", "re
  *     from — `sourceBlocks` itself unless next-turn follow-ups were moved —
  *     kept for per-element reference comparison.
  * :param nextTurnFollowUps: whether the cached walk placed next-turn follow-ups
- *     after their turn (see `orderNextTurnFollowUps`), and `"holding"` when a
- *     batch still waited at the tail, so the next walk may insert above it.
+ *     after their turn (see `orderNextTurnFollowUps`); `"holding"` when a
+ *     batch still waited at the tail, so the next walk may insert above it, and
+ *     `"waiting"` when that batch's bubbles were also marked `waitingForNextTurn`.
  * :param activeResponse: the `activeResponse` the cached `bubbles`
  *     were built with.
  * :param bubbles: the last result returned.
@@ -293,7 +296,7 @@ const REASONING_BLOCK_TYPES = new Set(["reasoning_start", "reasoning_chunk", "re
 export interface BubbleCache {
   sourceBlocks: AnyBlock[] | null;
   blocks: AnyBlock[] | null;
-  nextTurnFollowUps: "off" | "on" | "holding";
+  nextTurnFollowUps: "off" | "on" | "holding" | "waiting";
   activeResponse: ActiveResponse | null;
   interruptedResponseIds: readonly string[] | null;
   // Response id of the newest assistant turn while the SESSION is running,
@@ -371,12 +374,13 @@ function newestAssistantTurnId(blocks: AnyBlock[]): string | null {
  * messages join the waiting batch. The batch is placed right after the turn's
  * `response_end`, or before the first block of another (or anonymous) response.
  *
- * @returns `blocks` itself when nothing moved, and whether a batch still waits
- *   at the tail (a later call may insert the running turn's blocks above it).
+ * @returns `blocks` itself when nothing moved, and the batch that still waits
+ *   at the tail — the turn it waits behind and its first index in the returned
+ *   blocks — since a later call may insert that turn's blocks above it.
  */
 export function orderNextTurnFollowUps(blocks: AnyBlock[]): {
   blocks: AnyBlock[];
-  holding: boolean;
+  held: { turn: string; from: number } | null;
 } {
   let ordered: AnyBlock[] | null = null;
   let held: AnyBlock[] = [];
@@ -395,10 +399,11 @@ export function orderNextTurnFollowUps(blocks: AnyBlock[]): {
         held.push(b);
         continue;
       }
-      // A tool_result folds into its call's card wherever it sits, so a
-      // backdated one moves up rather than placing the batch early.
+      // A tool_result folds into its call's card wherever it sits, and a
+      // subagent row carries its own id, so both stay with the running turn.
       if (
         b.type === "tool_result" ||
+        isSubagentActivityBlock(b) ||
         (b.ctx.responseId === heldTurn && !isTerminalCommandInput(b))
       ) {
         ordered ??= blocks.slice(0, heldAt);
@@ -418,9 +423,14 @@ export function orderNextTurnFollowUps(blocks: AnyBlock[]): {
     ordered?.push(b);
     openTurn = openTurnAfter(b, openTurn);
   }
-  const holding = heldTurn !== null;
+  const waiting = heldTurn === null ? null : { turn: heldTurn, from: ordered?.length ?? heldAt };
   place();
-  return { blocks: ordered ?? blocks, holding };
+  return { blocks: ordered ?? blocks, held: waiting };
+}
+
+/** Whether a walk left a follow-up batch at the tail that a later walk may insert above. */
+function holdsFollowUps(state: BubbleCache["nextTurnFollowUps"]): boolean {
+  return state === "holding" || state === "waiting";
 }
 
 /** Response id of the turn still running after `b`, given the one before it. */
@@ -465,7 +475,9 @@ function openTurnAfter(b: AnyBlock, openTurn: string | null): string | null {
  *   cancelled, and failed are unaffected; it only reaches the tool-state gate.
  * @param placeNextTurnFollowUps - whether the session's harness reads mid-turn
  *   input only on its next turn, so follow-ups render after the turn they were
- *   sent during (see `orderNextTurnFollowUps`).
+ *   sent during (see `orderNextTurnFollowUps`). A batch still held behind a
+ *   turn that may be running (it streams, or the session runs without a
+ *   streaming response) is marked `waitingForNextTurn`.
  */
 export function buildBubbles(
   sourceBlocks: AnyBlock[],
@@ -482,8 +494,17 @@ export function buildBubbles(
   const liveTurnId = sessionRunning ? newestAssistantTurnId(sourceBlocks) : null;
   const arranged = placeNextTurnFollowUps
     ? orderNextTurnFollowUps(sourceBlocks)
-    : { blocks: sourceBlocks, holding: false };
+    : { blocks: sourceBlocks, held: null };
   const blocks = arranged.blocks;
+  const held = arranged.held;
+  // Another streaming turn means the held batch is already being read.
+  const waitingFrom =
+    held !== null &&
+    (activeResponse?.state === "streaming"
+      ? activeResponse.responseId === held.turn
+      : sessionRunning)
+      ? held.from
+      : -1;
   // Resolved over the whole transcript before any reuse decision: a create-time
   // chip and the turn chip that repeats it verbatim are one verdict however far
   // apart they landed, and whether the pair is still visible decides whether the
@@ -500,11 +521,18 @@ export function buildBubbles(
         new Map(),
         superseded,
         liveTurnId,
+        waitingFrom,
       ).bubbles,
       activeResponse,
     );
   }
-  const nextTurnFollowUps = !placeNextTurnFollowUps ? "off" : arranged.holding ? "holding" : "on";
+  const nextTurnFollowUps = !placeNextTurnFollowUps
+    ? "off"
+    : held === null
+      ? "on"
+      : waitingFrom === -1
+        ? "holding"
+        : "waiting";
 
   // Nothing changed since the last call — hand back the same array.
   if (
@@ -517,12 +545,9 @@ export function buildBubbles(
     return cache.bubbles;
   }
 
-  // Try the incremental path: reuse every finalized bubble (all but the
-  // last) and rebuild only from where the last cached bubble started. The
-  // running turn's blocks are inserted ABOVE a waiting follow-up batch, inside
-  // the finalized prefix, so a walk on either side of one rebuilds in full.
+  // Reuse the finalized prefix; a held follow-up batch forces a full rebuild.
   const reuse =
-    nextTurnFollowUps === "holding" || cache.nextTurnFollowUps === "holding"
+    holdsFollowUps(nextTurnFollowUps) || holdsFollowUps(cache.nextTurnFollowUps)
       ? null
       : reusablePrefix(blocks, activeResponse, interruptedResponses, cache, superseded, liveTurnId);
   if (reuse !== null) {
@@ -565,6 +590,7 @@ export function buildBubbles(
     new Map(),
     superseded,
     liveTurnId,
+    waitingFrom,
   );
   cache.sourceBlocks = sourceBlocks;
   cache.blocks = blocks;
@@ -650,67 +676,26 @@ export function lastRenderableAssistantIndex(bubbles: readonly Bubble[]): number
  * first item lands (seconds on native harnesses, whose items round-trip
  * through the vendor TUI). System `[System: ...]` markers don't end a
  * turn (see `hasAssistantContinuation`), so they don't clear the
- * suppression.
+ * suppression; neither does a follow-up still `waitingForNextTurn`.
  */
 export function liveCandidateAssistantIndex(bubbles: readonly Bubble[]): number {
   const idx = lastRenderableAssistantIndex(bubbles);
   for (let i = idx + 1; i < bubbles.length; i += 1) {
     const b = bubbles[i]!;
-    if (b.kind === "user" && !isSystemUserContent(b.content)) return -1;
+    if (b.kind === "user" && !isSystemUserContent(b.content) && !b.waitingForNextTurn) return -1;
   }
   return idx;
 }
 
 /**
- * Index at which to splice a `working` marker row so the Working… indicator
- * stays WITH the active turn — directly after its content and above a follow-up
- * steered in behind it. A steered follow-up is promoted to a bubble immediately,
- * so a tail indicator would sit beneath it and read as that follow-up being
- * processed while the earlier turn is the one still running.
- *
- * Returns -1 when no reposition is needed: no trailing follow-up (ride the tail)
- * or the session is not working.
- *
- * @param bubbles - the rendered bubble list, without any injected marker.
- * @param activeResponse - the in-flight response, when the harness streams one.
- * @param showWorking - whether the Working… indicator is shown at all.
+ * Index at which to splice a `working` marker row so Working… stays with the
+ * running turn, above a follow-up still `waitingForNextTurn`; -1 otherwise.
  */
 export function workingIndicatorInsertIndex(
   bubbles: readonly Bubble[],
-  activeResponse: ActiveResponse | null,
   showWorking: boolean,
 ): number {
-  if (!showWorking) return -1;
-  const isFollowUp = (b: Bubble): boolean => b.kind === "user" && !isSystemUserContent(b.content);
-  // End of the active turn's content: the LAST bubble of its streaming reply
-  // when it has rendered one (a turn can split across bubbles), else the first
-  // unanswered prompt after the last rendered assistant turn (FIFO).
-  const streamingIndex =
-    activeResponse?.state === "streaming"
-      ? bubbles.findLastIndex(
-          (b) =>
-            b.kind === "assistant" &&
-            b.responseId === activeResponse.responseId &&
-            b.items.length > 0,
-        )
-      : -1;
-  let activeTurnEnd: number;
-  if (streamingIndex !== -1) {
-    activeTurnEnd = streamingIndex;
-    // The active turn can trail subagent-activity and routing rows after its
-    // last assistant fragment. Keep the marker below those, never mid-turn.
-    while (activeTurnEnd + 1 < bubbles.length) {
-      const next = bubbles[activeTurnEnd + 1]!;
-      if (next.kind !== "subagent_activity" && next.kind !== "routing_decision") break;
-      activeTurnEnd += 1;
-    }
-  } else {
-    const lastAssistant = lastRenderableAssistantIndex(bubbles);
-    activeTurnEnd = bubbles.findIndex((b, i) => i > lastAssistant && isFollowUp(b));
-  }
-  if (activeTurnEnd === -1) return -1;
-  const hasTrailingFollowUp = bubbles.slice(activeTurnEnd + 1).some(isFollowUp);
-  return hasTrailingFollowUp ? activeTurnEnd + 1 : -1;
+  return showWorking ? bubbles.findIndex((b) => b.kind === "user" && b.waitingForNextTurn) : -1;
 }
 
 /**
@@ -940,6 +925,8 @@ function chipPendingBeforeRegion(blocks: AnyBlock[], startBlock: number): boolea
  *     in between (claude-native's injected `/model` echo) is inside it too.
  * :param superseded: whole-transcript block indexes of create-time chips the
  *     first turn repeats verbatim; they render nothing and claim no message.
+ * :param waitingFrom: first block index of a follow-up batch still waiting
+ *     for its turn (marked `waitingForNextTurn`), or ``-1``.
  */
 function walkBubbles(
   blocks: AnyBlock[],
@@ -950,6 +937,7 @@ function walkBubbles(
   subIndexByResp: Map<string, number>,
   superseded: ReadonlySet<number>,
   liveTurnId: string | null = null,
+  waitingFrom = -1,
 ): { bubbles: Bubble[]; lastBubbleStart: number; lastBubbleCount: number } {
   const bubbles: Bubble[] = [...seedBubbles];
   // One cross-bubble result index per walk: the relay backdates a
@@ -1030,6 +1018,7 @@ function walkBubbles(
         content:
           b.type === "user_message" ? b.content : [{ type: "input_text", text: `!${b.input}` }],
         ...(b.type === "terminal_command" ? { shellCommand: b.input } : {}),
+        ...(waitingFrom !== -1 && i >= waitingFrom ? { waitingForNextTurn: true } : {}),
         ...(b.ctx.createdBy !== undefined ? { createdBy: b.ctx.createdBy } : {}),
         // Server stamp on cold load, client stamp while live — display
         // only, so either clock is correct here.
@@ -2022,6 +2011,7 @@ export function bubblesEqual(a: Bubble, b: Bubble): boolean {
       a.itemId !== b.itemId ||
       Boolean(a.pending) !== Boolean(b.pending) ||
       Boolean(a.awaitingAgent) !== Boolean(b.awaitingAgent) ||
+      Boolean(a.waitingForNextTurn) !== Boolean(b.waitingForNextTurn) ||
       a.createdBy !== b.createdBy ||
       a.createdAtS !== b.createdAtS ||
       a.stableKey !== b.stableKey ||

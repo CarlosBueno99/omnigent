@@ -5,12 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bubble } from "@/lib/renderItems";
 import { useChatStore, type ChatState } from "@/store/chatStore";
 import { ForkDialogContextProvider } from "@/shell/ForkDialogContext";
-import {
-  BubbleView,
-  WorkingIndicator,
-  containsMermaidDiagram,
-  workingIndicatorPaints,
-} from "./chatBubbleParts";
+import { BubbleView, WorkingIndicator, containsMermaidDiagram } from "./chatBubbleParts";
 
 const fetchMock = vi.fn();
 const initialStoreState = useChatStore.getState();
@@ -690,15 +685,6 @@ describe("WorkingIndicator paint gating", () => {
         <WorkingIndicator mode={mode} />
       </QueryClientProvider>,
     );
-
-  it("workingIndicatorPaints suppresses only the background-tasks-only state", () => {
-    // Suppressed only when background tasks outlive a finished turn.
-    expect(workingIndicatorPaints(2, null, false)).toBe(false);
-    // Otherwise it paints: no background tasks, an active turn, or a block.
-    expect(workingIndicatorPaints(0, null, false)).toBe(true);
-    expect(workingIndicatorPaints(2, null, true)).toBe(true);
-    expect(workingIndicatorPaints(0, "a dialog", false)).toBe(true);
-  });
 
   it("renders nothing while only background tasks outlive a finished turn", () => {
     useChatStore.setState({

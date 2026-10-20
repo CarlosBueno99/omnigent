@@ -8,10 +8,8 @@ above the follow-up, and the follow-up's own reply must come after it.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import uuid
 from collections.abc import Callable, Iterator
 
 import httpx
@@ -19,19 +17,11 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from tests._helpers.polling import poll_until
-from tests.e2e_ui.conftest import (
-    _TOOL_FOLD_AGENT_NAME,
-    _TOOL_FOLD_AGENT_YAML,
-    _create_bundled_session,
-    _ensure_runner_online,
-    _server_state,
-    configure_mock_llm,
-    set_fallback_mock_llm,
-)
+from tests.e2e_ui.conftest import tool_fold_session_with_script
 
 _COMPOSER_LABEL = "Message the agent"
 _FIRST_PROMPT = "Inspect the workspace and tell me what is in it."
-_FOLLOW_UP = "sentinel-steer-followup-7291 push this prompt forward"
+_FOLLOW_UP = "sentinel-mid-turn-followup push this prompt forward"
 _FIRST_REPLY = "Workspace inspected."
 _FOLLOW_UP_REPLY = "Follow-up answered."
 _QUEUED_STRIP = '[data-testid="composer-queued-strip"]'
@@ -49,44 +39,24 @@ def two_pause_session(
 
     :returns: ``(base_url, session_id, mock_llm_url)``.
     """
-    model = f"two-pause-turn-{uuid.uuid4().hex[:8]}"
-    read_call = {
-        "call_id": "call_read",
-        "name": "sys_os_read",
-        "arguments": json.dumps({"path": "README.md"}),
-    }
-    configure_mock_llm(
+    shell_arguments = json.dumps({"command": "ls"})
+    read_arguments = json.dumps({"path": "README.md"})
+    shell_call = {"call_id": "call_ls", "name": "sys_os_shell", "arguments": shell_arguments}
+    read_call = {"call_id": "call_read", "name": "sys_os_read", "arguments": read_arguments}
+    with tool_fold_session_with_script(
+        live_server,
         mock_llm_server_url,
-        [
-            {
-                "tool_calls": [
-                    {
-                        "call_id": "call_ls",
-                        "name": "sys_os_shell",
-                        "arguments": json.dumps({"command": "ls"}),
-                    }
-                ]
-            },
+        tmp_path_factory,
+        model_prefix="two-pause-turn",
+        script=[
+            {"tool_calls": [shell_call]},
             {"block": True, "tool_calls": [read_call]},
             {"block": True, "text": _FIRST_REPLY},
             {"text": _FOLLOW_UP_REPLY},
         ],
-        key=model,
-    )
-    set_fallback_mock_llm(mock_llm_server_url, model, "Unexpected extra model call.")
-    respawned = _ensure_runner_online(live_server, tmp_path_factory)
-    yaml_text = _TOOL_FOLD_AGENT_YAML.format(name=_TOOL_FOLD_AGENT_NAME, model=model)
-    session_id = _create_bundled_session(live_server, str(_server_state["runner_id"]), yaml_text)
-    try:
-        yield (live_server, session_id, mock_llm_server_url)
-    finally:
-        for _ in range(2):
-            with contextlib.suppress(httpx.HTTPError):
-                httpx.post(f"{mock_llm_server_url}/gate/release", timeout=5.0)
-        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-        if respawned is not None:
-            respawned.terminate()
-            respawned.wait(timeout=5)
+        fallback_text="Unexpected extra model call.",
+    ) as session:
+        yield session
 
 
 def _gate_pending(mock_url: str) -> bool:
@@ -162,7 +132,7 @@ def _await_rows(page: Page, layout: Callable[[list[str]], bool], expectation: st
         raise AssertionError(f"{expectation}; transcript rows were {rows}") from exc
 
 
-def test_steered_followup_waits_behind_the_running_turn(
+def test_follow_up_sent_mid_turn_waits_behind_the_running_turn(
     request: pytest.FixtureRequest,
     two_pause_session: tuple[str, str, str],
     output_path: str,

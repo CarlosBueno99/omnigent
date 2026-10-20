@@ -400,19 +400,6 @@ export function isBackgroundTasksOnly(
 }
 
 /**
- * Inverse of `isBackgroundTasksOnly`: whether the Working… indicator paints.
- * Background tasks outliving a finished turn render nothing, so callers can
- * skip reserving a marker row for it.
- */
-export function workingIndicatorPaints(
-  bgCount: number,
-  blockedOn: string | null,
-  agentWorking: boolean,
-): boolean {
-  return !isBackgroundTasksOnly(bgCount, blockedOn, agentWorking);
-}
-
-/**
  * Whether the agent's own turn is in progress — server `running`/`waiting`, or
  * a local send in flight.
  */
@@ -460,7 +447,7 @@ export function WorkingIndicator({
   // Once the turn ends but background shells outlive it, BackgroundTaskPill owns
   // the state and the shimmer stays off (it would misread as the agent still
   // thinking). While the turn is active the shimmer shows, with the pill beside it.
-  if (!workingIndicatorPaints(bgCount, blockedOn, agentWorking)) return null;
+  if (isBackgroundTasksOnly(bgCount, blockedOn, agentWorking)) return null;
   const label = workingIndicatorLabel(tick, blockedOn);
   return (
     <>

@@ -83,6 +83,12 @@ export function effortFamiliesFromCatalog(
   return families;
 }
 
+/** The catalog's ``live_steering`` spellings; null when an older server omits the list. */
+export function liveSteeringFromCatalog(value: unknown): ReadonlySet<string> | null {
+  if (!Array.isArray(value)) return null;
+  return new Set(value.filter((id): id is string => typeof id === "string"));
+}
+
 export async function fetchHarnessCatalog(): Promise<HarnessCatalog> {
   const res = await authenticatedFetch("/v1/harnesses");
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -103,9 +109,7 @@ export async function fetchHarnessCatalog(): Promise<HarnessCatalog> {
     setupSteps,
     acpHarnesses,
     effortFamilies: effortFamiliesFromCatalog(body.data ?? []),
-    liveSteeringHarnesses: Array.isArray(body.live_steering)
-      ? new Set(body.live_steering.filter((id) => typeof id === "string"))
-      : null,
+    liveSteeringHarnesses: liveSteeringFromCatalog(body.live_steering),
   };
 }
 
@@ -214,6 +218,24 @@ export function useHarnessEffortFamilies(enabled = true): Record<string, string>
  */
 export function useLiveSteeringHarnessIds(): ReadonlySet<string> | null {
   return useHarnessCatalog((c) => c.liveSteeringHarnesses, null);
+}
+
+/**
+ * Whether a session's harness reads a follow-up sent mid-turn only on its next
+ * turn. Native terminal sessions, and an unknown harness or catalog, keep
+ * arrival order.
+ */
+export function readsFollowUpsOnNextTurn(
+  harness: string | null,
+  liveSteeringHarnesses: ReadonlySet<string> | null,
+  isNativeTerminalSession: boolean,
+): boolean {
+  return (
+    !isNativeTerminalSession &&
+    harness !== null &&
+    liveSteeringHarnesses !== null &&
+    !liveSteeringHarnesses.has(harness)
+  );
 }
 
 /**

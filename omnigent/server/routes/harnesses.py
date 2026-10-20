@@ -27,8 +27,7 @@ def create_harnesses_router(*, auth_provider: AuthProvider | None = None) -> API
         # declare — native wrappers (``codex-native``) and installable ids that
         # aren't picker rows (``opencode``/``qwen``) — so the setup dialog can
         # resolve steps by the harness it actually holds without the picker
-        # list gaining non-pickable rows. ``live_steering`` lists, the same way,
-        # the spellings declared to read a message sent mid-turn in that turn.
+        # list gaining non-pickable rows.
         return {
             "data": harness_catalog(),
             "setup_steps": harness_setup_steps_by_spelling(),

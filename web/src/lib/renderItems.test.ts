@@ -4264,29 +4264,20 @@ describe("workingIndicatorInsertIndex", () => {
     state: "streaming",
     error: null,
   });
+  const nextTurn = (blocks: AnyBlock[]): Bubble[] =>
+    buildBubbles(blocks, streaming("r1"), undefined, [], true, true);
+  const sentMidTurn = [
+    userMsg("u1", "q"),
+    textDone("m1", "r1", "working…"),
+    userMsg("u2", "follow-up"),
+  ];
 
-  it("rides the tail (-1) for a normal live turn with no trailing follow-up", () => {
-    const bubbles = buildBubbles(
-      [userMsg("u1", "q"), textDone("m1", "r1", "working…")],
-      streaming("r1"),
-    );
-    expect(workingIndicatorInsertIndex(bubbles, streaming("r1"), true)).toBe(-1);
+  it("splices above the follow-up the running turn has not read", () => {
+    expect(workingIndicatorInsertIndex(nextTurn(sentMidTurn), true)).toBe(2);
   });
 
-  it("splices above a follow-up steered in behind the streaming turn's reply", () => {
-    const bubbles = buildBubbles(
-      [userMsg("u1", "q"), textDone("m1", "r1", "working…"), userMsg("u2", "follow-up")],
-      streaming("r1"),
-    );
-    // [user u1, assistant r1 (streaming), user u2]: the marker sits after the
-    // active reply (index 1) and above the follow-up, not at the tail below it.
-    expect(workingIndicatorInsertIndex(bubbles, streaming("r1"), true)).toBe(2);
-  });
-
-  it("anchors below the LAST fragment when the streaming turn splits across bubbles", () => {
-    // An answered AskUserQuestion card splits one streaming turn (r1) into
-    // several assistant bubbles. The marker must land after the LAST fragment,
-    // above the steered follow-up, not between the turn's own fragments.
+  it("anchors below every fragment and trailing row of the running turn", () => {
+    // An answered AskUserQuestion card splits the running turn across bubbles.
     const blocks: AnyBlock[] = [
       {
         type: "user_message",
@@ -4320,35 +4311,6 @@ describe("workingIndicatorInsertIndex", () => {
           ],
         },
       },
-      {
-        type: "text_done",
-        ctx: ctx({ itemId: "a1", responseId: "r1" }),
-        fullText: "working…",
-        hasCodeBlocks: false,
-      },
-      {
-        type: "user_message",
-        ctx: ctx({ itemId: "u2", responseId: "" }),
-        content: [{ type: "input_text", text: "follow-up" }],
-      },
-    ];
-    const bubbles = buildBubbles(blocks, streaming("r1"));
-    // [user, assistant r1 x3 (tool, card, text), user u2]: the anchor is the
-    // last r1 fragment (index 3), so the marker splices at 4 — above the
-    // follow-up and below every fragment of the turn, not between them.
-    expect(bubbles.map((b) => b.kind)).toEqual([
-      "user",
-      "assistant",
-      "assistant",
-      "assistant",
-      "user",
-    ]);
-    expect(workingIndicatorInsertIndex(bubbles, streaming("r1"), true)).toBe(4);
-  });
-
-  it("anchors below trailing same-turn rows before the steered follow-up", () => {
-    const blocks: AnyBlock[] = [
-      userMsg("u1", "q"),
       textDone("a1", "r1", "working…"),
       {
         type: "native_tool",
@@ -4359,55 +4321,25 @@ describe("workingIndicatorInsertIndex", () => {
       },
       userMsg("u2", "follow-up"),
     ];
-    const bubbles = buildBubbles(blocks, streaming("r1"));
-    // A subagent-activity row trails the streaming turn's last assistant
-    // fragment. The marker lands after that row (index 3), above the follow-up,
-    // not between the fragment and its own trailing row.
-    expect(bubbles.map((b) => b.kind)).toEqual(["user", "assistant", "subagent_activity", "user"]);
-    expect(workingIndicatorInsertIndex(bubbles, streaming("r1"), true)).toBe(3);
+    const bubbles = nextTurn(blocks);
+    expect(bubbles.map((b) => b.kind)).toEqual([
+      "user",
+      "assistant",
+      "assistant",
+      "assistant",
+      "subagent_activity",
+      "user",
+    ]);
+    expect(workingIndicatorInsertIndex(bubbles, true)).toBe(5);
   });
 
-  it("anchors to the active prompt when its reply has not streamed yet", () => {
-    const bubbles = buildBubbles(
-      [userMsg("u1", "q"), userMsg("u2", "follow-up")],
-      streaming("r_new"),
-    );
-    // No rendered reply yet: the indicator sits right after the prompt that is
-    // actually running (u1), above the steered follow-up.
-    expect(workingIndicatorInsertIndex(bubbles, streaming("r_new"), true)).toBe(1);
-  });
-
-  it("returns -1 when the Working… indicator is not shown", () => {
-    const bubbles = buildBubbles(
-      [userMsg("u1", "q"), textDone("m1", "r1", "working…"), userMsg("u2", "follow-up")],
-      streaming("r1"),
-    );
-    expect(workingIndicatorInsertIndex(bubbles, streaming("r1"), false)).toBe(-1);
-  });
-
-  it("rides the tail (-1) without a streaming response (buffer-drain harness)", () => {
-    // No streaming response to anchor to and the rendered turn (r1) has already
-    // produced its reply, so there is no in-flight turn above the follow-up to
-    // hold the indicator — the tail is correct here.
-    const bubbles = buildBubbles(
-      [userMsg("u1", "q"), textDone("m1", "r1", "answer"), userMsg("u2", "follow-up")],
-      null,
-    );
-    expect(workingIndicatorInsertIndex(bubbles, null, true)).toBe(-1);
-  });
-
-  it("stops at a row that is not part of the active turn", () => {
-    const built = buildBubbles(
-      [userMsg("u1", "q"), textDone("m1", "r1", "working…"), userMsg("u2", "follow-up")],
-      streaming("r1"),
-    );
-    const bubbles: Bubble[] = [
-      built[0]!,
-      built[1]!,
-      { kind: "compaction", itemId: "c1" },
-      built[2]!,
-    ];
-    expect(workingIndicatorInsertIndex(bubbles, streaming("r1"), true)).toBe(2);
+  it.each<[string, Bubble[], boolean]>([
+    ["the indicator is hidden", nextTurn(sentMidTurn), false],
+    ["nothing trails the running turn", nextTurn(sentMidTurn.slice(0, 2)), true],
+    ["the harness steers its running turn", buildBubbles(sentMidTurn, streaming("r1")), true],
+    ["the turn has finished", buildBubbles(sentMidTurn, null, undefined, [], false, true), true],
+  ])("rides the tail (-1) when %s", (_case, bubbles, showWorking) => {
+    expect(workingIndicatorInsertIndex(bubbles, showWorking)).toBe(-1);
   });
 });
 
@@ -4595,7 +4527,7 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
         const below = bubbles.slice(followUp + 1);
         expect(below.some((b) => b.kind === "assistant" && b.responseId === "r1")).toBe(false);
         if (active?.responseId === "r1") {
-          expect(workingIndicatorInsertIndex(bubbles, active, true)).toBe(followUp);
+          expect(workingIndicatorInsertIndex(bubbles, true)).toBe(followUp);
         }
       }
     },
@@ -4612,7 +4544,53 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
     ]);
   });
 
-  it("moves a tool result stamped with another turn above the waiting follow-up", () => {
+  it("keeps Working… below a batch the next turn reads together", () => {
+    const blocks = liveBlocks([userMsg("u2", "first"), userMsg("u3", "second")]);
+    const r2Start = blocks.findIndex(
+      (b) => b.type === "response_start" && b.ctx.responseId === "r2",
+    );
+    const r2: ActiveResponse = { responseId: "r2", state: "streaming", error: null };
+    const started = blocks.slice(0, r2Start + 1);
+    const readingBatch = buildBubbles(started, r2, undefined, [], true, true);
+    expect(summary(readingBatch)).toEqual([
+      "user u1",
+      "r1: ls, read, Workspace inspected.",
+      "user u2",
+      "user u3",
+    ]);
+    expect(workingIndicatorInsertIndex(readingBatch, true)).toBe(-1);
+    // A message sent before r2 renders anything waits behind r2.
+    const heldBehindR2 = buildBubbles(
+      [...started, userMsg("u4", "third")],
+      r2,
+      undefined,
+      [],
+      true,
+      true,
+    );
+    expect(workingIndicatorInsertIndex(heldBehindR2, true)).toBe(4);
+  });
+
+  it("keeps the running turn live above its waiting follow-up without a streaming response", () => {
+    const blocks = liveBlocks();
+    const running = blocks.slice(
+      0,
+      blocks.findIndex((b) => b.ctx.itemId === "m_r1"),
+    );
+    const bubbles = buildBubbles(running, null, undefined, [], true, true);
+    expect(summary(bubbles)).toEqual(["user u1", "r1: ls, read", "user u2"]);
+    expect(workingIndicatorInsertIndex(bubbles, true)).toBe(2);
+    expect(liveCandidateAssistantIndex(bubbles)).toBe(1);
+    // Idle, or another turn streaming, means the follow-up is no longer waiting.
+    const idle = buildBubbles(running, null, undefined, [], false, true);
+    expect(liveCandidateAssistantIndex(idle)).toBe(-1);
+    const r2: ActiveResponse = { responseId: "r2", state: "streaming", error: null };
+    const reading = buildBubbles(running, r2, undefined, [], true, true);
+    expect(workingIndicatorInsertIndex(reading, true)).toBe(-1);
+    expect(liveCandidateAssistantIndex(reading)).toBe(-1);
+  });
+
+  it("keeps a backdated tool result and a subagent row with the running turn", () => {
     const blocks: AnyBlock[] = [
       userMsg("u1", "inspect"),
       {
@@ -4630,11 +4608,25 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
         agentName: "test",
         output: "ok",
       },
+      {
+        type: "native_tool",
+        ctx: ctx({ itemId: "sub_1", responseId: "subagent_1" }),
+        toolType: "subagent_activity",
+        label: "Sub-agent activity",
+        data: {},
+      },
       textDone("m_r1", "r1", "Workspace inspected."),
     ];
-    const { blocks: ordered, holding } = orderNextTurnFollowUps(blocks);
-    expect(ordered.map((b) => b.ctx.itemId)).toEqual(["u1", "fc_1", "fco_1", "m_r1", "u2"]);
-    expect(holding).toBe(true);
+    const { blocks: ordered, held } = orderNextTurnFollowUps(blocks);
+    expect(ordered.map((b) => b.ctx.itemId)).toEqual([
+      "u1",
+      "fc_1",
+      "fco_1",
+      "sub_1",
+      "m_r1",
+      "u2",
+    ]);
+    expect(held).toEqual({ turn: "r1", from: 5 });
   });
 
   it("leaves arrival order alone when no turn is running or the message joined the turn", () => {
@@ -4645,7 +4637,7 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
       response: null,
     };
     const idle = [userMsg("u1", "q"), textDone("m1", "r1", "a"), ended, userMsg("u2", "next")];
-    expect(orderNextTurnFollowUps(idle)).toEqual({ blocks: idle, holding: false });
+    expect(orderNextTurnFollowUps(idle)).toEqual({ blocks: idle, held: null });
     // Reloaded history carries no response_end, so the follow-up waits but nothing moves.
     const reloaded = [userMsg("u1", "q"), textDone("m1", "r1", "a"), userMsg("u2", "next")];
     expect(orderNextTurnFollowUps(reloaded).blocks).toBe(reloaded);
