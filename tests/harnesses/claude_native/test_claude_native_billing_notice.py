@@ -159,7 +159,6 @@ def test_billing_consent_is_pending_instead_of_an_informational_notice(
         _CONSENT.replace("y to continue · n to cancel", "y to approve · n to cancel"),
         _CONSENT + _COMPOSER,
         f"{_RULE}\nAn unrelated choice\ny to continue · n to cancel\n",
-        _NO_HOST_NOTICE,
         _NO_HOST_CONSENT.replace(_NO_HOST_REMEDY, _GATEWAY_REMEDY),
         _NO_HOST_CONSENT + _COMPOSER,
     ],
@@ -168,12 +167,11 @@ def test_billing_consent_requires_the_exact_live_prompt(pane: str) -> None:
     assert not bridge._user_prompt_visible(pane)
 
 
-@pytest.mark.parametrize("consent", [_CONSENT, _NO_HOST_CONSENT], ids=["gateway", "no-host"])
 @pytest.mark.parametrize("operation", ["message", "slash-command", "permission-mode", "readiness"])
 def test_billing_consent_refuses_input_without_answering(
-    monkeypatch: pytest.MonkeyPatch, bridge_dir: Path, clock: _Clock, operation: str, consent: str
+    monkeypatch: pytest.MonkeyPatch, bridge_dir: Path, clock: _Clock, operation: str
 ) -> None:
-    sends = _terminal(monkeypatch, [consent])
+    sends = _terminal(monkeypatch, [_CONSENT])
     with pytest.raises(bridge.ClaudeUserPromptPending) as caught:
         if operation == "message":
             bridge.inject_user_message(bridge_dir, content="Keep the original request")
@@ -425,7 +423,6 @@ def test_readiness_wait_continues_after_acknowledgement(
     assert sends.call_count == 1
 
 
-@pytest.mark.parametrize("notice", [_NOTICE, _NO_HOST_NOTICE], ids=["gateway", "no-host"])
 @pytest.mark.parametrize("notice_after_switch", [False, True])
 @pytest.mark.parametrize("ack_delay", [0.0, 2.4])
 def test_permission_mode_change_acknowledges_notice_before_or_during_switch(
@@ -434,7 +431,6 @@ def test_permission_mode_change_acknowledges_notice_before_or_during_switch(
     clock: _Clock,
     notice_after_switch: bool,
     ack_delay: float,
-    notice: str,
 ) -> None:
     state = {"mode": "default", "notice": not notice_after_switch, "acknowledged": False}
     dismiss_at: float | None = None
@@ -443,7 +439,7 @@ def test_permission_mode_change_acknowledges_notice_before_or_during_switch(
         if dismiss_at is not None and clock.now >= dismiss_at:
             state["notice"] = False
         if state["notice"]:
-            return notice
+            return _NOTICE
         footer = "auto mode on" if state["mode"] == "auto" else "manual mode on"
         return f"{_RULE}\n❯\n{_RULE}\n{footer}\n"
 

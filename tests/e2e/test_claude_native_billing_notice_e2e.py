@@ -180,7 +180,11 @@ async def _wait_for_pane(
 @pytest.mark.parametrize("recovery", ["runner_watcher", "permission_mode"])
 @pytest.mark.parametrize("routing", ["gateway_host", "unix_socket"])
 async def test_real_claude_billing_notice_unblocks_pending_tool(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery: str, routing: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    recovery: str,
+    routing: str,
 ) -> None:
     """A real blocked Bash call must resume without user input to the dialog."""
     config_dir = tmp_path / "claude-config"
@@ -225,8 +229,11 @@ async def test_real_claude_billing_notice_unblocks_pending_tool(
     )
     gateway = _Gateway(command)
     # Claude omits the gateway host from its notice when it reaches the API over a unix socket.
-    socket_dir = Path(tempfile.mkdtemp(prefix="omni-gw-", dir="/tmp"))
-    unix_socket = socket_dir / "gw.sock" if routing == "unix_socket" else None
+    unix_socket: Path | None = None
+    if routing == "unix_socket":
+        socket_dir = Path(tempfile.mkdtemp(prefix="omni-gw-", dir="/tmp"))
+        request.addfinalizer(lambda: shutil.rmtree(socket_dir, ignore_errors=True))
+        unix_socket = socket_dir / "gw.sock"
     with _local_gateway(gateway, unix_socket) as base_url:
         env = {
             name: os.environ[name]
@@ -357,4 +364,3 @@ async def test_real_claude_billing_notice_unblocks_pending_tool(
                 assert config.get("autoModeClassifierBillingNoticeAcknowledgedAt", 0) > 0
         finally:
             await terminals.shutdown()
-            shutil.rmtree(socket_dir, ignore_errors=True)
