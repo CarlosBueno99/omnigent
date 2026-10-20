@@ -315,6 +315,8 @@ def test_build_codex_remote_args_fresh_thread_selects_the_override_model(
         (("-m", "gpt-configured"), []),
         (("--", "--model", "gpt-configured"), []),
         (("--",), ["--model", "gpt-5.6-luna"]),
+        (("-m", "wrapper", "--"), ["--model", "gpt-5.6-luna"]),
+        (("-m", "wrapper", "--", "-m", "gpt-configured"), []),
     ],
 )
 def test_build_codex_remote_args_leads_with_base_args(

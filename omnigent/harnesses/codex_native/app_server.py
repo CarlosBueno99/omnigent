@@ -4901,9 +4901,9 @@ def build_codex_remote_args(
     if thread_id is None:
         # A system managed_config.toml outranks ``-c model=``; ``--model`` outranks both.
         model = _codex_override_model(config_overrides)
-        # Codex rejects a repeated ``--model``; a later caller ``-c model=`` also outranks ours.
-        # Configured args may wrap Codex as ``wrapper -- <codex args>``, so look past ``--``.
-        configured = [arg for arg in base_args if arg != "--"]
+        # Codex rejects a repeated ``--model``; keep a caller-chosen model authoritative.
+        # Configured args may wrap Codex as ``wrapper -- <codex args>``; only the tail is Codex's.
+        configured = base_args[base_args.index("--") + 1 :] if "--" in base_args else base_args
         caller_model = codex_launch_selects_model(passthrough) or codex_launch_selects_model(
             configured, include_config=False
         )
