@@ -863,6 +863,37 @@ describe("useHostModelOptions", () => {
     }
   });
 
+  it("stops loading within the retry bound when every catalog request times out", async () => {
+    // Each attempt waits out the server's 15 s host model-options timeout.
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          setTimeout(
+            () =>
+              resolve(
+                mockResponse(
+                  { detail: "host 'host_1' did not resolve model options within 15s" },
+                  504,
+                ),
+              ),
+            15_000,
+          );
+        }),
+    );
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { result } = renderHook(() => useHostModelOptions("host_1", "claude-native"), {
+        wrapper,
+      });
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.isError).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the committed retry policy when a deselection render suspends", async () => {
     let finishRequest!: (response: Response) => void;
     fetchMock
