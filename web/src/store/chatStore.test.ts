@@ -14196,8 +14196,8 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     failItemFetches: number;
     /** Item fetches that settle only when aborted. */
     hangItemFetches: number;
-    /** Fail only older pages, which carry an `after` cursor. */
-    failOlderPagesOnly: boolean;
+    /** Fail only item fetches whose URL contains this. */
+    failItemUrlsContaining: string;
     /** Holds item fetches until it settles. */
     itemsGate: Promise<void> | null;
   }
@@ -14211,7 +14211,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       itemFetches: 0,
       failItemFetches: 0,
       hangItemFetches: 0,
-      failOlderPagesOnly: false,
+      failItemUrlsContaining: "",
       itemsGate: null,
     };
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -14237,8 +14237,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       }
       if (url.startsWith(`/v1/sessions/${id}/items`)) {
         clock.itemFetches += 1;
-        const failable = !clock.failOlderPagesOnly || url.includes("after=");
-        if (failable && clock.failItemFetches > 0) {
+        if (url.includes(clock.failItemUrlsContaining) && clock.failItemFetches > 0) {
           clock.failItemFetches -= 1;
           return Promise.reject(new TypeError("network error"));
         }
@@ -14425,49 +14424,60 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     },
   );
 
-  it("retries after a later backfill page fails, not just the first", async () => {
-    seedSession("conv_items_page_fail", []);
-    const gapItems = Array.from({ length: 25 }, (_, i) => ({
-      ...assistantMessage(`g${i}`, `line ${i}`),
-      created_at: 110 + i,
-    }));
-    const sink = pushableStream();
-    const clock = routeSnapshotClock("conv_items_page_fail", sink);
-    clock.failOlderPagesOnly = true;
-    const controller = new AbortController();
-    const bound = bindConversationForTest("conv_items_page_fail", { abortController: controller });
-    const loop = startStreamPump("conv_items_page_fail", controller, bound.set, bound.get);
-    await drainAsync();
+  it.each([
+    { fetch: "a later backfill page", gapLength: 25, failUrl: "after=", fetchesThroughFailure: 2 },
+    {
+      fetch: "the fresh-window fetch",
+      gapLength: 100,
+      failUrl: `limit=${INITIAL_WINDOW_ITEMS}`,
+      fetchesThroughFailure: 5,
+    },
+  ])(
+    "retries after $fetch fails, not just the first page",
+    async ({ gapLength, failUrl, fetchesThroughFailure }) => {
+      const id = `conv_items_page_fail_${gapLength}`;
+      seedSession(id, []);
+      const gapItems = Array.from({ length: gapLength }, (_, i) => ({
+        ...assistantMessage(`g${i}`, `line ${i}`),
+        created_at: 110 + i,
+      }));
+      const sink = pushableStream();
+      const clock = routeSnapshotClock(id, sink);
+      clock.failItemUrlsContaining = failUrl;
+      const controller = new AbortController();
+      const bound = bindConversationForTest(id, { abortController: controller });
+      const loop = startStreamPump(id, controller, bound.set, bound.get);
+      await drainAsync();
 
-    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-    await drainAsync();
-    expect(clock.itemFetches).toBe(0);
+      await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+      await drainAsync();
+      expect(clock.itemFetches).toBe(0);
 
-    // A gap longer than one page lands; the first page fetches, the older page fails once.
-    clock.updatedAt = 160;
-    clock.failItemFetches = 1;
-    seedSessionItems("conv_items_page_fail", gapItems);
-    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-    await drainAsync();
+      // A gap longer than one page lands; the first page fetches, then a later fetch fails once.
+      clock.updatedAt = 110 + gapLength;
+      clock.failItemFetches = 1;
+      seedSessionItems(id, gapItems);
+      await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+      await drainAsync();
 
-    // The older-page failure aborts the backfill with nothing merged; the
-    // snapshot must stay unrecorded so the whole gap is retried next tick.
-    expect(bound.get().blocks).toEqual([]);
-    const afterFailFetches = clock.itemFetches;
-    expect(afterFailFetches).toBe(2);
+      // The failure aborts the backfill with nothing merged; the snapshot
+      // must stay unrecorded so the whole gap is retried next tick.
+      expect(bound.get().blocks).toEqual([]);
+      expect(clock.itemFetches).toBe(fetchesThroughFailure);
 
-    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-    await drainAsync();
-    expect(clock.itemFetches).toBeGreaterThan(afterFailFetches);
-    const ids = bound.get().blocks.map((b) => b.ctx.itemId);
-    expect(ids).toHaveLength(25);
-    expect(ids[0]).toBe("msg_g0_asst");
-    expect(ids.at(-1)).toBe("msg_g24_asst");
+      await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+      await drainAsync();
+      expect(clock.itemFetches).toBeGreaterThan(fetchesThroughFailure);
+      const ids = bound.get().blocks.map((b) => b.ctx.itemId);
+      expect(ids).toHaveLength(gapLength);
+      expect(ids[0]).toBe("msg_g0_asst");
+      expect(ids.at(-1)).toBe(`msg_g${gapLength - 1}_asst`);
 
-    controller.abort();
-    await drainAsync(2);
-    await loop;
-  });
+      controller.abort();
+      await drainAsync(2);
+      await loop;
+    },
+  );
 
   const backfillInterrupts = [
     {
