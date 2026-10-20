@@ -16,6 +16,7 @@ import { XIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { useIOSNativeKeyboardInset } from "@/hooks/useIOSNativeKeyboardInset";
 import { cn } from "@/lib/utils";
 
 interface MobilePanelDrawerProps {
@@ -65,17 +66,22 @@ export function MobilePanelDrawer({
   testId,
   keepMounted = false,
 }: MobilePanelDrawerProps) {
+  // The iOS shell-lock (useIOSViewportLock) resizes only flow content inside
+  // .app-shell, so this fixed overlay must reserve the docked keyboard itself;
+  // otherwise its bottom content (the side-chat composer) stays under it.
+  const keyboardInset = useIOSNativeKeyboardInset(open);
   return (
     <aside
       data-testid={testId}
       data-state={open ? "open" : "closed"}
+      style={keyboardInset > 0 ? { paddingBottom: keyboardInset } : undefined}
       className={cn(
         // `mobile-panel-drawer` is the hook the native shells use to inset the
         // drawer past the status bar / home indicator (see index.css); without
         // it the header sits under the notch and Close is untappable.
         "mobile-panel-drawer flex flex-col overflow-hidden bg-card transition-[translate] duration-150 ease-out",
-        "fixed inset-0 z-50 shadow-lg md:hidden",
-        open ? "translate-x-0" : "translate-x-full",
+        "fixed inset-0 z-50 md:hidden",
+        open ? "translate-x-0 shadow-lg" : "translate-x-full shadow-none",
       )}
       aria-hidden={!open}
       data-collapsed={!open || undefined}
