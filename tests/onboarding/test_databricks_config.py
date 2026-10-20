@@ -205,6 +205,7 @@ def test_port_conflict_none_when_port_free(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(db_cfg_mod, "_DATABRICKS_OAUTH_CALLBACK_PORT", free_port)
     _set_cli_version(monkeypatch, (0, 244, 0))
     assert databricks_login_port_conflict("databricks") is None
+    assert databricks_login_port_conflict("databricks", login_failed=True) is None
 
 
 def test_port_conflict_message_for_old_cli(
@@ -251,6 +252,29 @@ def test_port_conflict_none_for_unknown_version(
     """An unreadable CLI version never blocks login."""
     _set_cli_version(monkeypatch, None)
     assert databricks_login_port_conflict("databricks") is None
+
+
+def test_port_conflict_after_failed_login_with_unknown_version(
+    monkeypatch: pytest.MonkeyPatch, busy_port: int
+) -> None:
+    """Once the login has failed, a busy port is named even if the CLI version is unreadable."""
+    _set_cli_version(monkeypatch, None)
+    monkeypatch.setattr(
+        db_cfg_mod, "_oauth_callback_port_holder", lambda: _OAuthPortHolder(None, None)
+    )
+    msg = databricks_login_port_conflict("databricks", login_failed=True)
+    assert msg is not None
+    assert str(busy_port) in msg
+    assert "releases before v0.265.0" in msg
+    assert "v0.265.0 or newer" in msg
+
+
+def test_port_conflict_after_failed_login_spares_fallback_capable_cli(
+    monkeypatch: pytest.MonkeyPatch, busy_port: int
+) -> None:
+    """A failed login on a CLI that falls back to a free port is not blamed on 8020."""
+    _set_cli_version(monkeypatch, (0, 265, 0))
+    assert databricks_login_port_conflict("databricks", login_failed=True) is None
 
 
 def _fake_cli(tmp_path: Path, body: str) -> str:

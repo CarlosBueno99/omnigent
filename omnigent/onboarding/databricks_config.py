@@ -240,29 +240,37 @@ def _databricks_cli_version(databricks_bin: str) -> tuple[int, int, int] | None:
     return None if version == (0, 0, 0) else version
 
 
-def databricks_login_port_conflict(databricks_bin: str) -> str | None:
+def databricks_login_port_conflict(
+    databricks_bin: str, *, login_failed: bool = False
+) -> str | None:
     """Return a message when ``databricks auth login`` is known to fail on its port.
 
     Older CLIs hardcode port 8020 for the OAuth callback and fail when it is
-    taken. Newer ones fall back to a free port, and an unknown version is
-    never treated as a conflict.
+    taken. Newer ones fall back to a free port. An unknown version never blocks
+    a login, but once the login has failed it no longer rules out the busy port.
 
     :param databricks_bin: Path to the ``databricks`` binary.
+    :param login_failed: Whether ``databricks auth login`` already exited non-zero.
     :returns: An actionable plain-text message, or ``None`` when login can proceed.
     """
     if not _oauth_callback_port_busy():
         return None
     version = _databricks_cli_version(databricks_bin)
-    if version is None or version >= _DATABRICKS_CLI_PORT_FALLBACK_VERSION:
+    if version is None:
+        if not login_failed:
+            return None
+        cli_needs = "Databricks CLI releases before v0.265.0 need"
+    elif version >= _DATABRICKS_CLI_PORT_FALLBACK_VERSION:
         return None
+    else:
+        cli_needs = f"Databricks CLI v{'.'.join(map(str, version))} needs"
     port = _DATABRICKS_OAUTH_CALLBACK_PORT
     holder = _oauth_callback_port_holder()
     who = ""
     if holder.pid is not None:
         who = f" by pid {holder.pid} ({holder.name})" if holder.name else f" by pid {holder.pid}"
     return (
-        f"Port {port}, which Databricks CLI v{'.'.join(map(str, version))} needs for the "
-        f"sign-in callback, is already in use{who}. "
+        f"Port {port}, which {cli_needs} for the sign-in callback, is already in use{who}. "
         "Upgrade the Databricks CLI to v0.265.0 or newer, which falls back to a free port "
         "automatically (https://docs.databricks.com/dev-tools/cli/install.html), "
         f"or free port {port} if nothing else needs it "

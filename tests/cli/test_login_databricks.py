@@ -15,12 +15,14 @@ app-rejects-token failure, and non-interference with accounts mode.
 from __future__ import annotations
 
 import base64
-import contextlib
 import hashlib
 import json
 import socket
+import subprocess
+import sys
 import textwrap
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -186,10 +188,10 @@ def _patch_login_env(
         )
         return login_calls
 
-    # The scripted run never spawns a CLI, so the test host's own 127.0.0.1:8020
-    # must not steer these logins into the callback-port preflight.
+    # The scripted run has no ``--version`` output, so a busy 127.0.0.1:8020 on
+    # the test host never blocks these logins before the CLI runs.
     monkeypatch.setattr(
-        "omnigent.onboarding.databricks_config.databricks_login_port_conflict",
+        "omnigent.onboarding.databricks_config._databricks_cli_version",
         lambda _bin: None,
     )
 
@@ -516,8 +518,34 @@ def test_login_runs_databricks_auth_login_when_no_cached_grant(
     assert load_databricks_workspace_host(_APPS_URL) == _WORKSPACE
 
 
+_LEGACY_CLI_CALLBACK_PORT = 8020
+
+
 def _legacy_databricks_cli(tmp_path: Path) -> Path:
-    """Write a stand-in for a Databricks CLI older than v0.265.0.
+    """Write a ``databricks`` executable whose ``auth login`` only binds 127.0.0.1:8020.
+
+    Databricks CLI releases before v0.265.0 have no fallback callback port.
+    """
+    port = _LEGACY_CLI_CALLBACK_PORT
+    script = tmp_path / "databricks"
+    script.write_text(
+        f"""#!{sys.executable}
+import socket
+import sys
+
+if sys.argv[1:3] == ["auth", "login"]:
+    try:
+        socket.create_server(("127.0.0.1", {port})).close()
+    except OSError:
+        sys.exit("Error: listen tcp 127.0.0.1:{port}: bind: address already in use")
+"""
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _versioned_legacy_databricks_cli(tmp_path: Path) -> Path:
+    """Write a stand-in for a Databricks CLI older than v0.265.0 that reports its version.
 
     Those releases bind the OAuth callback listener to a fixed localhost:8020
     and abort the login when another process already holds it.
@@ -556,16 +584,46 @@ def _legacy_databricks_cli(tmp_path: Path) -> Path:
     return script
 
 
-@contextlib.contextmanager
-def _port_8020_held() -> Iterator[None]:
-    """Keep 127.0.0.1:8020 busy, like a remote-dev port forwarder does."""
+@contextmanager
+def _callback_port_busy() -> Iterator[None]:
+    """Keep 127.0.0.1:8020 occupied, as another local app would."""
     try:
-        holder = socket.create_server(("127.0.0.1", 8020))
-    except OSError:
-        yield  # another process already holds it, which is the scenario itself
-        return
-    with holder:
+        listener = socket.create_server(("127.0.0.1", _LEGACY_CLI_CALLBACK_PORT))
+    except OSError:  # another process already holds it
         yield
+        return
+    with listener:
+        yield
+
+
+def test_login_with_busy_callback_port_names_the_port(
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path, tmp_path: Path
+) -> None:
+    """An old CLI that cannot bind its callback port must not be reported as a VPN problem."""
+    from omnigent.cli_auth import load_databricks_workspace_host
+
+    fake = _FakeHttpx(
+        responses=[
+            _response(
+                401,
+                headers={"www-authenticate": 'Bearer realm="DatabricksRealm"'},
+                body={"error_code": 401, "message": "Credential was not sent"},
+            ),
+        ]
+    )
+    real_run = subprocess.run
+    _patch_login_env(monkeypatch, fake_httpx=fake, cached_tokens=[None])
+    monkeypatch.setattr(cli_mod.subprocess, "run", real_run)
+    legacy_cli = _legacy_databricks_cli(tmp_path)
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: str(legacy_cli))
+
+    with _callback_port_busy():
+        result = CliRunner().invoke(cli_group, ["login", _WORKSPACE_API_URL])
+
+    assert result.exit_code != 0
+    assert str(_LEGACY_CLI_CALLBACK_PORT) in result.output, result.output
+    assert "VPN / IP access lists" not in result.output, result.output
+    assert load_databricks_workspace_host(_WORKSPACE_API_URL) is None
 
 
 def test_login_with_busy_callback_port_and_old_cli_names_the_port(
@@ -581,10 +639,10 @@ def test_login_with_busy_callback_port_and_old_cli_names_the_port(
         monkeypatch,
         fake_httpx=fake,
         cached_tokens=[None],
-        databricks_bin=_legacy_databricks_cli(tmp_path),
+        databricks_bin=_versioned_legacy_databricks_cli(tmp_path),
     )
 
-    with _port_8020_held():
+    with _callback_port_busy():
         result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
 
     assert result.exit_code != 0
@@ -730,7 +788,9 @@ def _patch_browser_login(
     from omnigent.onboarding import databricks_config as db_cfg_mod
 
     monkeypatch.setattr(cli_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(db_cfg_mod, "databricks_login_port_conflict", lambda _bin: conflict)
+    monkeypatch.setattr(
+        db_cfg_mod, "databricks_login_port_conflict", lambda _bin, **_kwargs: conflict
+    )
     calls: list[list[str]] = []
 
     @dataclass
@@ -753,6 +813,8 @@ def test_run_databricks_browser_login_port_conflict_fails_before_login(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A reported port conflict raises its message and never launches the login."""
+    from omnigent.cli_diagnostics import suppresses_recovery_hint
+
     calls = _patch_browser_login(monkeypatch, conflict="Port 8020 is busy; upgrade.")
 
     with pytest.raises(click.ClickException) as exc_info:
@@ -760,6 +822,33 @@ def test_run_databricks_browser_login_port_conflict_fails_before_login(
 
     assert exc_info.value.format_message() == "Port 8020 is busy; upgrade."
     assert calls == []
+    # `omnigent stop` cannot free a port held by another app.
+    assert suppresses_recovery_hint(exc_info.value)
+
+
+def test_run_databricks_browser_login_failure_names_busy_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A login that fails while the callback port is busy reports the port, not the network."""
+    from omnigent.cli_diagnostics import suppresses_recovery_hint
+    from omnigent.onboarding import databricks_config as db_cfg_mod
+
+    calls = _patch_browser_login(monkeypatch, conflict=None, exit_code=1)
+    monkeypatch.setattr(
+        db_cfg_mod,
+        "databricks_login_port_conflict",
+        lambda _bin, *, login_failed=False: "Port 8020 is busy." if login_failed else None,
+    )
+
+    with pytest.raises(click.ClickException) as exc_info:
+        cli_mod._run_databricks_browser_login(_WORKSPACE)
+
+    assert len(calls) == 1
+    msg = exc_info.value.format_message()
+    assert "failed (exit 1)" in msg
+    assert msg.endswith("Port 8020 is busy.")
+    assert "VPN" not in msg
+    assert suppresses_recovery_hint(exc_info.value)
 
 
 def test_run_databricks_browser_login_no_conflict_keeps_failure_message(
