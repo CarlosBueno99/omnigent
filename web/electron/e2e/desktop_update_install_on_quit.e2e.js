@@ -1,7 +1,5 @@
-// A downloaded update installs on quit, including when the setting is turned on after the
-// download. Linux stand-in: AppImageUpdater replaces APPIMAGE with a stub payload at quit.
-// Run from web/electron after `pnpm --filter web run build && pnpm --filter web run build:overlay`:
-//   OMNIGENT_PW_NO_SANDBOX=1 xvfb-run -a node --test e2e/desktop_update_install_on_quit.e2e.js
+// Linux stand-in: AppImageUpdater replaces APPIMAGE with a stub payload at quit.
+// Prerequisite: pnpm --filter web run build && pnpm --filter web run build:overlay
 
 "use strict";
 
