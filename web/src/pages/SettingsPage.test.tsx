@@ -12,7 +12,6 @@ import type { Conversation } from "@/hooks/useConversations";
 import { BACKGROUND_SESSION_TITLES_STORAGE_KEY } from "@/lib/backgroundSessionTitlesPreferences";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import * as host from "@/lib/host";
-import { PALETTES } from "@/lib/themePalette";
 import {
   readTerminalClipboardPreference,
   writeTerminalClipboardPreference,
@@ -766,11 +765,11 @@ describe("SettingsPage", () => {
 
     const style = document.documentElement.style;
     expect(document.documentElement.getAttribute("data-theme")).toBe("custom");
-    expect(style.getPropertyValue("--custom-light-background")).not.toBe("#ffffff");
-    expect(style.getPropertyValue("--custom-dark-background")).not.toBe("#0e1013");
+    expect(style.getPropertyValue("--custom-light-background")).toBe("#ffb6b6");
+    expect(style.getPropertyValue("--custom-dark-background")).toBe("#360508");
     // The dark canvas is painted with the shell gradient, so that must follow too.
-    expect(style.getPropertyValue("--custom-dark-shell-background")).not.toBe(
-      PALETTES[0].tokens.dark.shellBackground,
+    expect(style.getPropertyValue("--custom-dark-shell-background")).toBe(
+      "radial-gradient(rgba(140, 29, 169, 0.12), transparent 50%), radial-gradient(at 80% 20%, rgba(120, 19, 129, 0.08), transparent 45%), linear-gradient(145deg, #420322, #36090d, #3b0310)",
     );
   });
 

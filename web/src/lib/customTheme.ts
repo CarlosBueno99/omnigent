@@ -147,9 +147,7 @@ function mix(first: string, second: string, secondWeight: number): string {
   });
 }
 
-// Dark surfaces take only the tint's hue: the tint is a light-mode colour, so
-// mixing it in directly would wash the canvas out instead of tinting it. The
-// reference rebase measures that hue against the preset's own light background.
+// Shift a dark surface by the tint's chroma only; mixing in the light tint would wash it out.
 function castTint(surface: string, tint: string, weight: number): string {
   const surfaceRgb = hexToRgb(surface);
   const tintRgb = hexToRgb(tint);

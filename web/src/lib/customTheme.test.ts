@@ -116,6 +116,8 @@ describe("customTheme", () => {
 
     expect(adjusted.light).not.toEqual(palette.tokens.light);
     expect(adjusted.dark).not.toEqual(palette.tokens.dark);
+    expect(adjusted.dark.background).toBe(palette.tokens.dark.background);
+    expect(adjusted.dark.shellBackground).toBe(palette.tokens.dark.shellBackground);
     expect(deriveCustomTheme({ ...theme, contrast: 50 })).toEqual(palette.tokens);
   });
 
@@ -232,30 +234,17 @@ describe("customTheme", () => {
     expect(variants.dark.shellBackground).not.toBe(PALETTES[0].tokens.dark.shellBackground);
   });
 
-  it.each(PALETTES)("tints $label's dark canvas and shell with the background tint", (palette) => {
-    const theme = createCustomThemeFromPalette(palette);
+  it.each(PALETTES)("pulls $label's canvas and shell toward the background tint", (palette) => {
+    const preset = palette.tokens;
+    const tinted = deriveCustomTheme({ ...createCustomThemeFromPalette(palette), tint: "#ff0000" });
 
-    const tinted = deriveCustomTheme({ ...theme, tint: "#ff0000" });
-
-    expect(tinted.light.background).not.toBe(palette.tokens.light.background);
-    expect(tinted.dark.background).not.toBe(palette.tokens.dark.background);
-    expect(tinted.dark.shellBackground).not.toBe(palette.tokens.dark.shellBackground);
-  });
-
-  it.each(PALETTES)("measures the tint's hue against $label's own light background", (palette) => {
-    const theme = createCustomThemeFromPalette(palette);
-    const preset = palette.tokens.dark.background;
-    const red = deriveCustomTheme({ ...theme, tint: "#ff0000" }).dark.background;
-
-    // A saturated tint pulls the canvas toward its hue without lifting it toward
-    // the tint's lightness...
-    expect(rgbChannel(red, "r")).toBeGreaterThan(rgbChannel(preset, "r"));
-    expect(rgbChannel(red, "g")).toBeLessThanOrEqual(rgbChannel(preset, "g"));
-    expect(rgbChannel(red, "b")).toBeLessThanOrEqual(rgbChannel(preset, "b"));
-    // ...and re-entering the preset's own light background changes nothing.
-    expect(
-      deriveCustomTheme({ ...theme, tint: palette.tokens.light.background }).dark.background,
-    ).toBe(preset);
+    expect(tinted.light.background).not.toBe(preset.light.background);
+    expect(tinted.dark.shellBackground).not.toBe(preset.dark.shellBackground);
+    // The dark canvas moves toward the tint's hue without taking on its lightness.
+    const dark = tinted.dark.background;
+    expect(rgbChannel(dark, "r")).toBeGreaterThan(rgbChannel(preset.dark.background, "r"));
+    expect(rgbChannel(dark, "g")).toBeLessThanOrEqual(rgbChannel(preset.dark.background, "g"));
+    expect(rgbChannel(dark, "b")).toBeLessThanOrEqual(rgbChannel(preset.dark.background, "b"));
   });
 
   it("treats a neutral tint relative to the preset's light background", () => {
@@ -293,15 +282,6 @@ describe("customTheme", () => {
     );
     expect(variants.light.sidebarBackground).not.toBe(PALETTES[0].tokens.light.sidebarBackground);
     expect(variants.light.shellBackground).toBe("var(--background)");
-  });
-
-  it("keeps the dark canvas on the preset when only contrast changes", () => {
-    const theme = createCustomThemeFromPalette(PALETTES[0]);
-
-    const variants = deriveCustomTheme({ ...theme, contrast: 90 });
-
-    expect(variants.dark.background).toBe(PALETTES[0].tokens.dark.background);
-    expect(variants.dark.shellBackground).toBe(PALETTES[0].tokens.dark.shellBackground);
   });
 
   it("keeps helper text and links readable across custom contrast settings", () => {
@@ -359,7 +339,7 @@ describe("customTheme", () => {
 
     const style = document.documentElement.style;
     expect(style.getPropertyValue("--custom-light-background")).not.toBe("");
-    expect(style.getPropertyValue("--custom-dark-background")).toMatch(/^#[0-9a-f]{6}$/);
+    expect(style.getPropertyValue("--custom-dark-background")).toBe("#130e28");
     expect(style.getPropertyValue("--custom-light-sidebar")).toMatch(/^rgba\(/);
     expect(style.getPropertyValue("--custom-dark-sidebar")).toMatch(/^rgba\(/);
     expect(document.documentElement).toHaveAttribute("data-custom-translucent-sidebar");
@@ -382,7 +362,7 @@ describe("customTheme", () => {
       contrast: 60,
       translucentSidebar: true,
     });
-    expect(scope.style.getPropertyValue("--custom-dark-background")).toMatch(/^#[0-9a-f]{6}$/);
+    expect(scope.style.getPropertyValue("--custom-dark-background")).toBe("#130e28");
     expect(scope).toHaveAttribute("data-custom-translucent-sidebar");
     expect(inner).toHaveAttribute("data-custom-translucent-sidebar");
     expect(document.documentElement.style.getPropertyValue("--custom-dark-background")).toBe("");
