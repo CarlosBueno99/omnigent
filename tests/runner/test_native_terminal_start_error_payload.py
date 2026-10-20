@@ -22,6 +22,7 @@ import pytest
 from omnigent.debug_logging import record_to_row
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harnesses.codex_native.launch_args import CodexTransportArgsError
+from omnigent.inference_config import ModelNotAllowedError, inference_config_scope
 from omnigent.inner.terminal import TerminalInstance, TmuxUnavailableError
 from omnigent.runner.native import orchestration
 from omnigent.runner.native.orchestration import (
@@ -33,6 +34,10 @@ from omnigent.runner.native.orchestration import (
 from omnigent.terminals.registry import TerminalExitedDuringLaunch
 
 _ERROR_ID_RE = re.compile(r" Error ID: (err_[0-9a-f]{32})\.$")
+_ALLOWED_CODEX_MODEL = "system.ai.gpt-5-6-sol"
+_MODEL_OUTSIDE_ALLOWLIST = ModelNotAllowedError(
+    "system.ai.gpt-6-astra", "codex-native", (_ALLOWED_CODEX_MODEL,)
+)
 
 
 def test_missing_session_agent_classified_as_lifecycle_condition() -> None:
@@ -105,6 +110,7 @@ def test_other_causes_keep_generic_startup_failure_code(cause: Exception) -> Non
         ),
         (TmuxUnavailableError("tmux is not installed or not on PATH."), "config"),
         (CodexTransportArgsError("app-server"), "config"),
+        (_MODEL_OUTSIDE_ALLOWLIST, "config"),
     ],
 )
 def test_start_failure_log_row_is_blocking_with_derived_category(
@@ -282,6 +288,8 @@ def test_outdated_pi_cli_surfaces_its_actionable_message() -> None:
             "Claude",
         ),
         (CodexTransportArgsError("app-server"), "Codex"),
+        (_MODEL_OUTSIDE_ALLOWLIST, "Codex"),
+        (ModelNotAllowedError("system.ai.gpt-6-astra", "codex-native", ()), "Codex"),
     ],
 )
 def test_host_setup_error_surfaces_its_remedy(
@@ -496,3 +504,45 @@ def test_ensure_response_and_diagnostic_share_error_and_session_ids(
     # This ``OSError`` has no numeric errno (single-arg constructor), so the
     # structured cause is the class name only.
     assert "(OSError)" in payload["message"]
+
+
+def test_codex_pin_outside_model_allowlist_names_the_allowed_models() -> None:
+    """A Codex pin outside codex-native's model list says which models the session may use."""
+    from omnigent.harnesses.codex_native.app_server import resolve_native_codex_launch
+
+    pinned_model = "system.ai.gpt-6-astra"
+    inference = {
+        "providers": {
+            "gateway": {
+                "kind": "key",
+                "default": ["openai"],
+                "openai": {
+                    "base_url": "https://gateway.example/v1",
+                    "api_key": "sk-test",
+                    "wire_api": "responses",
+                    "models": {"default": _ALLOWED_CODEX_MODEL},
+                },
+            }
+        },
+        "inference": {
+            "harnesses": {
+                "codex-native": {
+                    "provider": "gateway",
+                    "default_model": _ALLOWED_CODEX_MODEL,
+                    "model_allowlist": [_ALLOWED_CODEX_MODEL],
+                }
+            }
+        },
+    }
+    with inference_config_scope(inference):
+        resolve_native_codex_launch(model=_ALLOWED_CODEX_MODEL)
+        with pytest.raises(ModelNotAllowedError) as rejected:
+            resolve_native_codex_launch(model=pinned_model)
+
+    assert rejected.value.code == ErrorCode.INVALID_INPUT
+    payload = _native_terminal_start_error_payload(rejected.value, "Codex", session_id="conv_1")
+    assert payload["code"] == ErrorCode.HARNESS_NOT_CONFIGURED
+    assert payload["message"].startswith(
+        f"Model {pinned_model!r} is not in the configured model list for 'codex-native'. "
+        f"Switch this session to an allowed model: {_ALLOWED_CODEX_MODEL}. Error ID: "
+    ), payload["message"]
