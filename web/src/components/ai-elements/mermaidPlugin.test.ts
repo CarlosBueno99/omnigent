@@ -75,6 +75,16 @@ describe("serializeSvgAsXml", () => {
     expect(serializeSvgAsXml(xml)).toBe(xml);
   });
 
+  it("keeps the sanitiser's markup when the XML would parse to a different tree", () => {
+    // Raw-text HTML elements read XMLSerializer's escaped text back literally.
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject>' +
+      '<div xmlns="http://www.w3.org/1999/xhtml"><style>p>b{}</style>a<br>b</div>' +
+      "</foreignObject></svg>";
+
+    expect(serializeSvgAsXml(svg)).toBe(svg);
+  });
+
   it("returns markup without an svg root unchanged", () => {
     expect(serializeSvgAsXml("<p>not a diagram</p>")).toBe("<p>not a diagram</p>");
     expect(serializeSvgAsXml("")).toBe("");
