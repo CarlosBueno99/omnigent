@@ -15,7 +15,8 @@
 // 2. Turn folding: once settled, each work run collapses behind a
 //    "Worked" row. Assistant messages remain visible in order;
 //    pending elicitations and routing cards stay visible too. A message
-//    that points back to output "above" keeps that output open beside it.
+//    that points back to output "above" keeps that output open beside it,
+//    while the fold still holds the complete trace.
 
 import type { ReactNode } from "react";
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -290,6 +291,7 @@ export function BlockRenderer({
       if (segment.kind === "text") {
         const referenced = referencedOutputTool(partition.segments[segmentIndex - 1], segment);
         if (referenced) {
+          // The open card mounts tooltips, so BlockRenderer cannot rely on an app-root provider.
           rendered.push(
             <TooltipProvider key={`referenced-output:${keyFor(referenced, 0)}`}>
               {renderToolCard(referenced, "card", true)}
@@ -481,7 +483,9 @@ function partitionTurn(items: RenderItem[]): TurnPartition {
 
 type ToolItem = Extract<RenderItem, { kind: "tool" }>;
 
-const BACKWARD_REFERENCE = /\b(?:above|scroll(?:ing)? up)\b/i;
+// "above 90%" or "above the threshold" compares values instead of pointing back.
+const BACKWARD_REFERENCE =
+  /\b(?:scroll(?:ing)? up\b|above\b(?!\s*(?:[\d$%]|(?:a|an|the|average|normal|zero)\b)))/i;
 
 /** The latest output of the work run that the following message points back to. */
 function referencedOutputTool(
@@ -494,7 +498,8 @@ function referencedOutputTool(
   );
   if (!pointsBack) return undefined;
   return previous.items.findLast(
-    (item): item is ToolItem => item.kind === "tool" && !isTrailingWrapup(item) && !!item.output,
+    (item): item is ToolItem =>
+      item.kind === "tool" && !isTrailingWrapup(item) && !!item.output?.trim(),
   );
 }
 

@@ -647,8 +647,9 @@ describe("BlockRenderer dispatch", () => {
         tool(1, "shell", "earlier step output"),
         tool(2, "shell", "REPORT: tests-42-passed"),
         tool(3, "shell", ""),
+        tool(4, "shell", "\n  \n"),
         { kind: "text", itemId: "m1", text: "Done. See the report above.", final: true },
-        tool(4, "turn_diff", "diff --git a/x b/x"),
+        tool(5, "turn_diff", "diff --git a/x b/x"),
       ];
       render(
         <FileViewerContext.Provider value={FILE_VIEWER_NOOP}>
@@ -668,14 +669,17 @@ describe("BlockRenderer dispatch", () => {
       expect(screen.queryByText(/diff --git/)).toBeNull();
 
       fireEvent.click(fold);
-      expect(screen.getByText("Ran 3 shell commands, called 1 other tool")).toBeVisible();
+      expect(screen.getByText("Ran 4 shell commands, called 1 other tool")).toBeVisible();
       expect(screen.getByText(/REPORT: tests-42-passed/)).toBeVisible();
     });
 
     it.each([
       ["Scroll up for the full report.", true],
       ["The full report is shown above.", true],
+      ["Above is the full report.", true],
       ["All checks passed.", false],
+      ["CPU usage stayed above 90% during the run.", false],
+      ["Latency is above the threshold.", false],
     ])("pins the work output for %j only when it points back: %s", (text, pinned) => {
       const items: RenderItem[] = [
         tool(1, "shell", "REPORT: tests-42-passed"),
