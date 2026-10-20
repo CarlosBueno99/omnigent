@@ -671,7 +671,7 @@ to check its capability matrix against observed behavior.
 
 ### Contributors
 
-Thanks to all of our amazing contributors!
+Thanks to all of our wonderful contributors!
 
 <a href="https://github.com/omnigent-ai/omnigent/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=omnigent-ai/omnigent" />
