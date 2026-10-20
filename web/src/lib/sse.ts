@@ -1078,11 +1078,11 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
     // Codex persistence choices: the server stamps `codex_persist_modes` on
     // approvals it adapts itself (file changes); MCP tool approvals carry
     // Codex's own `_meta.persist` advertisement.
+    const codexMcpPersist =
+      codexMeta?.codex_approval_kind === "mcp_tool_call" ? codexMeta.persist : null;
     const codexPersistRaw = Array.isArray(p.codex_persist_modes)
       ? p.codex_persist_modes
-      : codexMeta?.codex_approval_kind === "mcp_tool_call"
-        ? codexMeta.persist
-        : null;
+      : codexMcpPersist;
     const codexPersistCandidates = Array.isArray(codexPersistRaw)
       ? codexPersistRaw
       : [codexPersistRaw];
