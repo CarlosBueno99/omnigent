@@ -77,9 +77,18 @@ async function teardownDesktop({ electronApp, stopDisplayCapture, userDataDir },
   await electronApp.close().catch((err) => console.warn("electronApp.close failed:", err));
   try {
     return saveRecording(RECORD_DIR, clipName);
+  } catch (err) {
+    // Callers assert on the returned clips, so a failed save cannot mask the test's own failure.
+    console.warn("saveRecording failed:", err);
+    return [];
   } finally {
     fs.rmSync(userDataDir, { recursive: true, force: true });
   }
+}
+
+/** A diagnostic for a failure message; a failed read cannot replace the failure. */
+function readForFailure(read) {
+  return read().catch((err) => `unreadable: ${err.message}`);
 }
 
 /** Boot the shell straight into the connected home composer. */
@@ -174,10 +183,10 @@ describe(
             async () => (await mic.getAttribute("aria-pressed")) === "true",
             TAKE_TIMEOUT_MS,
           );
-          assert.ok(
-            listening,
-            `the take never started (title: ${await mic.getAttribute("title")})`,
-          );
+          if (!listening) {
+            const title = await readForFailure(() => mic.getAttribute("title", { timeout: 1000 }));
+            assert.fail(`the take never started (title: ${title})`);
+          }
 
           // The fake engine finalizes its script after ~0.5 s of audio.
           const transcribed = await pollUntil(
@@ -185,10 +194,10 @@ describe(
             async () => (await composer.inputValue()).includes(script),
             TRANSCRIPT_TIMEOUT_MS,
           );
-          assert.ok(
-            transcribed,
-            `transcript did not land; composer: ${await composer.inputValue()}`,
-          );
+          if (!transcribed) {
+            const text = await readForFailure(() => composer.inputValue({ timeout: 1000 }));
+            assert.fail(`transcript did not land; composer: ${text}`);
+          }
 
           await mic.click();
           const stopped = await pollUntil(

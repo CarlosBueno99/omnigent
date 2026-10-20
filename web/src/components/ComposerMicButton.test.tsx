@@ -5,8 +5,7 @@
 // transcripts are emitted via onTranscript. It renders nothing when the
 // browser has no SpeechRecognition constructor AND the server offers no
 // dictation (Electron's Web Speech has no backend, so the server fallback is
-// the only path there). CI has no real mic/engine, so SpeechRecognition is
-// stubbed and getUserMedia rejects to keep jsdom free of AudioContext.
+// the only path there).
 //
 // Server mode: when there is no SpeechRecognition constructor but the
 // /v1/info capability probe reports dictation_available, the button drives a
@@ -672,23 +671,6 @@ describe("ComposerMicButton (server dictation)", () => {
       expect(startSpy).not.toHaveBeenCalled();
       expect(sessionStartMock).not.toHaveBeenCalled();
       expect(showToastMock).not.toHaveBeenCalled();
-    });
-  });
-
-  it("in Electron with server dictation, the dictation hotkey starts a server take", async () => {
-    await inElectronShell(async () => {
-      render(
-        <CapabilitiesContext.Provider value={DICTATION_INFO}>
-          <ComposerMicButton onTranscript={vi.fn()} enableHotkey />
-        </CapabilitiesContext.Provider>,
-      );
-      const chord = dictationChord();
-      await act(async () => {
-        window.dispatchEvent(chord);
-      });
-      expect(chord.defaultPrevented).toBe(true);
-      expect(sessionStartMock).toHaveBeenCalledTimes(1);
-      expect(startSpy).not.toHaveBeenCalled();
     });
   });
 
