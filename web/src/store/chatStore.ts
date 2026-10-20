@@ -1404,9 +1404,8 @@ let queryClient: QueryClient | null = null;
 const streamEventRevisions = new Map<string, number>();
 conversationRegistry.subscribeDisposed((id) => streamEventRevisions.delete(id));
 
-// Conversations whose stream delivered a status edge after the bind snapshot
-// set their status. That edge is newer than any first-open re-read.
-const liveStatusSinceBind = new Set<string>();
+// Latest status each conversation's own stream delivered since its bind began.
+const liveStatusSinceBind = new Map<string, SessionStatus>();
 conversationRegistry.subscribeDisposed((id) => liveStatusSinceBind.delete(id));
 
 // Reconnects share a binding; only one usage request may hydrate it at a time.
@@ -4894,7 +4893,6 @@ async function bindStream(
         }[],
       };
     });
-    liveStatusSinceBind.delete(id);
     if (session.usageIncluded === false) void hydrateSessionUsage(id);
     racedNativeModelOptions.delete(id);
   } catch (err) {
@@ -5202,8 +5200,8 @@ async function reconcileLaunchStatus(id: string, set: Setter, get: Getter): Prom
  *
  * A stream pump can keep receiving heartbeats while missing a lifecycle event.
  * Periodically re-read durable status, discarding a snapshot if any semantic
- * stream event arrives during the fetch. `raiseOnly` applies only a newer
- * `running`, so a stale read cannot demote a correct running bind.
+ * stream event arrives during the fetch. `raiseOnly` applies only an
+ * idle-to-running recovery.
  */
 async function reconcileActiveSessionStatus(
   id: string,
@@ -5260,7 +5258,7 @@ async function reconcileActiveSessionStatus(
   ) {
     return;
   }
-  if (raiseOnly && (session.status !== "running" || current.sessionStatus === "running")) return;
+  if (raiseOnly && (session.status !== "running" || current.sessionStatus !== "idle")) return;
   set((s) => {
     const patch = reconnectStatusPatch(session, s, stateBeforeFetch.mcpStartupLaunch);
     const blocks = snapshotCompactionSpinners(s.blocks, s.activeResponse, patch.activeResponse);
@@ -5848,14 +5846,18 @@ export async function startStreamPump(
     catchupTimers = [];
   };
   // Re-read status (on screen only) and any shown launch stage at each delay.
-  // First-open status re-reads only raise to running and stop after a live edge.
+  // First-open status re-reads only raise idle to running, and stop once the
+  // latest live edge reports any other status.
   const scheduleStatusCatchup = (reconnecting: boolean): void => {
     if (typeof window === "undefined") return;
     clearCatchupTimers();
     catchupTimers = STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS.map((delayMs) =>
       window.setTimeout(() => {
         if (controller.signal.aborted || isConversationDisposed(id)) return;
-        if (reconnecting || !liveStatusSinceBind.has(id)) runGuardedStatusReconcile(!reconnecting);
+        const liveStatus = liveStatusSinceBind.get(id);
+        if (reconnecting || liveStatus === undefined || liveStatus === "running") {
+          runGuardedStatusReconcile(!reconnecting);
+        }
         const launch = get().sandboxStatus;
         if (launch !== null && launch.stage !== "failed") void reconcileLaunchStatus(id, set, get);
       }, delayMs),
@@ -8721,7 +8723,7 @@ async function* tapSessionEvents(
     if (!isConversationDisposed(conversationId)) {
       streamEventRevisions.set(conversationId, (streamEventRevisions.get(conversationId) ?? 0) + 1);
       if (event.type === "session_status" && event.conversationId === conversationId) {
-        liveStatusSinceBind.add(conversationId);
+        liveStatusSinceBind.set(conversationId, event.status);
       }
     }
     if (event.type === "session_status" || event.type === "session_interrupted") {

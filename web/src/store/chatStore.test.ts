@@ -12765,6 +12765,7 @@ describe("chatStore — pumpStreamEvents end reasons", () => {
 });
 
 describe("chatStore — startStreamPump reconnect loop", () => {
+  type SnapshotReadStatus = "idle" | "running" | "waiting" | "error";
   const setState = useChatStore.setState as unknown as Parameters<typeof startStreamPump>[2];
   const getState = useChatStore.getState as unknown as Parameters<typeof startStreamPump>[3];
 
@@ -12800,7 +12801,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
   /** Serve slim snapshot GETs of `id` with each read's status; returns the read count. */
   function routeSnapshotStatuses(
     id: string,
-    statusForRead: (read: number) => "idle" | "running" | "error",
+    statusForRead: (read: number) => SnapshotReadStatus | Promise<SnapshotReadStatus>,
   ): () => number {
     const normalFetch = fetchMock.getMockImplementation()!;
     let reads = 0;
@@ -12814,18 +12815,18 @@ describe("chatStore — startStreamPump reconnect loop", () => {
         return normalFetch(input, init);
       }
       reads += 1;
-      const status = statusForRead(reads);
-      if (status === "error") return Promise.resolve(mockResponse({}, { ok: false, status: 500 }));
-      return Promise.resolve(
-        mockResponse({
-          id,
-          agent_id: "agent_xyz",
-          status,
-          active_response_id: status === "running" ? "resp_live" : null,
-          created_at: 0,
-          items: [],
-          labels: {},
-        }),
+      return Promise.resolve(statusForRead(reads)).then((status) =>
+        status === "error"
+          ? mockResponse({}, { ok: false, status: 500 })
+          : mockResponse({
+              id,
+              agent_id: "agent_xyz",
+              status,
+              active_response_id: status === "idle" ? null : "resp_live",
+              created_at: 0,
+              items: [],
+              labels: {},
+            }),
       );
     });
     return () => reads;
@@ -13433,6 +13434,9 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     const loop = startStreamPump("conv_catchup", controller, setState, getState);
     try {
       await vi.advanceTimersByTimeAsync(1);
+      // A live idle before the drop must not stop the reconnect's re-reads.
+      sinks[0]!.push(sse("session.status", { conversation_id: "conv_catchup", status: "idle" }));
+      await drainAsync(2);
       sinks[0]!.error();
       // Reconnect + its immediate reconcile read the still-"running" snapshot.
       await vi.advanceTimersByTimeAsync(50);
@@ -13487,28 +13491,26 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await releaseBoundStream("conv_first_open_stale", sinks);
   });
 
-  it("does not demote a running first-open snapshot on a stale idle re-read", async () => {
-    seedSession("conv_first_open_running", []);
+  it.each([
+    ["running", "idle"],
+    ["waiting", "running"],
+  ] as const)("keeps a %s first-open snapshot over stale %s re-reads", async (bound, stale) => {
+    const id = `conv_first_open_${bound}`;
+    seedSession(id, []);
     const sinks = routeStreamOpens();
-    const snapshotReads = routeSnapshotStatuses("conv_first_open_running", (read) =>
-      read === 1 ? "running" : "idle",
-    );
+    const snapshotReads = routeSnapshotStatuses(id, (read) => (read === 1 ? bound : stale));
 
-    await useChatStore.getState().switchTo("conv_first_open_running");
+    await useChatStore.getState().switchTo(id);
     await drainAsync(2);
-    expect(useChatStore.getState().sessionStatus).toBe("running");
+    expect(useChatStore.getState().sessionStatus).toBe(bound);
 
     await vi.advanceTimersByTimeAsync(Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
     await drainAsync(2);
 
     expect(snapshotReads()).toBe(STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS.length + 1);
-    expect(useChatStore.getState().sessionStatus).toBe("running");
-    expect(useChatStore.getState().activeResponse).toMatchObject({
-      responseId: "resp_live",
-      state: "streaming",
-    });
+    expect(useChatStore.getState().sessionStatus).toBe(bound);
 
-    await releaseBoundStream("conv_first_open_running", sinks);
+    await releaseBoundStream(id, sinks);
   });
 
   it("keeps a live idle edge over stale running first-open re-reads", async () => {
@@ -13534,39 +13536,42 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await releaseBoundStream("conv_first_open_live", sinks);
   });
 
-  it("re-reads status after a reconnect that follows a live status edge", async () => {
-    seedSession("conv_reconnect_after_live", []);
-    const sinks = routeStreamOpens(["server-a", "server-b"]);
-    // The reconnect's own reconcile still sees running; the catch-up sees the settled idle.
-    const snapshotReads = routeSnapshotStatuses("conv_reconnect_after_live", (read) =>
-      read === 2 ? "running" : "idle",
-    );
+  it.each(["idle", "running"] as const)(
+    "follows a live %s edge that arrives during the bind snapshot fetch",
+    async (live) => {
+      const id = `conv_bind_race_${live}`;
+      seedSession(id, []);
+      const sinks = routeStreamOpens();
+      let releaseBindSnapshot!: () => void;
+      const bindSnapshotHeld = new Promise<void>((resolve) => {
+        releaseBindSnapshot = resolve;
+      });
+      const snapshotReads = routeSnapshotStatuses(id, async (read) => {
+        if (read > 1) return "running";
+        await bindSnapshotHeld;
+        return "idle";
+      });
 
-    await useChatStore.getState().switchTo("conv_reconnect_after_live");
-    await drainAsync(2);
-    sinks[0]!.push(
-      sse("session.status", {
-        conversation_id: "conv_reconnect_after_live",
-        status: "running",
-        response_id: "resp_live",
-      }),
-    );
-    await drainAsync(2);
-    sinks[0]!.error();
-    await vi.advanceTimersByTimeAsync(50);
-    await drainAsync(2);
-    expect(sinks).toHaveLength(2);
-    expect(snapshotReads()).toBe(2);
-    expect(useChatStore.getState().sessionStatus).toBe("running");
+      const switching = useChatStore.getState().switchTo(id);
+      await drainAsync(2);
+      expect(sinks).toHaveLength(1);
+      expect(snapshotReads()).toBe(1);
+      sinks[0]!.push(
+        sse("session.status", { conversation_id: id, status: live, response_id: "resp_live" }),
+      );
+      await drainAsync(2);
+      releaseBindSnapshot();
+      await switching;
+      await drainAsync(2);
+      expect(useChatStore.getState().sessionStatus).toBe("idle");
 
-    await vi.advanceTimersByTimeAsync(STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS[0]);
-    await drainAsync(2);
+      await vi.advanceTimersByTimeAsync(Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
+      await drainAsync(2);
 
-    expect(snapshotReads()).toBe(3);
-    expect(useChatStore.getState().sessionStatus).toBe("idle");
-
-    await releaseBoundStream("conv_reconnect_after_live", sinks);
-  });
+      expect(useChatStore.getState().sessionStatus).toBe(live);
+      await releaseBoundStream(id, sinks);
+    },
+  );
 
   it("re-reads status after a send rebind whose ended stream saw a live edge", async () => {
     seedSession("conv_rebind_marker", []);
