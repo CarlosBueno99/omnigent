@@ -286,10 +286,7 @@ def _codex_native_storage_homes() -> tuple[Path, ...]:
 
 
 def _codex_native_thread_ids(omnigent_session_id: str) -> frozenset[str]:
-    """Return the Codex threads native bridges record for an Omnigent session id.
-
-    Several bridges can record the same id; the caller imports the newest matching rollout.
-    """
+    """Return the Codex threads that bridges map to an Omnigent id; the newest rollout wins."""
     thread_ids: set[str] = set()
     for bridge_dir in _codex_native_bridge_dirs():
         try:
