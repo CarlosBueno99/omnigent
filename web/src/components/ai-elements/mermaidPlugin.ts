@@ -18,13 +18,9 @@ function removeNamespaceDeclarations(root: Element): void {
   }
 }
 
-/**
- * Re-serialise mermaid's HTML-serialised SVG (bare `<br>`, `&nbsp;` in
- * labels) as well-formed XML, so it opens as a standalone file and loads
- * through `<img>`. Streamdown injects the same string inline, so the XML is
- * used only when the HTML parser builds the same tree from it as from the
- * sanitiser's markup; otherwise the input is returned unchanged.
- */
+// Re-emit mermaid's HTML-serialised SVG (bare `<br>`, `&nbsp;`) as XML for files and `<img>`.
+// Streamdown also injects it inline, so the XML is kept only if the HTML parser
+// rebuilds the sanitiser's exact tree from it.
 export function serializeSvgAsXml(svg: string): string {
   if (typeof DOMParser === "undefined" || typeof XMLSerializer === "undefined") return svg;
   const root = parseSvgAsHtml(svg);
@@ -47,11 +43,7 @@ function withXmlSvg(instance: MermaidInstance): MermaidInstance {
   };
 }
 
-/**
- * Streamdown's mermaid plugin with standalone-file SVG output. Streamdown's
- * download menu renders through the plugin, so this is the only seam the app
- * controls on that path.
- */
+// Streamdown's download menu renders through the plugin, the only seam the app controls there.
 export const mermaid: DiagramPlugin = {
   ...streamdownMermaid,
   getMermaid: (config) => withXmlSvg(streamdownMermaid.getMermaid(config)),
