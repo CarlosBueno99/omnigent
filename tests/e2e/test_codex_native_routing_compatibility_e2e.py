@@ -159,10 +159,7 @@ def test_native_turn_survives_an_unsupported_automatic_model_verdict(
 def _codex_under_managed_model_pin(
     root: Path, pinned_model: str, upgrade_target: str
 ) -> Path | None:
-    """Return a PATH dir whose ``codex`` runs the real CLI with a system managed config.
-
-    Returns ``None`` when this host cannot create the shim's bwrap mounts.
-    """
+    """Return a PATH dir whose ``codex`` sees a managed config, or ``None`` if bwrap cannot."""
     if shutil.which("bwrap") is None:
         return None
     managed = root / "managed_config.toml"
