@@ -22,6 +22,7 @@ from omnigent.session_import.local import (
     load_codex_session,
     load_kimi_session,
     load_kiro_session,
+    load_local_session,
     load_opencode_session,
     load_pi_session,
     load_qwen_session,
@@ -1504,6 +1505,81 @@ def test_codex_private_discovery_uses_producer_bridge_root(
     assert _codex_item_texts(imported) == ["producer"]
     with pytest.raises(SessionImportNotFoundError, match="was not found"):
         load_codex_session(data_id)
+
+
+def _write_codex_native_bridge_state(bridge_dir: Path, *, session_id: str, thread_id: str) -> Path:
+    """Record which Codex thread a native bridge serves; return its private home."""
+    codex_home = codex_native_bridge.codex_home_for_bridge_dir(bridge_dir)
+    codex_home.mkdir(parents=True, exist_ok=True)
+    codex_native_bridge.write_bridge_state(
+        bridge_dir,
+        codex_native_bridge.CodexNativeBridgeState(
+            session_id=session_id,
+            socket_path=str(bridge_dir / "app-server.sock"),
+            thread_id=thread_id,
+            codex_home=str(codex_home),
+        ),
+    )
+    return codex_home
+
+
+def test_codex_import_by_native_omnigent_id_uses_thread_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Omnigent session id imports its native thread under the thread's id and title."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "bridge-root")
+    omnigent_session_id = "6c0f3d8e4b2a4f7f9a1e2d3c4b5a6978"
+    thread_id = "019f7777-0001-7000-8000-000000000021"
+    codex_home = _write_codex_native_bridge_state(
+        codex_native_bridge.bridge_dir_for_bridge_id(omnigent_session_id),
+        session_id=omnigent_session_id,
+        thread_id=thread_id,
+    )
+    _write_codex_rollout(codex_home, thread_id, first_message="dev server turn")
+    (codex_home / "session_index.jsonl").write_text(
+        json.dumps({"id": thread_id, "thread_name": "Dev server thread"}) + "\n",
+        encoding="utf-8",
+    )
+
+    imported = load_local_session("codex", omnigent_session_id)
+
+    assert imported.external_session_id == thread_id
+    assert imported.native_title == "Dev server thread"
+    assert _codex_item_texts(imported) == ["dev server turn"]
+    assert load_local_session("codex", thread_id).external_session_id == thread_id
+    with pytest.raises(SessionImportNotFoundError, match="was not found"):
+        load_codex_session(omnigent_session_id, codex_home=codex_home)
+
+
+def test_codex_import_by_rotated_native_omnigent_id_reaches_current_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rotated session's id maps through the bridge that still carries its old id."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "bridge-root")
+    original_session_id = "0a1b2c3d4e5f40718293a4b5c6d7e8f9"
+    rotated_session_id = "f9e8d7c6b5a440f39281706f5e4d3c2b"
+    original_thread_id = "019f7777-0001-7000-8000-000000000022"
+    rotated_thread_id = "019f7777-0001-7000-8000-000000000023"
+    codex_home = _write_codex_native_bridge_state(
+        codex_native_bridge.bridge_dir_for_bridge_id(original_session_id),
+        session_id=rotated_session_id,
+        thread_id=rotated_thread_id,
+    )
+    _write_codex_rollout(codex_home, original_thread_id, first_message="before rotation")
+    _write_codex_rollout(codex_home, rotated_thread_id, first_message="after rotation")
+
+    imported = load_local_session("codex", rotated_session_id)
+
+    assert imported.external_session_id == rotated_thread_id
+    assert _codex_item_texts(imported) == ["after rotation"]
+    with pytest.raises(SessionImportNotFoundError, match="was not found"):
+        load_local_session("codex", original_session_id)
 
 
 def test_codex_discovery_skips_unreadable_private_bridge(
