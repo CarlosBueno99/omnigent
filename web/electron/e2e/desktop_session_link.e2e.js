@@ -53,17 +53,21 @@ it(
         .getByRole("button", { name: "Send", exact: true })
         .waitFor({ timeout: 30_000 });
       await sessionLink.click();
-      // Let the assertion below report both the window path and any external open.
-      await window.waitForURL(targetUrl, { timeout: 5_000 }).catch(() => {});
-
+      // The linked session is empty, so its welcome prompt shows it rendered in this window.
+      // Read external opens only after that, so a late one still fails the assertion.
+      const rendered = await window
+        .getByText("What should we work on?")
+        .waitFor({ timeout: 15_000 })
+        .then(
+          () => true,
+          () => false,
+        );
       const openedExternally = await electronApp.evaluate(() => globalThis.fakeBrowserOpened);
       assert.deepEqual(
-        { openedExternally, windowPath: new URL(window.url()).pathname },
-        { openedExternally: [], windowPath: `/c/${otherSessionId}` },
+        { openedExternally, windowPath: new URL(window.url()).pathname, rendered },
+        { openedExternally: [], windowPath: `/c/${otherSessionId}`, rendered: true },
       );
-      // The linked session is empty, so its welcome prompt shows it rendered in this window.
-      await window.getByText("What should we work on?").waitFor({ timeout: 15_000 });
-      await window.waitForTimeout(2_000);
+      if (process.env.OMNIGENT_DESKTOP_RECORD_DIR) await window.waitForTimeout(2_000);
     } finally {
       // Stop the screen capture first so the clip ends on the opened session, not teardown.
       await desktop?.stopDisplayCapture();
