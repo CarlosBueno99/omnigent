@@ -52,7 +52,21 @@ def skills_app(db_uri: str, tmp_path: Path):
     conversations = SqlAlchemyConversationStore(db_uri)
     permissions = SqlAlchemyPermissionStore(db_uri)
     artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
-    artifacts.put("bundle", build_agent_bundle("menu-test"))
+    artifacts.put(
+        "bundle",
+        build_agent_bundle(
+            "menu-test",
+            sub_agents=[
+                {
+                    "name": "child",
+                    "executor": {"type": "omnigent", "config": {"harness": "claude-native"}},
+                    "skills": [
+                        {"name": "child-review", "description": "Review", "content": "Review."}
+                    ],
+                }
+            ],
+        ),
+    )
     agent = agents.create(
         "735f0aa173274531aaf7eb203ca4aa31", name="menu-test", bundle_location="bundle"
     )
@@ -109,6 +123,12 @@ def skills_app(db_uri: str, tmp_path: Path):
     return app, registry, conn, conv, agent, hosts
 
 
+async def _next_skills_frame(conn) -> HostSkillsFrame:
+    frame = decode_host_frame((await asyncio.wait_for(conn.outbound_queue.get(), budget(2))).data)
+    assert isinstance(frame, HostSkillsFrame)
+    return frame
+
+
 @pytest.fixture
 def presession_app(skills_app):
     _, _, conn, _, _, hosts = skills_app
@@ -156,6 +176,151 @@ async def test_session_catalog_needs_no_runner_and_allows_shared_editors(
         ]
     else:
         assert "update the host" in response.json()["detail"]
+    assert not conn.pending_skills
+
+
+async def test_session_catalog_survives_failed_host_bundle_read(
+    skills_app, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _, conn, conv, agent, _ = skills_app
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    workspace = tmp_path / "workspace"
+    (workspace / ".claude" / "skills" / "repo-skill").mkdir(parents=True)
+    (workspace / ".claude" / "skills" / "repo-skill" / "SKILL.md").write_text(
+        "---\nname: repo-skill\ndescription: Repo\n---\nInstructions\n"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        bundle = await client.get(
+            f"/v1/sessions/{conv.id}/agent/contents", headers={"x-test-user": "editor"}
+        )
+        healthy = asyncio.create_task(
+            client.get(
+                "/v1/skills", params={"session_id": conv.id}, headers={"x-test-user": "editor"}
+            )
+        )
+        frame = await _next_skills_frame(conn)
+        conn.pending_skills[frame.request_id].set_result(
+            HostSkillsResultFrame(
+                frame.request_id,
+                "ok",
+                skills=HostSkillDiscovery(lambda _: bundle).discover(frame, workspace),
+                session_id=conv.id,
+            )
+        )
+        expected = (await healthy).json()["skills"]
+
+        redirected = asyncio.create_task(
+            client.get(
+                "/v1/skills", params={"session_id": conv.id}, headers={"x-test-user": "editor"}
+            )
+        )
+        frame = await _next_skills_frame(conn)
+        login_redirect = httpx.Response(
+            302, headers={"location": "/oidc/oauth2/v2.0/authorize"}, request=bundle.request
+        )
+        discovery = HostSkillDiscovery(lambda _: login_redirect)
+        with pytest.raises(httpx.HTTPStatusError, match="302"):
+            discovery.discover(frame, workspace)
+        conn.pending_skills[frame.request_id].set_result(
+            HostSkillsResultFrame(
+                frame.request_id,
+                "failed",
+                error_code="discovery_failed",
+                error="skill discovery failed; see the host log",
+            )
+        )
+        fallback = asyncio.create_task(_next_skills_frame(conn))
+        await asyncio.wait({redirected, fallback}, return_when=asyncio.FIRST_COMPLETED)
+        assert not redirected.done(), (await redirected).json()
+        frame = await fallback
+        assert (
+            frame.session_id,
+            frame.harness,
+            frame.path,
+            frame.agent_id,
+            frame.agent_version,
+            frame.skills_filter,
+        ) == (None, "claude-native", conv.workspace, agent.id, str(agent.version), "all")
+        conn.pending_skills[frame.request_id].set_result(
+            HostSkillsResultFrame(
+                frame.request_id,
+                "ok",
+                skills=discovery.discover(frame, workspace),
+                agent_id=frame.agent_id,
+            )
+        )
+        response = await redirected
+    assert response.status_code == 200
+    assert [skill["name"] for skill in expected] == ["child-review", "repo-skill"]
+    assert response.json()["skills"] == expected
+    assert conn.outbound_queue.empty()
+    assert not conn.pending_skills
+
+
+@pytest.mark.parametrize(
+    "error_code,bundle,fallback_error,status,detail",
+    [
+        pytest.param("not_directory", "valid", None, 404, "host error", id="other-host-error"),
+        pytest.param(
+            "discovery_failed", "without-child", None, 502, "host error", id="child-not-in-bundle"
+        ),
+        pytest.param("discovery_failed", "invalid", None, 502, "host error", id="invalid-bundle"),
+        pytest.param(
+            "discovery_failed", "valid", "scan error", 502, "scan error", id="fallback-scan-fails"
+        ),
+    ],
+)
+async def test_session_catalog_reports_host_error_without_usable_fallback(
+    skills_app,
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    bundle: str,
+    fallback_error: str | None,
+    status: int,
+    detail: str,
+) -> None:
+    app, _, conn, conv, agent, _ = skills_app
+    if bundle == "without-child":
+        loaded = app.state.agent_cache.load(agent.id, agent.bundle_location)
+        orphaned = SimpleNamespace(spec=replace(loaded.spec, sub_agents=[]))
+        monkeypatch.setattr(app.state.agent_cache, "load", lambda *a, **kw: orphaned)
+    elif bundle == "invalid":
+
+        def reject_bundle(*_args: object, **_kwargs: object) -> None:
+            raise ValueError("invalid agent spec")
+
+        monkeypatch.setattr(app.state.agent_cache, "load", reject_bundle)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        task = asyncio.create_task(
+            client.get(
+                "/v1/skills", params={"session_id": conv.id}, headers={"x-test-user": "editor"}
+            )
+        )
+        frame = await _next_skills_frame(conn)
+        conn.pending_skills[frame.request_id].set_result(
+            HostSkillsResultFrame(
+                frame.request_id, "failed", error_code=error_code, error="host error"
+            )
+        )
+        if fallback_error is not None:
+            frame = await _next_skills_frame(conn)
+            assert frame.session_id is None
+            conn.pending_skills[frame.request_id].set_result(
+                HostSkillsResultFrame(
+                    frame.request_id,
+                    "failed",
+                    error_code="discovery_failed",
+                    error=fallback_error,
+                )
+            )
+        response = await task
+    assert (response.status_code, response.json()["detail"]) == (status, detail)
+    assert conn.outbound_queue.empty()
     assert not conn.pending_skills
 
 
