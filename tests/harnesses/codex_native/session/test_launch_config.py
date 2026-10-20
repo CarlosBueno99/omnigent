@@ -301,7 +301,10 @@ def test_build_codex_remote_args_fresh_thread_selects_the_override_model(
     assert remote_args(config_overrides) == [*override_args, *model_args, *remote_args(())]
 
 
-@pytest.mark.parametrize("thread_id", [None, "thread_abc123"])
+@pytest.mark.parametrize(
+    ("thread_id", "codex_cli_version"),
+    [(None, None), ("thread_abc123", None), ("thread_abc123", (0, 150, 0))],
+)
 @pytest.mark.parametrize(
     ("base_args", "model_args"),
     [
@@ -318,6 +321,7 @@ def test_build_codex_remote_args_leads_with_base_args(
     base_args: tuple[str, ...],
     model_args: list[str],
     thread_id: str | None,
+    codex_cli_version: tuple[int, int, int] | None,
 ) -> None:
     """Base args lead unchanged; only their ``--model`` suppresses ours (Codex rejects repeats)."""
     remote_url, override = "ws://127.0.0.1:9876", 'model="gpt-5.6-luna"'
@@ -326,6 +330,7 @@ def test_build_codex_remote_args_leads_with_base_args(
         thread_id=thread_id,
         remote_url=remote_url,
         config_overrides=(override,),
+        codex_cli_version=codex_cli_version,
         base_args=base_args,
     )
     if thread_id is None:
@@ -339,7 +344,18 @@ def test_build_codex_remote_args_leads_with_base_args(
             remote_url,
         ]
     else:
-        assert args == [*base_args, "-c", override, "resume", "--remote", remote_url, thread_id]
+        # Pre-0.154 resume keeps permission flags rather than relying on preload.
+        permission_args = _AUTO_REVIEW_ARGS if codex_cli_version else []
+        assert args == [
+            *base_args,
+            "-c",
+            override,
+            *permission_args,
+            "resume",
+            "--remote",
+            remote_url,
+            thread_id,
+        ]
 
 
 # Pre- and post-0.154 remote resume keep or strip permission flags differently;
