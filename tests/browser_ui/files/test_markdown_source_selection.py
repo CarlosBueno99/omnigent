@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from playwright.sync_api import Page, Route, expect
+from playwright.sync_api import Locator, Page, Route, expect
 
 from tests.browser_ui.files.test_file_line_navigation import (
     BrowserSession,
@@ -34,18 +34,12 @@ _LIGATURE_FONT = Path(__file__).with_name("fixtures") / "geist-mono-latin-hash-l
 _BUNDLED_MONO_FONT = re.compile(r".*/geist-mono-latin-wght-normal-[^/]*\.woff2$")
 
 
-def _is_dark(pixel: tuple[int, int, int]) -> bool:
-    red, green, blue = pixel
-    return 0.299 * red + 0.587 * green + 0.114 * blue < 140
+def _row_image(row: Locator) -> Image.Image:
+    return Image.open(io.BytesIO(row.screenshot())).convert("RGB")
 
 
-def _is_wash(pixel: tuple[int, int, int]) -> bool:
-    # The light ::selection wash is about (252, 234, 244); anti-aliased ink on white
-    # misses this band, so halos around clipped glyphs are not counted as wash.
-    red, green, blue = pixel
-    return (
-        red >= 243 and blue >= 232 and 222 <= green <= 242 and red - green >= 10
-    ) and red >= blue >= green
+def _differs(pixel: tuple[int, int, int], reference: tuple[int, int, int]) -> bool:
+    return max(abs(channel - base) for channel, base in zip(pixel, reference, strict=True)) > 12
 
 
 @pytest.mark.parametrize("font_mode", ["bundled", "ligature"])
@@ -71,6 +65,7 @@ def test_source_selection_wash_covers_heading_markers(
     assert page.evaluate("document.fonts.ready.then(() => document.fonts.status)") == "loaded"
     assert served_fonts or font_mode == "bundled", "the ligature font was never served"
 
+    unselected = _row_image(heading)
     start = heading.locator("span").first.bounding_box()
     end = paragraph.locator("span").last.bounding_box()
     assert start and end
@@ -82,13 +77,23 @@ def test_source_selection_wash_covers_heading_markers(
         "heading => window.getSelection().toString().startsWith(heading)", arg=_HEADING
     )
 
-    row = Image.open(io.BytesIO(heading.screenshot())).convert("RGB")
-    pixels = row.load()
-    columns = range(row.width)
-    rows = range(row.height)
-    # A wash column spans most of the line height; an ink halo covers only a few pixels.
-    wash = [x for x in columns if sum(_is_wash(pixels[x, y]) for y in rows) >= 6]
-    ink = [x for x in columns if sum(_is_dark(pixels[x, y]) for y in rows) >= 3]
+    selected = _row_image(heading)
+    assert selected.size == unselected.size
+    _count, background = max(unselected.getcolors(unselected.width * unselected.height) or [])
+    before, after = unselected.load(), selected.load()
+    columns, rows = range(unselected.width), range(unselected.height)
+    # Ink is drawn before selecting; wash is background that selecting repaints. A wash
+    # column spans most of the line height, while an anti-aliased halo covers a few pixels.
+    ink = [x for x in columns if sum(_differs(before[x, y], background) for y in rows) >= 3]
+    wash = [
+        x
+        for x in columns
+        if sum(
+            not _differs(before[x, y], background) and _differs(after[x, y], background)
+            for y in rows
+        )
+        >= 6
+    ]
     assert wash, "no selection wash painted on the heading row"
     assert ink, "no glyph ink found on the heading row"
     assert min(wash) <= min(ink) + 2, (
