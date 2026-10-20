@@ -14180,7 +14180,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     expect(bound.get().sessionStatus).toBe("idle");
     expect(useChatStore.getState().sessionStatus).toBe("idle");
     expect(bound.get().blocks.map((block) => block.ctx.itemId)).toEqual(
-      expect.arrayContaining(missedTurn.map((item) => item.id)),
+      missedTurn.map((item) => item.id),
     );
 
     controller.abort();
@@ -14189,10 +14189,13 @@ describe("chatStore — startStreamPump reconnect loop", () => {
   });
 
   interface SnapshotClock {
+    status: "idle" | "waiting";
     updatedAt: number;
     streamOpens: number;
     itemFetches: number;
     failItemFetches: number;
+    /** Item fetches that settle only when aborted. */
+    hangItemFetches: number;
     /** Fail only older pages, which carry an `after` cursor. */
     failOlderPagesOnly: boolean;
     /** Holds item fetches until it settles. */
@@ -14202,10 +14205,12 @@ describe("chatStore — startStreamPump reconnect loop", () => {
   /** Route `id`'s stream to `sink`; serve snapshots whose `updated_at` the test advances. */
   function routeSnapshotClock(id: string, sink: StreamSink): SnapshotClock {
     const clock: SnapshotClock = {
+      status: "idle",
       updatedAt: 100,
       streamOpens: 0,
       itemFetches: 0,
       failItemFetches: 0,
+      hangItemFetches: 0,
       failOlderPagesOnly: false,
       itemsGate: null,
     };
@@ -14222,7 +14227,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
         return mockResponse({
           id,
           agent_id: "agent_xyz",
-          status: "idle",
+          status: clock.status,
           created_at: 0,
           updated_at: clock.updatedAt,
           items: [],
@@ -14236,6 +14241,16 @@ describe("chatStore — startStreamPump reconnect loop", () => {
         if (failable && clock.failItemFetches > 0) {
           clock.failItemFetches -= 1;
           return Promise.reject(new TypeError("network error"));
+        }
+        if (clock.hangItemFetches > 0) {
+          clock.hangItemFetches -= 1;
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("aborted", "AbortError")),
+              { once: true },
+            );
+          });
         }
         if (clock.itemsGate) return clock.itemsGate.then(() => defaultFetchHandler(input, init));
       }
@@ -14362,47 +14377,53 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
-  it("retries a backfill for a missed lifecycle edge until it lands", async () => {
-    seedSession("conv_edge_retry", []);
-    const sink = pushableStream();
-    const clock = routeSnapshotClock("conv_edge_retry", sink);
-    const controller = new AbortController();
-    // The tab saw the turn start; the snapshot clock never moves past its baseline.
-    const bound = bindConversationForTest("conv_edge_retry", {
-      abortController: controller,
-      sessionStatus: "running",
-    });
-    const loop = startStreamPump("conv_edge_retry", controller, bound.set, bound.get);
-    await drainAsync();
+  it.each([
+    { fault: "fails", id: "conv_edge_retry_fail", items: { failItemFetches: 1 } },
+    { fault: "never settles", id: "conv_edge_retry_hang", items: { hangItemFetches: 1 } },
+  ])(
+    "retries a missed lifecycle edge's backfill after its items fetch $fault",
+    async ({ id, items }) => {
+      seedSession(id, []);
+      const sink = pushableStream();
+      const clock = routeSnapshotClock(id, sink);
+      const controller = new AbortController();
+      // The tab saw the turn start; the snapshot clock never moves past its baseline.
+      const bound = bindConversationForTest(id, {
+        abortController: controller,
+        sessionStatus: "running",
+      });
+      const loop = startStreamPump(id, controller, bound.set, bound.get);
+      await drainAsync();
 
-    clock.failItemFetches = 1;
-    seedSessionItems("conv_edge_retry", [
-      userMessage("resp_tui", "typed in the TUI"),
-      assistantMessage("resp_tui", "reply printed in the TUI"),
-    ]);
-    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-    await drainAsync(2);
-    expect(bound.get().sessionStatus).toBe("idle");
-    expect(clock.itemFetches).toBe(1);
-    expect(bound.get().blocks).toEqual([]);
+      Object.assign(clock, items);
+      seedSessionItems(id, [
+        userMessage("resp_tui", "typed in the TUI"),
+        assistantMessage("resp_tui", "reply printed in the TUI"),
+      ]);
+      await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+      await drainAsync(2);
+      expect(bound.get().sessionStatus).toBe("idle");
+      expect(clock.itemFetches).toBe(1);
+      expect(bound.get().blocks).toEqual([]);
 
-    // The status already matches, but the dropped turn is still owed.
-    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-    await drainAsync(2);
-    expect(clock.itemFetches).toBe(2);
-    expect(bound.get().blocks.map((b) => b.ctx.itemId)).toEqual([
-      "msg_resp_tui_user",
-      "msg_resp_tui_asst",
-    ]);
+      // The status already matches, but the dropped turn is still owed.
+      await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+      await drainAsync(2);
+      expect(clock.itemFetches).toBe(2);
+      expect(bound.get().blocks.map((b) => b.ctx.itemId)).toEqual([
+        "msg_resp_tui_user",
+        "msg_resp_tui_asst",
+      ]);
 
-    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-    await drainAsync(2);
-    expect(clock.itemFetches).toBe(2);
+      await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+      await drainAsync(2);
+      expect(clock.itemFetches).toBe(2);
 
-    controller.abort();
-    await drainAsync(2);
-    await loop;
-  });
+      controller.abort();
+      await drainAsync(2);
+      await loop;
+    },
+  );
 
   it("retries after a later backfill page fails, not just the first", async () => {
     seedSession("conv_items_page_fail", []);
@@ -14448,69 +14469,100 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
-  it.each([
-    { path: "ordinary backfill", gapLength: 2 },
-    { path: "the fresh-window fallback", gapLength: 100 },
-  ])("keeps a live status that arrives during a reconcile through $path", async ({ gapLength }) => {
-    const id = `conv_backfill_race_${gapLength}`;
-    seedSession(id, []);
-    const sink = pushableStream();
-    const clock = routeSnapshotClock(id, sink);
-    const controller = new AbortController();
-    // The tab saw a turn start; the idle snapshot reveals the dropped edge.
-    const bound = bindConversationForTest(id, {
-      abortController: controller,
-      sessionStatus: "running",
-    });
-    const loop = startStreamPump(id, controller, bound.set, bound.get);
-    await drainAsync();
-
-    const gap = Array.from({ length: gapLength }, (_, i) => gapUser("gap", i));
-    seedSessionItems(id, gap);
-    seedPendingElicitations(id, [
-      {
-        type: "response.elicitation_request",
-        elicitation_id: "elic_gap",
-        params: { mode: "form", message: "Approve the gap tool?", phase: "tool_call_approval" },
+  const backfillInterrupts = [
+    {
+      interrupt: "a live status event",
+      snapshotStatus: "idle" as const,
+      interruptBackfill: (id: string, sink: StreamSink) =>
+        sink.push(
+          sse("session.status", {
+            conversation_id: id,
+            status: "running",
+            response_id: "resp_new",
+          }),
+        ),
+      expected: {
+        sessionStatus: "running",
+        status: "streaming",
+        activeResponse: { responseId: "resp_new", state: "streaming" },
       },
-    ]);
-    let releaseItems!: () => void;
-    clock.itemsGate = new Promise<void>((resolve) => {
-      releaseItems = resolve;
-    });
-    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-    await drainAsync();
-    expect(bound.get().sessionStatus).toBe("idle");
-    expect(clock.itemFetches).toBe(1);
+    },
+    {
+      interrupt: "a local send",
+      snapshotStatus: "waiting" as const,
+      // A send latches its lifecycle locally, with no stream event.
+      interruptBackfill: (
+        _id: string,
+        _sink: StreamSink,
+        bound: ReturnType<typeof bindConversationForTest>,
+      ) => bound.set({ status: "streaming", activeResponse: null, sendLatchedAt: Date.now() }),
+      expected: { sessionStatus: "waiting", status: "streaming", activeResponse: null },
+    },
+  ];
 
-    // The next turn starts while the backfill's items are still in flight.
-    sink.push(
-      sse("session.status", { conversation_id: id, status: "running", response_id: "resp_new" }),
-    );
-    await drainAsync();
-    expect(bound.get().sessionStatus).toBe("running");
+  it.each(
+    [
+      { path: "ordinary backfill", gapLength: 2 },
+      { path: "the fresh-window fallback", gapLength: 100 },
+    ].flatMap((route) => backfillInterrupts.map((interrupt) => ({ ...route, ...interrupt }))),
+  )(
+    "keeps $interrupt during a reconcile through $path",
+    async ({ gapLength, snapshotStatus, interruptBackfill, expected }) => {
+      const id = `conv_backfill_race_${snapshotStatus}_${gapLength}`;
+      seedSession(id, []);
+      const sink = pushableStream();
+      const clock = routeSnapshotClock(id, sink);
+      clock.status = snapshotStatus;
+      const controller = new AbortController();
+      // The tab saw a turn start; the turn-end snapshot reveals the dropped edge.
+      const bound = bindConversationForTest(id, {
+        abortController: controller,
+        sessionStatus: "running",
+      });
+      const loop = startStreamPump(id, controller, bound.set, bound.get);
+      await drainAsync();
 
-    releaseItems();
-    await drainAsync(3);
+      const gap = Array.from({ length: gapLength }, (_, i) => gapUser("gap", i));
+      seedSessionItems(id, gap);
+      seedPendingElicitations(id, [
+        {
+          type: "response.elicitation_request",
+          elicitation_id: "elic_gap",
+          params: { mode: "form", message: "Approve the gap tool?", phase: "tool_call_approval" },
+        },
+      ]);
+      let releaseItems!: () => void;
+      clock.itemsGate = new Promise<void>((resolve) => {
+        releaseItems = resolve;
+      });
+      await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+      await drainAsync();
+      expect(bound.get().sessionStatus).toBe(snapshotStatus);
+      expect(clock.itemFetches).toBe(1);
 
-    expect(bound.get().sessionStatus).toBe("running");
-    expect(bound.get().activeResponse).toMatchObject({
-      responseId: "resp_new",
-      state: "streaming",
-    });
-    const blocks = bound.get().blocks;
-    expect(blocks.filter((b) => b.ctx.itemId).map((b) => b.ctx.itemId)).toEqual(
-      gap.slice(-INITIAL_WINDOW_ITEMS).map((item) => item.id),
-    );
-    // The live event does not void recovery of a prompt the stream dropped.
-    expect(
-      blocks.filter((b): b is ElicitationBlock => b.type === "elicitation").map((b) => b.status),
-    ).toEqual(["pending"]);
+      // The next turn starts while the backfill's items are still in flight.
+      interruptBackfill(id, sink, bound);
+      await drainAsync();
+      expect(bound.get()).toMatchObject(expected);
 
-    controller.abort();
-    await drainAsync(2);
-    await loop;
-  });
+      releaseItems();
+      await drainAsync(3);
+
+      expect(bound.get()).toMatchObject(expected);
+      const blocks = bound.get().blocks;
+      expect(blocks.filter((b) => b.ctx.itemId).map((b) => b.ctx.itemId)).toEqual(
+        gap.slice(-INITIAL_WINDOW_ITEMS).map((item) => item.id),
+      );
+      // The interruption does not void recovery of a prompt the stream dropped.
+      expect(
+        blocks.filter((b): b is ElicitationBlock => b.type === "elicitation").map((b) => b.status),
+      ).toEqual(["pending"]);
+
+      controller.abort();
+      await drainAsync(2);
+      await loop;
+    },
+  );
 
   it("backfills once for a bare metadata edit, then not again", async () => {
     seedSession("conv_meta_only", []);
