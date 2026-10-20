@@ -701,8 +701,8 @@ Follow these rules for each clip:
 - A symptom seen in a terminal pane must be filmed. Use the app's terminal view
   while the pane's session still opens there. Otherwise (for example, a leaked
   pane whose Omnigent session was deleted), follow the `terminal` lane's
-  read-only tmux attach in `dev/recording-lanes.md` and caption that it films
-  outside the app.
+  read-only tmux attach in `dev/recording-lanes.md`. Caption that this clip
+  films the pane outside the app and shows the response, not the user action.
 - For internal/API-only results with no visible user interaction, written
   evidence is enough. Set `recordings: []` and describe the result in `evidence`.
 - An absence is filmable. When the bug is that nothing happens (a parent chat
