@@ -200,14 +200,23 @@ function retryList(
   return refetch();
 }
 
+// Shared by the archived list query and its retry's cache key so the two cannot drift.
+const ARCHIVED_LIST = {
+  searchQuery: "",
+  includeArchived: false,
+  project: undefined,
+  visibility: "archived",
+} as const;
+
 export function useArchivedSessions(enabled: boolean, sortBy: SessionSortBy = "updated_at") {
   const client = useQueryClient();
+  const { searchQuery, includeArchived, project, visibility } = ARCHIVED_LIST;
   const query = useConversations(
-    "",
-    false,
+    searchQuery,
+    includeArchived,
     { enabled, snapshot: true, sortBy },
-    undefined,
-    "archived",
+    project,
+    visibility,
   );
   const previousEntry = useRef({ enabled: false, sortBy });
   const { data, refetch, isLoading: firstLoadPending } = query;
@@ -222,11 +231,11 @@ export function useArchivedSessions(enabled: boolean, sortBy: SessionSortBy = "u
     () =>
       retryList(
         client,
-        conversationsQueryKey("", false, undefined, "archived", sortBy),
+        conversationsQueryKey(searchQuery, includeArchived, project, visibility, sortBy),
         firstLoadPending,
         refetch,
       ),
-    [client, sortBy, firstLoadPending, refetch],
+    [client, searchQuery, includeArchived, project, visibility, sortBy, firstLoadPending, refetch],
   );
   return { ...query, refetch: retry };
 }

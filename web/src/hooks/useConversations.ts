@@ -638,18 +638,16 @@ export function conversationsQueryKey(
   visibility: "mine" | "shared" | "archived" | undefined,
   sortBy: SessionSortBy,
 ): unknown[] {
-  // Keep the base three-element key for the unfiltered callers (byte-for-byte
-  // unchanged, so the sidebar / rename / push-delta paths are untouched); only
-  // append `project` for a concrete name; append `visibility` only when set so
-  // the "mine"/"shared" tab queries get their own cache entries without
-  // disturbing the existing all-sessions key used by every other caller.
-  return sortBy === "created_at"
-    ? ["conversations", searchQuery, includeArchived, project ?? null, visibility, sortBy]
-    : visibility
-      ? ["conversations", searchQuery, includeArchived, project ?? null, visibility]
-      : project
-        ? ["conversations", searchQuery, includeArchived, project]
-        : ["conversations", searchQuery, includeArchived];
+  // Unfiltered callers keep the base three-element key; filters are appended only
+  // when set, so each filtered list gets its own cache entry.
+  if (sortBy === "created_at") {
+    return ["conversations", searchQuery, includeArchived, project ?? null, visibility, sortBy];
+  }
+  if (visibility) {
+    return ["conversations", searchQuery, includeArchived, project ?? null, visibility];
+  }
+  if (project) return ["conversations", searchQuery, includeArchived, project];
+  return ["conversations", searchQuery, includeArchived];
 }
 
 export function useConversations(

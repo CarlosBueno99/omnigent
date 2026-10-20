@@ -2505,7 +2505,7 @@ function ConversationList({
   const [loadAttempt, setLoadAttempt] = useState(0);
   const slowFirstLoad = useSlowFirstLoad(
     conversationsQuery.isLoading,
-    `${activeTab}:${loadAttempt}`,
+    `${activeTab}:${sortBy}:${loadAttempt}`,
   );
   const sessionStatus = conversationsQuery.isError ? (
     <p role="status" className="px-2 py-1 text-destructive text-ui">

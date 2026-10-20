@@ -3430,6 +3430,36 @@ describe("Sidebar view options", () => {
     ).toEqual(["conv_done_new", "conv_done_old", "conv_running"]);
   });
 
+  it("restarts the slow-load wait when the ordering changes", () => {
+    vi.useFakeTimers();
+    try {
+      mockConversations([]);
+      const original = useConvMock.getMockImplementation()!;
+      useConvMock.mockImplementation(
+        (...args) =>
+          ({
+            ...original(...args),
+            data: undefined,
+            isLoading: true,
+          }) as ReturnType<typeof useConversations>,
+      );
+      renderGroupingSidebar();
+      const status = () => within(groupSection("Sessions")).getByRole("status");
+
+      act(() => vi.advanceTimersByTime(SESSION_LIST_SLOW_LOAD_MS - 1));
+      openViewSubmenu("session-ordering-menu");
+      const created = screen.getByRole("menuitemradio", { name: "Created" });
+      fireEvent.mouseOver(created);
+      fireEvent.click(created);
+      act(() => vi.advanceTimersByTime(SESSION_LIST_SLOW_LOAD_MS - 1));
+      expect(status()).toHaveTextContent("Loading…");
+      act(() => vi.advanceTimersByTime(1));
+      expect(status()).toHaveTextContent("Sessions are taking longer than usual.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["default", "status", "created", "updated"])(
     "uses Created for saved %s grouping and project folders",
     (grouping) => {
