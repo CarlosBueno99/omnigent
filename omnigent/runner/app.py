@@ -188,7 +188,7 @@ from omnigent.runner.subagent_work import (
     _SubagentDeliveryAck,
     _SubagentWorkEntry,
     _truncate_child_preview,
-    await_subagent_child_start_report,
+    arm_subagent_child_start_timeout,
     get_subagent_work,
     is_codex_native_subagent_wrapper,
     latest_wake_eligible_subagent_work,
@@ -3964,7 +3964,7 @@ def create_runner_app(
             mark_subagent_work_started(conv_id)
             if _session_harness_name(conv_id) == _CODEX_NATIVE_HARNESS:
                 # Codex reports every turn start it begins; bound a child that never does.
-                await_subagent_child_start_report(conv_id)
+                arm_subagent_child_start_timeout(conv_id)
         try:
             loop = asyncio.get_running_loop()
             _cont = loop.create_task(

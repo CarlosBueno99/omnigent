@@ -356,14 +356,12 @@ def note_subagent_child_start_reported(child_session_id: str) -> None:
     entry.awaiting_child_start_since = None
 
 
-def await_subagent_child_start_report(child_session_id: str, *, now: float | None = None) -> None:
+def arm_subagent_child_start_timeout(child_session_id: str, *, now: float | None = None) -> None:
     """
-    Bound a running dispatch whose harness accepted the prompt but has not reported a start.
+    Start the launch timeout for a running dispatch whose child has not reported a turn start.
 
-    Codex-native delivery ends once ``turn/start`` is accepted; afterwards only
-    the child's own status edges settle the dispatch, so a child that never
-    reports would otherwise stay ``running`` forever. The launch reaper fails
-    the dispatch once :func:`resolve_subagent_launch_timeout_s` elapses.
+    Codex-native delivery ends once ``turn/start`` is accepted, so only the
+    child's own status edges settle the dispatch afterwards.
 
     :param child_session_id: Child session id, e.g. ``"conv_child456"``.
     :param now: Clock override for tests, e.g. ``time.time()``.
@@ -680,6 +678,7 @@ async def _recover_subagent_results_from_server(
         if interrupted:
             # This dispatch already existed; a local launch timeout cannot judge it.
             entry.status = "waiting"
+            entry.child_start_reported = True
             continue
         ack = mark_subagent_work_terminal(child_id, status=status, output=output)
         if ack.delivered_now:
@@ -862,7 +861,7 @@ def reap_stalled_subagent_launches(
 
     A dispatch with no running/waiting/terminal status acknowledgment can
     otherwise remain pending forever. The same budget bounds a ``running``
-    dispatch armed by :func:`await_subagent_child_start_report` whose child
+    dispatch armed by :func:`arm_subagent_child_start_timeout` whose child
     has not reported a start. Missing acknowledgment does not prove
     that the child process never started. Each reaped entry is
     marked ``failed`` and its failure is delivered to the parent inbox through

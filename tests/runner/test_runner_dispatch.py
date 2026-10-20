@@ -12792,7 +12792,7 @@ async def test_named_send_adopts_busy_child_as_running_not_launching(
         work = subagent_work.get_subagent_work(child_id)
         assert work is not None
         # A codex child reported its in-flight turn's start before this entry existed.
-        subagent_work.await_subagent_child_start_report(child_id)
+        subagent_work.arm_subagent_child_start_timeout(child_id)
         reaped = subagent_work.reap_stalled_subagent_launches(
             now=work.created_at + 7200.0, timeout_s=180.0
         )

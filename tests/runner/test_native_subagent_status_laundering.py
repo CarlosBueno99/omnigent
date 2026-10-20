@@ -279,7 +279,7 @@ async def test_started_dispatch_is_not_reaped_by_launch_liveness(
             subagent_work.note_subagent_child_start_reported(child_id)
         subagent_work.mark_subagent_work_started(child_id)
         if start_reported_before_prompt_accepted:
-            subagent_work.await_subagent_child_start_report(child_id)
+            subagent_work.arm_subagent_child_start_timeout(child_id)
         assert entry.status == "running"
         reaped = subagent_work.reap_stalled_subagent_launches(
             now=entry.created_at + 10_000.0, timeout_s=180.0
