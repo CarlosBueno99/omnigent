@@ -17,23 +17,31 @@ class DeepLinkActivity : Activity() {
             return
         }
         val store = ServerStore(this)
-        if (store.hasServer() && originOf(store.currentServerUrl()) == link.origin) {
+        val known = store.recentServer(link.origin)
+        if (known == null) {
+            askToConnect(store, link)
+        } else if (store.hasServer() && originOf(store.currentServerUrl()) == link.origin) {
             openApp(link.path)
-            return
+        } else {
+            store.connect(known)
+            openApp(link.path, UserConnectRequests.issue())
         }
-        val known = store.offeredServers().firstOrNull { originOf(it) == link.origin }
-        if (known != null) {
-            connect(store, known, link.path)
-            return
-        }
-        // Connecting grants the origin the native bridge, so an unknown server needs consent.
+    }
+
+    // Connecting grants the native bridge, so only servers in recents skip consent. A consented
+    // server joins recents once its page loads; a preset joins once the user picks it.
+    private fun askToConnect(
+        store: ServerStore,
+        link: DeepLink,
+    ) {
         consent =
             AlertDialog
                 .Builder(this)
                 .setTitle(R.string.deep_link_consent_title)
                 .setMessage(getString(R.string.deep_link_consent_message, link.hostLabel))
                 .setPositiveButton(R.string.deep_link_consent_open) { _, _ ->
-                    connect(store, link.origin, link.path)
+                    store.select(link.origin)
+                    openApp(link.path, UserConnectRequests.issue())
                 }.setNegativeButton(android.R.string.cancel) { _, _ -> finish() }
                 .setOnCancelListener { finish() }
                 .show()
@@ -42,15 +50,6 @@ class DeepLinkActivity : Activity() {
     override fun onDestroy() {
         consent?.dismiss()
         super.onDestroy()
-    }
-
-    private fun connect(
-        store: ServerStore,
-        serverUrl: String,
-        path: String,
-    ) {
-        store.connect(serverUrl)
-        openApp(path, UserConnectRequests.issue())
     }
 
     // NEW_TASK + CLEAR_TOP|SINGLE_TOP re-enter the app's own task, reusing a running shell.

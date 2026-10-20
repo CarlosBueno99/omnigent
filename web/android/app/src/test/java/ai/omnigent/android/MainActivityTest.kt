@@ -368,6 +368,18 @@ class MainActivityTest {
     }
 
     @Test
+    fun `a server opened from a link is remembered once its page loads`() {
+        val store = ServerStore(ApplicationProvider.getApplicationContext())
+        store.select("https://example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+
+        activity.invoke("onPageReady", arrayOf(String::class.java), "chrome-error://chromewebdata/")
+        assertEquals(emptyList<String>(), store.recentServers())
+        activity.invoke("onPageReady", arrayOf(String::class.java), "https://example.com/")
+        assertEquals(listOf("https://example.com"), store.recentServers())
+    }
+
+    @Test
     fun `server pill tracks the container width and truncates in the middle`() {
         val activity = launch()
         val pill = activity.switchButton() as TextView

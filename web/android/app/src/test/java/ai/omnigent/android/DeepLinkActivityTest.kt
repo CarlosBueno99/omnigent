@@ -67,8 +67,19 @@ class DeepLinkActivityTest {
 
         val opened = activity.openedShell()
         assertEquals("https://new.example.com:8443", store.currentServerUrl())
+        assertEquals(emptyList<String>(), store.recentServers())
         assertEquals("/c/abc", opened.navigatePath())
         assertTrue(UserConnectRequests.consume(opened.connectRequest()))
+    }
+
+    @Test
+    fun `a server that has not loaded since consent asks again`() {
+        store.select("https://new.example.com")
+
+        val activity = launch("omnigent://new.example.com/c/abc")
+
+        assertTrue(ShadowAlertDialog.getLatestAlertDialog().isShowing)
+        assertNull(shadowOf(activity).peekNextStartedActivity())
     }
 
     @Test
