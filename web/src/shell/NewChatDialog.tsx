@@ -1537,8 +1537,10 @@ export function AgentHarnessPicker({
         : `${detail.label} ${compactModelTriggerLabel(detail.value)}`,
     )
     .join(", ");
+  const noAgentsLabel =
+    noneOption !== undefined && effectiveAgentId === null ? noneOption.label : "No agents";
   const triggerAccessibleName = [
-    hasAgents ? agentLabel : "No agents",
+    hasAgents ? agentLabel : noAgentsLabel,
     selectedUnavailable ? "unavailable" : triggerAccessibleDetails,
   ]
     .filter(Boolean)
@@ -1546,7 +1548,7 @@ export function AgentHarnessPicker({
   const triggerText = triggerSdk
     ? agentLabel
     : visibleModelText ||
-      (triggerModel === undefined ? (hasAgents ? agentLabel : "No agents") : "");
+      (triggerModel === undefined ? (hasAgents ? agentLabel : noAgentsLabel) : "");
   const triggerSecondaryText = triggerSdk
     ? compactModelTriggerLabel(triggerSdk.value)
     : visibleEffortText;

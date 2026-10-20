@@ -457,8 +457,11 @@ describe("ProjectSettingsDialog", () => {
       ),
     );
 
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveTextContent("No agents");
+
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
     fireEvent.click(within(screen.getByRole("menu")).getByText("No default"));
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveTextContent("No default");
     fireEvent.click(screen.getByTestId("project-settings-save"));
 
     await waitFor(() => expect(updateMock).toHaveBeenCalledWith("p_1", {}));
