@@ -4696,8 +4696,8 @@ class _CodexTerminalCli:
         ``("codex", "--")``. Empty without a configured command.
     :param codex_args: Configured args passed to Codex itself when there is
         no wrapper, e.g. ``("--sandbox", "danger-full-access")``.
-    :param codex_cli_version: Version of the Codex the TUI runs, e.g.
-        ``(0, 154, 0)``, or ``None`` when unknown.
+    :param codex_cli_version: Probed wrapper Codex version on a wrapped resume,
+        otherwise the app-server's, e.g. ``(0, 154, 0)``; ``None`` when unknown.
     """
 
     command: str | None
@@ -4746,15 +4746,21 @@ async def _resolve_codex_terminal_cli(
             codex_args=configured_args,
             codex_cli_version=app_server.codex_cli_version,
         )
+    if not resume:
+        codex_cli_version = app_server.codex_cli_version
+    else:
+        codex_cli_version = await _codex_cli_version(command, *configured_args)
+        if codex_cli_version is None:
+            _logger.info(
+                "Codex resume: configured command %r reported no Codex version; "
+                "applying permissions through thread/resume",
+                command,
+            )
     return _CodexTerminalCli(
         command=command,
         wrapper_args=configured_args,
         codex_args=(),
-        codex_cli_version=(
-            await _codex_cli_version(command, *configured_args)
-            if resume
-            else app_server.codex_cli_version
-        ),
+        codex_cli_version=codex_cli_version,
     )
 
 
@@ -4808,8 +4814,8 @@ async def _launch_codex_native_tui(
         # The runner provisions and trusts these hooks. An unknown CLI version
         # must not strand a headless session behind an interactive trust prompt.
         bypass_hook_trust=(
-            app_server.codex_cli_version is None
-            or app_server.codex_cli_version >= _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION
+            terminal_cli.codex_cli_version is None
+            or terminal_cli.codex_cli_version >= _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION
         ),
         configured_codex_args=terminal_cli.codex_args,
     )

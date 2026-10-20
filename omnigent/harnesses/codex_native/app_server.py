@@ -4852,7 +4852,7 @@ def build_codex_remote_args(
         ``('model="databricks-gpt-5-5"', 'model_provider="omnigent_databricks"')``.
         Each is emitted as a ``-c <value>`` global flag. Empty for a
         plain Codex-login launch that needs no provider routing.
-    :param codex_cli_version: Probed app-server CLI version. Before 0.154,
+    :param codex_cli_version: Probed CLI version of the Codex the TUI runs. Before 0.154,
         preserve permission flags because a remote TUI can reapply its own
         defaults on attach. ``None`` uses the 0.154+ compatible arguments.
     :param bypass_sandbox: When ``True`` for a fresh thread or a pre-0.154

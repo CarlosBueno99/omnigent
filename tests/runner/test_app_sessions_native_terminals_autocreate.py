@@ -5080,6 +5080,42 @@ async def test_codex_tui_resume_omits_permission_overrides_for_configured_launch
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("wrapper_version", "app_server_version", "bypasses_hook_trust"),
+    [("0.130.0", (0, 153, 4), False), ("0.154.0", (0, 130, 0), True)],
+    ids=["older-wrapper", "newer-wrapper"],
+)
+async def test_codex_tui_resume_gates_hook_trust_on_wrapper_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wrapper_version: str,
+    app_server_version: tuple[int, int, int],
+    bypasses_hook_trust: bool,
+) -> None:
+    """A wrapped resume sends the hook-trust flag only when the wrapper's Codex accepts it."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config_home = tmp_path / "config-home"
+    config_home.mkdir()
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
+    wrapper = tmp_path / "codex-wrapper"
+    wrapper.write_text(f'#!/bin/sh\necho "codex-cli {wrapper_version}"\n')
+    wrapper.chmod(0o755)
+    (config_home / "config.yaml").write_text(
+        f"harness:\n  codex-native:\n    command: {wrapper}\n"
+    )
+
+    spec = await _launch_recorded_codex_tui(
+        tmp_path,
+        workspace=workspace,
+        thread_id="thread-resume",
+        codex_cli_version=app_server_version,
+    )
+
+    assert ("--dangerously-bypass-hook-trust" in spec.args) is bypasses_hook_trust, spec.args
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("harness_config", "resume", "expected"),
     [
         pytest.param(

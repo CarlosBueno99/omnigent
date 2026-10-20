@@ -1016,6 +1016,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     if not codex_args_only:
         assert "bridge state is preloaded" in caplog.text
         assert "no bridge-state wait extension is needed" in caplog.text
+        assert ("reported no Codex version" in caplog.text) is (version is None)
 
 
 @pytest.mark.asyncio
@@ -1257,7 +1258,7 @@ async def test_auto_create_codex_terminal_fork_clones_rollout_and_resumes(
         assert codex_native_bridge.read_bridge_state(bridge_dir) is None, (
             "fork-resume must not expose stale bridge state before preload"
         )
-        assert not terminal_launch_args
+        assert terminal_launch_args == []
         preload_calls.append((transport, loaded_thread_id))
 
     async def _fake_forward_known_thread(**kwargs: Any) -> None:
@@ -1546,7 +1547,7 @@ async def test_auto_create_codex_terminal_fork_builds_rollout_from_items_and_res
         model_provider: str | None = None,
     ) -> None:
         """:param transport: App-server URL. :param loaded_thread_id: Resumed thread."""
-        assert not terminal_launch_args
+        assert terminal_launch_args == []
         preload_calls.append((transport, loaded_thread_id))
 
     async def _fake_forward_known_thread(**kwargs: Any) -> None:
