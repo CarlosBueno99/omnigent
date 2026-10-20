@@ -790,12 +790,19 @@ def test_long_btw_quick_answer_scrolls_to_its_end(
     visible_top = max(rect["y"], 0)
     visible_bottom = min(rect["y"] + rect["height"], DESKTOP["height"])
     page.mouse.move(rect["x"] + rect["width"] / 2, (visible_top + visible_bottom) / 2)
+    scroll_top_before = answer.evaluate("el => el.scrollTop")
     for _ in range(8):
         page.mouse.wheel(0, 400)
         page.wait_for_timeout(100)
 
     expect(page.get_by_text("Plan step 40:", exact=False)).to_be_in_viewport(ratio=1)
     expect(page.get_by_text("Press Esc to close", exact=True)).to_be_in_viewport(ratio=1)
+    # The answer scrolls internally while the panel's header, question and the composer stay put.
+    assert answer.evaluate("el => el.scrollHeight > el.clientHeight")
+    assert answer.evaluate("el => el.scrollTop") > scroll_top_before
+    question = page.get_by_text("/btw List 40 numbered lines about this plan", exact=True)
+    for surrounding in (heading, question, _input(page, "live")):
+        expect(surrounding).to_be_in_viewport(ratio=1)
 
 
 def test_composer_hides_native_scrollbar_without_disabling_scroll(
