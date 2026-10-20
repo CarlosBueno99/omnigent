@@ -914,8 +914,8 @@ def test_host_background_fails_when_daemon_never_registers(
     expected_terminated: list[int],
 ) -> None:
     """A live PID without a registered channel is never reported as started; the
-    daemon is left running only while the server answers."""
-    _spawned, log_path = _patch_background_host_spawn(monkeypatch, tmp_path)
+    daemon is left running only while the server answers, and a rerun adopts it."""
+    spawned, log_path = _patch_background_host_spawn(monkeypatch, tmp_path)
     log_path.write_text("Host registration failed: database unavailable\n")
     monkeypatch.setattr("omnigent.cli._daemon_host_online", lambda record, **kwargs: False)
     monkeypatch.setattr(
@@ -944,6 +944,19 @@ def test_host_background_fails_when_daemon_never_registers(
     if not expected_terminated:
         assert "still running (pid 4242)" in result.output
         assert "host stop --server https://example.databricksapps.com" in result.output
+        monkeypatch.setattr(
+            "omnigent.cli._daemon_host_status_probe",
+            lambda record, **kwargs: cli_module._HostHttpResult(
+                status_code=200, body={"status": "online"}
+            ),
+        )
+        rerun = CliRunner().invoke(
+            cli,
+            ["host", "--background", "--server", "https://example.databricksapps.com"],
+        )
+        assert rerun.exit_code == 0, rerun.output
+        assert "already running (pid 4242" in rerun.output
+        assert len(spawned) == 1, "the rerun must adopt the pending daemon"
 
 
 def test_host_background_does_not_block(

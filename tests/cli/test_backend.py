@@ -1119,7 +1119,7 @@ def test_registration_timeout_keeps_stale_host_hint_when_server_answers(
     assert "`omnigent stop`" in message
 
 
-def test_registration_timeout_reports_daemon_that_exits_during_final_probe(
+def test_registration_timeout_reports_daemon_that_exits_before_deadline_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A daemon that dies as the wait expires is reported as exited, not as still running."""
