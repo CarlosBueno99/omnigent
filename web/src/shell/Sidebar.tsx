@@ -2507,33 +2507,45 @@ function ConversationList({
     conversationsQuery.isLoading,
     `${activeTab}:${sortBy}:${loadAttempt}`,
   );
-  const sessionStatus = conversationsQuery.isError ? (
-    <p role="status" className="px-2 py-1 text-destructive text-ui">
-      {allConversations.length === 0
-        ? `Failed to load: ${conversationsQuery.error instanceof Error ? conversationsQuery.error.message : String(conversationsQuery.error)}`
-        : "Some sessions could not be loaded."}{" "}
-      <button type="button" onClick={() => void conversationsQuery.refetch?.()}>
-        Retry
-      </button>
-    </p>
-  ) : slowFirstLoad ? (
-    <p role="status" className="px-2 py-1 text-muted-foreground text-sm">
-      Sessions are taking longer than usual.{" "}
-      <button
-        type="button"
-        onClick={() => {
-          setLoadAttempt((attempt) => attempt + 1);
-          void conversationsQuery.refetch?.();
-        }}
-      >
-        Retry
-      </button>
-    </p>
-  ) : conversationsQuery.isLoading ? (
-    <p role="status" className="px-2 py-1 text-muted-foreground text-sm">
-      Loading…
-    </p>
-  ) : undefined;
+  const renderSessionStatus = () => {
+    if (conversationsQuery.isError) {
+      return (
+        <p role="status" className="px-2 py-1 text-destructive text-ui">
+          {allConversations.length === 0
+            ? `Failed to load: ${conversationsQuery.error instanceof Error ? conversationsQuery.error.message : String(conversationsQuery.error)}`
+            : "Some sessions could not be loaded."}{" "}
+          <button type="button" onClick={() => void conversationsQuery.refetch?.()}>
+            Retry
+          </button>
+        </p>
+      );
+    }
+    if (slowFirstLoad) {
+      return (
+        <p role="status" className="px-2 py-1 text-muted-foreground text-sm">
+          Sessions are taking longer than usual.{" "}
+          <button
+            type="button"
+            onClick={() => {
+              setLoadAttempt((attempt) => attempt + 1);
+              void conversationsQuery.refetch?.();
+            }}
+          >
+            Retry
+          </button>
+        </p>
+      );
+    }
+    if (conversationsQuery.isLoading) {
+      return (
+        <p role="status" className="px-2 py-1 text-muted-foreground text-sm">
+          Loading…
+        </p>
+      );
+    }
+    return undefined;
+  };
+  const sessionStatus = renderSessionStatus();
   const showShared = activeTab === "shared";
   // The Shared section replaces Sessions on the Shared filter (release-flagged).
   const sharedListOnly = groupingUi && !grouped && showShared;

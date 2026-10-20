@@ -625,6 +625,32 @@ describe("Sidebar session list", () => {
     }
   });
 
+  it("keeps the error Retry ahead of the slow-load message", () => {
+    vi.useFakeTimers();
+    try {
+      mockConversations([]);
+      const original = useConvMock.getMockImplementation()!;
+      useConvMock.mockImplementation((...args) => {
+        const query = original(...args);
+        const states = {
+          mine: { data: undefined, isLoading: true },
+          shared: { isError: true, error: new Error("unavailable") },
+        };
+        const state = args[4] === "mine" || args[4] === "shared" ? states[args[4]] : {};
+        return { ...query, ...state } as ReturnType<typeof useConversations>;
+      });
+      renderSidebar();
+      selectSessionFilter("all");
+      const sessions = screen.getByRole("button", { name: "Sessions" }).closest("section")!;
+
+      act(() => vi.advanceTimersByTime(SESSION_LIST_SLOW_LOAD_MS));
+      expect(within(sessions).getByRole("status")).toHaveTextContent("Failed to load: unavailable");
+      expect(screen.queryByText("Sessions are taking longer than usual.")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reveals a thin, theme-aware scrollbar only while scrolling", () => {
     vi.useFakeTimers();
     try {

@@ -74,24 +74,27 @@ it("fetches on each entry while retaining cached rows and never polling", async 
   client.clear();
 });
 
-it("replaces a pending first load when retried", async () => {
-  const client = new QueryClient({ defaultOptions: { queries: { gcTime: Infinity } } });
-  const fetch = vi
-    .fn()
-    .mockImplementationOnce(() => new Promise<Response>(() => {}))
-    .mockImplementation(async () => response("Recovered"));
-  vi.stubGlobal("fetch", fetch);
-  const { result } = renderHook(() => ({ ...useArchivedSessions(true) }), {
-    wrapper: ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
-    ),
-  });
-  await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
-  expect(result.current.isLoading).toBe(true);
-  act(() => {
-    void result.current.refetch();
-  });
-  await waitFor(() => expect(result.current.data?.pages[0].data[0].title).toBe("Recovered"));
-  expect(fetch).toHaveBeenCalledTimes(2);
-  client.clear();
-});
+it.each(["updated_at", "created_at"] as const)(
+  "replaces a pending %s first load when retried",
+  async (sortBy) => {
+    const client = new QueryClient({ defaultOptions: { queries: { gcTime: Infinity } } });
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<Response>(() => {}))
+      .mockImplementation(async () => response("Recovered"));
+    vi.stubGlobal("fetch", fetch);
+    const { result } = renderHook(() => ({ ...useArchivedSessions(true, sortBy) }), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    });
+    await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(result.current.isLoading).toBe(true);
+    act(() => {
+      void result.current.refetch();
+    });
+    await waitFor(() => expect(result.current.data?.pages[0].data[0].title).toBe("Recovered"));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    client.clear();
+  },
+);

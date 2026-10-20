@@ -5,6 +5,7 @@ import {
   useQueryClient,
   type QueryClient,
   type QueryKey,
+  type RefetchOptions,
 } from "@tanstack/react-query";
 import { appendScopePage, refreshScopeWindow, type ScopeCacheData } from "@/lib/sidebarData";
 import { filterSessionScope } from "@/lib/sessionVisibility";
@@ -189,14 +190,14 @@ export function useScopeCache(
 }
 
 /** Refetch a list, replacing a pending first load that refetch would only rejoin. */
-function retryList(
+async function retryList<Result>(
   client: QueryClient,
   queryKey: QueryKey,
   firstLoadPending: boolean,
-  refetch: () => Promise<unknown>,
-): Promise<unknown> {
-  // Cancelling synchronously reverts the query to idle, so this refetch starts a new request.
-  if (firstLoadPending) void client.cancelQueries({ queryKey, exact: true });
+  refetch: () => Promise<Result>,
+): Promise<Result> {
+  // Cancel first so refetch starts a new request instead of rejoining the pending one.
+  if (firstLoadPending) await client.cancelQueries({ queryKey, exact: true });
   return refetch();
 }
 
@@ -228,12 +229,12 @@ export function useArchivedSessions(enabled: boolean, sortBy: SessionSortBy = "u
     if (opening && data) void refetch({ cancelRefetch: false });
   }, [enabled, sortBy, data, refetch]);
   const retry = useCallback(
-    () =>
+    (options?: RefetchOptions) =>
       retryList(
         client,
         conversationsQueryKey(searchQuery, includeArchived, project, visibility, sortBy),
         firstLoadPending,
-        refetch,
+        () => refetch(options),
       ),
     [client, searchQuery, includeArchived, project, visibility, sortBy, firstLoadPending, refetch],
   );
