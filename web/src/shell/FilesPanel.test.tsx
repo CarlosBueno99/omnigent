@@ -324,6 +324,8 @@ describe("FilesPanel header role", () => {
     // Content is always shown — the tree search box is part of it.
     const search = screen.getByRole("searchbox", { name: "Search all files" });
     expect(search).toBeInTheDocument();
+    expect(search).toHaveAttribute("placeholder", "Find files by name");
+    expect(screen.queryByRole("group", { name: "Search mode" })).not.toBeInTheDocument();
     expect(search.parentElement).toHaveClass("rounded-lg");
     expect(search.parentElement).not.toHaveClass("rounded-full");
   });
@@ -406,23 +408,23 @@ describe("FilesPanel hidden-files toggle icon", () => {
 
 describe("FilesPanel on an asleep sandbox", () => {
   it.each([true, false])(
-    "says the agent is asleep instead of an empty workspace (flatView=%s)",
+    "says the sandbox is offline instead of an empty workspace (flatView=%s)",
     (flatView) => {
       useAsleepMock.mockReturnValue(true);
       renderPanel({ conversationId: "conv_asleep", flatView, files: [], listsLoaded: false });
 
-      expect(screen.getByText("Agent is asleep")).toBeInTheDocument();
+      expect(screen.getByText("Sandbox is offline")).toBeInTheDocument();
       expect(screen.queryByText("No files in workspace")).not.toBeInTheDocument();
       expect(screen.queryByText("No workspace changes yet")).not.toBeInTheDocument();
     },
   );
 
-  it("keeps showing a list cached before the sandbox slept", () => {
+  it("keeps showing a list cached before the sandbox went offline", () => {
     useAsleepMock.mockReturnValue(true);
     renderPanel({ conversationId: "conv_asleep", files: [file("README.md")] });
 
     expect(screen.getByText("README.md")).toBeInTheDocument();
-    expect(screen.queryByText("Agent is asleep")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sandbox is offline")).not.toBeInTheDocument();
   });
 });
 
