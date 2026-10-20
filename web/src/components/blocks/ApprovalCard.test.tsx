@@ -5,10 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { childSessionsQueryKey, type ChildSessionInfo } from "@/hooks/useChildSessions";
 import type { ClaudeQuestion } from "@/lib/askUserQuestion";
+import { getAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
 import { BlockStream } from "@/lib/blockStream";
+import type { ElicitationBlock } from "@/lib/blocks";
 import { buildBubbles, type RenderItem } from "@/lib/renderItems";
 import { parseEventLines } from "@/lib/sse";
-import { useChatStore } from "@/store/chatStore";
+import { bindConversationForTest, useChatStore } from "@/store/chatStore";
 import { ApprovalCard, ElicitationCard } from "./ApprovalCard";
 
 afterEach(() => {
@@ -1358,7 +1360,11 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
       },
     ];
 
-    function pendingQuestionsCard(elicitationId: string, questions: ClaudeQuestion[]) {
+    function pendingQuestionsCard(
+      elicitationId: string,
+      questions: ClaudeQuestion[],
+      block?: ElicitationBlock,
+    ) {
       return (
         <ApprovalCard
           elicitationId={elicitationId}
@@ -1367,8 +1373,8 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
           policyName="claude_native_permission"
           contentPreview=""
           requestedSchema={{}}
-          status="pending"
-          response={null}
+          status={block?.status ?? "pending"}
+          response={block?.response ?? null}
           askUserQuestion={{ questions }}
         />
       );
@@ -1442,27 +1448,79 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
       expectFreshCard();
     });
 
+    it("keeps no draft for a card nobody answered", () => {
+      const first = renderPendingQuestions("elic_draft_untouched", draftQuestions);
+      expect(getAskUserQuestionDraft("elic_draft_untouched", draftQuestions)).toBeUndefined();
+      fireEvent.click(screen.getByTestId("ask-user-question-next"));
+      fireEvent.click(screen.getByTestId("ask-user-question-prev"));
+      first.unmount();
+
+      expect(getAskUserQuestionDraft("elic_draft_untouched", draftQuestions)).toBeUndefined();
+    });
+
     it.each([
       ["Submit", () => fireEvent.click(screen.getByTestId("ask-user-question-submit"))],
       ["Cancel", () => fireEvent.click(screen.getByRole("button", { name: /cancel/i }))],
-    ])("restores the answers when a %s verdict is rolled back", (action, respond) => {
-      const submitSpy = vi.fn().mockResolvedValue(undefined);
-      useChatStore.setState({ submitApproval: submitSpy } as Partial<
-        ReturnType<typeof useChatStore.getState>
-      >);
+    ])("restores the answers when a failed %s returns the card", async (action, respond) => {
       const elicitationId = `elic_draft_rollback_${action}`;
-      const first = renderPendingQuestions(elicitationId, draftQuestions);
-      answerFirstAndTypeSecond();
-      respond();
-      expect(submitSpy).toHaveBeenCalledTimes(1);
-      first.unmount();
-
-      renderPendingQuestions(elicitationId, draftQuestions);
-
-      expect(screen.getByTestId("ask-user-question-progress").textContent).toBe("Question 2 of 2:");
-      expect((screen.getByTestId("ask-user-question-custom-input") as HTMLInputElement).value).toBe(
-        "Keep this partial answer",
+      bindConversationForTest(`conv_draft_rollback_${action}`, {
+        blocks: [
+          {
+            type: "elicitation",
+            ctx: {
+              agent: null,
+              depth: 0,
+              turn: 0,
+              timestamp: 0,
+              responseId: "resp_1",
+              itemId: null,
+            },
+            elicitationId,
+            message: "Claude wants to call AskUserQuestion",
+            phase: "pre_tool_use",
+            policyName: "claude_native_permission",
+            contentPreview: "",
+            requestedSchema: {},
+            status: "pending",
+            response: null,
+          },
+        ],
+      });
+      useChatStore.setState({ submitApproval: useChatStore.getInitialState().submitApproval });
+      let failResolve: ((response: Response) => void) | undefined;
+      const fetchMock = vi.fn((input: RequestInfo | URL) =>
+        String(input).endsWith("/resolve")
+          ? new Promise<Response>((resolve) => {
+              failResolve = resolve;
+            })
+          : Promise.resolve(new Response("{}")),
       );
+      vi.stubGlobal("fetch", fetchMock);
+      function StoreBackedCard() {
+        const block = useChatStore((s) =>
+          s.blocks.find((b): b is ElicitationBlock => b.type === "elicitation"),
+        );
+        return block ? pendingQuestionsCard(elicitationId, draftQuestions, block) : null;
+      }
+      try {
+        render(<StoreBackedCard />);
+        answerFirstAndTypeSecond();
+        respond();
+        expect(screen.queryByTestId("ask-user-question-progress")).toBeNull();
+        await vi.waitFor(() => expect(failResolve).toBeDefined());
+        await act(async () => failResolve!(new Response("{}", { status: 500 })));
+
+        expect(screen.getByTestId("ask-user-question-progress").textContent).toBe(
+          "Question 2 of 2:",
+        );
+        expect(
+          (screen.getByTestId("ask-user-question-custom-input") as HTMLInputElement).value,
+        ).toBe("Keep this partial answer");
+      } finally {
+        cleanup();
+        vi.unstubAllGlobals();
+        bindConversationForTest(null);
+      }
     });
 
     it.each([

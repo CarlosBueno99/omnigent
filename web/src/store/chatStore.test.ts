@@ -1428,6 +1428,7 @@ describe("chatStore — switchTo", () => {
     expect(cardOf("conv_vis_elic")[0]!.status).toBe("pending");
 
     // Background it, then the prompt is answered on another surface.
+    saveRegionDraft("elic_vis");
     await useChatStore.getState().switchTo("conv_vis_other");
     seedPendingElicitations("conv_vis_elic", []);
 
@@ -1440,6 +1441,7 @@ describe("chatStore — switchTo", () => {
     expect(reconciled).toHaveLength(1);
     expect(reconciled[0]!.status).toBe("responded");
     expect(reconciled[0]!.response).toEqual({ action: "auto_resolved" });
+    expect(getAskUserQuestionDraft("elic_vis", regionQuestions)).toBeUndefined();
   });
 
   it("does not abort a conversation's stream when switching away", async () => {
@@ -10238,6 +10240,17 @@ describe("chatStore — handleSessionEvent (resource events)", () => {
   });
 });
 
+const regionQuestions = [{ question: "Pick a region", options: [], multiSelect: false }];
+
+function saveRegionDraft(elicitationId: string): void {
+  saveAskUserQuestionDraft(elicitationId, regionQuestions, {
+    currentIndex: 0,
+    selections: { "Pick a region": "" },
+    customSelected: { "Pick a region": true },
+    customInputs: { "Pick a region": "eu-west" },
+  });
+}
+
 function elicitationBlock(id: string): ElicitationBlock {
   return {
     type: "elicitation",
@@ -10318,27 +10331,21 @@ describe("chatStore — submitApproval", () => {
 
   it("keeps an AskUserQuestion draft until the server accepts the verdict", async () => {
     useChatStore.setState({ conversationId: "conv_abc", blocks: [elicitationBlock("elic_ask")] });
-    const questions = [{ question: "Pick a region", options: [], multiSelect: false }];
-    saveAskUserQuestionDraft("elic_ask", questions, {
-      currentIndex: 0,
-      selections: { "Pick a region": "" },
-      customSelected: { "Pick a region": true },
-      customInputs: { "Pick a region": "eu-west" },
-    });
+    saveRegionDraft("elic_ask");
 
     fetchMock.mockImplementationOnce(() => mockResponse({}, { ok: false, status: 500 }));
     await useChatStore
       .getState()
       .submitApproval("elic_ask", "accept", { "Pick a region": "eu-west" });
     expect(useChatStore.getState().blocks[0]).toMatchObject({ status: "pending" });
-    expect(getAskUserQuestionDraft("elic_ask", questions)?.customInputs).toEqual({
+    expect(getAskUserQuestionDraft("elic_ask", regionQuestions)?.customInputs).toEqual({
       "Pick a region": "eu-west",
     });
 
     await useChatStore
       .getState()
       .submitApproval("elic_ask", "accept", { "Pick a region": "eu-west" });
-    expect(getAskUserQuestionDraft("elic_ask", questions)).toBeUndefined();
+    expect(getAskUserQuestionDraft("elic_ask", regionQuestions)).toBeUndefined();
   });
 
   it("posts the verdict to the elicitation resolve URL and optimistically marks responded", async () => {
@@ -10716,6 +10723,8 @@ describe("chatStore — elicitation_resolved", () => {
     useChatStore.setState({
       blocks: [elicitationBlock("elic_older"), elicitationBlock("elic_target")],
     });
+    saveRegionDraft("elic_older");
+    saveRegionDraft("elic_target");
 
     handleSessionEvent(elicitationResolvedEvent("elic_target"));
 
@@ -10732,6 +10741,8 @@ describe("chatStore — elicitation_resolved", () => {
     expect(older.response).toBeNull();
     expect(target.status).toBe("responded");
     expect(target.response).toEqual({ action: "auto_resolved" });
+    expect(getAskUserQuestionDraft("elic_older", regionQuestions)).toBeDefined();
+    expect(getAskUserQuestionDraft("elic_target", regionQuestions)).toBeUndefined();
   });
 
   it("carries a delivered verdict to the card instead of the neutral pill", () => {
@@ -17120,6 +17131,7 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     sinks[0]!.push(elicitationReqFrame("elic_res", "Approve soon-resolved?"));
     await drainAsync();
     expect(elicitationCards()[0]!.status).toBe("pending");
+    saveRegionDraft("elic_res");
 
     // Answered elsewhere during the gap: the resolved event fired into
     // the dead socket and the snapshot no longer lists the prompt.
@@ -17136,6 +17148,7 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     // would 404 against the already-cleared parked future.
     expect(cards[0]!.status).toBe("responded");
     expect(cards[0]!.response).toEqual({ action: "auto_resolved" });
+    expect(getAskUserQuestionDraft("elic_res", regionQuestions)).toBeUndefined();
 
     await closeLoop(sinks, loop);
   });

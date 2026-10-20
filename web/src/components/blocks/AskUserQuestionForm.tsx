@@ -35,7 +35,11 @@ import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-reac
 import { type ChangeEvent, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { ClaudeQuestion } from "@/lib/askUserQuestion";
-import { getAskUserQuestionDraft, saveAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
+import {
+  clearAskUserQuestionDraft,
+  getAskUserQuestionDraft,
+  saveAskUserQuestionDraft,
+} from "@/lib/askUserQuestionDrafts";
 
 /**
  * Map from question id/text → either a single selected label
@@ -126,7 +130,21 @@ export function AskUserQuestionForm({
     return initial;
   });
 
+  // Untouched cards keep no draft, so they cannot evict real ones.
+  const [initialAnswers] = useState(() =>
+    draft ? null : { selections, customSelected, customInputs },
+  );
   useEffect(() => {
+    if (
+      initialAnswers &&
+      currentIndex === 0 &&
+      selections === initialAnswers.selections &&
+      customSelected === initialAnswers.customSelected &&
+      customInputs === initialAnswers.customInputs
+    ) {
+      clearAskUserQuestionDraft(elicitationId);
+      return;
+    }
     const draftSelections = { ...selections };
     const draftSelected = { ...customSelected };
     const draftInputs = { ...customInputs };
@@ -143,7 +161,15 @@ export function AskUserQuestionForm({
       customSelected: draftSelected,
       customInputs: draftInputs,
     });
-  }, [elicitationId, questions, currentIndex, selections, customSelected, customInputs]);
+  }, [
+    elicitationId,
+    questions,
+    initialAnswers,
+    currentIndex,
+    selections,
+    customSelected,
+    customInputs,
+  ]);
 
   const handleSingleSelect = (key: string, label: string) => {
     // Single-select mutex: clicking a real option clears the

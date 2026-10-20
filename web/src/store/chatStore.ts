@@ -4384,6 +4384,7 @@ async function reconcilePendingElicitations(id: string): Promise<void> {
         !stillPending.has(b.elicitationId)
       ) {
         changed = true;
+        clearAskUserQuestionDraft(b.elicitationId);
         const updated: ElicitationBlock = {
           ...b,
           status: "responded",
@@ -5340,6 +5341,7 @@ function reconcileElicitationBlocks(
       !pendingNow.has(b.elicitationId)
     ) {
       changed = true;
+      clearAskUserQuestionDraft(b.elicitationId);
       const updated: ElicitationBlock = {
         ...b,
         status: "responded",
@@ -8503,6 +8505,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       // elsewhere".
       return;
     case "elicitation_resolved":
+      clearAskUserQuestionDraft(event.elicitationId);
       // Match by id, not first-pending — the `pending` guard keeps
       // a user-delivered verdict from being overwritten by a later
       // duplicate-resolve.

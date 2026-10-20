@@ -325,9 +325,9 @@ export function InboxPage() {
         ...(meta === undefined ? {} : { _meta: meta }),
       }).then(
         () => {
-          clearAskUserQuestionDraft(elicitationId);
           if (pendingSubmissions.current.get(elicitationId) !== verdict) return;
           pendingSubmissions.current.delete(elicitationId);
+          clearAskUserQuestionDraft(elicitationId);
           void queryClient.invalidateQueries({ queryKey: ["conversations"] });
           if (item.elicitation.nativeDelivery) {
             const queryKey = ["inbox-elicitations", item.row.id];

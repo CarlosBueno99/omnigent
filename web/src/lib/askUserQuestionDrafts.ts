@@ -13,16 +13,7 @@ const MAX_DRAFTS = 20;
 // In memory only, so typed answers never reach browser storage.
 const drafts = new Map<string, { questions: string; draft: AskUserQuestionDraft }>();
 
-/**
- * Return the draft saved for a pending question card.
- *
- * Harness elicitation ids can recur for different questions, so a draft
- * restores only onto the exact questions it was saved with.
- *
- * @param elicitationId Pending elicitation id, e.g. ``"elicit_claude_0f3a..."``.
- * @param questions The card's current questions.
- * @returns The saved draft, or ``undefined`` when none matches.
- */
+/** Saved draft for this card; only restored when the questions are unchanged. */
 export function getAskUserQuestionDraft(
   elicitationId: string,
   questions: ClaudeQuestion[],
@@ -42,7 +33,7 @@ export function saveAskUserQuestionDraft(
   if (drafts.size > MAX_DRAFTS) drafts.delete(drafts.keys().next().value as string);
 }
 
-/** Forget a card's draft once the server has accepted its verdict. */
+/** Forget a card's draft once its prompt has been answered or has ended. */
 export function clearAskUserQuestionDraft(elicitationId: string): void {
   drafts.delete(elicitationId);
 }

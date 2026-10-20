@@ -778,6 +778,7 @@ it.each(
       act(async () => {
         await queryClient.refetchQueries({ queryKey: ["inbox-elicitations"] });
       });
+    saveAskUserQuestionDraft("eli_1", draftQuestions, unsentDraft);
     renderPage(queryClient);
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
     await poll();
@@ -804,6 +805,10 @@ it.each(
       submissions[1]!.reject(new Error("retry failed"));
     });
     expect(await screen.findByRole("button", { name: "Retry sending approval" })).toBeEnabled();
+    // Only a success for the attempt still on screen clears the draft.
+    expect(getAskUserQuestionDraft("eli_1", draftQuestions)).toEqual(
+      outcome === "success" && !retryFirst ? undefined : unsentDraft,
+    );
   },
 );
 
