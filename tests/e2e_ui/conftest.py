@@ -2928,7 +2928,7 @@ def native_codex_mock_session_context(
     with _temp_omnigent_mock_config(
         mock_llm_server_url, "codex", workflow_owned=bool(_server_state.get("workflow_owned"))
     ):
-        # Keep the default create call unchanged; tests/test_ui_fixture_wiring.py pins it.
+        # Forward only set options: test_mock_session_uses_owned_config asserts the default call.
         session_options = {
             name: value
             for name, value in (

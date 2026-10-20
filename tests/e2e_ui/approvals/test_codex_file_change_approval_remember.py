@@ -110,6 +110,7 @@ def test_codex_native_file_change_session_approval_skips_later_prompts(
         + [{"text": done}] * 6,
         key=marker,
         match=marker,
+        required_tools=["exec_command"],
     )
     set_fallback_mock_llm(mock_llm_server_url, _CODEX_MOCK_MODEL, "")
 
