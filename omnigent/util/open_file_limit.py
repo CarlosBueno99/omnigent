@@ -17,8 +17,7 @@ _logger = logging.getLogger(__name__)
 
 #: Soft limit requested at startup; bounded by the hard limit when that is finite.
 DEFAULT_SOFT_OPEN_FILE_LIMIT = 65536
-# macOS OPEN_MAX: the largest soft limit the kernel accepts when the hard limit is
-# unlimited but ``kern.maxfilesperproc`` is below the requested value.
+# Darwin's OPEN_MAX; macOS rejects soft limits above ``kern.maxfilesperproc``.
 _MACOS_OPEN_MAX = 10240
 # Tried in order when the kernel rejects the target; the smaller steps cover
 # hosts whose ``kern.maxfilesperproc`` is tuned below OPEN_MAX.
@@ -103,6 +102,7 @@ def raise_soft_open_file_limit(target: int = DEFAULT_SOFT_OPEN_FILE_LIMIT) -> Op
     return OpenFileLimit(soft, hard)
 
 
+# Host children are launched as ``python -m omnigent...``; other entry points are not counted.
 def _runs_omnigent_module(cmdline: list[str]) -> bool:
     return any(
         flag == "-m" and module.split(".")[0] == "omnigent"

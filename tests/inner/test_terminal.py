@@ -1032,6 +1032,34 @@ async def test_async_idle_watcher_backoff_resets_after_probes_start_again(
     ]
 
 
+def test_probe_start_warning_repeats_once_the_log_interval_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Start failures warn again once the throttle window has elapsed."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    clock = iter([1000.0, 1059.9, 1060.0, 1061.0])
+    monkeypatch.setattr(terminal_mod, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    exhausted = OSError(errno.EMFILE, "Too many open files")
+
+    with caplog.at_level(logging.DEBUG, logger=terminal_mod.__name__):
+        for _ in range(4):
+            instance._log_probe_start_failure("capture-pane", exhausted)
+
+    start_failures = [r for r in caplog.records if "could not start" in r.getMessage()]
+    assert [r.levelno for r in start_failures] == [
+        logging.WARNING,
+        logging.DEBUG,
+        logging.WARNING,
+        logging.DEBUG,
+    ]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("threaded", [False, True], ids=["async", "threaded"])
 @pytest.mark.parametrize(

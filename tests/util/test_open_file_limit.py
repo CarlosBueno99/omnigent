@@ -75,6 +75,7 @@ def test_raise_soft_open_file_limit_falls_back_through_fixed_steps(
     "limits",
     [
         pytest.param((65536, _INFINITY), id="already-at-target"),
+        pytest.param((100000, _INFINITY), id="above-target"),
         pytest.param((_INFINITY, _INFINITY), id="unlimited"),
         pytest.param((4096, 4096), id="at-hard-limit"),
     ],
