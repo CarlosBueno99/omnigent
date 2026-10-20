@@ -3076,6 +3076,30 @@ async def test_route_session_harness_skips_the_static_top_up_off_gateway() -> No
 
 
 @pytest.mark.asyncio
+async def test_route_session_harness_narrows_only_the_judges_menu() -> None:
+    """A judge catalog narrows its harness; a statically topped-up one offers all."""
+    local = FakeRoutingClient(
+        RoutingResult(model="claude-opus-5", rationale="hard", harness="claude-native")
+    )
+    caps = FakeCaps(routing_client=local, routing_backends=RoutingBackends(local=local))
+    with patch("omnigent.runtime._globals._caps", new=caps):
+        harness, model, _verdict, error = await route_session_harness(
+            "hello",
+            harness_candidates=("claude-native", "codex-native"),
+            catalog={"claude-native": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-opus-5"]},
+            judge_catalog={"claude-native": ["claude-sonnet-4-6", "claude-opus-5"]},
+        )
+    assert error is None
+    assert (harness, model) == ("claude-native", "claude-opus-5")
+    assert local.offered == [
+        {
+            "claude-native": ["claude-sonnet-4-6", "claude-opus-5"],
+            "codex-native": infer_models("codex-native"),
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_route_turn_skips_the_static_table_off_gateway_but_takes_the_catalog() -> None:
     local = FakeRoutingClient(RoutingResult(model="claude-sonnet-4-6", rationale="mid"))
     caps = FakeCaps(routing_client=local, routing_backends=RoutingBackends(local=local))

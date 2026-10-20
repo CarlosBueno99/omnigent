@@ -1202,7 +1202,7 @@ async def test_auto_routing_falls_back_to_the_built_in_judge_off_the_gateway(
         patch.object(
             orchestration,
             "_pre_session_model_catalog",
-            AsyncMock(return_value=_PreSessionCatalog(dict(_OFF_GATEWAY_CATALOG), {})),
+            AsyncMock(return_value=_PreSessionCatalog(_OFF_GATEWAY_CATALOG, _OFF_GATEWAY_CATALOG)),
         ),
     ):
         agent_name, model, verdict, error = await orchestration._resolve_native_smart_routing(
@@ -1343,7 +1343,7 @@ async def test_top_level_smart_routing_create_succeeds_off_the_gateway_with_the_
         patch.object(
             orchestration,
             "_pre_session_model_catalog",
-            AsyncMock(return_value=_PreSessionCatalog(dict(_OFF_GATEWAY_CATALOG), {})),
+            AsyncMock(return_value=_PreSessionCatalog(_OFF_GATEWAY_CATALOG, _OFF_GATEWAY_CATALOG)),
         ),
     ):
         created = await _create_smart_routing_session(client, wrappers, routing_client, oss=True)
@@ -1395,7 +1395,7 @@ async def test_fixed_harness_routing_create_succeeds_off_the_gateway_with_the_ju
         patch.object(
             orchestration,
             "_pre_session_model_catalog",
-            AsyncMock(return_value=_PreSessionCatalog({harness: [pick]}, {})),
+            AsyncMock(return_value=_PreSessionCatalog({harness: [pick]}, {harness: [pick]})),
         ),
     ):
         created = await _create_fixed_harness_session(
@@ -1445,7 +1445,7 @@ async def test_a_pane_create_routes_with_the_judge_when_the_router_is_not_enable
         patch.object(
             orchestration,
             "_pre_session_model_catalog",
-            AsyncMock(return_value=_PreSessionCatalog({harness: [pick]}, {})),
+            AsyncMock(return_value=_PreSessionCatalog({harness: [pick]}, {harness: [pick]})),
         ),
     ):
         created = await client.post("/v1/sessions", json=body)
@@ -1713,7 +1713,8 @@ def _model_options_request(  # type: ignore[explicit-any]
             {"claude-native": ["databricks-claude-opus-5"]},
         ),
         # Spellings of one model keep the host's order, so resolution by
-        # comparison spelling still lands on the plain row before ``[1m]``.
+        # comparison spelling still lands on the plain row before ``[1m]``;
+        # the judge's menu holds that spelling alone.
         (
             True,
             {
@@ -1732,13 +1733,7 @@ def _model_options_request(  # type: ignore[explicit-any]
                     "claude-sonnet-4-6[1m]",
                 ]
             },
-            {
-                "claude-native": [
-                    "claude-haiku-4-5",
-                    "claude-sonnet-4-6",
-                    "claude-sonnet-4-6[1m]",
-                ]
-            },
+            {"claude-native": ["claude-haiku-4-5", "claude-sonnet-4-6"]},
         ),
         # A row whose declared successor is also listed is superseded; one
         # whose successor is absent is still the current pick for its tier.
@@ -1914,6 +1909,7 @@ async def test_built_in_judge_ranks_only_codexs_current_models(tier: str, expect
     )
 
     assert error is None and verdict is not None
+    assert verdict["router_source"] == "oss-llm"
     # Superseded rows stay off the menu the rubric ranks by position.
     assert judge.menus == [["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"]]
     assert model == expected

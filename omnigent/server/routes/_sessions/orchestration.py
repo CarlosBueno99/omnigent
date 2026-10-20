@@ -10651,8 +10651,8 @@ async def _host_model_options(
     :param host_registry: Registry used to enqueue the outbound frame.
     :param harness: Native harness id, e.g. ``"claude-native"``.
     :returns: ``(launchable, current)``: every model id the host reported,
-        picker rows first, and the picker rows no other listed row supersedes.
-        Both are empty when the host could not answer.
+        picker rows first, and one spelling of each picker model no other
+        picker row supersedes. Both are empty when the host could not answer.
     """
     from omnigent.models.codex_model_vocabulary import codex_upgrade_target, comparable_model_id
     from omnigent.server.routes._host_model_options import request_host_model_options
@@ -10682,26 +10682,31 @@ async def _host_model_options(
                     successors[raw] = successor
     listed = {comparable_model_id(model) for model in models}
     superseded = {
-        model
+        comparable_model_id(model)
         for model, successor in successors.items()
         if comparable_model_id(successor) != comparable_model_id(model)
         and comparable_model_id(successor) in listed
     }
-    current = [model for model in models if model not in superseded]
+    # One spelling per model: the judge ranks by position, so ``[1m]`` twins
+    # must not take a slot of their own.
+    current: dict[str, str] = {}
+    for model in models:
+        if (comparable := comparable_model_id(model)) not in superseded:
+            current.setdefault(comparable, model)
     routable = result.get("routable_models")
     if isinstance(routable, list):
         for raw in routable:
             if isinstance(raw, str) and raw and raw not in models:
                 models.append(raw)
-    return models, current
+    return models, list(current.values())
 
 
 class _PreSessionCatalog(NamedTuple):
-    """A host's pre-launch routing candidates, each list least preferred first.
+    """A host's pre-launch routing candidates, in routing order.
 
     :param launchable: Harness → every model id the host can launch.
-    :param current: Harness → the picker models no listed model supersedes,
-        the menu the built-in judge ranks by position.
+    :param current: Harness → the host's current picker models, the menu the
+        built-in judge ranks by position.
     """
 
     launchable: dict[str, list[str]]

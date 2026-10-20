@@ -158,10 +158,8 @@ def models_in_family(harness: str | None, models: Iterable[str]) -> list[str]:
 def routing_order_from_preference(models: Iterable[str]) -> list[str]:
     """Reverse a most-preferred-first host list so the most preferred model is last.
 
-    Routing candidate lists put their most capable model last, while host CLI
-    catalogs put their preferred model first. Distinct models are reversed;
-    spellings of one model (``[1m]``, dotted versions) keep their host order
-    so first-match resolution still lands on the host's spelling.
+    Spellings of one model keep host order so first-match resolution still
+    finds the host's spelling.
 
     :param models: Model ids, most preferred first.
     :returns: The same ids, least preferred first.
@@ -2080,7 +2078,8 @@ async def route_session_harness(
     :param judge_catalog: Harness → the subset of *catalog* the built-in judge
         may pick from. Its rubric ranks candidates by position, so superseded
         and frozen models are left off while the external router still sees
-        every *catalog* id. A harness absent here offers the judge everything.
+        every *catalog* id. A harness absent or empty here offers the judge
+        everything.
     :param gateway_backed: Whether every candidate harness resolves
         AI-Gateway-backed inference on the target host. ``False`` takes the
         external router out of play (its picks are gateway catalog ids the pane
