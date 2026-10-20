@@ -8296,18 +8296,16 @@ def answer_question_dialog(
         if _wait_for_pane(socket_path, tmux_target, shows_question, deadline) is None:
             return False
         _run_tmux(socket_path, "send-keys", "-t", tmux_target, key)
-    answered = [(question, labels[int(key) - 1]) for question, labels, key in plan]
-    pane = _wait_for_pane(
-        socket_path,
-        tmux_target,
-        lambda pane: _composer_row(pane) is not None or _question_review_shows(pane, answered),
-        deadline,
-    )
-    if pane is not None and _composer_row(pane) is None:
+    if len(plan) > 1:
+        # Claude always reviews multiple answers first; a composer without it means a cancel.
+        answered = [(question, labels[int(key) - 1]) for question, labels, key in plan]
+        review = functools.partial(_question_review_shows, answered=answered)
+        if _wait_for_pane(socket_path, tmux_target, review, deadline) is None:
+            return False
         _run_tmux(socket_path, "send-keys", "-t", tmux_target, "1")
-        pane = _wait_for_pane(
-            socket_path, tmux_target, lambda pane: _composer_row(pane) is not None, deadline
-        )
+    pane = _wait_for_pane(
+        socket_path, tmux_target, lambda pane: _composer_row(pane) is not None, deadline
+    )
     return pane is not None
 
 

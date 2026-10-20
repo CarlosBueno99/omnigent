@@ -22,6 +22,7 @@ from tests.e2e_ui.conftest import (
     _server_state,
     _temp_omnigent_mock_config,
     configure_mock_llm,
+    reset_mock_llm,
     set_fallback_mock_llm,
 )
 from tests.helpers.ui_configuration import _CLAUDE_MOCK_MODEL
@@ -152,6 +153,7 @@ def test_card_answer_reaches_subagent_after_permission_hook_exits(
 ) -> None:
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
     runner_id = str(_server_state["runner_id"])
+    parent_id: str | None = None
     try:
         with _temp_omnigent_mock_config(
             mock_llm_server_url, "claude", workflow_owned=bool(_server_state.get("workflow_owned"))
@@ -180,6 +182,11 @@ def test_card_answer_reaches_subagent_after_permission_hook_exits(
                 assert time.monotonic() < deadline, "The sub-agent never received the card answer"
                 time.sleep(1)
     finally:
-        if respawned is not None:
-            respawned.terminate()
-            respawned.wait(timeout=10)
+        try:
+            reset_mock_llm(mock_llm_server_url)
+            if parent_id is not None:
+                httpx.delete(f"{live_server}/v1/sessions/{parent_id}", timeout=10, trust_env=False)
+        finally:
+            if respawned is not None:
+                respawned.terminate()
+                respawned.wait(timeout=10)

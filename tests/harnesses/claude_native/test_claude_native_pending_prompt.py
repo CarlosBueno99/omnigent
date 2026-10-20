@@ -466,9 +466,10 @@ def test_question_picker_refuses_answers_it_cannot_verify(
     ("screens", "expected_keys"),
     [
         ([_COLOR_TAB, _COMPOSER], ["2"]),
+        ([_COLOR_TAB, _SIZE_TAB, _COMPOSER], ["2", "3"]),
         ([_COLOR_TAB, _SIZE_TAB, _REVIEW_TAB.replace("→ Large", "→ Small")], ["2", "3"]),
     ],
-    ids=["picker-closed-mid-answer", "review-lists-other-answers"],
+    ids=["picker-closed-mid-answer", "picker-closed-before-review", "review-lists-other-answers"],
 )
 def test_question_picker_stops_when_the_pane_diverges(
     native_bridge: Path,
