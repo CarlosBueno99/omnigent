@@ -14227,6 +14227,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
           updated_at: clock.updatedAt,
           items: [],
           labels: {},
+          pending_elicitations: sessionPendingElicitations.get(id) ?? [],
         });
       }
       if (url.startsWith(`/v1/sessions/${id}/items`)) {
@@ -14283,30 +14284,37 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
-  it("does not refetch items the live stream already mirrored", async () => {
-    seedSession("conv_items_live", []);
+  // Runner-relayed items carry no server stamp, so one backfill confirms them.
+  it.each([
+    { shape: "stamped", stamp: { created_at: 160 }, backfills: 0, outcome: "skips the backfill" },
+    { shape: "unstamped", stamp: {}, backfills: 1, outcome: "backfills once" },
+  ])("$outcome after the stream mirrors a $shape item", async (testCase) => {
+    const id = `conv_items_live_${testCase.backfills}`;
+    seedSession(id, []);
     const sink = pushableStream();
-    const clock = routeSnapshotClock("conv_items_live", sink);
+    const clock = routeSnapshotClock(id, sink);
     const controller = new AbortController();
-    const bound = bindConversationForTest("conv_items_live", { abortController: controller });
-    const loop = startStreamPump("conv_items_live", controller, bound.set, bound.get);
+    const bound = bindConversationForTest(id, { abortController: controller });
+    const loop = startStreamPump(id, controller, bound.set, bound.get);
     await drainAsync();
     await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
     await drainAsync();
 
-    // The server persists a reply and the stream mirrors it, stamped from the same clock.
     clock.updatedAt = 160;
-    sink.push(
-      sse("response.output_item.done", {
-        item: { ...assistantMessage("resp_live", "mirrored live"), created_at: 160 },
-      }),
-    );
+    const mirrored = assistantMessage("resp_live", "mirrored live");
+    seedSessionItems(id, [{ ...mirrored, created_at: 160 }]);
+    sink.push(sse("response.output_item.done", { item: { ...mirrored, ...testCase.stamp } }));
     await drainAsync();
-    expect(bound.get().blocks.map((b) => b.ctx.itemId)).toContain("msg_resp_live_asst");
+    expect(bound.get().blocks.map((b) => b.ctx.itemId)).toEqual(["msg_resp_live_asst"]);
 
     await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-    await drainAsync();
-    expect(clock.itemFetches).toBe(0);
+    await drainAsync(2);
+    expect(clock.itemFetches).toBe(testCase.backfills);
+    expect(bound.get().blocks.map((b) => b.ctx.itemId)).toEqual(["msg_resp_live_asst"]);
+
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync(2);
+    expect(clock.itemFetches).toBe(testCase.backfills);
 
     controller.abort();
     await drainAsync(2);
@@ -14459,6 +14467,13 @@ describe("chatStore — startStreamPump reconnect loop", () => {
 
     const gap = Array.from({ length: gapLength }, (_, i) => gapUser("gap", i));
     seedSessionItems(id, gap);
+    seedPendingElicitations(id, [
+      {
+        type: "response.elicitation_request",
+        elicitation_id: "elic_gap",
+        params: { mode: "form", message: "Approve the gap tool?", phase: "tool_call_approval" },
+      },
+    ]);
     let releaseItems!: () => void;
     clock.itemsGate = new Promise<void>((resolve) => {
       releaseItems = resolve;
@@ -14483,9 +14498,14 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       responseId: "resp_new",
       state: "streaming",
     });
-    expect(bound.get().blocks.map((b) => b.ctx.itemId)).toEqual(
+    const blocks = bound.get().blocks;
+    expect(blocks.filter((b) => b.ctx.itemId).map((b) => b.ctx.itemId)).toEqual(
       gap.slice(-INITIAL_WINDOW_ITEMS).map((item) => item.id),
     );
+    // The live event does not void recovery of a prompt the stream dropped.
+    expect(
+      blocks.filter((b): b is ElicitationBlock => b.type === "elicitation").map((b) => b.status),
+    ).toEqual(["pending"]);
 
     controller.abort();
     await drainAsync(2);
@@ -14663,6 +14683,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
 
     await pump.stop();
   });
+
   it("keeps a live status event that arrives during snapshot reconciliation", async () => {
     seedSession("conv_status_race", []);
     const sink = pushableStream();

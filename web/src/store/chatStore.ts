@@ -1404,9 +1404,7 @@ let queryClient: QueryClient | null = null;
 const streamEventRevisions = new Map<string, number>();
 conversationRegistry.subscribeDisposed((id) => streamEventRevisions.delete(id));
 
-// Server clock (epoch s) of the transcript activity each conversation has seen:
-// the last snapshot's `updatedAt` and the newest item `createdAt` (hydration,
-// backfill, or a live item event). The periodic snapshot reconcile compares them.
+// Server-clock (epoch s) markers compared by the periodic snapshot reconcile.
 const snapshotUpdatedAtS = new Map<string, number>();
 const newestItemCreatedAtS = new Map<string, number>();
 // Conversations whose snapshot showed a lifecycle edge the stream never
@@ -1426,7 +1424,9 @@ function noteItemCreatedAt(id: string, createdAt: number | undefined): void {
 /** Record a processed session snapshot and the items fetched with it. */
 function noteSnapshot(id: string, session: Session, items: ConversationItem[] = []): void {
   itemBackfillPending.delete(id);
-  if (session.updatedAt != null) snapshotUpdatedAtS.set(id, session.updatedAt);
+  if (session.updatedAt != null) {
+    snapshotUpdatedAtS.set(id, Math.max(session.updatedAt, snapshotUpdatedAtS.get(id) ?? 0));
+  }
   for (const item of items) noteItemCreatedAt(id, item.created_at);
 }
 
@@ -5567,19 +5567,17 @@ async function rehydrateWindowOnReconnect(
       windowBlocks,
       withoutRebuiltUserInputCards(tail, windowBlocks),
     );
-    const superseded = snapshotSuperseded();
-    const statusPatch: Partial<ChatState> = superseded
+    const statusPatch: Partial<ChatState> = snapshotSuperseded()
       ? {}
       : reconnectStatusPatch(session, s, launchBeforeFetch);
-    const blocks = superseded
-      ? merged
-      : (reconcileElicitationBlocks(
-          merged,
-          snapshotPending,
-          preGapElicitations.pending,
-          preGapElicitations.autoResolved,
-          preGapElicitations.cards,
-        ) ?? merged);
+    const blocks =
+      reconcileElicitationBlocks(
+        merged,
+        snapshotPending,
+        preGapElicitations.pending,
+        preGapElicitations.autoResolved,
+        preGapElicitations.cards,
+      ) ?? merged;
     return {
       ...statusPatch,
       // Same persisted-item evidence as the reconnect path: a rehydrated item
@@ -5622,8 +5620,8 @@ async function rehydrateWindowOnReconnect(
  * re-hydrate. Swallows fetch errors: a transient
  * failure just means the next reconnect retries. All writes are
  * `historyGeneration`-guarded so a window reset mid-fetch voids them.
- * A caller holding a just-applied session snapshot passes it, with the stream
- * revision read before its fetch, to skip the re-read.
+ * A caller holding a just-applied session snapshot passes it to skip the
+ * re-read; stream events after its `streamRevision` keep their newer status.
  */
 async function reconcileOnReconnect(
   id: string,
@@ -5633,7 +5631,6 @@ async function reconcileOnReconnect(
   snapshot?: { session: Session; streamRevision: number },
 ): Promise<void> {
   if (queryClient === null) return;
-  // Live events after the caller's snapshot supersede its status and prompts.
   const snapshotSuperseded = (): boolean =>
     snapshot !== undefined && (streamEventRevisions.get(id) ?? 0) !== snapshot.streamRevision;
   const launchBeforeFetch = mcpStartupBeforeSnapshot(id, get());
@@ -5731,9 +5728,8 @@ async function reconcileOnReconnect(
       s.isNativeTerminalSession && unseen.some((b) => b.type === "text_done" && b.ctx.itemId)
         ? withoutInterruptedNativePreviews(currentBlocks, ignoredNativeMessageIds)
         : currentBlocks;
-    const superseded = snapshotSuperseded();
     const patch: Partial<ChatState> = {
-      ...(superseded ? {} : reconnectStatusPatch(session, s, launchBeforeFetch)),
+      ...(snapshotSuperseded() ? {} : reconnectStatusPatch(session, s, launchBeforeFetch)),
       // A gap-committed item can be a send whose POST died in the gap: it
       // retracts the draft, or marks it refused when the snapshot says the
       // runner rejected the forward (see `reconcileSendDraftWithSnapshot`).
@@ -5775,24 +5771,20 @@ async function reconcileOnReconnect(
     // was auto-cleared. Items can't resupply these (elicitations are
     // never items), so this is the only path that fixes them short of
     // a full page refresh.
-    const reconciled = superseded
-      ? null
-      : reconcileElicitationBlocks(
-          nextBlocks,
-          snapshotPending,
-          preGapElicitations.pending,
-          preGapElicitations.autoResolved,
-          preGapElicitations.cards,
-        );
+    const reconciled = reconcileElicitationBlocks(
+      nextBlocks,
+      snapshotPending,
+      preGapElicitations.pending,
+      preGapElicitations.autoResolved,
+      preGapElicitations.cards,
+    );
     if (reconciled !== null) nextBlocks = reconciled;
     nextBlocks =
       snapshotCompactionSpinners(nextBlocks, s.activeResponse, patch.activeResponse) ?? nextBlocks;
     if (nextBlocks !== s.blocks) patch.blocks = nextBlocks;
     return patch;
   });
-  // Advance the recovery markers only once the covered backfill is applied. A
-  // failed later page returns above with them unchanged, so the next reconcile
-  // tick retries instead of treating the gap as already processed.
+  // Record only after the backfill applies; failure paths return so the next tick retries.
   noteSnapshot(id, session, items);
 }
 
