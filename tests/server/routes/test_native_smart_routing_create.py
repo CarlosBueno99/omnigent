@@ -45,6 +45,7 @@ from omnigent.server.smart_routing import (
     AUTO_NATIVE_ROUTING_HARNESSES,
     RoutePick,
     RoutingResult,
+    RoutingSettings,
     TaskV1RouteOptionSource,
     infer_models,
     route_session_harness,
@@ -1774,6 +1775,27 @@ async def test_pre_session_catalog_reads_the_hosts_model_options(
     assert catalog == _PreSessionCatalog(expected, current)
     # No in-flight request is left behind on any path.
     assert conn.pending_model_options == {}
+
+
+async def test_pre_session_catalog_detects_supersession_under_a_configured_prefix() -> None:
+    answers = {
+        "codex-native": {
+            "models": [
+                {"id": "acme.gpt-6-sol", "model": "acme.gpt-6-sol"},
+                {"id": "acme.gpt-5.6-sol", "model": "acme.gpt-5.6-sol", "upgrade": "gpt-6-sol"},
+            ]
+        }
+    }
+    _conn, request = _model_options_request(answers, host_online=True)
+    caps = FakeCaps(routing_settings=RoutingSettings(model_prefixes=("acme.",)))
+    with patch("omnigent.runtime._globals._caps", new=caps):
+        catalog = await _pre_session_model_catalog(
+            cast("Any", request), _host(None), ("codex-native",)
+        )
+    assert catalog == _PreSessionCatalog(
+        {"codex-native": ["acme.gpt-5.6-sol", "acme.gpt-6-sol"]},
+        {"codex-native": ["acme.gpt-6-sol"]},
+    )
 
 
 # Codex CLI 0.158.0's ``model/list`` answer, in the order the CLI reports it.

@@ -10654,8 +10654,9 @@ async def _host_model_options(
         picker rows first, and one spelling of each picker model no other
         picker row supersedes. Both are empty when the host could not answer.
     """
-    from omnigent.models.codex_model_vocabulary import codex_upgrade_target, comparable_model_id
+    from omnigent.models.codex_model_vocabulary import codex_upgrade_target
     from omnigent.server.routes._host_model_options import request_host_model_options
+    from omnigent.server.smart_routing import _bare_id
 
     try:
         result = await request_host_model_options(
@@ -10680,18 +10681,17 @@ async def _host_model_options(
                 models.append(raw)
                 if (successor := codex_upgrade_target(option)) is not None:
                     successors[raw] = successor
-    listed = {comparable_model_id(model) for model in models}
+    listed = {_bare_id(model) for model in models}
     superseded = {
-        comparable_model_id(model)
+        _bare_id(model)
         for model, successor in successors.items()
-        if comparable_model_id(successor) != comparable_model_id(model)
-        and comparable_model_id(successor) in listed
+        if _bare_id(successor) != _bare_id(model) and _bare_id(successor) in listed
     }
     # One spelling per model: the judge ranks by position, so ``[1m]`` twins
     # must not take a slot of their own.
     current: dict[str, str] = {}
     for model in models:
-        if (comparable := comparable_model_id(model)) not in superseded:
+        if (comparable := _bare_id(model)) not in superseded:
             current.setdefault(comparable, model)
     routable = result.get("routable_models")
     if isinstance(routable, list):

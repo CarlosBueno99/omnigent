@@ -3076,7 +3076,20 @@ async def test_route_session_harness_skips_the_static_top_up_off_gateway() -> No
 
 
 @pytest.mark.asyncio
-async def test_route_session_harness_narrows_only_the_judges_menu() -> None:
+@pytest.mark.parametrize(
+    ("current", "judged"),
+    [
+        (
+            ["claude-sonnet-4-6", "claude-opus-5"],
+            ["claude-sonnet-4-6", "claude-opus-5"],
+        ),
+        # A harness with no current models offers the judge everything.
+        ([], ["claude-sonnet-4-6", "claude-opus-4-8", "claude-opus-5"]),
+    ],
+)
+async def test_route_session_harness_narrows_only_the_judges_menu(
+    current: list[str], judged: list[str]
+) -> None:
     """A judge catalog narrows its harness; a statically topped-up one offers all."""
     local = FakeRoutingClient(
         RoutingResult(model="claude-opus-5", rationale="hard", harness="claude-native")
@@ -3087,15 +3100,12 @@ async def test_route_session_harness_narrows_only_the_judges_menu() -> None:
             "hello",
             harness_candidates=("claude-native", "codex-native"),
             catalog={"claude-native": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-opus-5"]},
-            judge_catalog={"claude-native": ["claude-sonnet-4-6", "claude-opus-5"]},
+            judge_catalog={"claude-native": current},
         )
     assert error is None
     assert (harness, model) == ("claude-native", "claude-opus-5")
     assert local.offered == [
-        {
-            "claude-native": ["claude-sonnet-4-6", "claude-opus-5"],
-            "codex-native": infer_models("codex-native"),
-        }
+        {"claude-native": judged, "codex-native": infer_models("codex-native")}
     ]
 
 

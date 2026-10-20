@@ -111,6 +111,8 @@ def test_every_extended_model_declares_a_ladder_and_a_fallback() -> None:
     [
         ({"id": "gpt-5.5", "upgrade": "gpt-6-sol"}, "gpt-6-sol"),
         ({"id": "gpt-5.5", "upgrade": {"model": "gpt-6-sol"}}, "gpt-6-sol"),
+        ({"id": "gpt-5.5", "upgrade": {"id": "gpt-6-sol"}}, "gpt-6-sol"),
+        ({"id": "gpt-5.5", "upgradeInfo": {"id": "gpt-6-sol"}}, "gpt-6-sol"),
         # ``model/list``'s structured field wins over the legacy string.
         (
             {"id": "gpt-5.5", "upgrade": "gpt-5.6-sol", "upgradeInfo": {"model": "gpt-6-sol"}},
