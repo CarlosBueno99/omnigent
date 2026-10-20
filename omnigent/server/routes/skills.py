@@ -156,7 +156,7 @@ def create_skills_router(
             spec = await _load_session_spec(agent_cache, session_agent, sub_agent_name)
             if spec is not None:
                 # Scan only the workspace and merge bundled skills from the server's copy;
-                # skills found only by extracting the bundle on the host, e.g. plugins, are lost.
+                # skills from the bundle's own .agents/skills and plugins are lost.
                 _logger.warning(
                     "host %s could not discover skills for session %s (%s); "
                     "scanning its workspace without the bundle",
@@ -222,6 +222,7 @@ async def _load_session_spec(
             agent_cache.load, agent.id, agent.bundle_location, expand_env=agent.operator_authored
         )
     except Exception:  # noqa: BLE001
+        # The fallback is best effort: any failure keeps the host's error instead of a 500.
         _logger.warning("could not load agent %s for skill discovery", agent.id, exc_info=True)
         return None
     return loaded.spec

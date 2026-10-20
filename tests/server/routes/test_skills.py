@@ -65,6 +65,7 @@ def skills_app(db_uri: str, tmp_path: Path, request: pytest.FixtureRequest):
                     "skills": [
                         {"name": "child-review", "description": "Review", "content": "Review."}
                     ],
+                    "skills_filter": ["repo-skill"],
                 }
             ],
         ),
@@ -248,7 +249,7 @@ async def test_session_catalog_survives_failed_host_bundle_read(
         conv.workspace,
         agent.id,
         str(agent.version),
-        "all",
+        ["repo-skill"] if conv.sub_agent_name else "all",
     )
     assert response.status_code == 200
     assert [skill["name"] for skill in expected] == [bundled_skill, "repo-skill"]
