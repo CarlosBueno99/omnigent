@@ -628,10 +628,18 @@ def test_inline_databricks_gateway_unlisted_override_is_routed_like_databricks_k
     assert [m["id"] for m in rendered[expected_provider]["models"]] == [override]
 
 
+def _refuse_host_metadata_probe(host: str) -> None:
+    raise ConnectionError(f"offline test stub: refusing to probe {host}")
+
+
 def _use_databricks_config_file(
     monkeypatch: pytest.MonkeyPatch, config_file: Path, contents: str | None
 ) -> None:
     """Resolve the Databricks workspace only from *config_file* (absent when ``None``)."""
+    # Newer SDKs probe the host during Config() and retry an unreachable one for minutes.
+    monkeypatch.setattr(
+        "databricks.sdk.config.get_host_metadata", _refuse_host_metadata_probe, raising=False
+    )
     for name in (
         "DATABRICKS_HOST",
         "DATABRICKS_TOKEN",
