@@ -266,6 +266,7 @@ def test_build_codex_remote_args_emits_config_overrides_before_subcommand(
     [
         ((), ('model="gpt-5.6-luna"',), "gpt-5.6-luna"),
         ((), ("model='gpt-5.6-luna'",), "gpt-5.6-luna"),
+        ((), ("model=gpt-5.6-luna",), "gpt-5.6-luna"),
         ((), ('model="gpt-5.6-sol"', 'model="gpt-5.6-luna"'), "gpt-5.6-luna"),
         ((), ('model_provider="omnigent"',), None),
         ((), ('model=""',), None),
