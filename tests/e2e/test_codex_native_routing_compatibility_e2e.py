@@ -35,6 +35,9 @@ from omnigent.cli import main
 main()
 """
 
+# Server title requests echo the prompt on the session model, not Codex's turn model.
+_TITLES_OFF = {"x-omnigent-background-session-titles": "off"}
+
 pytestmark = pytest.mark.skipif(
     shutil.which("codex") is None or shutil.which("tmux") is None,
     reason="requires native Codex and tmux",
@@ -209,7 +212,9 @@ def test_native_turn_uses_the_session_model_over_a_managed_config_pin(
                 "OMNIGENT_HARNESS_TMP_PARENT": os.environ.get("OMNIGENT_HARNESS_TMP_PARENT"),
             }
         )
-        with httpx.Client(base_url=stack.base_url, trust_env=False, timeout=30) as client:
+        with httpx.Client(
+            base_url=stack.base_url, trust_env=False, timeout=30, headers=_TITLES_OFF
+        ) as client:
             session = _create_native_codex_session(
                 client, session_model, isolated_mock_llm_server_url
             )
@@ -249,7 +254,9 @@ def test_configured_model_launch_args_keep_choosing_the_model(
                 "OMNIGENT_HARNESS_TMP_PARENT": os.environ.get("OMNIGENT_HARNESS_TMP_PARENT"),
             }
         )
-        with httpx.Client(base_url=stack.base_url, trust_env=False, timeout=30) as client:
+        with httpx.Client(
+            base_url=stack.base_url, trust_env=False, timeout=30, headers=_TITLES_OFF
+        ) as client:
             session = _create_native_codex_session(
                 client, "gpt-5.6-luna", isolated_mock_llm_server_url
             )
