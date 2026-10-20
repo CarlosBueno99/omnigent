@@ -3869,6 +3869,47 @@ def test_cli_config_pi_provider_discovery_failure_falls_back_to_catalog_default(
     )
 
 
+@pytest.mark.parametrize(
+    ("recorded_workspace_id", "expected_listing_calls"),
+    [
+        pytest.param(
+            "1965859176160743", [("https://wkspc.cloud.databricks.com", "live-token")], id="match"
+        ),
+        pytest.param("999", [], id="profile-records-another-workspace"),
+    ],
+)
+def test_cli_config_dedicated_gateway_lists_only_the_matching_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    recorded_workspace_id: str,
+    expected_listing_calls: list[tuple[str, str]],
+) -> None:
+    """The cli-config path skips discovery when the profile records another workspace."""
+    listing_calls: list[tuple[str, str]] = []
+
+    def fetch(host: str, token: str) -> tuple[list, list, list, list]:
+        listing_calls.append((host, token))
+        return [], [], [], []
+
+    monkeypatch.setattr(creds, "_fetch_pi_model_lists", fetch)
+    monkeypatch.setattr(creds, "_run_auth_command", lambda _cmd: "live-token")
+    _use_databricks_config_file(
+        monkeypatch,
+        tmp_path / "databrickscfg",
+        f"{_WORKSPACE_PROFILE}workspace_id = {recorded_workspace_id}\n",
+    )
+    _write_codex_config(tmp_path, _DATABRICKS_CODEX_CONFIG)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    provider = creds.resolve_pi_native_provider(config_loader=_cli_config_databricks_config)
+
+    assert provider is not None
+    assert provider.base_url == (
+        "https://1965859176160743.ai-gateway.cloud.databricks.com/anthropic"
+    )
+    assert listing_calls == expected_listing_calls
+
+
 _PI_CUSTOM_PROVIDERS = {
     "ollama": {
         "baseUrl": "http://127.0.0.1:11434/v1",
