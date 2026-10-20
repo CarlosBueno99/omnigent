@@ -227,14 +227,14 @@ async def test_reaped_native_launch_must_not_discard_childs_real_completion() ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("harness_name", "child_reports_start"),
-    [("claude-native", False), ("codex-native", True)],
-    ids=["claude-native-steer", "codex-native-reported-start"],
+    ("harness_name", "reported_status"),
+    [("claude-native", None), ("codex-native", "running"), ("codex-native", "waiting")],
+    ids=["claude-native-steer", "codex-native-reported-start", "codex-native-reported-approval"],
 )
 async def test_native_prompt_delivery_takes_dispatch_out_of_launching(
     monkeypatch: pytest.MonkeyPatch,
     harness_name: str,
-    child_reports_start: bool,
+    reported_status: str | None,
 ) -> None:
     """The runner's own verified prompt delivery is the launch acknowledgment.
 
@@ -243,7 +243,8 @@ async def test_native_prompt_delivery_takes_dispatch_out_of_launching(
     it, so that turn ending cleanly is the only proof the child took the
     message. The dispatch must leave ``launching`` there, or the launch-liveness
     reaper fails a working child. A codex-native child whose forwarder reports
-    the turn start after Codex accepted the prompt is working too.
+    the turn start, or an approval wait, after Codex accepted the prompt is
+    working too.
     """
     from omnigent.runner import app as runner_app
 
@@ -290,10 +291,10 @@ async def test_native_prompt_delivery_takes_dispatch_out_of_launching(
                 lambda: child_id not in app.state.active_turns,
                 "the steered native turn never ended",
             )
-            if child_reports_start:
+            if reported_status is not None:
                 resp = await client.post(
                     f"/v1/sessions/{child_id}/events",
-                    json={"type": "external_session_status", "data": {"status": "running"}},
+                    json={"type": "external_session_status", "data": {"status": reported_status}},
                 )
                 assert resp.status_code == 204, resp.text
 

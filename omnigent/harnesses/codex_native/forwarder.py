@@ -5078,19 +5078,21 @@ async def _post_missed_turn_start(
     turn_id = _turn_id_from_payload(params)
     if turn_id is None or turn_id == forwarder_state.running_reported_turn_id:
         return
-    state = read_bridge_state(bridge_dir)
-    if (
-        state is None
-        or state.active_turn_id != turn_id
-        or params.get("threadId") != state.thread_id
-    ):
-        return
-    forwarder_state.running_reported_turn_id = turn_id
-    await _post_turn_status_edge(
-        client,
-        session_id,
-        _CodexTurnStatusEdge(status="running", turn_id=turn_id, source="item:recovered"),
-    )
+    # Resume replay may end this turn concurrently; its terminal edge must win.
+    async with _conversation_item_delivery_scope(session_id):
+        state = read_bridge_state(bridge_dir)
+        if (
+            state is None
+            or state.active_turn_id != turn_id
+            or params.get("threadId") != state.thread_id
+        ):
+            return
+        forwarder_state.running_reported_turn_id = turn_id
+        await _post_turn_status_edge(
+            client,
+            session_id,
+            _CodexTurnStatusEdge(status="running", turn_id=turn_id, source="item:recovered"),
+        )
 
 
 def _turn_started_status_edge(
