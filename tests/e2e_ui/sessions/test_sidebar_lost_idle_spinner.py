@@ -77,7 +77,7 @@ def test_finished_session_stops_spinning_after_a_lost_idle_edge(
     page.goto(f"{base_url}/")
     expect(_row(page, session_id)).to_be_visible(timeout=30_000)
     expect(_running_badge(page, session_id)).to_have_count(0, timeout=_SETTLE_TIMEOUT_MS)
-    assert _listed_status(base_url, session_id) != "running"
+    assert _listed_status(base_url, session_id) == "idle"
 
     page.reload()
     expect(_row(page, session_id)).to_be_visible(timeout=30_000)

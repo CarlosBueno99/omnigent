@@ -600,14 +600,19 @@ class SessionResourceRegistry:
     ) -> None:
         """Record the session's latest PTY status for exit classification."""
         with self._lock:
-            if record_activity and status in {"running", "waiting"}:
-                self._active_session_turns.add(session_id)
-                self._session_activity_epoch[session_id] = (
-                    self._session_activity_epoch.get(session_id, 0) + 1
-                )
-            if status in {"idle", "failed"}:
-                self._active_session_turns.discard(session_id)
-            self._last_session_status[session_id] = status
+            self._set_session_status_memo_locked(session_id, status, record_activity)
+
+    def _set_session_status_memo_locked(
+        self, session_id: str, status: str, record_activity: bool
+    ) -> None:
+        if record_activity and status in {"running", "waiting"}:
+            self._active_session_turns.add(session_id)
+            self._session_activity_epoch[session_id] = (
+                self._session_activity_epoch.get(session_id, 0) + 1
+            )
+        if status in {"idle", "failed"}:
+            self._active_session_turns.discard(session_id)
+        self._last_session_status[session_id] = status
 
     def _take_session_status_memo(self, session_id: str) -> str | None:
         """Pop and return the session's recorded PTY status (or ``None``)."""
@@ -617,7 +622,15 @@ class SessionResourceRegistry:
             self._status_pollers.pop(session_id, None)
             return self._last_session_status.pop(session_id, None)
 
-    def _claim_status_edge(self, session_id: str, status: str, blocked_on: str | None) -> bool:
+    def _claim_status_edge(
+        self,
+        session_id: str,
+        status: str,
+        blocked_on: str | None,
+        *,
+        explicit_activity: bool = False,
+        repeated: bool = False,
+    ) -> bool:
         """Record an edge as published, reporting whether it was a change.
 
         Keyed on the ``(status, blocked_on)`` pair so a session that stays
@@ -626,11 +639,21 @@ class SessionResourceRegistry:
         :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
         :param status: Status about to be published, e.g. ``"running"``.
         :param blocked_on: Reason the agent is parked, or ``None``.
+        :param explicit_activity: Whether the agent itself reported this
+            working edge, which marks the turn active even when deduplicated.
+        :param repeated: Whether the source re-reported its previous edge,
+            for example after a resync. A repeat never overrides ``failed``.
         :returns: ``True`` when this differs from the last published edge
-            (so the caller should publish), ``False`` when it is a duplicate.
+            (so the caller should publish), ``False`` when it is a duplicate
+            or a repeat that would clear a failure.
         """
         with self._lock:
-            if self._published_session_status.get(session_id) == (status, blocked_on):
+            published = self._published_session_status.get(session_id)
+            if repeated and published is not None and published[0] == "failed":
+                return False
+            if explicit_activity:
+                self._set_session_status_memo_locked(session_id, status, True)
+            if published == (status, blocked_on):
                 return False
             self._published_session_status[session_id] = (status, blocked_on)
             return True
@@ -1473,7 +1496,11 @@ class SessionResourceRegistry:
         last_activity_emit: dict[str, float | None] = {"value": None}
 
         def _publish_status(
-            status: str, blocked_on: str | None = None, *, record_activity: bool = False
+            status: str,
+            blocked_on: str | None = None,
+            *,
+            record_activity: bool = False,
+            repeated: bool = False,
         ) -> None:
             # Publish one running/idle edge: dedup against the last value,
             # memo for exit classification, and hop to the loop (publishers
@@ -1485,9 +1512,13 @@ class SessionResourceRegistry:
             if status_publisher is None:
                 return
             explicit_activity = record_activity and status in {"running", "waiting"}
-            if explicit_activity:
-                self._set_session_status_memo(session_id, status)
-            if not self._claim_status_edge(session_id, status, blocked_on):
+            if not self._claim_status_edge(
+                session_id,
+                status,
+                blocked_on,
+                explicit_activity=explicit_activity,
+                repeated=repeated,
+            ):
                 return
             with contextlib.suppress(Exception):
                 reader = getattr(instance, "program_status", None)
@@ -1504,6 +1535,17 @@ class SessionResourceRegistry:
                 self._set_session_status_memo(session_id, status, record_activity=False)
             loop.call_soon_threadsafe(status_publisher, session_id, status, blocked_on)
 
+        # Claude's previous report, touched only on the watcher thread.
+        last_reported_edge: dict[str, tuple[str, str | None] | None] = {"value": None}
+
+        def _publish_reported_status(status: str, blocked_on: str | None = None) -> None:
+            # A re-read after a resync repeats Claude's last report; that is
+            # not new evidence against a forwarded failure.
+            edge = (status, blocked_on)
+            repeated = edge == last_reported_edge["value"]
+            last_reported_edge["value"] = edge
+            _publish_status(status, blocked_on, record_activity=True, repeated=repeated)
+
         def _structured_status_active() -> bool:
             # Explicit Claude state owns the indicator; pane changes still drive
             # activity badges and process-death detection.
@@ -1515,9 +1557,7 @@ class SessionResourceRegistry:
             self._build_claude_native_status_poller(
                 session_id=session_id,
                 instance=instance,
-                on_status=lambda status, blocked_on=None: _publish_status(
-                    status, blocked_on, record_activity=True
-                ),
+                on_status=_publish_reported_status,
             )
             if emit_status and resource_role == CLAUDE_NATIVE_TERMINAL_ROLE
             else None
