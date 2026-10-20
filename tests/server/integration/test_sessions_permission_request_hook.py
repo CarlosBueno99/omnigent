@@ -2382,7 +2382,8 @@ async def test_gap_question_answer_typed_into_picker_when_hook_never_reparks(
     tombstone waits for a retry that never comes while the TUI picker keeps
     blocking. A confirmed runner answer leaves a verdict-free tombstone so a
     late retry fail-asks instead of answering twice; a refused or unreachable
-    runner restores the verdict for a retry.
+    runner restores the verdict for a retry. Repeating the answer, e.g. from a
+    second tab, changes neither outcome.
     """
     from omnigent.runtime import pending_elicitations
 
@@ -2396,7 +2397,7 @@ async def test_gap_question_answer_typed_into_picker_when_hook_never_reparks(
 
     monkeypatch.setattr(sessions_route, "_poll_request_disconnect", _disconnect_immediately)
     monkeypatch.setattr(sessions_route, "_HARNESS_ELICITATION_REPARK_GRACE_S", 0.25)
-    monkeypatch.setattr(sessions_route, "_HARNESS_QUESTION_TUI_ANSWER_DELAY_S", 0.05)
+    monkeypatch.setattr(sessions_route, "_HARNESS_QUESTION_TUI_ANSWER_DELAY_S", 0.2)
     pending_elicitations.reset_for_tests()
     agent = await create_test_agent(client, "test-gap-question-tui-answer")
     session_id = await _create_session(client, agent["id"])
@@ -2409,11 +2410,16 @@ async def test_gap_question_answer_typed_into_picker_when_hook_never_reparks(
         assert first.content == b""
 
         tasks_before = set(sessions_route._native_popup_forward_tasks)
-        verdict = await _post_approval(
+        for _ in range(2):
+            verdict = await _post_approval(
+                client, session_id, _REATTACH_ELICITATION_ID, "accept", _GAP_ANSWERS
+            )
+            assert verdict.status_code == 202, verdict.text
+        await _await_new_tasks(sessions_route._native_popup_forward_tasks, tasks_before)
+        repeated = await _post_approval(
             client, session_id, _REATTACH_ELICITATION_ID, "accept", _GAP_ANSWERS
         )
-        assert verdict.status_code == 202, verdict.text
-        await _await_new_tasks(sessions_route._native_popup_forward_tasks, tasks_before)
+        assert repeated.status_code == 202, repeated.text
 
         assert forwarded == [
             {

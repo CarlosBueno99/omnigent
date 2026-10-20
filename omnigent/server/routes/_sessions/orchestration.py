@@ -2342,14 +2342,20 @@ async def _resolve_elicitation(
             pre_resolved = ElicitationResult.model_validate(result_payload)
         except ValidationError:
             pre_resolved = None
-        if pre_resolved is not None:
+        pending_entry = pending_elicitations.lookup(elicitation_id)
+        _prune_pre_resolved_harness_elicitations()
+        earlier = _harness_pre_resolved_elicitations.get(elicitation_id)
+        # A repeated answer to an already-resolved prompt keeps the first answer and its delivery.
+        repeated = (
+            pending_entry is None and earlier is not None and earlier.session_id == session_id
+        )
+        if pre_resolved is not None and not repeated:
             # The pending index still holds the answered prompt (the
             # resolved fan-out below drains it), so fingerprint the
             # tombstone with the question's params: a later, different
             # question that reuses this id must not inherit the verdict.
             gap_fingerprint: str | None = None
             pending_params: Any = None
-            pending_entry = pending_elicitations.lookup(elicitation_id)
             if pending_entry is not None and pending_entry[0] == session_id:
                 pending_params = pending_entry[1].get("params")
                 try:
@@ -2358,7 +2364,6 @@ async def _resolve_elicitation(
                     )
                 except ValidationError:
                     gap_fingerprint = None
-            _prune_pre_resolved_harness_elicitations()
             question_answer = _claude_question_answer_event(
                 elicitation_id, pending_params, pre_resolved
             )

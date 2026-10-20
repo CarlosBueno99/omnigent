@@ -457,6 +457,11 @@ def test_question_picker_receives_the_web_answer(
             {"Which bridge should we use?": "Try"},
             _QUESTION,
         ),
+        (
+            [{**_BRIDGE_QUESTION, "options": [{"label": "Keep overlay"}]}],
+            {"Which bridge should we use?": "Keep overlay"},
+            _QUESTION,
+        ),
     ],
     ids=[
         "multi-select",
@@ -466,6 +471,7 @@ def test_question_picker_receives_the_web_answer(
         "other-options",
         "longer-question",
         "longer-options",
+        "extra-option",
     ],
 )
 def test_question_picker_refuses_answers_it_cannot_verify(

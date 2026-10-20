@@ -8185,6 +8185,7 @@ _QUESTION_ANSWER_TIMEOUT_S = 10.0
 _QUESTION_ANSWER_POLL_S = 0.2
 _QUESTION_REVIEW_HINT = "Review your answers"
 _QUESTION_OPTION_ROW = re.compile(r"^\s*(?:❯\s*)?(\d+)\.\s+(.*\S)\s*$")
+_QUESTION_BUILT_IN_OPTIONS = ("Type something.", "Chat about this")
 
 
 def _single_line(text: str) -> str:
@@ -8224,7 +8225,7 @@ def _question_answer_keys(
 
 
 def _question_dialog_shows(pane: str, question: str, labels: Sequence[str]) -> bool:
-    """Whether the bottom dialog asks exactly *question* with *labels* as its first options."""
+    """Whether the bottom dialog asks exactly *question* with exactly *labels* as its options."""
     if not _user_prompt_visible(pane):
         return False
     lines = _decision_dialog_region(pane).splitlines()
@@ -8233,7 +8234,7 @@ def _question_dialog_shows(pane: str, question: str, labels: Sequence[str]) -> b
         match = _QUESTION_OPTION_ROW.match(line)
         if match is not None:
             option_rows.append((index, match))
-    if not option_rows or len(option_rows) < len(labels):
+    if len(option_rows) <= len(labels):
         return False
     prompt = lines[: option_rows[0][0]]
     # A soft-wrapped question must still equal whole rows directly above the options.
@@ -8241,9 +8242,13 @@ def _question_dialog_shows(pane: str, question: str, labels: Sequence[str]) -> b
         _single_line(" ".join(prompt[start:])) == _single_line(question)
         for start in range(len(prompt))
     )
-    listed = [(match[1], _single_line(match[2])) for _, match in option_rows[: len(labels)]]
-    expected = [(str(number), _single_line(label)) for number, label in enumerate(labels, 1)]
-    return asks_question and listed == expected
+    # Claude's own rows follow the provided options, so no further provided option can hide.
+    listed = [(match[1], _single_line(match[2])) for _, match in option_rows]
+    expected = [
+        (str(number), _single_line(label))
+        for number, label in enumerate((*labels, *_QUESTION_BUILT_IN_OPTIONS), 1)
+    ]
+    return asks_question and listed == expected[: len(listed)]
 
 
 def _question_review_shows(pane: str, answered: Sequence[tuple[str, str]]) -> bool:
