@@ -418,6 +418,24 @@ def test_merge_diff_selects_union_and_drives_existing_matrices(
         assert bool(matrix["include"]) == selected
 
 
+def test_merge_gate_skip_lookup_drains_the_list_under_pipefail():
+    process = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -eo pipefail; source "$1"; '
+            'for i in {1..2000}; do ALLOW_SKIP+=("unused-check-$i"); done; '
+            'is_allow_skip "Docker result"; ! is_allow_skip "Required check"',
+            "bash",
+            str(ROOT / ".github/scripts/merge-ready/required.sh"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert process.returncode == 0, process.stderr
+
+
 @pytest.mark.parametrize(
     "fault",
     [
