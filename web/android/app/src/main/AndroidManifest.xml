@@ -77,10 +77,8 @@
             </intent-filter>
         </activity>
 
-        <!--
-          Conversation links from the web Share dialog (omnigent://<host>/c/<id>). A taskless
-          trampoline, so a link opened from another app re-enters the shell in its own task.
-        -->
+        <!-- Share-dialog conversation links. Taskless, so a link opened from another app
+             re-enters the shell in its own task. -->
         <activity
             android:name=".DeepLinkActivity"
             android:excludeFromRecents="true"

@@ -2,12 +2,7 @@ package ai.omnigent.android
 
 import java.net.URI
 
-/**
- * A parsed `omnigent://<host[:port]>/c/<id>` conversation link, the form the web Share
- * dialog encodes in its mobile QR code. Mirrors the iOS `DeepLink` and the desktop
- * `parseOmnigentDeepLink` (web/electron/src/deepLink.js): the http(s) scheme is inferred
- * from the host, and only the conversation route is kept.
- */
+/** An `omnigent://<host[:port]>/c/<id>` Share QR link, parsed like the iOS and desktop apps. */
 data class DeepLink(
     /** The inferred server origin, e.g. `https://omnigent.example.com`. */
     val origin: String,

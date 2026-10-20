@@ -5,11 +5,7 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 
-/**
- * Opens a [DeepLink] in [MainActivity]. The current server or one the user already chose
- * opens directly; an unknown server needs consent first, because connecting to it grants
- * its origin the native bridge.
- */
+/** Opens a [DeepLink] in [MainActivity], switching to or connecting its server as needed. */
 class DeepLinkActivity : Activity() {
     private var consent: AlertDialog? = null
 
@@ -30,6 +26,7 @@ class DeepLinkActivity : Activity() {
             connect(store, known, link.path)
             return
         }
+        // Connecting grants the origin the native bridge, so an unknown server needs consent.
         consent =
             AlertDialog
                 .Builder(this)
