@@ -164,6 +164,7 @@ def test_cursor_multiselect_question_renders_checkboxes(
 
     thread = threading.Thread(target=_run_mirror, daemon=True)
     thread.start()
+    browser_failure: BaseException | None = None
     try:
         page.goto(f"{base_url}/c/{session_id}")
 
@@ -202,6 +203,9 @@ def test_cursor_multiselect_question_renders_checkboxes(
         # skipped — no pane is advertised in the tmp bridge dir).
         responded = page.locator(f'{_APPROVAL_CARD}[data-state="responded"]').first
         expect(responded).to_be_visible(timeout=_MOCK_ELICITATION_TIMEOUT_MS)
+    except BaseException as exc:
+        browser_failure = exc
+        raise
     finally:
         thread.join(timeout=10)
         fallback_note = ""
@@ -227,7 +231,8 @@ def test_cursor_multiselect_question_renders_checkboxes(
             raise AssertionError(
                 f"cursor question mirror failed: {mirror_result['error']}"
             ) from mirror_result["error"]  # type: ignore[misc]
+        stuck_note = f"cursor question mirror never received a web verdict{fallback_note}"
+        if browser_failure is not None and thread.is_alive():
+            browser_failure.add_note(stuck_note)
 
-    assert not thread.is_alive(), (
-        f"cursor question mirror never received a web verdict{fallback_note}"
-    )
+    assert not thread.is_alive(), stuck_note
