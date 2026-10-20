@@ -664,10 +664,8 @@ class _LocalAuthTokenFactory:
             )
             if oidc_token:
                 return oidc_token
-            # Expired or near-lapse: renew from the login-issued refresh
-            # grant when one exists. This is what keeps an unattended host
-            # alive past session-JWT expiry — the tunnel rebuilds headers
-            # through this factory on every reconnect.
+            # Renew from the login's refresh grant so an unattended host survives
+            # session-JWT expiry; the tunnel rebuilds headers here on every reconnect.
             refreshed = refresh_stored_token(self._server_url)
             if refreshed:
                 return refreshed

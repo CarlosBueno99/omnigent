@@ -2833,6 +2833,41 @@ def test_reused_token_source_retries_resolution_after_failure(monkeypatch):
     assert source.failure_reason is None
 
 
+def test_reused_token_source_clears_failure_after_cached_mint_succeeds(monkeypatch):
+    """A mint failure on resolved auth is cleared once that cached auth mints again."""
+    from omnigent.inner.databricks_executor import (
+        DatabricksAuthError,
+        _DatabricksBearerAuth,
+        _ReusedDatabricksTokenSource,
+    )
+
+    mint_succeeds = {"ok": False}
+
+    class _Cfg:
+        def authenticate(self):
+            if not mint_succeeds["ok"]:
+                raise DatabricksAuthError("token endpoint unavailable")
+            return {"Authorization": "Bearer tok-recovered"}
+
+    resolutions = []
+
+    def _fake_resolve(profile=None, *, host=None):
+        resolutions.append(host)
+        return _DatabricksBearerAuth(_Cfg(), profile_name=None), "https://ex.test"
+
+    monkeypatch.setattr(
+        "omnigent.inner.databricks_executor._resolve_databricks_auth", _fake_resolve
+    )
+
+    source = _ReusedDatabricksTokenSource()
+    assert source.current_token() is None
+    assert source.failure_reason is not None
+    mint_succeeds["ok"] = True
+    assert source.current_token() == "tok-recovered"
+    assert len(resolutions) == 1, "the recovered mint must come from the cached auth"
+    assert source.failure_reason is None
+
+
 def test_reused_token_source_logs_first_failure_until_resolution_succeeds(monkeypatch, caplog):
     """Only the first failure after a success is logged; a recovery re-arms it."""
     from omnigent.inner.databricks_executor import (

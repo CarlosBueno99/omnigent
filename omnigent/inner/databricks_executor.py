@@ -929,9 +929,12 @@ class _ReusedDatabricksTokenSource:
         cached = self._auth
         if cached is not None:
             try:
-                return cached.current_token()
+                token = cached.current_token()
             except DatabricksAuthError:
                 self._auth = None
+            else:
+                self.failure_reason = None
+                return token
         auth = self._resolve()
         if auth is None:
             return None
