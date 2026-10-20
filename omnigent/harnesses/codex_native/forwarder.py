@@ -6204,7 +6204,7 @@ async def _handle_agent_message_delta(
         _logger.warning("Codex agentMessage delta missing string delta: turn_id=%s", turn_id)
         return
     if bridge_dir is not None and not _is_active_turn_delta(bridge_dir, turn_id):
-        edge = _delta_recovery_status_edge(bridge_dir, params, turn_id)
+        edge = _delta_recovery_status_edge(bridge_dir, params, turn_id, forwarder_state)
         if edge is not None:
             await _ensure_user_message_posted(client, session_id, params, forwarder_state)
             await _post_turn_status_edge(client, session_id, edge)
@@ -6271,7 +6271,7 @@ async def _handle_plan_delta(
         _logger.warning("Codex plan delta missing string delta: turn_id=%s", turn_id)
         return
     if bridge_dir is not None and not _is_active_turn_delta(bridge_dir, turn_id):
-        edge = _delta_recovery_status_edge(bridge_dir, params, turn_id)
+        edge = _delta_recovery_status_edge(bridge_dir, params, turn_id, forwarder_state)
         if edge is not None:
             await _ensure_user_message_posted(client, session_id, params, forwarder_state)
             await _post_turn_status_edge(client, session_id, edge)
@@ -8581,6 +8581,7 @@ def _delta_recovery_status_edge(
     bridge_dir: Path,
     params: _JsonObject,
     turn_id: str | None,
+    forwarder_state: _CodexForwarderState | None,
 ) -> _CodexTurnStatusEdge | None:
     """
     Recover a missed turn start from a scoped Codex delta.
@@ -8589,11 +8590,15 @@ def _delta_recovery_status_edge(
     :param params: Codex delta notification params.
     :param turn_id: Turn id extracted from *params*, e.g.
         ``"turn_abc123"``.
+    :param forwarder_state: Optional forwarder state that records the turn
+        whose ``running`` edge this recovery publishes.
     :returns: Running status edge when the delta adopts the turn, or
         ``None`` when the delta is stale or ambiguous.
     """
     if not _try_recover_active_turn_from_delta(bridge_dir, params, turn_id):
         return None
+    if forwarder_state is not None:
+        forwarder_state.running_reported_turn_id = turn_id
     return _CodexTurnStatusEdge(
         status="running",
         turn_id=turn_id,

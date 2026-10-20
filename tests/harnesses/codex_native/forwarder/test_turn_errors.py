@@ -754,6 +754,23 @@ def _turn_event(
             id="turn-id-written-after-first-item",
         ),
         pytest.param(
+            None,
+            [
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "threadId": "thread_123",
+                        "turnId": "turn_123",
+                        "itemId": "turn_123_agentMessage",
+                        "delta": "Rev",
+                    },
+                },
+                _turn_event("item/completed", "turn_123", "agentMessage"),
+            ],
+            ["turn_123"],
+            id="start-recovered-from-delta",
+        ),
+        pytest.param(
             "turn_124",
             [_turn_event("item/completed", "turn_123", "agentMessage")],
             [],
@@ -787,6 +804,12 @@ async def test_first_item_reports_running_for_a_turn_whose_start_was_missed(
     )
     client = _RecordingClient()
     forwarder_state = fwd._CodexForwarderState()
+    delta_coalescer = fwd._OutputTextDeltaCoalescer(
+        client,  # type: ignore[arg-type]
+        "conv_x",
+        flush_interval_seconds=60.0,
+        flush_char_threshold=100_000,
+    )
     for event in events:
         if "active_turn_id" in event:
             active_turn_id = event["active_turn_id"]
@@ -807,9 +830,11 @@ async def test_first_item_reports_running_for_a_turn_whose_start_was_missed(
             event=event,
             usage_coalescer=fwd._SessionUsageCoalescer(client, "conv_x"),  # type: ignore[arg-type]
             elicitation_tracker=fwd._CodexElicitationTaskTracker(),
+            delta_coalescer=delta_coalescer,
             expected_thread_id="thread_123",
             forwarder_state=forwarder_state,
         )
+    await delta_coalescer.close()
 
     statuses = [body for _, body in client.posts if body["type"] == "external_session_status"]
     assert [body["data"]["status"] for body in statuses] == ["running"] * len(
@@ -822,7 +847,9 @@ async def test_first_item_reports_running_for_a_turn_whose_start_was_missed(
         assert client.posts[0][1]["type"] == "external_session_status"
     state = read_bridge_state(tmp_path)
     assert state is not None
-    assert state.active_turn_id == active_turn_id
+    assert state.active_turn_id == (
+        expected_running_turns[-1] if expected_running_turns else active_turn_id
+    )
 
 
 @pytest.mark.asyncio
