@@ -618,6 +618,19 @@ describe("useIdleNotifications badge (native shell)", () => {
     );
   });
 
+  it("counts an open session that was already marked unread when the hook mounts", () => {
+    setWindowFocused(true);
+    markConversationSeen("a", 200);
+    markConversationUnread("a", 100);
+    setConversations([{ ...conv("a", "idle"), updated_at: 100 }]);
+    renderHook(() => useIdleNotifications("a"));
+
+    expect(setBadgeMock).toHaveBeenLastCalledWith(
+      1,
+      expect.objectContaining({ navigatePath: "/c/a" }),
+    );
+  });
+
   it("counts the open session when the window is blurred", () => {
     setWindowFocused(false);
     setConversations([unseenConv("a")]);
@@ -667,7 +680,7 @@ describe("useIdleNotifications badge (native shell)", () => {
       window.dispatchEvent(new Event("focus"));
     });
 
-    expect(setBadgeMock).not.toHaveBeenCalledWith(0);
+    expect(setBadgeMock).not.toHaveBeenCalled();
   });
 
   it("keeps other unread sessions when focusing clears only the active one", () => {

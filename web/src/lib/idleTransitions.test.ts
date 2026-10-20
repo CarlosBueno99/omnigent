@@ -249,14 +249,8 @@ describe("computeUnreadBadgeIds", () => {
   });
 
   it("does not count an explicitly-unread active session with nothing unseen", () => {
-    // Explicit unread alone doesn't count; isUnseen (false while running) still gates it.
-    const next = computeUnreadBadgeIds(
-      [convB("a", { status: "running" })],
-      "a",
-      true,
-      unseenIds(),
-      (id) => id === "a",
-    );
+    // Explicit unread lifts suppression but doesn't count a session on its own.
+    const next = computeUnreadBadgeIds([convB("a")], "a", true, unseenIds(), (id) => id === "a");
     expect(next.size).toBe(0);
   });
 
