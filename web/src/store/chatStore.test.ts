@@ -14128,7 +14128,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
-  it("reconciles status when a heartbeat-only stream misses the idle event", async () => {
+  it("reconciles status and items when a heartbeat-only stream misses their events", async () => {
     seedSession("conv_heartbeat_gap", []);
     const sink = pushableStream();
     let streamOpens = 0;
@@ -14164,6 +14164,13 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await drainAsync();
     expect(streamOpens).toBe(1);
 
+    // A turn driven from the TUI commits while this stream delivers no events.
+    const missedTurn = [
+      userMessage("resp_tui", "typed in the terminal"),
+      assistantMessage("resp_tui", "reply from the terminal turn"),
+    ];
+    seedSessionItems("conv_heartbeat_gap", missedTurn);
+
     // The transport stays byte-active while the real idle edge is absent.
     await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
     await drainAsync();
@@ -14172,6 +14179,9 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     expect(snapshotFetches).toBe(1);
     expect(bound.get().sessionStatus).toBe("idle");
     expect(useChatStore.getState().sessionStatus).toBe("idle");
+    expect(bound.get().blocks.map((block) => block.ctx.itemId)).toEqual(
+      expect.arrayContaining(missedTurn.map((item) => item.id)),
+    );
 
     controller.abort();
     await drainAsync(2);
@@ -14182,8 +14192,8 @@ describe("chatStore — startStreamPump reconnect loop", () => {
   function routeSnapshotClock(
     id: string,
     sink: StreamSink,
-  ): { updatedAt: number; streamOpens: number; itemFetches: number } {
-    const clock = { updatedAt: 100, streamOpens: 0, itemFetches: 0 };
+  ): { updatedAt: number; streamOpens: number; itemFetches: number; failItemFetches: number } {
+    const clock = { updatedAt: 100, streamOpens: 0, itemFetches: 0, failItemFetches: 0 };
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url === `/v1/sessions/${id}/stream`) {
@@ -14204,7 +14214,13 @@ describe("chatStore — startStreamPump reconnect loop", () => {
           labels: {},
         });
       }
-      if (url.startsWith(`/v1/sessions/${id}/items`)) clock.itemFetches += 1;
+      if (url.startsWith(`/v1/sessions/${id}/items`)) {
+        clock.itemFetches += 1;
+        if (clock.failItemFetches > 0) {
+          clock.failItemFetches -= 1;
+          return Promise.reject(new TypeError("network error"));
+        }
+      }
       return defaultFetchHandler(input, init);
     });
     return clock;
@@ -14283,36 +14299,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
   it("retries the backfill on the next tick after a transient items fetch fails", async () => {
     seedSession("conv_items_retry", []);
     const sink = pushableStream();
-    const clock = { updatedAt: 100, streamOpens: 0, itemFetches: 0, failItemFetches: 0 };
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url === "/v1/sessions/conv_items_retry/stream") {
-        clock.streamOpens += 1;
-        init?.signal?.addEventListener("abort", () =>
-          sink.error(new DOMException("aborted", "AbortError")),
-        );
-        return mockResponse(null, { bodyStream: sink.stream });
-      }
-      if (url.startsWith("/v1/sessions/conv_items_retry?") && (init?.method ?? "GET") === "GET") {
-        return mockResponse({
-          id: "conv_items_retry",
-          agent_id: "agent_xyz",
-          status: "idle",
-          created_at: 0,
-          updated_at: clock.updatedAt,
-          items: [],
-          labels: {},
-        });
-      }
-      if (url.startsWith("/v1/sessions/conv_items_retry/items")) {
-        clock.itemFetches += 1;
-        if (clock.failItemFetches > 0) {
-          clock.failItemFetches -= 1;
-          return Promise.reject(new TypeError("network error"));
-        }
-      }
-      return defaultFetchHandler(input, init);
-    });
+    const clock = routeSnapshotClock("conv_items_retry", sink);
     const controller = new AbortController();
     const bound = bindConversationForTest("conv_items_retry", { abortController: controller });
     const loop = startStreamPump("conv_items_retry", controller, bound.set, bound.get);
@@ -14344,6 +14331,48 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       "msg_resp_tui_user",
       "msg_resp_tui_asst",
     ]);
+
+    controller.abort();
+    await drainAsync(2);
+    await loop;
+  });
+
+  it("retries a backfill for a missed lifecycle edge until it lands", async () => {
+    seedSession("conv_edge_retry", []);
+    const sink = pushableStream();
+    const clock = routeSnapshotClock("conv_edge_retry", sink);
+    const controller = new AbortController();
+    // The tab saw the turn start; the snapshot clock never moves past its baseline.
+    const bound = bindConversationForTest("conv_edge_retry", {
+      abortController: controller,
+      sessionStatus: "running",
+    });
+    const loop = startStreamPump("conv_edge_retry", controller, bound.set, bound.get);
+    await drainAsync();
+
+    clock.failItemFetches = 1;
+    seedSessionItems("conv_edge_retry", [
+      userMessage("resp_tui", "typed in the TUI"),
+      assistantMessage("resp_tui", "reply printed in the TUI"),
+    ]);
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync(2);
+    expect(bound.get().sessionStatus).toBe("idle");
+    expect(clock.itemFetches).toBe(1);
+    expect(bound.get().blocks).toEqual([]);
+
+    // The status already matches, but the dropped turn is still owed.
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync(2);
+    expect(clock.itemFetches).toBe(2);
+    expect(bound.get().blocks.map((b) => b.ctx.itemId)).toEqual([
+      "msg_resp_tui_user",
+      "msg_resp_tui_asst",
+    ]);
+
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync(2);
+    expect(clock.itemFetches).toBe(2);
 
     controller.abort();
     await drainAsync(2);

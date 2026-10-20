@@ -1409,9 +1409,13 @@ conversationRegistry.subscribeDisposed((id) => streamEventRevisions.delete(id));
 // backfill, or a live item event). The periodic snapshot reconcile compares them.
 const snapshotUpdatedAtS = new Map<string, number>();
 const newestItemCreatedAtS = new Map<string, number>();
+// Conversations whose snapshot showed a lifecycle edge the stream never
+// delivered; cleared once a snapshot is recorded with its items.
+const itemBackfillPending = new Set<string>();
 conversationRegistry.subscribeDisposed((id) => {
   snapshotUpdatedAtS.delete(id);
   newestItemCreatedAtS.delete(id);
+  itemBackfillPending.delete(id);
 });
 
 function noteItemCreatedAt(id: string, createdAt: number | undefined): void {
@@ -1421,6 +1425,7 @@ function noteItemCreatedAt(id: string, createdAt: number | undefined): void {
 
 /** Record a processed session snapshot and the items fetched with it. */
 function noteSnapshot(id: string, session: Session, items: ConversationItem[] = []): void {
+  itemBackfillPending.delete(id);
   if (session.updatedAt != null) snapshotUpdatedAtS.set(id, session.updatedAt);
   for (const item of items) noteItemCreatedAt(id, item.created_at);
 }
@@ -5238,7 +5243,8 @@ async function reconcileLaunchStatus(id: string, set: Setter, get: Getter): Prom
  * A stream pump can keep receiving heartbeats while missing a lifecycle event.
  * Periodically re-read durable status, discarding a snapshot if any semantic
  * stream event arrives during the fetch. When the snapshot shows transcript
- * activity the stream never delivered, backfill the items as a reconnect would.
+ * activity or a lifecycle edge the stream never delivered, backfill the items
+ * as a reconnect would.
  */
 async function reconcileActiveSessionStatus(
   id: string,
@@ -5300,7 +5306,10 @@ async function reconcileActiveSessionStatus(
     return blocks === null ? patch : { ...patch, blocks };
   });
   if (session.usageIncluded === false) void hydrateSessionUsage(id);
-  const missedItems = transcriptAdvancedUnseen(id, session);
+  // No event arrived during the fetch, so a changed status is an edge the stream
+  // dropped, along with that turn's items.
+  if (session.status !== stateBeforeFetch.sessionStatus) itemBackfillPending.add(id);
+  const missedItems = itemBackfillPending.has(id) || transcriptAdvancedUnseen(id, session);
   // On a miss, let reconcileOnReconnect record the snapshot on its own success
   // path so a failed or stale backfill is retried on the next reconcile tick
   // rather than being masked by an already-advanced snapshot clock.
@@ -5314,7 +5323,7 @@ async function reconcileActiveSessionStatus(
     );
   if (missedItems || previewInterrupted) {
     // Backfill items the open stream never carried, on the status-reconcile cadence.
-    await reconcileOnReconnect(id, set, get, ignored);
+    await reconcileOnReconnect(id, set, get, ignored, session);
   }
 }
 
@@ -5613,12 +5622,14 @@ async function rehydrateWindowOnReconnect(
  * re-hydrate. Swallows fetch errors: a transient
  * failure just means the next reconnect retries. All writes are
  * `historyGeneration`-guarded so a window reset mid-fetch voids them.
+ * A caller holding a just-applied session snapshot passes it to skip the re-read.
  */
 async function reconcileOnReconnect(
   id: string,
   set: Setter,
   get: Getter,
   ignoredNativeMessageIds: Set<string> = new Set<string>(),
+  snapshot?: Session,
 ): Promise<void> {
   if (queryClient === null) return;
   const launchBeforeFetch = mcpStartupBeforeSnapshot(id, get());
@@ -5642,12 +5653,13 @@ async function reconcileOnReconnect(
   let page: SessionItemsPage;
   try {
     [session, page] = await Promise.all([
-      queryClient.fetchQuery({
-        queryKey: ["session", id],
-        queryFn: () => getSessionSlim(id),
-        staleTime: 0,
-        retry: false,
-      }),
+      snapshot ??
+        queryClient.fetchQuery({
+          queryKey: ["session", id],
+          queryFn: () => getSessionSlim(id),
+          staleTime: 0,
+          retry: false,
+        }),
       fetchSessionItemsPage(id),
     ]);
   } catch {
