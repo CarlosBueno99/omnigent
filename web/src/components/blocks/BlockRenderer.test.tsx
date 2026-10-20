@@ -677,9 +677,15 @@ describe("BlockRenderer dispatch", () => {
       ["Scroll up for the full report.", true],
       ["The full report is shown above.", true],
       ["Above is the full report.", true],
+      ["The output is above.", true],
+      ["The log shown above the summary has the details.", true],
       ["All checks passed.", false],
       ["CPU usage stayed above 90% during the run.", false],
       ["Latency is above the threshold.", false],
+      ["Latency was above-average today.", false],
+      ["Above all, the build is green.", false],
+      ["The table above lists each step.", false],
+      ["All set. The summary is above.", false],
     ])("pins the work output for %j only when it points back: %s", (text, pinned) => {
       const items: RenderItem[] = [
         tool(1, "shell", "REPORT: tests-42-passed"),

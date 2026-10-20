@@ -14,9 +14,8 @@
 //
 // 2. Turn folding: once settled, each work run collapses behind a
 //    "Worked" row. Assistant messages remain visible in order;
-//    pending elicitations and routing cards stay visible too. A message
-//    that points back to output "above" keeps that output open beside it,
-//    while the fold still holds the complete trace.
+//    pending elicitations and routing cards stay visible too.
+//    A copy of output that a message points back to stays open beside it.
 
 import type { ReactNode } from "react";
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -291,7 +290,7 @@ export function BlockRenderer({
       if (segment.kind === "text") {
         const referenced = referencedOutputTool(partition.segments[segmentIndex - 1], segment);
         if (referenced) {
-          // The open card mounts tooltips, so BlockRenderer cannot rely on an app-root provider.
+          // Default-open card mounts tooltips at once; keep it safe outside an app-root provider.
           rendered.push(
             <TooltipProvider key={`referenced-output:${keyFor(referenced, 0)}`}>
               {renderToolCard(referenced, "card", true)}
@@ -483,9 +482,15 @@ function partitionTurn(items: RenderItem[]): TurnPartition {
 
 type ToolItem = Extract<RenderItem, { kind: "tool" }>;
 
-// "above 90%" or "above the threshold" compares values instead of pointing back.
-const BACKWARD_REFERENCE =
-  /\b(?:scroll(?:ing)? up\b|above\b(?!\s*(?:[\d$%]|(?:a|an|the|average|normal|zero)\b)))/i;
+// Explicit pointers back to earlier output; "above 90%" or "the table above" do not count.
+const BACKWARD_REFERENCE = new RegExp(
+  [
+    String.raw`\b(?:(?:output|report|results?|logs?)(?:\s+(?:is|are))?|shown|printed|displayed|listed|see)\s+above\b`,
+    String.raw`\babove(?:\s+(?:is|are)\b|\s*:)`,
+    String.raw`\bscroll(?:ing)?\s+up\b`,
+  ].join("|"),
+  "i",
+);
 
 /** The latest output of the work run that the following message points back to. */
 function referencedOutputTool(
