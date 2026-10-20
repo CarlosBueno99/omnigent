@@ -654,6 +654,42 @@ describe("mergePendingBubbles", () => {
     expect(bubbleIds(merged)).toEqual(["pend_1", "rd_create", "live:m1", "pend_2"]);
   });
 
+  it("lifts the oldest send above every opening reply preview", () => {
+    const merged = mergePendingBubbles(
+      [livePreviewBubble("m1"), livePreviewBubble("m2")],
+      [userBubble("pend_1")],
+    );
+    expect(bubbleIds(merged)).toEqual(["pend_1", "live:m1", "live:m2"]);
+  });
+
+  it("does NOT lift a send above a preview while older history is unloaded", () => {
+    // A paged window may hide the prompt that the preview answers.
+    const merged = mergePendingBubbles([livePreviewBubble("m1")], [userBubble("pend_1")], true);
+    expect(bubbleIds(merged)).toEqual(["live:m1", "pend_1"]);
+  });
+
+  it("does NOT lift a send above a preview that follows an earlier command", () => {
+    const command: Bubble = {
+      kind: "assistant",
+      responseId: "resp_0",
+      stableId: "resp_0",
+      lifecycle: "completed",
+      error: null,
+      items: [
+        {
+          kind: "slash_command",
+          itemId: "sc_0",
+          slashKind: "command",
+          name: "effort",
+          arguments: "high",
+          output: null,
+        },
+      ],
+    };
+    const merged = mergePendingBubbles([command, livePreviewBubble("m1")], [userBubble("pend_1")]);
+    expect(bubbleIds(merged)).toEqual(["resp_0", "live:m1", "pend_1"]);
+  });
+
   it("does NOT lift a send above a preview once a prompt is on the timeline", () => {
     // A follow-up preview may answer a message the agent already read, so
     // it keeps arrival order; the forwarder posts the prompt first.

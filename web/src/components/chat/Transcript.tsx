@@ -154,6 +154,7 @@ function TranscriptImpl({
     return mergePendingBubbles(
       committed,
       buildPendingBubbles(pendingUserMessages, getCurrentAuthorId()),
+      hasMoreHistory,
     );
   }, [
     blocks,
@@ -162,6 +163,7 @@ function TranscriptImpl({
     pendingUserMessages,
     subagentRoutingOverride,
     sessionStatus,
+    hasMoreHistory,
   ]);
 
   const pendingElicitations = useMemo(() => collectPendingElicitations(bubbles), [bubbles]);

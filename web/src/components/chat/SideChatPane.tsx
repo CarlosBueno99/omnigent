@@ -156,6 +156,7 @@ export function SideChatPane({
     subagentRoutingOverride,
     sessionStatus,
     sessionHarness,
+    hasMoreHistory,
     boundAgentId,
     loadingConversation,
     conversationLoadError,
@@ -234,6 +235,7 @@ export function SideChatPane({
     return mergePendingBubbles(
       committed,
       buildPendingBubbles(pendingUserMessages, getCurrentAuthorId()),
+      hasMoreHistory,
     );
   }, [
     visibleBlocks,
@@ -242,6 +244,7 @@ export function SideChatPane({
     pendingUserMessages,
     subagentRoutingOverride,
     sessionStatus,
+    hasMoreHistory,
   ]);
 
   const lastAssistantIndex = liveCandidateAssistantIndex(bubbles);

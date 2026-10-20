@@ -5844,11 +5844,7 @@ async def _read_available_deltas(
     :returns: The new records and the byte offset after them; empty, at
         the current offset, before the deltas file exists.
     """
-    # The deltas file only exists once the MessageDisplay hook has fired
-    # for this Claude process. Skip the worker-thread read until then so
-    # idle / non-streaming polls don't churn the thread pool (this loop
-    # polls every ~0.25s). A bare ``exists()`` is a cheap stat consistent
-    # with the other sync reads this loop already does each poll.
+    # Skip the thread hop until the MessageDisplay hook creates the deltas file.
     if not (bridge_dir / MESSAGE_DELTAS_FILE).exists():
         return MessageDeltaReadResult(byte_offset=state.byte_offset, deltas=[])
     return await asyncio.to_thread(read_message_deltas_from_offset, bridge_dir, state.byte_offset)

@@ -6158,12 +6158,20 @@ function isLiveProvisionalBlock(b: AnyBlock): boolean {
   return b.ctx.itemId?.startsWith(LIVE_ITEM_PREFIX) ?? false;
 }
 
-// Append a promoted send, keeping the first user message above a reply
+function isInputBlock(b: AnyBlock): boolean {
+  return b.type === "user_message" || b.type === "slash_command" || b.type === "terminal_command";
+}
+
+// Append a promoted send, keeping the session's first input above a reply
 // preview that streamed before it was acknowledged.
-function withPromotedUserBlock(blocks: AnyBlock[], user: UserMessageBlock): AnyBlock[] {
+function withPromotedUserBlock(
+  blocks: AnyBlock[],
+  user: UserMessageBlock,
+  hasMoreHistory: boolean,
+): AnyBlock[] {
   let at = blocks.length;
   while (at > 0 && isLiveProvisionalBlock(blocks[at - 1]!)) at -= 1;
-  if (at === blocks.length || blocks.some((b) => b.type === "user_message")) {
+  if (at === blocks.length || hasMoreHistory || blocks.some(isInputBlock)) {
     return [...blocks, user];
   }
   return [...blocks.slice(0, at), user, ...blocks.slice(at)];
@@ -8194,6 +8202,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
                   event.createdBy ?? matched.author,
                   matched.createdAtS,
                 ),
+                s.hasMoreHistory,
               ),
             };
           }
@@ -8230,6 +8239,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
                 event.createdBy ?? head.author,
                 head.createdAtS,
               ),
+              s.hasMoreHistory,
             ),
           };
         }

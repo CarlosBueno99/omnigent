@@ -272,24 +272,41 @@ function liftAboveCreateRoutingChips(committed: Bubble[], end: number): number {
   return start === 0 ? start : end;
 }
 
-// A reply preview that streams before any user message is committed can only
-// answer the oldest pending send.
-function endsWithOpeningReplyPreview(committed: Bubble[]): boolean {
-  const last = committed.at(-1);
+function isLiveReplyPreview(bubble: Bubble): boolean {
   return (
-    last?.kind === "assistant" &&
-    last.items.length > 0 &&
-    last.items.every((item) => item.itemId?.startsWith(LIVE_ITEM_PREFIX) ?? false) &&
-    !committed.some((bubble) => bubble.kind === "user")
+    bubble.kind === "assistant" &&
+    bubble.items.length > 0 &&
+    bubble.items.every((item) => item.itemId?.startsWith(LIVE_ITEM_PREFIX) ?? false)
   );
+}
+
+function isInputBubble(bubble: Bubble): boolean {
+  return (
+    bubble.kind === "user" ||
+    (bubble.kind === "assistant" && bubble.items.some((item) => item.kind === "slash_command"))
+  );
+}
+
+// Start of the trailing reply previews that streamed before the session's first
+// input, or -1. Only the oldest pending send can have started them.
+function openingReplyPreviewStart(committed: Bubble[], hasMoreHistory: boolean): number {
+  if (hasMoreHistory || committed.some(isInputBubble)) return -1;
+  let start = committed.length;
+  while (start > 0 && isLiveReplyPreview(committed[start - 1]!)) start -= 1;
+  return start === committed.length ? -1 : start;
 }
 
 // Place optimistic pending user bubbles into the committed timeline, keeping
 // the prompt above a trailing REQUEST-phase card or create-time routing chip.
-export function mergePendingBubbles(committed: Bubble[], pending: Bubble[]): Bubble[] {
+export function mergePendingBubbles(
+  committed: Bubble[],
+  pending: Bubble[],
+  hasMoreHistory = false,
+): Bubble[] {
   if (pending.length === 0) return committed;
-  if (endsWithOpeningReplyPreview(committed)) {
-    const at = liftAboveCreateRoutingChips(committed, committed.length - 1);
+  const previewStart = openingReplyPreviewStart(committed, hasMoreHistory);
+  if (previewStart >= 0) {
+    const at = liftAboveCreateRoutingChips(committed, previewStart);
     return [...committed.slice(0, at), pending[0]!, ...committed.slice(at), ...pending.slice(1)];
   }
   let insertAt = committed.length;

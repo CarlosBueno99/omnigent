@@ -16480,6 +16480,121 @@ describe("chatStore — live delta streaming (claude-native)", () => {
     controller.abort();
   });
 
+  it.each([
+    { history: "an empty session", hasMoreHistory: false, earlier: [], lifted: true },
+    // A paged window may hide the prompt those previews answer.
+    { history: "paged history", hasMoreHistory: true, earlier: [], lifted: false },
+    {
+      history: "an earlier /effort command",
+      hasMoreHistory: false,
+      earlier: [
+        {
+          type: "slash_command",
+          ctx: {
+            agent: null,
+            depth: 0,
+            turn: 0,
+            timestamp: 0,
+            responseId: "resp_0",
+            itemId: "sc_0",
+          },
+          kind: "command",
+          name: "effort",
+          arguments: "high",
+          output: null,
+        },
+      ] satisfies AnyBlock[],
+      lifted: false,
+    },
+    {
+      history: "an earlier shell input",
+      hasMoreHistory: false,
+      earlier: [
+        {
+          type: "terminal_command",
+          ctx: {
+            agent: null,
+            depth: 0,
+            turn: 0,
+            timestamp: 0,
+            responseId: "resp_0",
+            itemId: "sh_0",
+          },
+          kind: "input",
+          input: "ls",
+          stdout: null,
+          stderr: null,
+        },
+      ] satisfies AnyBlock[],
+      lifted: false,
+    },
+  ])(
+    "places a send against early previews after $history",
+    async ({ hasMoreHistory, earlier, lifted }) => {
+      onTestFinished(() => useChatStore.setState({ hasMoreHistory: false }));
+      useChatStore.setState({
+        conversationId: "conv_live_prior",
+        blocks: [...earlier],
+        hasMoreHistory,
+        isNativeTerminalSession: true,
+        sessionStatus: "running",
+        pendingUserMessages: [
+          {
+            tempId: "pend_p",
+            pendingId: "pending_p",
+            posted: true,
+            content: [{ type: "input_text", text: "go" }],
+          },
+        ],
+      });
+      const { sink, controller } = startPump("conv_live_prior");
+      const sentAndPreviews = (labels: string[]) =>
+        labels.filter((label) => label === "sent" || label.startsWith("live:"));
+      const renderedOrder = () => {
+        const state = useChatStore.getState();
+        return sentAndPreviews(
+          mergePendingBubbles(
+            buildBubbles(state.blocks, state.activeResponse),
+            buildPendingBubbles(state.pendingUserMessages, null),
+            state.hasMoreHistory,
+          ).flatMap((bubble) => {
+            if (bubble.kind === "user") return bubble.shellCommand ? [] : ["sent"];
+            return bubble.kind === "assistant" ? bubble.items.map((item) => item.itemId ?? "") : [];
+          }),
+        );
+      };
+      const blockOrder = () =>
+        sentAndPreviews(
+          useChatStore
+            .getState()
+            .blocks.map((b) => (b.type === "user_message" ? "sent" : (b.ctx.itemId ?? ""))),
+        );
+      const expected = lifted ? ["sent", "live:m_a", "live:m_b"] : ["live:m_a", "live:m_b", "sent"];
+
+      sink.push(nativeDelta("m_a", 0, "One.", true));
+      sink.push(nativeDelta("m_b", 0, "Two.", false));
+      await tick();
+      expect(renderedOrder()).toEqual(expected);
+
+      sink.push(
+        sse("session.input.consumed", {
+          data: {
+            item_id: "item_p",
+            type: "message",
+            cleared_pending_id: "pending_p",
+            data: { role: "user", content: [{ type: "input_text", text: "go" }] },
+          },
+        }),
+      );
+      await tick();
+      expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+      expect(blockOrder()).toEqual(expected);
+      expect(renderedOrder()).toEqual(expected);
+
+      controller.abort();
+    },
+  );
+
   it("reconciles each preview independently across a multi-message turn", async () => {
     useChatStore.setState({
       conversationId: "conv_live4",
