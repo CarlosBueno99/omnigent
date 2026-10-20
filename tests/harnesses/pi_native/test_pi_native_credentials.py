@@ -628,15 +628,28 @@ def test_inline_databricks_gateway_unlisted_override_is_routed_like_databricks_k
     assert [m["id"] for m in rendered[expected_provider]["models"]] == [override]
 
 
-def test_inline_dedicated_gateway_host_stays_single_family(
-    monkeypatch: pytest.MonkeyPatch,
+def _use_databricks_config_file(
+    monkeypatch: pytest.MonkeyPatch, config_file: Path, contents: str | None
 ) -> None:
-    """A dedicated ``ai-gateway`` host names no workspace, so nothing is enumerated."""
+    """Resolve the Databricks workspace only from *config_file* (absent when ``None``)."""
+    for name in ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "DATABRICKS_CONFIG_PROFILE"):
+        monkeypatch.delenv(name, raising=False)
+    if contents is not None:
+        config_file.write_text(contents)
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(config_file))
 
-    def _unexpected(host: str, token: str):
-        raise AssertionError("a dedicated gateway host must not trigger enumeration")
 
-    monkeypatch.setattr(creds, "_fetch_pi_model_lists", _unexpected)
+def test_inline_dedicated_gateway_without_profile_stays_single_family(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A dedicated ``ai-gateway`` host with no Databricks profile is not enumerated."""
+    _use_databricks_config_file(monkeypatch, tmp_path / "missing-databrickscfg", None)
+    listing_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        creds,
+        "_fetch_pi_model_lists",
+        lambda host, token: listing_calls.append((host, token)) or ([], [], [], []),
+    )
     config = {
         "providers": {
             "anthropic-gateway": {
@@ -658,6 +671,118 @@ def test_inline_dedicated_gateway_host_stays_single_family(
     assert provider.base_url == "https://123.ai-gateway.cloud.databricks.com/anthropic"
     assert provider.model == "system.ai.claude-opus-5"
     assert not provider.additional_providers
+    assert listing_calls == []
+
+
+@pytest.mark.parametrize(
+    ("family", "surface_path", "default_model", "default_provider"),
+    [
+        ("anthropic", "/anthropic", "system.ai.claude-opus-5", "omnigent"),
+        ("openai", "/codex/v1", "system.ai.gpt-5", "omnigent-openai"),
+    ],
+)
+def test_inline_dedicated_gateway_with_profile_routes_each_family_to_its_surface(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    family: str,
+    surface_path: str,
+    default_model: str,
+    default_provider: str,
+) -> None:
+    """Listed families launch on the dedicated host; Gemini uses the profile's workspace."""
+    _use_databricks_config_file(
+        monkeypatch,
+        tmp_path / "databrickscfg",
+        "[DEFAULT]\nhost = https://wkspc.cloud.databricks.com\ntoken = dapi-profile\n",
+    )
+    listing_calls: list[tuple[str, str]] = []
+
+    def _listing(host: str, token: str):
+        listing_calls.append((host, token))
+        return (
+            [{"id": "system.ai.claude-opus-5"}],
+            [{"id": "system.ai.gpt-5"}],
+            [],
+            [{"id": "system.ai.gemini-3-flash"}],
+        )
+
+    monkeypatch.setattr(creds, "_fetch_pi_model_lists", _listing)
+    family_config = {"api_key": "gw-token", "models": {"default": default_model}}
+    if family == "openai":
+        family_config["wire_api"] = "responses"
+    config = {
+        "providers": {
+            "gateway": {
+                "kind": "gateway",
+                "default": True,
+                family: {
+                    "base_url": f"https://123.ai-gateway.cloud.databricks.com{surface_path}",
+                    **family_config,
+                },
+            }
+        }
+    }
+
+    provider = creds.resolve_pi_native_provider(config_loader=lambda: config)
+
+    assert listing_calls == [("https://wkspc.cloud.databricks.com", "gw-token")]
+    assert provider is not None
+    assert provider.model == default_model
+    rendered = provider.to_models_config()["providers"]
+    assert {pid: payload["baseUrl"] for pid, payload in rendered.items()} == {
+        "omnigent": "https://123.ai-gateway.cloud.databricks.com/anthropic",
+        "omnigent-openai": "https://123.ai-gateway.cloud.databricks.com/codex/v1",
+        "omnigent-mlflow": "https://wkspc.cloud.databricks.com/ai-gateway/mlflow/v1",
+    }
+    assert default_model in [m["id"] for m in rendered[default_provider]["models"]]
+
+
+def test_inline_dedicated_gateway_with_workspace_profile_offers_every_family(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A dedicated gateway host offers every family once a profile names its workspace."""
+    for name in ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "DATABRICKS_CONFIG_PROFILE"):
+        monkeypatch.delenv(name, raising=False)
+    databricks_config = tmp_path / "databrickscfg"
+    databricks_config.write_text(
+        "[DEFAULT]\nhost = https://wkspc.cloud.databricks.com\ntoken = dapi-test\n"
+    )
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(databricks_config))
+    monkeypatch.setattr(
+        creds,
+        "_fetch_pi_model_lists",
+        lambda host, token: (
+            [{"id": "system.ai.claude-opus-5"}],
+            [{"id": "system.ai.gpt-5"}],
+            [],
+            [{"id": "system.ai.gemini-3-flash"}],
+        ),
+    )
+    config = {
+        "providers": {
+            "gateway": {
+                "kind": "gateway",
+                "default": True,
+                "openai": {
+                    "base_url": "https://123.ai-gateway.cloud.databricks.com/codex/v1",
+                    "api_key": "gw-token",
+                    "wire_api": "responses",
+                    "models": {"default": "system.ai.gpt-5"},
+                },
+            }
+        }
+    }
+
+    options = creds.pi_native_model_options(
+        config_loader=lambda: config,
+        transport=httpx.MockTransport(lambda request: httpx.Response(404)),
+    )
+
+    assert {o["model"] for o in options} == {
+        "omnigent/system.ai.claude-opus-5",
+        "omnigent-openai/system.ai.gpt-5",
+        "omnigent-mlflow/system.ai.gemini-3-flash",
+    }
 
 
 def test_databricks_gateway_builder_derives_codex_surface_from_anthropic_url(
