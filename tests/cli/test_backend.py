@@ -1046,6 +1046,8 @@ def test_registration_diagnostics_never_expose_url_credentials(
     # The server is still identified, just without its userinfo.
     assert "http://127.0.0.1:59999" in message
     assert "Waiting for the host daemon to register with http://127.0.0.1:59999" in captured.err
+    if not probe_result.unreachable:
+        assert "host stop --server http://[REDACTED]@127.0.0.1:59999" in message
 
 
 def test_registration_target_display_preserves_ipv6_brackets() -> None:

@@ -959,6 +959,34 @@ def test_host_background_fails_when_daemon_never_registers(
         assert len(spawned) == 1, "the rerun must adopt the pending daemon"
 
 
+def test_local_host_background_keeps_pending_daemon_while_server_answers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local daemon whose server answers but whose host is not online yet is left running."""
+    _patch_background_host_spawn(monkeypatch, tmp_path)
+    monkeypatch.setattr("omnigent.cli._daemon_host_online", lambda record, **kwargs: False)
+    monkeypatch.setattr(
+        "omnigent.cli._daemon_host_status_probe",
+        lambda record, **kwargs: cli_module._HostHttpResult(
+            status_code=404, body={"detail": "host not found"}
+        ),
+    )
+    monkeypatch.setattr("omnigent.cli._BACKGROUND_HOST_REGISTRATION_GRACE_S", 0.0)
+    terminated: list[int] = []
+    monkeypatch.setattr(
+        "omnigent.cli._terminate_daemon",
+        lambda record, *, force: terminated.append(record.pid),
+    )
+
+    result = CliRunner().invoke(cli, ["host", "--background"])
+
+    assert result.exit_code != 0
+    assert "did not register with the server at http://127.0.0.1:6767" in result.output
+    assert "still running (pid 4242)" in result.output
+    assert terminated == []
+
+
 def test_host_background_does_not_block(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
