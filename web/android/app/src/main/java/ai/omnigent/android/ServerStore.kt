@@ -75,8 +75,10 @@ class ServerStore(
     /** Push the current server to the front of the recents list. */
     fun rememberCurrent() {
         val url = storedServerUrl() ?: return
-        val recents = (listOf(url) + recentServers()).distinct().take(MAX_RECENTS)
-        prefs.edit().putString(KEY_RECENTS, recents.joinToString("\n")).apply()
+        val recents = recentServers()
+        if (recents.firstOrNull() == url) return
+        val updated = (listOf(url) + recents).distinct().take(MAX_RECENTS)
+        prefs.edit().putString(KEY_RECENTS, updated.joinToString("\n")).apply()
     }
 
     private fun storedServerUrl(): String? = prefs.getString(KEY_CURRENT, null)

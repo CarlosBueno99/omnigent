@@ -380,6 +380,37 @@ class MainActivityTest {
     }
 
     @Test
+    fun `a page from the server being left does not remember the next one`() {
+        val store = ServerStore(ApplicationProvider.getApplicationContext())
+        store.connect("https://example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+
+        store.select("https://new.example.test")
+        activity.invoke("onPageReady", arrayOf(String::class.java), "https://example.com/")
+
+        assertEquals(listOf("https://example.com"), store.recentServers())
+    }
+
+    @Test
+    fun `switching servers drops a path held for the server being left`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        ServerStore(context).connect("https://second.example.test")
+        ServerStore(context).connect("https://example.com")
+        val shell = Robolectric.buildActivity(MainActivity::class.java).setup()
+        val activity = shell.get()
+        shell.openLink("omnigent://second.example.test/c/abc")
+
+        activity.invoke(
+            "onSwitchServerRequested",
+            arrayOf(String::class.java),
+            "https://example.com",
+        )
+
+        assertEquals("https://example.com", shadowOf(activity.webView()).lastLoadedUrl)
+        assertNull(activity.declared<String?>("pendingNavigatePath"))
+    }
+
+    @Test
     fun `server pill tracks the container width and truncates in the middle`() {
         val activity = launch()
         val pill = activity.switchButton() as TextView

@@ -75,6 +75,7 @@ class DeepLinkTest {
                 "abc%3Fview=terminal",
                 "abc%23top",
                 "a%2Fb",
+                "a%5Cb",
                 "..",
                 "%2E%2E",
                 "abc%00",

@@ -77,8 +77,8 @@
             </intent-filter>
         </activity>
 
-        <!-- Share-dialog conversation links. Taskless, so a link opened from another app
-             re-enters the shell in its own task. -->
+        <!-- Share-dialog conversation links. No task affinity; the NEW_TASK handoff re-enters
+             the shell's task. -->
         <activity
             android:name=".DeepLinkActivity"
             android:excludeFromRecents="true"

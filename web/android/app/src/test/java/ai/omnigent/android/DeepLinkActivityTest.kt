@@ -45,7 +45,7 @@ class DeepLinkActivityTest {
         assertNull(ShadowAlertDialog.getLatestAlertDialog())
         assertEquals("https://proxy.example.com/omnigent", store.currentServerUrl())
         assertEquals("/c/abc", opened.navigatePath())
-        assertTrue(UserConnectRequests.consume(opened.connectRequest()))
+        assertNull(opened.connectRequest())
     }
 
     @Test
@@ -61,6 +61,7 @@ class DeepLinkActivityTest {
         )
         assertNull(shadowOf(activity).peekNextStartedActivity())
         assertFalse(store.hasServer())
+        assertTrue(consent.getButton(AlertDialog.BUTTON_POSITIVE).filterTouchesWhenObscured)
 
         consent.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
         shadowOf(Looper.getMainLooper()).idle()

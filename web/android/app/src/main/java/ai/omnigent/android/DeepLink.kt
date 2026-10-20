@@ -20,7 +20,7 @@ data class DeepLink(
         private val LOOPBACK_HOSTS = setOf("localhost", "127.0.0.1", "[::1]")
 
         // Decoded id characters that would smuggle a query, fragment, path, traversal or escape.
-        private val BLOCKED_ID_CHARACTERS = setOf('?', '#', '/', '.', '%')
+        private val BLOCKED_ID_CHARACTERS = setOf('?', '#', '/', '\\', '.', '%')
 
         /** The link's server and conversation, or null for anything else. */
         fun parse(link: String?): DeepLink? {

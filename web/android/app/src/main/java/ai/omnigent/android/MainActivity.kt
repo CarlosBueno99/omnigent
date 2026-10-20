@@ -847,6 +847,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun switchToServer(url: String) {
+        // A path held for the server being left must not open on the new one.
+        pendingNavigatePath = null
         val store = ServerStore(this)
         store.connect(url)
         val target = store.currentServerUrl()
@@ -1573,7 +1575,9 @@ class MainActivity : AppCompatActivity() {
         loginAttempts = 0 // reached a pinned-origin page — we're past the login redirect
         // A server first opened from a link joins recents only once its page loads.
         val store = ServerStore(this)
-        if (originOf(store.currentServerUrl()) == originOf(url)) store.rememberCurrent()
+        if (!isServerChange(store.currentServerUrl(), pinnedOrigin, workspaceContext)) {
+            store.rememberCurrent()
+        }
         oidcSession?.onPageVisited(url)
         // Does NOT reset the crash budget: a load-then-crash loop fires onPageReady
         // every cycle, so resetting here would defeat withinCrashBudget()'s guard.

@@ -23,13 +23,14 @@ class DeepLinkActivity : Activity() {
         } else if (store.hasServer() && originOf(store.currentServerUrl()) == link.origin) {
             openApp(link.path)
         } else {
+            // Any app can send this link, so the switch must not start an interactive sign-in.
             store.connect(known)
-            openApp(link.path, UserConnectRequests.issue())
+            openApp(link.path)
         }
     }
 
     // Connecting grants the native bridge, so only servers in recents skip consent. A consented
-    // server joins recents once its page loads; a preset joins once the user picks it.
+    // server joins recents once its page loads; a preset on that origin keeps its mount.
     private fun askToConnect(
         store: ServerStore,
         link: DeepLink,
@@ -40,11 +41,12 @@ class DeepLinkActivity : Activity() {
                 .setTitle(R.string.deep_link_consent_title)
                 .setMessage(getString(R.string.deep_link_consent_message, link.hostLabel))
                 .setPositiveButton(R.string.deep_link_consent_open) { _, _ ->
-                    store.select(link.origin)
+                    store.select(store.managed.serverFor(link.origin) ?: link.origin)
                     openApp(link.path, UserConnectRequests.issue())
                 }.setNegativeButton(android.R.string.cancel) { _, _ -> finish() }
                 .setOnCancelListener { finish() }
                 .show()
+                .apply { getButton(AlertDialog.BUTTON_POSITIVE).filterTouchesWhenObscured = true }
     }
 
     override fun onDestroy() {
