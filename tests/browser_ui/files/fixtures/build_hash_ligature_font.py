@@ -1,8 +1,6 @@
-"""Build a Geist Mono variant whose ``liga`` feature merges ``###`` into one glyph that
-keeps a single cell's advance but draws its ink in the two cells to the left. Run from
-the repo root with ``.venv/bin/python``; fonttools 4.66.1, brotli 1.2.0 and
-@fontsource-variable/geist-mono 5.3.0 reproduce the committed bytes. The output is a
-Modified Version under the SIL Open Font License; see OFL.txt beside it."""
+"""Build a Geist Mono variant (licence: OFL.txt) whose ``liga`` merges ``###`` into one
+glyph with a single cell's advance and ink in the two cells to the left. Regenerate with
+``uv run --no-project --with fonttools==4.66.1 --with brotli==1.2.0 python <this file>``."""
 
 from __future__ import annotations
 
