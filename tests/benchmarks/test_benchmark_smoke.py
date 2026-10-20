@@ -56,6 +56,7 @@ _SMOKE_JOURNEYS = [
     "policy_evaluate",
     "native_hook_spawn",
     *(name for name in ALL_JOURNEYS if name.startswith("project_order_")),
+    *(name for name in ALL_JOURNEYS if name.startswith("shared_preferences_")),
 ]
 
 
@@ -80,6 +81,9 @@ def _smoke_args(**overrides: object) -> argparse.Namespace:
         "min_rps": None,
         "max_p50_ms": None,
         "max_p99_ms": None,
+        "preference_clients": 2,
+        "preference_keys": 4,
+        "preference_history": 2,
     }
     base.update(overrides)
     return argparse.Namespace(**base)

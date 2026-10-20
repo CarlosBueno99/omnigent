@@ -61,6 +61,7 @@ import httpx
 
 from .environment import BenchEnvironment, GatedTurn, ServerRequestSnapshot
 from .measure import RunResult
+from .preferences import preference_journeys
 from .project_order import project_order_journeys
 
 # Per-journey context returned by ``setup`` and threaded to ``measure``. Its
@@ -103,6 +104,7 @@ class Journey:
     :param needs_host: Whether this journey needs a real host daemon
         (``BenchEnvironment(with_host=True)``) so a host-bound session-create
         or restart can fire ``host.launch_runner``. Implies ``needs_runner``.
+    :param needs_shared_preferences: Enable the opt-in API on the owned benchmark server.
     :param max_iterations: Upper bound on latency iterations for this journey,
         clamping ``--iterations`` down (never up). Runner journeys cap so the
         suite fits the CI time budget; the slowest (cold starts, CLI startup)
@@ -124,6 +126,7 @@ class Journey:
     concurrency_safe: bool = False
     needs_runner: bool = False
     needs_host: bool = False
+    needs_shared_preferences: bool = False
     max_iterations: int | None = None
     max_warmup: int | None = None
     description: str = ""
@@ -1106,6 +1109,7 @@ ALL_JOURNEYS: dict[str, Journey] = {
     j.name: j
     for j in (
         *project_order_journeys(),
+        *preference_journeys(),
         Journey(
             name="list_sessions",
             kind="latency",
