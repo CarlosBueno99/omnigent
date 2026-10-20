@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+  type QueryKey,
+} from "@tanstack/react-query";
 import { appendScopePage, refreshScopeWindow, type ScopeCacheData } from "@/lib/sidebarData";
 import { filterSessionScope } from "@/lib/sessionVisibility";
 import { sidebarConfig } from "@/lib/sidebarConfig";
 import { useViewerId } from "./useViewerId";
 import { isStaleCursorError } from "@/lib/staleCursor";
 import {
+  conversationsQueryKey,
   fetchConversationsPage,
   timeInitialConversationLoad,
   useConversations,
@@ -159,11 +166,12 @@ export function useScopeCache(
       ? null
       : pagination.error;
   const { isError: pageFailed, reset: resetPage } = pagination;
+  const { isLoading: firstLoadPending } = query;
   const refetch = useCallback(() => {
     if (!enabled) return Promise.resolve();
     if (pageFailed) resetPage();
-    return refreshHead();
-  }, [enabled, pageFailed, resetPage, refreshHead]);
+    return retryList(client, queryKey, firstLoadPending, refreshHead);
+  }, [enabled, pageFailed, resetPage, client, queryKey, firstLoadPending, refreshHead]);
   return {
     ...query,
     refetch,
@@ -180,7 +188,20 @@ export function useScopeCache(
   };
 }
 
+/** Refetch a list, replacing a pending first load that refetch would only rejoin. */
+function retryList(
+  client: QueryClient,
+  queryKey: QueryKey,
+  firstLoadPending: boolean,
+  refetch: () => Promise<unknown>,
+): Promise<unknown> {
+  // Cancelling synchronously reverts the query to idle, so this refetch starts a new request.
+  if (firstLoadPending) void client.cancelQueries({ queryKey, exact: true });
+  return refetch();
+}
+
 export function useArchivedSessions(enabled: boolean, sortBy: SessionSortBy = "updated_at") {
+  const client = useQueryClient();
   const query = useConversations(
     "",
     false,
@@ -189,7 +210,7 @@ export function useArchivedSessions(enabled: boolean, sortBy: SessionSortBy = "u
     "archived",
   );
   const previousEntry = useRef({ enabled: false, sortBy });
-  const { data, refetch } = query;
+  const { data, refetch, isLoading: firstLoadPending } = query;
   useEffect(() => {
     const opening =
       enabled && (!previousEntry.current.enabled || sortBy !== previousEntry.current.sortBy);
@@ -197,5 +218,15 @@ export function useArchivedSessions(enabled: boolean, sortBy: SessionSortBy = "u
     // The initial load is automatic; entries and sort changes refresh retained snapshots.
     if (opening && data) void refetch({ cancelRefetch: false });
   }, [enabled, sortBy, data, refetch]);
-  return query;
+  const retry = useCallback(
+    () =>
+      retryList(
+        client,
+        conversationsQueryKey("", false, undefined, "archived", sortBy),
+        firstLoadPending,
+        refetch,
+      ),
+    [client, sortBy, firstLoadPending, refetch],
+  );
+  return { ...query, refetch: retry };
 }

@@ -630,6 +630,28 @@ export async function timeInitialConversationLoad(
   }
 }
 
+/** The {@link useConversations} cache key for one list. */
+export function conversationsQueryKey(
+  searchQuery: string,
+  includeArchived: boolean,
+  project: string | undefined,
+  visibility: "mine" | "shared" | "archived" | undefined,
+  sortBy: SessionSortBy,
+): unknown[] {
+  // Keep the base three-element key for the unfiltered callers (byte-for-byte
+  // unchanged, so the sidebar / rename / push-delta paths are untouched); only
+  // append `project` for a concrete name; append `visibility` only when set so
+  // the "mine"/"shared" tab queries get their own cache entries without
+  // disturbing the existing all-sessions key used by every other caller.
+  return sortBy === "created_at"
+    ? ["conversations", searchQuery, includeArchived, project ?? null, visibility, sortBy]
+    : visibility
+      ? ["conversations", searchQuery, includeArchived, project ?? null, visibility]
+      : project
+        ? ["conversations", searchQuery, includeArchived, project]
+        : ["conversations", searchQuery, includeArchived];
+}
+
 export function useConversations(
   searchQuery = "",
   includeArchived = false,
@@ -647,20 +669,8 @@ export function useConversations(
   const streamConnected = useSessionUpdatesConnected();
   const queryClient = useQueryClient();
   const { sessionPageSize } = useContext(SidebarConfigContext);
-  // Keep the base three-element key for the unfiltered callers (byte-for-byte
-  // unchanged, so the sidebar / rename / push-delta paths are untouched); only
-  // append `project` for a concrete name; append `visibility` only when set so
-  // the "mine"/"shared" tab queries get their own cache entries without
-  // disturbing the existing all-sessions key used by every other caller.
   const sortBy = options.sortBy ?? "updated_at";
-  const queryKey =
-    sortBy === "created_at"
-      ? ["conversations", searchQuery, includeArchived, project ?? null, visibility, sortBy]
-      : visibility
-        ? ["conversations", searchQuery, includeArchived, project ?? null, visibility]
-        : project
-          ? ["conversations", searchQuery, includeArchived, project]
-          : ["conversations", searchQuery, includeArchived];
+  const queryKey = conversationsQueryKey(searchQuery, includeArchived, project, visibility, sortBy);
   const query = useInfiniteQuery({
     queryKey,
     queryFn: async ({ pageParam }) => {

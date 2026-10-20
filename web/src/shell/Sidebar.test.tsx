@@ -178,7 +178,7 @@ vi.mock("@/lib/serverOrigin", () => ({
 
 import { useConversations } from "@/hooks/useConversations";
 import { useChatStore } from "@/store/chatStore";
-import { Sidebar } from "./Sidebar";
+import { SESSION_LIST_SLOW_LOAD_MS, Sidebar } from "./Sidebar";
 import { useSessionImportStore } from "@/store/sessionImport";
 import * as identity from "@/lib/identity";
 
@@ -580,6 +580,49 @@ describe("Sidebar session list", () => {
     selectSessionFilter("mine");
     expect(screen.getByText("pinned-session")).toBe(pinned);
     expect(screen.getByText("filed-session")).toBe(filed);
+  });
+
+  it.each([
+    ["mine", "mine"],
+    ["all", "mine"],
+    ["shared", "shared"],
+    ["archived", "archived"],
+  ] as const)("offers Retry when the %s list's first %s load stays pending", (view, scope) => {
+    vi.useFakeTimers();
+    try {
+      mockConversations([conv("pinned-session", "Claude Code")]);
+      seedPins(["pinned-session"]);
+      const original = useConvMock.getMockImplementation()!;
+      const retry = vi.fn();
+      useConvMock.mockImplementation((...args) => {
+        const query = original(...args);
+        if (args[4] !== scope) return { ...query, refetch: vi.fn() };
+        return {
+          ...query,
+          data: undefined,
+          isLoading: true,
+          refetch: retry,
+        } as ReturnType<typeof useConversations>;
+      });
+      renderSidebar();
+      selectSessionFilter(view);
+      const sessions = screen.getByRole("button", { name: "Sessions" }).closest("section")!;
+      const status = () => within(sessions).getByRole("status");
+
+      act(() => vi.advanceTimersByTime(SESSION_LIST_SLOW_LOAD_MS - 1));
+      expect(status()).toHaveTextContent("Loading…");
+      act(() => vi.advanceTimersByTime(1));
+      expect(status()).toHaveTextContent("Sessions are taking longer than usual.");
+      expect(screen.getByText("pinned-session")).toBeInTheDocument();
+
+      fireEvent.click(within(status()).getByRole("button", { name: "Retry" }));
+      expect(retry).toHaveBeenCalledOnce();
+      expect(status()).toHaveTextContent("Loading…");
+      act(() => vi.advanceTimersByTime(SESSION_LIST_SLOW_LOAD_MS));
+      expect(within(status()).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reveals a thin, theme-aware scrollbar only while scrolling", () => {
