@@ -8585,6 +8585,41 @@ def test_provider_config_for_native_claude_keeps_betas_under_use_gateway(
     assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" not in cfg.env
 
 
+def test_provider_config_for_native_claude_disables_advisor_on_databricks_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider on the Databricks AI Gateway turns off only the advisor tool.
+
+    Under CLAUDE_CODE_USE_GATEWAY=1 betas stay on, so without the flag Claude
+    Code sends ``advisor_20260301`` and the gateway fails every turn with a 400.
+    """
+    from omnigent.onboarding.provider_config import load_providers
+
+    monkeypatch.setenv("CLAUDE_CODE_USE_GATEWAY", "1")
+    base_url = "https://dbc-1234.cloud.databricks.com/ai-gateway/anthropic"
+
+    entry = load_providers(
+        {
+            "providers": {
+                "gw": {
+                    "kind": "gateway",
+                    "anthropic": {
+                        "base_url": base_url,
+                        "auth_command": "my-cli print-token",
+                    },
+                }
+            }
+        }
+    )["gw"]
+
+    cfg = claude_native._provider_config_for_native_claude(entry)
+    assert cfg is not None
+    assert cfg.env == {
+        "ANTHROPIC_BASE_URL": base_url,
+        "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
+    }
+
+
 def test_bedrock_config_for_native_claude_static_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``bedrock`` provider sets the Bedrock env trio and no apiKeyHelper.
 
