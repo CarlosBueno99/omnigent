@@ -119,6 +119,7 @@ def register_resource_routes(
     _pi_terminal_ensure_locks: dict[str, asyncio.Lock],
     _publish_event: Callable[[str, Mapping[str, object]], None],
     _qwen_terminal_ensure_locks: dict[str, asyncio.Lock],
+    _rebind_claude_bridge: Callable[[str, str], Coroutine[Any, Any, None]],
     _record_session_claude_launch_config: Callable[[str, ClaudeNativeUcodeConfig | None], None],
     _repl_terminal_ensure_locks: dict[str, asyncio.Lock],
     _repop_pending_cost_popup_on_attach: Callable[[str, str, str], Coroutine[Any, Any, None]],
@@ -357,9 +358,9 @@ def register_resource_routes(
         ):
             # Each native harness contributes only the ensure hooks that differ
             # from the uniform base; a single _ensure_native_terminal call runs
-            # them. The 4 uniform harnesses (goose/kiro/hermes/qwen) need only the
-            # base context; pi/opencode/cursor/kimi/claude resolve an agent spec
-            # via build_context; codex/antigravity add an ownership check (and
+            # them. pi/opencode/cursor/kimi/devin/goose/hermes/kiro/qwen/claude
+            # resolve an agent spec via build_context (its os_env carries the
+            # terminal sandbox); codex/antigravity add an ownership check (and
             # codex a one-shot policy-notice response wrap).
             _ensure_locks = _require_full_native_lock_coverage(
                 {
@@ -396,6 +397,7 @@ def register_resource_routes(
                 server_client=server_client,
                 event_dispatcher=getattr(app.state, "runner_event_dispatcher", None),
                 ensure_comment_relay=_ensure_comment_relay_started,
+                rebind_bridge=_rebind_claude_bridge,
             )
             _ensure_build: (
                 Callable[[NativeLaunchContext], Awaitable[NativeLaunchContext]] | None
@@ -477,7 +479,15 @@ def register_resource_routes(
 
                 _ensure_build = _spec_ensure_build
 
-            elif terminal_name in ("cursor", "kimi", "devin"):
+            elif terminal_name in (
+                "cursor",
+                "kimi",
+                "devin",
+                "goose",
+                "hermes",
+                "kiro",
+                "qwen",
+            ):
 
                 async def _spec_or_none_ensure_build(
                     ctx: NativeLaunchContext,
@@ -918,6 +928,7 @@ def register_resource_routes(
                         _publish_event,
                         server_client=server_client,
                         ensure_comment_relay=_ensure_comment_relay_started,
+                        agent_spec=await _resolve_session_agent_spec_or_none(session_id),
                     )
                 except Exception:
                     _logger.exception(
@@ -1009,6 +1020,34 @@ def register_resource_routes(
             before=before,
             order=order,
         )
+
+    @app.get("/v1/sessions/{session_id}/resources/environments/{environment_id}/content-search")
+    async def search_environment_content(
+        session_id: str,
+        environment_id: str,
+        q: str = Query(min_length=1, max_length=4096, pattern=r".*\S.*"),
+        case_sensitive: bool = False,
+        regex: bool = False,
+        include: str = Query(default="", max_length=4096),
+        exclude: str = Query(default="", max_length=4096),
+        limit: int = Query(default=500, ge=1, le=500),
+    ) -> JSONResponse:
+        """Search live file contents inside the session's environment."""
+        from omnigent.runner.content_search import search_content
+
+        agent_spec = await _require_os_env(session_id)
+        await _ensure_session_registered(session_id)
+        env = resource_registry.resolve_environment(session_id, environment_id, agent_spec)
+        result = await search_content(
+            env,
+            q,
+            case_sensitive=case_sensitive,
+            regex=regex,
+            include=include,
+            exclude=exclude,
+            limit=limit,
+        )
+        return JSONResponse(result)
 
     @app.get("/v1/sessions/{session_id}/resources/environments/{environment_id}/search")
     async def search_environment_files(
@@ -1289,12 +1328,8 @@ def register_resource_routes(
             },
         )
 
-    # ── GitHub integration (read-only): PR metadata + the PR's files / diff ──
-    # The list and patch come from the ``gh`` CLI (the PR's "Files changed");
-    # only the per-file expand-context reader uses ``git show``. See
-    # omnigent.runner.github_resource. Each shells out synchronously, so it is
-    # offloaded to a thread like the changed-files / diff routes above (a blocked
-    # loop 503s the session).
+    # Pull request reads use the provider dispatcher; route names stay compatible.
+    # Provider calls block on a CLI or API, so run them outside the event loop.
 
     async def _github_workspace_root(session_id: str) -> str:
         """Resolve the workspace root for GitHub routes, or 404 when headless."""
@@ -1308,10 +1343,10 @@ def register_resource_routes(
         return root
 
     async def _github_call(session_id: str, operation: str, **kwargs: Any) -> JSONResponse:
-        from omnigent.runner import github_resource
+        from omnigent.runner import pr_resource
 
         root = await _github_workspace_root(session_id)
-        function = getattr(github_resource, operation)
+        function = getattr(pr_resource, operation)
         try:
             result = await asyncio.to_thread(function, root, session_id=session_id, **kwargs)
         except ValueError as exc:
@@ -1320,15 +1355,15 @@ def register_resource_routes(
 
     @app.get("/v1/sessions/{session_id}/resources/github")
     async def read_github_info(session_id: str, pr_url: str | None = None) -> JSONResponse:
-        return await _github_call(session_id, "github_info", pr_url=pr_url)
+        return await _github_call(session_id, "pr_info", pr_url=pr_url)
 
     @app.get("/v1/sessions/{session_id}/resources/github/changes")
     async def read_github_changes(session_id: str, pr_url: str | None = None) -> JSONResponse:
-        return await _github_call(session_id, "github_changed_files", pr_url=pr_url)
+        return await _github_call(session_id, "pr_changed_files", pr_url=pr_url)
 
     @app.get("/v1/sessions/{session_id}/resources/github/diff")
     async def read_github_pr_diff(session_id: str, pr_url: str | None = None) -> JSONResponse:
-        return await _github_call(session_id, "github_pr_diff", pr_url=pr_url)
+        return await _github_call(session_id, "pr_diff", pr_url=pr_url)
 
     @app.get("/v1/sessions/{session_id}/resources/github/diff/{relative_path:path}")
     async def read_github_file_diff(
@@ -1346,7 +1381,7 @@ def register_resource_routes(
             raise HTTPException(status_code=400, detail="Invalid path")
         return await _github_call(
             session_id,
-            "github_file_diff",
+            "pr_file_diff",
             base=base or "",
             path=relative_path,
             pr_url=pr_url,
@@ -1369,7 +1404,7 @@ def register_resource_routes(
         body = await request.json()
         return await _github_call(
             session_id,
-            "set_github_preference",
+            "set_pr_preference",
             account=body.get("account"),
             remote=body.get("remote"),
             pr_url=body.get("pr_url"),
@@ -1538,7 +1573,7 @@ def register_resource_routes(
         )
         fs = CallerProcessFilesystem(env)
         result = await fs.delete(relative_path, recursive=recursive)
-        if filesystem_registry is not None and result.type == "file":
+        if filesystem_registry is not None and result.type in ("file", "symlink"):
             filesystem_registry.record_change(relative_path, "deleted", session_id)
         return JSONResponse(
             status_code=200,
