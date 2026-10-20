@@ -72,11 +72,16 @@ it.each([
   expect(openOrNavigate).not.toHaveBeenCalled();
 });
 
-it("keeps the external default when the preference is off", () => {
-  writeOpenLinksInApp(false);
-  expect(clickLink().defaultPrevented).toBe(false);
-  expect(openOrNavigate).not.toHaveBeenCalled();
-});
+it.each([LINK, "https://other.example.com/c/conv-2"])(
+  "keeps %s on the external path when the preference is off",
+  (href) => {
+    writeOpenLinksInApp(false);
+    window.history.replaceState(null, "", "/c/conv-1");
+    expect(clickLink(href).defaultPrevented).toBe(false);
+    expect(window.location.pathname).toBe("/c/conv-1");
+    expect(openOrNavigate).not.toHaveBeenCalled();
+  },
+);
 
 it.each([true, false])(
   "opens a same-origin session link in place (in-app browser preference %s)",
@@ -102,11 +107,3 @@ it.each([true, false])(
     );
   },
 );
-
-it("keeps another server's session link on the external path", () => {
-  writeOpenLinksInApp(false);
-  window.history.replaceState(null, "", "/c/conv-1");
-  expect(clickLink("https://other.example.com/c/conv-2").defaultPrevented).toBe(false);
-  expect(window.location.pathname).toBe("/c/conv-1");
-  expect(openOrNavigate).not.toHaveBeenCalled();
-});
