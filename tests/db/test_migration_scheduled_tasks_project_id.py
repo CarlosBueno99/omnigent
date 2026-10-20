@@ -1,11 +1,4 @@
-"""Upgrade keeps a ``scheduled_tasks.project_id`` column that predates its migration.
-
-Revision ``0638f6e46137`` adds the column only when it is missing, so an upgrade
-replayed over a schema that already has it (a rewound ``alembic_version``, or a
-column patched in outside Alembic) reaches head without a duplicate-column
-failure and without losing rows. The fresh-upgrade path is covered by
-``test_migration_scheduled_tasks.py::test_scheduled_tasks_columns``.
-"""
+"""Upgrading over a pre-existing ``scheduled_tasks.project_id`` keeps the column and rows."""
 
 from __future__ import annotations
 
