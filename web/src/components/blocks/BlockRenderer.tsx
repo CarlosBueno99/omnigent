@@ -485,7 +485,9 @@ type ToolItem = Extract<RenderItem, { kind: "tool" }>;
 // Explicit pointers back to earlier output; "above 90%" or "the table above" do not count.
 const BACKWARD_REFERENCE = new RegExp(
   [
-    String.raw`\b(?:(?:output|report|results?|logs?)(?:\s+(?:is|are))?|shown|printed|displayed|listed|see)\s+above\b`,
+    String.raw`\b(?:output|report|results?|logs?)\s+(?:is|are)\s+above(?=\s*(?:[.,;:!?)]|$))`,
+    String.raw`\b(?:output|report|results?|logs?)\s+above\b(?!\s*(?:[\d$%]|(?:a|an|the)\b))`,
+    String.raw`\b(?:shown|printed|displayed|listed|see)\s+above\b`,
     String.raw`\babove(?:\s+(?:is|are)\b|\s*:)`,
     String.raw`\bscroll(?:ing)?\s+up\b`,
   ].join("|"),
