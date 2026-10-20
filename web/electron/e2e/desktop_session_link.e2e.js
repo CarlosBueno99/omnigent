@@ -19,7 +19,9 @@ it(
   { skip: deps.ok ? false : `missing deps: ${deps.missing.join(", ")}`, timeout: 240_000 },
   async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omni-session-link-"));
-    const recordDir = process.env.OMNIGENT_DESKTOP_RECORD_DIR || path.join(tmpDir, "recordings");
+    const recordDir =
+      process.env.OMNIGENT_DESKTOP_RECORD_DIR ||
+      fs.mkdtempSync(path.join(os.tmpdir(), "omni-session-link-recordings-"));
     let backend;
     let desktop;
     try {
@@ -75,8 +77,7 @@ it(
       await backend?.close();
       console.log(saveRecording(recordDir, "session-link"));
       if (desktop) fs.rmSync(desktop.userDataDir, { recursive: true, force: true });
-      if (process.env.OMNIGENT_DESKTOP_RECORD_DIR)
-        fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   },
 );

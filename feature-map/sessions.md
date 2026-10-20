@@ -605,10 +605,11 @@ plain `uv run pytest`, which starts a private server for the test.
   in. Another session should be signed out. Log out and refresh the same-session
   tabs; all should be signed out.
 - **Desktop session links (real Electron, own environment):**
-  `web/electron/e2e/desktop_session_link.e2e.js`. Click a chat link to another
-  session on the connected server; it opens in the same window and no system
-  browser opens. Cmd-click still opens it externally. On iOS, tap the same link
-  manually.
+  `web/electron/e2e/desktop_session_link.e2e.js` plain-clicks a chat link to
+  another session on the connected server and checks it opens in the same
+  window with no system browser. Cmd-click opening it externally has component
+  coverage in `web/src/components/blocks/ChatMarkdown.inAppLinkRouting.test.tsx`;
+  check it and an iOS tap of the same link manually.
 - **`canvas-workspace` (sidebar entry, project cards, chat, focus, and history):**
   `tests/e2e_ui/sessions/test_canvas_workspace.py::test_canvas_keeps_board_drafts_and_sidebar_while_switching_sessions`.
   Workspace open/close, independent focus, maximizing, and pane sizing on wide
