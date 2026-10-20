@@ -4607,6 +4607,7 @@ async function bindStream(
     return;
   }
   set({ abortController: controller });
+  liveStatusSinceBind.delete(id);
 
   // Opening a conversation URL with no session list loaded yet leaves the
   // session→host map empty, so the SSE stream
@@ -5201,13 +5202,15 @@ async function reconcileLaunchStatus(id: string, set: Setter, get: Getter): Prom
  *
  * A stream pump can keep receiving heartbeats while missing a lifecycle event.
  * Periodically re-read durable status, discarding a snapshot if any semantic
- * stream event arrives during the fetch.
+ * stream event arrives during the fetch. `raiseOnly` applies only a newer
+ * `running`, so a stale read cannot demote a correct running bind.
  */
 async function reconcileActiveSessionStatus(
   id: string,
   controller: AbortController,
   set: Setter,
   get: Getter,
+  raiseOnly = false,
 ): Promise<void> {
   if (
     queryClient === null ||
@@ -5257,6 +5260,7 @@ async function reconcileActiveSessionStatus(
   ) {
     return;
   }
+  if (raiseOnly && (session.status !== "running" || current.sessionStatus === "running")) return;
   set((s) => {
     const patch = reconnectStatusPatch(session, s, stateBeforeFetch.mcpStartupLaunch);
     const blocks = snapshotCompactionSpinners(s.blocks, s.activeResponse, patch.activeResponse);
@@ -5822,40 +5826,36 @@ export async function startStreamPump(
   nativePreviewTombstonesByController.set(controller, ignoredNativeMessageIds);
   let failedOpens = 0;
   let statusReconcileInFlight = false;
-  // Shared by the periodic reconcile and the post-open catch-up burst so
-  // reconciliations stay serialized: a catch-up tick that straddles a slow
-  // snapshot fetch (or the periodic tick) is skipped rather than issuing a
-  // duplicate concurrent backfill.
-  const runGuardedStatusReconcile = (): void => {
+  // Serializes periodic and catch-up reconciles; an overlapping tick is skipped.
+  const runGuardedStatusReconcile = (raiseOnly = false): void => {
     if (statusReconcileInFlight) return;
     statusReconcileInFlight = true;
-    void reconcileActiveSessionStatus(id, controller, set, get).finally(() => {
+    void reconcileActiveSessionStatus(id, controller, set, get, raiseOnly).finally(() => {
       statusReconcileInFlight = false;
     });
   };
   const statusReconcileTimer =
     typeof window === "undefined"
       ? null
-      : window.setInterval(runGuardedStatusReconcile, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-  // Pending post-open catch-up timers. Tracked so each reconnect cancels
-  // the previous burst before scheduling a new one — otherwise recurring
-  // reconnects (the ~5-min ingress recycle) would accumulate timers on the
-  // long-lived controller. Cleared on teardown in the outer `finally`.
+      : window.setInterval(
+          () => runGuardedStatusReconcile(),
+          ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS,
+        );
+  // Each open replaces the prior burst so recurring reconnects cannot pile up timers.
   let catchupTimers: number[] = [];
   const clearCatchupTimers = (): void => {
     for (const timer of catchupTimers) window.clearTimeout(timer);
     catchupTimers = [];
   };
-  // Re-read at each catch-up delay, replacing any prior burst: the full status
-  // (on screen only) and, while a launch shows, its stage on screen or not.
-  // After a first open, a live status edge ends the status re-reads.
+  // Re-read status (on screen only) and any shown launch stage at each delay.
+  // First-open status re-reads only raise to running and stop after a live edge.
   const scheduleStatusCatchup = (reconnecting: boolean): void => {
     if (typeof window === "undefined") return;
     clearCatchupTimers();
     catchupTimers = STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS.map((delayMs) =>
       window.setTimeout(() => {
         if (controller.signal.aborted || isConversationDisposed(id)) return;
-        if (reconnecting || !liveStatusSinceBind.has(id)) runGuardedStatusReconcile();
+        if (reconnecting || !liveStatusSinceBind.has(id)) runGuardedStatusReconcile(!reconnecting);
         const launch = get().sandboxStatus;
         if (launch !== null && launch.stage !== "failed") void reconcileLaunchStatus(id, set, get);
       }, delayMs),
