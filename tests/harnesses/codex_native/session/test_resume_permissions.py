@@ -648,3 +648,31 @@ def test_remote_args_lead_with_configured_codex_args(
     )
 
     assert args == [*expected, "ws://127.0.0.1:9876", *([thread_id] if thread_id else [])]
+
+
+@pytest.mark.parametrize(
+    ("configured_args", "session_args", "expected"),
+    [
+        (
+            ("--ask-for-approval", "never"),
+            ("--config", "approval_policy=on-request"),
+            {"approvalPolicy": "never"},
+        ),
+        (
+            ("-c", 'sandbox_mode="read-only"'),
+            ("--sandbox", "workspace-write"),
+            {"sandbox": "workspace-write"},
+        ),
+    ],
+    ids=["configured-flag", "session-flag"],
+)
+def test_preload_resolves_configured_and_session_args_like_fresh_argv(
+    configured_args: tuple[str, ...],
+    session_args: tuple[str, ...],
+    expected: dict[str, str],
+) -> None:
+    """As in Codex's fresh-start argv, an explicit flag beats a ``-c`` value from either layer."""
+    assert (
+        codex_native_app_server._codex_resume_permission_params([*configured_args, *session_args])
+        == expected
+    )
