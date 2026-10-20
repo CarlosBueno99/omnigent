@@ -608,14 +608,19 @@ describe("insertCreatedRowIntoCaches", () => {
       ["conversations", "", true, null, "archived"],
       data([conv("gone", { archived: true })]),
     );
+    // Nor can another project's list or the shared tab hold a fork the viewer owns.
+    qc.setQueryData(["conversations", "", true, "Alpha"], data([conv("old")]));
+    qc.setQueryData(["conversations", "", false, null, "shared"], data([conv("theirs")]));
 
-    const row = conv("fork", { title: "Fork of old" });
+    const row = conv("fork", { title: "Fork of old", labels: { omni_project: "Beta" } });
     insertCreatedRowIntoCaches(qc, row);
 
     expect(ids(qc, ["conversations", "", false])).toEqual(["fork", "old"]);
     expect(ids(qc, ["conversations", "", false, null, "mine"])).toEqual(["fork", "old"]);
     expect(ids(qc, ["conversations", "old", false])).toEqual(["old"]);
     expect(ids(qc, ["conversations", "", true, null, "archived"])).toEqual(["gone"]);
+    expect(ids(qc, ["conversations", "", true, "Alpha"])).toEqual(["old"]);
+    expect(ids(qc, ["conversations", "", false, null, "shared"])).toEqual(["theirs"]);
     expect(recentlyCreatedSessions.get("fork")).toEqual(row);
 
     insertCreatedRowIntoCaches(qc, row);
