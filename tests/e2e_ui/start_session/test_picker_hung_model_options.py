@@ -15,11 +15,11 @@ from playwright.async_api import Route, async_playwright, expect
 from tests._helpers.async_thread import run_in_fresh_loop
 from tests.e2e_ui.start_session.test_start_session import _HOST_ID, _agents_body, _hosts_body
 
-# Twice the client's 30 s request deadline: a bounded load has settled by then.
+# Twice useHosts.ts MODEL_OPTIONS_TIMEOUT_MS (30 s): a bounded load has settled by then.
 _PICKER_DEADLINE_S = 60.0
 _SAMPLE_INTERVAL_S = 5.0
 _SCREENSHOT_AT_S = (0.0, 30.0, 60.0)
-# The picker polls the catalog every 15 s; the next hung request must not hide it again.
+# Re-polled every MODEL_OPTIONS_POLL_INTERVAL_MS (15 s); the next hung poll must not hide it.
 _NEXT_POLL_TIMEOUT_S = 30.0
 
 
@@ -129,6 +129,7 @@ async def _drive(base_url: str, browser_name: str, output: Path) -> None:
                 "requestAnimationFrame(() => requestAnimationFrame(resolve)))"
             )
             await expect(picker).to_be_visible()
+            await expect(picker).to_be_enabled()
             await expect(loading).to_have_count(0)
             await page.screenshot(path=output / "landing-picker-rendered.png")
         finally:
