@@ -399,10 +399,18 @@ async def test_route_with_fallback_uses_the_judge_off_the_gateway() -> None:
     assert (call.source, external.calls) == ("oss-llm", 0)
 
 
-@pytest.mark.parametrize("gateway_backed", [True, False])
-async def test_route_with_fallback_offers_the_judge_its_own_menu(gateway_backed: bool) -> None:
+@pytest.mark.parametrize(
+    ("gateway_backed", "external"),
+    [
+        pytest.param(True, _Recording(None, last_error="HTTP 404"), id="router-declines"),
+        pytest.param(True, _Recording(error=RuntimeError("connection reset")), id="router-raises"),
+        pytest.param(False, _Recording(None), id="off-gateway"),
+    ],
+)
+async def test_route_with_fallback_offers_the_judge_its_own_menu(
+    gateway_backed: bool, external: _Recording
+) -> None:
     """The external router sees every candidate; the judge only its narrower menu."""
-    external = _Recording(None, last_error="router returned HTTP 404: not enabled")
     local = _Recording(_VERDICT)
     every = {"codex-native": ["gpt-5.6-sol", "gpt-6-sol"]}
     current = {"codex-native": ["gpt-6-sol"]}
