@@ -24,9 +24,8 @@ import { useLoadedConversations } from "@/hooks/useSidebarData";
 // elicitations). That keeps it correct across reloads and counts sessions
 // that finished while the app was closed. A session is suppressed only while
 // the user is actively viewing it: the window is focused AND it's the open
-// conversation, unless they explicitly marked it unread. Notifications follow
-// the viewing rule — anything that needs attention notifies, except the
-// conversation you're actively looking at.
+// conversation (unless explicitly marked unread — see computeUnreadBadgeIds).
+// Notifications skip only the conversation you're actively looking at.
 //
 // Notifications are on by default — there's no settings toggle. In a plain
 // browser the Web Notifications API still requires a permission grant, so we
@@ -118,11 +117,12 @@ function isWindowFocused(): boolean {
  * elicitations). It's recomputed from the conversation list every tick (no
  * accumulated state), so it survives reloads and counts sessions that
  * finished while the app was closed. The actively-viewed session is cleared
- * the moment the user views it.
+ * the moment the user views it, unless they explicitly marked it unread.
  *
  * :param activeConversationId: The conversation currently open in the UI, or
  *   undefined on a non-chat route, e.g. ``"conv_abc123"``. Used to suppress
- *   the notification/badge for the session the user is actively viewing.
+ *   the notification/badge for the session the user is actively viewing; the
+ *   badge still counts it once it's explicitly marked unread.
  */
 export function useIdleNotifications(activeConversationId?: string): void {
   const navigate = useNavigate();
@@ -220,9 +220,8 @@ export function useIdleNotifications(activeConversationId?: string): void {
     else void setBadgeCount(count);
   };
 
-  // Refocusing the window marks the open conversation read: recompute with windowFocused true,
-  // dropping it from the count unless it's explicitly unread. ChatPage's `useMarkConversationSeen`
-  // advances the last-seen baseline, so the next data tick agrees with this recompute.
+  // Refocusing drops the open conversation from the count unless it's explicitly unread.
+  // For a dropped one, ChatPage's `useMarkConversationSeen` advances the baseline to match.
   useEffect(() => {
     const onFocus = () => {
       windowFocusedRef.current = true;

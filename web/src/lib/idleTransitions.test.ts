@@ -249,7 +249,7 @@ describe("computeUnreadBadgeIds", () => {
   });
 
   it("does not count an explicitly-unread active session with nothing unseen", () => {
-    // A running turn keeps the dot hidden until it finishes; the badge waits too.
+    // Explicit unread alone doesn't count; isUnseen (false while running) still gates it.
     const next = computeUnreadBadgeIds(
       [convB("a", { status: "running" })],
       "a",
