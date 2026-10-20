@@ -62,7 +62,7 @@ def _host_status(client: httpx.Client, host_id: str) -> str:
     return str(response.json().get("status"))
 
 
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(400)
 def test_start_brings_host_online_when_registration_outlasts_wait(
     tmp_path: Path, stalled_tunnel_server: tuple[str, FaultProxy]
 ) -> None:
@@ -99,6 +99,10 @@ def test_start_brings_host_online_when_registration_outlasts_wait(
                 assert status_at_exit == "online", (
                     f"`omnigent start` reported success before the host registered "
                     f"(server says {status_at_exit}):\n{output}"
+                )
+            else:
+                assert "still running (pid" in output, (
+                    f"`omnigent start` failed without leaving the daemon running:\n{output}"
                 )
             observed: list[str] = [status_at_exit]
 

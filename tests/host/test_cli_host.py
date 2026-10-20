@@ -913,10 +913,8 @@ def test_host_background_fails_when_daemon_never_registers(
     expected_error: str,
     expected_terminated: list[int],
 ) -> None:
-    """A live PID without a registered channel must not be reported as started.
-
-    It is left running while the server answers and stopped when unreachable.
-    """
+    """A live PID without a registered channel is never reported as started; the
+    daemon is left running only while the server answers."""
     _spawned, log_path = _patch_background_host_spawn(monkeypatch, tmp_path)
     log_path.write_text("Host registration failed: database unavailable\n")
     monkeypatch.setattr("omnigent.cli._daemon_host_online", lambda record, **kwargs: False)

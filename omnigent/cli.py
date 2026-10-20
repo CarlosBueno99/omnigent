@@ -8982,10 +8982,10 @@ def _background_registration_timeout(
     :param stop_command: Command that stops the daemon, e.g.
         ``"omnigent stop"``.
     :returns: The exception to raise — an unreachable server is named
-        together with its transport failure; otherwise a
-        :class:`_HostRegistrationPending` says the daemon keeps retrying.
+        together with its transport failure; a server that answered gets a
+        :class:`_HostRegistrationPending` naming the still-running daemon.
     """
-    from omnigent.cli_diagnostics import SUPPRESS_RECOVERY_HINT_ATTR
+    from omnigent.cli_diagnostics import SUPPRESS_RECOVERY_HINT_ATTR, redact_secrets
 
     target = _registration_target_display(record)
     log_detail = _background_host_log_detail(record.log_path)
@@ -9000,12 +9000,16 @@ def _background_registration_timeout(
         # tunnel rejection, so the recovery hint would mislead here.
         setattr(exc, SUPPRESS_RECOVERY_HINT_ATTR, True)
         return exc
-    return _HostRegistrationPending(
+    timeout_message = (
         "The host daemon started but did not register with the server at "
-        f"{target} within {_BACKGROUND_HOST_REGISTRATION_GRACE_S:.0f}s. "
-        f"It is still running (pid {record.pid}) and keeps retrying in the "
-        f"background. Check it with `{cli_invocation()} host status`, or stop "
-        f"it with `{stop_command}`.{log_detail}"
+        f"{target} within {_BACKGROUND_HOST_REGISTRATION_GRACE_S:.0f}s."
+    )
+    if not server_responded:
+        return click.ClickException(f"{timeout_message}{log_detail}")
+    return _HostRegistrationPending(
+        f"{timeout_message} It is still running (pid {record.pid}) and may "
+        f"still register. Check it with `{cli_invocation()} host status`, or "
+        f"stop it with `{redact_secrets(stop_command)}`.{log_detail}"
     )
 
 
