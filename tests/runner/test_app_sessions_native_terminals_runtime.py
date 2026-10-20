@@ -644,7 +644,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
         """Minimal app-server object used by ``codex_terminal_env``."""
 
         codex_path = "/opt/codex/bin/codex"
-        # A configured wrapper's probed ``version`` governs its resume, not this.
+        # Wrapped resumes use the probed wrapper version instead.
         codex_cli_version = version if codex_args_only else (0, 153, 1)
 
         def __init__(self) -> None:

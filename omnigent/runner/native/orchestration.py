@@ -4800,6 +4800,8 @@ async def _launch_codex_native_tui(
         terminal_cli = await _resolve_codex_terminal_cli(
             workspace=workspace, app_server=app_server, resume=thread_id is not None
         )
+    # A wrapper whose version probe failed keeps the app-server's hook-trust decision.
+    hook_trust_version = terminal_cli.codex_cli_version or app_server.codex_cli_version
     codex_remote_args = build_codex_remote_args(
         codex_args=tuple(launch_config.terminal_launch_args or ()),
         thread_id=thread_id,
@@ -4814,8 +4816,8 @@ async def _launch_codex_native_tui(
         # The runner provisions and trusts these hooks. An unknown CLI version
         # must not strand a headless session behind an interactive trust prompt.
         bypass_hook_trust=(
-            terminal_cli.codex_cli_version is None
-            or terminal_cli.codex_cli_version >= _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION
+            hook_trust_version is None
+            or hook_trust_version >= _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION
         ),
         configured_codex_args=terminal_cli.codex_args,
     )

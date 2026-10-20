@@ -152,7 +152,7 @@ With a configured `harness.codex-native.command`, a resume probes
 `<command> <args> --version` instead of the app-server's binary. The wrapper
 must pass `--version` through to Codex so it prints `codex-cli X.Y.Z`; any other
 output is logged as an unknown version, and the runner uses the Codex 0.154+
-resume arguments.
+resume arguments. The hook-trust bypass then follows the app-server's version.
 
 The TUI's private tmux server keeps its pane after the process exits
 (`keep_alive_after_exit`), so once the terminal has started, its exit is
