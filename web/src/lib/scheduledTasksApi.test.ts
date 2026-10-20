@@ -13,6 +13,7 @@ import {
   getScheduledTask,
   listScheduledTaskRuns,
   listScheduledTasks,
+  reportLocalTimezone,
   updateScheduledTask,
 } from "./scheduledTasksApi";
 
@@ -183,6 +184,29 @@ describe("deleteScheduledTask", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("/v1/scheduled-tasks/st_1");
     expect(init.method).toBe("DELETE");
+  });
+});
+
+describe("reportLocalTimezone", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("PUTs the browser's zone as the caller's default", async () => {
+    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
+      timeZone: "America/Chicago",
+    } as Intl.ResolvedDateTimeFormatOptions);
+    fetchMock.mockResolvedValueOnce(mockResponse({ timezone: "America/Chicago" }));
+    await reportLocalTimezone();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/v1/scheduled-tasks/default-timezone");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body)).toEqual({ timezone: "America/Chicago" });
+  });
+
+  it("ignores a failed request", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("offline"));
+    await expect(reportLocalTimezone()).resolves.toBeUndefined();
   });
 });
 
