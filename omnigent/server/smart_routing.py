@@ -156,12 +156,12 @@ def models_in_family(harness: str | None, models: Iterable[str]) -> list[str]:
 
 
 def routing_order_from_preference(models: Iterable[str]) -> list[str]:
-    """Reorder a most-preferred-first model list into routing candidate order.
+    """Reverse a most-preferred-first host list so the most preferred model is last.
 
-    Host CLI catalogs list their preferred model first and older generations
-    last, but routing candidates run cheapest → most powerful. Distinct models
-    are reversed; spellings of one model (``[1m]``, dotted versions) keep their
-    host order so first-match resolution still lands on the host's spelling.
+    Routing candidate lists put their most capable model last, while host CLI
+    catalogs put their preferred model first. Distinct models are reversed;
+    spellings of one model (``[1m]``, dotted versions) keep their host order
+    so first-match resolution still lands on the host's spelling.
 
     :param models: Model ids, most preferred first.
     :returns: The same ids, least preferred first.
@@ -2045,6 +2045,7 @@ async def route_session_harness(
     allowed_family: str | None = None,
     harness_candidates: Sequence[str] | None = None,
     catalog: Mapping[str, Sequence[str]] | None = None,
+    judge_catalog: Mapping[str, Sequence[str]] | None = None,
     gateway_backed: bool = True,
     allow_static_fallback: bool = True,
 ) -> tuple[str | None, str | None, dict[str, Any] | None, str | None]:
@@ -2076,6 +2077,10 @@ async def route_session_harness(
         host's pre-launch model options during a session create. Used when no
         live runner catalog is in reach; the static table then only tops up the
         candidates it could not answer for.
+    :param judge_catalog: Harness → the subset of *catalog* the built-in judge
+        may pick from. Its rubric ranks candidates by position, so superseded
+        and frozen models are left off while the external router still sees
+        every *catalog* id. A harness absent here offers the judge everything.
     :param gateway_backed: Whether every candidate harness resolves
         AI-Gateway-backed inference on the target host. ``False`` takes the
         external router out of play (its picks are gateway catalog ids the pane
@@ -2169,9 +2174,20 @@ async def route_session_harness(
     if not harness_models:
         return None, None, None, "No routable harnesses are available on this runner."
 
+    judge_models = None
+    if judge_catalog:
+        judge_models = {
+            harness: [model for model in models if model in judge_catalog.get(harness, ())]
+            or models
+            for harness, models in harness_models.items()
+        }
     try:
         call = await route_with_fallback(
-            backends, user_message, harness_models, gateway_backed=gateway_backed
+            backends,
+            user_message,
+            harness_models,
+            gateway_backed=gateway_backed,
+            judge_models=judge_models,
         )
     except Exception as exc:  # routing failures must not block session creation
         _logger.exception("smart_routing: route_session_harness failed")

@@ -284,6 +284,33 @@ def test_model_family_agrees_with_the_shared_token_rule(model: str, expected: st
         assert model_family_mismatch("codex", model) is None
 
 
+@pytest.mark.parametrize(
+    ("preferred", "expected"),
+    [
+        (["opus", "sonnet", "haiku"], ["haiku", "sonnet", "opus"]),
+        # Spellings of one model keep their host order, adjacent or not.
+        (
+            ["claude-sonnet-4-6", "claude-haiku-4-5", "claude-sonnet-4-6[1m]"],
+            ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-4-6[1m]"],
+        ),
+        (
+            ["claude-sonnet-4.6", "claude-haiku-4-5", "claude-sonnet-4-6"],
+            ["claude-haiku-4-5", "claude-sonnet-4.6", "claude-sonnet-4-6"],
+        ),
+        (
+            ["databricks-claude-opus-5", "claude-haiku-4-5", "claude-opus-5"],
+            ["claude-haiku-4-5", "databricks-claude-opus-5", "claude-opus-5"],
+        ),
+    ],
+)
+def test_routing_order_from_preference_reverses_models_not_spellings(
+    preferred: list[str], expected: list[str]
+) -> None:
+    from omnigent.server.smart_routing import routing_order_from_preference
+
+    assert routing_order_from_preference(preferred) == expected
+
+
 def test_catalog_models_for_harness_matches_worker_rows() -> None:
     from omnigent.server.smart_routing import catalog_models_for_harness
 

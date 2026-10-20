@@ -17,7 +17,7 @@ import secrets
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import httpx
 from fastapi import (
@@ -10634,7 +10634,7 @@ async def _host_model_options(
     host_conn: HostConnection,
     host_registry: HostRegistry,
     harness: str,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Ask a host which models *harness* could launch with right now.
 
     The pre-launch preview the landing screen's model picker already reads,
@@ -10650,8 +10650,11 @@ async def _host_model_options(
     :param host_conn: Live host connection to query.
     :param host_registry: Registry used to enqueue the outbound frame.
     :param harness: Native harness id, e.g. ``"claude-native"``.
-    :returns: Model ids the host reported, picker rows first, or an empty list.
+    :returns: ``(launchable, current)``: every model id the host reported,
+        picker rows first, and the picker rows no other listed row supersedes.
+        Both are empty when the host could not answer.
     """
+    from omnigent.models.codex_model_vocabulary import codex_upgrade_target, comparable_model_id
     from omnigent.server.routes._host_model_options import request_host_model_options
 
     try:
@@ -10663,30 +10666,53 @@ async def _host_model_options(
         )
     except Exception:  # noqa: BLE001 — a timeout or host error just means no candidates
         _logger.debug("host model options unavailable for harness %r", harness, exc_info=True)
-        return []
+        return [], []
     if result.get("status") != "ok":
-        return []
+        return [], []
     options = result.get("models")
     models: list[str] = []
+    successors: dict[str, str] = {}
     if isinstance(options, list):
         for option in options:
             # Picker rows carry the launchable id in ``model``; ``id`` is the row key.
             raw = option.get("model") or option.get("id") if isinstance(option, dict) else None
             if isinstance(raw, str) and raw and raw not in models:
                 models.append(raw)
+                if (successor := codex_upgrade_target(option)) is not None:
+                    successors[raw] = successor
+    listed = {comparable_model_id(model) for model in models}
+    superseded = {
+        model
+        for model, successor in successors.items()
+        if comparable_model_id(successor) != comparable_model_id(model)
+        and comparable_model_id(successor) in listed
+    }
+    current = [model for model in models if model not in superseded]
     routable = result.get("routable_models")
     if isinstance(routable, list):
         for raw in routable:
             if isinstance(raw, str) and raw and raw not in models:
                 models.append(raw)
-    return models
+    return models, current
+
+
+class _PreSessionCatalog(NamedTuple):
+    """A host's pre-launch routing candidates, each list least preferred first.
+
+    :param launchable: Harness → every model id the host can launch.
+    :param current: Harness → the picker models no listed model supersedes,
+        the menu the built-in judge ranks by position.
+    """
+
+    launchable: dict[str, list[str]]
+    current: dict[str, list[str]]
 
 
 async def _pre_session_model_catalog(
     request: Request,
     host: Host | None,
     harnesses: Sequence[str],
-) -> dict[str, list[str]]:
+) -> _PreSessionCatalog:
     """Resolve a routing catalog for *harnesses* before any runner exists.
 
     A create routes with no session, so the live runner catalog
@@ -10697,25 +10723,28 @@ async def _pre_session_model_catalog(
     :param request: Used to reach the app's host registry.
     :param host: The session's target host, or ``None`` (e.g. a sandbox).
     :param harnesses: Candidate native harness ids to ask about.
-    :returns: ``{harness: model ids}`` for whatever the host answered, each
-        list least preferred first like every routing candidate list.
+    :returns: The candidates for whatever harnesses the host answered.
     """
     from omnigent.server.smart_routing import routing_order_from_preference
 
     host_registry = getattr(request.app.state, "host_registry", None)
     if host is None or host_registry is None:
-        return {}
+        return _PreSessionCatalog({}, {})
     host_conn = host_registry.get(host.host_id)
     if host_conn is None:
-        return {}
+        return _PreSessionCatalog({}, {})
     results = await asyncio.gather(
         *(_host_model_options(host_conn, host_registry, harness) for harness in harnesses)
     )
-    return {
-        harness: routing_order_from_preference(models)
-        for harness, models in zip(harnesses, results, strict=True)
-        if models
-    }
+    answered = [
+        (harness, launchable, current)
+        for harness, (launchable, current) in zip(harnesses, results, strict=True)
+        if launchable
+    ]
+    return _PreSessionCatalog(
+        {harness: routing_order_from_preference(models) for harness, models, _ in answered},
+        {harness: routing_order_from_preference(models) for harness, _, models in answered},
+    )
 
 
 async def _routing_host_for_create(
@@ -10933,10 +10962,12 @@ async def _resolve_fixed_native_model_routing(
     # ``databricks-*`` ids are unreachable — the host's pre-launch catalog is the
     # only provider-accurate candidate source.
     backed = _gateway_backed(host, (harness,))
+    pre_session = await _pre_session_model_catalog(request, host, (harness,))
     _harness, model, verdict, error = await route_session_harness(
         body.smart_routing_message or "",
         harness_candidates=(harness,),
-        catalog=await _pre_session_model_catalog(request, host, (harness,)),
+        catalog=pre_session.launchable,
+        judge_catalog=pre_session.current,
         gateway_backed=backed,
         allow_static_fallback=backed,
     )
@@ -11020,10 +11051,12 @@ async def _resolve_native_smart_routing(
     # Smart Routing session, minus the harness half — instead of declining.
     judge_only = not _external_router_usable()
     candidates = (installed[0],) if judge_only else installed
+    pre_session = await _pre_session_model_catalog(request, host, candidates)
     harness, model, verdict, error = await route_session_harness(
         body.smart_routing_message or "",
         harness_candidates=candidates,
-        catalog=await _pre_session_model_catalog(request, host, candidates),
+        catalog=pre_session.launchable,
+        judge_catalog=pre_session.current,
         gateway_backed=backed,
         allow_static_fallback=backed,
     )
