@@ -2836,9 +2836,15 @@ async def test_serve_tunnel_no_ssl_context_for_ws(
     "use_proxy,no_proxy", [(False, ""), (True, ""), (True, "server.sandbox.test")]
 )
 async def test_serve_tunnel_proxy_socket(
-    monkeypatch: pytest.MonkeyPatch, use_proxy: bool, no_proxy: str
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    use_proxy: bool,
+    no_proxy: str,
 ) -> None:
-    proxy_url = "http://127.0.0.1:3128"
+    import logging
+
+    caplog.set_level(logging.INFO, logger=serve_module.__name__)
+    proxy_url = "http://proxyuser:proxysecret@127.0.0.1:3128"
     tunnel_url = "ws://server.sandbox.test:8000/v1/runners/runner_test/tunnel"
     if use_proxy:
         monkeypatch.setenv("http_proxy", proxy_url)
@@ -2855,8 +2861,10 @@ async def test_serve_tunnel_proxy_socket(
             dial.assert_awaited_once_with(
                 proxy_url, tunnel_url, timeout=serve_module._PROXY_CONNECT_TIMEOUT_S
             )
+            assert "via CONNECT proxy http://127.0.0.1:3128" in caplog.text
         else:
             dial.assert_not_awaited()
+        assert "proxysecret" not in caplog.text
 
 
 @pytest.mark.asyncio

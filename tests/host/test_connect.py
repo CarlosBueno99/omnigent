@@ -9005,12 +9005,16 @@ async def test_dispatch_fs_write_op_unknown_op_raises() -> None:
     ("use_proxy", "failure"), [(False, "enter"), (True, "constructor"), (True, "enter")]
 )
 async def test_connect_and_serve_proxy_socket(
-    monkeypatch: pytest.MonkeyPatch, use_proxy: bool, failure: str
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    use_proxy: bool,
+    failure: str,
 ) -> None:
     """The proxied socket is passed to connect() and closed when either connect step fails."""
     from omnigent.host import connect as connect_mod
 
-    proxy_url = "http://127.0.0.1:3128"
+    caplog.set_level(logging.INFO, logger="omnigent.host.connect")
+    proxy_url = "http://proxyuser:proxysecret@127.0.0.1:3128"
     if use_proxy:
         monkeypatch.setenv("http_proxy", proxy_url)
     host = HostProcess(
@@ -9039,8 +9043,10 @@ async def test_connect_and_serve_proxy_socket(
                 proxy_url, tunnel_url, timeout=connect_mod._INITIAL_CONNECT_OPEN_TIMEOUT_S
             )
             assert proxy_sock.fileno() == -1
+            assert "via CONNECT proxy http://127.0.0.1:3128" in caplog.text
         else:
             dial.assert_not_awaited()
+        assert "proxysecret" not in caplog.text
 
 
 async def test_connect_and_serve_builds_ssl_context_before_dialing_proxy(

@@ -355,8 +355,9 @@ async def open_proxy_connect_socket(
     except TimeoutError:
         # Registered first: the worker may finish just as the deadline fires.
         dial.add_done_callback(_close_dial_result)
-        if dial.done() and not dial.cancelled() and dial.exception() is not None:
-            raise  # the worker's own budget fired; keep its message
+        dial_error = dial.exception() if dial.done() and not dial.cancelled() else None
+        if dial_error is not None:
+            raise dial_error from None  # the worker failed first; keep its own error
         raise TimeoutError(
             f"proxy did not complete CONNECT to {target_host}:{target_port} within {timeout:g}s"
         ) from None

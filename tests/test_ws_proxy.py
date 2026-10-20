@@ -307,25 +307,38 @@ async def test_connect_timeout_bounds_a_slow_dial(monkeypatch):
     assert sock.fileno() == -1
 
 
-async def test_connect_timeout_race_closes_completed_dial(monkeypatch):
-    """A deadline that fires as the dial completes still closes the returned socket."""
+@pytest.mark.parametrize("dial_fails", [False, True])
+async def test_connect_timeout_race_with_completed_dial(monkeypatch, dial_fails):
+    """A deadline that fires as the dial completes closes its socket or keeps its error."""
     from omnigent.util import ws_proxy
 
-    sock = socket.socket()
-    monkeypatch.setattr(ws_proxy, "_connect_sync", lambda *_args: sock)
+    sock = None if dial_fails else socket.socket()
+
+    def finish_dial(*_args):
+        if sock is None:
+            raise ConnectionRefusedError("refused by test proxy")
+        return sock
+
+    monkeypatch.setattr(ws_proxy, "_connect_sync", finish_dial)
 
     async def wait_for_after_completion(awaitable, _timeout):
-        await awaitable
+        with contextlib.suppress(ConnectionRefusedError):
+            await awaitable
         raise TimeoutError
 
     # Patch the module's own asyncio reference, not the shared stdlib module.
     patched_asyncio = types.SimpleNamespace(**vars(asyncio))
     patched_asyncio.wait_for = wait_for_after_completion
     monkeypatch.setattr(ws_proxy, "asyncio", patched_asyncio)
-    with pytest.raises(TimeoutError, match="within 5s"):
+    error, message = (
+        (ConnectionRefusedError, "refused by test proxy")
+        if dial_fails
+        else (TimeoutError, "within 5s")
+    )
+    with pytest.raises(error, match=message):
         await open_proxy_connect_socket("http://127.0.0.1:1", _TUNNEL_URL, timeout=5)
     await asyncio.sleep(0)
-    assert sock.fileno() == -1
+    assert sock is None or sock.fileno() == -1
 
 
 async def test_connect_timeout_bounds_the_whole_handshake():
