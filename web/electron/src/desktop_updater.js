@@ -96,6 +96,7 @@ function isUpdateSecurityError(message) {
  *   installUpdateNow: () => boolean,
  *   registerIpc: () => void,
  *   quitAndInstallIfPending: () => boolean,
+ *   waitForInstallOnQuit: () => Promise<void>,
  *   readonly installPending: boolean,
  * }}
  */
@@ -119,6 +120,10 @@ function createDesktopUpdater({
   let updateCheckTimer = null;
   let currentUpdateStatus = { state: "idle" };
   let installPending = false;
+  // electron-updater decides whether to install a download on quit when that
+  // download finishes, from autoInstallOnAppQuit at that moment.
+  let installOnQuitArmed = false;
+  let armingInstallOnQuit = null;
   // A user-initiated ("Check for Updates…") check in flight — lets the error
   // handler surface a failure to the user only when they explicitly asked.
   let manualCheckInFlight = false;
@@ -183,6 +188,7 @@ function createDesktopUpdater({
     }
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = cfg.autoInstall;
+    if (cfg.autoInstall) armDownloadedUpdateForQuit();
     // v1 is stable-only and rides electron-updater's default "latest" channel.
     if (!canUseFeed() || cfg.mode === "none") return;
     if (cfg.mode === "manual") return;
@@ -233,9 +239,10 @@ function createDesktopUpdater({
     autoUpdater.on("download-progress", (progress) =>
       broadcast({ state: "downloading", progress }),
     );
-    autoUpdater.on("update-downloaded", (info) =>
-      broadcast({ state: "downloaded", currentVersion: getCurrentVersion(), info }),
-    );
+    autoUpdater.on("update-downloaded", (info) => {
+      installOnQuitArmed = autoUpdater.autoInstallOnAppQuit === true;
+      broadcast({ state: "downloaded", currentVersion: getCurrentVersion(), info });
+    });
     autoUpdater.on("error", (err) => {
       const msg = String(err?.message ?? err);
       const isSecurity = isUpdateSecurityError(msg);
@@ -315,13 +322,36 @@ function createDesktopUpdater({
       .downloadUpdate()
       .then(() => undefined)
       .catch((err) => {
-        const message = String(err?.message ?? err);
-        broadcast({
-          state: isUpdateSecurityError(message) ? "error-security" : "idle",
-          lastError: message,
-        });
+        reportDownloadFailure(err);
         throw err;
       });
+  }
+
+  function reportDownloadFailure(err) {
+    const message = String(err?.message ?? err);
+    broadcast({
+      state: isUpdateSecurityError(message) ? "error-security" : "idle",
+      lastError: message,
+    });
+  }
+
+  // Re-running the download reuses the verified cached file and repeats
+  // electron-updater's install-on-quit step (quit handler or Squirrel.Mac staging).
+  function armDownloadedUpdateForQuit() {
+    if (currentUpdateStatus.state !== "downloaded" || installOnQuitArmed || armingInstallOnQuit) {
+      return;
+    }
+    armingInstallOnQuit = autoUpdater
+      .downloadUpdate()
+      .then(() => undefined, reportDownloadFailure)
+      .finally(() => {
+        armingInstallOnQuit = null;
+      });
+  }
+
+  /** @returns {Promise<void>} Settles once any in-flight install-on-quit arming ends. */
+  function waitForInstallOnQuit() {
+    return armingInstallOnQuit ?? Promise.resolve();
   }
 
   /**
@@ -473,6 +503,7 @@ function createDesktopUpdater({
     installUpdateNow,
     registerIpc,
     quitAndInstallIfPending,
+    waitForInstallOnQuit,
     get installPending() {
       return installPending;
     },

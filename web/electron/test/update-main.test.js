@@ -839,6 +839,38 @@ describe("auto-update main-process wiring", () => {
     assert.equal(harness.calls.appExit, 0);
   });
 
+  it("waits for install-on-quit to be armed before re-issuing the quit", async (t) => {
+    const harness = loadMainHarness({
+      forceDevUpdateConfig: true,
+      settings: {
+        allowed_hosting_origins: ["https://server.example"],
+        update_mode: "manual",
+        update_auto_install: false,
+      },
+    });
+    t.after(harness.cleanup);
+    harness.api.updater.init();
+    harness.autoUpdater.emit("update-downloaded", { version: "0.4.0" });
+    harness.api.registerIpc();
+    let finishRearm;
+    harness.autoUpdater.downloadUpdate = () =>
+      new Promise((resolve) => {
+        finishRearm = resolve;
+      });
+
+    await harness.ipcHandlers.get("omnigent:set-update-config")(harness.events.pinned, {
+      autoInstall: true,
+    });
+    harness.appEvents.get("before-quit")({ preventDefault: () => {} });
+    await flushPromises();
+    assert.equal(harness.pendingMainImmediates(), 0);
+
+    finishRearm([]);
+    await flushPromises();
+    harness.runMainImmediates();
+    assert.equal(harness.calls.appQuit, 1);
+  });
+
   it("force-exits if before-quit cleanup hangs past the safety cap", async (t) => {
     // A stuck shutdown (e.g. a hung `omnigent server stop`, or the known
     // Electron hazard where re-issuing app.quit() after before-quit's

@@ -5497,7 +5497,7 @@ if (!gotLock) {
     // SIGKILL'd within 4s and `omnigent server stop` has its own exec timeout.
     (async () => {
       const cliPath = resolvedCliPath();
-      await serverManager.shutdown(cliPath);
+      await Promise.all([serverManager.shutdown(cliPath), updater.waitForInstallOnQuit()]);
     })()
       .catch(() => {})
       .finally(() => {

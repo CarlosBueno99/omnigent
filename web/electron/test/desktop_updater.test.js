@@ -361,6 +361,80 @@ describe("desktop_updater — downloads", () => {
   });
 });
 
+describe("desktop_updater — install on quit", () => {
+  function makeDownloadedWithAutoInstall(autoInstall) {
+    const h = makeUpdater({
+      forceDevUpdateConfig: true,
+      settings: { update_mode: "manual", update_auto_install: autoInstall },
+    });
+    h.updater.init();
+    h.updater.registerIpc();
+    h.autoUpdater.emit("update-downloaded", { version: "0.4.0" });
+    return h;
+  }
+
+  it("re-arms a download finished with the setting off once it is turned on", async () => {
+    const h = makeDownloadedWithAutoInstall(false);
+    let finishRearm;
+    h.autoUpdater.downloadUpdate = () => {
+      h.calls.downloadUpdate += 1;
+      return new Promise((resolve) => {
+        finishRearm = () => {
+          h.autoUpdater.emit("update-downloaded", { version: "0.4.0" });
+          resolve([]);
+        };
+      });
+    };
+
+    await h.ipcHandlers.get("omnigent:set-update-config")(h.event, { autoInstall: true });
+    assert.equal(h.autoUpdater.autoInstallOnAppQuit, true);
+    assert.equal(h.calls.downloadUpdate, 1);
+
+    let quitWaitSettled = false;
+    const quitWait = h.updater.waitForInstallOnQuit().then(() => {
+      quitWaitSettled = true;
+    });
+    await new Promise(setImmediate);
+    assert.equal(quitWaitSettled, false);
+
+    finishRearm();
+    await quitWait;
+    assert.equal(h.updater.getStatus().state, "downloaded");
+
+    await h.ipcHandlers.get("omnigent:set-update-config")(h.event, { autoInstall: true });
+    assert.equal(h.calls.downloadUpdate, 1);
+  });
+
+  it("does not re-download when the update is already armed or absent", async () => {
+    const armed = makeDownloadedWithAutoInstall(true);
+    await armed.ipcHandlers.get("omnigent:set-update-config")(armed.event, { autoInstall: true });
+    assert.equal(armed.calls.downloadUpdate, 0);
+
+    const absent = makeUpdater({
+      forceDevUpdateConfig: true,
+      settings: { update_mode: "manual", update_auto_install: false },
+    });
+    absent.updater.init();
+    absent.updater.registerIpc();
+    await absent.ipcHandlers.get("omnigent:set-update-config")(absent.event, {
+      autoInstall: true,
+    });
+    assert.equal(absent.calls.downloadUpdate, 0);
+  });
+
+  it("surfaces a failed re-arm without blocking quit", async () => {
+    const h = makeDownloadedWithAutoInstall(false);
+    h.autoUpdater.downloadUpdate = () => Promise.reject(new Error("cached update unreadable"));
+
+    await h.ipcHandlers.get("omnigent:set-update-config")(h.event, { autoInstall: true });
+    await h.updater.waitForInstallOnQuit();
+    assert.deepEqual(plain(h.updater.getStatus()), {
+      state: "idle",
+      lastError: "cached update unreadable",
+    });
+  });
+});
+
 describe("desktop_updater — development update config gating", () => {
   it("does not offer production updates to a packaged dev build", async () => {
     const h = makeUpdater({ isPackaged: true, updatesEnabled: false });
