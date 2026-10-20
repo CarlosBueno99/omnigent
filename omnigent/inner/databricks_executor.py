@@ -1162,16 +1162,9 @@ def databrickscfg_workspace_id_for_profile(profile: str) -> str | None:
 
 
 def databrickscfg_own_workspace_id(profile: str, host: str) -> str | None:
-    """Return the ``workspace_id`` *profile* itself records, when it names *host*.
+    """Return the ``workspace_id`` *profile* records itself, if it names *host*.
 
-    Unlike :func:`databrickscfg_workspace_id_for_profile`, a named profile does
-    not inherit ``[DEFAULT]``'s id, matching how the Databricks SDK reads it.
-
-    :param profile: Profile name, e.g. ``"DEFAULT"`` or ``"prod"``.
-    :param host: Workspace host the profile must name, e.g.
-        ``"https://example.databricks.com"``.
-    :returns: The recorded id, or ``None`` when the profile is absent, names
-        another host, or records none.
+    A named profile does not inherit ``[DEFAULT]``'s id, matching the Databricks SDK.
     """
     if profile not in _databrickscfg_profiles_for_host(host):
         return None
