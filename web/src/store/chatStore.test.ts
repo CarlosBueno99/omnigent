@@ -20006,6 +20006,14 @@ describe("a send cut off by a reload", () => {
 
       expect(peekUnsentSend("conv_held")).toBeNull();
     });
+
+    it("forgets its record when the session's queue is cleared on delete", async () => {
+      await holdSend();
+
+      useChatStore.getState().clearQueuedMessages("conv_held");
+
+      expect(peekUnsentSend("conv_held")).toBeNull();
+    });
   });
 
   describe("a queued send a background flush posts", () => {
@@ -20039,6 +20047,12 @@ describe("a send cut off by a reload", () => {
       });
       useChatStore.getState().flushBackgroundQueues();
       await vi.waitFor(() => expect(settle).toBeDefined());
+    });
+
+    afterEach(async () => {
+      // A failed assertion can leave the POST open; settle it so the flush cleans up.
+      settle?.(false);
+      await tick();
     });
 
     it("isn't handed back while its POST is open and is forgotten once delivered", async () => {

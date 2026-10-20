@@ -2227,12 +2227,16 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   },
 
   clearQueuedMessages: (conversationId) => {
+    const dropped = get().queuedMessages.filter((m) => m.conversationId === conversationId);
     setActive((s) => {
       if (!s.queuedMessages.some((m) => m.conversationId === conversationId)) return {};
       return {
         queuedMessages: s.queuedMessages.filter((m) => m.conversationId !== conversationId),
       };
     });
+    for (const message of dropped) {
+      if (message.stableId !== undefined) forgetUnsentSend(conversationId, message.stableId);
+    }
   },
 
   maybeFlushQueuedHead: () => {
@@ -2674,13 +2678,13 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // it, so keep its text where a reload can find it (see `unsentSendToRestore`).
       // Only once identity names the sender: unlike `getCurrentAuthorId`, this id
       // tells the single-user `local` viewer apart from one not yet resolved.
-      // A session keeps one record, and a message still queued here keeps it.
       const senderId = getCurrentUserId();
       if (
         !compacts &&
         sentOnScreen &&
         senderId !== null &&
         text.trim() &&
+        // A session keeps one record, and a message still queued here keeps it.
         !recordsQueuedSend(sessionId)
       ) {
         rememberUnsentSend(sessionId, {
