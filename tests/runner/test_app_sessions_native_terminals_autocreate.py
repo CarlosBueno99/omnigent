@@ -75,6 +75,7 @@ from omnigent.runner.resource_registry import (
 from omnigent.runner.session_init_protocol import RunnerSessionInitEnvelope
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.terminals import TerminalRegistry
+from tests._helpers.pi_native import seed_pi_own_login_catalog
 from tests.runner.conftest import (
     _FakeProcessManager,
     _runner_client,
@@ -744,6 +745,123 @@ async def test_auto_create_pi_terminal_cli_version_at_floor_or_unknown_proceeds(
     assert captured["spec"].command == "pi"
 
 
+async def _launch_pi_terminal_args(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model_override: str | None,
+    agent_spec: AgentSpec | None = None,
+) -> list[str]:
+    import omnigent.harnesses.pi_native.bridge as pi_native_bridge
+    import omnigent.harnesses.pi_native.credentials as pi_native_credentials
+    import omnigent.harnesses.pi_native.main as pi_native
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+    monkeypatch.setattr(pi_native_bridge, "_BRIDGE_ROOT", tmp_path / "pi-bridge")
+    monkeypatch.setattr(pi_native, "resolve_pi_executable", lambda: "pi")
+    own_login_dir = tmp_path / "pi-own-login"
+    own_login_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(own_login_dir))
+
+    config = {
+        "providers": {
+            "openrouter": {
+                "kind": "gateway",
+                "default": "pi",
+                "openai": {
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "api_key": "sk-or-testkey",
+                    "wire_api": "chat",
+                },
+            }
+        }
+    }
+    real_resolve = pi_native_credentials.resolve_pi_native_provider
+    monkeypatch.setattr(
+        pi_native_credentials,
+        "resolve_pi_native_provider",
+        lambda **kwargs: real_resolve(config_loader=lambda: config, **kwargs),
+    )
+
+    async def _fake_launch_config(**_kwargs: Any) -> _PiNativeLaunchConfig:
+        return _PiNativeLaunchConfig(
+            workspace=tmp_path,
+            server_url="http://127.0.0.1:8000",
+            terminal_launch_args=None,
+            external_session_id=None,
+            model_override=model_override,
+        )
+
+    monkeypatch.setattr("omnigent.runner.app._pi_native_launch_config", _fake_launch_config)
+
+    captured: dict[str, Any] = {}
+
+    class _FakeResourceRegistry:
+        terminal_registry = None
+
+        async def launch_required_terminal(
+            self, *, session_id: str, spec: Any, **_kwargs: Any
+        ) -> SessionResourceView:
+            captured["spec"] = spec
+            return SessionResourceView(
+                id="terminal_pi_main",
+                type="terminal",
+                session_id=session_id,
+                name="pi:main",
+                metadata={"terminal_name": "pi", "session_key": "main", "running": True},
+            )
+
+    await _auto_create_pi_terminal(
+        "47f049b9d13df4db397c7f46859b825f",
+        _FakeResourceRegistry(),  # type: ignore[arg-type]
+        lambda _sid, _evt: None,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        agent_spec=agent_spec,
+    )
+    args = captured["spec"].args
+    assert isinstance(args, list)
+    return args
+
+
+@pytest.mark.asyncio
+async def test_auto_create_pi_terminal_spec_pinned_own_login_reference_passes_through(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_pi_own_login_catalog(tmp_path / "pi-own-login", "openai-codex", ["gpt-5.6-sol"])
+
+    args = await _launch_pi_terminal_args(
+        tmp_path,
+        monkeypatch,
+        model_override=None,
+        agent_spec=AgentSpec(
+            spec_version=1,
+            name="pi",
+            executor=ExecutorSpec(model="openai-codex/gpt-5.6-sol"),
+        ),
+    )
+
+    assert "omnigent/openai-codex/gpt-5.6-sol" not in args
+    assert "--provider" not in args
+    assert "--model" in args
+    assert args[args.index("--model") + 1] == "openai-codex/gpt-5.6-sol"
+
+
+@pytest.mark.asyncio
+async def test_auto_create_pi_terminal_keeps_gateway_routing_for_slash_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = await _launch_pi_terminal_args(
+        tmp_path, monkeypatch, model_override="openai/gpt-4o-mini"
+    )
+
+    assert "--provider" in args
+    assert "--model" in args
+    assert args[args.index("--provider") + 1] == "omnigent"
+    assert args[args.index("--model") + 1] == "omnigent/openai/gpt-4o-mini"
+
+
 @pytest.mark.asyncio
 async def test_auto_create_kiro_terminal_launches_required_terminal_with_isolated_env(
     tmp_path: Path,
@@ -1372,9 +1490,14 @@ async def test_auto_create_claude_terminal_passes_session_effort(
     workspace = tmp_path / "workspace"
     (workspace / ".omnigent").mkdir(parents=True)
     (workspace / ".omnigent" / "config.yaml").write_text(
-        "harness:\n  claude-native:\n    command: workspace-claude\n"
+        "harness:\n  default: claude-native\n  claude-native:\n    command: workspace-claude\n"
     )
     monkeypatch.setenv("OMNIGENT_RUNNER_WORKSPACE", str(workspace))
+    config_home = tmp_path / "config-home"
+    config_home.mkdir()
+    (config_home / "config.yaml").write_text(
+        "harness:\n  claude-native:\n    command: user-claude\n"
+    )
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config-home"))
     monkeypatch.delenv("OMNIGENT_CLAUDE_PATH", raising=False)
 
@@ -1436,7 +1559,7 @@ async def test_auto_create_claude_terminal_passes_session_effort(
 
     args = captured["spec"].args
     assert captured["spec"].os_env.cwd == str(workspace)
-    assert captured["spec"].command == "workspace-claude"
+    assert captured["spec"].command == "user-claude"
     assert "--effort" in args
     effort_idx = args.index("--effort")
     assert args[effort_idx + 1] == "high"
@@ -4834,11 +4957,11 @@ class _RecordingCodexRegistry:
 
 
 @pytest.mark.asyncio
-async def test_codex_tui_launch_reads_project_config_from_session_workspace(
+async def test_codex_tui_launch_keeps_user_config_when_process_cwd_is_gone(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Codex TUI relaunch reads the session workspace's config after the runner cwd is gone."""
+    """A Codex TUI relaunch retains user launch settings after the runner cwd is gone."""
     from omnigent.runner.native.orchestration import (
         _CodexNativeLaunchConfig,
         _launch_codex_native_tui,
@@ -4848,6 +4971,11 @@ async def test_codex_tui_launch_reads_project_config_from_session_workspace(
     (workspace / ".omnigent").mkdir(parents=True)
     (workspace / ".omnigent" / "config.yaml").write_text(
         "harness:\n  codex-native:\n    command: workspace-codex\n    args: [--workspace-arg]\n"
+    )
+    config_home = tmp_path / "config-home"
+    config_home.mkdir()
+    (config_home / "config.yaml").write_text(
+        "harness:\n  codex-native:\n    command: user-codex\n    args: [--user-arg]\n"
     )
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config-home"))
 
@@ -4887,8 +5015,8 @@ async def test_codex_tui_launch_reads_project_config_from_session_workspace(
     )
 
     spec = captured["spec"]
-    assert spec.command == "workspace-codex"
-    assert spec.args[0] == "--workspace-arg"
+    assert spec.command == "user-codex"
+    assert spec.args[0] == "--user-arg"
     assert spec.os_env.cwd == str(workspace)
 
 
