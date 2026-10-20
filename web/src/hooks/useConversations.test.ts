@@ -320,10 +320,24 @@ describe("useConversations search timeout", () => {
     // Plain pagination is indexed/fast; adding a deadline could abort a
     // legitimately larger page, so it carries only the query's cancellation signal.
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).not.toContain("search_query=");
-    expect(timeout).not.toHaveBeenCalled();
+    try {
+      expect(url).not.toContain("search_query=");
+      expect(timeout).not.toHaveBeenCalled();
+      expect(init.signal?.aborted).toBe(false);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("aborts a search fetch when its query is cancelled", async () => {
+    fetchMock.mockReturnValueOnce(new Promise(() => {}));
+    const queryClient = renderSearch("linear");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(init.signal?.aborted).toBe(false);
-    timeout.mockRestore();
+    await queryClient.cancelQueries();
+    expect(init.signal?.aborted).toBe(true);
   });
 
   it("does not retry a client-side search timeout, but retries other errors", () => {
@@ -357,27 +371,46 @@ describe("list_sessions timing", () => {
     ]);
     const analytics = vi.fn();
     setOmnigentHostConfig({ analytics });
-    const stalled = new AbortController();
-    void timeInitialConversationLoad(
-      undefined,
-      "mine",
-      () => new Promise(() => {}),
-      stalled.signal,
-    );
-    stalled.abort();
-    const page = { data: [], first_id: null, last_id: null, has_more: false };
-    await timeInitialConversationLoad(undefined, "mine", async () => page);
-    await timeInitialConversationLoad(undefined, "mine", async () => page);
+    try {
+      const abortError = () => new DOMException("aborted", "AbortError");
+      const fetchUntilAborted = (signal: AbortSignal) => () =>
+        new Promise<never>((_, reject) => {
+          if (signal.aborted) reject(abortError());
+          signal.addEventListener("abort", () => reject(abortError()), { once: true });
+        });
+      const alreadyAborted = AbortSignal.abort();
+      await expect(
+        timeInitialConversationLoad(
+          undefined,
+          "mine",
+          fetchUntilAborted(alreadyAborted),
+          alreadyAborted,
+        ),
+      ).rejects.toThrow("aborted");
+      const stalled = new AbortController();
+      const stalledLoad = timeInitialConversationLoad(
+        undefined,
+        "mine",
+        fetchUntilAborted(stalled.signal),
+        stalled.signal,
+      );
+      stalled.abort();
+      await expect(stalledLoad).rejects.toThrow("aborted");
+      const page = { data: [], first_id: null, last_id: null, has_more: false };
+      await timeInitialConversationLoad(undefined, "mine", async () => page);
+      await timeInitialConversationLoad(undefined, "mine", async () => page);
 
-    const outcomes = analytics.mock.calls
-      .map(([event]) => event as { interactionKind: string; phase: string; status?: string })
-      .filter((event) => event.phase === "complete")
-      .map((event) => [event.interactionKind, event.status]);
-    expect(outcomes).toEqual([
-      ["list_sessions", "cancelled"],
-      ["list_sessions", "success"],
-    ]);
-    setOmnigentHostConfig({});
+      const outcomes = analytics.mock.calls
+        .map(([event]) => event as { interactionKind: string; phase: string; status?: string })
+        .filter((event) => event.phase === "complete")
+        .map((event) => [event.interactionKind, event.status]);
+      expect(outcomes).toEqual([
+        ["list_sessions", "cancelled"],
+        ["list_sessions", "success"],
+      ]);
+    } finally {
+      setOmnigentHostConfig({});
+    }
   });
 });
 

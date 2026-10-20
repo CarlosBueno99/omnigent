@@ -549,7 +549,11 @@ export async function fetchConversationsPage({
   // SEARCH_FETCH_TIMEOUT_MS): a search whose server-side index is missing can
   // hang, and the palette shows "Searching…" for the whole in-flight window.
   // Plain list pagination is indexed/fast, so it keeps no timeout.
-  const signal = searchQuery ? AbortSignal.timeout(SEARCH_FETCH_TIMEOUT_MS) : requestSignal;
+  let signal = requestSignal;
+  if (searchQuery) {
+    const deadline = AbortSignal.timeout(SEARCH_FETCH_TIMEOUT_MS);
+    signal = requestSignal ? AbortSignal.any([requestSignal, deadline]) : deadline;
+  }
   const res = await authenticatedFetch(`/v1/sessions?${params.toString()}`, { signal });
   // Carries the server's `code`, so a dead cursor stays recognizable as
   // `stale_cursor` instead of an opaque "400 Bad Request".
@@ -615,6 +619,7 @@ export async function timeInitialConversationLoad(
 ): Promise<ConversationsPage> {
   if (
     initialListLoadTimed ||
+    signal?.aborted ||
     pageParam !== undefined ||
     (visibility !== undefined && visibility !== "mine")
   )

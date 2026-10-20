@@ -651,6 +651,33 @@ describe("Sidebar session list", () => {
     }
   });
 
+  it("restarts the slow-load wait when the Display view changes", () => {
+    vi.useFakeTimers();
+    try {
+      mockConversations([]);
+      const original = useConvMock.getMockImplementation()!;
+      useConvMock.mockImplementation(
+        (...args) =>
+          ({ ...original(...args), data: undefined, isLoading: true }) as ReturnType<
+            typeof useConversations
+          >,
+      );
+      renderSidebar();
+      selectSessionFilter("mine");
+      const sessions = screen.getByRole("button", { name: "Sessions" }).closest("section")!;
+      const status = () => within(sessions).getByRole("status");
+
+      act(() => vi.advanceTimersByTime(SESSION_LIST_SLOW_LOAD_MS - 1));
+      selectSessionFilter("shared");
+      act(() => vi.advanceTimersByTime(SESSION_LIST_SLOW_LOAD_MS - 1));
+      expect(status()).toHaveTextContent("Loading…");
+      act(() => vi.advanceTimersByTime(1));
+      expect(status()).toHaveTextContent("Sessions are taking longer than usual.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reveals a thin, theme-aware scrollbar only while scrolling", () => {
     vi.useFakeTimers();
     try {

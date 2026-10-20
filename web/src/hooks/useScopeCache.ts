@@ -193,14 +193,16 @@ export function useScopeCache(
   };
 }
 
-/** Refetch a list, replacing a pending first load that refetch would only rejoin. */
+/**
+ * Refetch a list. Without data, refetch rejoins the pending first load even with
+ * cancelRefetch, so that load is cancelled first.
+ */
 async function retryList<Result>(
   client: QueryClient,
   queryKey: QueryKey,
   firstLoadPending: boolean,
   refetch: () => Promise<Result>,
 ): Promise<Result> {
-  // Cancel first so refetch starts a new request instead of rejoining the pending one.
   if (firstLoadPending) await client.cancelQueries({ queryKey, exact: true });
   return refetch();
 }
