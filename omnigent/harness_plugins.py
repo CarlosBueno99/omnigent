@@ -1325,12 +1325,7 @@ def harness_setup_steps_by_spelling() -> dict[str, list[dict[str, str | None]]]:
 
 
 def live_steering_harnesses() -> list[str]:
-    """Return every harness spelling whose declared capabilities include steering.
-
-    Covers every spelling a session may declare, aliases included, so the web
-    UI can tell whether an SDK session reads a message sent mid-turn in that
-    turn or only on its next one.
-    """
+    """Return harness spellings, aliases included, that read mid-turn input in the running turn."""
     capabilities = harness_capabilities()
     steering = {harness for harness, capability in capabilities.items() if capability.steering}
     steering.update(alias for alias, target in harness_aliases().items() if target in steering)

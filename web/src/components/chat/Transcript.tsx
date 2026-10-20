@@ -52,16 +52,15 @@ import {
   bubbleKey,
   buildPendingBubbles,
   collectPendingElicitations,
-  computeIsTurnActive,
   computeIsWorking,
   extractUserText,
-  isBackgroundTasksOnly,
   isSystemBubble,
   mergePendingBubbles,
   reorderCommittedRequestElicitations,
   shouldShowWorkingIndicator,
   stripGatedSubagentRoutingChips,
   stripPendingElicitations,
+  useWorkingIndicatorPaints,
 } from "@/components/chat/chatBubbleParts";
 import { SCROLL_RESTORE_BUDGET_MS } from "@/shell/useScrollRestore";
 
@@ -131,9 +130,6 @@ function TranscriptImpl({
   const activeResponse = useChatStore((s) => s.activeResponse);
   const interruptedResponseIds = useChatStore((s) => s.interruptedResponseIds);
   const sessionStatus = useChatStore((s) => s.sessionStatus);
-  const status = useChatStore((s) => s.status);
-  const backgroundTaskCount = useChatStore((s) => s.backgroundTaskCount);
-  const blockedOn = useChatStore((s) => s.blockedOn);
   const subagentRoutingOverride = useChatStore((s) => s.subagentRoutingOverride);
   const mcpStartupActive = useChatStore((s) => s.mcpStartup !== null);
   const hasTasks = useChatStore((s) => s.todos.length > 0);
@@ -315,13 +311,7 @@ function TranscriptImpl({
   // Repositioning the marker is worth it only when the indicator actually
   // paints. In the background-tasks-only state it renders nothing, so splicing
   // a marker row would reserve blank space in the virtualized list.
-  const workingIndicatorRenders =
-    showWorkingIndicator &&
-    !isBackgroundTasksOnly(
-      backgroundTaskCount,
-      blockedOn,
-      computeIsTurnActive(sessionStatus, status === "streaming"),
-    );
+  const workingIndicatorRenders = useWorkingIndicatorPaints() && showWorkingIndicator;
   // Keep Working… with the running turn, above a follow-up sent mid-turn.
   const workingInsert = useMemo(
     () => workingIndicatorInsertIndex(display.streamBubbles, workingIndicatorRenders),

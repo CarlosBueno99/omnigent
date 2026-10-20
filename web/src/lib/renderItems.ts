@@ -273,10 +273,8 @@ const REASONING_BLOCK_TYPES = new Set(["reasoning_start", "reasoning_chunk", "re
  * :param blocks: the walked `blocks` array the cached `bubbles` were built
  *     from — `sourceBlocks` itself unless next-turn follow-ups were moved —
  *     kept for per-element reference comparison.
- * :param nextTurnFollowUps: whether the cached walk placed next-turn follow-ups
- *     after their turn (see `orderNextTurnFollowUps`); `"holding"` when a
- *     batch still waited at the tail, so the next walk may insert above it, and
- *     `"waiting"` when that batch's bubbles were also marked `waitingForNextTurn`.
+ * :param nextTurnFollowUps: follow-up placement state of the cached walk; see
+ *     `orderNextTurnFollowUps` and `holdsFollowUps`.
  * :param activeResponse: the `activeResponse` the cached `bubbles`
  *     were built with.
  * :param bubbles: the last result returned.
@@ -428,6 +426,31 @@ export function orderNextTurnFollowUps(blocks: AnyBlock[]): {
   return { blocks: ordered ?? blocks, held: waiting };
 }
 
+/** First block index of a held batch whose turn may still be running, or -1. */
+function waitingFollowUpsFrom(
+  held: { turn: string; from: number } | null,
+  activeResponse: ActiveResponse | null,
+  sessionRunning: boolean,
+): number {
+  if (held === null) return -1;
+  // Another streaming turn means the held batch is already being read.
+  if (activeResponse?.state === "streaming") {
+    return activeResponse.responseId === held.turn ? held.from : -1;
+  }
+  return sessionRunning ? held.from : -1;
+}
+
+/** Cache key for how a walk placed next-turn follow-ups. */
+function followUpPlacement(
+  placeNextTurnFollowUps: boolean,
+  held: { turn: string; from: number } | null,
+  waitingFrom: number,
+): BubbleCache["nextTurnFollowUps"] {
+  if (!placeNextTurnFollowUps) return "off";
+  if (held === null) return "on";
+  return waitingFrom === -1 ? "holding" : "waiting";
+}
+
 /** Whether a walk left a follow-up batch at the tail that a later walk may insert above. */
 function holdsFollowUps(state: BubbleCache["nextTurnFollowUps"]): boolean {
   return state === "holding" || state === "waiting";
@@ -497,14 +520,7 @@ export function buildBubbles(
     : { blocks: sourceBlocks, held: null };
   const blocks = arranged.blocks;
   const held = arranged.held;
-  // Another streaming turn means the held batch is already being read.
-  const waitingFrom =
-    held !== null &&
-    (activeResponse?.state === "streaming"
-      ? activeResponse.responseId === held.turn
-      : sessionRunning)
-      ? held.from
-      : -1;
+  const waitingFrom = waitingFollowUpsFrom(held, activeResponse, sessionRunning);
   // Resolved over the whole transcript before any reuse decision: a create-time
   // chip and the turn chip that repeats it verbatim are one verdict however far
   // apart they landed, and whether the pair is still visible decides whether the
@@ -526,13 +542,7 @@ export function buildBubbles(
       activeResponse,
     );
   }
-  const nextTurnFollowUps = !placeNextTurnFollowUps
-    ? "off"
-    : held === null
-      ? "on"
-      : waitingFrom === -1
-        ? "holding"
-        : "waiting";
+  const nextTurnFollowUps = followUpPlacement(placeNextTurnFollowUps, held, waitingFrom);
 
   // Nothing changed since the last call — hand back the same array.
   if (

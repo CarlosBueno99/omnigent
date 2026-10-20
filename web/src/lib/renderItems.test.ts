@@ -64,6 +64,23 @@ function mkExec(name: string, callId: string): ToolExecution {
   };
 }
 
+function textDoneBlock(itemId: string, responseId: string, text: string): AnyBlock {
+  return {
+    type: "text_done",
+    ctx: ctx({ itemId, responseId }),
+    fullText: text,
+    hasCodeBlocks: false,
+  };
+}
+
+function userMessageBlock(itemId: string, text: string, responseId = ""): AnyBlock {
+  return {
+    type: "user_message",
+    ctx: ctx({ itemId, responseId }),
+    content: [{ type: "input_text", text }],
+  };
+}
+
 describe("shell command user turns", () => {
   function shellInput(itemId: string, input: string | null): AnyBlock {
     return {
@@ -4248,17 +4265,6 @@ describe("liveCandidateAssistantIndex", () => {
 });
 
 describe("workingIndicatorInsertIndex", () => {
-  const textDone = (itemId: string, rid: string, text: string): AnyBlock => ({
-    type: "text_done",
-    ctx: ctx({ itemId, responseId: rid }),
-    fullText: text,
-    hasCodeBlocks: false,
-  });
-  const userMsg = (itemId: string, text: string): AnyBlock => ({
-    type: "user_message",
-    ctx: ctx({ itemId, responseId: "" }),
-    content: [{ type: "input_text", text }],
-  });
   const streaming = (rid: string): ActiveResponse => ({
     responseId: rid,
     state: "streaming",
@@ -4267,9 +4273,9 @@ describe("workingIndicatorInsertIndex", () => {
   const nextTurn = (blocks: AnyBlock[]): Bubble[] =>
     buildBubbles(blocks, streaming("r1"), undefined, [], true, true);
   const sentMidTurn = [
-    userMsg("u1", "q"),
-    textDone("m1", "r1", "working…"),
-    userMsg("u2", "follow-up"),
+    userMessageBlock("u1", "q"),
+    textDoneBlock("m1", "r1", "working…"),
+    userMessageBlock("u2", "follow-up"),
   ];
 
   it("splices above the follow-up the running turn has not read", () => {
@@ -4311,7 +4317,7 @@ describe("workingIndicatorInsertIndex", () => {
           ],
         },
       },
-      textDone("a1", "r1", "working…"),
+      textDoneBlock("a1", "r1", "working…"),
       {
         type: "native_tool",
         ctx: ctx({ itemId: "sub_1", responseId: "r1" }),
@@ -4319,7 +4325,7 @@ describe("workingIndicatorInsertIndex", () => {
         label: "Sub-agent activity",
         data: {},
       },
-      userMsg("u2", "follow-up"),
+      userMessageBlock("u2", "follow-up"),
     ];
     const bubbles = nextTurn(blocks);
     expect(bubbles.map((b) => b.kind)).toEqual([
@@ -4373,11 +4379,6 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
     itemId,
     responseId,
   });
-  const userMsg = (itemId: string, text: string, responseId = ""): AnyBlock => ({
-    type: "user_message",
-    ctx: ctx({ itemId, responseId }),
-    content: [{ type: "input_text", text }],
-  });
 
   // r1 lists the workspace; the user sends u2 while r1 still has a read and its
   // reply to go; the harness answers u2 as r2 once r1 ends.
@@ -4395,10 +4396,15 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
     reply("m_r2", "r2", "Follow-up answered."),
     { type: "response_completed", response: response("r2", "completed") },
   ];
-  function liveBlocks(followUps: AnyBlock[] = [userMsg("u2", "follow-up")]): AnyBlock[] {
+  function liveBlocks(followUps: AnyBlock[] = [userMessageBlock("u2", "follow-up")]): AnyBlock[] {
     const sent = new BlockStream().reduceSync(beforeFollowUp).length;
     const all = new BlockStream().reduceSync([...beforeFollowUp, ...afterFollowUp]);
-    return [userMsg("u1", "inspect"), ...all.slice(0, sent), ...followUps, ...all.slice(sent)];
+    return [
+      userMessageBlock("u1", "inspect"),
+      ...all.slice(0, sent),
+      ...followUps,
+      ...all.slice(sent),
+    ];
   }
 
   const summary = (bubbles: Bubble[]): string[] =>
@@ -4534,7 +4540,7 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
   );
 
   it("holds consecutive follow-ups together in send order", () => {
-    const blocks = liveBlocks([userMsg("u2", "first"), userMsg("u3", "second")]);
+    const blocks = liveBlocks([userMessageBlock("u2", "first"), userMessageBlock("u3", "second")]);
     expect(summary(buildBubbles(blocks, null, undefined, [], false, true))).toEqual([
       "user u1",
       "r1: ls, read, Workspace inspected.",
@@ -4544,8 +4550,52 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
     ]);
   });
 
+  const turnEnds: StreamEvent[] = [
+    { type: "response_failed", response: response("r1", "failed") },
+    { type: "response_cancelled", response: response("r1", "cancelled") },
+    {
+      type: "response_incomplete",
+      response: response("r1", "incomplete"),
+      reason: "max_iterations",
+    },
+  ];
+  it.each(turnEnds)(
+    "releases the batch, system notices included, when the turn ends by $type",
+    (turnEnd) => {
+      const sent = new BlockStream().reduceSync(beforeFollowUp).length;
+      const all = new BlockStream().reduceSync([
+        ...beforeFollowUp,
+        turnEnd,
+        ...afterFollowUp.slice(-3),
+      ]);
+      const ended = [
+        userMessageBlock("u1", "inspect"),
+        ...all.slice(0, sent),
+        userMessageBlock("u2", "follow-up"),
+        userMessageBlock(
+          "u3",
+          "[System: sub-agent general-purpose finished (completed) — 1 result]",
+        ),
+        all[sent]!,
+      ];
+      const blocks = [...ended, ...all.slice(sent + 1)];
+      expect(orderNextTurnFollowUps(ended).held).toBeNull();
+      const waiting = buildBubbles(ended, null, undefined, [], true, true).filter(
+        (b) => b.kind === "user" && b.waitingForNextTurn,
+      );
+      expect(waiting).toEqual([]);
+      expect(summary(buildBubbles(blocks, null, undefined, [], false, true))).toEqual([
+        "user u1",
+        "r1: ls",
+        "user u2",
+        "user u3",
+        "r2: Follow-up answered.",
+      ]);
+    },
+  );
+
   it("keeps Working… below a batch the next turn reads together", () => {
-    const blocks = liveBlocks([userMsg("u2", "first"), userMsg("u3", "second")]);
+    const blocks = liveBlocks([userMessageBlock("u2", "first"), userMessageBlock("u3", "second")]);
     const r2Start = blocks.findIndex(
       (b) => b.type === "response_start" && b.ctx.responseId === "r2",
     );
@@ -4561,7 +4611,7 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
     expect(workingIndicatorInsertIndex(readingBatch, true)).toBe(-1);
     // A message sent before r2 renders anything waits behind r2.
     const heldBehindR2 = buildBubbles(
-      [...started, userMsg("u4", "third")],
+      [...started, userMessageBlock("u4", "third")],
       r2,
       undefined,
       [],
@@ -4592,14 +4642,14 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
 
   it("keeps a backdated tool result and a subagent row with the running turn", () => {
     const blocks: AnyBlock[] = [
-      userMsg("u1", "inspect"),
+      userMessageBlock("u1", "inspect"),
       {
         type: "tool_group",
         ctx: ctx({ itemId: "fc_1", responseId: "r1" }),
         executions: [mkExec("ls", "c_1")],
         iteration: 0,
       },
-      userMsg("u2", "follow-up"),
+      userMessageBlock("u2", "follow-up"),
       {
         type: "tool_result",
         ctx: ctx({ itemId: "fco_1", responseId: "r0" }),
@@ -4615,7 +4665,7 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
         label: "Sub-agent activity",
         data: {},
       },
-      textDone("m_r1", "r1", "Workspace inspected."),
+      textDoneBlock("m_r1", "r1", "Workspace inspected."),
     ];
     const { blocks: ordered, held } = orderNextTurnFollowUps(blocks);
     expect(ordered.map((b) => b.ctx.itemId)).toEqual([
@@ -4636,28 +4686,28 @@ describe("buildBubbles — follow-ups read on the next turn", () => {
       status: "completed",
       response: null,
     };
-    const idle = [userMsg("u1", "q"), textDone("m1", "r1", "a"), ended, userMsg("u2", "next")];
+    const idle = [
+      userMessageBlock("u1", "q"),
+      textDoneBlock("m1", "r1", "a"),
+      ended,
+      userMessageBlock("u2", "next"),
+    ];
     expect(orderNextTurnFollowUps(idle)).toEqual({ blocks: idle, held: null });
     // Reloaded history carries no response_end, so the follow-up waits but nothing moves.
-    const reloaded = [userMsg("u1", "q"), textDone("m1", "r1", "a"), userMsg("u2", "next")];
+    const reloaded = [
+      userMessageBlock("u1", "q"),
+      textDoneBlock("m1", "r1", "a"),
+      userMessageBlock("u2", "next"),
+    ];
     expect(orderNextTurnFollowUps(reloaded).blocks).toBe(reloaded);
     const steered = [
-      userMsg("u1", "q"),
-      textDone("m1", "r1", "partial"),
-      userMsg("u2", "steer", "r1"),
-      textDone("m2", "r1", "done"),
+      userMessageBlock("u1", "q"),
+      textDoneBlock("m1", "r1", "partial"),
+      userMessageBlock("u2", "steer", "r1"),
+      textDoneBlock("m2", "r1", "done"),
     ];
     expect(orderNextTurnFollowUps(steered).blocks).toBe(steered);
   });
-
-  function textDone(itemId: string, rid: string, text: string): AnyBlock {
-    return {
-      type: "text_done",
-      ctx: ctx({ itemId, responseId: rid }),
-      fullText: text,
-      hasCodeBlocks: false,
-    };
-  }
 });
 
 describe("buildBubbles — lastActivityAtS", () => {

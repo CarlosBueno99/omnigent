@@ -1,11 +1,25 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bubble } from "@/lib/renderItems";
 import { useChatStore, type ChatState } from "@/store/chatStore";
 import { ForkDialogContextProvider } from "@/shell/ForkDialogContext";
-import { BubbleView, WorkingIndicator, containsMermaidDiagram } from "./chatBubbleParts";
+import {
+  BubbleView,
+  WorkingIndicator,
+  containsMermaidDiagram,
+  useWorkingIndicatorPaints,
+} from "./chatBubbleParts";
 
 const fetchMock = vi.fn();
 const initialStoreState = useChatStore.getState();
@@ -685,6 +699,13 @@ describe("WorkingIndicator paint gating", () => {
         <WorkingIndicator mode={mode} />
       </QueryClientProvider>,
     );
+  // Transcript gates the relocated marker row on this hook.
+  const paints = () =>
+    renderHook(useWorkingIndicatorPaints, {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={new QueryClient()}>{children}</QueryClientProvider>
+      ),
+    }).result.current;
 
   it("renders nothing while only background tasks outlive a finished turn", () => {
     useChatStore.setState({
@@ -696,6 +717,7 @@ describe("WorkingIndicator paint gating", () => {
     const { container } = renderIndicator();
     expect(container.querySelector('[data-testid="working-indicator"]')).toBeNull();
     expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(paints()).toBe(false);
   });
 
   it("shows the shimmer when the turn is active despite background tasks", () => {
@@ -708,6 +730,7 @@ describe("WorkingIndicator paint gating", () => {
     expect(
       renderIndicator().container.querySelector('[data-testid="working-indicator"]'),
     ).not.toBeNull();
+    expect(paints()).toBe(true);
   });
 
   it("splits the announce region from the relocated shimmer so neither duplicates", () => {

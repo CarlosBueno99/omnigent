@@ -430,9 +430,7 @@ export function workingIndicatorLabel(tick = 0, blockedOn: string | null = null)
   return WORKING_MESSAGES[tick % WORKING_MESSAGES.length]!;
 }
 
-export function WorkingIndicator({
-  mode = "full",
-}: { mode?: "full" | "visual" | "announce" } = {}) {
+function useWorkingIndicatorState(): { blockedOn: string | null; paints: boolean } {
   const scopedConversationId = useContext(ConversationScopeContext);
   const scopedState = useConversationEntryState(scopedConversationId);
   const rootBgCount = useChatStore((s) => s.backgroundTaskCount);
@@ -443,11 +441,23 @@ export function WorkingIndicator({
   const agentWorking = scopedConversationId
     ? computeIsTurnActive(scopedState.sessionStatus, scopedState.status === "streaming")
     : rootAgentWorking;
-  const tick = useWorkingLabelTick();
   // Once the turn ends but background shells outlive it, BackgroundTaskPill owns
   // the state and the shimmer stays off (it would misread as the agent still
   // thinking). While the turn is active the shimmer shows, with the pill beside it.
-  if (isBackgroundTasksOnly(bgCount, blockedOn, agentWorking)) return null;
+  return { blockedOn, paints: !isBackgroundTasksOnly(bgCount, blockedOn, agentWorking) };
+}
+
+/** Whether a mounted `WorkingIndicator` would paint in the current conversation scope. */
+export function useWorkingIndicatorPaints(): boolean {
+  return useWorkingIndicatorState().paints;
+}
+
+export function WorkingIndicator({
+  mode = "full",
+}: { mode?: "full" | "visual" | "announce" } = {}) {
+  const { blockedOn, paints } = useWorkingIndicatorState();
+  const tick = useWorkingLabelTick();
+  if (!paints) return null;
   const label = workingIndicatorLabel(tick, blockedOn);
   return (
     <>
