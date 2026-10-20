@@ -715,7 +715,7 @@ def test_threaded_idle_watcher_backs_off_and_throttles_logs_while_descriptors_ar
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Sustained EMFILE at probe start must not retry and warn at a fixed per-attempt rate."""
+    """Sustained EMFILE at probe start backs off to the cap and warns once, not per retry."""
     instance = TerminalInstance(
         name="shell",
         session_key="main",
@@ -743,10 +743,9 @@ def test_threaded_idle_watcher_backs_off_and_throttles_logs_while_descriptors_ar
         sum(stop_event.timeouts[start:end]) for start, end in itertools.pairwise(attempt_marks)
     ]
     warnings = [record for record in caplog.records if "could not start" in record.getMessage()]
-    assert len(attempt_marks) >= 5
     assert instance.running is True
-    assert delays[-1] > delays[0], f"retry delay never grows: {delays}"
-    assert len(warnings) < len(attempt_marks) // 2, (
+    assert delays == [2.0, 3.0, 5.0, 9.0, *[17.0] * 15], f"retry delays: {delays}"
+    assert len(warnings) == 1, (
         f"{len(warnings)} warnings for {len(attempt_marks)} failed probe starts"
     )
 
