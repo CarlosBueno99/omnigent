@@ -88,7 +88,10 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
   `tests/e2e_ui/shells/test_new_shell.py::test_new_shell_accepts_typed_command`.
   Closing a shell has no e2e coverage: close its tab, confirm, and expect the
   tab to disappear.
-- **`agent-terminal-view`, `user-shell`, keyboard:** no e2e coverage; component
+- **`user-shell`, key encoding:**
+  `tests/e2e_ui/shells/test_terminal_cmd_line_editing.py::test_ctrl_slash_reaches_the_shell_as_ctrl_underscore`;
+  the same file covers Cmd+Backspace/Left/Right line editing.
+- **`agent-terminal-view`, `user-shell`, hotkeys:** no e2e coverage; component
   tests `web/src/hooks/useViewModeToggleHotkey.test.tsx` and
   `web/src/hooks/useNewShellHotkey.test.tsx` (`pnpm --dir web test`). Manually,
   in a Claude or Codex session with the composer focused: press ⌘/Ctrl+Alt+\
