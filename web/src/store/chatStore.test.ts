@@ -69,6 +69,7 @@ import { type ChildSessionInfo, childSessionsQueryKey } from "@/hooks/useChildSe
 import {
   ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS,
   ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS,
+  RECONNECT_STATUS_CATCHUP_DELAYS_MS,
   beginLocalConversation,
   committedItemProvesDelivery,
   takeFailedSendDraft,
@@ -948,6 +949,11 @@ describe("chatStore — lazy subtree usage", () => {
       await drainAsync();
     }
 
+    async function passOpenStatusCatchup(): Promise<void> {
+      await vi.advanceTimersByTimeAsync(Math.max(...RECONNECT_STATUS_CATCHUP_DELAYS_MS));
+      await drainAsync();
+    }
+
     function streamOpenCount(): number {
       return fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/stream")).length;
     }
@@ -963,19 +969,19 @@ describe("chatStore — lazy subtree usage", () => {
     }
 
     it("recovers missed usage while the stream stays heartbeat-alive", async () => {
-      const readUsage = vi
-        .fn()
-        .mockReturnValueOnce(usage("conv_usage", 3.5))
-        .mockReturnValue(usage("conv_usage", 8, 500));
+      const readUsage = vi.fn(() => usage("conv_usage", 3.5));
       routeUsage("conv_usage", readUsage);
       await useChatStore.getState().switchTo("conv_usage");
       await drainAsync();
+      await passOpenStatusCatchup();
       expect(useChatStore.getState().sessionCostUsd).toBe(3.5);
+      const readsBeforePeriodic = readUsage.mock.calls.length;
+      readUsage.mockImplementation(() => usage("conv_usage", 8, 500));
 
       await advanceReconcileInterval();
 
       expect(streamOpenCount()).toBe(1);
-      expect(readUsage).toHaveBeenCalledTimes(2);
+      expect(readUsage).toHaveBeenCalledTimes(readsBeforePeriodic + 1);
       expect(useChatStore.getState().sessionCostUsd).toBe(8);
       expect(useChatStore.getState().sessionUsageByModel?.["model-a"]).toMatchObject({
         inputTokens: 500,
@@ -988,17 +994,17 @@ describe("chatStore — lazy subtree usage", () => {
       const pending = new Promise<Response>((resolve) => {
         finishUsage = resolve;
       });
-      const readUsage = vi
-        .fn()
-        .mockReturnValueOnce(usage("conv_usage", 3.5))
-        .mockReturnValue(pending);
+      const readUsage = vi.fn((): Response | Promise<Response> => usage("conv_usage", 3.5));
       routeUsage("conv_usage", readUsage);
       await useChatStore.getState().switchTo("conv_usage");
       await drainAsync();
+      await passOpenStatusCatchup();
       const initialSnapshots = metadataSnapshotCount();
+      const readsBeforePeriodic = readUsage.mock.calls.length;
+      readUsage.mockImplementation(() => pending);
 
       await advanceReconcileInterval();
-      expect(readUsage).toHaveBeenCalledTimes(2);
+      expect(readUsage).toHaveBeenCalledTimes(readsBeforePeriodic + 1);
       handleSessionEvent({
         type: "session_status",
         conversationId: "conv_usage",
@@ -1010,7 +1016,7 @@ describe("chatStore — lazy subtree usage", () => {
 
       expect(streamOpenCount()).toBe(1);
       expect(metadataSnapshotCount()).toBe(initialSnapshots + 2);
-      expect(readUsage).toHaveBeenCalledTimes(2);
+      expect(readUsage).toHaveBeenCalledTimes(readsBeforePeriodic + 1);
       expect(useChatStore.getState().sessionStatus).toBe("idle");
       expect(useChatStore.getState().loadingConversation).toBe(false);
       expect(useChatStore.getState().sessionCostUsd).toBe(3.5);
@@ -12791,6 +12797,12 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     /* oxlint-enable no-await-in-loop */
   }
 
+  /** Run past the post-open status re-reads so only the periodic reconcile reads status. */
+  async function passOpenStatusCatchup(sink: StreamSink): Promise<void> {
+    await advanceWithHeartbeats(sink, Math.max(...RECONNECT_STATUS_CATCHUP_DELAYS_MS));
+    await drainAsync();
+  }
+
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -13405,6 +13417,59 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     }
   });
 
+  it("relights a running turn that the first open's snapshot reported idle", async () => {
+    seedSession("conv_first_open_stale", []);
+    const sinks = routeStreamOpens();
+    const normalFetch = fetchMock.getMockImplementation()!;
+    let snapshotGets = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://test.local");
+      if (
+        url.pathname === "/v1/sessions/conv_first_open_stale" &&
+        url.searchParams.get("include_usage") !== "true" &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        snapshotGets += 1;
+        // The bind's own snapshot is stale; later reads see the turn still running.
+        const running = snapshotGets > 1;
+        return Promise.resolve(
+          mockResponse({
+            id: "conv_first_open_stale",
+            agent_id: "agent_xyz",
+            status: running ? "running" : "idle",
+            active_response_id: running ? "resp_live" : null,
+            created_at: 0,
+            items: [],
+            labels: {},
+          }),
+        );
+      }
+      return normalFetch(input, init);
+    });
+
+    await useChatStore.getState().switchTo("conv_first_open_stale");
+    await drainAsync(2);
+    expect(sinks).toHaveLength(1);
+    expect(snapshotGets).toBe(1);
+    expect(useChatStore.getState().sessionStatus).toBe("idle");
+
+    await vi.advanceTimersByTimeAsync(RECONNECT_STATUS_CATCHUP_DELAYS_MS[0]);
+    await drainAsync(2);
+
+    expect(sinks).toHaveLength(1);
+    expect(useChatStore.getState().sessionStatus).toBe("running");
+    expect(useChatStore.getState().status).toBe("streaming");
+    expect(useChatStore.getState().activeResponse).toMatchObject({
+      responseId: "resp_live",
+      state: "streaming",
+    });
+
+    releaseConversation("conv_first_open_stale");
+    sinks[0]!.push("data: [DONE]\n\n");
+    sinks[0]!.close();
+    await drainAsync(2);
+  });
+
   it("suppresses delayed previews after snapshot-only completion recovery", async () => {
     seedSession("conv_native_tombstone", []);
     const sinks = routeStreamOpens();
@@ -13614,7 +13679,8 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     });
 
     const loop = startStreamPump("conv_404flap", controller, setState, getState);
-    await vi.advanceTimersByTimeAsync(20_000);
+    // Three failed opens back off at most 1.75 s, before the first post-open status re-read.
+    await vi.advanceTimersByTimeAsync(2_000);
 
     expect(opens).toBe(4);
     expect(sinks).toHaveLength(1);
@@ -13642,12 +13708,9 @@ describe("chatStore — startStreamPump reconnect loop", () => {
         sinks.push(sink);
         return mockResponse(null, { bodyStream: sink.stream });
       }
-      // reconcileOnReconnect is the only thing in startStreamPump that GETs
-      // the session snapshot / items page; count those to detect it running.
-      if (
-        /\/v1\/sessions\/[^/]+\/items/.test(url) ||
-        (/\/v1\/sessions\/[^/]+$/.test(url) && (init?.method ?? "GET") === "GET")
-      ) {
+      // reconcileOnReconnect is the only thing in startStreamPump that reads
+      // the items page; the post-open status re-reads fetch only the snapshot.
+      if (/\/v1\/sessions\/[^/]+\/items/.test(url)) {
         reconcileFetches += 1;
       }
       return defaultFetchHandler(input, init);
@@ -14150,8 +14213,14 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       return defaultFetchHandler(input, init);
     });
     const controller = new AbortController();
-    const bound = bindConversationForTest("conv_heartbeat_gap", {
-      abortController: controller,
+    const bound = bindConversationForTest("conv_heartbeat_gap", { abortController: controller });
+
+    const loop = startStreamPump("conv_heartbeat_gap", controller, bound.set, bound.get);
+    await drainAsync();
+    expect(streamOpens).toBe(1);
+    await passOpenStatusCatchup(sink);
+    const fetchesBeforePeriodic = snapshotFetches;
+    bound.set({
       sessionStatus: "running",
       status: "idle",
       activeResponse: {
@@ -14162,16 +14231,12 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       },
     });
 
-    const loop = startStreamPump("conv_heartbeat_gap", controller, bound.set, bound.get);
-    await drainAsync();
-    expect(streamOpens).toBe(1);
-
     // The transport stays byte-active while the real idle edge is absent.
     await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
     await drainAsync();
 
     expect(streamOpens).toBe(1);
-    expect(snapshotFetches).toBe(1);
+    expect(snapshotFetches).toBe(fetchesBeforePeriodic + 1);
     expect(bound.get().sessionStatus).toBe("idle");
     expect(useChatStore.getState().sessionStatus).toBe("idle");
 
@@ -14493,7 +14558,8 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
     await drainAsync();
 
-    expect(snapshotFetches).toBe(1);
+    // Each post-open re-read and the periodic read issues its own request.
+    expect(snapshotFetches).toBe(RECONNECT_STATUS_CATCHUP_DELAYS_MS.length + 1);
     expect(bound.get().sessionStatus).toBe("idle");
 
     resolveSharedQuery!({ source: "older request" });
@@ -14507,6 +14573,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     seedSession("conv_status_timeout", []);
     const sink = pushableStream();
     let snapshotFetches = 0;
+    let hangNextSnapshot = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url === "/v1/sessions/conv_status_timeout/stream") {
@@ -14520,7 +14587,8 @@ describe("chatStore — startStreamPump reconnect loop", () => {
         (init?.method ?? "GET") === "GET"
       ) {
         snapshotFetches += 1;
-        if (snapshotFetches === 1) {
+        if (hangNextSnapshot) {
+          hangNextSnapshot = false;
           return new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener(
               "abort",
@@ -14533,15 +14601,16 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       return defaultFetchHandler(input, init);
     });
     const controller = new AbortController();
-    const bound = bindConversationForTest("conv_status_timeout", {
-      abortController: controller,
-      sessionStatus: "running",
-    });
+    const bound = bindConversationForTest("conv_status_timeout", { abortController: controller });
     const loop = startStreamPump("conv_status_timeout", controller, bound.set, bound.get);
     await drainAsync();
+    await passOpenStatusCatchup(sink);
+    const fetchesBeforePeriodic = snapshotFetches;
+    hangNextSnapshot = true;
+    bound.set({ sessionStatus: "running" });
 
     await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-    expect(snapshotFetches).toBe(1);
+    expect(snapshotFetches).toBe(fetchesBeforePeriodic + 1);
 
     await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS);
     await advanceWithHeartbeats(
@@ -14550,7 +14619,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     );
     await drainAsync();
 
-    expect(snapshotFetches).toBe(2);
+    expect(snapshotFetches).toBe(fetchesBeforePeriodic + 2);
     expect(bound.get().sessionStatus).toBe("idle");
 
     controller.abort();

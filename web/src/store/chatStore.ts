@@ -1798,13 +1798,9 @@ const STREAM_RECONNECT_BASE_MS = 250;
 const STREAM_RECONNECT_MAX_MS = 5_000;
 export const ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS = 60_000;
 export const ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS = 15_000;
-// After the stream reconnects, `reconcileActiveSessionStatus` runs once
-// immediately — but a server that just restarted may not have reprocessed the
-// in-flight turn's completion yet, so that read can see a stale "running" and
-// leave the tab on "Working…" until the 60s periodic reconcile. These short
-// catch-up delays re-read status a few times over the first ~20s so a status
-// that settles right after reconnect is reflected in seconds, not up to a
-// minute. Each call is guarded + idempotent (see reconcileActiveSessionStatus).
+// The snapshot read on each stream open can carry a stale status that the stream
+// never replays, so re-read it at these delays instead of waiting for the 60s
+// reconcile. Each re-read is guarded and idempotent (reconcileActiveSessionStatus).
 export const RECONNECT_STATUS_CATCHUP_DELAYS_MS = [3_000, 8_000, 20_000] as const;
 // A reverse proxy serves 404 for the stream route for the ~10-60s a backend
 // container takes to restart (upgrade, config change, re-seed bounce), so a
@@ -5820,7 +5816,7 @@ export async function startStreamPump(
   nativePreviewTombstonesByController.set(controller, ignoredNativeMessageIds);
   let failedOpens = 0;
   let statusReconcileInFlight = false;
-  // Shared by the periodic reconcile and the post-reconnect catch-up burst so
+  // Shared by the periodic reconcile and the post-open catch-up burst so
   // reconciliations stay serialized: a catch-up tick that straddles a slow
   // snapshot fetch (or the periodic tick) is skipped rather than issuing a
   // duplicate concurrent backfill.
@@ -5835,7 +5831,7 @@ export async function startStreamPump(
     typeof window === "undefined"
       ? null
       : window.setInterval(runGuardedStatusReconcile, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
-  // Pending post-reconnect catch-up timers. Tracked so each reconnect cancels
+  // Pending post-open catch-up timers. Tracked so each reconnect cancels
   // the previous burst before scheduling a new one — otherwise recurring
   // reconnects (the ~5-min ingress recycle) would accumulate timers on the
   // long-lived controller. Cleared on teardown in the outer `finally`.
@@ -5844,15 +5840,15 @@ export async function startStreamPump(
     for (const timer of catchupTimers) window.clearTimeout(timer);
     catchupTimers = [];
   };
-  // Re-read at each catch-up delay, replacing any prior burst: the full status if asked
+  // Re-read at each catch-up delay, replacing any prior burst: the full status
   // (on screen only) and, while a launch shows, its stage on screen or not.
-  const scheduleStatusCatchup = (withStatus: boolean): void => {
+  const scheduleStatusCatchup = (): void => {
     if (typeof window === "undefined") return;
     clearCatchupTimers();
     catchupTimers = RECONNECT_STATUS_CATCHUP_DELAYS_MS.map((delayMs) =>
       window.setTimeout(() => {
         if (controller.signal.aborted || isConversationDisposed(id)) return;
-        if (withStatus) runGuardedStatusReconcile();
+        runGuardedStatusReconcile();
         const launch = get().sandboxStatus;
         if (launch !== null && launch.stage !== "failed") void reconcileLaunchStatus(id, set, get);
       }, delayMs),
@@ -6053,19 +6049,11 @@ export async function startStreamPump(
         );
         if (reconnecting) {
           await reconcileOnReconnect(id, set, get, ignoredNativeMessageIds);
-          // reconcileOnReconnect can read a stale "running" when the server
-          // just restarted and hasn't reprocessed the turn's completion yet,
-          // stranding the tab on "Working…" until the 60s periodic reconcile.
-          // Re-read status a few times over the next ~20s so a status that
-          // settles shortly after reconnect clears in seconds. Guarded +
-          // idempotent, and scoped to the active conversation by
-          // reconcileActiveSessionStatus itself.
-          scheduleStatusCatchup(true);
-        } else {
-          // A launch's `ready` sent before this first open subscribed is in no snapshot
-          // read yet, so re-read its stage over the next ~20 s while it still shows.
-          scheduleStatusCatchup(false);
         }
+        // Neither bindStream's nor reconcileOnReconnect's snapshot is final: a
+        // status or launch stage that changed before this open subscribed is
+        // never re-sent, so re-read both over the next ~20s.
+        scheduleStatusCatchup();
         let reason = await pumpPromise;
 
         // Presence or host changes abort only the attempt; a live outer
