@@ -1713,6 +1713,7 @@ describe("session PR selection", () => {
     ({ available, reason, offline }) => {
       const pr = state.info!.data!.pr!;
       const cachedAt = 1_700_000_000;
+      const diffWarning = "Could not refresh the diff. Showing the saved snapshot.";
       state.info!.data = {
         ...state.info!.data!,
         cached: true,
@@ -1744,7 +1745,12 @@ describe("session PR selection", () => {
         },
       };
       state.changes!.data = { ...state.changes!.data!, cached: true, cached_at: cachedAt - 10 };
-      state.diff = { ...state.diff!, cached: true, cached_at: cachedAt - 20 };
+      state.diff = {
+        ...state.diff!,
+        cached: true,
+        cached_at: cachedAt - 20,
+        message: offline ? undefined : diffWarning,
+      };
       renderPanel();
 
       expect(screen.getByText("Saved description")).toBeVisible();
@@ -1772,6 +1778,8 @@ describe("session PR selection", () => {
 
       fireEvent.mouseDown(screen.getByRole("tab", { name: "Changes" }));
       expect(screen.getAllByTestId("diff")).toHaveLength(2);
+      if (offline) expect(screen.queryByText(diffWarning)).not.toBeInTheDocument();
+      else expect(screen.getByText(diffWarning)).toBeVisible();
       for (const diff of screen.getAllByTestId("diff")) {
         expect(diff).toHaveAttribute("data-can-expand-context", "false");
       }

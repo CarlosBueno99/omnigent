@@ -3223,6 +3223,123 @@ async def test_github_pr_diff_proxies_whole_patch(client: httpx.AsyncClient) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("via_host", [False, True], ids=["runner", "host"])
+@pytest.mark.parametrize("failure_status", [200, 400, 503])
+@pytest.mark.parametrize(
+    ("kind", "saved"),
+    [("diff", {"patch": "Saved patch"}), ("changes", {"data": [{"path": "saved.py"}]})],
+)
+async def test_saved_pr_resources_survive_provider_failure(
+    file_client: httpx.AsyncClient,
+    file_conv_store: _ConversationStore,
+    artifact_store: _InMemoryArtifactStore,
+    monkeypatch: pytest.MonkeyPatch,
+    via_host: bool,
+    failure_status: int,
+    kind: str,
+    saved: dict[str, Any],
+) -> None:
+    from omnigent.server.routes import _host_filesystem
+
+    session_id = "79b22ebd2309e48fdeb450c65611d51b"
+    pr_url = "https://github.com/example/project/pull/42"
+    conv = file_conv_store._conversations[session_id]
+    conv.session_pull_requests = [{"url": pr_url}]
+    conv.session_pr_snapshots = {pr_url: {kind: {"key": "saved-pr", "captured_at_ns": 10**9}}}
+    artifact_store.put("saved-pr", json.dumps(saved).encode())
+    detail = "GitHub could not load the PR diff. Refresh or open the PR on GitHub."
+    failure = (
+        {"patch": "", "unavailable_reason": "lookup_failed"}
+        if kind == "diff"
+        else {"data": [], "warning": "Temporary provider failure", "has_more": True}
+    )
+    runner = _FakeRunnerClient(
+        status_code=failure_status,
+        payload=failure if failure_status == 200 else {"detail": detail},
+    )
+    if via_host:
+        conv.host_id, conv.workspace = "host_files", "/workspace"
+        runner = _OfflineRunnerClient()
+
+        async def fail_provider(**kwargs: Any) -> dict[str, Any]:
+            if failure_status == 200:
+                return failure
+            raise _host_filesystem.HostFsError(failure_status, "invalid_request", detail)
+
+        monkeypatch.setattr(_host_filesystem, "read_workspace_from_host", fail_provider)
+    set_runner_router(_FakeRunnerRouter(runner))  # type: ignore[arg-type]
+
+    path = f"/v1/sessions/{session_id}/resources/github/{kind}"
+    response = await file_client.get(path, params={"pr_url": pr_url})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        **saved,
+        "cached": True,
+        "cached_at": 1.0,
+        "message" if kind == "diff" else "warning": (
+            "Could not refresh this pull request. Showing the last saved version."
+        ),
+    }
+    rejected = await file_client.get(
+        path, params={"pr_url": "https://github.com/example/other/pull/1"}
+    )
+    assert rejected.status_code == 400
+    assert artifact_store.get("saved-pr") == json.dumps(saved).encode()
+    conv.session_pr_snapshots = {}
+    uncached = await file_client.get(path)
+    if failure_status == 200:
+        assert uncached.json() == failure
+    else:
+        assert uncached.status_code == (400 if via_host and failure_status == 400 else 502)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via_host", [False, True], ids=["runner", "host"])
+@pytest.mark.parametrize(
+    ("status", "code", "detail"),
+    [
+        (401, "unauthorized", "Authentication required"),
+        (403, "forbidden", "Permission denied"),
+        (400, "invalid_path", "Invalid repository-relative path"),
+        (400, "invalid_workspace", "Invalid workspace"),
+        (400, "invalid_request", "Invalid pull request URL"),
+        (422, "invalid_input", "Invalid query"),
+    ],
+)
+async def test_saved_pr_resources_do_not_mask_rejected_requests(
+    file_client: httpx.AsyncClient,
+    file_conv_store: _ConversationStore,
+    artifact_store: _InMemoryArtifactStore,
+    monkeypatch: pytest.MonkeyPatch,
+    via_host: bool,
+    status: int,
+    code: str,
+    detail: str,
+) -> None:
+    from omnigent.server.routes import _host_filesystem
+
+    session_id = "79b22ebd2309e48fdeb450c65611d51b"
+    pr_url = "https://github.com/example/project/pull/42"
+    conv = file_conv_store._conversations[session_id]
+    conv.session_pull_requests = [{"url": pr_url}]
+    conv.session_pr_snapshots = {pr_url: {"diff": {"key": "saved-pr", "captured_at_ns": 10**9}}}
+    artifact_store.put("saved-pr", b'{"patch":"Saved patch"}')
+    runner = _FakeRunnerClient(status_code=status, payload={"detail": detail})
+    if via_host:
+        conv.host_id, conv.workspace = "host_files", "/workspace"
+        runner = _OfflineRunnerClient()
+
+        async def reject_request(**kwargs: Any) -> dict[str, Any]:
+            raise _host_filesystem.HostFsError(status, code, detail)
+
+        monkeypatch.setattr(_host_filesystem, "read_workspace_from_host", reject_request)
+    set_runner_router(_FakeRunnerRouter(runner))  # type: ignore[arg-type]
+    response = await file_client.get(f"/v1/sessions/{session_id}/resources/github/diff")
+    assert response.status_code == (400 if via_host and status == 400 else 502), response.text
+    assert "cached" not in response.json()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("previous_path", "status"),
     [

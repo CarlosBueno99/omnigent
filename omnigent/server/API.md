@@ -530,6 +530,8 @@ Fields:
     uses `unavailable_reason: "not_synced" | "too_large"`. Full-file context
     expansion still requires the workspace. Snapshot bodies and artifact keys
     are excluded from session detail/list responses.
+    Eligible provider failures return saved changes/diffs with a warning;
+    authorization failures and unassociated PR URLs remain errors.
 
   pull_requests_updated_at_ns (integer or null, session detail only)
     Last acknowledged registry revision. Replacement runners retain this floor
@@ -1155,6 +1157,8 @@ Request body matches `SessionEventInput`:
                                   Credentials and host account configuration
                                   are excluded. Detached PRs and deleted
                                   sessions release their saved artifacts.
+                                  Saved partial captures use the normal five-minute
+                                  refresh interval; PR activity refreshes sooner.
     The route validates `type` against the conversation entity's item
     discriminator map plus the documented control/internal event types.
     Unknown values fail loud with 400 — they are NOT silently enqueued.

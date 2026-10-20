@@ -353,6 +353,10 @@ async def test_proxy_persists_created_prs_before_return(
 ) -> None:
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(
+        "omnigent.runner.session_pr_snapshot_sync.schedule_session_pr_snapshots",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
         pending_approvals,
         "wait_for_user_verdict",
         AsyncMock(return_value=pending_approvals.Verdict(approved=True)),

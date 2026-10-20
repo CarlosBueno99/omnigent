@@ -116,6 +116,22 @@ from omnigent.stores.session_pr_snapshots import (
 )
 
 
+class _ResourceReadError(HTTPException):
+    """Keep upstream failure details when the resource proxy maps its HTTP status."""
+
+    def __init__(
+        self,
+        status_code: int,
+        detail: str,
+        *,
+        upstream_status: int,
+        upstream_code: str | None = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=detail)
+        self.upstream_status = upstream_status
+        self.upstream_code = upstream_code
+
+
 class _RunnerStreamResponse(StreamingResponse):
     """Stream a runner response body and close it however the send ends.
 
@@ -492,6 +508,12 @@ def register_resources_routes(
         try:
             response_payload = resp.json()
         except ValueError as exc:
+            if resp.status_code >= 400:
+                raise _ResourceReadError(
+                    status_code=502,
+                    detail="runner resource endpoint returned invalid JSON",
+                    upstream_status=resp.status_code,
+                ) from exc
             raise HTTPException(
                 status_code=502, detail="runner resource endpoint returned invalid JSON"
             ) from exc
@@ -509,12 +531,16 @@ def register_resources_routes(
             # Re-derive the typed session-lifecycle 410 (agent deleted or
             # rebound) instead of flattening it to a generic 502.
             _raise_if_runner_session_agent_missing(resp)
-            if isinstance(response_payload, dict):
-                error = response_payload.get("error", {})
-                msg = error.get("message") or "runner resource endpoint failed"
-            else:
-                msg = "runner resource endpoint failed"
-            raise HTTPException(status_code=502, detail=msg)
+            error = response_payload.get("error") if isinstance(response_payload, dict) else None
+            error = error if isinstance(error, dict) else {}
+            detail = response_payload.get("detail") if isinstance(response_payload, dict) else None
+            msg = error.get("message") or detail
+            raise _ResourceReadError(
+                status_code=502,
+                detail=msg if isinstance(msg, str) else "runner resource endpoint failed",
+                upstream_status=resp.status_code,
+                upstream_code=error.get("code") if isinstance(error.get("code"), str) else None,
+            )
         if not isinstance(response_payload, dict):
             raise HTTPException(
                 status_code=502, detail="runner resource endpoint returned non-object JSON"
@@ -936,13 +962,13 @@ def register_resources_routes(
         except HostFsError as exc:
             if exc.status == 404:
                 raise OmnigentError(exc.message, code=ErrorCode.NOT_FOUND) from exc
-            if exc.status == 400:
-                # Invalid path is a client error; surface it verbatim like the
-                # runner's 400 rather than collapsing it to a 502.
-                raise HTTPException(status_code=400, detail=exc.message) from exc
-            # Any other host FS failure (e.g. git_status_failed 500) mirrors the
-            # runner proxy, which wraps non-200/404 responses as a 502.
-            raise HTTPException(status_code=502, detail=exc.message) from exc
+            # Preserve client errors; other upstream failures use the proxy's 502.
+            raise _ResourceReadError(
+                status_code=400 if exc.status == 400 else 502,
+                detail=exc.message,
+                upstream_status=exc.status,
+                upstream_code=exc.code,
+            ) from exc
 
     async def _write_workspace_via_host(
         session_id: str,
@@ -3012,11 +3038,38 @@ def register_resources_routes(
         )
         if offline:
             return "workspace_offline"
+        selected = pr_url or next((pr["url"] for pr in conv.session_pull_requests or []), None)
+        if not any(pr["url"] == selected for pr in conv.session_pull_requests or []):
+            return None
         if (
-            isinstance(exc, HTTPException)
-            and exc.status_code in (400, 502)
-            and exc.detail == "This pull request is not associated with the session"
-            and any(pr["url"] == pr_url for pr in conv.session_pull_requests or [])
+            isinstance(exc, _ResourceReadError)
+            and exc.upstream_code
+            not in {
+                ErrorCode.UNAUTHORIZED,
+                ErrorCode.FORBIDDEN,
+                ErrorCode.UPSTREAM_PERMISSION_DENIED,
+                ErrorCode.INVALID_INPUT,
+                "invalid_path",
+                "invalid_workspace",
+            }
+            and (
+                500 <= exc.upstream_status < 600
+                or (
+                    exc.upstream_status == 400
+                    and (
+                        exc.detail == "This pull request is not associated with the session"
+                        or exc.detail.startswith(
+                            (
+                                "GitHub could not load ",
+                                "GitHub returned an invalid ",
+                                "GitLab could not read ",
+                                "GitLab request timed out.",
+                                "GitLab returned an invalid ",
+                            )
+                        )
+                    )
+                )
+            )
         ):
             return "provider_unavailable"
         return None
@@ -3076,7 +3129,14 @@ def register_resources_routes(
         runner_path: str,
     ) -> dict[str, Any]:
         captured_at_ns = time.time_ns()
-        selected = pr_url or next((pr["url"] for pr in conv.session_pull_requests or []), None)
+        selected = (
+            _associated_pr_url(conv, pr_url) if conv.session_pull_requests is not None else pr_url
+        )
+        saved_warning = {
+            "message" if kind == "diff" else "warning": (
+                "Could not refresh this pull request. Showing the last saved version."
+            )
+        }
         try:
             payload = await _fs_get_with_host_fallback(
                 session_id,
@@ -3087,17 +3147,31 @@ def register_resources_routes(
                 runner_params={"pr_url": selected} if selected else None,
             )
         except (OmnigentError, HTTPException) as exc:
-            if (
-                _saved_pr_fallback_reason(exc, conv, selected) is None
-                or conv.session_pull_requests is None
-            ):
+            reason = _saved_pr_fallback_reason(exc, conv, selected)
+            if reason is None or selected is None or conv.session_pull_requests is None:
                 raise
-            selected = _associated_pr_url(conv, pr_url)
-            if selected is None:
-                raise
-            return await asyncio.to_thread(
+            cached = await asyncio.to_thread(
                 load_session_pr_snapshot, artifact_store, conv, selected, kind
             )
+            if reason == "workspace_offline":
+                return cached
+            if cached.get("unavailable_reason"):
+                raise
+            return {**cached, **saved_warning}
+        if (
+            conv.session_pull_requests
+            and selected is not None
+            and (
+                payload.get("warning")
+                or payload.get("unavailable_reason")
+                or payload.get("has_more")
+            )
+        ):
+            cached = await asyncio.to_thread(
+                load_session_pr_snapshot, artifact_store, conv, selected, kind
+            )
+            if not cached.get("unavailable_reason"):
+                return {**cached, **saved_warning}
         await _cache_pr_resource(session_id, selected, kind, payload, captured_at_ns)
         return payload
 
@@ -3213,6 +3287,8 @@ def register_resources_routes(
         :returns: The ``session.github.info`` object.
         """
         conv = await _validate_session(session_id, request, LEVEL_READ)
+        if pr_url is not None and conv.session_pull_requests is not None:
+            _associated_pr_url(conv, pr_url)
         captured_at_ns = time.time_ns()
         host_params: dict[str, Any] = {"pr_url": pr_url} if pr_url else {}
         if conv.session_pull_requests is not None:

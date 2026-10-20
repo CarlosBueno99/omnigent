@@ -28,7 +28,6 @@ class _SnapshotAttempt:
     activity: tuple[float, float]
     retry_at: float
     pending: dict[str, Any] | None = None
-    complete: bool = False
 
 
 # A failed upload retains its bounded payload, while successful entries retain only a timestamp.
@@ -135,23 +134,19 @@ async def _sync_snapshot(
     # Throttle failures too: ordinary tools and heartbeats share this path.
     _attempts[key] = _SnapshotAttempt(activity, time.monotonic() + _RETRY_SECONDS)
     pending = previous.pending if previous is not None else None
-    complete = previous.complete if previous is not None else False
     if pending is None:
         captured_at_ns = max(time.time_ns(), revision)
         resources = await asyncio.to_thread(_read_resources, root, entry)
         if not resources:
             return
         pending = {"pr_url": entry.url, "captured_at_ns": captured_at_ns, **resources}
-        complete = all(kind in resources for kind in ("info", "changes", "diff"))
     current = await asyncio.to_thread(registry.snapshot)
     if current is None or not any(
         candidate.url == entry.url and _activity(candidate) == activity for candidate in current[1]
     ):
         _attempts.pop(key, None)
         return
-    _attempts[key] = _SnapshotAttempt(
-        activity, time.monotonic() + _RETRY_SECONDS, pending, complete
-    )
+    _attempts[key] = _SnapshotAttempt(activity, time.monotonic() + _RETRY_SECONDS, pending)
     response = await client.post(
         f"/v1/sessions/{session_id}/events",
         json={"type": "external_session_pr_snapshot", "data": pending},
@@ -161,7 +156,7 @@ async def _sync_snapshot(
     saved = response.json().get("saved", True)
     _attempts[key] = _SnapshotAttempt(
         activity,
-        time.monotonic() + (_REFRESH_SECONDS if complete and saved else _RETRY_SECONDS),
+        time.monotonic() + (_REFRESH_SECONDS if saved else _RETRY_SECONDS),
     )
 
 

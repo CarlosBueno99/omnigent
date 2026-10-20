@@ -9594,7 +9594,7 @@ async def test_live_pr_resources_save_links_and_explicit_removal(
 
     def runner_response(request: httpx.Request) -> httpx.Response:
         if runner_status != 200:
-            return httpx.Response(runner_status, json=payload)
+            return httpx.Response(runner_status, json={"detail": payload["detail"]})
         if request.url.path.endswith("/diff"):
             selections.append(request.url.params.get("pr_url"))
             return httpx.Response(
@@ -9668,7 +9668,7 @@ async def test_live_pr_resources_save_links_and_explicit_removal(
         ] == failed_provider.json()["cached_at"]
         payload.update(pr={**prs[0], "body": "Live description"}, available=True)
         payload.pop("reason")
-        payload["error"] = {"message": "This pull request is not associated with the session"}
+        payload["detail"] = "This pull request is not associated with the session"
         runner_status = 400
         selected = await client.get(path + "/resources/github", params={"pr_url": prs[0]["url"]})
         assert selected.status_code == 200, selected.text
@@ -9679,7 +9679,7 @@ async def test_live_pr_resources_save_links_and_explicit_removal(
             assert restored.status_code == 200, restored.text
             assert restored.json()["cached"] is True
         runner_status = 200
-        payload.pop("error")
+        payload.pop("detail")
         payload.update(prs=prs, prs_updated_at_ns=1)
         offline = True
         saved = await client.get(path + "/resources/github")

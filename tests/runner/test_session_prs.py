@@ -1022,6 +1022,10 @@ async def test_runner_shell_dispatch_records_only_success(tmp_path, monkeypatch,
     from omnigent.runner import tool_dispatch
 
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "omnigent.runner.session_pr_snapshot_sync.schedule_session_pr_snapshots",
+        lambda *_args, **_kwargs: None,
+    )
     output = A + ("\n[exit code: 1]" if failed else "\n")
 
     async def shell(*_args, **_kwargs):

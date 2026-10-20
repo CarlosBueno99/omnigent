@@ -72,7 +72,7 @@ afterEach(() => {
 });
 
 describe("usePullRequestInfo runner-offline retry", () => {
-  it.each([undefined, "not_synced", "too_large"])(
+  it.each([undefined, "not_synced"])(
     "reads saved changes and diff while offline (%s)",
     async (reason) => {
       vi.useFakeTimers();

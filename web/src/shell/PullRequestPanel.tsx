@@ -1877,6 +1877,14 @@ function PullRequestPanelDetails({
                 {changes.data.warning || "The changed-file list is incomplete."}
               </p>
             )}
+          {prDiff.data?.cached && prDiff.data.message && !prDiff.data.unavailable_reason && (
+            <p
+              role="status"
+              className="shrink-0 border-b border-border p-2 text-ui text-muted-foreground"
+            >
+              {prDiff.data.message}
+            </p>
+          )}
           {files.length > 0 && (
             <div className="flex w-full shrink-0 items-center justify-between gap-2 border-b border-border px-2 py-1">
               <IconButton

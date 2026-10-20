@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -17,12 +18,19 @@ from omnigent.runner.session_prs import PullRequestRef, SessionPrRegistry
 URL = "https://github.com/example/repo/pull/42"
 
 
-@pytest.mark.parametrize("revision_change", [None, "head_sha", "base_sha", "unavailable"])
+@pytest.mark.parametrize(
+    "revision_change", [None, "head_sha", "base_sha", "unavailable", "partial"]
+)
 async def test_snapshot_enrichment_is_background_and_retries_without_provider_refetch(
     tmp_path, monkeypatch, revision_change
 ) -> None:
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(session_pr_snapshot_sync, "_RETRY_SECONDS", 0)
+    clock = 0.0
+    monkeypatch.setattr(
+        session_pr_snapshot_sync,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock, time_ns=session_pr_snapshot_sync.time.time_ns),
+    )
     registry = SessionPrRegistry("session")
     registry.record([PullRequestRef.from_url(URL)], relationship="created", source="test")
     started = threading.Event()
@@ -55,6 +63,8 @@ async def test_snapshot_enrichment_is_background_and_retries_without_provider_re
             }
 
         def changed_files(self, root, entry):
+            if revision_change == "partial":
+                return {"object": "list", "data": [], "warning": "Provider omitted files"}
             return {"object": "list", "data": [{"path": "app.py"}], "has_more": False}
 
         def pr_diff(self, root, entry):
@@ -87,13 +97,18 @@ async def test_snapshot_enrichment_is_background_and_retries_without_provider_re
         finally:
             proceed.set()
         await task
-        if revision_change is not None:
+        if revision_change not in (None, "partial"):
             assert snapshots == []
+            clock += session_pr_snapshot_sync._RETRY_SECONDS
             await sync_session_prs("session", client)
             await session_pr_snapshot_sync._tasks[(client, registry.path)]
-        reads_before_retry = 2 if revision_change is None else 4
+        reads_before_retry = 2 if revision_change in (None, "partial") else 4
         assert len(snapshots) == 1
         assert provider_roots == [str(tmp_path)] * reads_before_retry
+        await sync_session_prs("session", client)
+        await session_pr_snapshot_sync._tasks[(client, registry.path)]
+        assert len(snapshots) == 1
+        clock += session_pr_snapshot_sync._RETRY_SECONDS
         await sync_session_prs("session", client)
         await session_pr_snapshot_sync._tasks[(client, registry.path)]
         assert snapshots[0] == snapshots[1]
@@ -103,16 +118,27 @@ async def test_snapshot_enrichment_is_background_and_retries_without_provider_re
         assert snapshots[1]["info"]["pr"]["body"] == "Saved description"
         assert snapshots[1]["info"]["pr"]["comments"][0]["body"] == "Saved comment"
         assert "auth" not in snapshots[1]["info"]
-        assert snapshots[1]["changes"]["data"][0]["path"] == "app.py"
+        if revision_change == "partial":
+            assert "changes" not in snapshots[1]
+        else:
+            assert snapshots[1]["changes"]["data"][0]["path"] == "app.py"
         assert snapshots[1]["diff"]["patch"] == "+saved change"
+        clock += session_pr_snapshot_sync._RETRY_SECONDS
         await sync_session_prs("session", client)
         await session_pr_snapshot_sync._tasks[(client, registry.path)]
         assert len(snapshots) == 2
-        registry.record([PullRequestRef.from_url(URL)], relationship="worked_on", source="test")
+        clock += (
+            session_pr_snapshot_sync._REFRESH_SECONDS - session_pr_snapshot_sync._RETRY_SECONDS
+        )
         await sync_session_prs("session", client)
         await session_pr_snapshot_sync._tasks[(client, registry.path)]
         assert len(snapshots) == 3
         assert len(provider_roots) == reads_before_retry + 2
+        registry.record([PullRequestRef.from_url(URL)], relationship="worked_on", source="test")
+        await sync_session_prs("session", client)
+        await session_pr_snapshot_sync._tasks[(client, registry.path)]
+        assert len(snapshots) == 4
+        assert len(provider_roots) == reads_before_retry + 4
         assert snapshots[-1]["captured_at_ns"] > snapshots[0]["captured_at_ns"]
 
 
