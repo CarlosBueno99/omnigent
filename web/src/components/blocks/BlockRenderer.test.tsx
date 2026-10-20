@@ -675,6 +675,7 @@ describe("BlockRenderer dispatch", () => {
 
     it.each([
       ["Scroll up for the full report.", true],
+      ["See above.", true],
       ["The full report is shown above.", true],
       ["Above is the full report.", true],
       ["The output is above.", true],
@@ -691,6 +692,8 @@ describe("BlockRenderer dispatch", () => {
       ["Error logs above 1GB were rotated.", false],
       ["Results above the baseline were flagged.", false],
       ["The results are above expectations.", false],
+      ["Results above average were flagged.", false],
+      ["Logs above threshold were rotated.", false],
     ])("pins the work output for %j only when it points back: %s", (text, pinned) => {
       const items: RenderItem[] = [
         tool(1, "shell", "REPORT: tests-42-passed"),
