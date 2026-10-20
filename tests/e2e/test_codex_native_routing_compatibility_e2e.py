@@ -156,8 +156,15 @@ def test_native_turn_survives_an_unsupported_automatic_model_verdict(
             assert snapshot["pending_inputs"] == []
 
 
-def _codex_under_managed_model_pin(root: Path, pinned_model: str, upgrade_target: str) -> Path:
-    """Return a PATH dir whose ``codex`` runs the real CLI with a system managed config."""
+def _codex_under_managed_model_pin(
+    root: Path, pinned_model: str, upgrade_target: str
+) -> Path | None:
+    """Return a PATH dir whose ``codex`` runs the real CLI with a system managed config.
+
+    Returns ``None`` when this host cannot create the shim's bwrap mounts.
+    """
+    if shutil.which("bwrap") is None:
+        return None
     managed = root / "managed_config.toml"
     # Acknowledge the bundled upgrade notice so it cannot hold the TUI before the turn.
     managed.write_text(
@@ -167,8 +174,11 @@ def _codex_under_managed_model_pin(root: Path, pinned_model: str, upgrade_target
     etc_entries = sorted(entry for entry in os.listdir("/etc") if entry != "codex")
     mounts = ["--die-with-parent", "--dev-bind", "/", "/", "--tmpfs", "/etc"]
     for entry in etc_entries:
-        mounts += ["--ro-bind", f"/etc/{entry}", f"/etc/{entry}"]
+        mounts += ["--ro-bind-try", f"/etc/{entry}", f"/etc/{entry}"]
     mounts += ["--dir", "/etc/codex", "--ro-bind", str(managed), "/etc/codex/managed_config.toml"]
+    probe = subprocess.run(["bwrap", *mounts, "--", "true"], capture_output=True, timeout=10)
+    if probe.returncode != 0:
+        return None
     shim_dir = root / "bin"
     shim_dir.mkdir()
     shim = shim_dir / "codex"
@@ -178,28 +188,17 @@ def _codex_under_managed_model_pin(root: Path, pinned_model: str, upgrade_target
     return shim_dir
 
 
-def _bwrap_mounts_available() -> bool:
-    if shutil.which("bwrap") is None:
-        return False
-    probe = subprocess.run(
-        ["bwrap", "--dev-bind", "/", "/", "--tmpfs", "/etc", "true"],
-        capture_output=True,
-        timeout=10,
-    )
-    return probe.returncode == 0
-
-
 @pytest.mark.timeout(150)
 def test_native_turn_uses_the_session_model_over_a_managed_config_pin(
     tmp_path: Path,
     isolated_mock_llm_server_url: str,
 ) -> None:
-    if not _bwrap_mounts_available():
-        pytest.skip("requires bwrap mount namespaces to install a system Codex config")
     session_model, managed_model = "gpt-5.6-luna", "gpt-5.6-sol"
+    shim_dir = _codex_under_managed_model_pin(tmp_path, managed_model, "gpt-6-sol")
+    if shim_dir is None:
+        pytest.skip("requires bwrap mount namespaces to install a system Codex config")
     prompt, answer = "Reply once under the managed pin.", "SESSION_MODEL_TURN"
     set_fallback_mock_llm(isolated_mock_llm_server_url, "default", answer)
-    shim_dir = _codex_under_managed_model_pin(tmp_path, managed_model, "gpt-6-sol")
     source = tmp_path / "source-home"
     source.mkdir()
     with server_runner(
