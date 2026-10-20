@@ -10,7 +10,7 @@
 // at fire time; supply them only as a validated pair.
 
 import { authenticatedFetch } from "./identity";
-import { localTimezone } from "./timezones";
+import { resolvedLocalTimezone } from "./timezones";
 
 /** Lifecycle state of a scheduled task. `paused` tasks don't fire. */
 export type ScheduledTaskState = "active" | "paused";
@@ -309,14 +309,17 @@ export async function createScheduledTask(input: CreateScheduledTaskInput): Prom
 
 /**
  * Record the browser's IANA zone as the caller's default for tasks created
- * without one, such as by an agent tool. Best effort: failures are ignored.
+ * without one, such as by an agent tool. Skipped when the zone is unknown, so a
+ * UTC fallback never replaces another device's zone. Failures are ignored.
  */
 export async function reportLocalTimezone(): Promise<void> {
+  const timezone = resolvedLocalTimezone();
+  if (timezone === null) return;
   try {
     await authenticatedFetch("/v1/scheduled-tasks/default-timezone", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ timezone: localTimezone() }),
+      body: JSON.stringify({ timezone }),
     });
   } catch {
     // The next app load retries.
