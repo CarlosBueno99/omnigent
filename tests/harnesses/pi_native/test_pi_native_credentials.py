@@ -2133,11 +2133,26 @@ _WORKSPACE_HOST = "host = https://workspace.cloud.databricks.com\n"
             id="env-profile-mismatch",
         ),
         pytest.param(
+            None,
+            None,
+            "[DEFAULT]\nhost = https://other.cloud.databricks.com\nworkspace_id = 999\n",
+            "https://workspace.cloud.databricks.com",
+            id="default-profile-for-another-host-ignored",
+        ),
+        pytest.param(
+            "prod",
+            None,
+            "[DEFAULT]\nhost = https://other.cloud.databricks.com\nworkspace_id = 999\n"
+            f"[prod]\n{_WORKSPACE_HOST}",
+            "https://workspace.cloud.databricks.com",
+            id="named-profile-does-not-inherit-default-id",
+        ),
+        pytest.param(
             "prod",
             None,
             f"[prod]\n{_WORKSPACE_HOST}workspace_id = 12%3\n",
             None,
-            id="unreadable-recorded-id",
+            id="malformed-recorded-id",
         ),
     ],
 )
@@ -2172,6 +2187,53 @@ def test_workspace_url_for_dedicated_gateway_uses_matching_profile(
         )
         == expected
     )
+
+
+@pytest.mark.parametrize(
+    ("gateway_url", "resolved_host", "expected"),
+    [
+        pytest.param(
+            "https://123.ai-gateway.cloud.databricks.com/anthropic",
+            "https://attacker.example",
+            None,
+            id="non-databricks-host",
+        ),
+        pytest.param(
+            "https://123.ai-gateway.cloud.databricks.com/anthropic",
+            "http://workspace.cloud.databricks.com",
+            None,
+            id="plain-http",
+        ),
+        pytest.param(
+            "https://wkspc.ai-gateway.cloud.databricks.com/anthropic",
+            "https://workspace.cloud.databricks.com",
+            "https://workspace.cloud.databricks.com",
+            id="non-numeric-gateway-label-skips-id-check",
+        ),
+    ],
+)
+def test_workspace_url_for_dedicated_gateway_checks_resolved_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    gateway_url: str,
+    resolved_host: str,
+    expected: str | None,
+) -> None:
+    """The gateway token is only sent to an https workspace on a Databricks domain."""
+    from omnigent.runtime.credentials import databricks as db_creds_mod
+
+    _use_databricks_config_file(
+        monkeypatch,
+        tmp_path / "databrickscfg",
+        f"[DEFAULT]\n{_WORKSPACE_HOST}workspace_id = 123\n",
+    )
+    monkeypatch.setattr(
+        creds,
+        "resolve_databricks_workspace",
+        lambda _profile: db_creds_mod.WorkspaceCreds(host=resolved_host, token="unused"),
+    )
+
+    assert creds._databricks_workspace_url_for_gateway(gateway_url) == expected
 
 
 def test_workspace_url_for_generic_provider_is_none() -> None:

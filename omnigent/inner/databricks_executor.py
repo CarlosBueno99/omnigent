@@ -1161,6 +1161,26 @@ def databrickscfg_workspace_id_for_profile(profile: str) -> str | None:
     return workspace_id if workspace_id else None
 
 
+def databrickscfg_own_workspace_id(profile: str, host: str) -> str | None:
+    """Return the ``workspace_id`` *profile* itself records, when it names *host*.
+
+    Unlike :func:`databrickscfg_workspace_id_for_profile`, a named profile does
+    not inherit ``[DEFAULT]``'s id, matching how the Databricks SDK reads it.
+
+    :param profile: Profile name, e.g. ``"DEFAULT"`` or ``"prod"``.
+    :param host: Workspace host the profile must name, e.g.
+        ``"https://example.databricks.com"``.
+    :returns: The recorded id, or ``None`` when the profile is absent, names
+        another host, or records none.
+    """
+    if profile not in _databrickscfg_profiles_for_host(host):
+        return None
+    config = _read_databrickscfg_no_inheritance()
+    if config is None or not config.has_section(profile):
+        return None
+    return config[profile].get("workspace_id") or None
+
+
 def _get_openai_client(profile: str | None = None) -> OpenAI:
     """Lazily import and construct the OpenAI client.
 

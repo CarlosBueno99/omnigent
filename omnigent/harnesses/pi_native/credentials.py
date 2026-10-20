@@ -37,6 +37,7 @@ from omnigent.databricks_ai_gateway import (
     DATABRICKS_AI_GATEWAY_LABEL,
     DATABRICKS_TRUSTED_HOST_SUFFIXES,
     is_databricks_ai_gateway_url,
+    is_databricks_workspace_url,
 )
 from omnigent.harnesses.pi_native.auth_command import (
     AUTH_DIR_ENV,
@@ -200,9 +201,10 @@ def _databricks_workspace_url_for_gateway(
 
     Workspace-hosted gateways already expose the workspace hostname. Dedicated
     ``ai-gateway`` subdomains require the configured Databricks profile because
-    the gateway hostname itself does not serve workspace APIs. A profile whose
-    recorded ``workspace_id`` names a different workspace than a dedicated
-    ``<workspace-id>.ai-gateway`` host is not used.
+    the gateway hostname itself does not serve workspace APIs. The resolved
+    workspace must be an https host on a trusted Databricks domain. For a
+    ``<workspace-id>.ai-gateway`` host, it is not used when the selected profile
+    for that workspace records a different (or unreadable) ``workspace_id``.
 
     :param base_url: Gateway protocol URL or origin.
     :param profile: Optional Databricks profile for dedicated gateway hosts.
@@ -220,18 +222,19 @@ def _databricks_workspace_url_for_gateway(
         workspace_url = resolve_databricks_workspace(profile).host
     except Exception:  # noqa: BLE001 — absent profile disables optional discovery
         return None
-    from omnigent.inner.databricks_executor import databrickscfg_workspace_id_for_profile
-
+    if not is_databricks_workspace_url(workspace_url):
+        return None
     gateway_workspace_id = hostname.split(".", 1)[0]
-    resolved_profile = profile or os.environ.get("DATABRICKS_CONFIG_PROFILE") or "DEFAULT"
+    if not gateway_workspace_id.isdecimal():
+        return workspace_url
+    from omnigent.inner.databricks_executor import databrickscfg_own_workspace_id
+
+    selected_profile = profile or os.environ.get("DATABRICKS_CONFIG_PROFILE") or "DEFAULT"
     try:
-        recorded_workspace_id = databrickscfg_workspace_id_for_profile(resolved_profile)
+        recorded_workspace_id = databrickscfg_own_workspace_id(selected_profile, workspace_url)
     except Exception:  # noqa: BLE001 — an unreadable workspace_id cannot confirm the match
         return None
-    if gateway_workspace_id.isdecimal() and recorded_workspace_id not in (
-        None,
-        gateway_workspace_id,
-    ):
+    if recorded_workspace_id not in (None, gateway_workspace_id):
         return None
     return workspace_url
 
