@@ -431,6 +431,7 @@ def test_ucode_config_for_profile_reads_allowlisted_claude_state(
             "ANTHROPIC_BASE_URL": "https://example.databricks.com/ai-gateway/anthropic",
             "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "123456",
             "CLAUDE_CODE_USE_GATEWAY": "1",
+            "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
             "ANTHROPIC_CUSTOM_HEADERS": "x-databricks-use-coding-agent-mode: true",
             # No CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: this path launches in
             # gateway mode (CLAUDE_CODE_USE_GATEWAY=1), where Claude Code
@@ -11626,6 +11627,7 @@ def test_resolve_native_claude_config_connect_broker_fallback(
     assert config is not None
     assert config.env["ANTHROPIC_BASE_URL"] == "https://ws.example/ai-gateway/anthropic"
     assert config.env["CLAUDE_CODE_USE_GATEWAY"] == "1"
+    assert config.env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
     assert config.api_key_helper is not None
     assert "omnigent.host.databricks_credential token" in config.api_key_helper
     # Model comes from the catalog default (stubbed by _stub_catalog_default).
@@ -11664,6 +11666,7 @@ def test_connect_fallback_prefers_ucode_state(
     assert config is not None
     # ucode's base URL + discovered model win over the hand-built defaults.
     assert config.env["ANTHROPIC_BASE_URL"] == "https://ws.example/serving-endpoints/anthropic"
+    assert config.env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
     assert config.model == "system.ai.claude-sonnet-4-6"
     # But the bearer is still our own broker command, not ucode's.
     assert config.api_key_helper is not None
