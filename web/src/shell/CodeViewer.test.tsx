@@ -1026,6 +1026,7 @@ describe("CodeViewer PDF routing", () => {
       setSearchOpen: () => {},
       searchInputRef: noopRef,
       viewMode: "source",
+      markdownSourceFallback: false,
     };
   }
 
