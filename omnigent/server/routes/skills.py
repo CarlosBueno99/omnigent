@@ -147,6 +147,7 @@ def create_skills_router(
             sub_agent_name=sub_agent_name,
             skills_filter=spec.skills_filter if spec is not None else "all",
         )
+        requested_session_id = session_id
         if (
             session_agent is not None
             and result.status == "failed"
@@ -164,6 +165,7 @@ def create_skills_router(
                     result.error,
                 )
                 harness_kind = spec.executor.harness_kind
+                requested_session_id = None
                 result = await request_host_skills(
                     host_registry=host_registry,
                     host_conn=conn,
@@ -173,16 +175,16 @@ def create_skills_router(
                     agent_version=agent_version,
                     skills_filter=spec.skills_filter,
                 )
-        elif session_id is not None and result.status == "ok" and result.session_id != session_id:
-            raise HTTPException(
-                status_code=502, detail="update the host to discover session skills"
-            )
         if result.status != "ok":
             raise HTTPException(
                 status_code={"invalid_path": 400, "not_directory": 404}.get(
                     result.error_code or "", 502
                 ),
                 detail=result.error or "host skill discovery failed",
+            )
+        if session_id is not None and result.session_id != requested_session_id:
+            raise HTTPException(
+                status_code=502, detail="update the host to discover session skills"
             )
         if spec is not None and result.agent_id != agent_id:
             raise HTTPException(status_code=502, detail="update the host to discover agent skills")
@@ -208,14 +210,14 @@ async def _load_session_spec(
     """Resolve a session's effective spec from the server's copy of its bundle."""
     if agent_cache is None:
         return None
-    if sub_agent_name:
-        return await asyncio.to_thread(
-            _resolve_subagent_spec,
-            agent=agent,
-            sub_agent_name=sub_agent_name,
-            agent_cache=agent_cache,
-        )
     try:
+        if sub_agent_name:
+            return await asyncio.to_thread(
+                _resolve_subagent_spec,
+                agent=agent,
+                sub_agent_name=sub_agent_name,
+                agent_cache=agent_cache,
+            )
         loaded = await asyncio.to_thread(
             agent_cache.load, agent.id, agent.bundle_location, expand_env=agent.operator_authored
         )

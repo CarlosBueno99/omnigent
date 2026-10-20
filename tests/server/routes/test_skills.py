@@ -258,16 +258,49 @@ async def test_session_catalog_survives_failed_host_bundle_read(
 
 
 @pytest.mark.parametrize(
-    "error_code,bundle,fallback,status,detail",
+    "skills_app,error_code,bundle,fallback,status,detail",
     [
-        pytest.param("not_directory", "valid", None, 404, "host error", id="other-host-error"),
         pytest.param(
-            "discovery_failed", "without-child", None, 502, "host error", id="child-not-in-bundle"
+            "child", "not_directory", "valid", None, 404, "host error", id="other-host-error"
         ),
         pytest.param(
-            "discovery_failed", "malformed", None, 502, "host error", id="malformed-bundle"
+            "child",
+            "discovery_failed",
+            "without-child",
+            None,
+            502,
+            "host error",
+            id="child-not-in-bundle",
         ),
         pytest.param(
+            "child",
+            "discovery_failed",
+            "resolver-error",
+            None,
+            502,
+            "host error",
+            id="sub-agent-resolver-error",
+        ),
+        pytest.param(
+            "child",
+            "discovery_failed",
+            "malformed",
+            None,
+            502,
+            "host error",
+            id="malformed-bundle",
+        ),
+        pytest.param(
+            None,
+            "discovery_failed",
+            "malformed",
+            None,
+            502,
+            "host error",
+            id="root-malformed-bundle",
+        ),
+        pytest.param(
+            "child",
             "discovery_failed",
             "valid",
             {"status": "failed", "error_code": "discovery_failed", "error": "scan error"},
@@ -276,21 +309,32 @@ async def test_session_catalog_survives_failed_host_bundle_read(
             id="fallback-scan-fails",
         ),
         pytest.param(
+            "child",
             "discovery_failed",
             "valid",
-            {"status": "ok"},
+            {"status": "ok", "agent_id": None},
             502,
             "update the host to discover agent skills",
             id="fallback-host-ignores-agent",
         ),
+        pytest.param(
+            "child",
+            "discovery_failed",
+            "valid",
+            {"status": "ok", "session_id": "other-session"},
+            502,
+            "update the host to discover session skills",
+            id="fallback-reply-names-a-session",
+        ),
     ],
+    indirect=["skills_app"],
 )
 async def test_session_catalog_reports_host_error_without_usable_fallback(
     skills_app,
     monkeypatch: pytest.MonkeyPatch,
     error_code: str,
     bundle: str,
-    fallback: dict[str, str] | None,
+    fallback: dict[str, str | None] | None,
     status: int,
     detail: str,
 ) -> None:
@@ -299,6 +343,12 @@ async def test_session_catalog_reports_host_error_without_usable_fallback(
         loaded = app.state.agent_cache.load(agent.id, agent.bundle_location)
         orphaned = SimpleNamespace(spec=replace(loaded.spec, sub_agents=[]))
         monkeypatch.setattr(app.state.agent_cache, "load", lambda *a, **kw: orphaned)
+    elif bundle == "resolver-error":
+
+        def fail_to_resolve(*_args: object) -> None:
+            raise OmnigentError("no bootable harness")
+
+        monkeypatch.setattr("omnigent.runtime.workflow._find_spec_by_name", fail_to_resolve)
     elif bundle == "malformed":
         app.state.agent_cache._artifact_store.put(agent.bundle_location, b"not a bundle archive")
     async with httpx.AsyncClient(
@@ -319,7 +369,7 @@ async def test_session_catalog_reports_host_error_without_usable_fallback(
             frame = await _next_skills_frame(conn)
             assert frame.session_id is None
             conn.pending_skills[frame.request_id].set_result(
-                HostSkillsResultFrame(frame.request_id, **fallback)
+                HostSkillsResultFrame(frame.request_id, **{"agent_id": agent.id, **fallback})
             )
         response = await task
     assert (response.status_code, response.json()["detail"]) == (status, detail)
