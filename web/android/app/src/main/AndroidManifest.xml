@@ -77,6 +77,25 @@
             </intent-filter>
         </activity>
 
+        <!--
+          Conversation links from the web Share dialog (omnigent://<host>/c/<id>). A taskless
+          trampoline, so a link opened from another app re-enters the shell in its own task.
+        -->
+        <activity
+            android:name=".DeepLinkActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Omnigent.Translucent">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="omnigent" />
+            </intent-filter>
+        </activity>
+
         <activity
             android:name=".ConnectActivity"
             android:exported="false"
