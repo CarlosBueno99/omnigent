@@ -154,7 +154,7 @@ describe("resolveIdentity transient failures", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("caches a 4xx answer without probing again", async () => {
+  it("caches a non-transient 4xx answer without probing again", async () => {
     fetchMock.mockResolvedValueOnce(mockJsonResponse({}, { ok: false, status: 404 }));
     const { resolveIdentity } = await import("./identity");
 

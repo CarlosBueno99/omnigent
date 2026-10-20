@@ -381,10 +381,10 @@ function isOnLoginPath(): boolean {
 }
 
 /**
- * Whether a non-2xx `/v1/me` status may change on retry. A 401 or another
- * 4xx is the server's answer (signed out, route missing); 5xx, 408, and 429
+ * Whether a non-2xx `/v1/me` status may change on retry. 5xx, 408, and 429
  * come from an overloaded server or the gateway in front of it. The built-in
  * handlers never return 403, so a 403 comes from the gateway and may be lifted.
+ * A 401 or any other 4xx is the server's answer (signed out, route missing).
  */
 function isTransientIdentityStatus(status: number): boolean {
   return status >= 500 || status === 403 || status === 408 || status === 429;

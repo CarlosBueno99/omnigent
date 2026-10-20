@@ -158,6 +158,7 @@ def test_owner_session_returns_to_my_sessions_after_brief_403_outage(
 
         page.unroute(_API, deny)
         load_error.get_by_role("button", name="Retry").click()
+        # Retry refetches only the session list; the identity retry restores ownership.
         expect(_row(page, sid)).to_be_visible(timeout=60_000)
 
 
