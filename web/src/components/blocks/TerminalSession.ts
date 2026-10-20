@@ -295,7 +295,8 @@ export function terminalKeyEventPayload(event: KeyboardEvent): string | null {
     if (event.key === "ArrowLeft") return CMD_LEFT_LINE_START;
     if (event.key === "ArrowRight") return CMD_RIGHT_LINE_END;
   }
-  if (event.key === "/" && event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey) {
+  // Shift is allowed for layouts that type "/" with it; US Ctrl+Shift+/ reports "?".
+  if (event.key === "/" && event.ctrlKey && !event.altKey && !event.metaKey) {
     return CTRL_SLASH_UNIT_SEPARATOR;
   }
   return null;

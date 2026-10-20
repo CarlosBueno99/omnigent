@@ -167,9 +167,7 @@ describe("KeyboardShortcutsDialog", () => {
   });
 
   it("yields the hotkey to a focused surface that already claimed it", () => {
-    // The terminal preventDefaults Ctrl+/ to forward it to the PTY (Codex's
-    // side-conversation toggle), so the dialog must not open over the pane; an
-    // unclaimed press from the same element still opens it.
+    // An unclaimed press from the same element still opens the dialog.
     render(<KeyboardShortcutsDialog />);
     const paneInput = document.createElement("textarea");
     document.body.appendChild(paneInput);
