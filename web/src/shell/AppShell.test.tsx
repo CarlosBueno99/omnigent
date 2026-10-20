@@ -3367,42 +3367,49 @@ describe("Right workspace card visibility", () => {
     }
   });
 
-  it("uses the default when navigating from Agents to a child in another tree", () => {
-    localStorage.setItem("omnigent:default-workspace-tab", "changes");
-    writeSessionWorkspaceState("conv_from", { rightRailTab: "subagents" });
-    useSessionMock.mockImplementation((id) => ({
-      session: id
-        ? {
-            id,
-            agentId: "ag",
-            agentName: null,
-            runnerId: null,
-            status: "idle",
-            createdAt: 0,
-            title: null,
-            labels: {},
-            items: [],
-            pendingElicitations: [],
-            permissionLevel: 4,
-            parentSessionId: id === "conv_child" ? "conv_other_root" : null,
-            subAgentName: null,
-            kind: id === "conv_child" ? "sub_agent" : "default",
-          }
-        : null,
-      isLoading: false,
-      error: null,
-    }));
-    mockConversations([{ id: "conv_from", permission_level: null }]);
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    qc.setQueryData(["rootSessionId", "conv_child"], "conv_other_root");
-    render(sessionShellTree(qc, "/c/conv_from", <SessionNavButton to="/c/conv_child" />));
-    expect(screen.getByRole("tab", { name: /Agents/i })).toHaveAttribute("aria-selected", "true");
+  it.each(["conv_from", "conv_other_root"])(
+    "restores Agents only within its tree (%s)",
+    (rootId) => {
+      localStorage.setItem("omnigent:default-workspace-tab", "changes");
+      writeSessionWorkspaceState("conv_from", { rightRailTab: "subagents" });
+      useSessionMock.mockImplementation((id) => ({
+        session: id
+          ? {
+              id,
+              agentId: "ag",
+              agentName: null,
+              runnerId: null,
+              status: "idle",
+              createdAt: 0,
+              title: null,
+              labels: {},
+              items: [],
+              pendingElicitations: [],
+              permissionLevel: 4,
+              parentSessionId: id === "conv_child" ? rootId : null,
+              subAgentName: null,
+              kind: id === "conv_child" ? "sub_agent" : "default",
+            }
+          : null,
+        isLoading: false,
+        error: null,
+      }));
+      mockConversations([{ id: "conv_from", permission_level: null }]);
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      qc.setQueryData(["rootSessionId", "conv_child"], rootId);
+      render(sessionShellTree(qc, "/c/conv_from", <SessionNavButton to="/c/conv_child" />));
+      expect(screen.getByRole("tab", { name: /Agents/i })).toHaveAttribute("aria-selected", "true");
 
-    fireEvent.click(screen.getByTestId("nav-session"));
+      fireEvent.click(screen.getByTestId("nav-session"));
 
-    expect(screen.getByRole("tab", { name: /Changes/i })).toHaveAttribute("aria-selected", "true");
-    expect(readSessionWorkspaceState("conv_child").rightRailTab).toBe("changes");
-  });
+      expect(
+        screen.getByRole("tab", { name: rootId === "conv_from" ? /Agents/i : /Changes/i }),
+      ).toHaveAttribute("aria-selected", "true");
+      expect(readSessionWorkspaceState("conv_child").rightRailTab).toBe(
+        rootId === "conv_from" ? "subagents" : "changes",
+      );
+    },
+  );
 
   it("falls back to Files when Browser mode has no open soft tab", async () => {
     vi.stubGlobal("omnigentDesktop", {

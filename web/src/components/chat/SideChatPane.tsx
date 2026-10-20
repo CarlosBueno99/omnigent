@@ -43,9 +43,11 @@ import { ReplyDraftBlocks } from "@/components/composer/ReplyDraftBlocks";
 import { Button } from "@/components/ui/button";
 import {
   EMPTY_SIDE_CHAT_COMPOSER,
+  committedItemProvesDelivery,
   ensureConversationStreamed,
   useChatStore,
 } from "@/store/chatStore";
+import { conversationRegistry } from "@/store/conversationRegistry";
 import { useConversationEntryState } from "@/hooks/useConversationEntryState";
 import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 import { useDictationInsert } from "@/hooks/useDictationInsert";
@@ -443,6 +445,43 @@ function SideChatComposer({
   const { text, files } = composer ?? EMPTY_SIDE_CHAT_COMPOSER;
   const updateComposer = useChatStore((s) => s.updateSideChatComposer);
   const clearComposer = useChatStore((s) => s.clearSideChatComposer);
+  const { failedSendDraft, restoredSendDraft } = useConversationEntryState(
+    pending ? null : childId,
+  );
+  useEffect(() => {
+    const entry = conversationRegistry.peek(childId);
+    const failed = entry?.getState().failedSendDraft;
+    if (!entry || !failed || failed.conversationId !== childId) return;
+    const current = useChatStore.getState().sideChatComposers[childId] ?? EMPTY_SIDE_CHAT_COMPOSER;
+    entry.setState({ failedSendDraft: null, pendingRetryStableId: null });
+    if (committedItemProvesDelivery(entry.getState().blocks, failed)) return;
+    // A draft started while the request was in flight takes precedence.
+    if (current.text.trim() || current.files.length || current.quotes?.length) return;
+    updateComposer(childId, () => ({ text: failed.text, files: failed.files }));
+    entry.setState({
+      pendingRetryStableId: failed.stableId ?? null,
+      restoredSendDraft: failed.stableId
+        ? { ...failed, stableId: failed.stableId, delivered: false }
+        : null,
+    });
+  }, [childId, failedSendDraft, updateComposer]);
+  useEffect(() => {
+    const entry = conversationRegistry.peek(childId);
+    const restored = entry?.getState().restoredSendDraft;
+    if (!entry || !restored?.delivered || restored.conversationId !== childId) return;
+    entry.setState({ restoredSendDraft: null });
+    const current = useChatStore.getState().sideChatComposers[childId] ?? EMPTY_SIDE_CHAT_COMPOSER;
+    const serialized = serializeReplyDraft({
+      text: current.text,
+      quotes: (current.quotes ?? []).map((quoteText) => ({ before: "", text: quoteText })),
+    });
+    if (
+      serialized === restored.text &&
+      current.files.length === restored.files.length &&
+      current.files.every((file) => restored.files.includes(file))
+    )
+      clearComposer(childId);
+  }, [childId, restoredSendDraft, clearComposer]);
   const setText = useCallback(
     (next: string) => updateComposer(childId, (current) => ({ ...current, text: next })),
     [childId, updateComposer],

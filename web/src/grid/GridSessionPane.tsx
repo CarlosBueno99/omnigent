@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useMemo, useState, type ComponentProps } from "react";
 import { createPortal } from "react-dom";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { cn } from "@/lib/utils";
@@ -12,27 +12,14 @@ import { useCanEdit } from "@/hooks/usePermissions";
 import { useRunnerHealthRegistration } from "@/hooks/RunnerHealthProvider";
 import { useSession, useRootSessionId } from "@/hooks/useSession";
 import { livenessRowFromSession, useSessionLiveness } from "@/hooks/useSessionLiveness";
-import { terminalTabKey, useTerminals, useDeleteTerminal } from "@/hooks/useTerminals";
-import {
-  useWorkspaceChangedFiles,
-  useWorkspaceEnvironment,
-} from "@/hooks/useWorkspaceChangedFiles";
+import { terminalTabKey } from "@/hooks/useTerminals";
+import { useSessionWorkspace, useWorkspaceResources } from "@/shell/useSessionWorkspace";
 import { supportsBrowser } from "@/lib/nativeBridge";
 import { Link } from "@/lib/routing";
-import {
-  readSessionWorkspaceState,
-  writeSessionWorkspaceState,
-  type SessionWorkspaceState,
-} from "@/lib/sessionWorkspaceState";
-import {
-  readInitialWorkspaceTab,
-  readPinnedWorkspaceTabs,
-  isDefaultWorkspaceTab,
-} from "@/lib/workspaceTabPreferences";
+import { readInitialWorkspaceTab } from "@/lib/workspaceTabPreferences";
 import { CloseShellDialog } from "@/shell/CloseShellDialog";
 import {
   FileViewerContext,
-  type FileNavigationGuard,
   type FilePosition,
   type OpenFileOptions,
 } from "@/shell/FileViewerContext";
@@ -67,7 +54,6 @@ export function GridSessionPane({
   const state = useConversationEntryState(sessionId);
   const canEdit = useCanEdit(sessionId);
   const permissionLevel = session?.permissionLevel ?? (canEdit ? null : 1);
-  const canBrowse = canEdit || session?.shareWorkspaceFiles === true;
   const grids = useGridSessions()!;
   const title = session?.title || "Session";
   const {
@@ -95,45 +81,43 @@ export function GridSessionPane({
   const liveness = useSessionLiveness(sessionId, livenessRowFromSession(session));
   const rootSessionId = useRootSessionId(sessionId, session?.parentSessionId);
   const { children: childSessions } = useChildSessions(rootSessionId);
-  const environment = useWorkspaceEnvironment(sessionId, { enabled: canBrowse });
-  const changedFiles = useWorkspaceChangedFiles(sessionId, { enabled: canBrowse });
-  const showFiles = canBrowse && environment.data?.available !== false;
-  const { terminals } = useTerminals(sessionId);
-  const deleteTerminal = useDeleteTerminal(sessionId);
-  const closingTerminal = terminals.find((terminal) => terminal.id === deleteTerminal.variables);
-  const [pendingClose, setPendingClose] = useState<string | null>(null);
+  const workspace = useSessionWorkspace(sessionId);
+  const {
+    setSelectedFilePath,
+    setSelectedTerminalKey,
+    setOpenFiles,
+    setRightRailTab,
+    setOpenPanels,
+    selectRightRailTab,
+    registerNavigationGuard,
+    navigateWorkspace,
+  } = workspace;
+  const {
+    canBrowseWorkspace: canBrowse,
+    environmentQuery: environment,
+    showFilesPanel: showFiles,
+    changedCount,
+    isChangedPath,
+    terminals,
+    openTerminals,
+    terminalPendingClose: pendingClose,
+    setTerminalPendingClose: setPendingClose,
+    closingTerminalKey,
+    confirmCloseTerminal,
+  } = useWorkspaceResources(
+    sessionId,
+    {
+      permissionLevel,
+      shareWorkspaceFiles: session?.shareWorkspaceFiles,
+      terminalFirst: session?.labels?.["omnigent.ui"] === "terminal",
+      terminalPending: state.terminalPending,
+    },
+    setSelectedTerminalKey,
+  );
   const terminalToClose = terminals.find((terminal) => terminalTabKey(terminal) === pendingClose);
-  const [workspace, setWorkspace] = useState<SessionWorkspaceState>(() => {
-    const saved = readSessionWorkspaceState(sessionId);
-    return {
-      rightRailTab: saved.rightRailTab ?? readInitialWorkspaceTab(),
-      openPanels: saved.openPanels ?? [],
-      openFiles: saved.openFiles ?? [],
-      selectedFilePath: saved.selectedFilePath ?? null,
-      selectedTerminalKey: saved.selectedTerminalKey ?? null,
-    };
-  });
-  useEffect(() => writeSessionWorkspaceState(sessionId, workspace), [sessionId, workspace]);
-  const updateWorkspace = useCallback((patch: SessionWorkspaceState) => {
-    setWorkspace((previous) => ({ ...previous, ...patch }));
-  }, []);
   const [sort, setSort] = useState<ChangedSort>("recent");
   const [showHidden, setShowHidden] = useState(false);
   const [position, setPosition] = useState<FilePosition>();
-  const navigationGuard = useRef<FileNavigationGuard | null>(null);
-  const registerNavigationGuard = useCallback((guard: FileNavigationGuard) => {
-    navigationGuard.current = guard;
-    return () => {
-      if (navigationGuard.current === guard) navigationGuard.current = null;
-    };
-  }, []);
-  const navigateWorkspace = useCallback(
-    (path: string, options: OpenFileOptions | undefined, apply: () => void) => {
-      if (navigationGuard.current) navigationGuard.current(path, options, apply);
-      else apply();
-    },
-    [],
-  );
   const openFile = useCallback(
     (path: string, options?: OpenFileOptions) => {
       navigateWorkspace(path, options, () => {
@@ -141,80 +125,68 @@ export function GridSessionPane({
         setPosition(
           options?.line === undefined ? undefined : { line: options.line, column: options.column },
         );
-        setWorkspace((previous) => ({
-          ...previous,
-          selectedFilePath: path,
-          selectedTerminalKey: null,
-          openFiles: previous.openFiles?.includes(path)
-            ? previous.openFiles
-            : [...(previous.openFiles ?? []), path],
-        }));
+        setSelectedFilePath(path);
+        setSelectedTerminalKey(null);
+        setOpenFiles((previous) => (previous.includes(path) ? previous : [...previous, path]));
       });
     },
-    [navigateWorkspace, onOpenWorkspace],
+    [navigateWorkspace, onOpenWorkspace, setSelectedFilePath, setSelectedTerminalKey, setOpenFiles],
   );
   const selectTab = useCallback(
-    (rightRailTab: RightRailTab | null) => {
-      navigateWorkspace("", undefined, () =>
-        setWorkspace((previous) => ({
-          ...previous,
-          rightRailTab,
-          selectedFilePath: null,
-          selectedTerminalKey: null,
-          openPanels:
-            isDefaultWorkspaceTab(rightRailTab) && !readPinnedWorkspaceTabs().includes(rightRailTab)
-              ? [...new Set([...(previous.openPanels ?? []), rightRailTab])]
-              : previous.openPanels,
-        })),
-      );
+    (rightRailTab: RightRailTab | null, reveal = false) => {
+      navigateWorkspace("", undefined, () => {
+        selectRightRailTab(rightRailTab);
+        setSelectedFilePath(null);
+        setSelectedTerminalKey(null);
+        if (reveal) onOpenWorkspace();
+      });
     },
-    [navigateWorkspace],
+    [
+      navigateWorkspace,
+      selectRightRailTab,
+      setSelectedFilePath,
+      setSelectedTerminalKey,
+      onOpenWorkspace,
+    ],
   );
   const closeFile = useCallback(
     (path: string) => {
-      navigateWorkspace("", undefined, () =>
-        setWorkspace((previous) => ({
-          ...previous,
-          openFiles: previous.openFiles?.filter((file) => file !== path),
-          selectedFilePath: previous.selectedFilePath === path ? null : previous.selectedFilePath,
-        })),
-      );
+      navigateWorkspace("", undefined, () => {
+        setOpenFiles((files) => files.filter((file) => file !== path));
+        setSelectedFilePath((selectedPath) => (selectedPath === path ? null : selectedPath));
+      });
     },
-    [navigateWorkspace],
+    [navigateWorkspace, setOpenFiles, setSelectedFilePath],
   );
   const openTerminal = useCallback(
     (key: string) => {
       navigateWorkspace("", undefined, () => {
         onOpenWorkspace();
-        updateWorkspace({ selectedFilePath: null, selectedTerminalKey: key });
+        setSelectedFilePath(null);
+        setSelectedTerminalKey(key);
       });
     },
-    [navigateWorkspace, updateWorkspace, onOpenWorkspace],
+    [navigateWorkspace, setSelectedFilePath, setSelectedTerminalKey, onOpenWorkspace],
   );
   const fileContext = useMemo(
     () => ({
       openFile,
       registerNavigationGuard,
-      openGithubTab: () => {
-        selectTab("github");
-        onOpenWorkspace();
-      },
+      openGithubTab: () => selectTab("github", true),
       conversationId: sessionId,
       workspaceRoot: environment.data?.root ?? null,
       workspaceHome: environment.data?.home ?? null,
       sessionHostId: session?.hostId,
-      isChangedPath: (path: string) =>
-        changedFiles.data?.data.some((file) => file.path === path) ?? false,
+      isChangedPath,
     }),
     [
       openFile,
       registerNavigationGuard,
       selectTab,
-      onOpenWorkspace,
       sessionId,
       environment.data,
       session?.hostId,
-      changedFiles.data,
+      isChangedPath,
     ],
   );
   const rightRailTab =
@@ -275,26 +247,13 @@ export function GridSessionPane({
           <div
             data-testid="grid-move-ghost"
             className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-brand-accent bg-brand-accent/25"
-          >
-            {/* <span className="rounded-md border bg-background/95 px-3 py-2 text-sm shadow-sm"> */}
-            {/* Swap with {title} */}
-            {/* </span> */}
-          </div>
+          ></div>
         )}
         <CloseShellDialog
           open={pendingClose !== null}
           shellLabel={terminalToClose?.name ?? null}
           onCancel={() => setPendingClose(null)}
-          onConfirm={() => {
-            if (terminalToClose)
-              deleteTerminal.mutate(terminalToClose.id, {
-                onSuccess: () => {
-                  if (workspace.selectedTerminalKey === pendingClose)
-                    updateWorkspace({ selectedTerminalKey: null });
-                },
-              });
-            setPendingClose(null);
-          }}
+          onConfirm={confirmCloseTerminal}
         />
       </section>
       {/* Keep inactive views mounted so switching cells preserves unsaved edits. */}
@@ -313,25 +272,18 @@ export function GridSessionPane({
               onRightRailTabChange={selectTab}
               openPanels={workspace.openPanels ?? []}
               onClosePanel={(tab) => {
-                navigateWorkspace("", undefined, () =>
-                  setWorkspace((previous) => {
-                    const remaining = previous.openPanels?.filter((panel) => panel !== tab) ?? [];
-                    return {
-                      ...previous,
-                      openPanels: remaining,
-                      rightRailTab:
-                        previous.rightRailTab === tab
-                          ? (remaining.at(-1) ?? readInitialWorkspaceTab())
-                          : previous.rightRailTab,
-                    };
-                  }),
-                );
+                navigateWorkspace("", undefined, () => () => {
+                  const remaining = workspace.openPanels.filter((panel) => panel !== tab);
+                  setOpenPanels(remaining);
+                  if (workspace.rightRailTab === tab)
+                    setRightRailTab(remaining.at(-1) ?? readInitialWorkspaceTab());
+                });
               }}
               showFilesPanel={showFiles}
               showGithubTab={showFiles}
               showBrowserTab={supportsBrowser()}
               onReveal={onOpenWorkspace}
-              changedCount={changedFiles.data?.data.length ?? 0}
+              changedCount={changedCount}
               subagentsWorking={childSessions.filter((child) => child.busy).length}
               agentCount={childSessions.length + 1}
               rootSessionId={rootSessionId}
@@ -343,11 +295,9 @@ export function GridSessionPane({
               onShowScopeView={() => selectTab(rightRailTab)}
               onCommentsOpenChange={() => {}}
               openTerminalTab={openTerminal}
-              openTerminals={terminals.map(terminalTabKey)}
+              openTerminals={openTerminals}
               selectedTerminalKey={workspace.selectedTerminalKey ?? null}
-              closingTerminalKey={
-                deleteTerminal.isPending && closingTerminal ? terminalTabKey(closingTerminal) : null
-              }
+              closingTerminalKey={closingTerminalKey}
               onCloseTerminal={setPendingClose}
               maximized={selected && workspacePanel.maximized}
               permissionLevel={permissionLevel}

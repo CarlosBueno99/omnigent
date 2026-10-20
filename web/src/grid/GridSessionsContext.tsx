@@ -55,8 +55,12 @@ function EnabledGridSessionsProvider({ children }: { children: ReactNode }) {
   }>();
   const conversationId = isTempConvId(routeConversationId) ? undefined : routeConversationId;
   const navigate = useNavigate();
-  const storageKey = `omnigent:session-grids:${getOmnigentServerIdentity() ?? "default"}:${viewerId ?? "anonymous"}`;
+  const storageKey =
+    viewerId === null
+      ? null
+      : `omnigent:session-grids:${getOmnigentServerIdentity() ?? "default"}:${viewerId}`;
   const read = useCallback(() => {
+    if (storageKey === null) return [];
     try {
       return parseSessionGrids(localStorage.getItem(storageKey));
     } catch {
@@ -66,6 +70,7 @@ function EnabledGridSessionsProvider({ children }: { children: ReactNode }) {
   const [saved, setSaved] = useState(() => ({ key: storageKey, grids: read() }));
   if (saved.key !== storageKey) setSaved({ key: storageKey, grids: read() });
   useEffect(() => {
+    if (storageKey === null) return;
     const onStorage = (event: StorageEvent) => {
       if (event.key !== null && event.key !== storageKey) return;
       if (event.storageArea !== localStorage) return;
@@ -78,6 +83,7 @@ function EnabledGridSessionsProvider({ children }: { children: ReactNode }) {
   const activeGrid = grids.find((grid) => grid.id === gridId);
   const value = useMemo<GridSessionsContextValue>(() => {
     const save = (next: SessionGrid[]) => {
+      if (storageKey === null) return;
       setSaved({ key: storageKey, grids: next });
       try {
         localStorage.setItem(storageKey, JSON.stringify(next));
@@ -95,6 +101,7 @@ function EnabledGridSessionsProvider({ children }: { children: ReactNode }) {
       activeGrid,
       conversationId,
       split: (targetId, sessionId, edge) => {
+        if (storageKey === null) return;
         if (isTempConvId(sessionId)) return;
         const layout = activeGrid?.layout ?? conversationId;
         if (!layout) return;
@@ -132,7 +139,11 @@ function EnabledGridSessionsProvider({ children }: { children: ReactNode }) {
       },
     };
   }, [grids, activeGrid, conversationId, gridId, navigate, storageKey]);
-  return <GridSessionsContext.Provider value={value}>{children}</GridSessionsContext.Provider>;
+  return (
+    <GridSessionsContext.Provider value={storageKey === null ? null : value}>
+      {children}
+    </GridSessionsContext.Provider>
+  );
 }
 
 export function gridTitle(grid: SessionGrid): string {

@@ -7,7 +7,7 @@ import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { gridSessionIds, splitGrid } from "./gridLayout";
 import { GridSessionsProvider, useGridSessions } from "./GridSessionsContext";
 
-const identity = vi.hoisted(() => ({ viewer: "alice", server: "one" }));
+const identity = vi.hoisted(() => ({ viewer: "alice" as string | null, server: "one" }));
 vi.mock("@/hooks/useViewerId", () => ({ useViewerId: () => identity.viewer }));
 vi.mock("@/lib/host", () => ({ getOmnigentServerIdentity: () => identity.server }));
 
@@ -176,4 +176,33 @@ it("keeps a trimmed custom name through layout changes and reloads", () => {
   render(tree(path));
   expect(screen.getByTestId("name")).toHaveTextContent("My work");
   expect(screen.getByTestId("order")).toHaveTextContent("second,first");
+});
+
+it("waits for a resolved identity without reading or writing anonymous grids", () => {
+  const anonymousKey = "omnigent:session-grids:one:anonymous";
+  const layout = splitGrid("first", "first", "second", "right")!;
+  localStorage.setItem(anonymousKey, JSON.stringify([{ id: "private", layout }]));
+  identity.viewer = null;
+  const read = vi.spyOn(Storage.prototype, "getItem");
+  const write = vi.spyOn(Storage.prototype, "setItem");
+  const view = render(tree("/c/first"));
+  fireEvent.click(screen.getByText("Split"));
+  view.rerender(tree("/c/first")); // Identity lookup failed and still has no viewer.
+  fireEvent(window, new StorageEvent("storage", { key: anonymousKey, storageArea: localStorage }));
+  expect(screen.getByTestId("path")).toHaveTextContent("/c/first");
+  expect(screen.getByTestId("count")).toHaveTextContent("0");
+  expect(read).not.toHaveBeenCalled();
+  expect(write).not.toHaveBeenCalled();
+  identity.viewer = "alice";
+  view.rerender(tree("/c/first"));
+  fireEvent.click(screen.getByText("Split"));
+  expect(screen.getByTestId("count")).toHaveTextContent("1");
+  expect(write).toHaveBeenCalledWith("omnigent:session-grids:one:alice", expect.any(String));
+  expect(read).not.toHaveBeenCalledWith(anonymousKey);
+  identity.viewer = null;
+  view.rerender(tree("/c/first"));
+  expect(screen.getByTestId("count")).toHaveTextContent("0");
+  identity.viewer = "bob";
+  view.rerender(tree("/c/first"));
+  expect(screen.getByTestId("count")).toHaveTextContent("0");
 });

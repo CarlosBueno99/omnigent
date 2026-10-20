@@ -171,8 +171,6 @@ def test_session_grid_drag_persist_live_updates_and_close(
         expect(workspace.get_by_test_id("file-viewer")).to_contain_text("Workspace 0")
         other_area = other_cell.evaluate("node => node.style.gridArea")
         first_cell.evaluate("node => node.dataset.instance = 'preserved'")
-        assert first_cell.locator("header").bounding_box()["height"] == 32
-        expect(first_cell.locator('header [data-size="icon-xs"]')).to_have_count(2)
         _move_cell(page, "grid-0", "grid-1")
         assert first_cell.evaluate("node => node.style.gridArea") == other_area
         assert other_cell.evaluate("node => node.style.gridArea") == original_area
@@ -240,6 +238,25 @@ def test_session_grid_drag_persist_live_updates_and_close(
         second = page.locator('[data-grid-session="grid-1"]')
         first.get_by_role("textbox").fill("Keep this draft")
         second.get_by_role("textbox").fill("Send to session one")
+        sessions[1].reject_uploads = False
+        second.locator('input[type="file"]').set_input_files(
+            {"name": "notes.txt", "mimeType": "text/plain", "buffer": b"Keep this attachment"}
+        )
+        page.route(
+            f"**/{sessions[1].session_id}/events",
+            lambda route: route.fulfill(
+                status=503,
+                content_type="application/json",
+                body='{"detail":"Runner unavailable; retry the message"}',
+            ),
+            times=1,
+        )
+        with page.expect_response(lambda response: response.status == 503):
+            second.get_by_role("button", name="Send message", exact=True).click()
+        expect(second.get_by_role("textbox")).to_have_value("Send to session one")
+        expect(second.get_by_text("notes.txt", exact=True)).to_be_visible()
+        expect(first.get_by_role("textbox")).to_have_value("Keep this draft")
+        page.screenshot(path=str(artifacts / "grid-failed-send-restored.png"))
         with page.expect_response(
             lambda response: (
                 response.url.endswith(f"/{sessions[1].session_id}/events")

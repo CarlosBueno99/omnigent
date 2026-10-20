@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as sessionsApi from "@/lib/sessionsApi";
+import * as filesApi from "@/lib/filesApi";
 import type * as ChatStoreModule from "@/store/chatStore";
 import { useChatStore, type ChatState } from "@/store/chatStore";
 import { conversationRegistry } from "@/store/conversationRegistry";
@@ -849,3 +850,95 @@ describe("side-chat slash commands", () => {
     expect(screen.queryByTestId("slash-menu-item-review")).toBeNull();
   });
 });
+
+it.each([false, true])(
+  "recovers a rejected grid send without replacing newer input (%s)",
+  async (edited) => {
+    const entry = conversationRegistry.acquire(childId);
+    entry.setState({
+      sessionStatus: "idle",
+      sessionHarness: "openai-agents",
+      abortController: new AbortController(),
+    });
+    useChatStore.setState({ send: initialStoreState.send });
+    const file = new File(["notes"], "notes.txt", { type: "text/plain" });
+    vi.spyOn(filesApi, "uploadFile").mockResolvedValue({
+      id: "uploaded",
+      filename: file.name,
+      bytes: 5,
+      created_at: 0,
+    });
+    let rejectPost!: (error: Error) => void;
+    const post = vi.spyOn(sessionsApi, "postEvent").mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectPost = reject;
+        }),
+    );
+    useChatStore
+      .getState()
+      .updateSideChatComposer("other-pane", () => ({ text: "other draft", files: [file] }));
+    renderPane(<SideChatPane childId={childId} fullSession />);
+    fireEvent.change(screen.getByTestId("side-chat-input"), {
+      target: { value: "keep this message" },
+    });
+    fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    fireEvent.click(screen.getByTestId("side-chat-send"));
+    await waitFor(() => expect(post).toHaveBeenCalledOnce());
+    expect(screen.getByTestId("side-chat-input")).toHaveValue("");
+    if (edited)
+      fireEvent.change(screen.getByTestId("side-chat-input"), { target: { value: "new draft" } });
+    await act(async () => rejectPost(new Error("runner unavailable")));
+    await waitFor(() =>
+      expect(screen.getByTestId("side-chat-input")).toHaveValue(
+        edited ? "new draft" : "keep this message",
+      ),
+    );
+    expect(useChatStore.getState().sideChatComposers["other-pane"]).toEqual({
+      text: "other draft",
+      files: [file],
+    });
+    expect(entry.getState().failedSendDraft).toBeNull();
+    if (edited) {
+      expect(screen.queryByText(file.name)).not.toBeInTheDocument();
+      expect(entry.getState().pendingRetryStableId).toBeNull();
+    } else {
+      expect(screen.getByText(file.name)).toBeInTheDocument();
+      expect(useChatStore.getState().sideChatComposers[childId].files[0]).toBe(file);
+      const stableId = entry.getState().pendingRetryStableId;
+      expect(stableId).toEqual(expect.any(String));
+      post.mockResolvedValue({ queued: true });
+      fireEvent.click(screen.getByTestId("side-chat-send"));
+      await waitFor(() => expect(post).toHaveBeenCalledTimes(2));
+      expect(post.mock.calls[1][1]).toMatchObject({ data: { stable_id: stableId } });
+      expect(screen.getByTestId("side-chat-input")).toHaveValue("");
+    }
+  },
+);
+
+it.each([false, true])(
+  "retracts late-delivered grid drafts only while unchanged (%s)",
+  (edited) => {
+    const entry = conversationRegistry.acquire(childId);
+    const file = new File(["notes"], "notes.txt", { type: "text/plain" });
+    entry.setState({
+      failedSendDraft: {
+        conversationId: childId,
+        text: "lost ack",
+        files: [file],
+        stableId: "stable",
+      },
+    });
+    renderPane(<SideChatPane childId={childId} fullSession />);
+    expect(screen.getByTestId("side-chat-input")).toHaveValue("lost ack");
+    if (edited)
+      fireEvent.change(screen.getByTestId("side-chat-input"), { target: { value: "edited" } });
+    act(() =>
+      entry.setState({
+        restoredSendDraft: { ...entry.getState().restoredSendDraft!, delivered: true },
+      }),
+    );
+    expect(screen.getByTestId("side-chat-input")).toHaveValue(edited ? "edited" : "");
+    expect(entry.getState().restoredSendDraft).toBeNull();
+  },
+);
