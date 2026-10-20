@@ -62,7 +62,7 @@ class CreateScheduledTaskRequest(BaseModel):
     prompt: str
     rrule: str
     agent_id: str
-    # Omitted: the owner's recorded default zone (see PUT .../default-timezone), else UTC.
+    # Omitted or null: the owner's recorded default zone (see PUT .../default-timezone), else UTC.
     timezone: str | None = None
     model_override: str | None = None
     reasoning_effort: str | None = None

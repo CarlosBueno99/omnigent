@@ -1043,6 +1043,8 @@ async def test_create_without_timezone_uses_the_owners_recorded_zone(
     assert task["timezone"] == "America/Chicago"
     next_run = datetime.fromisoformat(str(task["next_run_at"]))
     assert next_run.astimezone(ZoneInfo("America/Chicago")).hour == 9
+    null_zone = await create("alice@example.com", {**unzoned, "timezone": None})
+    assert null_zone["timezone"] == "America/Chicago"
     explicit = await create("alice@example.com", _create_body(timezone="Asia/Tokyo"))
     assert explicit["timezone"] == "Asia/Tokyo"
     assert (await create("bob@example.com", unzoned))["timezone"] == "UTC"
