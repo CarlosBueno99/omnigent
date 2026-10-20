@@ -36,6 +36,7 @@ from omnigent.runner.resource_registry import (
     trim_terminal_output,
 )
 from omnigent.terminals import TerminalRegistry
+from omnigent.terminals.program_status import ProgramStatusReader
 from tests.runner.helpers import make_test_terminal_instance
 
 
@@ -803,8 +804,10 @@ async def _observe_native_with_real_poller(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     session_id: str,
+    *,
+    program_status: ProgramStatusReader | None = None,
 ) -> tuple[Callable[[], None], list[str], SessionResourceRegistry, Path]:
-    """Observe a Claude terminal with a real poller and caller-written status file."""
+    """Observe Claude with a real poller; *program_status* makes the file the OSC fallback."""
     config_dir = tmp_path / "claude"
     status_file = config_dir / "sessions" / "123.json"
     status_file.parent.mkdir(parents=True)
@@ -815,6 +818,7 @@ async def _observe_native_with_real_poller(
     terminal_registry = TerminalRegistry()
     registry = SessionResourceRegistry(terminal_registry=terminal_registry)
     instance = make_test_terminal_instance("claude", "main", tmp_path)
+    instance.program_status = program_status
     terminal_registry._by_conversation.setdefault(session_id, {})[("claude", "main")] = instance
     watcher = Mock()
     monkeypatch.setattr(instance, "start_idle_watcher_thread", watcher)
@@ -1039,6 +1043,59 @@ async def test_failed_hook_does_not_republish_stale_running_status(
     await asyncio.sleep(0)
     assert statuses == ["running"]
     assert not registry.session_turn_is_active(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["osc", "status_file"])
+@pytest.mark.parametrize("forwarded_status", ["running", "waiting"])
+async def test_claude_idle_settles_a_forwarded_edge_without_idle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, forwarded_status: str, source: str
+) -> None:
+    """A forwarded working edge cannot outlive Claude's own idle status."""
+    session_id = "conv_forwarded_running"
+    osc_snapshot = tmp_path / "program-status.json"
+    on_tick, statuses, registry, status_file = await _observe_native_with_real_poller(
+        tmp_path,
+        monkeypatch,
+        session_id,
+        program_status=ProgramStatusReader(osc_snapshot) if source == "osc" else None,
+    )
+    mtimes = iter(range(1, 10))
+
+    def report(state: str) -> None:
+        if source == "osc":
+            status = {"state": "working" if state == "busy" else state}
+            osc_snapshot.write_text(json.dumps({"relay_pid": os.getpid(), "status": status}))
+            return
+        status_file.write_text(json.dumps({"kind": "interactive", "status": state}))
+        mtime_ns = next(mtimes) * 1_000_000_000
+        os.utime(status_file, ns=(mtime_ns, mtime_ns))
+
+    report("idle")
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["idle"]
+
+    registry.note_external_session_status(session_id, forwarded_status)
+    assert registry.session_turn_is_active(session_id)
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["idle", "idle"]
+    assert not registry.session_turn_is_active(session_id)
+
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["idle", "idle"]
+
+    # A busy Claude agrees with a forwarded running edge, so it adds no duplicate.
+    report("busy")
+    on_tick()
+    await asyncio.sleep(0)
+    registry.note_external_session_status(session_id, "running")
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["idle", "idle", "running"]
+    assert registry.session_turn_is_active(session_id)
 
 
 @pytest.mark.asyncio

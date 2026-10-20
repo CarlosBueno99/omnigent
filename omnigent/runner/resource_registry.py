@@ -512,7 +512,7 @@ class SessionResourceRegistry:
         # would swallow the turn's real ``running``.
         self._published_session_status: dict[str, tuple[str, str | None]] = {}
         # Per-session pollers need re-arming after reconnects or forwarded
-        # idle statuses because they keep their own edge/mtime baselines.
+        # statuses because they keep their own edge/mtime baselines.
         self._status_pollers: dict[str, SessionStatusPoller | ClaudeProgramStatusPoller] = {}
         # Optional callback invoked on the event loop when a watched terminal
         # disappears unexpectedly. The callback receives the terminal's
@@ -636,13 +636,13 @@ class SessionResourceRegistry:
             return True
 
     def _sync_status_edge(self, session_id: str, status: str) -> None:
-        """Adopt an external status and re-arm its file poller after idle."""
+        """Adopt an external status and re-arm its status poller unless it failed."""
         with self._lock:
             self._published_session_status[session_id] = (status, None)
             poller = self._status_pollers.get(session_id)
-        # A queued turn can hide the idle file edge. Re-arm only for idle so a
-        # stale busy file cannot clear a forwarded failure.
-        if status == "idle" and poller is not None:
+        # Claude's own status re-asserts itself against a forwarded edge it never
+        # reported. A stale busy report must not clear a forwarded failure.
+        if status != "failed" and poller is not None:
             poller.resync()
 
     def resync_session_statuses(self) -> None:
@@ -715,9 +715,11 @@ class SessionResourceRegistry:
         exit as mid-turn.
 
         Also adopts *status* as the watcher's dedup baseline and re-arms its
-        status-file poller after ``idle``. The forwarder publishes directly
-        to the server, so both caches must catch up or they can swallow the
-        next turn's ``running`` as a duplicate, leaving it on the hook's ``idle``.
+        Claude status poller unless *status* is ``failed``. The forwarder
+        publishes directly to the server, so both caches must catch up or they
+        can swallow the next turn's ``running`` as a duplicate, leaving it on
+        the hook's ``idle``. Re-arming after ``running`` / ``waiting`` lets
+        Claude's idle status settle a forwarded edge whose ``idle`` never arrives.
 
         :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
         :param status: External native status, e.g. ``"running"`` or ``"idle"``.
