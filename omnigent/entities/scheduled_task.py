@@ -63,6 +63,8 @@ class ScheduledTask:
         run only on ``"connected_host"``.
     :param host_id: Specific connected host to run on. ``None`` only for legacy
         or invalid rows.
+    :param project_id: First-class project each fired session is filed into, or
+        ``None`` to leave fired sessions unfiled.
     :param state: Lifecycle state — one of ``"active"``, ``"paused"``,
         ``"deleted"``. Defaults to ``"active"``.
     :param last_run_at: Unix epoch seconds of the most recent firing, or
@@ -90,6 +92,7 @@ class ScheduledTask:
     base_branch: str | None = None
     execution_target: str = "connected_host"
     host_id: str | None = None
+    project_id: str | None = None
     state: str = "active"
     last_run_at: int | None = None
     last_run_conversation_id: str | None = None

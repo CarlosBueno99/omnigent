@@ -1475,6 +1475,9 @@ class SqlScheduledTask(OmnigentBase):
         (see omnigent.db.enum_codecs SCHEDULED_TASK_EXECUTION_TARGET); the store
         converts to/from the string name at the row↔entity boundary. Defaults to
         ``connected_host``.
+    :param project_id: First-class project each fired session is filed into
+        (relates to ``projects.id``; no DB foreign key, Rule R032). ``None``
+        leaves fired sessions unfiled.
     :param host_id: For ``execution_target=connected_host``, the specific host
         to run on (relates to ``hosts.host_id``; no DB foreign key, Rule R032).
         ``None`` means "the owner's freshest online host". Always ``None`` for
@@ -1551,6 +1554,7 @@ class SqlScheduledTask(OmnigentBase):
     # sandbox is provisioned/adopted under a deterministic id at fire time, so
     # there is nothing to pin here).
     host_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    project_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, server_default="UTC")
     # Enum stored as a stable int code (see omnigent.db.enum_codecs
     # SCHEDULED_TASK_STATE: active=1, paused=2, deleted=3). The

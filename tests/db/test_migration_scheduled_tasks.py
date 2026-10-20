@@ -67,6 +67,7 @@ def test_scheduled_tasks_columns(db_engine: Engine) -> None:
         "base_branch",
         "execution_target",
         "host_id",
+        "project_id",
         "timezone",
         "state",
         "last_run_at",
