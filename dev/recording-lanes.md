@@ -79,7 +79,8 @@ Recording is **best-effort**:
 Every declared recording includes `capture_mode`, which records how the product
 surface was filmed. Use `playwright_ui` for browser-page capture, `electron` for
 the desktop harness, `vhs_user_command` for a VHS tape that types the real user
-command, and `screen` for a direct device/screen capture. For every lane, save
+command (or the `terminal` lane's observer attach), and `screen` for a direct
+device/screen capture. For every lane, save
 the selected raw capture as `recordings/<slug>/raw/<kind>-<facet>.<ext>`;
 reserve `recordings/<slug>/<kind>-<facet>.mp4` for the captioned render.
 Declare only the finished clip after following "Finishing a clip" below.
@@ -261,8 +262,9 @@ when the defect is a runner-side leak or a failed background request. When the
 app can no longer open the pane (for example, a leaked pane whose Omnigent
 session was deleted while its tmux pane still runs), author an observer VHS tape.
 It uses the `cli` section's `Output`, `raw/` and render steps but types only the
-attach, not a user journey. Attach to the socket and target your own probe
-captured, never another run's or user's socket, without sending input or
+attach, not a user journey; declare it with `capture_mode: vhs_user_command`.
+Attach to the exact socket path and target your own probe used, quoted in the
+`Type` line, never another run's or user's socket, without sending input or
 updating the session environment: `tmux -S <socket> attach -E -r -t <target>`.
 Caption that the clip attaches to the pane outside the app, and end a `before`
 clip on `Wait+Screen /<symptom text>/`: a plain `Wait` checks only the last

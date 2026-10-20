@@ -101,6 +101,8 @@ def test_symptom_captured_from_a_terminal_pane_must_be_filmed() -> None:
     assert "of the symptom in your evidence rules this reason out" in instructions
     assert "A pane capture that shows the symptom means the facet must be filmed" in lanes
     assert "`tmux -S <socket> attach -E -r -t <target>`" in lanes
+    assert "never another run's or user's socket" in lanes
+    assert "declare it with `capture_mode: vhs_user_command`" in lanes
     assert "`Wait+Screen /<symptom text>/`: a plain `Wait` checks only the last line" in lanes
     assert "Do not claim there is no visible surface when your own pane capture" in lanes
 
