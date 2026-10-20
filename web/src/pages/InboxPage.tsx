@@ -84,6 +84,7 @@ import {
   writeInboxFilter,
   type InboxFilter,
 } from "@/lib/inboxFilterPreferences";
+import { clearAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
 import { latestOutputPreview } from "@/lib/lastAssistantText";
 import { relativeTime } from "@/lib/relativeTime";
 import { Link } from "@/lib/routing";
@@ -324,6 +325,7 @@ export function InboxPage() {
         ...(meta === undefined ? {} : { _meta: meta }),
       }).then(
         () => {
+          clearAskUserQuestionDraft(elicitationId);
           if (pendingSubmissions.current.get(elicitationId) !== verdict) return;
           pendingSubmissions.current.delete(elicitationId);
           void queryClient.invalidateQueries({ queryKey: ["conversations"] });

@@ -31,15 +31,7 @@ export function getAskUserQuestionDraft(
   return entry?.questions === JSON.stringify(questions) ? entry.draft : undefined;
 }
 
-/**
- * Remember a card's unsent answers so a remounted card can restore them.
- *
- * Only the most recently saved drafts are kept.
- *
- * @param elicitationId Pending elicitation id the answers belong to.
- * @param questions The questions the answers were given for.
- * @param draft The card's current carousel position and answers.
- */
+/** Remember a card's unsent answers; only the most recent drafts are kept. */
 export function saveAskUserQuestionDraft(
   elicitationId: string,
   questions: ClaudeQuestion[],
@@ -50,7 +42,7 @@ export function saveAskUserQuestionDraft(
   if (drafts.size > MAX_DRAFTS) drafts.delete(drafts.keys().next().value as string);
 }
 
-/** Forget a card's draft once the user submits or cancels it. */
+/** Forget a card's draft once the server has accepted its verdict. */
 export function clearAskUserQuestionDraft(elicitationId: string): void {
   drafts.delete(elicitationId);
 }

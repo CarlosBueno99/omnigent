@@ -29,18 +29,13 @@
 // answer}`` map matching MCP's ``ElicitResult.content`` shape and
 // passed to ``onSubmit``.
 //
-// Unsent answers are kept per elicitation (:file:`@/lib/askUserQuestionDrafts`)
-// and restored when the card remounts, e.g. after leaving the session.
+// Unsent answers are restored on remount (see ``@/lib/askUserQuestionDrafts``).
 
 import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import { type ChangeEvent, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { ClaudeQuestion } from "@/lib/askUserQuestion";
-import {
-  clearAskUserQuestionDraft,
-  getAskUserQuestionDraft,
-  saveAskUserQuestionDraft,
-} from "@/lib/askUserQuestionDrafts";
+import { getAskUserQuestionDraft, saveAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
 
 /**
  * Map from question id/text → either a single selected label
@@ -132,17 +127,19 @@ export function AskUserQuestionForm({
   });
 
   useEffect(() => {
+    const draftSelections = { ...selections };
     const draftSelected = { ...customSelected };
     const draftInputs = { ...customInputs };
-    // Text typed into a secret question is never kept past this mount.
+    // Answers to a secret question are never kept past this mount.
     for (const q of questions) {
       if (!q.isSecret) continue;
+      draftSelections[questionKey(q)] = q.multiSelect ? [] : "";
       draftSelected[questionKey(q)] = false;
       draftInputs[questionKey(q)] = "";
     }
     saveAskUserQuestionDraft(elicitationId, questions, {
       currentIndex,
-      selections,
+      selections: draftSelections,
       customSelected: draftSelected,
       customInputs: draftInputs,
     });
@@ -225,13 +222,7 @@ export function AskUserQuestionForm({
       if (answer === null) return; // unreachable while ``allAnswered`` gates the button
       finalAnswers[key] = answer;
     }
-    clearAskUserQuestionDraft(elicitationId);
     onSubmit(finalAnswers);
-  };
-
-  const handleReject = () => {
-    clearAskUserQuestionDraft(elicitationId);
-    onReject();
   };
 
   const current = questions[currentIndex];
@@ -423,7 +414,7 @@ export function AskUserQuestionForm({
         <Button
           size="sm"
           variant="outline"
-          onClick={handleReject}
+          onClick={onReject}
           className="ml-auto"
           componentId="question.cancel"
         >

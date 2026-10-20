@@ -207,6 +207,12 @@ def test_partial_answers_survive_leaving_the_session(
 
     card.get_by_role("button", name="Cancel").click()
     hook_thread.join(timeout=30)
+    assert not hook_thread.is_alive(), "hook call still parked after Cancel"
+    if "error" in result_holder:
+        raise AssertionError(f"hook thread failed: {result_holder['error']}") from result_holder[
+            "error"
+        ]
+    poll_until(lambda: not _pending_elicitations(base_url, session_id))
 
 
 @pytest.mark.timeout(180)

@@ -23,6 +23,11 @@ import type { Conversation } from "@/hooks/useConversations";
 import * as conversationsHook from "@/hooks/useConversations";
 import * as commentInboxHook from "@/hooks/useCommentInbox";
 import * as sessionsApi from "@/lib/sessionsApi";
+import {
+  type AskUserQuestionDraft,
+  getAskUserQuestionDraft,
+  saveAskUserQuestionDraft,
+} from "@/lib/askUserQuestionDrafts";
 import type { CommentInbox } from "@/hooks/useCommentInbox";
 import {
   isExplicitlyUnread,
@@ -87,6 +92,14 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
     ...overrides,
   };
 }
+
+const draftQuestions = [{ question: "Pick a region", options: [], multiSelect: false }];
+const unsentDraft: AskUserQuestionDraft = {
+  currentIndex: 0,
+  selections: { "Pick a region": "" },
+  customSelected: { "Pick a region": true },
+  customInputs: { "Pick a region": "eu-west" },
+};
 
 /** A raw `response.elicitation_request` event dict, as a snapshot replays it. */
 function rawElicitation(id: string, message: string, extra: Record<string, unknown> = {}) {
@@ -307,6 +320,7 @@ describe("InboxPage approval items", () => {
     vi.mocked(sessionsApi.getSession).mockResolvedValue({
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    saveAskUserQuestionDraft("eli_1", draftQuestions, unsentDraft);
     renderPage();
 
     fireEvent.click(await screen.findByRole("button", { name: "Stub Accept" }));
@@ -317,6 +331,7 @@ describe("InboxPage approval items", () => {
     await waitFor(() =>
       expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "responded"),
     );
+    expect(getAskUserQuestionDraft("eli_1", draftQuestions)).toBeUndefined();
   });
 
   it("offers auto mode from a snapshot and sends the choice to the owning session", async () => {
@@ -351,6 +366,7 @@ describe("InboxPage approval items", () => {
       pendingElicitations: [rawElicitation("eli_1", "Approve this?")],
     } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
     vi.mocked(sessionsApi.approve).mockRejectedValue(new Error("nope"));
+    saveAskUserQuestionDraft("eli_1", draftQuestions, unsentDraft);
     renderPage();
 
     fireEvent.click(await screen.findByRole("button", { name: "Stub Accept" }));
@@ -358,6 +374,7 @@ describe("InboxPage approval items", () => {
     await waitFor(() =>
       expect(screen.getByTestId("approval-card")).toHaveAttribute("data-status", "pending"),
     );
+    expect(getAskUserQuestionDraft("eli_1", draftQuestions)).toEqual(unsentDraft);
   });
 
   it("clears a stale verdict when a snapshot refresh still shows the elicitation as pending", async () => {

@@ -37,6 +37,7 @@ import { getSessionSlim, INITIAL_WINDOW_ITEMS, SESSION_HISTORY_PAGE_SIZE } from 
 import { SSE_STALL_TIMEOUT_MS } from "@/lib/sse";
 import { serializeReplyDraft, type StoredReplyDraft } from "@/lib/replyDraft";
 import { clearUnsentSends, peekUnsentSend, rememberUnsentSend } from "@/lib/unsentSends";
+import { getAskUserQuestionDraft, saveAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
 import {
   clearSessionDrafts,
   getSessionDraft,
@@ -10313,6 +10314,31 @@ describe("chatStore — submitApproval", () => {
       status: "pending",
       nativeDelivery: { state: "unconfirmed", attempt: "retry-1", action: "decline" },
     });
+  });
+
+  it("keeps an AskUserQuestion draft until the server accepts the verdict", async () => {
+    useChatStore.setState({ conversationId: "conv_abc", blocks: [elicitationBlock("elic_ask")] });
+    const questions = [{ question: "Pick a region", options: [], multiSelect: false }];
+    saveAskUserQuestionDraft("elic_ask", questions, {
+      currentIndex: 0,
+      selections: { "Pick a region": "" },
+      customSelected: { "Pick a region": true },
+      customInputs: { "Pick a region": "eu-west" },
+    });
+
+    fetchMock.mockImplementationOnce(() => mockResponse({}, { ok: false, status: 500 }));
+    await useChatStore
+      .getState()
+      .submitApproval("elic_ask", "accept", { "Pick a region": "eu-west" });
+    expect(useChatStore.getState().blocks[0]).toMatchObject({ status: "pending" });
+    expect(getAskUserQuestionDraft("elic_ask", questions)?.customInputs).toEqual({
+      "Pick a region": "eu-west",
+    });
+
+    await useChatStore
+      .getState()
+      .submitApproval("elic_ask", "accept", { "Pick a region": "eu-west" });
+    expect(getAskUserQuestionDraft("elic_ask", questions)).toBeUndefined();
   });
 
   it("posts the verdict to the elicitation resolve URL and optimistically marks responded", async () => {

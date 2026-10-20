@@ -1358,8 +1358,8 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
       },
     ];
 
-    function renderPendingQuestions(elicitationId: string, questions: ClaudeQuestion[]) {
-      return render(
+    function pendingQuestionsCard(elicitationId: string, questions: ClaudeQuestion[]) {
+      return (
         <ApprovalCard
           elicitationId={elicitationId}
           message="Claude wants to call AskUserQuestion"
@@ -1370,8 +1370,12 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
           status="pending"
           response={null}
           askUserQuestion={{ questions }}
-        />,
+        />
       );
+    }
+
+    function renderPendingQuestions(elicitationId: string, questions: ClaudeQuestion[]) {
+      return render(pendingQuestionsCard(elicitationId, questions));
     }
 
     function answerFirstAndTypeSecond() {
@@ -1423,68 +1427,82 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
       expectFreshCard();
     });
 
-    it("forgets the answers once they are submitted", () => {
+    it("starts fresh when a mounted card's questions change", () => {
+      const first = renderPendingQuestions("elic_draft_replaced", draftQuestions);
+      answerFirstAndTypeSecond();
+      const [firstQuestion, ...rest] = draftQuestions;
+      const replaced = [{ ...firstQuestion!, question: "Pick another codename" }, ...rest];
+
+      first.rerender(pendingQuestionsCard("elic_draft_replaced", replaced));
+      expect(screen.getByTestId("ask-user-question-progress").textContent).toBe("Question 1 of 2:");
+      expect((screen.getByLabelText("Alpha") as HTMLInputElement).checked).toBe(false);
+      first.unmount();
+
+      renderPendingQuestions("elic_draft_replaced", replaced);
+      expectFreshCard();
+    });
+
+    it.each([
+      ["Submit", () => fireEvent.click(screen.getByTestId("ask-user-question-submit"))],
+      ["Cancel", () => fireEvent.click(screen.getByRole("button", { name: /cancel/i }))],
+    ])("restores the answers when a %s verdict is rolled back", (action, respond) => {
       const submitSpy = vi.fn().mockResolvedValue(undefined);
       useChatStore.setState({ submitApproval: submitSpy } as Partial<
         ReturnType<typeof useChatStore.getState>
       >);
-      const first = renderPendingQuestions("elic_draft_submit", draftQuestions);
+      const elicitationId = `elic_draft_rollback_${action}`;
+      const first = renderPendingQuestions(elicitationId, draftQuestions);
       answerFirstAndTypeSecond();
-      fireEvent.click(screen.getByTestId("ask-user-question-submit"));
-      expect(submitSpy).toHaveBeenCalledWith("elic_draft_submit", "accept", {
-        "Pick a codename": "Alpha",
-        "Describe the rollout": "Keep this partial answer",
-      });
+      respond();
+      expect(submitSpy).toHaveBeenCalledTimes(1);
       first.unmount();
 
-      renderPendingQuestions("elic_draft_submit", draftQuestions);
+      renderPendingQuestions(elicitationId, draftQuestions);
 
-      expectFreshCard();
+      expect(screen.getByTestId("ask-user-question-progress").textContent).toBe("Question 2 of 2:");
+      expect((screen.getByTestId("ask-user-question-custom-input") as HTMLInputElement).value).toBe(
+        "Keep this partial answer",
+      );
     });
 
-    it("forgets the answers once the question is cancelled", () => {
-      const submitSpy = vi.fn().mockResolvedValue(undefined);
-      useChatStore.setState({ submitApproval: submitSpy } as Partial<
-        ReturnType<typeof useChatStore.getState>
-      >);
-      const first = renderPendingQuestions("elic_draft_cancel", draftQuestions);
-      answerFirstAndTypeSecond();
-      fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
-      expect(submitSpy).toHaveBeenCalledWith("elic_draft_cancel", "decline", undefined);
-      first.unmount();
-
-      renderPendingQuestions("elic_draft_cancel", draftQuestions);
-
-      expectFreshCard();
-    });
-
-    it("does not keep text typed into a secret question", () => {
+    it.each([
+      [
+        "typed",
+        () =>
+          fireEvent.change(screen.getByTestId("ask-user-question-custom-input"), {
+            target: { value: "sk-not-for-storage" },
+          }),
+      ],
+      ["chosen", () => fireEvent.click(screen.getByLabelText("Use the saved token"))],
+    ])("does not keep a %s answer to a secret question", (how, answerSecret) => {
       const secretQuestions: ClaudeQuestion[] = [
         {
           id: "token",
           question: "Paste the API token",
-          options: [],
+          options: [{ label: "Use the saved token", description: "" }],
           multiSelect: false,
           isSecret: true,
         },
         { id: "region", question: "Pick a region", options: [], multiSelect: false },
       ];
-      const first = renderPendingQuestions("elic_draft_secret", secretQuestions);
-      fireEvent.change(screen.getByTestId("ask-user-question-custom-input"), {
-        target: { value: "sk-not-for-storage" },
-      });
+      const elicitationId = `elic_draft_secret_${how}`;
+      const first = renderPendingQuestions(elicitationId, secretQuestions);
+      answerSecret();
       fireEvent.click(screen.getByTestId("ask-user-question-next"));
       fireEvent.change(screen.getByTestId("ask-user-question-custom-input"), {
         target: { value: "eu-west" },
       });
       first.unmount();
 
-      renderPendingQuestions("elic_draft_secret", secretQuestions);
+      renderPendingQuestions(elicitationId, secretQuestions);
 
       expect((screen.getByTestId("ask-user-question-custom-input") as HTMLInputElement).value).toBe(
         "eu-west",
       );
       fireEvent.click(screen.getByTestId("ask-user-question-prev"));
+      expect((screen.getByLabelText("Use the saved token") as HTMLInputElement).checked).toBe(
+        false,
+      );
       expect((screen.getByTestId("ask-user-question-custom-input") as HTMLInputElement).value).toBe(
         "",
       );
