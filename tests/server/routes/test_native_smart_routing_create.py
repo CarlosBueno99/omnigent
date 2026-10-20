@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1647,46 +1648,18 @@ def test_static_candidates_serve_the_routers_current_codex_arms(arm: str, applie
     assert resolved.raw_model == arm
 
 
-@pytest.mark.parametrize(
-    ("has_registry", "answers", "expected"),
-    [
-        # The row's launchable ``model`` id, not its picker key; a harness the
-        # host cannot answer for is simply absent.
-        (
-            True,
-            {"claude-native": {"models": [{"id": "opus", "model": "databricks-claude-opus-4-8"}]}},
-            {"claude-native": ["databricks-claude-opus-4-8"]},
-        ),
-        # ``routable_models`` widens the catalog past the picker rows (which
-        # name the newest of each family only), so a frozen arm the workspace
-        # still serves stays routable.
-        (
-            True,
-            {
-                "claude-native": {
-                    "models": [{"id": "opus", "model": "databricks-claude-opus-5"}],
-                    "routable_models": [
-                        "databricks-claude-opus-5",
-                        "databricks-claude-opus-4-8",
-                    ],
-                }
-            },
-            {
-                "claude-native": [
-                    "databricks-claude-opus-5",
-                    "databricks-claude-opus-4-8",
-                ]
-            },
-        ),
-        # No live host: nothing to ask, so no catalog.
-        (False, {}, {}),
-    ],
-)
-async def test_pre_session_catalog_reads_the_hosts_model_options(
-    has_registry: bool,
-    answers: dict[str, dict[str, Any]],  # type: ignore[explicit-any]
-    expected: dict[str, list[str]],
-) -> None:
+def _model_options_request(  # type: ignore[explicit-any]
+    answers: dict[str, dict[str, Any]],
+    *,
+    host_online: bool = True,
+) -> tuple[Any, Any]:
+    """A request whose host registry's one live host answers model-options requests.
+
+    :param answers: Each harness's ``model/list`` payload; a harness absent
+        here is answered as unsupported.
+    :param host_online: ``False`` leaves the request with no host registry.
+    :returns: ``(connection, request)``.
+    """
     from omnigent.host.frames import decode_host_frame
 
     conn = SimpleNamespace(host_id="host_1", pending_model_options={})
@@ -1701,10 +1674,74 @@ async def test_pre_session_catalog_reads_the_hosts_model_options(
             else {"status": "failed", "error": "unsupported"}
         )
 
-    registry = (
-        SimpleNamespace(get=lambda host_id: conn, send_text=send_text) if has_registry else None
-    )
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(host_registry=registry)))
+    registry = SimpleNamespace(get=lambda host_id: conn, send_text=send_text)
+    state = SimpleNamespace(host_registry=registry if host_online else None)
+    return conn, SimpleNamespace(app=SimpleNamespace(state=state))
+
+
+@pytest.mark.parametrize(
+    ("has_registry", "answers", "expected"),
+    [
+        # The row's launchable ``model`` id, not its picker key; a harness the
+        # host cannot answer for is simply absent.
+        (
+            True,
+            {"claude-native": {"models": [{"id": "opus", "model": "databricks-claude-opus-4-8"}]}},
+            {"claude-native": ["databricks-claude-opus-4-8"]},
+        ),
+        # ``routable_models`` widens the catalog past the picker rows (which
+        # name the newest of each family only), so a frozen arm the workspace
+        # still serves stays routable. Candidates run least preferred first, so
+        # the frozen arm precedes the picker's newest model.
+        (
+            True,
+            {
+                "claude-native": {
+                    "models": [{"id": "opus", "model": "databricks-claude-opus-5"}],
+                    "routable_models": [
+                        "databricks-claude-opus-5",
+                        "databricks-claude-opus-4-8",
+                    ],
+                }
+            },
+            {
+                "claude-native": [
+                    "databricks-claude-opus-4-8",
+                    "databricks-claude-opus-5",
+                ]
+            },
+        ),
+        # Spellings of one model keep the host's order, so resolution by
+        # comparison spelling still lands on the plain row before ``[1m]``.
+        (
+            True,
+            {
+                "claude-native": {
+                    "models": [
+                        {"id": "sonnet", "model": "claude-sonnet-4-6"},
+                        {"id": "sonnet[1m]", "model": "claude-sonnet-4-6[1m]"},
+                        {"id": "haiku", "model": "claude-haiku-4-5"},
+                    ]
+                }
+            },
+            {
+                "claude-native": [
+                    "claude-haiku-4-5",
+                    "claude-sonnet-4-6",
+                    "claude-sonnet-4-6[1m]",
+                ]
+            },
+        ),
+        # No live host: nothing to ask, so no catalog.
+        (False, {}, {}),
+    ],
+)
+async def test_pre_session_catalog_reads_the_hosts_model_options(
+    has_registry: bool,
+    answers: dict[str, dict[str, Any]],  # type: ignore[explicit-any]
+    expected: dict[str, list[str]],
+) -> None:
+    conn, request = _model_options_request(answers, host_online=has_registry)
     catalog = await _pre_session_model_catalog(
         cast("Any", request),
         _host(None),
@@ -1713,6 +1750,80 @@ async def test_pre_session_catalog_reads_the_hosts_model_options(
     assert catalog == expected
     # No in-flight request is left behind on any path.
     assert conn.pending_model_options == {}
+
+
+# Codex CLI 0.158.0's ``model/list`` answer, in the order the CLI reports it.
+_CODEX_MODEL_LIST = [
+    ("gpt-6-astra", "Frontier intelligence for the most demanding work.", None),
+    ("gpt-6-sol", "Workhorse model for coding and everyday work.", None),
+    ("gpt-6-luna", "Fast and affordable model for easier tasks.", None),
+    ("gpt-5.6-sol", "Older coding model for complex work.", "gpt-6-sol"),
+    ("gpt-5.6-terra", "Older balanced model for straightforward work.", "gpt-6-sol"),
+    ("gpt-5.6-luna", "Older fast and efficient model.", "gpt-6-luna"),
+    ("gpt-5.5", "Legacy coding model.", "gpt-6-sol"),
+]
+_BACKPORT_REVIEW = (
+    "Assess whether PR 4821 (the session-restore crash fix) is worth backporting to the "
+    "release-1.8, release-1.9 and release-2.0 branches: check each branch for conflicts, "
+    "risk and test coverage before recommending."
+)
+
+
+class _RubricFollowingJudge:
+    """A judge model that classifies every task COMPLEX and obeys the rubric's rule for it."""
+
+    def __init__(self) -> None:
+        self.instructions: list[str] = []
+
+    async def create(self, *, instructions: str, **_kwargs: Any) -> Any:  # type: ignore[explicit-any]
+        self.instructions.append(instructions)
+        menu = re.findall(r"^    - (\S+)$", instructions, re.MULTILINE)
+        rule = re.search(r"COMPLEX\s+→ \w+: (first|middle|last) available model", instructions)
+        assert rule is not None and menu
+        model = {"first": menu[0], "middle": menu[len(menu) // 2], "last": menu[-1]}[rule[1]]
+        verdict = {
+            "harness": "codex-native",
+            "model": model,
+            "rationale": f"This is a COMPLEX task (multi-branch review); "
+            f"selected most capable model {model}.",
+        }
+        text = SimpleNamespace(text=json.dumps(verdict))
+        return SimpleNamespace(output=[SimpleNamespace(content=[text])])
+
+
+async def test_built_in_judge_routes_a_complex_codex_task_to_codexs_frontier_model() -> None:
+    from omnigent.server.routes._sessions import orchestration
+    from omnigent.server.routing_backend import RoutingBackends
+    from omnigent.server.smart_routing import LLMRoutingClient
+
+    rows = [
+        {"id": model, "model": model, "description": description, "upgrade": upgrade}
+        for model, description, upgrade in _CODEX_MODEL_LIST
+    ]
+    _conn, request = _model_options_request({"codex-native": {"models": rows}})
+    judge = _RubricFollowingJudge()
+    caps = FakeCaps(routing_backends=RoutingBackends(local=LLMRoutingClient(judge)))
+    body = SimpleNamespace(host_id="host_1", smart_routing_message=_BACKPORT_REVIEW)
+    with (
+        patch("omnigent.runtime._globals._caps", new=caps),
+        patch.object(
+            orchestration,
+            "_routing_host_for_create",
+            return_value=_host_reporting({"codex-native": False}),
+        ),
+    ):
+        model, verdict, error = await orchestration._resolve_fixed_native_model_routing(
+            cast("Any", body),
+            cast("Any", request),
+            "alice@example.com",
+            "codex-native",
+        )
+
+    assert error is None and verdict is not None
+    assert verdict["router_source"] == "oss-llm"
+    assert len(judge.instructions) == 1
+    # The rationale says "most capable", so the pick must not be a superseded model.
+    assert model == "gpt-6-astra"
 
 
 def _native_conv(  # type: ignore[explicit-any]

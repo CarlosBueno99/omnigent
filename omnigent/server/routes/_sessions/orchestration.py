@@ -10697,8 +10697,11 @@ async def _pre_session_model_catalog(
     :param request: Used to reach the app's host registry.
     :param host: The session's target host, or ``None`` (e.g. a sandbox).
     :param harnesses: Candidate native harness ids to ask about.
-    :returns: ``{harness: model ids}`` for whatever the host answered.
+    :returns: ``{harness: model ids}`` for whatever the host answered, each
+        list least preferred first like every routing candidate list.
     """
+    from omnigent.server.smart_routing import routing_order_from_preference
+
     host_registry = getattr(request.app.state, "host_registry", None)
     if host is None or host_registry is None:
         return {}
@@ -10708,7 +10711,11 @@ async def _pre_session_model_catalog(
     results = await asyncio.gather(
         *(_host_model_options(host_conn, host_registry, harness) for harness in harnesses)
     )
-    return {harness: models for harness, models in zip(harnesses, results, strict=True) if models}
+    return {
+        harness: routing_order_from_preference(models)
+        for harness, models in zip(harnesses, results, strict=True)
+        if models
+    }
 
 
 async def _routing_host_for_create(

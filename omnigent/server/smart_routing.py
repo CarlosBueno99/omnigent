@@ -155,6 +155,23 @@ def models_in_family(harness: str | None, models: Iterable[str]) -> list[str]:
     return [model for model in models if model_in_family(family, model)]
 
 
+def routing_order_from_preference(models: Iterable[str]) -> list[str]:
+    """Reorder a most-preferred-first model list into routing candidate order.
+
+    Host CLI catalogs list their preferred model first and older generations
+    last, but routing candidates run cheapest → most powerful. Distinct models
+    are reversed; spellings of one model (``[1m]``, dotted versions) keep their
+    host order so first-match resolution still lands on the host's spelling.
+
+    :param models: Model ids, most preferred first.
+    :returns: The same ids, least preferred first.
+    """
+    spellings: dict[str, list[str]] = {}
+    for model in models:
+        spellings.setdefault(_bare_id(model), []).append(model)
+    return [model for group in reversed(spellings.values()) for model in group]
+
+
 def catalog_models_for_harness(
     catalog: Mapping[str, list[str]] | None,
     harness: str,
