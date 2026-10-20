@@ -5681,9 +5681,43 @@ _CODEX_MODEL_CARD = {
 }
 
 
+_CODEX_COMPACTION_MODELS = {
+    "compaction_model": "system.ai.gpt-6-astra",
+    "selected_model": "system.ai.gpt-6-1-sol",
+}
+_CODEX_COMPACTION_BUDGET_DETAIL = (
+    'unexpected status 403 Forbidden: {"error_code":"PERMISSION_DENIED","message":'
+    '"Budget \\"example-budget\\" has reached its limit of $100."}'
+)
+_CODEX_COMPACTION_BUDGET_CARD = {
+    "title": "gpt-6-astra is over its AI gateway budget",
+    "cause": (
+        "The AI gateway refused a compaction request on gpt-6-astra: its budget is exhausted. "
+        "Codex retries it every turn before switching to gpt-6-1-sol, so switching models "
+        "doesn't help."
+    ),
+    "remediation": (
+        "Fork this session to continue on gpt-6-1-sol. The fork rebuilds the conversation "
+        "from its history, so it doesn't need gpt-6-astra. Or ask an admin to raise that "
+        "budget."
+    ),
+}
+_CODEX_COMPACTION_RETRY_CARD = {
+    "title": "Codex can't compact on gpt-6-astra right now",
+    "cause": (
+        "Codex compacts this conversation on the previous model, gpt-6-astra, before "
+        "switching to gpt-6-1-sol, and that model is temporarily unavailable."
+    ),
+    "remediation": "Retry later, or choose Fork in the session menu to continue on gpt-6-1-sol.",
+}
+_CODEX_LOGIN_EXPIRED_DETAIL = (
+    "unexpected status 401 Unauthorized: Provided authentication token is expired."
+)
+
+
 @pytest.mark.parametrize("wire_output", [False, True])
 @pytest.mark.parametrize(
-    ("detail", "expected_code", "card", "wrapper", "reauth_required"),
+    ("detail", "expected_code", "card", "wrapper", "reauth_required", "status_extra"),
     [
         (
             'API Error: 499 {"error_code":"CANCELLED","message":""}',
@@ -5691,11 +5725,62 @@ _CODEX_MODEL_CARD = {
             {},
             "claude-code-native-ui",
             False,
+            {},
         ),
-        (_OLD_CLI_DETAIL, "client_update_required", _OLD_CLI_CARD, "claude-code-native-ui", False),
-        (_CODEX_MODEL_DETAIL, None, _CODEX_MODEL_CARD, "codex-native-ui", False),
-        (_CODEX_MODEL_DETAIL, "native_turn_error", {}, "claude-code-native-ui", False),
-        (_CODEX_MODEL_DETAIL, "codex_reauth_required", {}, "codex-native-ui", True),
+        (
+            _OLD_CLI_DETAIL,
+            "client_update_required",
+            _OLD_CLI_CARD,
+            "claude-code-native-ui",
+            False,
+            {},
+        ),
+        (_CODEX_MODEL_DETAIL, None, _CODEX_MODEL_CARD, "codex-native-ui", False, {}),
+        (_CODEX_MODEL_DETAIL, "native_turn_error", {}, "claude-code-native-ui", False, {}),
+        (_CODEX_MODEL_DETAIL, "codex_reauth_required", {}, "codex-native-ui", True, {}),
+        (
+            _CODEX_COMPACTION_BUDGET_DETAIL,
+            "codex_compaction_model_failed",
+            _CODEX_COMPACTION_BUDGET_CARD,
+            "codex-native-ui",
+            False,
+            _CODEX_COMPACTION_MODELS,
+        ),
+        # A retry can clear a temporary failure, so its retryable code stays.
+        (
+            "unexpected status 429 Too Many Requests: rate limit exceeded",
+            "rate_limit_exceeded",
+            _CODEX_COMPACTION_RETRY_CARD,
+            "codex-native-ui",
+            False,
+            _CODEX_COMPACTION_MODELS,
+        ),
+        (
+            "unexpected status 503 Service Unavailable",
+            "transient_upstream_error",
+            _CODEX_COMPACTION_RETRY_CARD,
+            "codex-native-ui",
+            False,
+            _CODEX_COMPACTION_MODELS,
+        ),
+        # A fork doesn't renew an expired login, so the sign-in recovery stays.
+        (
+            _CODEX_LOGIN_EXPIRED_DETAIL,
+            "codex_reauth_required",
+            {},
+            "codex-native-ui",
+            True,
+            _CODEX_COMPACTION_MODELS,
+        ),
+        # Only a Codex session's compaction runs on its previous model.
+        (
+            _CODEX_COMPACTION_BUDGET_DETAIL,
+            "budget_exhausted",
+            {},
+            "claude-code-native-ui",
+            False,
+            _CODEX_COMPACTION_MODELS,
+        ),
     ],
 )
 async def test_native_failures_are_coded_live_and_after_reload(
@@ -5707,6 +5792,7 @@ async def test_native_failures_are_coded_live_and_after_reload(
     card: dict[str, str],
     wrapper: str,
     reauth_required: bool,
+    status_extra: dict[str, str],
 ) -> None:
     """Native failures keep their diagnosis and raw detail through status and persistence."""
     published: list[dict[str, Any]] = []
@@ -5741,7 +5827,7 @@ async def test_native_failures_are_coded_live_and_after_reload(
     )
     assert item_resp.status_code == 202, item_resp.text
 
-    data: dict[str, Any] = {"status": "failed", "response_id": response_id}
+    data: dict[str, Any] = {"status": "failed", "response_id": response_id, **status_extra}
     if reauth_required:
         data["reauth_required"] = True
     if wire_output:
@@ -10061,6 +10147,7 @@ async def test_retry_session_retries_native_terminal_ensure_after_runner_reconne
 async def test_native_message_is_refused_with_input_kept_when_host_runner_tunnel_drops(
     client: httpx.AsyncClient,
     db_uri: str,
+    app: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A send as a host runner's tunnel drops is refused, not recorded as a failed turn."""
@@ -10082,10 +10169,14 @@ async def test_native_message_is_refused_with_input_kept_when_host_runner_tunnel
     store.replace_runner_id(session["id"], "native-runner")
     terminals_path = f"/v1/sessions/{session['id']}/resources/terminals"
     runner_paths: list[str] = []
-    tunnel_up = False
+    tunnel_up = True
 
     def runner(request: httpx.Request) -> httpx.Response:
         runner_paths.append(request.url.path)
+        if request.url.path == "/v1/sessions":
+            return httpx.Response(
+                201, json={"session_init_protocol_version": 2, "terminal_ready": False}
+            )
         if request.url.path == terminals_path:
             if not tunnel_up:
                 # What WSTunnelTransport raises when the tunnel dies under the request.
@@ -10111,6 +10202,15 @@ async def test_native_message_is_refused_with_input_kept_when_host_runner_tunnel
         monkeypatch.setattr(
             "omnigent.server.routes.sessions._ensure_runner_relay_ready", AsyncMock()
         )
+        bound = store.get_conversation(session["id"])
+        assert bound is not None
+        initialized = await app.state.runner_session_initializer.initialize(
+            bound, runner_client, timeout=5, suppress_recovery_turn=True
+        )
+        assert initialized.status_code == 201
+        assert runner_paths == ["/v1/sessions"]
+        runner_paths.clear()
+        tunnel_up = False
         try:
             refused = await client.post(f"/v1/sessions/{session['id']}/events", json=message)
 

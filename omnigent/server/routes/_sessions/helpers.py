@@ -81,7 +81,11 @@ from omnigent.harness_plugins import (
 from omnigent.host.frames import RUNNER_LOG_TAIL_HEADING
 from omnigent.mcp_selection import mcp_selection_revision
 from omnigent.models.model_metadata import concrete_reported_model
-from omnigent.native.failure_telemetry import failure_log_attributes
+from omnigent.native.failure_telemetry import (
+    FailureContext,
+    failure_log_attributes,
+    normalize_failure_context,
+)
 from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_wrapper_label,
@@ -294,6 +298,7 @@ from omnigent.server.schemas import (
     ToolOutputDeltaEvent,
 )
 from omnigent.server.session_metadata_logging import harness_attributes
+from omnigent.server.startup_inputs import StartupInputContext
 from omnigent.spec.types import (
     AgentSpec,
     Phase,
@@ -5321,7 +5326,9 @@ def _publish_sandbox_status(*args: Any, **kwargs: Any) -> None:
     return _facade._publish_sandbox_status(*args, **kwargs)
 
 
-def _publish_sandbox_status_impl(session_id: str, stage: str, error: str | None = None) -> None:
+def _publish_sandbox_status_impl(
+    session_id: str, stage: str, error: str | None = None, *, provider: str | None = None
+) -> None:
     """
     Publish a typed :class:`SessionSandboxStatusEvent` and update the
     cache the snapshot reads.
@@ -5344,13 +5351,21 @@ def _publish_sandbox_status_impl(session_id: str, stage: str, error: str | None 
     :param error: Failure detail when *stage* is ``"failed"``, e.g.
         ``"managed sandbox launch failed: spend limit reached"``.
         ``None`` for non-terminal stages.
+    :param provider: Sandbox provider being launched, e.g. ``"arclet"``.
+        Later stages keep the cached launch's provider when omitted.
     """
     # "ready" evicts: from then on the session looks like any
     # host-bound session and the snapshot carries no launch state.
     # Failures stay cached (mirroring ManagedLaunchTracker retention)
     # so a reload after a dead launch still shows the reason.
-    status = SandboxStatus.model_validate({"stage": stage, "error": error})
     previous = _session_sandbox_status_cache.get(session_id)
+    status = SandboxStatus.model_validate(
+        {
+            "stage": stage,
+            "error": error,
+            "provider": provider or (previous.provider if previous else None),
+        }
+    )
     log = _logger.error if stage == "failed" else _logger.info
     log(
         "Managed sandbox launch stage: %s",
@@ -5370,6 +5385,7 @@ def _publish_sandbox_status_impl(session_id: str, stage: str, error: str | None 
         conversation_id=session_id,
         stage=status.stage,
         error=status.error,
+        provider=status.provider,
     )
     session_stream.publish(session_id, event.model_dump())
 
@@ -5662,7 +5678,7 @@ async def _query_host_runner_status(
     runner_id: str,
 ) -> str | None:
     """
-    Ask a host whether a runner's process is alive, dead, or unknown.
+    Ask the host for this runner's liveness or bounded pending-sign-in state.
 
     The host owns runner-process liveness (it holds the ``Popen``), so it
     can answer the one question the server's tunnel registry cannot: is an
@@ -5673,7 +5689,7 @@ async def _query_host_runner_status(
     :param host_conn: Live host connection to query.
     :param host_registry: Registry used to enqueue the outbound frame.
     :param runner_id: Runner to ask about, e.g. ``"runner_abc123..."``.
-    :returns: ``"alive"``, ``"dead"``, or ``"unknown"`` from the host; or
+    :returns: ``"alive"``, ``"sign_in_pending"``, ``"dead"``, or ``"unknown"``; or
         ``None`` when the host didn't reply in time, the connection
         dropped, or the host is too old to support the query. ``None``
         means "no authoritative answer" — the caller falls back to the
@@ -6209,6 +6225,9 @@ async def _launch_runner_on_host_locked(
                 inference_config=(
                     conv.inference_snapshot["runtime_config"] if conv.inference_snapshot else None
                 ),
+                # Only the binding we just replaced: an unbound session's old
+                # runner may now serve its /clear or /switch successor.
+                superseded_runner_ids=(superseded_runner_id,) if superseded_runner_id else (),
             )
         )
         try:
@@ -6310,6 +6329,8 @@ async def _provision_managed_sandbox(
     relaunch_host: Host | None,
     provider: str | None = None,
     agent_name: str | None = None,
+    host_id: str | None = None,
+    relaunch_slice_key_enabled: bool = False,
 ) -> ManagedHostLaunch | None:
     """
     Run the provision phase of a background managed launch.
@@ -6333,6 +6354,11 @@ async def _provision_managed_sandbox(
     :param agent_name: Server-resolved built-in agent name the session
         runs, stamped as the runner Pod's ``omnigent.ai/agent`` classifier
         (Kubernetes only), or ``None`` to leave it unstamped.
+    :param host_id: Host id a managed create asked for, or
+        ``None`` to mint one. Ignored on a relaunch, which keeps the host's
+        identity.
+    :param relaunch_slice_key_enabled: On a relaunch, whether the host routes
+        by its own id, as at its first launch.
     :returns: The launch result, or ``None`` when the launch failed
         (the tracker entry is already settled with the reason).
     """
@@ -6359,6 +6385,7 @@ async def _provision_managed_sandbox(
                 repos=repos,
                 agent_name=agent_name,
                 on_stage=_on_stage,
+                slice_key_enabled=relaunch_slice_key_enabled,
             )
         return await launch_managed_host(
             config=sandbox_config,
@@ -6368,6 +6395,7 @@ async def _provision_managed_sandbox(
             provider=provider,
             agent_name=agent_name,
             on_stage=_on_stage,
+            host_id=host_id,
         )
     except HTTPException as exc:
         _logger.warning(
@@ -6686,9 +6714,9 @@ def _native_terminal_failure_from_runner_response(
     resp: httpx.Response,
     *,
     display_name: str,
-) -> ErrorData:
+) -> _NativeTerminalEnsureOutcome:
     """
-    Convert a failed runner terminal-ensure response into durable error data.
+    Convert a failed runner terminal-ensure response into an error and safe evidence.
 
     The runner's terminal ensure endpoint must return structured
     ``{"error": {"code": ..., "message": ...}}`` for definitive startup
@@ -6701,8 +6729,8 @@ def _native_terminal_failure_from_runner_response(
     :param resp: Non-2xx response from
         ``POST /v1/sessions/{id}/resources/terminals``.
     :param display_name: Human-readable runtime name, e.g. ``"Codex"``.
-    :returns: Error data suitable for a persisted ``type="error"``
-        conversation item.
+    :returns: A definitive error suitable for persistence and optional bounded
+        failure evidence for the existing failed-status log.
     """
     try:
         body = resp.json()
@@ -6719,18 +6747,19 @@ def _native_terminal_failure_from_runner_response(
                 and isinstance(raw_message, str)
                 and raw_message.strip()
             ):
-                return ErrorData(
-                    source="execution",
-                    code=raw_code,
-                    message=raw_message,
+                return _NativeTerminalEnsureOutcome(
+                    error=ErrorData(source="execution", code=raw_code, message=raw_message),
+                    failure_context=normalize_failure_context(body.get("failure_context")),
                 )
-    return ErrorData(
-        source="execution",
-        code=_NATIVE_TERMINAL_ENSURE_FAILED_CODE,
-        message=(
-            f"Native {display_name} terminal ensure failed with malformed "
-            f"runner response (HTTP {resp.status_code})."
-        ),
+    return _NativeTerminalEnsureOutcome(
+        error=ErrorData(
+            source="execution",
+            code=_NATIVE_TERMINAL_ENSURE_FAILED_CODE,
+            message=(
+                f"Native {display_name} terminal ensure failed with malformed "
+                f"runner response (HTTP {resp.status_code})."
+            ),
+        )
     )
 
 
@@ -6779,10 +6808,13 @@ class _NativeTerminalEnsureOutcome:
         old or the hook could not be trusted), or ``None`` when
         enforcement is active. Non-fatal: surfaced once as a durable
         banner, never blocks the turn.
+    :param failure_context: Optional normalized runner evidence, independent
+        of the error's display text and status policy.
     """
 
     error: ErrorData | None
     policy_notice: str | None = None
+    failure_context: FailureContext | None = None
 
 
 def _policy_notice_from_ensure_response(resp: httpx.Response) -> str | None:
@@ -7581,6 +7613,7 @@ async def _dispatch_skill_slash_command_to_runner(
     has_mcp_servers: bool,
     created_by: str | None,
     legacy_skill_names: Mapping[str, str] | None = None,
+    startup_input: StartupInputContext | None = None,
 ) -> str:
     """
     Persist a skill slash command and forward hidden skill context.
@@ -7631,6 +7664,9 @@ async def _dispatch_skill_slash_command_to_runner(
         runner_client,
         legacy_name=(legacy_skill_names or {}).get(skill_name),
     )
+    if startup_input is not None and not await startup_input.claim(conversation_store, session_id):
+        return startup_input.input_id
+    startup_input_id = startup_input.input_id if startup_input is not None else None
 
     response_id = f"turn_{uuid.uuid4().hex}"
     meta_content = [{"type": "input_text", "text": meta_text}]
@@ -7644,6 +7680,8 @@ async def _dispatch_skill_slash_command_to_runner(
             arguments=arguments,
         ),
         created_by=created_by,
+        stable_id=startup_input_id,
+        replaces_pending_id=startup_input_id,
     )
     meta_item = NewConversationItem(
         type="message",
@@ -8948,7 +8986,9 @@ async def _apply_pending_policy_ask_writes(
         await asyncio.to_thread(engine.apply_label_writes, pending.set_labels)
     if pending.state_updates:
         with contextlib.suppress(ConversationNotFoundError):
-            await asyncio.to_thread(engine.apply_state_updates, pending.state_updates)
+            await asyncio.to_thread(
+                engine.apply_state_updates, pending.state_updates, approved=True
+            )
 
 
 def _build_actor(user_id: str | None) -> dict[str, str] | None:
