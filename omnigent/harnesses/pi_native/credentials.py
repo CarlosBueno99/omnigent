@@ -203,8 +203,8 @@ def _databricks_workspace_url_for_gateway(
     ``ai-gateway`` subdomains require the configured Databricks profile because
     the gateway hostname itself does not serve workspace APIs. The resolved
     workspace must be an https host on a trusted Databricks domain. For a
-    ``<workspace-id>.ai-gateway`` host, it is not used when the selected profile
-    for that workspace records a different (or unreadable) ``workspace_id``.
+    ``<workspace-id>.ai-gateway`` host, it is not used when any profile naming
+    that workspace records a different (or unreadable) ``workspace_id``.
 
     :param base_url: Gateway protocol URL or origin.
     :param profile: Optional Databricks profile for dedicated gateway hosts.
@@ -227,14 +227,13 @@ def _databricks_workspace_url_for_gateway(
     gateway_workspace_id = hostname.split(".", 1)[0]
     if not gateway_workspace_id.isdecimal():
         return workspace_url
-    from omnigent.inner.databricks_executor import databrickscfg_own_workspace_id
+    from omnigent.inner.databricks_executor import databrickscfg_own_workspace_ids_for_host
 
-    selected_profile = profile or os.environ.get("DATABRICKS_CONFIG_PROFILE") or "DEFAULT"
     try:
-        recorded_workspace_id = databrickscfg_own_workspace_id(selected_profile, workspace_url)
+        recorded_workspace_ids = databrickscfg_own_workspace_ids_for_host(workspace_url)
     except Exception:  # noqa: BLE001 — an unreadable workspace_id cannot confirm the match
         return None
-    if recorded_workspace_id not in (None, gateway_workspace_id):
+    if recorded_workspace_ids - {gateway_workspace_id}:
         return None
     return workspace_url
 

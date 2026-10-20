@@ -2121,8 +2121,24 @@ _WORKSPACE_HOST = "host = https://workspace.cloud.databricks.com\n"
             None,
             None,
             f"[DEFAULT]\n{_WORKSPACE_HOST}[other]\n{_WORKSPACE_HOST}workspace_id = 999\n",
-            "https://workspace.cloud.databricks.com",
-            id="other-profile-on-same-host-ignored",
+            None,
+            id="unselected-profile-on-same-host-mismatch",
+        ),
+        pytest.param(
+            "prod",
+            None,
+            f"[prod]\n{_WORKSPACE_HOST}workspace_id = 123\n"
+            f"[other]\n{_WORKSPACE_HOST}workspace_id = 999\n",
+            None,
+            id="profiles-on-same-host-disagree",
+        ),
+        pytest.param(
+            None,
+            None,
+            "[__settings__]\ndefault_profile = prod\n"
+            f"[prod]\n{_WORKSPACE_HOST}workspace_id = 999\n",
+            None,
+            id="settings-default-profile-mismatch",
         ),
         pytest.param(
             None,
@@ -2164,7 +2180,7 @@ def test_workspace_url_for_dedicated_gateway_uses_matching_profile(
     databricks_config: str | None,
     expected: str | None,
 ) -> None:
-    """A dedicated gateway resolves through a profile not recorded for another workspace."""
+    """A dedicated gateway's workspace is unused if a profile on it records another workspace."""
     from omnigent.runtime.credentials import databricks as db_creds_mod
 
     _use_databricks_config_file(monkeypatch, tmp_path / "databrickscfg", databricks_config)

@@ -715,7 +715,7 @@ from omnigent.inner.databricks_executor import (  # noqa: E402
     _read_databrickscfg,
     _read_databrickscfg_file_fallback,
     _read_databrickscfg_host,
-    databrickscfg_own_workspace_id,
+    databrickscfg_own_workspace_ids_for_host,
     databrickscfg_workspace_id_for_host,
     databrickscfg_workspace_id_for_profile,
 )
@@ -2756,10 +2756,10 @@ def test_databrickscfg_workspace_id_for_profile_reads_exact_profile(
     assert databrickscfg_workspace_id_for_profile("missing") is None
 
 
-def test_databrickscfg_own_workspace_id_requires_profile_on_host(
+def test_databrickscfg_own_workspace_ids_for_host_skip_default_inheritance(
     tmp_path: _Path, monkeypatch: pytest.MonkeyPatch, clean_databricks_env: None
 ) -> None:
-    """Only the named profile's own id counts, and only when it names the host."""
+    """Profiles on the host contribute their own ids; ``[DEFAULT]``'s id is not inherited."""
     cfg = tmp_path / "databrickscfg"
     cfg.write_text(
         textwrap.dedent(
@@ -2774,18 +2774,23 @@ def test_databrickscfg_own_workspace_id_requires_profile_on_host(
 
             [inherits]
             host = https://acme.databricks.com
+
+            [staging]
+            host = https://acme.databricks.com
+            workspace_id = workspace-b
             """
         ).lstrip()
     )
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
 
-    assert databrickscfg_own_workspace_id("prod", "https://acme.databricks.com") == "workspace-a"
-    assert databrickscfg_own_workspace_id("inherits", "https://acme.databricks.com") is None
-    assert (
-        databrickscfg_own_workspace_id("DEFAULT", "https://other.databricks.com") == "default-ws"
-    )
-    assert databrickscfg_own_workspace_id("DEFAULT", "https://acme.databricks.com") is None
-    assert databrickscfg_own_workspace_id("missing", "https://acme.databricks.com") is None
+    assert databrickscfg_own_workspace_ids_for_host("https://acme.databricks.com") == {
+        "workspace-a",
+        "workspace-b",
+    }
+    assert databrickscfg_own_workspace_ids_for_host("https://other.databricks.com") == {
+        "default-ws"
+    }
+    assert databrickscfg_own_workspace_ids_for_host("https://missing.databricks.com") == set()
 
 
 def test_databrickscfg_workspace_id_for_host_missing_file_returns_none(

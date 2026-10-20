@@ -3982,7 +3982,6 @@ def test_dedicated_gateway_fetches_wire_catalog_from_workspace_host(
         f"workspace_id = {recorded_workspace_id}\n"
     )
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(config_file))
-    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
     with (
         patch("omnigent.inner.pi_executor._find_pi_cli", return_value="/usr/bin/pi"),
         patch(
