@@ -4828,10 +4828,9 @@ def build_codex_remote_args(
     through makes the TUI resolve the Omnigent provider
     (``requires_openai_auth = false``), skip onboarding, and start the
     thread immediately. Codex global ``-c`` flags must precede the
-    ``resume`` subcommand, so they are emitted first. A fresh thread also
-    receives the override model as ``--model``, because a system
-    ``managed_config.toml`` outranks ``-c`` values; resumed threads keep
-    their persisted model, and caller args that choose a model win.
+    ``resume`` subcommand, so they are emitted first. Fresh threads also
+    get the override model as ``--model``, which outranks a managed config;
+    resumes and caller-chosen models are left alone.
 
     :param codex_args: Raw Codex CLI args that precede the attach flags,
         e.g. ``("--model", "gpt-5.4-mini")``. Empty when the thread's own
@@ -4903,8 +4902,10 @@ def build_codex_remote_args(
         # A system managed_config.toml outranks ``-c model=``; ``--model`` outranks both.
         model = _codex_override_model(config_overrides)
         # Codex rejects a repeated ``--model``; a later caller ``-c model=`` also outranks ours.
+        # Configured args may wrap Codex as ``wrapper -- <codex args>``, so look past ``--``.
+        configured = [arg for arg in base_args if arg != "--"]
         caller_model = codex_launch_selects_model(passthrough) or codex_launch_selects_model(
-            base_args, include_config=False
+            configured, include_config=False
         )
         model_args = ["--model", model] if model and not caller_model else []
         # Codex refuses --add-dir with --remote; app-server startup writes
