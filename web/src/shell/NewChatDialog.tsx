@@ -1845,7 +1845,8 @@ export function AgentHarnessPicker({
         }
       }}
       trigger={{
-        disabled: disabledLabel !== undefined || previewOnly || !hasAgents,
+        disabled:
+          disabledLabel !== undefined || previewOnly || (!hasAgents && noneOption === undefined),
         "aria-busy": loading || undefined,
         label: disabledLabel ?? visibleCachedPreview?.label ?? triggerAccessibleName,
         model: disabledLabel ?? visibleCachedPreview?.model ?? triggerText,

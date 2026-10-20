@@ -442,4 +442,25 @@ describe("ProjectSettingsDialog", () => {
       expect(updateMock).toHaveBeenCalledWith("p_1", { agent_id: "ag_claude", model: "opus" }),
     );
   });
+
+  it("clears a stored default agent that hasn't resolved from discovery", async () => {
+    availableAgentsMock.mockReturnValue({ data: [] });
+    getProjectMock.mockResolvedValue({
+      id: "p_1",
+      name: "Work",
+      config: { agent_id: "ag_claude", model: "opus" },
+    });
+    renderDialog();
+    await waitFor(() =>
+      expect((screen.getByTestId("project-settings-save") as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(within(screen.getByRole("menu")).getByText("No default"));
+    fireEvent.click(screen.getByTestId("project-settings-save"));
+
+    await waitFor(() => expect(updateMock).toHaveBeenCalledWith("p_1", {}));
+  });
 });
