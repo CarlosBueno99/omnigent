@@ -697,9 +697,11 @@ async def test_correlated_error_recovers_a_missed_turn_start(tmp_path: Path) -> 
     assert client.posts[0][1]["data"]["response_id"] == "codex_missed_start_turn"
 
 
-def _turn_event(method: str, turn_id: str, item_type: str | None = None) -> dict:
+def _turn_event(
+    method: str, turn_id: str, item_type: str | None = None, *, thread_id: str = "thread_123"
+) -> dict:
     if item_type is None:
-        return {"method": method, "params": {"threadId": "thread_123", "turn": {"id": turn_id}}}
+        return {"method": method, "params": {"threadId": thread_id, "turn": {"id": turn_id}}}
     item = {"type": item_type, "id": f"{turn_id}_{item_type}"}
     if item_type == "userMessage":
         item["content"] = [{"type": "text", "text": "Review the change."}]
@@ -707,7 +709,7 @@ def _turn_event(method: str, turn_id: str, item_type: str | None = None) -> dict
         item["text"] = "Reviewed."
     return {
         "method": method,
-        "params": {"threadId": "thread_123", "turnId": turn_id, "item": item},
+        "params": {"threadId": thread_id, "turnId": turn_id, "item": item},
     }
 
 
@@ -744,6 +746,12 @@ def _turn_event(method: str, turn_id: str, item_type: str | None = None) -> dict
             [_turn_event("item/completed", "turn_123", "agentMessage")],
             [],
             id="other-turn",
+        ),
+        pytest.param(
+            "turn_123",
+            [_turn_event("item/completed", "turn_123", "userMessage", thread_id="thread_side")],
+            [],
+            id="other-thread",
         ),
     ],
 )

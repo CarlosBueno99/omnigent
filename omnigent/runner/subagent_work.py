@@ -762,7 +762,7 @@ def mark_subagent_work_terminal(
             entry.delivered = False
             return _deliver_subagent_completion(entry)
         # A child-reported terminal state supersedes the reaper's provisional failure.
-        if entry.launch_timed_out and status in ("completed", "failed"):
+        if entry.launch_timed_out and status in _SUBAGENT_TERMINAL_STATUSES:
             entry.status = status
             entry.output = output
             entry.completed_at = time.time()

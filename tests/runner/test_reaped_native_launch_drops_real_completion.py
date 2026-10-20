@@ -442,6 +442,8 @@ async def test_codex_native_silent_child_failure_yields_to_its_real_result() -> 
             )
             accepted_by = time.time()
             assert entry.status == "running"
+            # A dispatch registered long before acceptance must still get the full budget.
+            entry.created_at -= 600.0
 
             assert (
                 subagent_work.reap_stalled_subagent_launches(

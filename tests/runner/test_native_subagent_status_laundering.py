@@ -427,8 +427,15 @@ async def test_real_completion_replaces_a_launch_timeout_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_real_failure_still_replaces_a_launch_timeout_failure() -> None:
-    """A genuine ``failed`` edge after the reaper's guess carries the real error text."""
+@pytest.mark.parametrize(
+    ("status", "output"),
+    [("failed", "Error: 400 from the model API"), ("cancelled", "Interrupted in the pane")],
+    ids=["failed", "cancelled"],
+)
+async def test_child_terminal_outcome_replaces_a_launch_timeout_failure(
+    status: str, output: str
+) -> None:
+    """A genuine terminal edge after the reaper's guess replaces it with the child's outcome."""
     parent_id = uuid.uuid4().hex
     child_id = uuid.uuid4().hex
     inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -439,11 +446,11 @@ async def test_real_failure_still_replaces_a_launch_timeout_failure() -> None:
     try:
         subagent_work.reap_stalled_subagent_launches(now=entry.created_at + 200.0, timeout_s=180.0)
         inbox.get_nowait()
-        ack = subagent_work.mark_subagent_work_terminal(
-            child_id, status="failed", output="Error: 400 from the model API"
-        )
+        ack = subagent_work.mark_subagent_work_terminal(child_id, status=status, output=output)
         assert ack.delivered_now
-        assert inbox.get_nowait()["output"] == "Error: 400 from the model API"
+        assert entry.status == status and not entry.launch_timed_out
+        payload = inbox.get_nowait()
+        assert (payload["status"], payload["output"]) == (status, output)
     finally:
         subagent_work.unregister_subagent_work(child_id)
         subagent_work._session_inboxes_ref.pop(parent_id, None)
