@@ -984,6 +984,22 @@ describe("browserIpc — typed actions", () => {
     assert.equal(calls.length, 1);
     assert.equal(calls[0][1], false);
   });
+
+  it("fails an action whose script never settles before the server stops waiting", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const wc = makeWebContents();
+    wc.executeJavaScript = () => new Promise(() => {});
+    const { ipcMain, event } = setup({ webContents: wc });
+    const pending = ipcMain.invoke("omnigent:browser-perform-action", event, {
+      conversationId: "conv_1",
+      action: "click",
+      params: { selector: "button" },
+    });
+    t.mock.timers.tick(30_000);
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.match(result.error, /did not finish within/);
+  });
 });
 
 it("applies navigation policy even when renderer options claim user intent", async () => {
