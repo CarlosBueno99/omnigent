@@ -79,16 +79,18 @@ export function HarnessCatalog({
   settings,
   host,
   family,
+  defaultTab = "mcps",
 }: {
   header: ReactNode;
   settings: ReactNode;
   host: Host;
   family: BrandHarness;
+  defaultTab?: CatalogKind | "settings";
 }) {
   // `?tab=settings` (the grid card's gear) opens on Settings; otherwise MCP servers.
   const [searchParams] = useSearchParams();
   const [tab, setTab] = useState<CatalogKind | "settings">(
-    searchParams.get("tab") === "settings" ? "settings" : "mcps",
+    searchParams.get("tab") === "settings" ? "settings" : defaultTab,
   );
   const [open, setOpen] = useState<OpenPlugin | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<{ name: string; sourceId?: string } | null>(
@@ -461,11 +463,15 @@ function SkillPage({
 
 const SKILL_MARKDOWN_COMPONENTS: Components = {
   img: ({ alt }) => <span>{alt}</span>,
-  a: ({ href, children }) => (
-    <a href={href} rel="noreferrer" target="_blank">
-      {children}
-    </a>
-  ),
+  // Only SKILL.md is shown, so relative links (sibling files, anchors) lead nowhere.
+  a: ({ href, children }) =>
+    href && /^[a-z][a-z\d+.-]*:/i.test(href) ? (
+      <a href={href} rel="noreferrer" target="_blank">
+        {children}
+      </a>
+    ) : (
+      <span>{children}</span>
+    ),
 };
 
 function McpList({
