@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -301,15 +302,24 @@ def test_databricks_cli_version_none_for_missing_binary(tmp_path: Path) -> None:
     assert _databricks_cli_version(str(tmp_path / "nope")) is None
 
 
-def test_oauth_callback_port_holder_finds_own_process(busy_port: int) -> None:
-    """psutil identifies the listener (this test process)."""
+def test_oauth_callback_port_holder_names_listener(
+    monkeypatch: pytest.MonkeyPatch, busy_port: int
+) -> None:
+    """Only a LISTEN socket on the callback port is attributed to its process."""
     import psutil
 
-    try:
-        psutil.net_connections(kind="tcp")
-    except psutil.AccessDenied:
-        pytest.skip("psutil.net_connections requires root on this platform")
-    assert _oauth_callback_port_holder().pid is not None
+    def _connection(port: int, status: str, pid: int) -> SimpleNamespace:
+        return SimpleNamespace(laddr=SimpleNamespace(port=port), status=status, pid=pid)
+
+    connections = [
+        _connection(busy_port, "ESTABLISHED", 1111),
+        _connection(busy_port + 1, "LISTEN", 2222),
+        _connection(busy_port, "LISTEN", 3333),
+    ]
+    monkeypatch.setattr(psutil, "net_connections", lambda **_kwargs: connections)
+    monkeypatch.setattr(psutil, "Process", lambda pid: SimpleNamespace(name=lambda: f"proc-{pid}"))
+
+    assert _oauth_callback_port_holder() == _OAuthPortHolder(pid=3333, name="proc-3333")
 
 
 def test_oauth_callback_port_holder_tolerates_psutil_access_denied(
