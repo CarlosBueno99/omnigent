@@ -251,10 +251,10 @@ coverage; missing footage does not change which tests belong in the PR.
 
 ## `terminal` facets
 
-The pane renders inside the web app, so record it the same way as `web`: the
-Playwright test drives the session page with the terminal view shown, and the
-pane's contents land in the browser video. Save `tmux capture-pane -e` text dumps
-alongside as machine-checkable evidence.
+The pane normally renders inside the web app, so record it the same way as
+`web`: the Playwright test drives the session page with the terminal view shown,
+and the pane's contents land in the browser video. Save `tmux capture-pane -e`
+text dumps alongside as machine-checkable evidence.
 
 **A pane capture that shows the symptom means the facet must be filmed**, even
 when the defect is a runner-side leak or a failed background request. When the
@@ -262,8 +262,9 @@ app can no longer open the pane (for example, a leaked pane whose session was
 deleted), author a VHS tape as in the `cli` section that attaches a read-only
 tmux client with the socket and target your probe used:
 `tmux -S <socket> attach -r -t <target>`. Caption that the clip attaches to
-the pane outside the app, and end a `before` clip on a `Wait` for the
-symptom's text.
+the pane outside the app, and end a `before` clip on
+`Wait+Screen /<symptom text>/`: a plain `Wait` checks only the last line, which
+is tmux's status bar.
 
 **For a native-harness pane** (claude/codex/cursor/goose/hermes/kiro/… — the bug
 is in a real harness CLI's output), don't hand-roll the launch: the existing
