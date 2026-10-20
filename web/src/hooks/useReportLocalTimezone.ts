@@ -1,11 +1,15 @@
 import { useEffect } from "react";
-import { useViewerId } from "@/hooks/useViewerId";
+import { useIdentityReady, useViewerId } from "@/hooks/useViewerId";
 import { reportLocalTimezone } from "@/lib/scheduledTasksApi";
 
-/** Once the viewer is known, record the browser's zone as their automation default. */
+/**
+ * Once identity settles, record the browser's zone as the viewer's automation
+ * default. A server without auth has no viewer id but still records it as local.
+ */
 export function useReportLocalTimezone(): void {
+  const identityReady = useIdentityReady();
   const viewerId = useViewerId();
   useEffect(() => {
-    if (viewerId !== null) void reportLocalTimezone();
-  }, [viewerId]);
+    if (identityReady) void reportLocalTimezone();
+  }, [identityReady, viewerId]);
 }

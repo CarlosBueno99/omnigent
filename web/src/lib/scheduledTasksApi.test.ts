@@ -216,6 +216,11 @@ describe("reportLocalTimezone", () => {
     fetchMock.mockRejectedValueOnce(new TypeError("offline"));
     await expect(reportLocalTimezone()).resolves.toBeUndefined();
   });
+
+  it("ignores a server that predates the endpoint", async () => {
+    fetchMock.mockResolvedValueOnce(mockResponse({}, { ok: false, status: 405 }));
+    await expect(reportLocalTimezone()).resolves.toBeUndefined();
+  });
 });
 
 describe("error path", () => {
