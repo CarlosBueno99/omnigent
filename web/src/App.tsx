@@ -13,14 +13,9 @@ import { AppShell } from "@/shell/AppShell";
 import { useSettingsRoute } from "@/shell/settingsNav";
 import { ExtensionPageRoute } from "@/extensions/ExtensionPageRoute";
 
-// Bind a page component to its analytics page-view id. Declaring the id here,
-// beside the component, keeps the route table clean and means no route ships
-// without one. Re-fires on pathname change (see useOmnigentPageView), so a page
-// kept mounted across a param change (ChatPage across `/` ↔ `/c/:id`) still emits
-// one view per destination under the same id.
-//
-// SettingsPage opts out (stays unwrapped): its id is param-derived
-// (`settings.<section>`), so SettingsRoute reports it from the resolved section.
+// Binds a page to its analytics page-view id; re-fires per pathname, so a page
+// kept mounted across `/` ↔ `/c/:id` still emits one view per destination.
+// SettingsPage stays unwrapped: SettingsRoute reports its section-derived id.
 function withPageView<P extends object>(id: string, Component: ComponentType<P>): ComponentType<P> {
   return function WithPageView(props: P) {
     useOmnigentPageView(id);
@@ -211,11 +206,8 @@ function AppRoutes({ basename }: AppProps) {
               </FeatureGatedPage>
             }
           />
-          {/* Settings renders into the chat outlet so the conversations
-              sidebar stays put — entering settings only swaps the card's
-              content (the section nav) and the main area. The active section
-              is carried in the URL (/settings/<section>); bare /settings
-              shows General and is replaced with that canonical URL. */}
+          {/* Settings renders in the chat outlet so the conversations sidebar stays put;
+              bare /settings shows General and is replaced with /settings/general. */}
           <Route path={`${prefix}/settings/:section?/:subSection?`} element={<SettingsRoute />} />
           <Route path={`${prefix}/extensions/:extensionId/*`} element={<ExtensionPageRoute />} />
           {/* Members / Policies are now settings sub-categories
