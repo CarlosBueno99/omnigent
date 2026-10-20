@@ -953,7 +953,7 @@ def test_registration_wait_names_server_while_waiting(
     )
 
     with pytest.raises(click.ClickException):
-        cli._confirm_background_host_registered(_server_record())
+        cli._confirm_background_host_registered(_server_record(), stop_command="omnigent stop")
 
     captured = capsys.readouterr()
     assert "Waiting for the host daemon to register with http://127.0.0.1:59999" in captured.err
@@ -970,7 +970,7 @@ def test_registration_wait_prints_nothing_when_immediately_online(
         monkeypatch, cli._HostHttpResult(status_code=200, body={"status": "online"})
     )
 
-    cli._confirm_background_host_registered(_server_record())
+    cli._confirm_background_host_registered(_server_record(), stop_command="omnigent stop")
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -997,7 +997,7 @@ def test_registration_timeout_names_unreachable_server_and_skips_stale_host_hint
     )
 
     with pytest.raises(click.ClickException) as excinfo:
-        cli._confirm_background_host_registered(_server_record())
+        cli._confirm_background_host_registered(_server_record(), stop_command="omnigent stop")
 
     message = str(excinfo.value)
     assert "127.0.0.1:59999" in message
@@ -1026,7 +1026,7 @@ def test_registration_diagnostics_never_expose_url_credentials(
     record = _server_record("http://synthetic-user:synthetic-secret@127.0.0.1:59999")
 
     with pytest.raises(click.ClickException) as excinfo:
-        cli._confirm_background_host_registered(record)
+        cli._confirm_background_host_registered(record, stop_command="omnigent stop")
 
     message = str(excinfo.value)
     captured = capsys.readouterr()
@@ -1075,7 +1075,7 @@ def test_registration_timeout_keeps_hint_when_server_answered_then_dropped(
     )
 
     with pytest.raises(click.ClickException) as excinfo:
-        cli._confirm_background_host_registered(_server_record())
+        cli._confirm_background_host_registered(_server_record(), stop_command="omnigent stop")
 
     message = str(excinfo.value)
     assert "did not register with the server at http://127.0.0.1:59999" in message
@@ -1098,11 +1098,35 @@ def test_registration_timeout_keeps_stale_host_hint_when_server_answers(
     )
 
     with pytest.raises(click.ClickException) as excinfo:
-        cli._confirm_background_host_registered(_server_record())
+        cli._confirm_background_host_registered(_server_record(), stop_command="omnigent stop")
 
     message = str(excinfo.value)
     assert "did not register with the server at http://127.0.0.1:59999" in message
     assert suppresses_recovery_hint(excinfo.value) is False
+    assert isinstance(excinfo.value, cli._HostRegistrationPending)
+    assert "still running (pid 4242)" in message
+    assert "`omnigent stop`" in message
+
+
+def test_registration_timeout_reports_daemon_that_exits_during_final_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon that dies as the wait expires is reported as exited, not as
+    still running, so its record is cleaned up."""
+    alive = iter([True])
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: next(alive, False))
+    monkeypatch.setattr(cli, "_BACKGROUND_HOST_REGISTRATION_GRACE_S", 0.0)
+    monkeypatch.setattr(
+        cli,
+        "_daemon_host_status_probe",
+        lambda record, **_kw: cli._HostHttpResult(status_code=200, body={"status": "offline"}),
+    )
+
+    with pytest.raises(click.ClickException) as excinfo:
+        cli._confirm_background_host_registered(_server_record(), stop_command="omnigent stop")
+
+    assert not isinstance(excinfo.value, cli._HostRegistrationPending)
+    assert "exited before registering" in str(excinfo.value)
 
 
 # Every proxy variable httpx consults, so the cases below see exactly the
