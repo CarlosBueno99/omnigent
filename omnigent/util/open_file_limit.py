@@ -112,9 +112,14 @@ def _runs_omnigent_module(cmdline: list[str]) -> bool:
 
 def _soft_limit(process: psutil.Process, inherited_limit: int | None) -> int | None:
     # psutil reads another process's rlimit only on Linux and FreeBSD.
-    soft = (
-        process.rlimit(psutil.RLIMIT_NOFILE)[0] if hasattr(process, "rlimit") else inherited_limit
-    )
+    try:
+        soft = (
+            process.rlimit(psutil.RLIMIT_NOFILE)[0]
+            if hasattr(process, "rlimit")
+            else inherited_limit
+        )
+    except psutil.AccessDenied:
+        soft = inherited_limit
     return soft if soft is not None and soft > 0 else None
 
 

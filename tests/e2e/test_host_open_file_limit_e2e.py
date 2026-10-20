@@ -1,7 +1,8 @@
 """A host daemon started under a low soft open-file limit raises it for its processes.
 
 The inherited soft limit of 256 matches what macOS launchd gives GUI apps and the
-processes they spawn.
+processes they spawn. Children's limits are read only on Linux; on macOS host status
+reports the daemon's recorded limit for them.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -16,6 +18,7 @@ import pytest
 from tests._helpers.compat import apply_runner_env, runner_executable
 from tests._helpers.host import isolated_host
 from tests._helpers.live_server import isolated_process_env
+from tests._helpers.polling import poll_until
 
 resource = pytest.importorskip("resource")
 
@@ -49,23 +52,35 @@ def test_host_raises_inherited_open_file_limit_and_reports_descriptor_use(
 
     with isolated_host(tmp_path / "host", live_server, command=command) as host:
         host.wait_online(http_client, timeout=60)
-        status_env = isolated_process_env(
-            host.home, {"OMNIGENT_CONFIG_HOME": str(host.home / ".omnigent")}, None
+        status_env = apply_runner_env(
+            isolated_process_env(
+                host.home, {"OMNIGENT_CONFIG_HOME": str(host.home / ".omnigent")}, None
+            )
         )
-        status = subprocess.run(
-            [runner_executable(), "-m", "omnigent", "host", "status", "--json"],
-            env=apply_runner_env(status_env),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
+        daemon: dict[str, Any] = {}
 
-    assert status.returncode == 0, status.stderr
-    [daemon] = json.loads(status.stdout)["daemons"]
+        def _zygote_listed() -> bool:
+            status = subprocess.run(
+                [runner_executable(), "-m", "omnigent", "host", "status", "--json"],
+                env=status_env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            assert status.returncode == 0, status.stderr
+            [latest] = json.loads(status.stdout)["daemons"]
+            daemon.update(latest)
+            return len(latest["open_files"]) > 1
+
+        # The zygote starts in the background after the host reports online.
+        try:
+            poll_until(_zygote_listed, timeout_s=60)
+        except AssertionError as exc:
+            raise AssertionError(f"host status never listed a runner zygote: {daemon}") from exc
+
     open_files = daemon["open_files"]
     assert daemon["pid"] == host.proc.pid
     assert host.proc.pid in {entry["pid"] for entry in open_files}, open_files
-    assert len(open_files) > 1, f"no runner zygote listed: {open_files}"
     assert all(entry["limit"] > _INHERITED_SOFT_LIMIT for entry in open_files), open_files
     assert all(entry["count"] > 0 and entry["near_limit"] is False for entry in open_files)

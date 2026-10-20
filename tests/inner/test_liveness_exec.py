@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import os
 import signal
 import subprocess
@@ -16,7 +15,6 @@ import psutil
 import pytest
 
 from omnigent.inner import _liveness_exec
-from omnigent.util.open_file_limit import raise_soft_open_file_limit
 
 
 def test_refresh_census_does_not_adopt_reused_worker_pid(
@@ -319,12 +317,49 @@ def test_main_in_process_reaps_leftovers_with_both_signals(
     assert census_calls == [signal.SIGTERM, signal.SIGKILL]
 
 
+@pytest.fixture(params=[False, True], ids=["fd-below-1024", "fd-above-1024"])
+def liveness_pipe(request: pytest.FixtureRequest) -> Iterator[tuple[int, int]]:
+    """A pipe for the test to close, its read end optionally above ``select()``'s FD_SETSIZE.
+
+    The runner raises its open-file limit, so the liveness descriptor it passes
+    on can be numbered above 1024. Both read ends sit well above the lowest free
+    descriptor so a closed one is not reused while the wrapper polls it.
+    """
+    import fcntl
+    import resource
+
+    original_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    soft, hard = original_limit
+    try:
+        if request.param:
+            wanted = 2048 if hard == resource.RLIM_INFINITY else min(hard, 2048)
+            if wanted <= 1100:
+                pytest.skip(f"hard open-file limit {hard} cannot hold a descriptor above 1024")
+            if soft != resource.RLIM_INFINITY and soft < wanted:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+            lowest_read_fd = 1025
+        else:
+            lowest_read_fd = (1024 if soft == resource.RLIM_INFINITY else min(soft, 1024)) // 2
+        pipe_read_fd, write_fd = os.pipe()
+        read_fd = fcntl.fcntl(pipe_read_fd, fcntl.F_DUPFD, lowest_read_fd)
+        os.close(pipe_read_fd)
+        yield read_fd, write_fd
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+
+
 @posix_only
-def test_main_in_process_tears_down_when_the_pipe_closes(
+@pytest.mark.parametrize("liveness_fd_open", [True, False], ids=["parent-exits", "fd-closed"])
+def test_main_in_process_tears_down_when_the_liveness_pipe_breaks(
     monkeypatch: pytest.MonkeyPatch,
+    liveness_pipe: tuple[int, int],
+    liveness_fd_open: bool,
 ) -> None:
-    read_fd, write_fd = os.pipe()
+    """Parent death, or a liveness fd the kernel rejects (EBADF), tears the worker down."""
+    read_fd, write_fd = liveness_pipe
     os.close(write_fd)  # the parent is already gone
+    if not liveness_fd_open:
+        os.close(read_fd)
     torn_down: list[tuple[int, bool]] = []
 
     def _fake_terminate(pgid: int, child: subprocess.Popen[bytes], **kw: object) -> None:
@@ -338,59 +373,8 @@ def test_main_in_process_tears_down_when_the_pipe_closes(
             monkeypatch, [sys.executable, "-c", "import time; time.sleep(60)"], read_fd
         )
     finally:
-        os.close(read_fd)
-    assert rc == 1
-    assert torn_down == [(os.getpgrp(), True)]
-
-
-@pytest.fixture
-def pipe_above_fd_setsize() -> Iterator[tuple[int, int]]:
-    """A pipe whose read end is numbered above ``select()``'s FD_SETSIZE of 1024.
-
-    The runner raises its open-file limit, so the liveness descriptor it passes
-    on can be numbered that high.
-    """
-    import fcntl
-    import resource
-
-    original_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
-    raised = raise_soft_open_file_limit()
-    if raised is None or (raised.soft != resource.RLIM_INFINITY and raised.soft <= 1100):
-        resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
-        pytest.skip(f"open-file limit {raised} cannot hold a descriptor above 1024")
-    read_fd, write_fd = os.pipe()
-    high_read_fd = fcntl.fcntl(read_fd, fcntl.F_DUPFD, 1025)
-    os.close(read_fd)
-    try:
-        yield high_read_fd, write_fd
-    finally:
-        for fd in (high_read_fd, write_fd):
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
-
-
-@posix_only
-@pytest.mark.parametrize("liveness_fd_open", [True, False], ids=["parent-exits", "fd-closed"])
-def test_main_in_process_tears_down_on_a_high_numbered_liveness_fd(
-    monkeypatch: pytest.MonkeyPatch,
-    pipe_above_fd_setsize: tuple[int, int],
-    liveness_fd_open: bool,
-) -> None:
-    """Parent death, or a liveness fd the kernel rejects (EBADF), tears the worker down."""
-    read_fd, write_fd = pipe_above_fd_setsize
-    os.close(write_fd)
-    if not liveness_fd_open:
-        os.close(read_fd)
-    torn_down: list[tuple[int, bool]] = []
-
-    def _fake_terminate(pgid: int, child: subprocess.Popen[bytes], **kw: object) -> None:
-        torn_down.append((pgid, bool(kw.get("detached_reaper"))))
-        child.kill()
-        child.wait(timeout=5)
-
-    monkeypatch.setattr(_liveness_exec, "_terminate_group", _fake_terminate)
-    rc = _main_with(monkeypatch, [sys.executable, "-c", "import time; time.sleep(60)"], read_fd)
+        if liveness_fd_open:
+            os.close(read_fd)
     assert rc == 1
     assert torn_down == [(os.getpgrp(), True)]
 

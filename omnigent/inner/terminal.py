@@ -2153,6 +2153,8 @@ class TerminalInstance:
                     extra=self._probe_log_extra("terminal_probe_failed"),
                 )
                 session_exists = await self._tmux_session_exists_async()
+                if session_exists is not None:
+                    self._note_probe_started()
                 if session_exists is not False:
                     consecutive_capture_failures = 0
                     self._probe_failures.clear()
@@ -2352,6 +2354,8 @@ class TerminalInstance:
                 continue
             if snapshot is None:
                 session_exists = self._tmux_session_exists_sync()
+                if session_exists is not None:
+                    self._note_probe_started()
                 if session_exists is not False:
                     consecutive_capture_failures = 0
                     self._probe_failures.clear()

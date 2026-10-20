@@ -49,6 +49,9 @@ class _FakeResource:
         pytest.param((256, _INFINITY), _INFINITY, 65536, [65536], id="macos-launchd-default"),
         pytest.param((256, _INFINITY), 10240, 10240, [65536, 10240], id="macos-open-max"),
         pytest.param((256, _INFINITY), 4096, 4096, [65536, 10240, 4096], id="tuned-maxfiles"),
+        pytest.param(
+            (256, _INFINITY), 1024, 1024, [65536, 10240, 4096, 1024], id="only-last-step-fits"
+        ),
         pytest.param((256, 4000), _INFINITY, 4000, [4000], id="finite-hard-limit"),
         pytest.param((1024, 1048576), _INFINITY, 65536, [65536], id="linux-default"),
     ],
@@ -124,14 +127,14 @@ class _FakeProcess:
     pid: int
     fds: int
     command: list[str]
-    soft_limit: int | None = None
+    soft_limit: int | psutil.Error | None = None
     descendants: list[_FakeProcess] = field(default_factory=list)
     error: psutil.Error | None = None
 
     def __post_init__(self) -> None:
-        if self.soft_limit is not None:
-            soft_limit = self.soft_limit
-            self.rlimit: Callable[[int], tuple[int, int]] = lambda _which: (soft_limit, _INFINITY)
+        soft_limit = self.soft_limit
+        if soft_limit is not None:
+            self.rlimit: Callable[[int], tuple[int, int]] = lambda _which: _read_rlimit(soft_limit)
 
     def children(self, *, recursive: bool) -> list[_FakeProcess]:
         assert recursive
@@ -148,6 +151,12 @@ class _FakeProcess:
         return self.fds
 
 
+def _read_rlimit(soft_limit: int | psutil.Error) -> tuple[int, int]:
+    if isinstance(soft_limit, psutil.Error):
+        raise soft_limit
+    return soft_limit, _INFINITY
+
+
 def _install_process_tree(monkeypatch: pytest.MonkeyPatch, root: _FakeProcess) -> None:
     def _process(pid: int) -> _FakeProcess:
         if pid != root.pid:
@@ -155,11 +164,13 @@ def _install_process_tree(monkeypatch: pytest.MonkeyPatch, root: _FakeProcess) -
         return root
 
     _process.num_fds = _FakeProcess.num_fds  # type: ignore[attr-defined]
-    fake_psutil = SimpleNamespace(Process=_process, Error=psutil.Error, RLIMIT_NOFILE=7)
+    fake_psutil = SimpleNamespace(
+        Process=_process, Error=psutil.Error, AccessDenied=psutil.AccessDenied, RLIMIT_NOFILE=7
+    )
     monkeypatch.setattr(open_file_limit, "psutil", fake_psutil)
 
 
-def _daemon_tree(*, soft_limit: int | None) -> _FakeProcess:
+def _daemon_tree(*, soft_limit: int | psutil.Error | None) -> _FakeProcess:
     zygote = [sys.executable, "-P", "-m", "omnigent.runner._zygote"]
     return _FakeProcess(
         pid=4242,
@@ -181,20 +192,23 @@ def _daemon_tree(*, soft_limit: int | None) -> _FakeProcess:
     [
         pytest.param(256, 65536, 256, [True, False, False], id="readable-rlimit"),
         pytest.param(None, 10240, 10240, [False, False, False], id="macos-recorded-limit"),
+        pytest.param(
+            psutil.AccessDenied(0), 10240, 10240, [False, False, False], id="denied-rlimit"
+        ),
         pytest.param(-1, 65536, None, [False, False, False], id="unlimited-rlimit"),
     ],
 )
 def test_host_process_open_files_lists_omnigent_processes_closest_to_limit_first(
     monkeypatch: pytest.MonkeyPatch,
-    rlimit_soft: int | None,
+    rlimit_soft: int | psutil.Error | None,
     inherited_limit: int,
     limit: int | None,
     near_limit: list[bool],
 ) -> None:
     """The busiest runner leads; agent CLIs, tmux and unreadable processes are skipped.
 
-    psutil cannot read another process's rlimit on macOS, so the daemon's recorded
-    limit stands in; on Linux an unlimited soft limit reads as ``-1``.
+    The daemon's recorded limit stands in where psutil cannot read another
+    process's rlimit (macOS, or access denied); on Linux unlimited reads as ``-1``.
     """
     _install_process_tree(monkeypatch, _daemon_tree(soft_limit=rlimit_soft))
 

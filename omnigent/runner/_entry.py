@@ -2166,7 +2166,7 @@ def main() -> None:
 
     configure_process_logging("runner", force=True)
     _install_crash_logging()
-    # Runners launched outside a host daemon still need headroom for terminals and sub-agents.
+    # Covers runners started without a host daemon.
     raise_soft_open_file_limit()
     _maybe_prewarm_ambient_detection()
     try:

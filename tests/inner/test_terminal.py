@@ -1033,6 +1033,68 @@ async def test_async_idle_watcher_backoff_resets_after_probes_start_again(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("threaded", [False, True], ids=["async", "threaded"])
+async def test_idle_watcher_backoff_resets_when_failed_capture_is_confirmed_by_has_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    threaded: bool,
+) -> None:
+    """A capture that runs but fails, then a has-session that runs, ends a start-failure streak."""
+    instance = TerminalInstance(
+        name="runtime",
+        session_key="main",
+        socket_path=tmp_path / "tmux.sock",
+        private_dir=tmp_path,
+        running=True,
+    )
+    no_descriptors = None
+    outcomes: list[_ProcessWithStdout | None] = [
+        *[no_descriptors] * 3,
+        _ProcessWithStdout(returncode=1, stderr=b"server busy"),
+        _ProcessWithStdout(),
+        no_descriptors,
+    ]
+
+    def _next_probe(*_args: object, **_kwargs: object) -> _ProcessWithStdout:
+        outcome = outcomes.pop(0)
+        if not outcomes:
+            instance.running = False
+        if outcome is None:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return outcome
+
+    async def _create_subprocess_exec(*args: object, **kwargs: object) -> _ProcessWithStdout:
+        return _next_probe(*args, **kwargs)
+
+    delays: list[float] = []
+    backoff = instance._probe_start_backoff_seconds
+
+    def _recording_backoff() -> float:
+        delays.append(backoff())
+        return delays[-1]
+
+    instance._probe_start_backoff_seconds = _recording_backoff  # type: ignore[method-assign]
+    monkeypatch.setattr(terminal_mod.subprocess, "run", _next_probe)
+    monkeypatch.setattr(terminal_mod.asyncio, "create_subprocess_exec", _create_subprocess_exec)
+    monkeypatch.setattr(terminal_mod, "_IDLE_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(terminal_mod, "_TMUX_PROBE_START_FAILURE_BACKOFF_SECONDS", 0.001)
+
+    with caplog.at_level(logging.DEBUG, logger=terminal_mod.__name__):
+        if threaded:
+            instance._idle_watch_loop_threaded(
+                _RecordingStopEvent(ticks=100),  # type: ignore[arg-type]
+                poll_interval_s=0.001,
+            )
+        else:
+            await asyncio.wait_for(instance._idle_watch_loop(lambda: None), timeout=1.0)
+
+    assert delays == [0.001, 0.002, 0.004, 0.001]
+    recoveries = [r.getMessage() for r in caplog.records if "started again" in r.getMessage()]
+    assert recoveries == ["tmux probes for terminal runtime:main started again after 3 failures"]
+
+
+@pytest.mark.asyncio
 async def test_close_kills_tmux_when_socket_exists_after_running_cleared(tmp_path: Path) -> None:
     """Cleanup kills a surviving tmux server even after a watcher marked it dead."""
     private_dir = tmp_path / "terminal"
