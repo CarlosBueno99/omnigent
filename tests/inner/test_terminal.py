@@ -1034,13 +1034,20 @@ async def test_async_idle_watcher_backoff_resets_after_probes_start_again(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("threaded", [False, True], ids=["async", "threaded"])
-async def test_idle_watcher_backoff_resets_when_failed_capture_is_confirmed_by_has_session(
+@pytest.mark.parametrize(
+    ("session_probe_fails", "expected_delays"),
+    [(False, [0.001, 0.002, 0.004, 0.001]), (True, [0.001, 0.002, 0.004, 0.001, 0.001])],
+    ids=["session-exists", "session-unknown"],
+)
+async def test_idle_watcher_backoff_resets_when_has_session_runs_after_a_failed_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     threaded: bool,
+    session_probe_fails: bool,
+    expected_delays: list[float],
 ) -> None:
-    """A capture that runs but fails, then a has-session that runs, ends a start-failure streak."""
+    """A has-session that starts ends a start-failure streak, even when it fails inconclusively."""
     instance = TerminalInstance(
         name="runtime",
         session_key="main",
@@ -1052,7 +1059,9 @@ async def test_idle_watcher_backoff_resets_when_failed_capture_is_confirmed_by_h
     outcomes: list[_ProcessWithStdout | None] = [
         *[no_descriptors] * 3,
         _ProcessWithStdout(returncode=1, stderr=b"server busy"),
-        _ProcessWithStdout(),
+        _ProcessWithStdout(returncode=1, stderr=b"server busy")
+        if session_probe_fails
+        else _ProcessWithStdout(),
         no_descriptors,
     ]
 
@@ -1089,7 +1098,7 @@ async def test_idle_watcher_backoff_resets_when_failed_capture_is_confirmed_by_h
         else:
             await asyncio.wait_for(instance._idle_watch_loop(lambda: None), timeout=1.0)
 
-    assert delays == [0.001, 0.002, 0.004, 0.001]
+    assert delays == expected_delays
     recoveries = [r.getMessage() for r in caplog.records if "started again" in r.getMessage()]
     assert recoveries == ["tmux probes for terminal runtime:main started again after 3 failures"]
 

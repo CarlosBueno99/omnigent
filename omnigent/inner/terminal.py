@@ -2153,8 +2153,6 @@ class TerminalInstance:
                     extra=self._probe_log_extra("terminal_probe_failed"),
                 )
                 session_exists = await self._tmux_session_exists_async()
-                if session_exists is not None:
-                    self._note_probe_started()
                 if session_exists is not False:
                     consecutive_capture_failures = 0
                     self._probe_failures.clear()
@@ -2354,8 +2352,6 @@ class TerminalInstance:
                 continue
             if snapshot is None:
                 session_exists = self._tmux_session_exists_sync()
-                if session_exists is not None:
-                    self._note_probe_started()
                 if session_exists is not False:
                     consecutive_capture_failures = 0
                     self._probe_failures.clear()
@@ -2460,6 +2456,7 @@ class TerminalInstance:
             self._log_probe_start_failure("has-session", exc)
             return None
         except _TmuxCommandFailedError as exc:
+            self._note_probe_started()
             self._remember_probe_failure("has-session", exc, started_at)
             self._last_session_probe_error = str(exc)
             logger.warning(
@@ -2471,9 +2468,11 @@ class TerminalInstance:
             )
             return None
         except RuntimeError as exc:
+            self._note_probe_started()
             self._remember_probe_failure("has-session", exc, started_at)
             self._last_session_probe_error = str(exc)
             return False
+        self._note_probe_started()
         return True
 
     def _pane_is_dead(self) -> bool | None:
@@ -2673,6 +2672,7 @@ class TerminalInstance:
             self._log_probe_start_failure("has-session", exc)
             return None
         except _TmuxCommandFailedError as exc:
+            self._note_probe_started()
             self._remember_probe_failure("has-session", exc, started_at)
             self._last_session_probe_error = str(exc)
             logger.warning(
@@ -2684,9 +2684,11 @@ class TerminalInstance:
             )
             return None
         except RuntimeError as exc:
+            self._note_probe_started()
             self._remember_probe_failure("has-session", exc, started_at)
             self._last_session_probe_error = str(exc)
             return False
+        self._note_probe_started()
         return True
 
     async def _tmux(self, *args: str) -> None:

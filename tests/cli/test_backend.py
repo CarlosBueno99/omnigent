@@ -175,12 +175,33 @@ def _write_daemon_registry_record(
                 "host_id": host_id,
                 "resolved_server_url": resolved_server_url,
                 "config_sig": config_sig,
-                "open_file_limit": open_file_limit,
+                **({} if open_file_limit is None else {"open_file_limit": open_file_limit}),
             },
             sort_keys=True,
         )
         + "\n"
     )
+
+
+@pytest.mark.parametrize("open_file_limit", [None, 10240], ids=["predates-limit", "recorded"])
+def test_daemon_record_reads_the_optional_open_file_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, open_file_limit: int | None
+) -> None:
+    """A record written before daemons recorded their open-file limit still loads."""
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target="https://server.example.com",
+        mode="server",
+        server_url="https://server.example.com",
+        open_file_limit=open_file_limit,
+    )
+
+    record = cli._find_daemon_record("https://server.example.com")
+
+    assert record is not None
+    assert record.open_file_limit == open_file_limit
 
 
 def test_ensure_host_daemon_remote_spawns_server_flag(

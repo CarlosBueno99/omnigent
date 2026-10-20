@@ -341,8 +341,13 @@ def liveness_pipe(request: pytest.FixtureRequest) -> Iterator[tuple[int, int]]:
         else:
             lowest_read_fd = (1024 if soft == resource.RLIM_INFINITY else min(soft, 1024)) // 2
         pipe_read_fd, write_fd = os.pipe()
-        read_fd = fcntl.fcntl(pipe_read_fd, fcntl.F_DUPFD, lowest_read_fd)
-        os.close(pipe_read_fd)
+        try:
+            read_fd = fcntl.fcntl(pipe_read_fd, fcntl.F_DUPFD, lowest_read_fd)
+        except OSError:
+            os.close(write_fd)
+            raise
+        finally:
+            os.close(pipe_read_fd)
         yield read_fd, write_fd
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
