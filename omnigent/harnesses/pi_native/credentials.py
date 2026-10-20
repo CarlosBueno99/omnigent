@@ -43,6 +43,7 @@ from omnigent.harnesses.pi_native.auth_command import (
     AUTH_DIR_NAME,
     wrap_auth_command,
 )
+from omnigent.harnesses.pi_native.model_scope import ScopableModel, scope_models
 from omnigent.inner._proc import kill_tree, spawn_kwargs
 from omnigent.models import model_catalog
 from omnigent.models.databricks_model_discovery import preferred_served_claude_model
@@ -452,11 +453,22 @@ def _read_json_object(path: Path) -> dict[str, object]:
     return raw if _is_str_object_dict(raw) else {}
 
 
-def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, object]]:
-    """List Pi's logged-in and keyed custom models for the prelaunch picker.
+def _pi_enabled_model_patterns(root: Path) -> list[str]:
+    """Read Pi's own model curation (``settings.json`` ``enabledModels``).
 
-    Declared models.json entries override cached names. Reserved Omnigent
-    provider IDs are excluded because own-login launch strips their prefixes.
+    :param root: Pi agent dir whose settings to read.
+    :returns: The non-empty string patterns, ``[]`` when unset or malformed.
+    """
+    raw = _read_json_object(root / "settings.json").get("enabledModels")
+    if not isinstance(raw, list):
+        return []
+    return [pattern for pattern in raw if isinstance(pattern, str) and pattern.strip()]
+
+
+def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, object]]:
+    """List logged-in and keyed custom models, filtered by Pi's enabledModels.
+
+    Use the full catalog when curation is empty or unavailable.
 
     :param agent_dir: Pi agent dir override (tests); defaults to the host's
         own Pi agent dir.
@@ -477,7 +489,7 @@ def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, 
         if provider_id in logged_in or (isinstance(api_key, str) and api_key):
             # Appended after the models-store rows so declared models.json names win.
             catalogs.append((provider_id, payload))
-    options: dict[str, dict[str, object]] = {}
+    catalog: dict[str, ScopableModel] = {}
     for provider_id, payload in catalogs:
         if not _is_str_object_dict(payload):
             continue
@@ -492,14 +504,27 @@ def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, 
             model_id = model.get("id")
             if not isinstance(model_id, str) or not model_id:
                 continue
-            qualified = f"{provider_id}/{model_id}"
             name = model.get("name")
-            options[qualified] = {
-                "id": qualified,
-                "model": qualified,
-                "displayName": name if isinstance(name, str) and name else model_id,
-            }
-    return [options[model_id] for model_id in sorted(options)]
+            entry = ScopableModel(
+                provider=provider_id,
+                model_id=model_id,
+                name=name if isinstance(name, str) and name else None,
+            )
+            catalog[entry.reference] = entry
+    entries = list(catalog.values())
+    patterns = _pi_enabled_model_patterns(root)
+    if patterns:
+        scoped = scope_models(patterns, entries)
+        if scoped:
+            entries = scoped
+    return [
+        {
+            "id": entry.reference,
+            "model": entry.reference,
+            "displayName": entry.name or entry.model_id,
+        }
+        for entry in sorted(entries, key=lambda entry: entry.reference)
+    ]
 
 
 def pi_own_login_model_arg(selection: str) -> str | None:
@@ -538,6 +563,13 @@ def _default_model_provider_id(provider: PiProviderConfig, rendered: _PiModelsCo
         if any(model.get("id") == provider.model for model in payload["models"]):
             return provider_id
     return provider.provider_id
+
+
+def pi_own_login_serves_reference(reference: str | None, agent_dir: Path | None = None) -> bool:
+    """Return whether Pi's own logged-in catalog serves the qualified *reference*."""
+    if not reference:
+        return False
+    return any(option["id"] == reference for option in pi_own_login_model_options(agent_dir))
 
 
 def pi_native_model_options(
@@ -1697,7 +1729,28 @@ def resolve_pi_native_provider(
         return replace(resolved, inference_bound=True)
 
     unmanaged_prefix_notice: str | None = None
+    # An unqualified slash id either names a configured provider or is the
+    # endpoint's (or Pi's own) model naming; both branches below need the split.
+    prefix = bare = ""
+    names_configured_provider = False
+    if selection is None and model and "/" in model:
+        prefix, _, bare = model.partition("/")
+        providers = config.get("providers")
+        names_configured_provider = (
+            bool(bare) and isinstance(providers, dict) and prefix in providers
+        )
     try:
+        # Preserve Pi-login references unless they name a configured provider.
+        if bare and not names_configured_provider and pi_own_login_serves_reference(model):
+            # Warn: the same id could also be served by the configured default
+            # provider, so this routes credentials/billing by host login state.
+            _LOGGER.warning(
+                "pi-native: model %r is served by Pi's own %r login; Pi will use that "
+                "login instead of the omnigent-configured default provider.",
+                model,
+                prefix,
+            )
+            return None
         # Pi is multi-family; ``omnigent setup`` marks defaults per family, not
         # for ``pi``. Use the shared house-pattern selection so pi resolves its
         # default exactly like the rest of the codebase — an explicit pi default
@@ -1723,25 +1776,17 @@ def resolve_pi_native_provider(
                 "surface; Pi will use its own login."
             )
             return None
-        if selection is None and model and "/" in model:
-            prefix, _, bare = model.partition("/")
-            providers = config.get("providers")
-            # A picker override can arrive qualified by the omnigent provider
-            # name ("rpw-fable/databricks-claude-fable-5-1"); registering it
-            # verbatim renders a slash id no endpoint serves. Split only when
-            # the prefix names a configured provider — any other slash id is
-            # the endpoint's own model naming (e.g. "openai/gpt-4o" on
-            # OpenRouter, "zai-org/GLM-4.7") and must stay verbatim.
-            if bare and isinstance(providers, dict) and prefix in providers:
-                if prefix != entry.name:
-                    unmanaged_prefix_notice = (
-                        f"The model override '{model}' names provider "
-                        f"'{prefix}', but this Pi session is served by "
-                        f"provider '{entry.name}'; the model '{bare}' was "
-                        f"requested from '{entry.name}' instead."
-                    )
-                    _LOGGER.info("pi-native: %s", unmanaged_prefix_notice)
-                model = bare
+        # Only strip configured provider prefixes; endpoint IDs may contain slashes.
+        if names_configured_provider:
+            if prefix != entry.name:
+                unmanaged_prefix_notice = (
+                    f"The model override '{model}' names provider "
+                    f"'{prefix}', but this Pi session is served by "
+                    f"provider '{entry.name}'; the model '{bare}' was "
+                    f"requested from '{entry.name}' instead."
+                )
+                _LOGGER.info("pi-native: %s", unmanaged_prefix_notice)
+            model = bare
         if entry.kind == DATABRICKS_KIND:
             resolved = _databricks_pi_provider(entry, model=model)
         elif entry.kind == CLI_CONFIG_KIND:
