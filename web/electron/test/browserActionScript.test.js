@@ -113,7 +113,7 @@ it("lists native select options under their labelled select and chooses one by r
       window.document.addEventListener(type, (event) => events.push(`${type}:${event.target.id}`));
     const click = (ref) => window.eval(buildBrowserActionScript("click", { ref }));
     await click(3);
-    await click(5);
+    await assert.rejects(click(5), /Element is disabled/);
     await click(3);
     assert.equal(account.value, "dev");
     assert.equal(window.document.activeElement, account);
@@ -129,10 +129,11 @@ it("lists native select options under their labelled select and chooses one by r
   }
 });
 
-it("presses and releases an element across a task before clicking it", async () => {
+it("presses, moves focus and releases across a task before clicking", async () => {
   const dom = openPage(
     '<div id="menu"><input id="query"></div><div id="trigger" role="button">Env</div>' +
-      '<button id="off" disabled>Off</button><svg><g id="icon" role="button"></g></svg>',
+      '<button id="off" disabled>Off</button><svg><g id="icon" role="button"></g></svg>' +
+      '<div id="plain">Plain</div><button id="save"><span id="save-icon">S</span></button>',
   );
   try {
     const { window } = dom;
@@ -184,8 +185,36 @@ it("presses and releases an element across a task before clicking it", async () 
       "pointerup:trigger",
       "click:trigger",
     ]);
-    assert.deepEqual(await click("#off"), []);
+    log.length = 0;
+    await assert.rejects(
+      window.eval(buildBrowserActionScript("click", { selector: "#off" })),
+      /Element is disabled/,
+    );
+    assert.deepEqual(log, []);
     assert.equal((await click("#icon")).at(-1), "click:icon");
+
+    document.querySelector("#query").focus();
+    await click("#plain");
+    assert.equal(document.activeElement, document.body);
+    assert.ok((await click("#save-icon")).includes("focusin:save"));
+    assert.equal(document.activeElement.id, "save");
+  } finally {
+    dom.window.close();
+  }
+});
+
+it("finishes a click when the page's message channel never delivers", async () => {
+  const dom = openPage('<button id="save">Save</button>');
+  try {
+    const { window } = dom;
+    window.MessageChannel = class {
+      port1 = { close() {} };
+      port2 = { postMessage() {} };
+    };
+    const clicks = [];
+    window.document.addEventListener("click", (event) => clicks.push(event.target.id));
+    assert.equal(await window.eval(buildBrowserActionScript("click", { selector: "#save" })), "ok");
+    assert.deepEqual(clicks, ["save"]);
   } finally {
     dom.window.close();
   }

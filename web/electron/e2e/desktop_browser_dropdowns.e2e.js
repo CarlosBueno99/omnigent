@@ -56,7 +56,11 @@ describe(
       recordDir = process.env.OMNIGENT_DESKTOP_RECORD_DIR || path.join(tmpDir, "recordings");
       server = await spawnServer(tmpDir);
       fixture = await startDropdownFixture();
-      desktop = await launchDesktop({ serverUrl: server.serverUrl, recordDir });
+      desktop = await launchDesktop({
+        serverUrl: server.serverUrl,
+        recordDir,
+        userDataDir: path.join(tmpDir, "profile"),
+      });
       const { electronApp, window } = desktop;
       await window.getByText("What should we build?").waitFor({ timeout: 30_000 });
       await window.waitForFunction(() => !!window.omnigentDesktop?.browserPerformAction);
@@ -80,11 +84,14 @@ describe(
     });
 
     after(async () => {
-      await desktop?.electronApp.close().catch(() => {});
-      await desktop?.stopDisplayCapture();
-      if (recordDir) saveRecording(recordDir, "browser-dropdown-actions");
-      await Promise.all([fixture?.close(), server?.close()]);
-      if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+      try {
+        await desktop?.electronApp.close().catch(() => {});
+        await desktop?.stopDisplayCapture();
+        if (recordDir) saveRecording(recordDir, "browser-dropdown-actions");
+      } finally {
+        await Promise.all([fixture?.close(), server?.close()]);
+        if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it("opens a mousedown dropdown and selects an option by ref", async () => {
@@ -102,7 +109,7 @@ describe(
           `events=${JSON.stringify(events)}\n${opened}`,
       );
       await perform("click", { ref: option });
-      assert.match(await fieldState(), /Region: us-west-2/);
+      await eventually(async () => /Region: us-west-2/.test(await fieldState()), "Region value");
     });
 
     it("lists native select options in the snapshot and chooses one by ref", async () => {
@@ -111,8 +118,10 @@ describe(
       for (const name of ["dev", "staging", "prod"]) {
         assert.ok(refFor(tree, "option", name), `option "${name}" missing from snapshot:\n${tree}`);
       }
-      await perform("click", { ref: refFor(tree, "option", "staging") });
-      assert.match(await fieldState(), /Account: staging/);
+      const staging = refFor(tree, "option", "staging");
+      assert.ok(staging, `staging option missing:\n${tree}`);
+      await perform("click", { ref: staging });
+      await eventually(async () => /Account: staging/.test(await fieldState()), "Account value");
       assert.match(await snapshot(), /- option "staging" \[ref=\d+\] \[selected\]/);
     });
 

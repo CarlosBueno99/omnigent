@@ -193,7 +193,7 @@ const CLICK_JS = `
   const select = el instanceof HTMLOptionElement ? el.closest('select') : null;
   (select || el).scrollIntoView({ block: 'center', inline: 'center' });
   if (select) {
-    if (el.matches(':disabled') || select.matches(':disabled')) return 'ok';
+    if (el.matches(':disabled') || select.matches(':disabled')) throw new Error('Element is disabled');
     select.focus({ preventScroll: true });
     const selected = select.multiple ? !el.selected : true;
     if (el.selected !== selected) {
@@ -203,7 +203,7 @@ const CLICK_JS = `
     }
     return 'ok';
   }
-  if (el.matches(':disabled')) return 'ok';
+  if (el.matches(':disabled')) throw new Error('Element is disabled');
   const rect = el.getBoundingClientRect();
   const mouse = {
     bubbles: true, cancelable: true, composed: true, view: window, button: 0, detail: 1,
@@ -212,13 +212,19 @@ const CLICK_JS = `
   const pointer = { ...mouse, detail: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true };
   const pressed = el.dispatchEvent(new PointerEvent('pointerdown', { ...pointer, buttons: 1 }));
   if (pressed && el.dispatchEvent(new MouseEvent('mousedown', { ...mouse, buttons: 1 }))) {
-    el.focus({ preventScroll: true });
+    const focusable = el.closest(
+      'a[href], button, input, select, textarea, summary, iframe, [tabindex], ' +
+      '[contenteditable]:not([contenteditable="false"])');
+    if (focusable) focusable.focus({ preventScroll: true });
+    else document.activeElement?.blur();
   }
-  // Let the page commit the press, e.g. render a menu, before the release.
-  // A message task is not throttled in a hidden view, unlike a timer.
+  // Let the page commit the press, e.g. render a menu, before the release. A message
+  // task is not throttled in a hidden view; the timer only covers a broken channel.
   await new Promise((resolve) => {
     const channel = new MessageChannel();
-    channel.port1.onmessage = () => { channel.port1.close(); resolve(); };
+    const done = () => { clearTimeout(timer); channel.port1.close(); resolve(); };
+    const timer = setTimeout(done, 1000);
+    channel.port1.onmessage = done;
     channel.port2.postMessage(null);
   });
   el.dispatchEvent(new PointerEvent('pointerup', pointer));
