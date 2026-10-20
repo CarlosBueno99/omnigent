@@ -2009,9 +2009,16 @@ def test_read_transcript_items_parses_prompt_before_reply_flushed_above_it(
 
     assert [item.data["role"] for item in result.items] == ["user", "assistant"]
     assert result.byte_offset == transcript_path.stat().st_size
+    assert [item for record in result.record_items for item in record.items] == result.items
     checkpoints = [record.next_byte_offset for record in result.record_items]
     assert checkpoints == sorted(checkpoints)
-    assert [item.data["role"] for item in result.record_items[1].items] == ["assistant"]
+    assert checkpoints[-1] == result.byte_offset
+    prompt_checkpoint = next(
+        record.next_byte_offset
+        for record in result.record_items
+        if any(item.data["role"] == "user" for item in record.items)
+    )
+    assert prompt_checkpoint == len(_transcript_line(entries[0]).encode())
 
 
 @pytest.mark.parametrize(

@@ -921,8 +921,9 @@ class TranscriptReadResult:
         scanned. Claude's own auto-generated ``aiTitle`` is deliberately
         not surfaced here; Omnigent titles unnamed sessions itself.
     :param record_items: Parsed items grouped by their complete source JSONL
-        record, with the byte offset immediately after each record. Native
-        child-transcript batching uses these boundaries for partial checkpoints.
+        record, in the same order as ``items``, with the byte offset through
+        which every record is parsed. Native child-transcript batching uses
+        these boundaries for partial checkpoints.
     """
 
     line_cursor: int
@@ -3324,6 +3325,49 @@ def _parent_first_order(entries: Sequence[_JsonObject | None]) -> list[int]:
     return order
 
 
+def _record_items_in_parse_order(
+    records: Sequence[_JsonlRecord],
+    parse_order: Sequence[int],
+    parsed_by_record: Sequence[tuple[ClaudeTranscriptItem, ...]],
+    *,
+    retained_source_ids: set[str],
+) -> list[TranscriptRecordItems]:
+    """
+    Group retained items by source record, in parse order.
+
+    A record parsed ahead of an earlier one checkpoints only through the
+    file prefix parsed so far, so resuming from it never skips a record.
+
+    :param records: Complete records in file order.
+    :param parse_order: Record indexes from :func:`_parent_first_order`.
+    :param parsed_by_record: Items parsed from each record, by file index.
+    :param retained_source_ids: Source ids kept after deduplication.
+    :returns: One entry per record, in parse order.
+    """
+    parsed: set[int] = set()
+    parsed_prefix = 0
+    grouped: list[TranscriptRecordItems] = []
+    for index in parse_order:
+        parsed.add(index)
+        while parsed_prefix in parsed:
+            parsed_prefix += 1
+        grouped.append(
+            TranscriptRecordItems(
+                next_byte_offset=(
+                    records[parsed_prefix - 1].next_byte_offset
+                    if parsed_prefix
+                    else records[0].byte_offset
+                ),
+                items=tuple(
+                    item
+                    for item in parsed_by_record[index]
+                    if item.source_id in retained_source_ids
+                ),
+            )
+        )
+    return grouped
+
+
 def read_transcript_items_since_with_position(
     transcript_path: Path,
     start_line: int,
@@ -3367,7 +3411,8 @@ def read_transcript_items_since_with_position(
     latest_custom_title: str | None = None
     entries = [_decoded_transcript_record(record) for record in read_result.records]
     parsed_by_record: list[tuple[ClaudeTranscriptItem, ...]] = [()] * len(entries)
-    for index in _parent_first_order(entries):
+    parse_order = _parent_first_order(entries)
+    for index in parse_order:
         entry = entries[index]
         if entry is None:
             continue
@@ -3397,15 +3442,12 @@ def read_transcript_items_since_with_position(
             latest_custom_title = custom_title
         parsed_by_record[index] = tuple(parsed)
     items = _dedupe_compact_noop_echo(items)
-    retained_source_ids = {item.source_id for item in items}
-    # Byte checkpoints follow file order even when parsing moved a record.
-    record_items = [
-        TranscriptRecordItems(
-            next_byte_offset=source_record.next_byte_offset,
-            items=tuple(item for item in record_parsed if item.source_id in retained_source_ids),
-        )
-        for source_record, record_parsed in zip(read_result.records, parsed_by_record, strict=True)
-    ]
+    record_items = _record_items_in_parse_order(
+        read_result.records,
+        parse_order,
+        parsed_by_record,
+        retained_source_ids={item.source_id for item in items},
+    )
     return TranscriptReadResult(
         line_cursor=read_result.line_cursor,
         byte_offset=read_result.byte_offset,
@@ -3473,7 +3515,8 @@ def read_transcript_items_from_offset(
     latest_custom_title: str | None = None
     entries = [_decoded_transcript_record(record) for record in read_result.records]
     parsed_by_record: list[tuple[ClaudeTranscriptItem, ...]] = [()] * len(entries)
-    for index in _parent_first_order(entries):
+    parse_order = _parent_first_order(entries)
+    for index in parse_order:
         entry = entries[index]
         if entry is None:
             continue
@@ -3507,15 +3550,12 @@ def read_transcript_items_from_offset(
             latest_custom_title = custom_title
         parsed_by_record[index] = tuple(parsed)
     items = _dedupe_compact_noop_echo(items)
-    retained_source_ids = {item.source_id for item in items}
-    # Byte checkpoints follow file order even when parsing moved a record.
-    record_items = [
-        TranscriptRecordItems(
-            next_byte_offset=source_record.next_byte_offset,
-            items=tuple(item for item in record_parsed if item.source_id in retained_source_ids),
-        )
-        for source_record, record_parsed in zip(read_result.records, parsed_by_record, strict=True)
-    ]
+    record_items = _record_items_in_parse_order(
+        read_result.records,
+        parse_order,
+        parsed_by_record,
+        retained_source_ids={item.source_id for item in items},
+    )
     return TranscriptReadResult(
         line_cursor=read_result.line_cursor,
         byte_offset=read_result.byte_offset,

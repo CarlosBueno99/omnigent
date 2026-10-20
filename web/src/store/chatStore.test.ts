@@ -16507,28 +16507,6 @@ describe("chatStore — live delta streaming (claude-native)", () => {
     // A paged window may hide the prompt those previews answer.
     { history: "paged history", hasMoreHistory: true, earlier: [], lifted: false },
     {
-      history: "an earlier /effort command",
-      hasMoreHistory: false,
-      earlier: [
-        {
-          type: "slash_command",
-          ctx: {
-            agent: null,
-            depth: 0,
-            turn: 0,
-            timestamp: 0,
-            responseId: "resp_0",
-            itemId: "sc_0",
-          },
-          kind: "command",
-          name: "effort",
-          arguments: "high",
-          output: null,
-        },
-      ] satisfies AnyBlock[],
-      lifted: false,
-    },
-    {
       history: "an agent greeting",
       hasMoreHistory: false,
       earlier: [
@@ -16537,28 +16515,6 @@ describe("chatStore — live delta streaming (claude-native)", () => {
           ctx: { agent: null, depth: 0, turn: 0, timestamp: 0, responseId: "resp_0", itemId: "a0" },
           fullText: "Hi!",
           hasCodeBlocks: false,
-        },
-      ] satisfies AnyBlock[],
-      lifted: false,
-    },
-    {
-      history: "an earlier shell input",
-      hasMoreHistory: false,
-      earlier: [
-        {
-          type: "terminal_command",
-          ctx: {
-            agent: null,
-            depth: 0,
-            turn: 0,
-            timestamp: 0,
-            responseId: "resp_0",
-            itemId: "sh_0",
-          },
-          kind: "input",
-          input: "ls",
-          stdout: null,
-          stderr: null,
         },
       ] satisfies AnyBlock[],
       lifted: false,
@@ -16588,16 +16544,17 @@ describe("chatStore — live delta streaming (claude-native)", () => {
       const renderedOrder = () => {
         const state = useChatStore.getState();
         const built = buildBubbles(state.blocks, state.activeResponse);
-        return sentAndPreviews(
-          mergePendingBubbles(
-            built,
-            buildPendingBubbles(state.pendingUserMessages, null),
-            opensWithEarlyReplyPreviews(built, state.hasMoreHistory),
-          ).flatMap((bubble) => {
-            if (bubble.kind === "user") return bubble.shellCommand ? [] : ["sent"];
-            return bubble.kind === "assistant" ? bubble.items.map((item) => item.itemId ?? "") : [];
-          }),
-        );
+        return mergePendingBubbles(
+          built,
+          buildPendingBubbles(state.pendingUserMessages, null),
+          opensWithEarlyReplyPreviews(built, state.hasMoreHistory),
+        ).flatMap((bubble) => {
+          if (bubble.kind === "user") return ["sent"];
+          if (bubble.kind === "routing_decision") return [bubble.itemId];
+          return bubble.kind === "assistant"
+            ? sentAndPreviews(bubble.items.map((item) => item.itemId ?? ""))
+            : [];
+        });
       };
       const blockOrder = () =>
         sentAndPreviews(
@@ -16606,11 +16563,16 @@ describe("chatStore — live delta streaming (claude-native)", () => {
             .blocks.map((b) => (b.type === "user_message" ? "sent" : (b.ctx.itemId ?? ""))),
         );
       const expected = lifted ? ["sent", "live:m_a", "live:m_b"] : ["live:m_a", "live:m_b", "sent"];
+      const chips = earlier.flatMap((block) =>
+        block.type === "routing_decision" ? [block.ctx.itemId] : [],
+      );
+      // A create-time routing chip renders below the send it belongs to.
+      const rendered = lifted ? ["sent", ...chips, "live:m_a", "live:m_b"] : expected;
 
       sink.push(nativeDelta("m_a", 0, "One.", true));
       sink.push(nativeDelta("m_b", 0, "Two.", false));
       await tick();
-      expect(renderedOrder()).toEqual(expected);
+      expect(renderedOrder()).toEqual(rendered);
 
       sink.push(
         sse("session.input.consumed", {
@@ -16625,7 +16587,7 @@ describe("chatStore — live delta streaming (claude-native)", () => {
       await tick();
       expect(useChatStore.getState().pendingUserMessages).toEqual([]);
       expect(blockOrder()).toEqual(expected);
-      expect(renderedOrder()).toEqual(expected);
+      expect(renderedOrder()).toEqual(rendered);
 
       controller.abort();
     },

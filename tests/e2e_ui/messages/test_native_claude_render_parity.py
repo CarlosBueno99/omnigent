@@ -240,9 +240,21 @@ def test_native_claude_message_render_parity(
         for item in _ordered_message_items(base_url, session_id)
     ]
     assert _replies_above_their_prompts(stored, user_markers, assistant_tokens) == []
+    orders = page.evaluate("window.__bubbleOrders")
+    assert any(
+        all(
+            any(role == "user" and marker in text for role, text in order)
+            for marker in user_markers
+        )
+        and all(
+            any(role == "assistant" and token in text for role, text in order)
+            for token in assistant_tokens
+        )
+        for order in orders
+    ), "the bubble-order log never captured every turn"
     displayed = [
         inverted
-        for order in page.evaluate("window.__bubbleOrders")
+        for order in orders
         for inverted in _replies_above_their_prompts(order, user_markers, assistant_tokens)
     ]
     assert displayed == [], f"a reply rendered above its prompt: {displayed}"
