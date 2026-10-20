@@ -21,6 +21,7 @@ from playwright.sync_api import Page, expect
 
 from tests._helpers.native_session import create_native_session
 from tests.e2e_ui.conftest import (
+    _CODEX_MOCK_MODEL,
     _bind_session_runner,
     _ensure_runner_online,
     _server_state,
@@ -39,9 +40,6 @@ _SESSION_BUTTON = "Approve for this session"
 _SESSION_LABEL = "Approved for this session"
 _CARD_TIMEOUT_MS = 15_000
 _CODEX_TURN_TIMEOUT_MS = 240_000
-# Must match the model in the mock openai provider config written by
-# _temp_omnigent_mock_config (conftest._CODEX_MOCK_MODEL).
-_CODEX_MOCK_MODEL = "gpt-4o"
 # The New Chat dialog's "Read only" launch args: every edit asks the human.
 _READ_ONLY_LAUNCH_ARGS = ["--sandbox", "read-only", "--ask-for-approval", "on-request"]
 
@@ -102,12 +100,23 @@ def _apply_patch_call(call_id: str, patch_body: str) -> dict:
     reason="codex-native e2e needs the `codex` CLI and `tmux` on PATH.",
 )
 @pytest.mark.timeout(600)
+@pytest.mark.parametrize(
+    ("approve_button", "responded_label", "expected_prompts"),
+    [(_SESSION_BUTTON, _SESSION_LABEL, 1), ("Approve", "Approved", 2)],
+    ids=["session", "one-time-control"],
+)
 def test_codex_native_file_change_session_approval_skips_later_prompts(
     request: pytest.FixtureRequest,
     codex_read_only_mock_session: tuple[str, str, Path],
     mock_llm_server_url: str,
+    approve_button: str,
+    responded_label: str,
+    expected_prompts: int,
 ) -> None:
-    """Approving the first edit for the session lets Codex edit that file again unprompted."""
+    """Approving the first edit for the session lets Codex edit that file again unprompted.
+
+    The one-time control proves the second edit would otherwise ask again.
+    """
     base_url, session_id, workspace = codex_read_only_mock_session
     nonce = uuid.uuid4().hex[:8]
     marker = f"filechange-{nonce}"
@@ -137,22 +146,21 @@ def test_codex_native_file_change_session_approval_skips_later_prompts(
         f"Context marker {marker}. Add {notes_name}, extend it, then reply with exactly: {done}",
     )
 
-    card = page.locator(_PENDING_CARD).filter(has_text="modify files").first
-    expect(card).to_be_visible(timeout=_CODEX_TURN_TIMEOUT_MS)
-    expect(card.get_by_role("button", name="Approve", exact=True)).to_be_visible()
-    expect(card.get_by_role("button", name="Reject", exact=True)).to_be_visible()
-    card.get_by_role("button", name=_SESSION_BUTTON, exact=True).click()
-    expect(page.locator(_RESPONDED_CARD).filter(has_text=_SESSION_LABEL).first).to_be_visible(
-        timeout=_CARD_TIMEOUT_MS
-    )
+    for answered in range(1, expected_prompts + 1):
+        card = page.locator(_PENDING_CARD).filter(has_text="modify files").first
+        expect(card).to_be_visible(timeout=_CODEX_TURN_TIMEOUT_MS)
+        for button in ("Approve", _SESSION_BUTTON, "Reject"):
+            expect(card.get_by_role("button", name=button, exact=True)).to_be_visible()
+        card.get_by_role("button", name=approve_button, exact=True).click()
+        expect(page.locator(_RESPONDED_CARD).filter(has_text=responded_label)).to_have_count(
+            answered, timeout=_CARD_TIMEOUT_MS
+        )
 
     reply = page.locator(_ASSISTANT, has_text=done).first
     expect(reply.or_(page.locator(_PENDING_CARD)).first).to_be_visible(
         timeout=_CODEX_TURN_TIMEOUT_MS
     )
-    expect(
-        page.locator(_PENDING_CARD), "Codex asked again for a file approved for this session"
-    ).to_have_count(0)
+    expect(page.locator(_PENDING_CARD), "Codex asked for an unexpected approval").to_have_count(0)
     expect(reply).to_be_visible()
-    expect(page.locator(_APPROVAL_CARD)).to_have_count(1)
+    expect(page.locator(_APPROVAL_CARD)).to_have_count(expected_prompts)
     assert (workspace / notes_name).read_text() == "notes\nmore notes\n"

@@ -5,6 +5,9 @@ These are pure-function tests — no HTTP or runtime needed.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 import pytest
 
 from omnigent.errors import OmnigentError
@@ -183,22 +186,29 @@ class TestCodexFileChangeApprovalPersistence:
 
         assert response == {"decision": decision}
 
-    def test_decline_ignores_persistence_meta(self) -> None:
-        result = ElicitationResult.model_validate(
+    @pytest.mark.parametrize(
+        ("build_response", "method", "decline", "accept"),
+        [
+            (_codex_file_change_approval_response, _FILE_CHANGE_METHOD, "decline", "accept"),
+            (_codex_apply_patch_approval_response, _APPLY_PATCH_METHOD, "denied", "approved"),
+        ],
+    )
+    def test_non_session_verdicts_ignore_persistence_meta(
+        self,
+        build_response: Callable[[ElicitationResult, str, dict[str, Any]], dict[str, Any]],
+        method: str,
+        decline: str,
+        accept: str,
+    ) -> None:
+        declined = ElicitationResult.model_validate(
             {"action": "decline", "_meta": {"persist": "session"}}
         )
-
-        response = _codex_file_change_approval_response(result, _FILE_CHANGE_METHOD, {})
-
-        assert response == {"decision": "decline"}
-
-    def test_rejects_unadvertised_persistence_mode(self) -> None:
-        result = ElicitationResult.model_validate(
+        unadvertised = ElicitationResult.model_validate(
             {"action": "accept", "_meta": {"persist": "always"}}
         )
 
-        with pytest.raises(OmnigentError, match="was not advertised"):
-            _codex_file_change_approval_response(result, _FILE_CHANGE_METHOD, {})
+        assert build_response(declined, method, {}) == {"decision": decline}
+        assert build_response(unadvertised, method, {}) == {"decision": accept}
 
 
 # ── _string_list_answer ──────────────────────────────────────────────

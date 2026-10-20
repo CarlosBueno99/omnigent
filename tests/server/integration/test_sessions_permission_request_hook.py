@@ -2487,11 +2487,17 @@ async def test_codex_mcp_elicitation_hook_persists_web_session_approval(
     }
 
 
-async def test_codex_file_change_approval_hook_returns_accept_for_session(
+@pytest.mark.parametrize(
+    ("persist", "decision"),
+    [("session", "acceptForSession"), ("always", "accept")],
+)
+async def test_codex_file_change_approval_hook_returns_session_decision(
     client: httpx.AsyncClient,
+    persist: str,
+    decision: str,
 ) -> None:
-    """A file-change card advertises the session scope and returns ``acceptForSession``."""
-    agent = await create_test_agent(client, "test-codex-file-change-session")
+    """A file-change card advertises the session scope; other scopes stay one-time."""
+    agent = await create_test_agent(client, f"test-codex-file-change-{persist}")
     session_id = await _create_session(client, agent["id"])
     payload = {
         "id": 21,
@@ -2520,13 +2526,13 @@ async def test_codex_file_change_approval_hook_returns_accept_for_session(
     assert event["params"]["codex_persist_modes"] == ["session"]
     verdict = await client.post(
         f"/v1/sessions/{session_id}/elicitations/{event['elicitation_id']}/resolve",
-        json={"action": "accept", "_meta": {"persist": "session"}},
+        json={"action": "accept", "_meta": {"persist": persist}},
     )
     assert verdict.status_code == 202, verdict.text
 
     resp = await hook_task
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"decision": "acceptForSession"}
+    assert resp.json() == {"decision": decision}
 
 
 async def test_codex_pending_elicitation_survives_session_snapshot_refresh(

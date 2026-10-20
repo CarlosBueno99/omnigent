@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -257,11 +257,20 @@ def _codex_mcp_elicitation_response(
     :raises OmnigentError: If the verdict asks for a persistence mode
         the original Codex request did not advertise.
     """
-    requested_persist = _requested_persist_mode(result, _codex_mcp_persist_modes(params))
+    response_meta: dict[str, str] | None = None
+    requested_persist = result.meta.get("persist") if result.meta is not None else None
+    if result.action == "accept" and requested_persist is not None:
+        advertised = _codex_mcp_persist_modes(params)
+        if not isinstance(requested_persist, str) or requested_persist not in advertised:
+            raise OmnigentError(
+                "Codex MCP persistence choice was not advertised by the request.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        response_meta = {"persist": requested_persist}
     return {
         "action": result.action,
         "content": result.content if result.action == "accept" else None,
-        "_meta": {"persist": requested_persist} if requested_persist is not None else None,
+        "_meta": response_meta,
     }
 
 
@@ -275,30 +284,18 @@ def _codex_mcp_persist_modes(params: dict[str, Any]) -> set[str]:
     return {value for value in values if isinstance(value, str) and value in {"session", "always"}}
 
 
-def _requested_persist_mode(
-    result: ElicitationResult,
-    advertised: Collection[str],
-) -> str | None:
+def _is_session_accept(result: ElicitationResult) -> bool:
     """
-    Return the persistence scope an accepted web verdict asked for.
+    Return whether a web verdict accepts a Codex file change for the session.
+
+    Codex file changes support only the ``session`` scope; any other
+    requested mode stays a one-time accept so Codex still gets an answer.
 
     :param result: Web-submitted elicitation result.
-    :param advertised: Persistence modes the request offered, e.g.
-        ``{"session", "always"}``.
-    :returns: The requested mode, or ``None`` for one-time accepts and
-        for declines / cancels.
-    :raises OmnigentError: If the verdict asks for a mode the request
-        did not advertise.
+    :returns: ``True`` for an accept whose ``_meta.persist`` is ``"session"``.
     """
-    requested = result.meta.get("persist") if result.meta is not None else None
-    if result.action != "accept" or requested is None:
-        return None
-    if not isinstance(requested, str) or requested not in advertised:
-        raise OmnigentError(
-            "Codex persistence choice was not advertised by the request.",
-            code=ErrorCode.INVALID_INPUT,
-        )
-    return requested
+    persist = result.meta.get("persist") if result.meta is not None else None
+    return result.action == "accept" and persist == "session"
 
 
 def _execpolicy_amendment(value: Any) -> list[str] | None:
@@ -466,10 +463,8 @@ def _codex_file_change_approval_response(
     :param _params: Original Codex request params, unused because the
         response depends only on the web verdict.
     :returns: Codex ``FileChangeRequestApprovalResponse`` payload.
-    :raises OmnigentError: If the verdict asks for a persistence mode
-        other than ``session``.
     """
-    if _requested_persist_mode(result, _CODEX_FILE_CHANGE_PERSIST_MODES) == "session":
+    if _is_session_accept(result):
         return {"decision": "acceptForSession"}
     return {
         "decision": {
@@ -497,10 +492,8 @@ def _codex_apply_patch_approval_response(
     :param _params: Original Codex request params, unused because the
         response depends only on the web verdict.
     :returns: Codex ``ApplyPatchApprovalResponse`` payload.
-    :raises OmnigentError: If the verdict asks for a persistence mode
-        other than ``session``.
     """
-    if _requested_persist_mode(result, _CODEX_FILE_CHANGE_PERSIST_MODES) == "session":
+    if _is_session_accept(result):
         return {"decision": "approved_for_session"}
     return {
         "decision": {
