@@ -761,7 +761,7 @@ def mark_subagent_work_terminal(
             entry.completed_at = time.time()
             entry.delivered = False
             return _deliver_subagent_completion(entry)
-        # A child-reported terminal state supersedes the reaper's provisional failure.
+        # The child's actual terminal outcome supersedes the reaper's provisional failure.
         if entry.launch_timed_out and status in _SUBAGENT_TERMINAL_STATUSES:
             entry.status = status
             entry.output = output
@@ -930,7 +930,7 @@ async def run_subagent_launch_reaper(
     reconcile_pending: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """
-    Periodically sweep for sub-agent dispatches wedged in ``launching``.
+    Periodically fail stalled sub-agent dispatches via :func:`reap_stalled_subagent_launches`.
 
     Runs until cancelled; started by the runner entrypoint alongside the
     process manager. Sweep errors are logged and never end the loop.

@@ -20,6 +20,7 @@ from omnigent.harnesses.codex_native.bridge import (
     read_bridge_state,
     read_certificate_failure,
     record_certificate_failure,
+    update_active_turn_id,
     write_bridge_state,
 )
 from tests.harnesses.codex_native.forwarder._support import (
@@ -742,6 +743,17 @@ def _turn_event(
             id="no-active-turn",
         ),
         pytest.param(
+            None,
+            [
+                _turn_event("item/started", "turn_123", "userMessage"),
+                {"active_turn_id": "turn_123"},
+                _turn_event("item/completed", "turn_123", "userMessage"),
+                _turn_event("item/completed", "turn_123", "agentMessage"),
+            ],
+            ["turn_123"],
+            id="turn-id-written-after-first-item",
+        ),
+        pytest.param(
             "turn_124",
             [_turn_event("item/completed", "turn_123", "agentMessage")],
             [],
@@ -776,10 +788,15 @@ async def test_first_item_reports_running_for_a_turn_whose_start_was_missed(
     client = _RecordingClient()
     forwarder_state = fwd._CodexForwarderState()
     for event in events:
+        if "active_turn_id" in event:
+            active_turn_id = event["active_turn_id"]
+            update_active_turn_id(tmp_path, active_turn_id)
+            continue
         await fwd._post_missed_turn_start(
             client,  # type: ignore[arg-type]
             session_id="conv_x",
             bridge_dir=tmp_path,
+            thread_id="thread_123",
             event=event,
             forwarder_state=forwarder_state,
         )

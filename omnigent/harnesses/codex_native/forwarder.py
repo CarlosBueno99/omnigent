@@ -2305,6 +2305,7 @@ async def supervise_forwarder(
                         ap_client,
                         session_id=target.session_id,
                         bridge_dir=bridge_dir,
+                        thread_id=target.thread_id,
                         event=event,
                         forwarder_state=forwarder_state,
                     )
@@ -5055,6 +5056,7 @@ async def _post_missed_turn_start(
     *,
     session_id: str,
     bridge_dir: Path,
+    thread_id: str,
     event: CodexMessage,
     forwarder_state: _CodexForwarderState,
 ) -> None:
@@ -5065,17 +5067,12 @@ async def _post_missed_turn_start(
     turn's first live item (normally its ``userMessage``) is the earliest sign
     this connection gets that Codex began it. Resume replay is excluded: it
     publishes its own verdict from the resumed turn's status.
-
-    :param client: HTTP client for Omnigent event posts.
-    :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
-    :param bridge_dir: Native Codex bridge directory.
-    :param event: Live Codex notification envelope.
-    :param forwarder_state: Mutable state for this forwarder connection.
-    :returns: None.
     """
     params = event.get("params")
-    if event.get("method") not in {"item/started", "item/completed"} or not isinstance(
-        params, dict
+    if (
+        event.get("method") not in {"item/started", "item/completed"}
+        or not isinstance(params, dict)
+        or params.get("threadId") != thread_id
     ):
         return
     turn_id = _turn_id_from_payload(params)
