@@ -220,12 +220,9 @@ export function useIdleNotifications(activeConversationId?: string): void {
     else void setBadgeCount(count);
   };
 
-  // Refocusing the window (focused on the open conversation) marks that
-  // conversation read: recompute from the latest list with windowFocused
-  // true, which drops the actively-viewed id from the count unless it's
-  // explicitly marked unread. The persistent last-seen baseline is advanced
-  // by ChatPage's `useMarkConversationSeen`, so the next data tick agrees
-  // with this immediate recompute.
+  // Refocusing the window marks the open conversation read: recompute with windowFocused true,
+  // dropping it from the count unless it's explicitly unread. ChatPage's `useMarkConversationSeen`
+  // advances the last-seen baseline, so the next data tick agrees with this recompute.
   useEffect(() => {
     const onFocus = () => {
       windowFocusedRef.current = true;
