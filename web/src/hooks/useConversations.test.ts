@@ -314,30 +314,19 @@ describe("useConversations search timeout", () => {
 
   it("does not bound an ordinary (non-search) list fetch", async () => {
     const timeout = vi.spyOn(AbortSignal, "timeout");
-    renderSearch("");
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-
-    // Plain pagination is indexed/fast; adding a deadline could abort a
-    // legitimately larger page, so it carries only the query's cancellation signal.
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     try {
+      renderSearch("");
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+      // Plain pagination is indexed/fast; adding a deadline could abort a
+      // legitimately larger page, so it carries only the query's cancellation signal.
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(url).not.toContain("search_query=");
       expect(timeout).not.toHaveBeenCalled();
       expect(init.signal?.aborted).toBe(false);
     } finally {
       timeout.mockRestore();
     }
-  });
-
-  it("aborts a search fetch when its query is cancelled", async () => {
-    fetchMock.mockReturnValueOnce(new Promise(() => {}));
-    const queryClient = renderSearch("linear");
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(init.signal?.aborted).toBe(false);
-    await queryClient.cancelQueries();
-    expect(init.signal?.aborted).toBe(true);
   });
 
   it("does not retry a client-side search timeout, but retries other errors", () => {

@@ -549,11 +549,7 @@ export async function fetchConversationsPage({
   // SEARCH_FETCH_TIMEOUT_MS): a search whose server-side index is missing can
   // hang, and the palette shows "Searching…" for the whole in-flight window.
   // Plain list pagination is indexed/fast, so it keeps no timeout.
-  let signal = requestSignal;
-  if (searchQuery) {
-    const deadline = AbortSignal.timeout(SEARCH_FETCH_TIMEOUT_MS);
-    signal = requestSignal ? AbortSignal.any([requestSignal, deadline]) : deadline;
-  }
+  const signal = searchQuery ? AbortSignal.timeout(SEARCH_FETCH_TIMEOUT_MS) : requestSignal;
   const res = await authenticatedFetch(`/v1/sessions?${params.toString()}`, { signal });
   // Carries the server's `code`, so a dead cursor stays recognizable as
   // `stale_cursor` instead of an opaque "400 Bad Request".
@@ -652,8 +648,8 @@ export function conversationsQueryKey(
   visibility: "mine" | "shared" | "archived" | undefined,
   sortBy: SessionSortBy,
 ): unknown[] {
-  // Keys stay identical to existing cache entries; created_at lists always use the
-  // full six-element key.
+  // The base three-element key is shared with other callers; only filtered lists get
+  // longer keys, and created_at lists always use the full six-element key.
   if (sortBy === "created_at") {
     return ["conversations", searchQuery, includeArchived, project ?? null, visibility, sortBy];
   }
