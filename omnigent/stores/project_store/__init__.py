@@ -78,13 +78,16 @@ class ProjectStore(ABC):
         ...
 
     @abstractmethod
-    def get_by_name(self, name: str, *, user_id: str | None) -> Project | None:
+    def get_or_create_by_name(
+        self, project_id: str, name: str, user_id: str | None
+    ) -> tuple[Project, bool]:
         """
-        Return the owner's oldest project with exactly this name, or ``None``.
+        Return the owner's oldest project with exactly this name, creating it if absent.
 
-        :param name: The project name, e.g. ``"Nightly triage"``.
-        :param user_id: The owner whose projects to search.
-        :returns: The matching :class:`Project`, else ``None``.
+        :param project_id: Pre-generated id used only when a project is created.
+        :param name: Trimmed project name, e.g. ``"Nightly triage"``.
+        :param user_id: Owning user, or ``None`` in single-user mode.
+        :returns: The project, and whether this call created it.
         """
         ...
 

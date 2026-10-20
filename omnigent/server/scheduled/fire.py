@@ -853,8 +853,7 @@ async def _agent_revision(deps: FireDeps, conv: Conversation) -> str | None:
 async def _fire_project_id(deps: FireDeps, task: ScheduledTask) -> str | None:
     """Return the project to file a fired session into, or ``None``.
 
-    A project deleted since the task was saved leaves the session unfiled rather
-    than failing the run, and is cleared from the task.
+    A deleted project leaves the session unfiled and is cleared from the task.
     """
     if task.project_id is None or deps.project_store is None:
         # Without a store the id can't be verified, so file nothing.
@@ -873,12 +872,11 @@ async def _fire_project_id(deps: FireDeps, task: ScheduledTask) -> str | None:
             task.id,
             task.project_id,
         )
-        # Best effort: clear only if the task still points there (it may have
-        # been moved since), and never fail the run over it.
+        # Clear only if the task still names this project; never fail the run.
         try:
-            current = await asyncio.to_thread(deps.scheduled_task_store.get, task.id)
-            if current is not None and current.project_id == task.project_id:
-                await asyncio.to_thread(deps.scheduled_task_store.update, task.id, project_id=None)
+            await asyncio.to_thread(
+                deps.scheduled_task_store.clear_project_id, task.id, task.project_id
+            )
         except Exception:
             _logger.exception("scheduled fire: task %s could not clear its project", task.id)
         return None

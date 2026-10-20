@@ -40,13 +40,15 @@ vi.mock("@/hooks/useScheduledTasks", () => ({
 vi.mock("@/lib/agentLabels", () => ({ useBrainHarnessLabels: () => ({}) }));
 // The project field (and the shared ProjectPicker inside it) lists projects
 // from this hook.
+const PROJECTS = [
+  { id: "proj_1", name: "Triage", icon: null },
+  { id: "proj_2", name: "Reports", icon: null },
+];
+const projectsQuery = vi.hoisted(() => ({
+  current: { data: undefined as unknown, isPending: false },
+}));
 vi.mock("@/hooks/useConversations", () => ({
-  useProjects: () => ({
-    data: [
-      { id: "proj_1", name: "Triage", icon: null },
-      { id: "proj_2", name: "Reports", icon: null },
-    ],
-  }),
+  useProjects: () => projectsQuery.current,
 }));
 vi.mock("@/shell/WorkspacePicker", () => ({
   isNavigablePath: (path: string) => path.startsWith("/"),
@@ -155,6 +157,7 @@ const mutateAsync = vi.fn();
 const updateMutateAsync = vi.fn();
 
 beforeEach(() => {
+  projectsQuery.current = { data: PROJECTS, isPending: false };
   mutateAsync.mockReset().mockResolvedValue({ id: "st_new" });
   updateMutateAsync.mockReset().mockResolvedValue({ id: "st_1" });
   vi.mocked(agentsHook.useAvailableAgents).mockReturnValue({
@@ -1057,6 +1060,15 @@ describe("CreateScheduledTaskDialog project", () => {
     fireEvent.click(screen.getByTestId("create-scheduled-task-submit"));
     await waitFor(() => expect(updateMutateAsync).toHaveBeenCalledTimes(1));
     expect(updateMutateAsync.mock.calls[0][0].input).toMatchObject({ projectId: "proj_2" });
+  });
+
+  it("shows a loading label, not a deleted one, while projects load", async () => {
+    projectsQuery.current = { data: undefined, isPending: true };
+    renderEditingFiledTask();
+    expect(screen.getByTestId("task-project-trigger")).toHaveTextContent("Loading…");
+    openProjectMenu();
+    expect(await screen.findByLabelText("Search or create project")).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "No project" })).not.toBeInTheDocument();
   });
 
   it("unfiles an edited task's runs when its project is removed", async () => {

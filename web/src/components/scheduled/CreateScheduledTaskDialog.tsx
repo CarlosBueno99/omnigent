@@ -222,8 +222,7 @@ export function CreateScheduledTaskDialog({
   // "managed_sandbox") instead of a connected host; hides the host/workspace
   // pickers. Only offered when the server advertises managed sandboxes.
   const [sandboxMode, setSandboxMode] = useState(false);
-  // Project every fired session is filed into, by name. `null` keeps the edited
-  // task's project unchanged; "" files runs into no project.
+  // Project by name: null = unchanged; "" = no project.
   const [projectChoice, setProjectChoice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [scheduleUnsupported, setScheduleUnsupported] = useState(false);
@@ -277,12 +276,13 @@ export function CreateScheduledTaskDialog({
   const projectName = projectChoice ?? savedProjectName ?? "";
   const projectIcon = projects.find((p) => p.name === projectName)?.icon;
   // The saved project has no name while the list loads or once it is deleted.
-  const unresolvedProjectLabel =
-    projectChoice === null && savedProjectName === undefined
-      ? projectsLoading
-        ? "Loading…"
-        : "Deleted project"
-      : null;
+  const savedProjectUnresolved = projectChoice === null && savedProjectName === undefined;
+  const savedProjectDeleted = savedProjectUnresolved && !projectsLoading;
+  const unresolvedProjectLabel = savedProjectUnresolved
+    ? savedProjectDeleted
+      ? "Deleted project"
+      : "Loading…"
+    : null;
 
   const hostOptions = hosts ?? [];
   const preservePinnedHost = isEdit && editingTask?.hostId != null;
@@ -361,19 +361,12 @@ export function CreateScheduledTaskDialog({
           ? { workspace: workspace.trim() }
           : {}),
       };
-      // An existing project goes by id; a newly typed name is created by the
-      // server. Only a changed choice is sent on edit.
-      const pickedProjectId = projects.find((p) => p.name === projectChoice)?.id ?? null;
-      const projectInput =
-        projectChoice === null || projectChoice === savedProjectName
-          ? {}
-          : projectChoice === ""
-            ? savedProjectId !== null
-              ? { projectId: null }
-              : {}
-            : pickedProjectId !== null
-              ? { projectId: pickedProjectId }
-              : { projectName: projectChoice };
+      const projectInput = projectChangeInput(
+        projectChoice,
+        savedProjectId,
+        savedProjectName,
+        projects,
+      );
       if (editingTask) {
         // Thread model/effort ONLY when the agent supports them. Each control's
         // "" (Default) maps to `null` so an update CLEARS a previously-set
@@ -598,7 +591,7 @@ export function CreateScheduledTaskDialog({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="min-w-56">
-                  {unresolvedProjectLabel !== null && (
+                  {savedProjectDeleted && (
                     <DropdownMenuItem className="px-2 py-1" onSelect={() => setProjectChoice("")}>
                       No project
                     </DropdownMenuItem>
@@ -742,6 +735,22 @@ export function CreateScheduledTaskDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * The project fields to send for a pick: an existing project by id, a newly
+ * typed name by name, and nothing when the choice is unchanged.
+ */
+function projectChangeInput(
+  choice: string | null,
+  savedProjectId: string | null,
+  savedProjectName: string | undefined,
+  projects: { id: string | null; name: string }[],
+): { projectId?: string | null; projectName?: string } {
+  if (choice === null || choice === savedProjectName) return {};
+  if (choice === "") return savedProjectId !== null ? { projectId: null } : {};
+  const pickedId = projects.find((p) => p.name === choice)?.id ?? null;
+  return pickedId !== null ? { projectId: pickedId } : { projectName: choice };
 }
 
 /** Sentinel Select value for "no pinned host" — Radix Select disallows "". */

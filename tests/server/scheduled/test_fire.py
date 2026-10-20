@@ -125,6 +125,13 @@ class FakeScheduledTaskStore:
         self.updates.append({"id": scheduled_task_id, **kwargs})
         return self._rows.get(scheduled_task_id)
 
+    def clear_project_id(self, scheduled_task_id: str, project_id: str) -> bool:
+        row = self._rows.get(scheduled_task_id)
+        if row is None or row.project_id != project_id:
+            return False
+        self.updates.append({"id": scheduled_task_id, "project_id": None})
+        return True
+
     def create_run(
         self, run_id: str, scheduled_task_id: str, status: str, scheduled_at: int, **kwargs: Any
     ) -> Any:
@@ -525,9 +532,10 @@ async def test_fired_session_is_filed_into_the_task_project(
 
 @pytest.mark.asyncio
 async def test_fire_keeps_a_project_the_task_moved_to_mid_fire() -> None:
-    moved = _task(project_id="proj_2")
     stale = _task(project_id="proj_1")
-    store = SequencedScheduledTaskStore([stale, stale, moved])
+    store = SequencedScheduledTaskStore([stale, stale])
+    # The row has moved on to another project by the time the fire clears it.
+    store._rows["task_1"] = _task(project_id="proj_2")
 
     async def _launch(conv: Any, task: Any) -> None:
         return None

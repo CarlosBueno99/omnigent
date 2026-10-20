@@ -661,6 +661,23 @@ async def test_update_moves_the_task_to_another_existing_project(
     assert sorted(p["name"] for p in projects) == ["first", "second"]
 
 
+async def test_failed_create_discards_the_project_it_made(
+    auth_client: httpx.AsyncClient, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_user(db_uri)
+
+    def _fail(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("insert failed")
+
+    monkeypatch.setattr(SqlAlchemyScheduledTaskStore, "create", _fail)
+    with pytest.raises(RuntimeError, match="insert failed"):
+        await auth_client.post(
+            "/v1/scheduled-tasks", json=_create_body(project_name="orphan"), headers=_headers()
+        )
+    projects = (await auth_client.get("/v1/projects", headers=_headers())).json()["data"]
+    assert "orphan" not in {p["name"] for p in projects}
+
+
 async def test_update_rejects_another_users_project(
     auth_client: httpx.AsyncClient, db_uri: str
 ) -> None:
