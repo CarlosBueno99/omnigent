@@ -402,7 +402,7 @@ describe("ForkSessionDialog", () => {
       updated_at: 1_700_000_000,
       agent_id: "ag_source",
     });
-    // The keep-alive re-injects the row into a first-page fetch that lags it.
+    // Arms the keep-alive.
     expect(recentlyCreatedSessions.has("conv_fork")).toBe(true);
   });
 

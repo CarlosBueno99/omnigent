@@ -1372,7 +1372,7 @@ function SupportedForkSessionForm({
           console.warn(`Clone ${fork.id}: background runner launch failed`, e);
         });
       }
-      // Keep the fork listed while a search-indexed list refetch lags the write.
+      // Show the fork now and keep it listed while the list refetch lags.
       insertCreatedRowIntoCaches(queryClient, conversationRowFromSession(fork));
       // Fire-and-forget: the sidebar refresh must not gate navigation.
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
