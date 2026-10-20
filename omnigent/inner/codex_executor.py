@@ -2275,9 +2275,7 @@ def _provider_codex_config_overrides(
     # to start at all.
     effective_wire_api = "responses" if wire_api == "chat" else wire_api
     arcaterm_headers = (
-        _arcaterm_env_http_headers(arcaterm_version)
-        if _is_databricks_gateway(base_url)
-        else ""
+        _arcaterm_env_http_headers(arcaterm_version) if _is_databricks_gateway(base_url) else ""
     )
     overrides: list[str] = []
     if model:

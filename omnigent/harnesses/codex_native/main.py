@@ -28,6 +28,8 @@ from omnigent._runner_startup import RunnerStartupProgress, runner_startup_progr
 from omnigent._startup_events import record_startup_event
 from omnigent._wrapper_labels import (
     ARCATERM_VERSION_LABEL_KEY as _ARCATERM_VERSION_LABEL_KEY,
+)
+from omnigent._wrapper_labels import (
     CODEX_NATIVE_WRAPPER_VALUE as _WRAPPER_LABEL_VALUE,
 )
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY as _WRAPPER_LABEL_KEY
@@ -1206,9 +1208,7 @@ async def _prepare_codex_terminal(
             bridge_id = str(labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY) or session_id)
             # Retrieve arcaterm_version from session labels if present
             arcaterm_version = (
-                labels.get(_ARCATERM_VERSION_LABEL_KEY)
-                if isinstance(labels, dict)
-                else None
+                labels.get(_ARCATERM_VERSION_LABEL_KEY) if isinstance(labels, dict) else None
             )
             existing_terminal = await _find_running_codex_terminal(client, session_id)
             external_session_id = payload.get("external_session_id")
