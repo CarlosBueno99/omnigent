@@ -995,7 +995,7 @@ describe("browserIpc — typed actions", () => {
       action: "click",
       params: { selector: "button" },
     });
-    t.mock.timers.tick(30_000);
+    t.mock.timers.tick(29_999);
     const result = await pending;
     assert.equal(result.ok, false);
     assert.match(result.error, /did not finish within/);

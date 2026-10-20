@@ -230,6 +230,34 @@ it("presses, moves focus and releases across a task before clicking", async () =
   }
 });
 
+for (const [replaceOn, pressEvents] of [
+  ["pointerdown", ["pointerdown:trigger", "mousedown:wrap"]],
+  ["mousedown", ["pointerdown:trigger", "mousedown:trigger"]],
+]) {
+  it(`releases on the element under the pointer when ${replaceOn} replaces the target`, async () => {
+    const dom = openPage('<div id="wrap"><button id="trigger">Open</button></div>');
+    try {
+      const { window } = dom;
+      const { document } = window;
+      const log = [];
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"])
+        document.addEventListener(type, (event) => log.push(`${type}:${event.target.id}`), true);
+      const wrap = document.querySelector("#wrap");
+      document.querySelector("#trigger").addEventListener(replaceOn, () => {
+        const replacement = document.createElement("button");
+        replacement.id = "replacement";
+        wrap.replaceChildren(replacement);
+      });
+      document.elementFromPoint = () => document.querySelector("#replacement");
+      const script = buildBrowserActionScript("click", { selector: "#trigger" });
+      assert.equal(await window.eval(script), "ok");
+      assert.deepEqual(log, [...pressEvents, "pointerup:replacement", "mouseup:replacement"]);
+    } finally {
+      dom.window.close();
+    }
+  });
+}
+
 it("ends a click when its press leaves the page and when the message channel never delivers", async () => {
   const dom = openPage('<button id="save">Save</button><a id="leave" href="/next">Leave</a>');
   try {

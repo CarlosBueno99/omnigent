@@ -217,9 +217,12 @@ const CLICK_JS = `
     clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
   };
   const pointer = { ...mouse, detail: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+  const ancestors = [];
+  for (let node = el; node; node = node.parentElement ?? node.parentNode?.host) ancestors.push(node);
   const pressed = el.dispatchEvent(new PointerEvent('pointerdown', { ...pointer, buttons: 1 }));
-  if (pressed && el.dispatchEvent(new MouseEvent('mousedown', { ...mouse, buttons: 1 }))) {
-    const focusable = el.closest(
+  const pressTarget = ancestors.find((node) => node.isConnected) ?? document.documentElement;
+  if (pressed && pressTarget.dispatchEvent(new MouseEvent('mousedown', { ...mouse, buttons: 1 }))) {
+    const focusable = pressTarget.closest(
       'a[href], button, input, select, textarea, summary, iframe, [tabindex], ' +
       '[contenteditable]:not([contenteditable="false"])');
     if (focusable) focusable.focus({ preventScroll: true });
@@ -243,6 +246,13 @@ const CLICK_JS = `
     channel.port2.postMessage(null);
   });
   if (left) return 'ok';
+  // Like a browser, release on what is now under the pointer and skip the click if the press removed el.
+  if (!el.isConnected) {
+    const release = document.elementFromPoint(mouse.clientX, mouse.clientY) ?? document.documentElement;
+    release.dispatchEvent(new PointerEvent('pointerup', pointer));
+    if (pressed) release.dispatchEvent(new MouseEvent('mouseup', mouse));
+    return 'ok';
+  }
   el.dispatchEvent(new PointerEvent('pointerup', pointer));
   if (pressed) el.dispatchEvent(new MouseEvent('mouseup', mouse));
   if (el.click) el.click(); else el.dispatchEvent(new MouseEvent('click', mouse));
