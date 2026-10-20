@@ -980,7 +980,10 @@ async def test_other_users_task_is_not_visible(
     assert listed.json()["scheduled_tasks"] == []
 
 
-@pytest.mark.parametrize("tz", ["Not/A_Timezone", "", "../UTC", "America"])
+_INVALID_TIMEZONES = ["Not/A_Timezone", "", "../UTC", "America"]
+
+
+@pytest.mark.parametrize("tz", _INVALID_TIMEZONES)
 async def test_create_rejects_invalid_timezone(
     auth_client: httpx.AsyncClient, db_uri: str, tz: str
 ) -> None:
@@ -993,7 +996,7 @@ async def test_create_rejects_invalid_timezone(
     assert resp.status_code == 400, resp.text
 
 
-@pytest.mark.parametrize("tz", ["Bogus/Zone", "", "../UTC", "America"])
+@pytest.mark.parametrize("tz", _INVALID_TIMEZONES)
 async def test_update_rejects_invalid_timezone(
     auth_client: httpx.AsyncClient, db_uri: str, tz: str
 ) -> None:
@@ -1045,7 +1048,7 @@ async def test_create_without_timezone_uses_the_owners_recorded_zone(
     assert (await create("bob@example.com", unzoned))["timezone"] == "UTC"
 
 
-@pytest.mark.parametrize("tz", ["Not/A_Timezone", "", "../UTC", "America"])
+@pytest.mark.parametrize("tz", _INVALID_TIMEZONES)
 async def test_set_default_timezone_rejects_invalid_timezone(
     auth_client: httpx.AsyncClient, db_uri: str, tz: str
 ) -> None:

@@ -188,14 +188,17 @@ describe("deleteScheduledTask", () => {
 });
 
 describe("reportLocalTimezone", () => {
+  const mockBrowserZone = (timeZone: string) =>
+    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
+      timeZone,
+    } as Intl.ResolvedDateTimeFormatOptions);
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
   it("PUTs the browser's zone as the caller's default", async () => {
-    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
-      timeZone: "America/Chicago",
-    } as Intl.ResolvedDateTimeFormatOptions);
+    mockBrowserZone("America/Chicago");
     fetchMock.mockResolvedValueOnce(mockResponse({ timezone: "America/Chicago" }));
     await reportLocalTimezone();
     const [url, init] = fetchMock.mock.calls[0];
@@ -205,21 +208,22 @@ describe("reportLocalTimezone", () => {
   });
 
   it("does not report a zone the browser cannot resolve", async () => {
-    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
-      timeZone: "",
-    } as Intl.ResolvedDateTimeFormatOptions);
+    mockBrowserZone("");
     await reportLocalTimezone();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("ignores a failed request", async () => {
-    fetchMock.mockRejectedValueOnce(new TypeError("offline"));
+  it.each([
+    ["a failed request", () => fetchMock.mockRejectedValueOnce(new TypeError("offline"))],
+    [
+      "a server that predates the endpoint",
+      () => fetchMock.mockResolvedValueOnce(mockResponse({}, { ok: false, status: 405 })),
+    ],
+  ])("ignores %s", async (_case, respond) => {
+    mockBrowserZone("America/Chicago");
+    respond();
     await expect(reportLocalTimezone()).resolves.toBeUndefined();
-  });
-
-  it("ignores a server that predates the endpoint", async () => {
-    fetchMock.mockResolvedValueOnce(mockResponse({}, { ok: false, status: 405 }));
-    await expect(reportLocalTimezone()).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
