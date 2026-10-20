@@ -3276,30 +3276,35 @@ async def test_serve_tunnel_wake_forces_prompt_reconnect(
 
 
 @pytest.mark.asyncio
-async def test_serve_tunnel_403_clears_server_error_decline_and_remints(
+@pytest.mark.parametrize("latch", ["declined_by_server_error", "declined_without_proxy_bearer"])
+async def test_serve_tunnel_403_clears_recoverable_decline_and_remints(
     monkeypatch: pytest.MonkeyPatch,
+    latch: str,
 ) -> None:
-    """An upgrade 403 clears a 5xx-latched mint decline so the tunnel re-mints.
+    """An upgrade 403 clears a recoverable mint decline so the tunnel re-mints.
 
     When an intermediary 5xx latched the managed-mint factory's ``declined``
-    while the server was down, the factory returns ``None`` without touching
-    the network. If the tunnel handshake itself requires the minted bearer,
-    the runner must recover without an HTTP callback triggering the reset
-    first: the upgrade rejection is the re-auth signal, so the tunnel clears
-    the latch and the loop-top refresh re-mints on the next attempt.
+    while the server was down, or a no-bearer 401/403 latched it before the
+    server would mint for this runner, the factory returns ``None`` without
+    touching the network. If the tunnel handshake itself requires the minted
+    bearer, the runner must recover without an HTTP callback triggering the
+    reset first: the upgrade rejection is the re-auth signal, so the tunnel
+    clears the latch and the loop-top refresh re-mints on the next attempt.
 
     :param monkeypatch: Pytest monkeypatch fixture.
+    :param latch: The recoverable-decline attribute the factory latched.
     :returns: None.
     """
     attempt = 0
     tokens: list[str | None] = []
 
     class _DeclinedFactory:
-        """Managed-mint factory stand-in with a 5xx-latched decline."""
+        """Managed-mint factory stand-in with a recoverable decline."""
 
         def __init__(self) -> None:
             self.declined = True
-            self.declined_by_server_error = True
+            self.declined_by_server_error = latch == "declined_by_server_error"
+            self.declined_without_proxy_bearer = latch == "declined_without_proxy_bearer"
 
         def __call__(self) -> str | None:
             if self.declined:
@@ -3309,6 +3314,7 @@ async def test_serve_tunnel_403_clears_server_error_decline_and_remints(
         def reset_decline(self) -> None:
             self.declined = False
             self.declined_by_server_error = False
+            self.declined_without_proxy_bearer = False
 
     factory = _DeclinedFactory()
 

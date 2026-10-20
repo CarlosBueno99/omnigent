@@ -37,6 +37,7 @@ from omnigent.runner.transports.ws_tunnel.serve import (
     RUNNER_TUNNEL_NO_CREDENTIAL_PREFIX,
     RUNNER_TUNNEL_REJECTION_PREFIX,
     RunnerTunnelAuthRejectedError,
+    _reset_recoverable_decline,
 )
 from omnigent.util.threaded_auth import ThreadedAuth
 from omnigent.version import VERSION
@@ -388,26 +389,19 @@ class _RunnerDatabricksAuth(ThreadedAuth):
             if not token:
                 if declined:
                     # The mint path declined for this runner (HTTP 400/404
-                    # no-auth/header mode, or a 5xx from an intermediary).
+                    # no-auth/header mode, a 5xx from an intermediary, or a
+                    # 401/403 before the runner held any bearer).
                     # Bare requests are correct on a no-auth server; do NOT
                     # fail closed or the runner bricks every callback.
                     response = yield request
                     if not _is_login_redirect_or_unauthorized(response):
                         return
                     # The bare request was rejected, so the server DOES
-                    # require auth and the decline was wrong (e.g. an
-                    # intermediary 5xx latched it while the server was
-                    # briefly down). Clear the latch and try a fresh mint
-                    # so a recovered server re-authenticates the runner.
-                    # Only a 5xx-latched decline is recoverable; a genuine
-                    # no-auth refusal (400/404) must not re-probe the mint
-                    # endpoint on every rejected callback.
-                    if not getattr(self._factory, "declined_by_server_error", False):
+                    # require auth and a recoverable decline (intermediary
+                    # 5xx, or no session bound yet) was wrong: re-mint. A
+                    # genuine no-auth refusal (400/404) must not re-probe.
+                    if not _reset_recoverable_decline(self._factory):
                         return
-                    reset = getattr(self._factory, "reset_decline", None)
-                    if not callable(reset):
-                        return
-                    reset()
                     token = self._factory()
                     if token:
                         request.headers["Authorization"] = f"Bearer {token}"
@@ -585,6 +579,12 @@ class _InitialAuthTokenFactory:
         """True when the inner fallback factory's decline came from a 5xx."""
         with self._lock:
             return bool(getattr(self._fallback_factory, "declined_by_server_error", False))
+
+    @property
+    def declined_without_proxy_bearer(self) -> bool:
+        """True when the inner fallback factory declined on a 401/403 it sent no bearer with."""
+        with self._lock:
+            return bool(getattr(self._fallback_factory, "declined_without_proxy_bearer", False))
 
     @property
     def sign_in_pending(self) -> bool:
@@ -828,7 +828,9 @@ def _make_managed_mint_factory(
         ``None`` thereafter, and :class:`_RunnerDatabricksAuth` falls back to
         bare requests. A post-install 401/403 with no still-valid cache
         latches ``proxy_auth_failed`` instead, which
-        :class:`_InitialAuthTokenFactory` answers by re-resolving SDK/OIDC.
+        :class:`_InitialAuthTokenFactory` answers by re-resolving SDK/OIDC —
+        unless the factory never held a proxy bearer: then it latches a
+        recoverable ``declined`` like the 5xx case above.
     """
     from omnigent.runner.identity import token_bound_runner_id
 
@@ -877,6 +879,10 @@ class _ManagedMintTokenFactory:
     :attr:`proxy_auth_failed` instead: the credential presented to the proxy
     died (the seeded host bearer, or the minted JWT once a session outlives
     it), so callers should re-resolve SDK/OIDC rather than send bare requests.
+    With no proxy bearer, nothing presented could have expired: the server
+    will not mint for this runner yet (e.g. no session is bound to it), so
+    the factory latches :attr:`declined` and
+    :attr:`declined_without_proxy_bearer`, recoverable like a 5xx decline.
     """
 
     def __init__(
@@ -915,15 +921,19 @@ class _ManagedMintTokenFactory:
         # refusal). Unlike ``declined``, this means the caller should try
         # another credential path (SDK/OIDC) rather than sending bare requests.
         self.proxy_auth_failed = False
+        # True when ``declined`` was latched by a 401/403 sent without a proxy
+        # bearer; recoverable via :meth:`reset_decline` like a 5xx decline.
+        self.declined_without_proxy_bearer = False
 
     def __call__(self) -> str | None:
         """Return a fresh owner JWT, or ``None``.
 
         :returns: The cached or freshly-minted JWT; ``None`` after a
-            definitive server decline or a 5xx with no prior successful
-            mint (sets :attr:`declined`), after a mint 401/403 with no
-            still-valid cached token (sets :attr:`proxy_auth_failed`), or
-            on a transient mint failure with no still-valid cached token.
+            definitive server decline, a 5xx with no prior successful mint,
+            or a 401/403 with no proxy bearer (sets :attr:`declined`), after
+            a mint 401/403 with no still-valid cached token (sets
+            :attr:`proxy_auth_failed`), or on a transient mint failure with
+            no still-valid cached token.
         """
         with self._lock:
             return self._call_locked()
@@ -968,6 +978,12 @@ class _ManagedMintTokenFactory:
                     return None
                 return self._still_valid_cached_token(now)
             if response.status_code in (401, 403):
+                if self._proxy_bearer is None:
+                    # A successful mint would have promoted a bearer, so
+                    # nothing expired: the server will not mint for us yet.
+                    self.declined = True
+                    self.declined_without_proxy_bearer = True
+                    return None
                 # The proxy bearer is expired or invalid — the seeded host
                 # bearer, or the minted JWT once a session outlives it. With
                 # no still-valid cache left the mint loop cannot renew itself:
@@ -1005,12 +1021,13 @@ class _ManagedMintTokenFactory:
 
         Used when a bare request is rejected with a re-auth signal: the
         server does require auth, so a decline latched by an intermediary
-        5xx (rather than a genuine no-auth server) must not stick once the
-        server is reachable again.
+        5xx or a no-bearer 401/403 (rather than a genuine no-auth server)
+        must not stick once the server will mint again.
         """
         with self._lock:
             self.declined = False
             self.declined_by_server_error = False
+            self.declined_without_proxy_bearer = False
 
     def invalidate(self) -> bool:
         """Discard the cached JWT so the next call re-mints.
