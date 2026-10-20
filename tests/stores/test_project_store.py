@@ -65,6 +65,17 @@ def test_get_scoped_to_owner(store: SqlAlchemyProjectStore) -> None:
     assert store.get(_uid("p1"), user_id="bob@example.com") is None
 
 
+def test_get_by_name_matches_exactly_within_the_owner(store: SqlAlchemyProjectStore) -> None:
+    store.create(_uid("p1"), "Nightly", "alice@example.com")
+    store.create(_uid("p2"), "Nightly", "bob@example.com")
+    store.create(_uid("p3"), "Nightly", None)
+    got = store.get_by_name("Nightly", user_id="alice@example.com")
+    assert got is not None and got.id == _uid("p1")
+    none_owned = store.get_by_name("Nightly", user_id=None)
+    assert none_owned is not None and none_owned.id == _uid("p3")
+    assert store.get_by_name("Nightly", user_id="carol@example.com") is None
+
+
 # ── list ──────────────────────────────────────────────────────────────────
 
 

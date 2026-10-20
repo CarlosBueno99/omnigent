@@ -247,6 +247,20 @@ class SqlAlchemyProjectStore(ProjectStore):
                 return None
             return _to_entity(row)
 
+    def get_by_name(self, name: str, *, user_id: str | None) -> Project | None:
+        """Return the owner's oldest project with exactly this name, or ``None``."""
+        with self._session("select_project_by_name") as session:
+            stmt = (
+                select(SqlProject)
+                .where(SqlProject.workspace_id == current_workspace_id())
+                .where(SqlProject.user_id == user_id)
+                .where(SqlProject.name == name)
+                .order_by(asc(SqlProject.created_at), asc(SqlProject.id))
+                .limit(1)
+            )
+            row = session.execute(stmt).scalars().first()
+            return None if row is None else _to_entity(row)
+
     def list(self, *, user_id: str | None) -> list[Project]:
         """List the owner's projects ordered by ``created_at ASC, id ASC``."""
         with self._session("list_projects") as session:

@@ -2,7 +2,7 @@
 // host, and workspace pickers where the backend can persist those fields.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FolderOpenIcon, TriangleAlertIcon } from "lucide-react";
+import { ChevronDownIcon, FolderOpenIcon, TriangleAlertIcon } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -12,6 +12,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -26,6 +32,8 @@ import { ScheduleFields } from "@/components/scheduled/ScheduleFields";
 import { ModelEffortFields } from "@/components/scheduled/ModelEffortFields";
 import { WorkspacePickerDialog } from "@/shell/WorkspacePickerDialog";
 import { AgentHarnessPicker } from "@/shell/NewChatDialog";
+import { ProjectPicker, ProjectRowIcon } from "@/shell/ProjectPicker";
+import { useProjects } from "@/hooks/useConversations";
 import { useAvailableAgents, type AvailableAgent } from "@/hooks/useAvailableAgents";
 import { useHosts } from "@/hooks/useHosts";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
@@ -69,11 +77,14 @@ export function CreateScheduledTaskDialog({
 }) {
   const { data: agents } = useAvailableAgents({ enabled: open });
   const { data: hosts } = useHosts({ enabled: open });
+  const { data: projects = [], isPending: projectsLoading } = useProjects();
   const info = useServerInfo();
   // Gates the "new sandbox each run" option: only servers that can actually
   // serve a managed launch advertise it (same flag New Chat's sandbox option
   // gates on). "loading" → treat as disabled until /v1/info resolves.
   const managedSandboxesEnabled = info !== "loading" && info.managed_sandboxes_enabled;
+  // Older servers reject a task's project fields, so the picker needs the flag.
+  const projectsSupported = info !== "loading" && info.scheduled_task_projects === true;
   // Provider-named label for the sandbox host option (e.g. "Modal Sandbox"),
   // falling back to the generic "New Sandbox" — same helper the New Chat picker uses.
   const sandboxLabel = sandboxOptionLabel(info !== "loading" ? info.sandbox_provider : null);
@@ -211,6 +222,9 @@ export function CreateScheduledTaskDialog({
   // "managed_sandbox") instead of a connected host; hides the host/workspace
   // pickers. Only offered when the server advertises managed sandboxes.
   const [sandboxMode, setSandboxMode] = useState(false);
+  // Project every fired session is filed into, by name. `null` keeps the edited
+  // task's project unchanged; "" files runs into no project.
+  const [projectChoice, setProjectChoice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [scheduleUnsupported, setScheduleUnsupported] = useState(false);
 
@@ -237,6 +251,7 @@ export function CreateScheduledTaskDialog({
         setHostId(editingTask.hostId ?? "");
         setWorkspace(editingTask.workspace ?? "");
         setSandboxMode(editingTask.executionTarget === "managed_sandbox");
+        setProjectChoice(null);
       } else {
         setName(initialName ?? "");
         setPrompt(initialPrompt ?? "");
@@ -249,11 +264,25 @@ export function CreateScheduledTaskDialog({
         setHostId("");
         setWorkspace("");
         setSandboxMode(false);
+        setProjectChoice(null);
       }
       setError(null);
     }
     wasOpen.current = open;
   }, [open, initialName, initialPrompt, editingTask]);
+
+  const savedProjectId = editingTask?.projectId ?? null;
+  const savedProjectName =
+    savedProjectId !== null ? projects.find((p) => p.id === savedProjectId)?.name : "";
+  const projectName = projectChoice ?? savedProjectName ?? "";
+  const projectIcon = projects.find((p) => p.name === projectName)?.icon;
+  // The saved project has no name while the list loads or once it is deleted.
+  const unresolvedProjectLabel =
+    projectChoice === null && savedProjectName === undefined
+      ? projectsLoading
+        ? "Loading…"
+        : "Deleted project"
+      : null;
 
   const hostOptions = hosts ?? [];
   const preservePinnedHost = isEdit && editingTask?.hostId != null;
@@ -298,6 +327,7 @@ export function CreateScheduledTaskDialog({
     setWorkspace("");
     setWorkspaceBrowserOpen(false);
     setSandboxMode(false);
+    setProjectChoice(null);
     setError(null);
     setScheduleUnsupported(false);
   }
@@ -331,6 +361,19 @@ export function CreateScheduledTaskDialog({
           ? { workspace: workspace.trim() }
           : {}),
       };
+      // An existing project goes by id; a newly typed name is created by the
+      // server. Only a changed choice is sent on edit.
+      const pickedProjectId = projects.find((p) => p.name === projectChoice)?.id ?? null;
+      const projectInput =
+        projectChoice === null || projectChoice === savedProjectName
+          ? {}
+          : projectChoice === ""
+            ? savedProjectId !== null
+              ? { projectId: null }
+              : {}
+            : pickedProjectId !== null
+              ? { projectId: pickedProjectId }
+              : { projectName: projectChoice };
       if (editingTask) {
         // Thread model/effort ONLY when the agent supports them. Each control's
         // "" (Default) maps to `null` so an update CLEARS a previously-set
@@ -348,6 +391,7 @@ export function CreateScheduledTaskDialog({
           input: {
             ...input,
             ...overrides,
+            ...projectInput,
             // Only on a real switch: sending the unchanged agent is a server-side
             // no-op, but omitting it keeps the PATCH honest about what changed.
             ...(agentChanged && effectiveAgentId !== null ? { agentId: effectiveAgentId } : {}),
@@ -357,6 +401,7 @@ export function CreateScheduledTaskDialog({
         if (effectiveAgentId === null) return;
         await createMutation.mutateAsync({
           ...input,
+          ...projectInput,
           agentId: effectiveAgentId,
           // Include an override only when the agent supports model/effort AND the
           // user picked a non-default value; an unselected control is omitted so
@@ -531,6 +576,44 @@ export function CreateScheduledTaskDialog({
           {/* Timezone is inferred from the browser (localTimezone via Intl) and
               intentionally has no visible control. It is still sent in the create
               payload so the schedule evaluates in the user's local zone. */}
+
+          {projectsSupported && (
+            <div className="flex flex-col gap-1.5" data-testid="task-project-field">
+              <Label>Project (optional)</Label>
+              <DropdownMenu onOpenChange={handleSelectOpenChange}>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full justify-start gap-2"
+                    data-testid="task-project-trigger"
+                  >
+                    {(projectName !== "" || unresolvedProjectLabel !== null) && (
+                      <ProjectRowIcon icon={projectIcon} />
+                    )}
+                    <span className="flex-1 truncate text-left">
+                      {unresolvedProjectLabel ?? (projectName || "No project")}
+                    </span>
+                    <ChevronDownIcon className="size-4 text-muted-foreground" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="min-w-56">
+                  {unresolvedProjectLabel !== null && (
+                    <DropdownMenuItem className="px-2 py-1" onSelect={() => setProjectChoice("")}>
+                      No project
+                    </DropdownMenuItem>
+                  )}
+                  <ProjectPicker
+                    currentProject={projectName || null}
+                    onSelect={(next) => setProjectChoice(next)}
+                  />
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <p className="text-sm text-muted-foreground">
+                Each run&apos;s session is filed into this project. Type a new name to create one.
+              </p>
+            </div>
+          )}
 
           {/* Host / execution target. When the server offers managed sandboxes,
               a "New Sandbox" entry sits in the same picker (mirroring the New Chat
