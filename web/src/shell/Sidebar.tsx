@@ -932,11 +932,9 @@ function SidebarImpl({
     return () => document.removeEventListener("focusin", onFocusIn);
   }, [keyboardInset]);
 
-  // While the peek card's entry animation is still fading it in, the card is
-  // (nearly) invisible — taking pointer events then would swallow a click aimed
-  // at the content still showing beneath it, landing it on sidebar content.
-  // Stay click-through until the composed entry animation completes.
-  // Children's animations bubble too, so only the card's own end unlocks it.
+  // Stay click-through while the peek card fades in, so a click lands on what
+  // still shows beneath it. Only the card's own animationend unlocks it, since
+  // children's animations bubble too.
   const [peekInteractive, setPeekInteractive] = useState(false);
   useEffect(() => {
     if (!peek) {

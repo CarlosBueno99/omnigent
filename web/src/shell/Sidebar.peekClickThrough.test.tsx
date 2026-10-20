@@ -1,10 +1,8 @@
 import { conversation as conv, conversationPage } from "@/test/sidebarMockHelpers";
 import { SidebarDataProvider } from "@/hooks/useSidebarData";
-// Behaviour tests for the peek card's entry window: while the card is still
-// fading in it is (nearly) invisible, so it must stay click-through — otherwise
-// a click aimed at what still shows beneath it lands on invisible sidebar
-// content (the brand link navigates the user to "/"). The card takes the
-// pointer over only once its entry animation completes.
+// While the peek card fades in it stays click-through, so a click lands on what
+// still shows beneath it rather than invisible sidebar content (the brand link
+// navigates to "/"). It takes the pointer only once its entry animation ends.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
