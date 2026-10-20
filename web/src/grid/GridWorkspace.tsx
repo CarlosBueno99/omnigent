@@ -29,6 +29,8 @@ import {
 } from "lucide-react";
 import { CanvasWorkspace } from "@/canvas/CanvasWorkspace";
 import { useLoadedConversations } from "@/hooks/useSidebarData";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { isFeatureEnabled } from "@/lib/capabilities";
 import { Link, useParams } from "@/lib/routing";
 import { SidebarOpenButton } from "@/shell/SidebarOpenButton";
 import { Button } from "@/components/ui/button";
@@ -357,6 +359,7 @@ export function GridWorkspace({
   );
   const grids = useGridSessions();
   const { gridId } = useParams<{ gridId: string }>();
+  const enabled = isFeatureEnabled(useServerInfo(), "grid_sessions_display_ui");
   const layout = grids?.activeGrid?.layout;
   // All visible panes must survive LRU eviction when the fourth stream opens.
   useEffect(() => {
@@ -367,14 +370,14 @@ export function GridWorkspace({
     );
     return () => release.forEach((unretain) => unretain());
   }, [grids?.enabled, gridId, layout]);
-  if (!grids?.enabled) return content;
+  if (!enabled || (!grids && !gridId)) return content;
   if (!gridId)
     return (
       <div
         className="relative flex min-h-0 min-w-0 flex-1"
         onDragOver={preventLinkDrop}
         onDropCapture={preventLinkDrop}
-        data-grid-session={grids.conversationId}
+        data-grid-session={grids?.conversationId}
       >
         {content}
       </div>
@@ -386,7 +389,7 @@ export function GridWorkspace({
       onDragOver={preventLinkDrop}
       onDropCapture={preventLinkDrop}
     >
-      {grids.activeGrid ? (
+      {grids?.activeGrid ? (
         <RearrangeableGrid key={gridId} grid={grids.activeGrid} onOpenSidebar={onOpenSidebar} />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
@@ -398,10 +401,19 @@ export function GridWorkspace({
             />
           )}
           <h1>Grid unavailable</h1>
-          <p>
-            This grid isn’t saved on this device. Open a session and drag another session into it to
-            create a grid.
-          </p>
+          {grids ? (
+            <p>
+              This grid isn’t saved on this device. Open a session and drag another session into it
+              to create a grid.
+            </p>
+          ) : (
+            <p>Your account identity is not available yet. Reload to retry.</p>
+          )}
+          {!grids && (
+            <Button variant="outline" onClick={() => window.location.reload()}>
+              Reload
+            </Button>
+          )}
           <Button asChild variant="outline">
             <Link to="/">Back to sessions</Link>
           </Button>

@@ -4406,7 +4406,7 @@ describe("Composer startSideChat (text-select → Ask in side chat)", () => {
       expect(useChatStore.getState().sideChatComposers[childId]).toEqual({
         text: "my question",
         files: [],
-        quotes: ["first selection", "second selection"],
+        quotes: ["first selection", "second selection"].map((text) => ({ before: "", text })),
       });
       expect(textarea()).toHaveValue("");
     },

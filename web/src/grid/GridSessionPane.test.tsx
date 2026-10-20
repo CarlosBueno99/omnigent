@@ -1,6 +1,6 @@
 import type * as UseTerminalsModule from "@/hooks/useTerminals";
 import { type ComponentProps, useContext, useState } from "react";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { FileViewerContext } from "@/shell/FileViewerContext";
@@ -8,6 +8,9 @@ import type { WorkspacePanel } from "@/shell/WorkspacePanel";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { RearrangeableGrid } from "./GridWorkspace";
 import { splitGrid } from "./gridLayout";
+import { writePinnedWorkspaceTabs } from "@/lib/workspaceTabPreferences";
+
+const navigation = vi.hoisted(() => ({ proceed: [] as (() => void)[] }));
 
 vi.mock("@/canvas/CanvasWorkspace", () => ({ CanvasWorkspace: () => null }));
 vi.mock("@/hooks/useSidebarData", () => ({ useLoadedConversations: () => ({}) }));
@@ -51,6 +54,16 @@ vi.mock("@/components/chat/SideChatPane", () => ({
         <button type="button" onClick={() => context.registerNavigationGuard?.(() => {})}>
           Block navigation
         </button>
+        <button
+          type="button"
+          onClick={() =>
+            context.registerNavigationGuard?.((_path, _options, proceed) =>
+              navigation.proceed.push(proceed),
+            )
+          }
+        >
+          Delay navigation
+        </button>
       </>
     );
   },
@@ -69,6 +82,18 @@ vi.mock("@/shell/WorkspacePanel", () => ({
         <span>{props.selectedFilePath ?? "No file"}</span>
         <span>{props.filePosition?.line}</span>
         <span>{props.agentId}</span>
+        <output aria-label="Selected panel">{props.rightRailTab}</output>
+        {props.openPanels.map((tab) => (
+          <button type="button" key={tab} onClick={() => props.onClosePanel(tab)}>
+            Close {tab}
+          </button>
+        ))}
+        <button type="button" onClick={() => props.onRightRailTabChange("changes")}>
+          Open changes
+        </button>
+        <button type="button" onClick={() => props.onRightRailTabChange("github")}>
+          Open github
+        </button>
         <input
           aria-label="File draft"
           value={draft}
@@ -93,6 +118,39 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
   vi.restoreAllMocks();
+  navigation.proceed = [];
+});
+
+it("closes soft tabs and preserves changes made while a navigation guard waits", () => {
+  writePinnedWorkspaceTabs(["files"]);
+  writeSessionWorkspaceState("grid:saved", { open: true });
+  writeSessionWorkspaceState("first", { rightRailTab: "changes", openPanels: ["changes"] });
+  const grid = { id: "saved", layout: splitGrid("first", "first", "second", "right")! };
+  render(
+    <MemoryRouter>
+      <RearrangeableGrid grid={grid} />
+    </MemoryRouter>,
+  );
+  const panel = within(screen.getByTestId("workspace-first"));
+  fireEvent.click(panel.getByText("Close changes"));
+  expect(panel.queryByText("Close changes")).toBeNull();
+  expect(panel.getByLabelText("Selected panel")).toHaveTextContent("files");
+  fireEvent.click(panel.getByText("Open changes"));
+  fireEvent.click(
+    within(screen.getByRole("region", { name: "first (active)" })).getByText("Delay navigation"),
+  );
+  fireEvent.click(panel.getByText("Close changes"));
+  expect(panel.getByText("Close changes")).toBeInTheDocument();
+  fireEvent.click(panel.getByText("Open github"));
+  act(() => navigation.proceed[1]());
+  act(() => navigation.proceed[0]());
+  expect(panel.queryByText("Close changes")).toBeNull();
+  expect(panel.getByText("Close github")).toBeInTheDocument();
+  expect(panel.getByLabelText("Selected panel")).toHaveTextContent("github");
+  expect(readSessionWorkspaceState("first")).toMatchObject({
+    openPanels: ["github"],
+    rightRailTab: "github",
+  });
 });
 
 it("shares one workspace, preserves per-session files and drafts, and persists grid width", () => {

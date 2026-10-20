@@ -279,6 +279,7 @@ function AppShellImpl() {
     openPanels,
     setOpenPanels,
     selectRightRailTab,
+    closePanel,
     selectedFilePath,
     setSelectedFilePath,
     openFiles,
@@ -1083,12 +1084,8 @@ function AppShellImpl() {
     setGithubPanelOpen(false);
     setSideChatsPanelOpen(false);
     setFilesPanelShowHidden(true);
-    // Drop shell interaction state carried from the outgoing session: a
-    // still-armed create ref would otherwise auto-focus an unrelated shell in
-    // the new session, and an open "Close shell?" dialog would target a
-    // terminal absent from the new session's list.
+    // A pending create from the outgoing session must not focus a shell in the next one.
     pendingShellCreateRef.current = null;
-    setTerminalPendingClose(null);
     setFileNavigation(undefined);
     if (!conversationId) {
       // No session → no rail; false (not the open default) so rail-gated
@@ -1790,23 +1787,9 @@ function AppShellImpl() {
     ],
   );
   const closeWorkspacePanel = useCallback(
-    (tab: DefaultWorkspaceTab) => {
-      const remaining = openPanels.filter((panel) => panel !== tab);
-      setOpenPanels(remaining);
-      if (rightRailTab === tab) {
-        setRightRailTab(
-          remaining.filter((panel) => railTabsAvailable[panel]).at(-1) ?? fallbackWorkspaceTab,
-        );
-      }
-    },
-    [
-      setOpenPanels,
-      setRightRailTab,
-      openPanels,
-      rightRailTab,
-      fallbackWorkspaceTab,
-      railTabsAvailable,
-    ],
+    (tab: DefaultWorkspaceTab) =>
+      closePanel(tab, fallbackWorkspaceTab, (panel) => railTabsAvailable[panel]),
+    [closePanel, fallbackWorkspaceTab, railTabsAvailable],
   );
 
   // Auto-open a Browser soft tab on a `navigate` action — agent-issued
@@ -1957,14 +1940,6 @@ function AppShellImpl() {
     }
   }, [openTerminals, openTerminalTab]);
 
-  // User clicked a tab's "x". Closing a tab kills the underlying terminal, so
-  // confirm first rather than acting immediately.
-  const requestCloseTerminal = useCallback(
-    (key: string) => {
-      setTerminalPendingClose(key);
-    },
-    [setTerminalPendingClose],
-  );
   // The active shell selection is sticky: it changes only on explicit user
   // action (opening a shell/file, switching a nav tab, closing the active
   // shell). We deliberately do NOT clear it off the terminal list — the list
@@ -2577,7 +2552,7 @@ function AppShellImpl() {
                       autoFocusTerminalKeyRef.current === selectedTerminalKey
                     }
                     closingTerminalKey={closingTerminalKey}
-                    onCloseTerminal={requestCloseTerminal}
+                    onCloseTerminal={setTerminalPendingClose}
                     maximized={rightPanelMaximized}
                     onToggleMaximized={toggleRightPanelMaximized}
                     permissionLevel={permissionLevel}

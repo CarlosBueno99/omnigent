@@ -20,6 +20,7 @@ import {
   isDefaultWorkspaceTab,
   readInitialWorkspaceTab,
   readPinnedWorkspaceTabs,
+  type DefaultWorkspaceTab,
 } from "@/lib/workspaceTabPreferences";
 import type { FileNavigationGuard, OpenFileOptions } from "./FileViewerContext";
 import type { RightRailTab } from "./railTabs";
@@ -90,6 +91,29 @@ export function useSessionWorkspace(sessionId: string | undefined) {
     [setters],
   );
   const guards = useRef(new Set<FileNavigationGuard>());
+  const closePanel = useCallback(
+    (
+      tab: DefaultWorkspaceTab,
+      fallback = readInitialWorkspaceTab(),
+      available?: (panel: DefaultWorkspaceTab) => boolean,
+    ) => {
+      setState((previous) => {
+        const remaining = previous.tabs.openPanels.filter((panel) => panel !== tab);
+        return {
+          ...previous,
+          tabs: {
+            ...previous.tabs,
+            openPanels: remaining,
+            rightRailTab:
+              previous.tabs.rightRailTab === tab
+                ? (remaining.filter((panel) => available?.(panel) ?? true).at(-1) ?? fallback)
+                : previous.tabs.rightRailTab,
+          },
+        };
+      });
+    },
+    [],
+  );
   const registerNavigationGuard = useCallback((guard: FileNavigationGuard) => {
     guards.current.add(guard);
     return () => {
@@ -112,6 +136,7 @@ export function useSessionWorkspace(sessionId: string | undefined) {
     ...state.tabs,
     ...setters,
     selectRightRailTab,
+    closePanel,
     registerNavigationGuard,
     navigateWorkspace,
   };
@@ -133,6 +158,7 @@ export function useWorkspaceResources(
   },
   setSelectedTerminalKey: (value: SetStateAction<string | null>) => void,
 ) {
+  // Unknown level stays permissive; the server enforces file access.
   const canBrowseWorkspace = isEditorLevel(permissionLevel) || shareWorkspaceFiles === true;
   const environmentQuery = useWorkspaceEnvironment(sessionId, { enabled: canBrowseWorkspace });
   const changedFilesQuery = useWorkspaceChangedFiles(sessionId, { enabled: canBrowseWorkspace });
@@ -177,7 +203,6 @@ export function useWorkspaceResources(
   return {
     canBrowseWorkspace,
     environmentQuery,
-    changedFilesQuery,
     changedCount: changedFilesQuery.data?.data.length ?? 0,
     isChangedPath,
     showFilesPanel: canBrowseWorkspace && environmentQuery.data?.available !== false,

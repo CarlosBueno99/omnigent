@@ -152,6 +152,8 @@ fills the grid area. Drag a cell titlebar onto another cell to swap positions,
 or focus the title and press Space, choose a cell with the arrow keys, and
 press Space again. Escape cancels. The sidebar's Delete grid menu action forgets
 only the grid, leaving sessions untouched. Unknown local grids show a recovery link.
+Until your account identity resolves, a grid URL offers Reload and Back to sessions
+without exposing saved grids.
 
 **Import:** open Settings → Import sessions, or choose **Import your recent
 sessions** on the empty landing. Choose a machine, harness, and recent count

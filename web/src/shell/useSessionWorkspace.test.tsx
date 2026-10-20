@@ -96,11 +96,12 @@ it("gates workspace reads and keeps agent terminals separate from user shells", 
     result.current.resource.setTerminalPendingClose("terminal:one");
   });
   act(() => result.current.resource.confirmCloseTerminal());
-  expect(resources.remove).toHaveBeenCalledWith("one");
+  expect(resources.remove).toHaveBeenCalledExactlyOnceWith("one");
   expect(result.current.workspace.selectedTerminalKey).toBe("terminal:two");
   act(() => result.current.resource.setTerminalPendingClose("terminal:one"));
   act(() => result.current.resource.confirmCloseTerminal());
   expect(result.current.workspace.selectedTerminalKey).toBe("terminal:two");
+  expect(resources.remove).toHaveBeenCalledTimes(2);
   act(() => result.current.resource.setTerminalPendingClose("terminal:two"));
   rerender({ id: "second", shared: true });
   expect(result.current.resource.terminalPendingClose).toBeNull();

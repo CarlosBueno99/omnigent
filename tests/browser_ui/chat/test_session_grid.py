@@ -105,6 +105,9 @@ def test_session_grid_drag_persist_live_updates_and_close(
             },
         )
         page.set_viewport_size({"width": 2000, "height": 1000})
+        page.add_init_script(
+            "localStorage.setItem('omnigent:pinned-workspace-tabs', '[\"files\"]')"
+        )
         page.goto(sessions[0].url)
         expect(page.get_by_text("Transcript 0", exact=True)).to_be_visible()
         page.get_by_role("button", name="Filter sessions", exact=True).click()
@@ -141,6 +144,17 @@ def test_session_grid_drag_persist_live_updates_and_close(
         # One grid-wide workspace follows clicks in any cell, keeping its width and tabs.
         page.get_by_role("button", name="Expand grid workspace").click()
         workspace = page.get_by_role("complementary", name="Workspace", exact=True)
+        workspace.get_by_role("button", name="Open new", exact=True).click()
+        page.get_by_role("menuitem", name="Changes", exact=True).click()
+        expect(workspace.get_by_role("tab", name="Changes", exact=True)).to_have_attribute(
+            "aria-selected", "true"
+        )
+        workspace.get_by_role("button", name="Close Changes", exact=True).click()
+        expect(workspace.get_by_role("tab", name="Changes", exact=True)).to_have_count(0)
+        expect(workspace.get_by_role("tab", name="Files", exact=True)).to_have_attribute(
+            "aria-selected", "true"
+        )
+        page.screenshot(path=str(artifacts / "grid-panel-closed.png"))
         for index in range(2):
             cell = page.locator(f'[data-grid-session="grid-{index}"]')
             cell.get_by_text(f"Transcript {index}", exact=True).click()
@@ -366,7 +380,7 @@ def test_session_grid_drag_persist_live_updates_and_close(
 
 @pytest.mark.parametrize("features", [{}, {"grid_sessions_display_ui": False}])
 def test_grid_flag_off_and_unknown_local_grid(
-    page: Page, browser_contract: BrowserContract, features: dict[str, bool]
+    page: Page, browser_contract: BrowserContract, features: dict[str, bool], output_path: str
 ) -> None:
     with contextmanager(chat_session_handle)(page, browser_contract) as session:
         browser_contract.json("/v1/info", {"single_user": True, "features": features})
@@ -407,3 +421,15 @@ def test_grid_flag_off_and_unknown_local_grid(
         page.reload()
         expect(page.get_by_text("Grid unavailable", exact=True)).to_be_visible()
         expect(page.get_by_role("link", name="Back to sessions")).to_be_visible()
+        browser_contract.json("/v1/me", {"user_id": None, "is_admin": True})
+        page.reload()
+        expect(
+            page.get_by_text("Your account identity is not available yet. Reload to retry.")
+        ).to_be_visible()
+        expect(page.get_by_role("link", name="Back to sessions")).to_be_visible()
+        page.screenshot(path=str(Path(output_path) / "grid-identity-unavailable.png"))
+        browser_contract.json("/v1/me", {"user_id": "local", "is_admin": True})
+        page.get_by_role("button", name="Reload", exact=True).click()
+        expect(
+            page.get_by_text("This grid isn’t saved on this device.", exact=False)
+        ).to_be_visible()

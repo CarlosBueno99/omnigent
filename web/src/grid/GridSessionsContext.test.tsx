@@ -6,6 +6,15 @@ import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { gridSessionIds, splitGrid } from "./gridLayout";
 import { GridSessionsProvider, useGridSessions } from "./GridSessionsContext";
+import { GridWorkspace } from "./GridWorkspace";
+import type { ReactNode } from "react";
+
+vi.mock("@/canvas/CanvasWorkspace", () => ({
+  CanvasWorkspace: ({ children }: { children: ReactNode }) => children,
+}));
+vi.mock("./GridSessionPane", () => ({
+  GridSessionPane: ({ sessionId }: { sessionId: string }) => <div>Session {sessionId}</div>,
+}));
 
 const identity = vi.hoisted(() => ({ viewer: "alice" as string | null, server: "one" }));
 vi.mock("@/hooks/useViewerId", () => ({ useViewerId: () => identity.viewer }));
@@ -44,10 +53,16 @@ function Probe() {
   );
 }
 
-function tree(path: string, enabled = true) {
+function tree(path: string, enabled = true, workspace = false) {
   const element = (
     <GridSessionsProvider>
-      <Probe />
+      {workspace ? (
+        <GridWorkspace active={false}>
+          <div>Ordinary session</div>
+        </GridWorkspace>
+      ) : (
+        <Probe />
+      )}
     </GridSessionsProvider>
   );
   return (
@@ -205,4 +220,28 @@ it("waits for a resolved identity without reading or writing anonymous grids", (
   identity.viewer = "bob";
   view.rerender(tree("/c/first"));
   expect(screen.getByTestId("count")).toHaveTextContent("0");
+});
+
+it("shows an identity-unavailable grid until its viewer resolves, without affecting flag-off routes", () => {
+  const layout = splitGrid("first", "first", "second", "right")!;
+  localStorage.setItem(
+    "omnigent:session-grids:one:alice",
+    JSON.stringify([{ id: "saved", layout }]),
+  );
+  identity.viewer = null;
+  const view = render(tree("/grid/saved", true, true));
+  expect(screen.getByRole("heading", { name: "Grid unavailable" })).toBeInTheDocument();
+  expect(
+    screen.getByText("Your account identity is not available yet. Reload to retry."),
+  ).toBeVisible();
+  expect(screen.getByRole("button", { name: "Reload" })).toBeVisible();
+  expect(screen.getByRole("link", { name: "Back to sessions" })).toHaveAttribute("href", "/");
+  view.rerender(tree("/grid/saved", false, true));
+  expect(screen.getByText("Ordinary session")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Grid unavailable" })).toBeNull();
+  identity.viewer = "alice";
+  view.rerender(tree("/grid/saved", true, true));
+  expect(screen.queryByRole("heading", { name: "Grid unavailable" })).toBeNull();
+  expect(screen.getByText("Session first")).toBeInTheDocument();
+  expect(screen.getByText("Session second")).toBeInTheDocument();
 });

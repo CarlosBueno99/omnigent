@@ -1093,7 +1093,7 @@ export interface ConversationState {
 /** One side chat's unsent composer contents. */
 export interface SideChatComposerDraft {
   starting?: boolean;
-  quotes?: string[];
+  quotes?: StoredReplyDraft["quotes"];
   text: string;
   files: File[];
 }

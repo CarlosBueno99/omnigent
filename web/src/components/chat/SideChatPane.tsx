@@ -60,7 +60,12 @@ import { skillInvocationPrefix } from "@/lib/harnessSetup";
 import { isNativeTerminalSession } from "@/lib/nativeCodingAgents";
 import { usesNativeSideChatFork } from "@/lib/sideChat";
 import { parentIdFromLabels } from "@/lib/sessionHost";
-import { serializeReplyDraft } from "@/lib/replyDraft";
+import {
+  removeReplyQuote,
+  restoreReplyDraft,
+  serializeReplyDraft,
+  snapshotReplyDraft,
+} from "@/lib/replyDraft";
 import { interrupt } from "@/lib/sessionsApi";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
 
@@ -368,7 +373,7 @@ export function SideChatPane({
             onReply={(text) => {
               useChatStore.getState().updateSideChatComposer(childId, (current) => ({
                 ...current,
-                quotes: [...(current.quotes ?? []), text],
+                quotes: [...(current.quotes ?? []), { before: "", text }],
               }));
             }}
           />
@@ -457,7 +462,10 @@ function SideChatComposer({
     if (committedItemProvesDelivery(entry.getState().blocks, failed)) return;
     // A draft started while the request was in flight takes precedence.
     if (current.text.trim() || current.files.length || current.quotes?.length) return;
-    updateComposer(childId, () => ({ text: failed.text, files: failed.files }));
+    updateComposer(childId, () => ({
+      ...restoreReplyDraft(failed.text, failed.replyDraft),
+      files: failed.files,
+    }));
     entry.setState({
       pendingRetryStableId: failed.stableId ?? null,
       restoredSendDraft: failed.stableId
@@ -473,7 +481,7 @@ function SideChatComposer({
     const current = useChatStore.getState().sideChatComposers[childId] ?? EMPTY_SIDE_CHAT_COMPOSER;
     const serialized = serializeReplyDraft({
       text: current.text,
-      quotes: (current.quotes ?? []).map((quoteText) => ({ before: "", text: quoteText })),
+      quotes: current.quotes ?? [],
     });
     if (
       serialized === restored.text &&
@@ -505,9 +513,8 @@ function SideChatComposer({
   const quotes = [
     ...(quote === undefined ? [] : [{ id: "seed", before: "", text: quote }]),
     ...(composer?.quotes ?? []).map((selection, index) => ({
+      ...selection,
       id: String(index),
-      before: "",
-      text: selection,
     })),
   ];
   const autoSend = pending ? undefined : draft;
@@ -537,7 +544,7 @@ function SideChatComposer({
   }, [autoSend, agentId, send, childId, clearSideChatDraft, refreshLabels]);
 
   const ready = pending ? !starting : agentId !== null;
-  const canSend = text.trim().length > 0 || (!pending && files.length > 0);
+  const canSend = text.trim().length > 0 || (!pending && (files.length > 0 || quotes.length > 0));
   // Slash suggestions mirror the main composer: the session's skills plus /help.
   // Other built-ins (/model, /compact, …) act on the main session and stay out.
   const isMobile = useIsMobileViewport();
@@ -657,7 +664,7 @@ function SideChatComposer({
       void onStart(serializeReplyDraft({ quotes, text: trimmed }));
       return;
     }
-    if (busy || (trimmed.length === 0 && files.length === 0) || agentId === null) return;
+    if (busy || !canSend || agentId === null) return;
     // On in-process harnesses /help and skills resolve locally; native TUIs
     // (claude-native, codex-native) read the text themselves, and a quote or
     // attachment is always an ordinary message.
@@ -694,6 +701,7 @@ function SideChatComposer({
       return;
     }
     const outgoing = files;
+    const replyDraft = snapshotReplyDraft({ quotes, text: trimmed });
     clearComposer(childId);
     void send(
       serializeReplyDraft({ quotes, text: trimmed }),
@@ -701,6 +709,7 @@ function SideChatComposer({
       outgoing.length > 0 ? outgoing : undefined,
       {
         pinnedConversationId: childId,
+        ...(replyDraft ? { replyDraft } : {}),
       },
     ).finally(refreshLabels);
   };
@@ -770,16 +779,35 @@ function SideChatComposer({
               <ReplyDraftBlocks
                 quotes={quotes}
                 activeTextId={null}
-                showTextInputs={false}
+                showTextInputs={quotes.some((item) => item.before !== "")}
                 keyboard={{ submitWithModEnter: false, preventsKeyboardSubmit: false }}
                 disabled={!ready}
-                inputFor={() => ({})}
+                inputFor={(item) => ({
+                  onChange: (event) => {
+                    const before = event.target.value;
+                    updateComposer(childId, (current) => ({
+                      ...current,
+                      quotes: current.quotes?.map((entry, index) =>
+                        String(index) === item.id ? { ...entry, before } : entry,
+                      ),
+                    }));
+                  },
+                })}
                 onRemove={(id) => {
                   if (id === "seed") clearSideChatDraft(childId);
                   else
                     updateComposer(childId, (current) => ({
                       ...current,
-                      quotes: current.quotes?.filter((_, index) => String(index) !== id),
+                      ...removeReplyQuote(
+                        {
+                          text: current.text,
+                          quotes: (current.quotes ?? []).map((item, index) => ({
+                            ...item,
+                            id: String(index),
+                          })),
+                        },
+                        id,
+                      ),
                     }));
                 }}
               />

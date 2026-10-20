@@ -16,7 +16,6 @@ import { terminalTabKey } from "@/hooks/useTerminals";
 import { useSessionWorkspace, useWorkspaceResources } from "@/shell/useSessionWorkspace";
 import { supportsBrowser } from "@/lib/nativeBridge";
 import { Link } from "@/lib/routing";
-import { readInitialWorkspaceTab } from "@/lib/workspaceTabPreferences";
 import { CloseShellDialog } from "@/shell/CloseShellDialog";
 import {
   FileViewerContext,
@@ -86,8 +85,7 @@ export function GridSessionPane({
     setSelectedFilePath,
     setSelectedTerminalKey,
     setOpenFiles,
-    setRightRailTab,
-    setOpenPanels,
+    closePanel,
     selectRightRailTab,
     registerNavigationGuard,
     navigateWorkspace,
@@ -272,12 +270,7 @@ export function GridSessionPane({
               onRightRailTabChange={selectTab}
               openPanels={workspace.openPanels ?? []}
               onClosePanel={(tab) => {
-                navigateWorkspace("", undefined, () => () => {
-                  const remaining = workspace.openPanels.filter((panel) => panel !== tab);
-                  setOpenPanels(remaining);
-                  if (workspace.rightRailTab === tab)
-                    setRightRailTab(remaining.at(-1) ?? readInitialWorkspaceTab());
-                });
+                navigateWorkspace("", undefined, () => closePanel(tab));
               }}
               showFilesPanel={showFiles}
               showGithubTab={showFiles}

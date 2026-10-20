@@ -3200,7 +3200,7 @@ function ComposerImpl(
       if (target?.parentId === sourceId) {
         store.updateSideChatComposer(target.childId, (current) => ({
           ...current,
-          quotes: [...(current.quotes ?? []), selectedText],
+          quotes: [...(current.quotes ?? []), { before: "", text: selectedText }],
         }));
       } else {
         store.openSideChatWithDraft(newPendingSideChatId(), selectedText, sourceId);

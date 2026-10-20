@@ -11,6 +11,7 @@ import type * as ChatStoreModule from "@/store/chatStore";
 import { useChatStore, type ChatState } from "@/store/chatStore";
 import { conversationRegistry } from "@/store/conversationRegistry";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
+import { serializeReplyDraft, snapshotReplyDraft } from "@/lib/replyDraft";
 import { SideChatPane } from "./SideChatPane";
 
 vi.mock("@/store/chatStore", async (importOriginal) => ({
@@ -237,7 +238,11 @@ describe("side chat opened from a text selection", () => {
     conversationRegistry.acquire(childId).setState({ sessionStatus: "idle" });
     useChatStore.setState({
       sideChatComposers: {
-        [childId]: { text: "why?", files: [], quotes: ["first selection", "second selection"] },
+        [childId]: {
+          text: "why?",
+          files: [],
+          quotes: ["first selection", "second selection"].map((text) => ({ before: "", text })),
+        },
       },
     });
     renderPane(<SideChatPane childId={childId} selectionParentId="conv_main" />);
@@ -253,6 +258,7 @@ describe("side chat opened from a text selection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send side question" }));
     expect(send).toHaveBeenCalledWith("> second selection\n\nwhy?", "agent_side", undefined, {
       pinnedConversationId: childId,
+      replyDraft: { version: 1, quotes: [{ before: "", text: "second selection" }], text: "why?" },
     });
     expect(useChatStore.getState().sideChatComposers[childId]).toBeUndefined();
   });
@@ -297,7 +303,11 @@ describe("side-chat selection reply", () => {
     conversationRegistry.acquire(childId).setState({ sessionStatus: "idle" });
     useChatStore.setState({
       sideChatComposers: {
-        [childId]: { text: "my follow-up", files: [], quotes: ["existing quote"] },
+        [childId]: {
+          text: "my follow-up",
+          files: [],
+          quotes: ["existing quote"].map((text) => ({ before: "", text })),
+        },
       },
     });
     renderPane(<SideChatPane childId={childId} />);
@@ -307,7 +317,10 @@ describe("side-chat selection reply", () => {
     expect(useChatStore.getState().sideChatComposers[childId]).toEqual({
       text: "my follow-up",
       files: [],
-      quotes: ["existing quote", "Ask a question here without affecting the main conversation."],
+      quotes: [
+        "existing quote",
+        "Ask a question here without affecting the main conversation.",
+      ].map((text) => ({ before: "", text })),
     });
     expect(screen.getByTestId("side-chat-input")).toHaveFocus();
     expect(screen.queryByRole("button", { name: "Reply ↵" })).toBeNull();
@@ -762,7 +775,11 @@ describe("side-chat slash commands", () => {
       .setState({ sessionHarness: "claude-sdk", sessionStatus: "idle" });
     useChatStore.setState({
       sideChatComposers: {
-        [childId]: { text: "", files: [], quotes: ["a selection"] },
+        [childId]: {
+          text: "",
+          files: [],
+          quotes: ["a selection"].map((text) => ({ before: "", text })),
+        },
       },
     });
     skillsFixture.current = { skills: [], skillsStatus: "loading" };
@@ -775,7 +792,10 @@ describe("side-chat slash commands", () => {
       "> a selection\n\n/review",
       "agent_side",
       undefined,
-      { pinnedConversationId: childId },
+      {
+        pinnedConversationId: childId,
+        replyDraft: { version: 1, quotes: [{ before: "", text: "a selection" }], text: "/review" },
+      },
     );
     expect(sendSlashCommand).not.toHaveBeenCalled();
   });
@@ -851,9 +871,13 @@ describe("side-chat slash commands", () => {
   });
 });
 
-it.each([false, true])(
-  "recovers a rejected grid send without replacing newer input (%s)",
-  async (edited) => {
+it.each([
+  { fullSession: true, edited: false },
+  { fullSession: false, edited: false },
+  { fullSession: true, edited: true },
+])(
+  "recovers a rejected quoted send without replacing newer input ($fullSession, $edited)",
+  async ({ fullSession, edited }) => {
     const entry = conversationRegistry.acquire(childId);
     entry.setState({
       sessionStatus: "idle",
@@ -878,7 +902,12 @@ it.each([false, true])(
     useChatStore
       .getState()
       .updateSideChatComposer("other-pane", () => ({ text: "other draft", files: [file] }));
-    renderPane(<SideChatPane childId={childId} fullSession />);
+    useChatStore.getState().updateSideChatComposer(childId, () => ({
+      text: "",
+      files: [],
+      quotes: [{ before: "", text: "Quoted selection" }],
+    }));
+    renderPane(<SideChatPane childId={childId} fullSession={fullSession} />);
     fireEvent.change(screen.getByTestId("side-chat-input"), {
       target: { value: "keep this message" },
     });
@@ -904,6 +933,7 @@ it.each([false, true])(
       expect(entry.getState().pendingRetryStableId).toBeNull();
     } else {
       expect(screen.getByText(file.name)).toBeInTheDocument();
+      expect(screen.getByTestId("composer-reply-quote")).toHaveTextContent("Quoted selection");
       expect(useChatStore.getState().sideChatComposers[childId].files[0]).toBe(file);
       const stableId = entry.getState().pendingRetryStableId;
       expect(stableId).toEqual(expect.any(String));
@@ -916,7 +946,7 @@ it.each([false, true])(
   },
 );
 
-it.each([false, true])(
+it.each(["none", "text", "files"] as const)(
   "retracts late-delivered grid drafts only while unchanged (%s)",
   (edited) => {
     const entry = conversationRegistry.acquire(childId);
@@ -931,14 +961,107 @@ it.each([false, true])(
     });
     renderPane(<SideChatPane childId={childId} fullSession />);
     expect(screen.getByTestId("side-chat-input")).toHaveValue("lost ack");
-    if (edited)
+    if (edited === "text")
       fireEvent.change(screen.getByTestId("side-chat-input"), { target: { value: "edited" } });
+    if (edited === "files")
+      fireEvent.click(screen.getByRole("button", { name: /Remove notes.txt/i }));
     act(() =>
       entry.setState({
         restoredSendDraft: { ...entry.getState().restoredSendDraft!, delivered: true },
       }),
     );
-    expect(screen.getByTestId("side-chat-input")).toHaveValue(edited ? "edited" : "");
+    expect(screen.getByTestId("side-chat-input")).toHaveValue(
+      edited === "text" ? "edited" : edited === "files" ? "lost ack" : "",
+    );
     expect(entry.getState().restoredSendDraft).toBeNull();
+  },
+);
+
+it("keeps another conversation's failed draft untouched", () => {
+  const entry = conversationRegistry.acquire(childId);
+  const failed = { conversationId: "other-pane", text: "Other failure", files: [] };
+  entry.setState({ failedSendDraft: failed });
+  renderPane(<SideChatPane childId={childId} fullSession />);
+  expect(screen.getByTestId("side-chat-input")).toHaveValue("");
+  expect(entry.getState().failedSendDraft).toBe(failed);
+});
+
+it("does not restore a failed draft already proven delivered", () => {
+  const entry = conversationRegistry.acquire(childId);
+  entry.setState({
+    failedSendDraft: { conversationId: childId, text: "Delivered", files: [], stableId: "stable" },
+    blocks: itemsToBlocks([
+      {
+        id: "stable",
+        response_id: "delivered-turn",
+        type: "message",
+        role: "user",
+        status: "completed",
+        content: [{ type: "input_text", text: "Delivered" }],
+      },
+    ]),
+  });
+  renderPane(<SideChatPane childId={childId} fullSession />);
+  expect(screen.getByTestId("side-chat-input")).toHaveValue("");
+  expect(entry.getState().failedSendDraft).toBeNull();
+  expect(entry.getState().restoredSendDraft).toBeNull();
+});
+
+it.each(["none", "remove", "before"] as const)(
+  "recovers a quoted main-composer failure in a grid (edit: %s)",
+  async (edit) => {
+    const entry = conversationRegistry.acquire(childId);
+    const replyDraft = snapshotReplyDraft({
+      text: "",
+      quotes: [{ id: "quote", before: "Introduction", text: "Quoted selection" }],
+    })!;
+    const text = serializeReplyDraft(replyDraft);
+    entry.setState({
+      sessionStatus: "idle",
+      sessionHarness: "openai-agents",
+      abortController: new AbortController(),
+      failedSendDraft: {
+        conversationId: childId,
+        text,
+        files: [],
+        stableId: "original-send",
+        replyDraft,
+      },
+    });
+    useChatStore.setState({ send: initialStoreState.send });
+    const post = vi.spyOn(sessionsApi, "postEvent").mockResolvedValue({ queued: true });
+    renderPane(<SideChatPane childId={childId} fullSession />);
+    expect(screen.getByTestId("composer-reply-quote")).toHaveTextContent("Quoted selection");
+    expect(screen.getByRole("textbox", { name: "Reply text before quote 1" })).toHaveValue(
+      "Introduction",
+    );
+    expect(screen.getByTestId("side-chat-input")).toHaveValue("");
+    if (edit === "remove") {
+      fireEvent.click(screen.getByRole("button", { name: "Remove quote" }));
+      expect(screen.queryByTestId("composer-reply-quote")).toBeNull();
+      expect(screen.getByTestId("side-chat-input")).toHaveValue("Introduction");
+    }
+    if (edit === "before")
+      fireEvent.change(screen.getByRole("textbox", { name: "Reply text before quote 1" }), {
+        target: { value: "Edited introduction" },
+      });
+    fireEvent.click(screen.getByTestId("side-chat-send"));
+    await waitFor(() => expect(post).toHaveBeenCalledOnce());
+    expect(post.mock.calls[0][1]).toMatchObject({
+      data: {
+        stable_id: edit !== "none" ? expect.not.stringMatching(/^original-send$/) : "original-send",
+        content: [
+          {
+            type: "input_text",
+            text:
+              edit === "remove"
+                ? "Introduction"
+                : edit === "before"
+                  ? text.replace("Introduction", "Edited introduction")
+                  : text,
+          },
+        ],
+      },
+    });
   },
 );
