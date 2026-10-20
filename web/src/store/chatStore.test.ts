@@ -14188,12 +14188,27 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await loop;
   });
 
+  interface SnapshotClock {
+    updatedAt: number;
+    streamOpens: number;
+    itemFetches: number;
+    failItemFetches: number;
+    /** Fail only older pages, which carry an `after` cursor. */
+    failOlderPagesOnly: boolean;
+    /** Holds item fetches until it settles. */
+    itemsGate: Promise<void> | null;
+  }
+
   /** Route `id`'s stream to `sink`; serve snapshots whose `updated_at` the test advances. */
-  function routeSnapshotClock(
-    id: string,
-    sink: StreamSink,
-  ): { updatedAt: number; streamOpens: number; itemFetches: number; failItemFetches: number } {
-    const clock = { updatedAt: 100, streamOpens: 0, itemFetches: 0, failItemFetches: 0 };
+  function routeSnapshotClock(id: string, sink: StreamSink): SnapshotClock {
+    const clock: SnapshotClock = {
+      updatedAt: 100,
+      streamOpens: 0,
+      itemFetches: 0,
+      failItemFetches: 0,
+      failOlderPagesOnly: false,
+      itemsGate: null,
+    };
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url === `/v1/sessions/${id}/stream`) {
@@ -14216,10 +14231,12 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       }
       if (url.startsWith(`/v1/sessions/${id}/items`)) {
         clock.itemFetches += 1;
-        if (clock.failItemFetches > 0) {
+        const failable = !clock.failOlderPagesOnly || url.includes("after=");
+        if (failable && clock.failItemFetches > 0) {
           clock.failItemFetches -= 1;
           return Promise.reject(new TypeError("network error"));
         }
+        if (clock.itemsGate) return clock.itemsGate.then(() => defaultFetchHandler(input, init));
       }
       return defaultFetchHandler(input, init);
     });
@@ -14386,40 +14403,8 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       created_at: 110 + i,
     }));
     const sink = pushableStream();
-    const clock = { updatedAt: 100, streamOpens: 0, itemFetches: 0, failOlderPage: 0 };
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url === "/v1/sessions/conv_items_page_fail/stream") {
-        clock.streamOpens += 1;
-        init?.signal?.addEventListener("abort", () =>
-          sink.error(new DOMException("aborted", "AbortError")),
-        );
-        return mockResponse(null, { bodyStream: sink.stream });
-      }
-      if (
-        url.startsWith("/v1/sessions/conv_items_page_fail?") &&
-        (init?.method ?? "GET") === "GET"
-      ) {
-        return mockResponse({
-          id: "conv_items_page_fail",
-          agent_id: "agent_xyz",
-          status: "idle",
-          created_at: 0,
-          updated_at: clock.updatedAt,
-          items: [],
-          labels: {},
-        });
-      }
-      if (url.startsWith("/v1/sessions/conv_items_page_fail/items")) {
-        clock.itemFetches += 1;
-        // The newest page carries no cursor; an older page sets `after`.
-        if (url.includes("after=") && clock.failOlderPage > 0) {
-          clock.failOlderPage -= 1;
-          return Promise.reject(new TypeError("network error"));
-        }
-      }
-      return defaultFetchHandler(input, init);
-    });
+    const clock = routeSnapshotClock("conv_items_page_fail", sink);
+    clock.failOlderPagesOnly = true;
     const controller = new AbortController();
     const bound = bindConversationForTest("conv_items_page_fail", { abortController: controller });
     const loop = startStreamPump("conv_items_page_fail", controller, bound.set, bound.get);
@@ -14431,7 +14416,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
 
     // A gap longer than one page lands; the first page fetches, the older page fails once.
     clock.updatedAt = 160;
-    clock.failOlderPage = 1;
+    clock.failItemFetches = 1;
     seedSessionItems("conv_items_page_fail", gapItems);
     await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
     await drainAsync();
@@ -14449,6 +14434,58 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     expect(ids).toHaveLength(25);
     expect(ids[0]).toBe("msg_g0_asst");
     expect(ids.at(-1)).toBe("msg_g24_asst");
+
+    controller.abort();
+    await drainAsync(2);
+    await loop;
+  });
+
+  it.each([
+    { path: "ordinary backfill", gapLength: 2 },
+    { path: "the fresh-window fallback", gapLength: 100 },
+  ])("keeps a live status that arrives during a reconcile through $path", async ({ gapLength }) => {
+    const id = `conv_backfill_race_${gapLength}`;
+    seedSession(id, []);
+    const sink = pushableStream();
+    const clock = routeSnapshotClock(id, sink);
+    const controller = new AbortController();
+    // The tab saw a turn start; the idle snapshot reveals the dropped edge.
+    const bound = bindConversationForTest(id, {
+      abortController: controller,
+      sessionStatus: "running",
+    });
+    const loop = startStreamPump(id, controller, bound.set, bound.get);
+    await drainAsync();
+
+    const gap = Array.from({ length: gapLength }, (_, i) => gapUser("gap", i));
+    seedSessionItems(id, gap);
+    let releaseItems!: () => void;
+    clock.itemsGate = new Promise<void>((resolve) => {
+      releaseItems = resolve;
+    });
+    await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    await drainAsync();
+    expect(bound.get().sessionStatus).toBe("idle");
+    expect(clock.itemFetches).toBe(1);
+
+    // The next turn starts while the backfill's items are still in flight.
+    sink.push(
+      sse("session.status", { conversation_id: id, status: "running", response_id: "resp_new" }),
+    );
+    await drainAsync();
+    expect(bound.get().sessionStatus).toBe("running");
+
+    releaseItems();
+    await drainAsync(3);
+
+    expect(bound.get().sessionStatus).toBe("running");
+    expect(bound.get().activeResponse).toMatchObject({
+      responseId: "resp_new",
+      state: "streaming",
+    });
+    expect(bound.get().blocks.map((b) => b.ctx.itemId)).toEqual(
+      gap.slice(-INITIAL_WINDOW_ITEMS).map((item) => item.id),
+    );
 
     controller.abort();
     await drainAsync(2);

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import httpx
 from playwright.sync_api import Page, expect
@@ -147,6 +148,8 @@ def test_snapshot_reconcile_backfills_messages_missed_on_heartbeat_only_stream(
     expect(page.get_by_placeholder("Send a message…")).to_be_visible(timeout=15_000)
     page.wait_for_function("window.__statusGapHeartbeats > 0")
 
+    # Snapshot clocks have one-second resolution; publish after the tab's baseline second.
+    time.sleep(1.1)
     # Output produced outside this tab reaches the server, but the tab's
     # stream delivers heartbeats only.
     _publish_message(
@@ -169,7 +172,11 @@ def test_snapshot_reconcile_backfills_messages_missed_on_heartbeat_only_stream(
         for part in item.get("content", [])
     )
 
-    page.clock.run_for("01:10")
+    reply = page.locator(_ASSISTANT, has_text=reply_text)
+    page.clock.run_for("00:50")
+    expect(reply).to_have_count(0)
 
-    expect(page.locator(_ASSISTANT, has_text=reply_text)).to_be_visible(timeout=15_000)
+    page.clock.run_for("00:20")
+
+    expect(reply).to_be_visible(timeout=15_000)
     assert page.evaluate("window.__statusGapStreamOpens") == 1
