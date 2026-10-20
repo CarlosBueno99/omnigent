@@ -19918,6 +19918,7 @@ describe("a send cut off by a reload", () => {
       // A reload or re-login starts a page whose queue is empty.
       conversationRegistry.clear();
       useChatStore.setState({ conversationId: null, queuedMessages: [] });
+      fetchMock.mockClear();
       await useChatStore.getState().switchTo("conv_held");
 
       expect(useChatStore.getState().failedSendDraft).toEqual({
@@ -19927,6 +19928,8 @@ describe("a send cut off by a reload", () => {
         stableId,
         serverRefused: false,
       });
+      const posts = fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/events"));
+      expect(posts).toEqual([]);
     });
 
     it("isn't handed back while this tab still queues it", async () => {
@@ -19940,6 +19943,36 @@ describe("a send cut off by a reload", () => {
       expect(useChatStore.getState().failedSendDraft).toBeNull();
       expect(useChatStore.getState().queuedMessages).toMatchObject([{ stableId }]);
       expect(peekUnsentSend("conv_held")?.stableId).toBe(stableId);
+    });
+
+    it("keeps its record when a later message is steered past it", async () => {
+      const stableId = await holdSend();
+      useChatStore.setState((s) => ({
+        queuedMessages: [
+          ...s.queuedMessages,
+          {
+            queueId: "q_steer",
+            text: "and then the lint",
+            stableId: "stable_steer",
+            conversationId: "conv_held",
+            agentId: "agent_xyz",
+          },
+        ],
+      }));
+
+      useChatStore.getState().steerMessage("q_steer");
+      await vi.waitFor(() =>
+        expect(useChatStore.getState().queuedMessages).toMatchObject([
+          { stableId, waitingForHost: true },
+          { stableId: "stable_steer", waitingForHost: true },
+        ]),
+      );
+
+      conversationRegistry.clear();
+      useChatStore.setState({ conversationId: null, queuedMessages: [] });
+      await useChatStore.getState().switchTo("conv_held");
+
+      expect(useChatStore.getState().failedSendDraft).toMatchObject({ text, stableId });
     });
 
     it("forgets its record once the resend is delivered", async () => {
@@ -19975,19 +20008,56 @@ describe("a send cut off by a reload", () => {
     });
   });
 
-  it("forgets a queued send's record once a background flush delivers it", async () => {
-    seedConversationsCache([conv("conv_active", "running"), conv("conv_bg", "idle")]);
-    rememberUnsentSend("conv_bg", { stableId: "stable_bg", text: "bg-first", authorId: "user_a" });
-    useChatStore.setState({
-      conversationId: "conv_active",
-      queuedMessages: [
-        { queueId: "q_1", text: "bg-first", stableId: "stable_bg", conversationId: "conv_bg" },
-      ],
+  describe("a queued send a background flush posts", () => {
+    let settle: ((delivered: boolean) => void) | undefined;
+
+    beforeEach(async () => {
+      settle = undefined;
+      seedConversationsCache([conv("conv_active", "running"), conv("conv_bg", "idle")]);
+      seedSession("conv_bg", []);
+      rememberUnsentSend("conv_bg", {
+        stableId: "stable_bg",
+        text: "bg-first",
+        authorId: "user_a",
+      });
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/v1/sessions/conv_bg/events")) {
+          return new Promise<Response>((resolve, reject) => {
+            settle = (delivered) =>
+              delivered
+                ? resolve(mockResponse({ queued: true, item_id: "ci_mock" }))
+                : reject(new TypeError("Failed to fetch"));
+          });
+        }
+        return defaultFetchHandler(input, init);
+      });
+      useChatStore.setState({
+        conversationId: "conv_active",
+        queuedMessages: [
+          { queueId: "q_1", text: "bg-first", stableId: "stable_bg", conversationId: "conv_bg" },
+        ],
+      });
+      useChatStore.getState().flushBackgroundQueues();
+      await vi.waitFor(() => expect(settle).toBeDefined());
     });
 
-    useChatStore.getState().flushBackgroundQueues();
+    it("isn't handed back while its POST is open and is forgotten once delivered", async () => {
+      await useChatStore.getState().switchTo("conv_bg");
 
-    await vi.waitFor(() => expect(peekUnsentSend("conv_bg")).toBeNull());
+      expect(useChatStore.getState().failedSendDraft).toBeNull();
+      expect(peekUnsentSend("conv_bg")?.stableId).toBe("stable_bg");
+      settle!(true);
+      await vi.waitFor(() => expect(peekUnsentSend("conv_bg")).toBeNull());
+    });
+
+    it("keeps its record when the POST fails and the queue takes it back", async () => {
+      settle!(false);
+
+      await vi.waitFor(() =>
+        expect(useChatStore.getState().queuedMessages).toMatchObject([{ stableId: "stable_bg" }]),
+      );
+      expect(peekUnsentSend("conv_bg")?.stableId).toBe("stable_bg");
+    });
   });
 
   it("hands an unanswered send back to the composer on the next load", async () => {

@@ -2360,6 +2360,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // release in finally) serializes every POST to this conversation across
       // both paths through one ordering primitive.
       const { waitForPrior, releaseSend } = enterSendChain(conversationId);
+      // Off the queue, its record must still read as open (see `unsentSendToRestore`).
+      if (head.stableId !== undefined) inFlightSends.set(head.stableId, false);
       // Upload any attachments, then post the message referencing their
       // server-assigned file_ids — the same two-phase sequence send() runs
       // (no combined endpoint exists: /resources/files stores the blob and
@@ -2404,6 +2406,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           });
         })
         .finally(() => {
+          if (head.stableId !== undefined) inFlightSends.delete(head.stableId);
           backgroundFlushInFlight.delete(conversationId);
           // Hand the chain to the next POST (foreground or background) so it
           // can start its own network work in submission order.
@@ -2671,8 +2674,15 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // it, so keep its text where a reload can find it (see `unsentSendToRestore`).
       // Only once identity names the sender: unlike `getCurrentAuthorId`, this id
       // tells the single-user `local` viewer apart from one not yet resolved.
+      // A session keeps one record, and a message still queued here keeps it.
       const senderId = getCurrentUserId();
-      if (!compacts && sentOnScreen && senderId !== null && text.trim()) {
+      if (
+        !compacts &&
+        sentOnScreen &&
+        senderId !== null &&
+        text.trim() &&
+        !recordsQueuedSend(sessionId)
+      ) {
         rememberUnsentSend(sessionId, {
           stableId,
           text,
@@ -3720,6 +3730,12 @@ function rejectBusyCompact(conversationId: string | null): boolean {
 /** Whether this tab's queue still holds the message sent under `stableId`. */
 function queuesSend(stableId: string): boolean {
   return useChatStore.getState().queuedMessages.some((m) => m.stableId === stableId);
+}
+
+/** Whether the session's unsent record belongs to a message this tab still queues. */
+function recordsQueuedSend(conversationId: string): boolean {
+  const unsent = peekUnsentSend(conversationId);
+  return unsent !== null && queuesSend(unsent.stableId);
 }
 
 /**
