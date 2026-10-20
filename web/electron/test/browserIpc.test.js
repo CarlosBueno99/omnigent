@@ -930,14 +930,16 @@ describe("browserIpc — navigation API helpers", () => {
 describe("browserIpc — typed actions", () => {
   it("accepts an older UI's action templates without executing arbitrary input", async () => {
     const { ipcMain, event, wc } = setup();
-    for (const { script } of require("./fixtures/browserActions-v0.18.json").requests) {
+    const { buildBrowserActionScript } = require("../src/browserActionScript.mjs");
+    for (const { action, args, script } of require("./fixtures/browserActions-v0.18.json")
+      .requests) {
       // oxlint-disable-next-line no-await-in-loop -- Exercise each legacy request against the same view.
       const result = await ipcMain.invoke("omnigent:browser-execute", event, {
         conversationId: "conv_1",
         js: script,
       });
       assert.equal(result.ok, true, result.error);
-      assert.equal(wc.scripts.at(-1), script);
+      assert.equal(wc.scripts.at(-1), buildBrowserActionScript(action, args));
     }
   });
 
