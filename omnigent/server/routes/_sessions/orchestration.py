@@ -2359,18 +2359,21 @@ async def _resolve_elicitation(
                 except ValidationError:
                     gap_fingerprint = None
             _prune_pre_resolved_harness_elicitations()
+            question_answer = _claude_question_answer_event(
+                elicitation_id, pending_params, pre_resolved
+            )
+            if gap_fingerprint is None:
+                question_answer = None
             gap_tombstone = _PreResolvedHarnessElicitation(
                 session_id=session_id,
                 created_at=time.time(),
                 result=pre_resolved,
                 request_fingerprint=gap_fingerprint,
+                questions=None if question_answer is None else question_answer["questions"],
             )
             _harness_pre_resolved_elicitations[elicitation_id] = gap_tombstone
             _prune_pre_resolved_harness_elicitations()
-            question_answer = _claude_question_answer_event(
-                elicitation_id, pending_params, pre_resolved
-            )
-            if gap_fingerprint is not None and question_answer is not None:
+            if question_answer is not None:
                 _spawn_question_tui_answer(
                     session_id, elicitation_id, gap_tombstone, question_answer, runner_router
                 )

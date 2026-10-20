@@ -2556,6 +2556,74 @@ async def test_gap_question_answer_reaches_hook_that_reparks_while_typing(
         pending_elicitations.reset_for_tests()
 
 
+async def test_gap_question_terminal_resolution_cancels_delayed_picker_answer(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A question answered in the terminal during the delay gets no typed web answer.
+
+    Claude can then show an identical question under a new hook id, so the
+    saved answer must not be typed into that later picker.
+    """
+    from omnigent.runtime import pending_elicitations
+
+    async def _disconnect_immediately(_request: Any) -> None:
+        await asyncio.sleep(0.01)
+
+    async def _runner_answers() -> Any:
+        return sessions_route._RunnerForwardResult(status_code=200, body="")
+
+    monkeypatch.setattr(sessions_route, "_poll_request_disconnect", _disconnect_immediately)
+    monkeypatch.setattr(sessions_route, "_HARNESS_ELICITATION_REPARK_GRACE_S", 0.25)
+    monkeypatch.setattr(sessions_route, "_HARNESS_QUESTION_TUI_ANSWER_DELAY_S", 0.5)
+    pending_elicitations.reset_for_tests()
+    agent = await create_test_agent(client, "test-gap-question-terminal-answer")
+    session_id = await _create_session(client, agent["id"])
+    forwarded = _record_question_answer_forwards(monkeypatch, _runner_answers)
+    payload = await _gap_question_payload()
+    later_id = f"elicit_claude_{'b' * 32}"
+    hook_url = f"/v1/sessions/{session_id}/hooks/permission-request"
+    try:
+        first = await client.post(hook_url, json=payload)
+        assert first.content == b""
+        tasks_before = set(sessions_route._native_popup_forward_tasks)
+        verdict = await _post_approval(
+            client, session_id, _REATTACH_ELICITATION_ID, "accept", _GAP_ANSWERS
+        )
+        assert verdict.status_code == 202, verdict.text
+
+        call = {
+            "agent": "Claude",
+            "name": "AskUserQuestion",
+            "arguments": json.dumps(payload["tool_input"]),
+            "call_id": "toolu_question_terminal",
+        }
+        output = {"call_id": "toolu_question_terminal", "output": "User answered: Vue"}
+        for item_type, item_data in (("function_call", call), ("function_call_output", output)):
+            mirrored = await _post_external_conversation_item(
+                client,
+                session_id,
+                item_type,
+                item_data,
+                source_id=f"src_question_{item_type}",
+                response_id="resp_question",
+            )
+            assert mirrored.status_code < 300, mirrored.text
+        later = await client.post(hook_url, json={**payload, "_omnigent_elicitation_id": later_id})
+        assert later.content == b""
+        await _await_new_tasks(sessions_route._native_popup_forward_tasks, tasks_before)
+
+        assert forwarded == [], "the terminal answer must cancel the delayed picker answer"
+        assert _harness_pre_resolved_elicitations[_REATTACH_ELICITATION_ID].result is None
+    finally:
+        for elicitation_id in (_REATTACH_ELICITATION_ID, later_id):
+            _harness_pre_resolved_elicitations.pop(elicitation_id, None)
+        for task in set(sessions_route._deferred_elicitation_clear_tasks):
+            await asyncio.wait_for(task, timeout=5.0)
+        pending_elicitations.reset_for_tests()
+
+
 async def test_permission_hook_rejects_malformed_reattach_id(
     client: httpx.AsyncClient,
 ) -> None:
