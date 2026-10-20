@@ -34,7 +34,7 @@ Module["_load"] = function (request, ...rest) {
 };
 
 const oauth = require("../src/databricks-oauth");
-const { isTransientRenewalError } = require("../src/databricks-auth");
+const { isTransientRenewalError, IP_ACL_BLOCKED } = require("../src/databricks-auth");
 
 // Point the token store at a throwaway HOME per test.
 let tmpHome;
@@ -616,6 +616,7 @@ describe("getValidStoredToken", () => {
       (refused) => refused,
     );
     assert.equal(error.status, 403);
+    assert.equal(error.errorCode, IP_ACL_BLOCKED);
     assert.equal(isTransientRenewalError(error), true);
     assert.doesNotMatch(error.message, /203\.0\.113\.7/);
     assert.equal(oauth.loadTokens(WS).refresh_token, "r0");
