@@ -42,7 +42,7 @@ class ForkVisibilityFaults:
         return time.monotonic() < self.stale_until
 
     def hides(self, item: dict[str, Any]) -> bool:
-        # Matching the derived title too covers a push or list read that races the fork response.
+        # Title match: a push or list read can race the fork response; this test forks once.
         title = str(item.get("title") or "")
         return self.lagging() and (
             item.get("id") in self.fork_ids or title.startswith(_FORK_TITLE_PREFIX)

@@ -380,7 +380,7 @@ export function conversationRowFromSession(session: Session): Conversation {
 }
 
 /**
- * Paint a just-created session (a fork) into every cached sidebar list and arm create's keep-alive.
+ * Insert a just-created session into the cached sidebar lists it belongs to and arm the keep-alive.
  */
 export function insertCreatedRowIntoCaches(queryClient: QueryClient, row: Conversation): void {
   markRecentlyCreated(row);

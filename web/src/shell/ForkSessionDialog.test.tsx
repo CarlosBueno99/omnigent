@@ -402,7 +402,6 @@ describe("ForkSessionDialog", () => {
       updated_at: 1_700_000_000,
       agent_id: "ag_source",
     });
-    // Arms the keep-alive.
     expect(recentlyCreatedSessions.has("conv_fork")).toBe(true);
   });
 
