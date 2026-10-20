@@ -7,7 +7,6 @@ processes they spawn.
 from __future__ import annotations
 
 import json
-import resource
 import subprocess
 from pathlib import Path
 
@@ -17,6 +16,8 @@ import pytest
 from tests._helpers.compat import apply_runner_env, runner_executable
 from tests._helpers.host import isolated_host
 from tests._helpers.live_server import isolated_process_env
+
+resource = pytest.importorskip("resource")
 
 _INHERITED_SOFT_LIMIT = 256
 

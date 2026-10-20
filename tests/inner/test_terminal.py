@@ -973,7 +973,11 @@ async def test_async_idle_watcher_backoff_resets_after_probes_start_again(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Start-failure delays double up to a cap and restart from the base after recovery."""
+    """Start-failure delays double up to a cap and restart from the base after recovery.
+
+    A cycle whose capture starts but whose pane-death probe cannot start still
+    counts as a failure, so alternating starts cannot pin the delay at its base.
+    """
     instance = TerminalInstance(
         name="runtime",
         session_key="main",
@@ -984,6 +988,8 @@ async def test_async_idle_watcher_backoff_resets_after_probes_start_again(
     no_descriptors = None
     outcomes: list[_ProcessWithStdout | None] = [
         *[no_descriptors] * 6,
+        _ProcessWithStdout(stdout=b"$ "),
+        no_descriptors,
         _ProcessWithStdout(stdout=b"$ "),
         _ProcessWithStdout(stdout=b"0 "),
         *[no_descriptors] * 2,
@@ -1017,12 +1023,12 @@ async def test_async_idle_watcher_backoff_resets_after_probes_start_again(
     with caplog.at_level(logging.DEBUG, logger=terminal_mod.__name__):
         await asyncio.wait_for(instance._idle_watch_loop(lambda: None), timeout=1.0)
 
-    assert delays == [0.001, 0.002, 0.004, 0.008, 0.016, 0.016, 0.001, 0.002]
+    assert delays == [0.001, 0.002, 0.004, 0.008, 0.016, 0.016, 0.016, 0.001, 0.002]
     start_failures = [r for r in caplog.records if "could not start" in r.getMessage()]
-    assert [r.levelno for r in start_failures] == [logging.WARNING] + [logging.DEBUG] * 7
+    assert [r.levelno for r in start_failures] == [logging.WARNING] + [logging.DEBUG] * 8
     recoveries = [r for r in caplog.records if "started again" in r.getMessage()]
     assert [(r.levelno, r.getMessage()) for r in recoveries] == [
-        (logging.INFO, "tmux probes for terminal runtime:main started again after 6 failures")
+        (logging.INFO, "tmux probes for terminal runtime:main started again after 7 failures")
     ]
 
 

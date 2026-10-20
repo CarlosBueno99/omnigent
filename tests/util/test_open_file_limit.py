@@ -53,7 +53,7 @@ class _FakeResource:
         pytest.param((1024, 1048576), _INFINITY, 65536, [65536], id="linux-default"),
     ],
 )
-def test_raise_soft_open_file_limit_raises_to_the_highest_accepted_value(
+def test_raise_soft_open_file_limit_falls_back_through_fixed_steps(
     monkeypatch: pytest.MonkeyPatch,
     limits: tuple[int, int],
     max_soft: int,
@@ -126,7 +126,7 @@ class _FakeProcess:
     command: list[str]
     soft_limit: int | None = None
     descendants: list[_FakeProcess] = field(default_factory=list)
-    gone: bool = False
+    error: psutil.Error | None = None
 
     def __post_init__(self) -> None:
         if self.soft_limit is not None:
@@ -135,11 +135,13 @@ class _FakeProcess:
 
     def children(self, *, recursive: bool) -> list[_FakeProcess]:
         assert recursive
+        if self.error is not None:
+            raise self.error
         return self.descendants
 
     def cmdline(self) -> list[str]:
-        if self.gone:
-            raise psutil.NoSuchProcess(self.pid)
+        if self.error is not None:
+            raise self.error
         return self.command
 
     def num_fds(self) -> int:
@@ -168,48 +170,71 @@ def _daemon_tree(*, soft_limit: int | None) -> _FakeProcess:
             _FakeProcess(pid=4243, fds=20, command=zygote, soft_limit=soft_limit),
             _FakeProcess(pid=4250, fds=230, command=zygote, soft_limit=soft_limit),
             _FakeProcess(pid=4260, fds=900, command=["tmux", "-S", "sock"], soft_limit=soft_limit),
-            _FakeProcess(pid=4270, fds=1, command=zygote, gone=True),
+            _FakeProcess(pid=4270, fds=1, command=zygote, error=psutil.NoSuchProcess(4270)),
+            _FakeProcess(pid=4280, fds=1, command=zygote, error=psutil.AccessDenied(4280)),
         ],
     )
 
 
+@pytest.mark.parametrize(
+    ("rlimit_soft", "inherited_limit", "limit", "near_limit"),
+    [
+        pytest.param(256, 65536, 256, [True, False, False], id="readable-rlimit"),
+        pytest.param(None, 10240, 10240, [False, False, False], id="macos-recorded-limit"),
+        pytest.param(-1, 65536, None, [False, False, False], id="unlimited-rlimit"),
+    ],
+)
 def test_host_process_open_files_lists_omnigent_processes_closest_to_limit_first(
     monkeypatch: pytest.MonkeyPatch,
+    rlimit_soft: int | None,
+    inherited_limit: int,
+    limit: int | None,
+    near_limit: list[bool],
 ) -> None:
-    """The busiest runner leads; agent CLIs, tmux and vanished processes are skipped."""
-    _install_process_tree(monkeypatch, _daemon_tree(soft_limit=256))
+    """The busiest runner leads; agent CLIs, tmux and unreadable processes are skipped.
 
-    usage = open_file_limit.host_process_open_files(4242, inherited_limit=65536)
+    psutil cannot read another process's rlimit on macOS, so the daemon's recorded
+    limit stands in; on Linux an unlimited soft limit reads as ``-1``.
+    """
+    _install_process_tree(monkeypatch, _daemon_tree(soft_limit=rlimit_soft))
+
+    usage = open_file_limit.host_process_open_files(4242, inherited_limit=inherited_limit)
 
     assert usage == [
-        ProcessOpenFiles(pid=4250, count=230, limit=256),
-        ProcessOpenFiles(pid=4242, count=40, limit=256),
-        ProcessOpenFiles(pid=4243, count=20, limit=256),
+        ProcessOpenFiles(pid=4250, count=230, limit=limit),
+        ProcessOpenFiles(pid=4242, count=40, limit=limit),
+        ProcessOpenFiles(pid=4243, count=20, limit=limit),
     ]
-    assert [entry.near_limit for entry in usage] == [True, False, False]
+    assert [entry.near_limit for entry in usage] == near_limit
 
 
-def test_host_process_open_files_uses_recorded_limit_where_rlimit_is_unreadable(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("count", "limit", "near_limit"),
+    [
+        pytest.param(204, 256, False, id="below"),
+        pytest.param(205, 256, True, id="above"),
+        pytest.param(8192, 10240, True, id="exactly-80-percent"),
+        pytest.param(8191, 10240, False, id="just-below-80-percent"),
+        pytest.param(10_000, None, False, id="unknown-limit"),
+    ],
+)
+def test_process_open_files_is_near_limit_from_80_percent(
+    count: int, limit: int | None, near_limit: bool
 ) -> None:
-    """On macOS the daemon's recorded limit stands in for each inheriting child."""
-    _install_process_tree(monkeypatch, _daemon_tree(soft_limit=None))
-
-    usage = open_file_limit.host_process_open_files(4242, inherited_limit=10240)
-
-    assert [(entry.pid, entry.limit) for entry in usage] == [
-        (4250, 10240),
-        (4242, 10240),
-        (4243, 10240),
-    ]
+    assert ProcessOpenFiles(pid=1, count=count, limit=limit).near_limit is near_limit
 
 
 def test_host_process_open_files_is_empty_when_counts_are_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A vanished daemon or a platform without descriptor counts reports nothing."""
+    """An unreadable daemon or a platform without descriptor counts reports nothing."""
     _install_process_tree(monkeypatch, _daemon_tree(soft_limit=256))
     assert open_file_limit.host_process_open_files(1, inherited_limit=None) == []
+
+    denied_root = _daemon_tree(soft_limit=256)
+    denied_root.error = psutil.AccessDenied(denied_root.pid)
+    _install_process_tree(monkeypatch, denied_root)
+    assert open_file_limit.host_process_open_files(4242, inherited_limit=None) == []
 
     monkeypatch.setattr(
         open_file_limit, "psutil", SimpleNamespace(Process=lambda pid: None, Error=psutil.Error)

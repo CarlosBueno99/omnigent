@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -14,6 +16,7 @@ import psutil
 import pytest
 
 from omnigent.inner import _liveness_exec
+from omnigent.util.open_file_limit import raise_soft_open_file_limit
 
 
 def test_refresh_census_does_not_adopt_reused_worker_pid(
@@ -340,27 +343,56 @@ def test_main_in_process_tears_down_when_the_pipe_closes(
     assert torn_down == [(os.getpgrp(), True)]
 
 
+@pytest.fixture
+def pipe_above_fd_setsize() -> Iterator[tuple[int, int]]:
+    """A pipe whose read end is numbered above ``select()``'s FD_SETSIZE of 1024.
+
+    The runner raises its open-file limit, so the liveness descriptor it passes
+    on can be numbered that high.
+    """
+    import fcntl
+    import resource
+
+    original_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    raised = raise_soft_open_file_limit()
+    if raised is None or (raised.soft != resource.RLIM_INFINITY and raised.soft <= 1100):
+        resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+        pytest.skip(f"open-file limit {raised} cannot hold a descriptor above 1024")
+    read_fd, write_fd = os.pipe()
+    high_read_fd = fcntl.fcntl(read_fd, fcntl.F_DUPFD, 1025)
+    os.close(read_fd)
+    try:
+        yield high_read_fd, write_fd
+    finally:
+        for fd in (high_read_fd, write_fd):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+
+
 @posix_only
-def test_main_in_process_tears_down_on_a_broken_liveness_fd(
+@pytest.mark.parametrize("liveness_fd_open", [True, False], ids=["parent-exits", "fd-closed"])
+def test_main_in_process_tears_down_on_a_high_numbered_liveness_fd(
     monkeypatch: pytest.MonkeyPatch,
+    pipe_above_fd_setsize: tuple[int, int],
+    liveness_fd_open: bool,
 ) -> None:
-    torn_down: list[int] = []
+    """Parent death, or a liveness fd the kernel rejects (EBADF), tears the worker down."""
+    read_fd, write_fd = pipe_above_fd_setsize
+    os.close(write_fd)
+    if not liveness_fd_open:
+        os.close(read_fd)
+    torn_down: list[tuple[int, bool]] = []
 
     def _fake_terminate(pgid: int, child: subprocess.Popen[bytes], **kw: object) -> None:
-        torn_down.append(pgid)
+        torn_down.append((pgid, bool(kw.get("detached_reaper"))))
         child.kill()
         child.wait(timeout=5)
 
     monkeypatch.setattr(_liveness_exec, "_terminate_group", _fake_terminate)
-
-    def _broken_select(*args: object, **kwargs: object) -> object:
-        raise OSError(9, "Bad file descriptor")
-
-    # A liveness fd the kernel rejects (EBADF) takes the same teardown path.
-    monkeypatch.setattr(_liveness_exec.select, "select", _broken_select)
-    rc = _main_with(monkeypatch, [sys.executable, "-c", "import time; time.sleep(60)"], 0)
+    rc = _main_with(monkeypatch, [sys.executable, "-c", "import time; time.sleep(60)"], read_fd)
     assert rc == 1
-    assert torn_down == [os.getpgrp()]
+    assert torn_down == [(os.getpgrp(), True)]
 
 
 @posix_only
