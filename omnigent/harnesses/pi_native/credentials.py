@@ -200,7 +200,9 @@ def _databricks_workspace_url_for_gateway(
 
     Workspace-hosted gateways already expose the workspace hostname. Dedicated
     ``ai-gateway`` subdomains require the configured Databricks profile because
-    the gateway hostname itself does not serve workspace APIs.
+    the gateway hostname itself does not serve workspace APIs. A profile whose
+    recorded ``workspace_id`` names a different workspace than a dedicated
+    ``<workspace-id>.ai-gateway`` host is not used.
 
     :param base_url: Gateway protocol URL or origin.
     :param profile: Optional Databricks profile for dedicated gateway hosts.
@@ -215,9 +217,26 @@ def _databricks_workspace_url_for_gateway(
     if _DATABRICKS_AI_GATEWAY_LABEL not in hostname.lower().split("."):
         return f"https://{hostname}"
     try:
-        return resolve_databricks_workspace(profile).host
+        workspace_url = resolve_databricks_workspace(profile).host
     except Exception:  # noqa: BLE001 — absent profile disables optional discovery
         return None
+    from omnigent.inner.databricks_executor import (
+        databrickscfg_workspace_id_for_host,
+        databrickscfg_workspace_id_for_profile,
+    )
+
+    gateway_workspace_id = hostname.split(".", 1)[0]
+    recorded_workspace_id = (
+        databrickscfg_workspace_id_for_profile(profile)
+        if profile
+        else databrickscfg_workspace_id_for_host(workspace_url)
+    )
+    if gateway_workspace_id.isdecimal() and recorded_workspace_id not in (
+        None,
+        gateway_workspace_id,
+    ):
+        return None
+    return workspace_url
 
 
 @dataclass(frozen=True)
