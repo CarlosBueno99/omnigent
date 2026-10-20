@@ -161,6 +161,8 @@ interface ToolCardProps {
   startedAt?: number | null;
   /** Completed runtime in seconds. Undefined when historical data lacks timing. */
   duration?: number;
+  /** Mount with the parameters and output expanded. */
+  defaultOpen?: boolean;
 }
 
 export function ToolCard({
@@ -172,6 +174,7 @@ export function ToolCard({
   state,
   startedAt,
   duration,
+  defaultOpen = false,
 }: ToolCardProps) {
   const title = useMemo(() => formatToolTitle(name, args, argsSummary), [name, args, argsSummary]);
   const inputJson = useMemo(() => JSON.stringify(args, null, 2), [args]);
@@ -192,7 +195,7 @@ export function ToolCard({
   const onBodyClick = openFile && linkPath ? () => openFile(linkPath) : undefined;
 
   return (
-    <Collapsible defaultOpen={false} className="group not-prose w-full">
+    <Collapsible defaultOpen={defaultOpen} className="group not-prose w-full">
       <ToolTriggerRow
         title={title}
         name={name}
