@@ -1,4 +1,4 @@
-"""E2E: key chords xterm.js leaves unencoded reach the session terminal's PTY.
+"""E2E: macOS Cmd line-editing shortcuts in the session terminal.
 
 On macOS the standard readline-style Cmd shortcuts in a session's terminal
 did nothing useful:
@@ -28,12 +28,6 @@ appears. xterm renders to a canvas (stdout is not in the DOM), so the file
 side-effect plus the bytes observed on the terminal-attach WebSocket are the
 machine-checkable signals.
 
-**Ctrl+/** is the same class of gap on every platform: xterm's Ctrl table has
-no entry for ``/``, so the chord transmitted nothing and the keydown bubbled
-to the app's Ctrl+/ "Keyboard shortcuts" hotkey, which opened its dialog over
-the pane. A native terminal sends ``0x1F`` (Ctrl-_, the byte Ctrl+7 shares) —
-the binding TUIs such as Codex use to toggle a side conversation.
-
 A readiness handshake (a ``touch`` that must land before the scenario) makes
 sure the PTY's shell is accepting and executing input before any Cmd keys are
 sent, so the assertions can only fail on the shortcut behavior itself.
@@ -42,6 +36,9 @@ All tests use the function-scoped ``terminal_session`` fixture (the
 ``zsh``-declaring agent, runner-bound session); the launched shell is
 actually ``bash --noprofile --norc``, whose default emacs bindings implement
 Ctrl-A / Ctrl-E / Ctrl-U — exactly what the fix is expected to send.
+
+Ctrl+/ must likewise reach the shell as Ctrl-_ instead of opening Omnigent's
+Keyboard shortcuts dialog over the terminal.
 """
 
 from __future__ import annotations
@@ -58,7 +55,7 @@ from tests.e2e_ui.conftest import open_right_rail
 CTRL_A = b"\x01"  # cursor to line start (Cmd+Left)
 CTRL_E = b"\x05"  # cursor to line end   (Cmd+Right)
 CTRL_U = b"\x15"  # kill to line start   (Cmd+Backspace)
-CTRL_UNDERSCORE = b"\x1f"  # what a native terminal sends for Ctrl+/
+CTRL_UNDERSCORE = b"\x1f"  # Ctrl+/ (Codex's side/main thread toggle)
 
 
 def _open_new_shell(page: Page) -> None:
@@ -277,30 +274,25 @@ def test_cmd_right_moves_cursor_to_line_end(
 def test_ctrl_slash_reaches_the_shell_as_ctrl_underscore(
     page: Page, terminal_session: tuple[str, str], tmp_path: Path
 ) -> None:
-    """Ctrl+/ is transmitted to the PTY as ``0x1F`` and opens no app overlay.
-
-    Journey: open a shell → ``bind -x`` readline's ``\\C-_`` key to a ``touch``
-    → press Ctrl+/. Only if the chord reached bash as ``0x1F`` does the
-    binding run and the marker appear. On the buggy build xterm sent nothing
-    and the keydown opened the "Keyboard shortcuts" dialog over the terminal.
-    """
+    """Ctrl+/ in a focused shell runs the shell's Ctrl-_ binding and opens no Omnigent dialog."""
     base_url, session_id = terminal_session
     frames = _capture_attach_frames(page)
     page.goto(f"{base_url}/c/{session_id}")
     textarea = _connected_shell_textarea(page)
     _await_shell_ready(page, textarea, tmp_path)
 
+    bound = tmp_path / "ctrl_underscore_bound.txt"
     marker = tmp_path / "ctrl_slash.ok"
-    page.keyboard.type(f"bind -x '\"\\C-_\": touch {marker}'")
+    page.keyboard.type(f"bind -x '\"\\C-_\": touch {marker}' && touch {bound}")
     page.keyboard.press("Enter")
-    sent_before = len(frames)
-    page.keyboard.press("Control+/")
-    file_created = _wait_for_file(marker, timeout_s=15.0)
-    sent = b"".join(frames[sent_before:])
+    assert _wait_for_file(bound, timeout_s=10.0), "bash did not accept the Ctrl-_ binding"
+
+    page.keyboard.press("Control+Slash")
+    file_created = _wait_for_file(marker, timeout_s=10.0)
     dialog_open = page.get_by_role("dialog", name="Keyboard shortcuts").is_visible()
+    sent = b"".join(frames)
     assert CTRL_UNDERSCORE in sent and file_created and not dialog_open, (
-        "Ctrl+/ did not reach the shell: expected the terminal to transmit "
-        f"{CTRL_UNDERSCORE!r} and the bound command to create {marker.name} "
-        f"(created={file_created}, shortcuts dialog open={dialog_open}); bytes "
-        f"sent on the attach WebSocket after the chord: {sent!r}"
+        f"Ctrl+/ did not reach the shell as {CTRL_UNDERSCORE!r}: binding ran={file_created}, "
+        f"Keyboard shortcuts dialog open={dialog_open}; bytes sent on the attach "
+        f"WebSocket: {sent!r}"
     )
