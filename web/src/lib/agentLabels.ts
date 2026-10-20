@@ -54,6 +54,8 @@ interface HarnessCatalogWire {
   // Setup steps keyed by EVERY harness spelling a session may declare (native
   // wrappers + installable non-picker ids), not just the picker rows in `data`.
   setup_steps?: Record<string, SetupStepWire[]>;
+  // Every spelling declared to read a message sent mid-turn in that turn.
+  live_steering?: string[];
 }
 
 export interface HarnessCatalog {
@@ -65,6 +67,8 @@ export interface HarnessCatalog {
   acpHarnesses: ReadonlySet<string>;
   /** harness id → declared effort family (``anthropic``, ``openai``, …). */
   effortFamilies: Record<string, string>;
+  /** spellings that steer a running turn — see {@link useLiveSteeringHarnessIds}. */
+  liveSteeringHarnesses: ReadonlySet<string> | null;
 }
 
 /** Pull each row's declared effort family; rows without one are skipped. */
@@ -99,6 +103,9 @@ export async function fetchHarnessCatalog(): Promise<HarnessCatalog> {
     setupSteps,
     acpHarnesses,
     effortFamilies: effortFamiliesFromCatalog(body.data ?? []),
+    liveSteeringHarnesses: Array.isArray(body.live_steering)
+      ? new Set(body.live_steering.filter((id) => typeof id === "string"))
+      : null,
   };
 }
 
@@ -198,6 +205,15 @@ const NO_EFFORT_FAMILIES: Record<string, string> = {};
 /** harness id → declared effort family, from ``/v1/harnesses`` ``capabilities.effort``. */
 export function useHarnessEffortFamilies(enabled = true): Record<string, string> {
   return useHarnessCatalog((c) => c.effortFamilies, NO_EFFORT_FAMILIES, enabled);
+}
+
+/**
+ * Harness spellings declared to read a message sent mid-turn in that turn; any
+ * other SDK harness reads it on its next turn. Null until the catalog loads,
+ * and on a server too old to report it.
+ */
+export function useLiveSteeringHarnessIds(): ReadonlySet<string> | null {
+  return useHarnessCatalog((c) => c.liveSteeringHarnesses, null);
 }
 
 /**

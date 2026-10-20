@@ -6,7 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from omnigent.harness_plugins import harness_catalog, harness_setup_steps_by_spelling
+from omnigent.harness_plugins import (
+    harness_catalog,
+    harness_setup_steps_by_spelling,
+    live_steering_harnesses,
+)
 from omnigent.server.auth import AuthProvider
 from omnigent.server.routes._auth_helpers import require_user
 
@@ -23,10 +27,12 @@ def create_harnesses_router(*, auth_provider: AuthProvider | None = None) -> API
         # declare — native wrappers (``codex-native``) and installable ids that
         # aren't picker rows (``opencode``/``qwen``) — so the setup dialog can
         # resolve steps by the harness it actually holds without the picker
-        # list gaining non-pickable rows.
+        # list gaining non-pickable rows. ``live_steering`` lists, the same way,
+        # the spellings declared to read a message sent mid-turn in that turn.
         return {
             "data": harness_catalog(),
             "setup_steps": harness_setup_steps_by_spelling(),
+            "live_steering": live_steering_harnesses(),
         }
 
     return router

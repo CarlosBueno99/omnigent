@@ -15,6 +15,7 @@ import { getCurrentAuthorId } from "@/lib/identity";
 import { hasCommandModifier } from "@/lib/hotkeys";
 import { isSystemUserContent } from "@/lib/systemMessage";
 import { isTerminalCommandInput } from "@/lib/blocks";
+import { useLiveSteeringHarnessIds } from "@/lib/agentLabels";
 import {
   type Bubble,
   type BubbleCache,
@@ -137,6 +138,14 @@ function TranscriptImpl({
   const mcpStartupActive = useChatStore((s) => s.mcpStartup !== null);
   const hasTasks = useChatStore((s) => s.todos.length > 0);
   const conversationId = useChatStore((s) => s.conversationId);
+  const sessionHarness = useChatStore((s) => s.sessionHarness);
+  const isNativeTerminalSession = useChatStore((s) => s.isNativeTerminalSession);
+  const liveSteeringHarnesses = useLiveSteeringHarnessIds();
+  const placeNextTurnFollowUps =
+    !isNativeTerminalSession &&
+    sessionHarness !== null &&
+    liveSteeringHarnesses !== null &&
+    !liveSteeringHarnesses.has(sessionHarness);
 
   // Build bubbles once per blocks/activeResponse change. Per-surface reuse
   // cache so a streaming append rebuilds only the active bubble, reusing the
@@ -152,6 +161,7 @@ function TranscriptImpl({
           bubbleCacheRef.current,
           interruptedResponseIds,
           computeIsWorking(sessionStatus),
+          placeNextTurnFollowUps,
         ),
       ),
       subagentRoutingOverride,
@@ -168,6 +178,7 @@ function TranscriptImpl({
     pendingUserMessages,
     subagentRoutingOverride,
     sessionStatus,
+    placeNextTurnFollowUps,
   ]);
 
   const pendingElicitations = useMemo(() => collectPendingElicitations(bubbles), [bubbles]);

@@ -266,8 +266,14 @@ const REASONING_BLOCK_TYPES = new Set(["reasoning_start", "reasoning_chunk", "re
  * the cached ones — so a session switch, history prepend, or in-place
  * block edit is always correct, just not incremental.
  *
- * :param blocks: the `blocks` array the cached `bubbles` were built
- *     from, kept for identity + per-element reference comparison.
+ * :param sourceBlocks: the caller's `blocks` array, kept for the identity
+ *     short-circuit.
+ * :param blocks: the walked `blocks` array the cached `bubbles` were built
+ *     from — `sourceBlocks` itself unless next-turn follow-ups were moved —
+ *     kept for per-element reference comparison.
+ * :param nextTurnFollowUps: whether the cached walk placed next-turn follow-ups
+ *     after their turn (see `orderNextTurnFollowUps`), and `"holding"` when a
+ *     batch still waited at the tail, so the next walk may insert above it.
  * :param activeResponse: the `activeResponse` the cached `bubbles`
  *     were built with.
  * :param bubbles: the last result returned.
@@ -285,7 +291,9 @@ const REASONING_BLOCK_TYPES = new Set(["reasoning_start", "reasoning_chunk", "re
  *     disagreement over the prefix forces the one full rebuild that removes it.
  */
 export interface BubbleCache {
+  sourceBlocks: AnyBlock[] | null;
   blocks: AnyBlock[] | null;
+  nextTurnFollowUps: "off" | "on" | "holding";
   activeResponse: ActiveResponse | null;
   interruptedResponseIds: readonly string[] | null;
   // Response id of the newest assistant turn while the SESSION is running,
@@ -306,7 +314,9 @@ const EMPTY_INTERRUPTED_RESPONSE_IDS: readonly string[] = [];
 /** A fresh, empty `BubbleCache`. */
 export function createBubbleCache(): BubbleCache {
   return {
+    sourceBlocks: null,
     blocks: null,
+    nextTurnFollowUps: "off",
     activeResponse: null,
     interruptedResponseIds: null,
     liveTurnId: null,
@@ -352,6 +362,83 @@ function newestAssistantTurnId(blocks: AnyBlock[]): string | null {
 }
 
 /**
+ * Arrival-order blocks with each follow-up placed after the turn it was sent
+ * during, for a harness that reads mid-turn input only on its NEXT turn.
+ *
+ * The server persists a follow-up when it is POSTed, so the running turn's
+ * remaining work lands below it and reads as the follow-up's answer. Blocks
+ * carrying that turn's response id move above the waiting follow-up; later
+ * messages join the waiting batch. The batch is placed right after the turn's
+ * `response_end`, or before the first block of another (or anonymous) response.
+ *
+ * @returns `blocks` itself when nothing moved, and whether a batch still waits
+ *   at the tail (a later call may insert the running turn's blocks above it).
+ */
+export function orderNextTurnFollowUps(blocks: AnyBlock[]): {
+  blocks: AnyBlock[];
+  holding: boolean;
+} {
+  let ordered: AnyBlock[] | null = null;
+  let held: AnyBlock[] = [];
+  let heldAt = -1;
+  let heldTurn: string | null = null;
+  let openTurn: string | null = null;
+  const place = (): void => {
+    ordered?.push(...held);
+    held = [];
+    heldTurn = null;
+  };
+  for (let i = 0; i < blocks.length; i += 1) {
+    const b = blocks[i]!;
+    if (heldTurn !== null) {
+      if (b.type === "user_message") {
+        held.push(b);
+        continue;
+      }
+      // A tool_result folds into its call's card wherever it sits, so a
+      // backdated one moves up rather than placing the batch early.
+      if (
+        b.type === "tool_result" ||
+        (b.ctx.responseId === heldTurn && !isTerminalCommandInput(b))
+      ) {
+        ordered ??= blocks.slice(0, heldAt);
+        ordered.push(b);
+        if (b.type === "response_end") place();
+        continue;
+      }
+      place();
+    }
+    if (b.type === "user_message" && openTurn !== null && b.ctx.responseId !== openTurn) {
+      held = [b];
+      heldAt = i;
+      heldTurn = openTurn;
+      openTurn = null;
+      continue;
+    }
+    ordered?.push(b);
+    openTurn = openTurnAfter(b, openTurn);
+  }
+  const holding = heldTurn !== null;
+  place();
+  return { blocks: ordered ?? blocks, holding };
+}
+
+/** Response id of the turn still running after `b`, given the one before it. */
+function openTurnAfter(b: AnyBlock, openTurn: string | null): string | null {
+  if (b.type === "response_end" || b.type === "user_message" || isTerminalCommandInput(b)) {
+    return null;
+  }
+  if (b.type === "response_start") {
+    return isAnonymousRid(b.ctx.responseId) ? null : b.ctx.responseId;
+  }
+  // A tool_result can be backdated to an earlier turn, so it names no turn.
+  if (!isAssistantSideBlock(b) || b.type === "tool_result" || isAnonymousRid(b.ctx.responseId)) {
+    return openTurn;
+  }
+  return b.ctx.responseId;
+}
+
+/**
  * Walk a flat block list and produce the bubble cluster list.
  *
  * @param blocks - the conversation's blocks in arrival order. Includes
@@ -376,19 +463,27 @@ function newestAssistantTurnId(blocks: AnyBlock[]): string | null {
  *   liveness lives in `sessionStatus` rather than a streaming `activeResponse`
  *   (claude-native). Does NOT change any bubble's `lifecycle` — fork, fold,
  *   cancelled, and failed are unaffected; it only reaches the tool-state gate.
+ * @param placeNextTurnFollowUps - whether the session's harness reads mid-turn
+ *   input only on its next turn, so follow-ups render after the turn they were
+ *   sent during (see `orderNextTurnFollowUps`).
  */
 export function buildBubbles(
-  blocks: AnyBlock[],
+  sourceBlocks: AnyBlock[],
   activeResponse: ActiveResponse | null,
   cache?: BubbleCache,
   interruptedResponseIds: readonly string[] = EMPTY_INTERRUPTED_RESPONSE_IDS,
   sessionRunning = false,
+  placeNextTurnFollowUps = false,
 ): Bubble[] {
   const interruptedResponses = new Set(interruptedResponseIds);
   // The newest turn spins its trailing tools only while the session runs; an
   // already-streaming `activeResponse` covers the in-process harnesses without
   // it, so this is null unless the session is running.
-  const liveTurnId = sessionRunning ? newestAssistantTurnId(blocks) : null;
+  const liveTurnId = sessionRunning ? newestAssistantTurnId(sourceBlocks) : null;
+  const arranged = placeNextTurnFollowUps
+    ? orderNextTurnFollowUps(sourceBlocks)
+    : { blocks: sourceBlocks, holding: false };
+  const blocks = arranged.blocks;
   // Resolved over the whole transcript before any reuse decision: a create-time
   // chip and the turn chip that repeats it verbatim are one verdict however far
   // apart they landed, and whether the pair is still visible decides whether the
@@ -409,10 +504,12 @@ export function buildBubbles(
       activeResponse,
     );
   }
+  const nextTurnFollowUps = !placeNextTurnFollowUps ? "off" : arranged.holding ? "holding" : "on";
 
   // Nothing changed since the last call — hand back the same array.
   if (
-    cache.blocks === blocks &&
+    cache.sourceBlocks === sourceBlocks &&
+    cache.nextTurnFollowUps === nextTurnFollowUps &&
     cache.activeResponse === activeResponse &&
     cache.interruptedResponseIds === interruptedResponseIds &&
     cache.liveTurnId === liveTurnId
@@ -421,15 +518,13 @@ export function buildBubbles(
   }
 
   // Try the incremental path: reuse every finalized bubble (all but the
-  // last) and rebuild only from where the last cached bubble started.
-  const reuse = reusablePrefix(
-    blocks,
-    activeResponse,
-    interruptedResponses,
-    cache,
-    superseded,
-    liveTurnId,
-  );
+  // last) and rebuild only from where the last cached bubble started. The
+  // running turn's blocks are inserted ABOVE a waiting follow-up batch, inside
+  // the finalized prefix, so a walk on either side of one rebuilds in full.
+  const reuse =
+    nextTurnFollowUps === "holding" || cache.nextTurnFollowUps === "holding"
+      ? null
+      : reusablePrefix(blocks, activeResponse, interruptedResponses, cache, superseded, liveTurnId);
   if (reuse !== null) {
     const subIndexSeed = new Map<string, number>();
     for (const b of reuse.prefix) {
@@ -447,7 +542,9 @@ export function buildBubbles(
       superseded,
       liveTurnId,
     );
+    cache.sourceBlocks = sourceBlocks;
     cache.blocks = blocks;
+    cache.nextTurnFollowUps = nextTurnFollowUps;
     cache.activeResponse = activeResponse;
     cache.interruptedResponseIds = interruptedResponseIds;
     cache.liveTurnId = liveTurnId;
@@ -469,7 +566,9 @@ export function buildBubbles(
     superseded,
     liveTurnId,
   );
+  cache.sourceBlocks = sourceBlocks;
   cache.blocks = blocks;
+  cache.nextTurnFollowUps = nextTurnFollowUps;
   cache.activeResponse = activeResponse;
   cache.interruptedResponseIds = interruptedResponseIds;
   cache.liveTurnId = liveTurnId;
@@ -598,10 +697,11 @@ export function workingIndicatorInsertIndex(
   let activeTurnEnd: number;
   if (streamingIndex !== -1) {
     activeTurnEnd = streamingIndex;
-    // The active turn can trail non-assistant rows after its last assistant
-    // fragment (subagent activity, routing). Keep the marker below those too,
-    // so it stays with the turn and above the follow-up, never mid-turn.
-    while (activeTurnEnd + 1 < bubbles.length && !isFollowUp(bubbles[activeTurnEnd + 1]!)) {
+    // The active turn can trail subagent-activity and routing rows after its
+    // last assistant fragment. Keep the marker below those, never mid-turn.
+    while (activeTurnEnd + 1 < bubbles.length) {
+      const next = bubbles[activeTurnEnd + 1]!;
+      if (next.kind !== "subagent_activity" && next.kind !== "routing_decision") break;
       activeTurnEnd += 1;
     }
   } else {

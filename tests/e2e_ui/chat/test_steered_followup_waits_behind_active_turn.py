@@ -1,46 +1,104 @@
 """E2E: a follow-up pushed forward mid-turn must not read as the active request.
 
 While the first turn is still running, the queued strip's "Send now" POSTs the
-follow-up. The runner buffers it behind the active turn, but the SPA renders it
-as a normal sent bubble with the Working… indicator beneath it, so the UI
-reports the follow-up as the request being processed while the first request
-is still executing.
+follow-up. An openai-agents turn cannot read it until that turn ends, so the
+first turn's remaining work, its Working… indicator and its reply must stay
+above the follow-up, and the follow-up's own reply must come after it.
 """
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
-import time
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterator
 
 import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests._helpers.polling import poll_until
+from tests.e2e_ui.conftest import (
+    _TOOL_FOLD_AGENT_NAME,
+    _TOOL_FOLD_AGENT_YAML,
+    _create_bundled_session,
+    _ensure_runner_online,
+    _server_state,
+    configure_mock_llm,
+    set_fallback_mock_llm,
+)
+
 _COMPOSER_LABEL = "Message the agent"
 _FIRST_PROMPT = "Inspect the workspace and tell me what is in it."
 _FOLLOW_UP = "sentinel-steer-followup-7291 push this prompt forward"
-_FINAL_REPLY = "Workspace inspected."
-_USER_BUBBLE = '[data-testid="message-bubble"][data-role="user"]'
-_ASSISTANT_BUBBLE = '[data-testid="message-bubble"][data-role="assistant"]'
-_WORKING = '[data-testid="working-indicator"]'
+_FIRST_REPLY = "Workspace inspected."
+_FOLLOW_UP_REPLY = "Follow-up answered."
 _QUEUED_STRIP = '[data-testid="composer-queued-strip"]'
-_QUEUE_STATE_RE = r"queued|waiting|pending"
+_WORKING = '[data-testid="working-indicator"]'
+_WORKING_ROW = "working"
 
 
-def _wait_for(page: Page, predicate: Callable[[], bool], *, timeout_s: float = 30.0) -> None:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        page.wait_for_timeout(100)
-    raise AssertionError(f"condition not met within {timeout_s:.0f}s")
+@pytest.fixture
+def two_pause_session(
+    live_server: str,
+    mock_llm_server_url: str,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, str, str]]:
+    """An openai-agents session whose first turn pauses before and after its read call.
+
+    :returns: ``(base_url, session_id, mock_llm_url)``.
+    """
+    model = f"two-pause-turn-{uuid.uuid4().hex[:8]}"
+    read_call = {
+        "call_id": "call_read",
+        "name": "sys_os_read",
+        "arguments": json.dumps({"path": "README.md"}),
+    }
+    configure_mock_llm(
+        mock_llm_server_url,
+        [
+            {
+                "tool_calls": [
+                    {
+                        "call_id": "call_ls",
+                        "name": "sys_os_shell",
+                        "arguments": json.dumps({"command": "ls"}),
+                    }
+                ]
+            },
+            {"block": True, "tool_calls": [read_call]},
+            {"block": True, "text": _FIRST_REPLY},
+            {"text": _FOLLOW_UP_REPLY},
+        ],
+        key=model,
+    )
+    set_fallback_mock_llm(mock_llm_server_url, model, "Unexpected extra model call.")
+    respawned = _ensure_runner_online(live_server, tmp_path_factory)
+    yaml_text = _TOOL_FOLD_AGENT_YAML.format(name=_TOOL_FOLD_AGENT_NAME, model=model)
+    session_id = _create_bundled_session(live_server, str(_server_state["runner_id"]), yaml_text)
+    try:
+        yield (live_server, session_id, mock_llm_server_url)
+    finally:
+        for _ in range(2):
+            with contextlib.suppress(httpx.HTTPError):
+                httpx.post(f"{mock_llm_server_url}/gate/release", timeout=5.0)
+        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        if respawned is not None:
+            respawned.terminate()
+            respawned.wait(timeout=5)
 
 
 def _gate_pending(mock_url: str) -> bool:
-    resp = httpx.get(f"{mock_url}/gate/pending", timeout=5.0)
-    resp.raise_for_status()
-    return bool(resp.json()["pending"])
+    response = httpx.get(f"{mock_url}/gate/pending", timeout=5.0)
+    response.raise_for_status()
+    return bool(response.json()["pending"])
+
+
+def _release_gate(mock_url: str) -> None:
+    response = httpx.post(f"{mock_url}/gate/release", timeout=5.0)
+    response.raise_for_status()
+    assert response.json()["released"], "no model call was waiting on the gate"
 
 
 def _send(page: Page, text: str) -> None:
@@ -48,112 +106,114 @@ def _send(page: Page, text: str) -> None:
     page.get_by_role("button", name="Send", exact=True).click()
 
 
-def _follow_up_presented_as_active(page: Page) -> bool:
-    """Whether the follow-up reads as the request being processed.
-
-    True when it is the last user bubble, the Working… indicator follows it in
-    the transcript, and neither the bubble nor the queued strip marks it as
-    still waiting.
-    """
-    return bool(
-        page.evaluate(
-            """([bubbleSel, workingSel, stripSel, text, stateRe]) => {
-              const bubbles = [...document.querySelectorAll(bubbleSel)];
-              const last = bubbles[bubbles.length - 1];
-              if (!last || !last.innerText.includes(text)) return false;
-              const working = document.querySelector(workingSel);
-              if (!working) return false;
-              const follows = Boolean(
-                last.compareDocumentPosition(working) & Node.DOCUMENT_POSITION_FOLLOWING,
-              );
-              const strip = document.querySelector(stripSel);
-              const stillQueued = strip !== null && strip.innerText.includes(text);
-              const marked = new RegExp(stateRe, "i").test(last.innerText);
-              return follows && !stillQueued && !marked;
-            }""",
-            [_USER_BUBBLE, _WORKING, _QUEUED_STRIP, _FOLLOW_UP, _QUEUE_STATE_RE],
-        )
+def _transcript_rows(page: Page) -> list[str]:
+    """Visible transcript rows in order: ``working`` or ``<role>: <text>``."""
+    return page.evaluate(
+        """(workingSel) => [
+          ...document.querySelectorAll(`[data-testid="message-bubble"], ${workingSel}`),
+        ]
+          .filter((el) => el.checkVisibility() && el.getClientRects().length > 0)
+          .map((el) =>
+            el.matches(workingSel)
+              ? "working"
+              : `${el.getAttribute("data-role")}: ${el.innerText.replace(/\\s+/g, " ")}`,
+          )""",
+        _WORKING,
     )
 
 
-def _working_sits_above_follow_up(page: Page) -> bool:
-    """Whether exactly one Working… indicator is visible above the follow-up.
+def _split_at_follow_up(rows: list[str]) -> tuple[list[str], list[str]] | None:
+    for index, row in enumerate(rows):
+        if row.startswith("user:") and _FOLLOW_UP in row:
+            return rows[:index], rows[index + 1 :]
+    return None
 
-    The fix keeps the shimmer with the active turn, so while the first request
-    runs there is exactly one visible indicator and it precedes the steered
-    follow-up. Visibility is checked explicitly: a hidden or vanished indicator
-    (count 0) must not read as success.
-    """
-    return bool(
-        page.evaluate(
-            """([workingSel, bubbleSel, followUp]) => {
-              const visible = (el) => el.checkVisibility() && el.getClientRects().length > 0;
-              const workings = [...document.querySelectorAll(workingSel)].filter(visible);
-              if (workings.length !== 1) return false;
-              const followUpBubble = [...document.querySelectorAll(bubbleSel)].find((b) =>
-                b.innerText.includes(followUp),
-              );
-              if (!followUpBubble) return false;
-              return Boolean(
-                workings[0].compareDocumentPosition(followUpBubble) &
-                  Node.DOCUMENT_POSITION_FOLLOWING,
-              );
-            }""",
-            [_WORKING, _USER_BUBBLE, _FOLLOW_UP],
-        )
+
+def _first_turn_still_runs_above(rows: list[str]) -> bool:
+    split = _split_at_follow_up(rows)
+    return split is not None and split[0].count(_WORKING_ROW) == 1 and split[1] == []
+
+
+def _replies_on_either_side(rows: list[str]) -> bool:
+    split = _split_at_follow_up(rows)
+    if split is None or _WORKING_ROW in rows:
+        return False
+    above, below = split
+    return (
+        any(row.startswith("assistant:") and _FIRST_REPLY in row for row in above)
+        and len(below) == 1
+        and below[0].startswith("assistant:")
+        and _FOLLOW_UP_REPLY in below[0]
+        and _FIRST_REPLY not in below[0]
     )
 
 
-def test_steered_followup_is_not_presented_as_active_while_first_turn_runs(
+def _await_rows(page: Page, layout: Callable[[list[str]], bool], expectation: str) -> None:
+    rows: list[str] = []
+
+    def matches() -> bool:
+        nonlocal rows
+        rows = _transcript_rows(page)
+        return layout(rows)
+
+    try:
+        poll_until(matches, timeout_s=20.0, interval_s=0.2)
+    except AssertionError as exc:
+        raise AssertionError(f"{expectation}; transcript rows were {rows}") from exc
+
+
+def test_steered_followup_waits_behind_the_running_turn(
     request: pytest.FixtureRequest,
-    paused_mid_turn_session: tuple[str, str, str],
+    two_pause_session: tuple[str, str, str],
     output_path: str,
 ) -> None:
-    base_url, session_id, mock_url = paused_mid_turn_session
+    base_url, session_id, mock_url = two_pause_session
     print(f"product_session_id={session_id}")
     page: Page = request.getfixturevalue("page")
     page.goto(f"{base_url}/c/{session_id}")
     expect(page.get_by_label(_COMPOSER_LABEL)).to_be_visible(timeout=30_000)
 
     _send(page, _FIRST_PROMPT)
-    # The first turn has run its `ls` tool and is now blocked on its next model call.
-    _wait_for(page, lambda: _gate_pending(mock_url))
-    expect(page.locator(_WORKING)).to_be_visible()
-
+    poll_until(lambda: _gate_pending(mock_url))
     _send(page, _FOLLOW_UP)
     strip = page.locator(_QUEUED_STRIP)
     expect(strip).to_contain_text(_FOLLOW_UP)
     page.get_by_role("button", name="Send queued message now").click()
-
-    follow_up = page.locator(_USER_BUBBLE).filter(has_text=_FOLLOW_UP)
-    expect(follow_up).to_be_visible(timeout=10_000)
     expect(strip).to_have_count(0)
-    page.wait_for_timeout(3_000)
+
+    _await_rows(
+        page,
+        _first_turn_still_runs_above,
+        "while the first request waits on its model, its Working… indicator must sit "
+        "above the sent follow-up with nothing beneath the follow-up",
+    )
     assert _gate_pending(mock_url), "the first request must still be executing here"
-    presented_as_active = _follow_up_presented_as_active(page)
-    working_above_follow_up = _working_sits_above_follow_up(page)
-    follow_up_item_id = follow_up.get_attribute("data-message-id")
-    page.screenshot(path=os.path.join(output_path, "follow-up-while-first-turn-runs.png"))
+    page.screenshot(path=os.path.join(output_path, "first-pause.png"))
 
-    httpx.post(f"{mock_url}/gate/release", timeout=5.0).raise_for_status()
-    first_reply = page.locator(_ASSISTANT_BUBBLE).filter(has_text=_FINAL_REPLY)
-    expect(first_reply.first).to_be_visible(timeout=60_000)
-    page.wait_for_timeout(2_000)
-    page.screenshot(path=os.path.join(output_path, "first-reply-after-release.png"))
-    expect(page.locator(_WORKING)).to_be_hidden(timeout=60_000)
-    page.wait_for_timeout(1_500)
-    print(
-        f"follow_up_item_id={follow_up_item_id} presented_as_active={presented_as_active} "
-        f"working_above_follow_up={working_above_follow_up}"
+    _release_gate(mock_url)
+    expect(page.get_by_text("README.md").first).to_be_visible(timeout=30_000)
+    poll_until(lambda: _gate_pending(mock_url))
+    _await_rows(
+        page,
+        _first_turn_still_runs_above,
+        "after the first request's read call, that call and Working… must still sit "
+        "above the follow-up, which the turn has not read",
     )
+    page.screenshot(path=os.path.join(output_path, "second-pause.png"))
 
-    assert not presented_as_active, (
-        "the follow-up was shown as the request being processed (committed bubble "
-        f"{follow_up_item_id!r} followed by the Working… indicator, no queued marker) "
-        "while the first request was still executing"
+    _release_gate(mock_url)
+    _await_rows(
+        page,
+        _replies_on_either_side,
+        f"{_FIRST_REPLY!r} must sit above the follow-up and only {_FOLLOW_UP_REPLY!r} below it",
     )
-    assert working_above_follow_up, (
-        "while the first request runs, exactly one Working… indicator must stay "
-        "visible with the active turn, above the steered follow-up — not beneath it "
-        "and not gone"
+    page.screenshot(path=os.path.join(output_path, "both-replies.png"))
+
+    page.reload()
+    expect(page.get_by_text(_FOLLOW_UP_REPLY)).to_be_visible(timeout=30_000)
+    _await_rows(
+        page,
+        _replies_on_either_side,
+        f"after a reload, {_FIRST_REPLY!r} must still sit above the follow-up and only "
+        f"{_FOLLOW_UP_REPLY!r} below it",
     )

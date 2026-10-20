@@ -602,6 +602,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
+        steering=True,
         instruction_delivery=_ID.COMPOSED_PER_TURN,
     ),
     "pi": _C(
@@ -614,6 +615,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
+        steering=True,
         instruction_delivery=_ID.COMPOSED_PER_TURN,
     ),
     "openai-agents": _C(
@@ -1320,6 +1322,19 @@ def harness_setup_steps_by_spelling() -> dict[str, list[dict[str, str | None]]]:
     return {
         spelling: [step.as_dict() for step in ui_setup_steps(spelling)] for spelling in spellings
     }
+
+
+def live_steering_harnesses() -> list[str]:
+    """Return every harness spelling whose declared capabilities include steering.
+
+    Covers every spelling a session may declare, aliases included, so the web
+    UI can tell whether an SDK session reads a message sent mid-turn in that
+    turn or only on its next one.
+    """
+    capabilities = harness_capabilities()
+    steering = {harness for harness, capability in capabilities.items() if capability.steering}
+    steering.update(alias for alias, target in harness_aliases().items() if target in steering)
+    return sorted(steering)
 
 
 def load_object(import_path: str) -> object:
