@@ -454,6 +454,13 @@ legitimate reproduction only when the failure truly has no user-facing surface,
 or when the surface exists but the harness genuinely cannot reach the failing
 state (see Step 4) — and then you say which in `evidence`.
 
+**Judge the surface by where the symptom shows, not where the defect lives.** A
+runner-side leak, a background task, or a failed request is a `terminal` facet
+when its effect renders in a pane, such as an error printed by a leaked native
+CLI. If your own probe captured a pane showing the symptom
+(a `tmux capture-pane` dump or a screenshot), stamp the facet `terminal` and
+film it in Step 4. Do not call it `api` or claim there is no visible surface.
+
 **Enumerate every distinct symptom the report claims — do not collapse them.**
 Many reports describe a *compound* bug: a title like "picker is unavailable **and**
 defaults/router catalog lag" is really two claims, and they can have *different*
@@ -690,6 +697,10 @@ Follow these rules for each clip:
 - For CLI or terminal output, record the real command and its output, even if
   only an error message changes. For example, run `omnigent host` with an
   expired login and capture the error it prints.
+- A symptom seen in a terminal pane must be filmed. Use the app's terminal view
+  while the pane's session still opens there. Otherwise (for example, a leaked
+  pane whose session was deleted), follow the `terminal` lane's read-only tmux
+  attach in `dev/recording-lanes.md` and caption that it films outside the app.
 - For internal/API-only results with no visible user interaction, written
   evidence is enough. Set `recordings: []` and describe the result in `evidence`.
 - An absence is filmable. When the bug is that nothing happens (a parent chat
@@ -872,7 +883,8 @@ Field meanings:
   present. Otherwise explain each missing clip:
 
   - For internal/API-only results, say there is no visible user interaction
-    and put the written evidence in `evidence`.
+    and put the written evidence in `evidence`. A pane capture or screenshot
+    of the symptom in your evidence rules this reason out.
   - For a recording failure, name the missing tool or the environment problem.
     When the preflight recorder check passed, name the recorder command you ran
     and its observed error; a reason that names no attempted recorder run is

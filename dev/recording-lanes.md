@@ -69,7 +69,8 @@ Recording is **best-effort**:
   stood up", a multi-process journey, a flaky boot, a bug that is an absence —
   is insufficient.
 - Text-only CLI output is not a reason to skip recording. A missing recording
-  from an earlier run is not a reason either.
+  from an earlier run is not a reason either. Do not claim there is no visible
+  surface when your own pane capture or screenshot shows the symptom.
 - Do not block the verdict, fix, or PR because footage is missing or rejected.
   Explain the gap and continue with the available evidence.
 
@@ -254,6 +255,14 @@ The pane renders inside the web app, so record it the same way as `web`: the
 Playwright test drives the session page with the terminal view shown, and the
 pane's contents land in the browser video. Save `tmux capture-pane -e` text dumps
 alongside as machine-checkable evidence.
+
+**A pane capture that shows the symptom means the facet must be filmed**, even
+when the defect is a runner-side leak or a failed background request. When the
+app can no longer open the pane (for example, a leaked pane whose session was
+deleted), author a VHS tape as in the `cli` section that attaches a read-only
+tmux client with the socket and target your probe used:
+`tmux -S <socket> attach -r -t <target>`. End on a `Wait` for the symptom's
+text, and caption that the clip attaches to the pane outside the app.
 
 **For a native-harness pane** (claude/codex/cursor/goose/hermes/kiro/… — the bug
 is in a real harness CLI's output), don't hand-roll the launch: the existing
