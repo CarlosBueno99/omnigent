@@ -201,6 +201,139 @@ class TestCodexExecutor(unittest.TestCase):
         self.assertTrue(any("refresh_interval_ms=900000" in item for item in overrides))
         self.assertFalse(any('env_key="DATABRICKS_TOKEN"' in item for item in overrides))
 
+    def test_databricks_codex_config_overrides_with_arcaterm(self):
+        """Arcaterm version string is included in Databricks provider headers.
+
+        When ARCATERM_VERSION is set in the environment, the config should
+        include env_http_headers mapping to send Databricks-Arcaterm header
+        to identify Arcaterm-launched sessions.
+        """
+        import tomllib
+
+        with patch.dict("os.environ", {"ARCATERM_VERSION": "1.16.0"}):
+            overrides = _databricks_codex_config_overrides(
+                model="databricks-gpt-5-4-mini",
+                base_url="https://example.cloud.databricks.com/ai-gateway/codex/v1",
+                auth_command=(
+                    'databricks auth token --host "https://example.cloud.databricks.com"'
+                ),
+            )
+            self.assertTrue(
+                any("env_http_headers=" in item for item in overrides),
+                "env_http_headers not found in overrides",
+            )
+            # Verify it parses correctly as TOML
+            parsed = tomllib.loads("\n".join(overrides))
+            provider = parsed["model_providers"]["omnigent_databricks"]
+            self.assertIn("env_http_headers", provider)
+            self.assertEqual(
+                provider["env_http_headers"],
+                {"Databricks-Arcaterm": "ARCATERM_VERSION"},
+            )
+
+    def test_databricks_codex_config_overrides_without_arcaterm(self):
+        """No Arcaterm header when ARCATERM_VERSION is unset.
+
+        When ARCATERM_VERSION is not in the environment, the config should
+        not include env_http_headers.
+        """
+        import tomllib
+
+        with patch.dict("os.environ", {}, clear=True):
+            overrides = _databricks_codex_config_overrides(
+                model="databricks-gpt-5-4-mini",
+                base_url="https://example.cloud.databricks.com/ai-gateway/codex/v1",
+                auth_command=(
+                    'databricks auth token --host "https://example.cloud.databricks.com"'
+                ),
+            )
+            self.assertFalse(
+                any("env_http_headers=" in item for item in overrides),
+                "env_http_headers should not be present",
+            )
+            # Verify it parses correctly as TOML
+            parsed = tomllib.loads("\n".join(overrides))
+            provider = parsed["model_providers"]["omnigent_databricks"]
+            self.assertNotIn("env_http_headers", provider)
+
+    def test_provider_codex_config_overrides_with_databricks_gateway_and_arcaterm(
+        self,
+    ):
+        """Provider config includes Arcaterm header for Databricks gateways.
+
+        When ARCATERM_VERSION is set and the provider targets a Databricks
+        gateway, the config should include env_http_headers.
+        """
+        import tomllib
+
+        with patch.dict("os.environ", {"ARCATERM_VERSION": "1.16.0"}):
+            overrides = _provider_codex_config_overrides(
+                model="test-model",
+                base_url="https://example.cloud.databricks.com/ai-gateway/codex/v1",
+                auth_command="printf %s token",
+                wire_api="responses",
+            )
+            self.assertTrue(
+                any("env_http_headers=" in item for item in overrides),
+                "env_http_headers not found in overrides",
+            )
+            # Verify it parses correctly as TOML
+            parsed = tomllib.loads("\n".join(overrides))
+            provider = parsed["model_providers"]["omnigent_provider"]
+            self.assertIn("env_http_headers", provider)
+            self.assertEqual(
+                provider["env_http_headers"],
+                {"Databricks-Arcaterm": "ARCATERM_VERSION"},
+            )
+
+    def test_provider_codex_config_overrides_with_non_databricks_gateway(self):
+        """No Arcaterm header for non-Databricks gateways.
+
+        When the provider targets a non-Databricks gateway (e.g., OpenRouter),
+        env_http_headers should not be included even if ARCATERM_VERSION is set.
+        """
+        import tomllib
+
+        with patch.dict("os.environ", {"ARCATERM_VERSION": "1.16.0"}):
+            overrides = _provider_codex_config_overrides(
+                model="test-model",
+                base_url="https://openrouter.ai/api/v1",
+                auth_command="printf %s token",
+                wire_api="responses",
+            )
+            self.assertFalse(
+                any("env_http_headers=" in item for item in overrides),
+                "env_http_headers should not be present for non-Databricks gateways",
+            )
+            # Verify it parses correctly as TOML
+            parsed = tomllib.loads("\n".join(overrides))
+            provider = parsed["model_providers"]["omnigent_provider"]
+            self.assertNotIn("env_http_headers", provider)
+
+    def test_provider_codex_config_overrides_without_arcaterm(self):
+        """No Arcaterm header when ARCATERM_VERSION is unset.
+
+        Even with a Databricks gateway, if ARCATERM_VERSION is not in the
+        environment, env_http_headers should not be included.
+        """
+        import tomllib
+
+        with patch.dict("os.environ", {}, clear=True):
+            overrides = _provider_codex_config_overrides(
+                model="test-model",
+                base_url="https://example.cloud.databricks.com/ai-gateway/codex/v1",
+                auth_command="printf %s token",
+                wire_api="responses",
+            )
+            self.assertFalse(
+                any("env_http_headers=" in item for item in overrides),
+                "env_http_headers should not be present when ARCATERM_VERSION is unset",
+            )
+            # Verify it parses correctly as TOML
+            parsed = tomllib.loads("\n".join(overrides))
+            provider = parsed["model_providers"]["omnigent_provider"]
+            self.assertNotIn("env_http_headers", provider)
+
     def test_codex_config_overrides_neutralize_toml_breakout(self):
         """A model id full of TOML metacharacters stays a literal string.
 
