@@ -395,9 +395,20 @@ function rebaseVariant(
   );
   const border = rebaseColor(base.border, reference.border, current.border);
   const sidebar = rebaseColor(base.sidebar, reference.sidebar, current.sidebar);
+  const background = rebaseColor(base.background, reference.background, current.background);
+  const muted = rebaseColor(base.muted, reference.muted, current.muted);
+  const codeBackground = rebaseColor(
+    base.codeBackground,
+    reference.codeBackground,
+    current.codeBackground,
+  );
+  const linkSurfaces = [background, cardSolid, muted, codeBackground].flatMap((surface) => {
+    const color = parseCssColor(surface);
+    return color?.alpha === 1 ? [rgbToHex(color)] : [];
+  });
 
   return {
-    background: rebaseColor(base.background, reference.background, current.background),
+    background,
     foreground,
     card,
     cardSolid,
@@ -410,6 +421,11 @@ function rebaseVariant(
       current.foreground,
     ),
     primary: primaryChanged ? primary : base.primary,
+    link: ensureContrast(
+      primaryChanged ? primary : base.link,
+      linkSurfaces,
+      readableForeground(background),
+    ),
     primaryForeground: primaryChanged ? readableForeground(primary) : base.primaryForeground,
     ...rebaseSelection(base, primaryChanged ? primary : null, foreground),
     secondary: rebaseColor(base.secondary, reference.secondary, current.secondary),
@@ -418,17 +434,13 @@ function rebaseVariant(
       reference.foreground,
       current.foreground,
     ),
-    muted: rebaseColor(base.muted, reference.muted, current.muted),
+    muted,
     mutedForeground: rebaseColor(
       base.mutedForeground,
       reference.mutedForeground,
       current.mutedForeground,
     ),
-    codeBackground: rebaseColor(
-      base.codeBackground,
-      reference.codeBackground,
-      current.codeBackground,
-    ),
+    codeBackground,
     accent,
     accentForeground,
     border,

@@ -2188,7 +2188,6 @@ def _chat_local(
                 resume_latest=resume_latest,
                 resume_picker=resume_picker,
             )
-            bundle_bytes = _bundle_agent(spec_path)
             _chat_with_server(
                 base_url,
                 tool_handler,
@@ -2199,7 +2198,6 @@ def _chat_local(
                 fork_session_id=fork_session_id,
                 log=log,
                 agent_yaml=spec_path,
-                session_bundle=bundle_bytes,
                 ephemeral=ephemeral,
                 debug_events=debug_events,
                 server_log_path=server.log_path,
@@ -2257,7 +2255,6 @@ def _run_local_headless_prompt(
                 tool_handler,
                 prompt=prompt,
                 runner_id=server.runner_id,
-                session_bundle=_bundle_agent(spec_path),
             )
         finally:
             _stop_local_server(server)
@@ -2691,9 +2688,11 @@ async def _persisted_turn_text(
         # resumed session can have far more than the limit of history;
         # fetching ``asc`` would return the oldest items and miss this
         # turn entirely.
-        recent: _ResponseOutput = await client.sessions.list_items(
-            session_id, limit=_RECONCILE_ITEMS_LIMIT, order="desc"
-        )
+        recent: _ResponseOutput = (
+            await client.sessions.list_items(
+                session_id, limit=_RECONCILE_ITEMS_LIMIT, order="desc"
+            )
+        ).data
     except ClientOmnigentError as exc:
         # The reconcile read is itself best-effort: if the items
         # endpoint is unreachable, fall back to the original outcome
@@ -2741,9 +2740,11 @@ async def _persisted_turn_error(
     :returns: The current turn's terminal error message, or ``None``.
     """
     try:
-        recent: _ResponseOutput = await client.sessions.list_items(
-            session_id, limit=_RECONCILE_ITEMS_LIMIT, order="desc"
-        )
+        recent: _ResponseOutput = (
+            await client.sessions.list_items(
+                session_id, limit=_RECONCILE_ITEMS_LIMIT, order="desc"
+            )
+        ).data
     except ClientOmnigentError as exc:
         logger.debug("reconcile error read failed for %s: %r", session_id, exc)
         return None
@@ -3700,6 +3701,7 @@ def _start_local_server(
             server_proc: subprocess.Popen[bytes] = subprocess.Popen(
                 [
                     sys.executable,
+                    "-P",
                     "-m",
                     "omnigent.cli",
                     "server",
@@ -3782,7 +3784,8 @@ def _wait_for_server(port: int, server: LocalServer, timeout: float = 45.0) -> N
                 )
                 if runner_resp.status_code == 200 and runner_resp.json()["online"] is True:
                     return
-        except httpx.ConnectError:
+        except httpx.TransportError:
+            # A starting server can reset a socket or time out before it is ready.
             pass
         elapsed = time.monotonic() - start
         poll_interval = (
@@ -3909,7 +3912,7 @@ def _spec_used_families(agent_yaml: Path | None) -> list[str]:
         from omnigent.spec import parse
 
         spec = parse(root, expand_env=False)
-    except Exception:  # noqa: BLE001 — best-effort startup-header hint: a spec parse must never break `run`
+    except Exception:  # noqa: BLE001, RUF100 — best-effort startup-header hint; a spec parse must never break `run`
         logger.debug("startup-header family parse failed for %s", agent_yaml, exc_info=True)
         return []
 
