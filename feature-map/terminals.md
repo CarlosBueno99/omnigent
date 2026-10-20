@@ -146,7 +146,8 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
 - The ⌘/Ctrl+Alt chords use ⌘ on macOS and Ctrl elsewhere, and they match the
   physical key, so AltGr+T on an international layout must not open a shell.
 - A focused terminal sends Ctrl+/ to its program as `0x1F` (Codex's side-thread
-  toggle), so the Ctrl+/ shortcuts dialog does not open from a focused terminal.
+  toggle), so the Ctrl+/ shortcuts dialog does not open from a focused terminal
+  outside an IME composition.
 - Key bindings added for scrollback can change how full-screen harness terminals
   behave. After a scrollback change, drive the harness terminal itself, not only
   a plain shell.
