@@ -2301,6 +2301,261 @@ async def test_permission_hook_verdict_during_gap_honored_on_repark(
     pending_elicitations.reset_for_tests()
 
 
+_GAP_QUESTION: dict[str, Any] = {
+    "question": "Which framework should we use?",
+    "header": "Framework",
+    "options": [
+        {"label": "React", "description": "JS UI library"},
+        {"label": "Vue", "description": "Progressive framework"},
+    ],
+    "multiSelect": False,
+}
+_GAP_ANSWERS = {"Which framework should we use?": "Vue"}
+
+
+async def _gap_question_payload() -> dict[str, Any]:
+    """
+    Build an AskUserQuestion hook body that re-attaches with a fixed id.
+
+    :returns: Hook payload carrying :data:`_GAP_QUESTION` and
+        :data:`_REATTACH_ELICITATION_ID`.
+    """
+    payload = await _claude_permission_payload(tool_name="AskUserQuestion")
+    payload["tool_input"] = {"questions": [_GAP_QUESTION]}
+    payload["_omnigent_elicitation_id"] = _REATTACH_ELICITATION_ID
+    return payload
+
+
+def _record_question_answer_forwards(
+    monkeypatch: pytest.MonkeyPatch,
+    respond: Any,
+) -> list[dict[str, Any]]:
+    """
+    Capture ``claude_native_question_answer`` forwards to the runner.
+
+    :param monkeypatch: Fixture used to replace the runner forward.
+    :param respond: Async callable returning the runner's forward result
+        for a question-answer event; other events forward to no runner.
+    :returns: The list that receives each forwarded question-answer event.
+    """
+    forwarded: list[dict[str, Any]] = []
+
+    async def _forward(
+        _session_id: str, _router: Any, event: dict[str, Any], **_kwargs: Any
+    ) -> Any:
+        if event.get("type") != "claude_native_question_answer":
+            return None
+        forwarded.append(event)
+        return await respond()
+
+    monkeypatch.setattr(sessions_route, "_forward_session_change_to_runner", _forward)
+    return forwarded
+
+
+async def _await_new_tasks(tasks: set[asyncio.Task[Any]], before: set[asyncio.Task[Any]]) -> None:
+    """
+    Await background tasks this test spawned.
+
+    :param tasks: Live task registry, e.g. ``_native_popup_forward_tasks``.
+    :param before: Snapshot taken before the test's action.
+    :returns: None.
+    """
+    for task in set(tasks) - before:
+        await asyncio.wait_for(task, timeout=5.0)
+
+
+@pytest.mark.parametrize(
+    ("runner_status", "delivered"),
+    [(200, True), (409, False), (None, False)],
+    ids=["answered", "picker-not-answerable", "runner-unreachable"],
+)
+async def test_gap_question_answer_typed_into_picker_when_hook_never_reparks(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    runner_status: int | None,
+    delivered: bool,
+) -> None:
+    """
+    A web answer whose hook died is typed into Claude's own question picker.
+
+    The hook's long-poll is severed and nothing re-parks, so the verdict
+    tombstone waits for a retry that never comes while the TUI picker keeps
+    blocking. A confirmed runner answer leaves a verdict-free tombstone so a
+    late retry fail-asks instead of answering twice; a refused or unreachable
+    runner restores the verdict for a retry.
+    """
+    from omnigent.runtime import pending_elicitations
+
+    async def _disconnect_immediately(_request: Any) -> None:
+        await asyncio.sleep(0.01)
+
+    async def _runner_result() -> Any:
+        if runner_status is None:
+            return None
+        return sessions_route._RunnerForwardResult(status_code=runner_status, body="")
+
+    monkeypatch.setattr(sessions_route, "_poll_request_disconnect", _disconnect_immediately)
+    monkeypatch.setattr(sessions_route, "_HARNESS_ELICITATION_REPARK_GRACE_S", 0.25)
+    monkeypatch.setattr(sessions_route, "_HARNESS_QUESTION_TUI_ANSWER_DELAY_S", 0.05)
+    pending_elicitations.reset_for_tests()
+    agent = await create_test_agent(client, "test-gap-question-tui-answer")
+    session_id = await _create_session(client, agent["id"])
+    forwarded = _record_question_answer_forwards(monkeypatch, _runner_result)
+    payload = await _gap_question_payload()
+    hook_url = f"/v1/sessions/{session_id}/hooks/permission-request"
+    try:
+        first = await client.post(hook_url, json=payload)
+        assert first.status_code == 200, first.text
+        assert first.content == b""
+
+        tasks_before = set(sessions_route._native_popup_forward_tasks)
+        verdict = await _post_approval(
+            client, session_id, _REATTACH_ELICITATION_ID, "accept", _GAP_ANSWERS
+        )
+        assert verdict.status_code == 202, verdict.text
+        await _await_new_tasks(sessions_route._native_popup_forward_tasks, tasks_before)
+
+        assert forwarded == [
+            {
+                "type": "claude_native_question_answer",
+                "elicitation_id": _REATTACH_ELICITATION_ID,
+                "questions": [_GAP_QUESTION],
+                "answers": _GAP_ANSWERS,
+            }
+        ]
+        tombstone = _harness_pre_resolved_elicitations[_REATTACH_ELICITATION_ID]
+        if delivered:
+            assert tombstone.result is None, "a typed answer must not also answer a late retry"
+        else:
+            assert tombstone.result is not None and tombstone.result.content == _GAP_ANSWERS
+
+        late = await client.post(hook_url, json=payload)
+        assert late.status_code == 200, late.text
+        if delivered:
+            assert late.content == b""
+            assert pending_elicitations.count_for(session_id) == 0, (
+                "the late retry should fail-ask without re-publishing the answered card"
+            )
+        else:
+            decision = late.json()["hookSpecificOutput"]["decision"]
+            assert decision["behavior"] == "allow"
+            assert decision["updatedInput"]["answers"] == _GAP_ANSWERS
+    finally:
+        _harness_pre_resolved_elicitations.pop(_REATTACH_ELICITATION_ID, None)
+        for task in set(sessions_route._deferred_elicitation_clear_tasks):
+            await asyncio.wait_for(task, timeout=5.0)
+        pending_elicitations.reset_for_tests()
+
+
+async def test_gap_question_answer_not_typed_when_hook_reparks_in_time(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A hook that re-parks before the delay receives the answer; the picker is untouched.
+    """
+    from omnigent.runtime import pending_elicitations
+
+    async def _disconnect_immediately(_request: Any) -> None:
+        await asyncio.sleep(0.01)
+
+    async def _unexpected_forward() -> Any:
+        raise AssertionError("a re-parked hook must not have its picker typed into")
+
+    monkeypatch.setattr(sessions_route, "_poll_request_disconnect", _disconnect_immediately)
+    monkeypatch.setattr(sessions_route, "_HARNESS_ELICITATION_REPARK_GRACE_S", 0.25)
+    monkeypatch.setattr(sessions_route, "_HARNESS_QUESTION_TUI_ANSWER_DELAY_S", 0.2)
+    pending_elicitations.reset_for_tests()
+    agent = await create_test_agent(client, "test-gap-question-repark")
+    session_id = await _create_session(client, agent["id"])
+    forwarded = _record_question_answer_forwards(monkeypatch, _unexpected_forward)
+    payload = await _gap_question_payload()
+    hook_url = f"/v1/sessions/{session_id}/hooks/permission-request"
+    try:
+        first = await client.post(hook_url, json=payload)
+        assert first.content == b""
+        tasks_before = set(sessions_route._native_popup_forward_tasks)
+        verdict = await _post_approval(
+            client, session_id, _REATTACH_ELICITATION_ID, "accept", _GAP_ANSWERS
+        )
+        assert verdict.status_code == 202, verdict.text
+
+        retry = await client.post(hook_url, json=payload)
+        decision = retry.json()["hookSpecificOutput"]["decision"]
+        assert decision["behavior"] == "allow"
+        assert decision["updatedInput"]["answers"] == _GAP_ANSWERS
+        await _await_new_tasks(sessions_route._native_popup_forward_tasks, tasks_before)
+        assert forwarded == []
+        assert _REATTACH_ELICITATION_ID not in _harness_pre_resolved_elicitations
+    finally:
+        _harness_pre_resolved_elicitations.pop(_REATTACH_ELICITATION_ID, None)
+        for task in set(sessions_route._deferred_elicitation_clear_tasks):
+            await asyncio.wait_for(task, timeout=5.0)
+        pending_elicitations.reset_for_tests()
+
+
+async def test_gap_question_answer_reaches_hook_that_reparks_while_typing(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A hook that re-parks while the runner answers the picker still gets the verdict.
+
+    The claimed tombstone is gone during the forward, so the retry parks; the
+    answer must be handed to it rather than leaving it to time out.
+    """
+    from omnigent.runtime import pending_elicitations
+
+    disconnect_calls = 0
+
+    async def _disconnect_first_call_only(_request: Any) -> None:
+        nonlocal disconnect_calls
+        disconnect_calls += 1
+        if disconnect_calls == 1:
+            await asyncio.sleep(0.01)
+            return
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(sessions_route, "_poll_request_disconnect", _disconnect_first_call_only)
+    monkeypatch.setattr(sessions_route, "_HARNESS_ELICITATION_REPARK_GRACE_S", 1.0)
+    monkeypatch.setattr(sessions_route, "_HARNESS_QUESTION_TUI_ANSWER_DELAY_S", 0.05)
+    pending_elicitations.reset_for_tests()
+    agent = await create_test_agent(client, "test-gap-question-repark-race")
+    session_id = await _create_session(client, agent["id"])
+    payload = await _gap_question_payload()
+    hook_url = f"/v1/sessions/{session_id}/hooks/permission-request"
+    retry_tasks: list[asyncio.Task[httpx.Response]] = []
+
+    async def _repark_then_answer() -> Any:
+        drain_task = asyncio.create_task(_drain_until_elicitation(session_id))
+        await asyncio.sleep(0.05)
+        retry_tasks.append(asyncio.create_task(client.post(hook_url, json=payload)))
+        await drain_task
+        return sessions_route._RunnerForwardResult(status_code=200, body="")
+
+    forwarded = _record_question_answer_forwards(monkeypatch, _repark_then_answer)
+    try:
+        first = await client.post(hook_url, json=payload)
+        assert first.content == b""
+        tasks_before = set(sessions_route._native_popup_forward_tasks)
+        verdict = await _post_approval(
+            client, session_id, _REATTACH_ELICITATION_ID, "accept", _GAP_ANSWERS
+        )
+        assert verdict.status_code == 202, verdict.text
+        await _await_new_tasks(sessions_route._native_popup_forward_tasks, tasks_before)
+
+        assert len(forwarded) == 1
+        retry = await asyncio.wait_for(retry_tasks[0], timeout=5.0)
+        decision = retry.json()["hookSpecificOutput"]["decision"]
+        assert decision["behavior"] == "allow"
+        assert decision["updatedInput"]["answers"] == _GAP_ANSWERS
+    finally:
+        _harness_pre_resolved_elicitations.pop(_REATTACH_ELICITATION_ID, None)
+        for task in set(sessions_route._deferred_elicitation_clear_tasks):
+            await asyncio.wait_for(task, timeout=5.0)
+        pending_elicitations.reset_for_tests()
+
+
 async def test_permission_hook_rejects_malformed_reattach_id(
     client: httpx.AsyncClient,
 ) -> None:
