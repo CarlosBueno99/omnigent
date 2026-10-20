@@ -1,5 +1,5 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { Outlet, MemoryRouter } from "react-router-dom";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { Outlet, MemoryRouter, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
@@ -234,11 +234,30 @@ describe("Usage release feature route", () => {
   });
 });
 
+function HistoryBackButton() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate(-1)}>
+      history back
+    </button>
+  );
+}
+
 describe("Settings routes", () => {
-  it("redirects bare settings to the canonical General section", async () => {
-    renderRoute("/settings");
+  it("replaces bare settings with the canonical General section", async () => {
+    render(
+      <CapabilitiesProvider info={FALLBACK_SERVER_INFO}>
+        <MemoryRouter initialEntries={["/c/session-one", "/settings"]} initialIndex={1}>
+          <App />
+          <HistoryBackButton />
+        </MemoryRouter>
+      </CapabilitiesProvider>,
+    );
 
     expect(await screen.findByTestId("settings-location")).toHaveTextContent("/settings/general");
+    // A pushed hop would leave bare /settings in history, so Back would redirect forward again.
+    fireEvent.click(screen.getByRole("button", { name: "history back" }));
+    expect(await screen.findByText("chat page")).toBeInTheDocument();
   });
 
   it("preserves an explicit settings section", async () => {

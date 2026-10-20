@@ -313,19 +313,12 @@ export function AppShell() {
     if (canvasMode) setSidebarPeek(false);
   }, [canvasMode]);
 
-  // Desktop settings need the sidebar's Back row: collapsing it on /settings
-  // would strand the user on the page. So the settings index pins the sidebar
-  // open (and clears any peek, which is only a transient hover card), then
-  // restores the prior open/collapsed preference on exit.
-  //
-  // Mobile section links keep whatever drawer state navigation chose — the
-  // header can reopen the menu there — so only the top-level /settings route
-  // forces the drawer open. Mirrors sidebarOpenBeforeMaximizeRef, which
-  // stashes and restores the same state around the maximize flow.
-  // useLayoutEffect: pin/restore must land in the same paint as the route
-  // change, or a collapsed sidebar shows one full-width frame first.
+  // Desktop settings need the sidebar's Back row. Mobile section links keep
+  // the drawer state chosen by navigation; the header can reopen the menu.
+  // Restore the prior sidebar preference when leaving settings.
   const { inSettings } = useSettingsRoute();
   const sidebarOpenBeforeSettingsRef = useRef<boolean | null>(null);
+  // Before paint, so a collapsed sidebar never shows a full-width Settings frame.
   useLayoutEffect(() => {
     if (inSettings) {
       // Stash inside the updater so it reads the CURRENT value rather than a
