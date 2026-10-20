@@ -28,7 +28,7 @@ os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 """
 
 
-@pytest.mark.min_runner_version("0.19.0")
+@pytest.mark.min_runner_version("0.20.0")
 def test_host_raises_inherited_open_file_limit_and_reports_descriptor_use(
     live_server: str, http_client: httpx.Client, tmp_path: Path
 ) -> None:
