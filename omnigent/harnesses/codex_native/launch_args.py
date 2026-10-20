@@ -295,8 +295,8 @@ def without_codex_add_dirs(args: Sequence[str]) -> list[str]:
     return stripped
 
 
-def codex_launch_selects_model(args: Sequence[str]) -> bool:
-    """Whether *args* choose the model via ``--model``/``-m`` or a ``-c model=`` override."""
+def codex_launch_selects_model(args: Sequence[str], *, include_config: bool = True) -> bool:
+    """Whether *args* choose the model via ``--model``/``-m`` or, optionally, ``-c model=``."""
     canonical = canonical_codex_launch_args(args)
     index = 0
     while index < len(canonical):
@@ -305,8 +305,12 @@ def codex_launch_selects_model(args: Sequence[str]) -> bool:
             break
         if arg == "--model" or arg.startswith(("-m", "--model=")):
             return True
-        if arg in {"-c", "--config"} and index + 1 < len(canonical):
-            if canonical[index + 1].split("=", 1)[0].strip() == "model":
+        if include_config:
+            if arg in {"-c", "--config"}:
+                override = canonical[index + 1] if index + 1 < len(canonical) else ""
+            else:
+                override = arg.partition("=")[2] if arg.startswith(("-c=", "--config=")) else ""
+            if override.partition("=")[0].strip() == "model":
                 return True
         if arg in _CODEX_VALUE_FLAGS:
             index += 1

@@ -4902,8 +4902,10 @@ def build_codex_remote_args(
     if thread_id is None:
         # A system managed_config.toml outranks ``-c model=``; ``--model`` outranks both.
         model = _codex_override_model(config_overrides)
-        # Codex rejects a repeated ``--model``, so a model chosen by the caller wins.
-        caller_model = any(codex_launch_selects_model(args) for args in (base_args, passthrough))
+        # Codex rejects a repeated ``--model``; a later caller ``-c model=`` also outranks ours.
+        caller_model = codex_launch_selects_model(passthrough) or codex_launch_selects_model(
+            base_args, include_config=False
+        )
         model_args = ["--model", model] if model and not caller_model else []
         # Codex refuses --add-dir with --remote; app-server startup writes
         # those roots into the private config (see CodexNativeAppServer.start).

@@ -274,6 +274,10 @@ def test_build_codex_remote_args_emits_config_overrides_before_subcommand(
         (("-m", "gpt-user"), ('model="gpt-5.6-luna"',), None),
         (("-mgpt-user",), ('model="gpt-5.6-luna"',), None),
         (("-c", 'model="gpt-user"'), ('model="gpt-5.6-luna"',), None),
+        (('-cmodel="gpt-user"',), ('model="gpt-5.6-luna"',), None),
+        (('-c=model="gpt-user"',), ('model="gpt-5.6-luna"',), None),
+        (('--config=model="gpt-user"',), ('model="gpt-5.6-luna"',), None),
+        (('--config=model_provider="omnigent"',), ('model="gpt-5.6-luna"',), "gpt-5.6-luna"),
         (("--image", "-m.png"), ('model="gpt-5.6-luna"',), "gpt-5.6-luna"),
     ],
 )
@@ -303,6 +307,7 @@ def test_build_codex_remote_args_fresh_thread_selects_the_override_model(
     [
         ((), ["--model", "gpt-5.6-luna"]),
         (("-c", 'model_reasoning_summary="auto"'), ["--model", "gpt-5.6-luna"]),
+        (("-c", 'model="gpt-configured"'), ["--model", "gpt-5.6-luna"]),
         (("--model", "gpt-configured"), []),
         (("-m", "gpt-configured"), []),
     ],
@@ -312,7 +317,7 @@ def test_build_codex_remote_args_leads_with_base_args(
     model_args: list[str],
     thread_id: str | None,
 ) -> None:
-    """Configured base args lead unchanged; Codex rejects a second ``--model`` after theirs."""
+    """Base args lead unchanged; only their ``--model`` suppresses ours (Codex rejects repeats)."""
     remote_url, override = "ws://127.0.0.1:9876", 'model="gpt-5.6-luna"'
     args = codex_native_app_server.build_codex_remote_args(
         codex_args=(),
