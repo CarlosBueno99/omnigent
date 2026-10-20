@@ -447,8 +447,26 @@ def test_question_picker_receives_the_web_answer(
             {"Which bridge should we use?": "Rewrite"},
             _QUESTION,
         ),
+        (
+            [{**_BRIDGE_QUESTION, "question": "bridge should we use?"}],
+            {"bridge should we use?": "Try PYTHONPATH"},
+            _QUESTION,
+        ),
+        (
+            [{**_BRIDGE_QUESTION, "options": [{"label": "Keep"}, {"label": "Try"}]}],
+            {"Which bridge should we use?": "Try"},
+            _QUESTION,
+        ),
     ],
-    ids=["multi-select", "free-text", "composer", "other-question", "other-options"],
+    ids=[
+        "multi-select",
+        "free-text",
+        "composer",
+        "other-question",
+        "other-options",
+        "longer-question",
+        "longer-options",
+    ],
 )
 def test_question_picker_refuses_answers_it_cannot_verify(
     native_bridge: Path,
@@ -468,8 +486,14 @@ def test_question_picker_refuses_answers_it_cannot_verify(
         ([_COLOR_TAB, _COMPOSER], ["2"]),
         ([_COLOR_TAB, _SIZE_TAB, _COMPOSER], ["2", "3"]),
         ([_COLOR_TAB, _SIZE_TAB, _REVIEW_TAB.replace("→ Large", "→ Small")], ["2", "3"]),
+        ([_COLOR_TAB, _SIZE_TAB, _REVIEW_TAB.replace("→ Large", "→ Large print")], ["2", "3"]),
     ],
-    ids=["picker-closed-mid-answer", "picker-closed-before-review", "review-lists-other-answers"],
+    ids=[
+        "picker-closed-mid-answer",
+        "picker-closed-before-review",
+        "review-lists-other-answers",
+        "review-lists-longer-answer",
+    ],
 )
 def test_question_picker_stops_when_the_pane_diverges(
     native_bridge: Path,

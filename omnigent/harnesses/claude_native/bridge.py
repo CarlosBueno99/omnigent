@@ -8184,11 +8184,12 @@ def dismiss_btw_overlay(bridge_dir: Path) -> bool:
 _QUESTION_ANSWER_TIMEOUT_S = 10.0
 _QUESTION_ANSWER_POLL_S = 0.2
 _QUESTION_REVIEW_HINT = "Review your answers"
+_QUESTION_OPTION_ROW = re.compile(r"^\s*(?:❯\s*)?(\d+)\.\s+(.*\S)\s*$")
 
 
-def _collapse_whitespace(text: str) -> str:
-    """Return *text* as one space-delimited run so Ink's soft wraps compare equal."""
-    return " " + " ".join(text.replace("❯", " ").split()) + " "
+def _single_line(text: str) -> str:
+    """Return *text* with whitespace runs, including Ink's soft wraps, as single spaces."""
+    return " ".join(text.split())
 
 
 def _question_answer_keys(
@@ -8223,30 +8224,51 @@ def _question_answer_keys(
 
 
 def _question_dialog_shows(pane: str, question: str, labels: Sequence[str]) -> bool:
-    """Whether the bottom dialog is *question* listing exactly these numbered options."""
+    """Whether the bottom dialog asks exactly *question* with *labels* as its first options."""
     if not _user_prompt_visible(pane):
         return False
-    region = _collapse_whitespace(_decision_dialog_region(pane))
-    return _collapse_whitespace(question) in region and all(
-        f" {number}.{_collapse_whitespace(label)}" in region
-        for number, label in enumerate(labels, start=1)
+    lines = _decision_dialog_region(pane).splitlines()
+    option_rows: list[tuple[int, re.Match[str]]] = []
+    for index, line in enumerate(lines):
+        match = _QUESTION_OPTION_ROW.match(line)
+        if match is not None:
+            option_rows.append((index, match))
+    if not option_rows or len(option_rows) < len(labels):
+        return False
+    prompt = lines[: option_rows[0][0]]
+    # A soft-wrapped question must still equal whole rows directly above the options.
+    asks_question = any(
+        _single_line(" ".join(prompt[start:])) == _single_line(question)
+        for start in range(len(prompt))
     )
+    listed = [(match[1], _single_line(match[2])) for _, match in option_rows[: len(labels)]]
+    expected = [(str(number), _single_line(label)) for number, label in enumerate(labels, 1)]
+    return asks_question and listed == expected
 
 
 def _question_review_shows(pane: str, answered: Sequence[tuple[str, str]]) -> bool:
-    """Whether a multi-question picker's review step lists exactly *answered*."""
+    """Whether a multi-question picker's review step lists exactly *answered*, in order."""
     if _composer_row(pane) is not None:
         return False
-    _, found, review = pane.partition(_QUESTION_REVIEW_HINT)
-    text = _collapse_whitespace(review)
-    return (
-        bool(found)
-        and " 1. Submit answers " in text
-        and all(
-            f"{_collapse_whitespace(question)}→{_collapse_whitespace(answer)}" in text
-            for question, answer in answered
-        )
-    )
+    _, found, review = pane.rpartition(_QUESTION_REVIEW_HINT)
+    listed: list[tuple[str, str]] = []
+    question_rows: list[str] | None = None
+    submit_offered = False
+    for line in review.splitlines():
+        row = line.strip()
+        option = _QUESTION_OPTION_ROW.match(line)
+        if option is not None:
+            if (option[1], _single_line(option[2])) == ("1", "Submit answers"):
+                submit_offered = True
+        elif row.startswith("●"):
+            question_rows = [row[1:]]
+        elif row.startswith("→") and question_rows is not None:
+            listed.append((_single_line(" ".join(question_rows)), _single_line(row[1:])))
+            question_rows = None
+        elif question_rows is not None:
+            question_rows.append(row)
+    expected = [(_single_line(question), _single_line(answer)) for question, answer in answered]
+    return bool(found) and submit_offered and listed == expected
 
 
 def _wait_for_pane(

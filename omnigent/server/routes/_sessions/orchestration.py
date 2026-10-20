@@ -2448,9 +2448,11 @@ def _spawn_question_tui_answer(
 
     A permission hook that dies mid-wait leaves Claude's own picker blocking
     while the verdict tombstone waits for a re-park that never comes. After a
-    short grace this claims the unconsumed tombstone and asks the runner to
-    answer the picker. A confirmed answer leaves a terminal-side tombstone, so
-    a late re-park fail-asks. Otherwise the verdict tombstone is restored.
+    short grace with the tombstone unconsumed, this asks the runner to answer
+    the picker; the tombstone stays claimable by a re-park or a terminal answer
+    meanwhile. A confirmed answer, or a re-park that took the verdict, leaves a
+    terminal-side tombstone so a late re-park fail-asks; otherwise the verdict
+    stays for a retry.
 
     :param session_id: Session that owns the prompt, e.g. ``"conv_abc123"``.
     :param elicitation_id: Hook-minted id, e.g. ``"elicit_claude_0f3a..."``.
@@ -2469,26 +2471,18 @@ def _spawn_question_tui_answer(
             or elicitation_id in _harness_elicitation_registry
         ):
             return
-        _harness_pre_resolved_elicitations.pop(elicitation_id, None)
         forwarded = await _forward_session_change_to_runner(
             session_id, runner_router, event, timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S
         )
-        future = _harness_elicitation_registry.get(elicitation_id)
-        if (
-            future is not None
-            and not future.done()
-            and _harness_elicitation_owners.get(elicitation_id) == session_id
-            and tombstone.result is not None
-        ):
-            future.set_result(tombstone.result)
         delivered = forwarded is not None and forwarded.status_code == 200
-        _prune_pre_resolved_harness_elicitations()
-        _harness_pre_resolved_elicitations[elicitation_id] = (
-            _PreResolvedHarnessElicitation(session_id=session_id, created_at=time.time())
-            if delivered
-            else tombstone
-        )
-        _prune_pre_resolved_harness_elicitations()
+        current = _harness_pre_resolved_elicitations.get(elicitation_id)
+        # A missing tombstone means a re-park took the verdict during the forward.
+        if current is None or (current is tombstone and delivered):
+            _prune_pre_resolved_harness_elicitations()
+            _harness_pre_resolved_elicitations[elicitation_id] = _PreResolvedHarnessElicitation(
+                session_id=session_id, created_at=time.time()
+            )
+            _prune_pre_resolved_harness_elicitations()
 
     task = asyncio.create_task(_answer_after_grace())
     _native_popup_forward_tasks.add(task)
