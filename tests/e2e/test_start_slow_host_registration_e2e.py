@@ -16,7 +16,7 @@ import yaml
 from tests._helpers.live_server import isolated_local_server, isolated_process_env
 from tests._helpers.polling import poll_until
 from tests.e2e.resilience.lab.events import EventLog
-from tests.e2e.resilience.lab.proxy import FaultProxy, LoopThread, host_link
+from tests.e2e.resilience.lab.proxy import Fault, FaultProxy, LoopThread, host_link
 
 _TUNNEL_STALL_S = 40.0
 _START_TIMEOUT_S = 150.0
@@ -44,8 +44,9 @@ def stalled_tunnel_server(tmp_path: Path) -> Iterator[tuple[str, FaultProxy]]:
             loop.stop()
 
 
-def _clear_after_first_tunnel_attempt(proxy: FaultProxy, stop: threading.Event) -> None:
-    fault = proxy.blackhole({"host.tunnel"})
+def _clear_after_first_tunnel_attempt(
+    proxy: FaultProxy, fault: Fault, stop: threading.Event
+) -> None:
     while not stop.is_set() and not proxy.connections({"host.tunnel"}):
         time.sleep(0.1)
     stop.wait(_TUNNEL_STALL_S)
@@ -73,9 +74,10 @@ def test_start_brings_host_online_when_registration_outlasts_wait(
     (config_home / "config.yaml").write_text(f"server: {proxy.url}\n")
     env = isolated_process_env(home, {"OMNIGENT_CONFIG_HOME": str(config_home)}, None)
 
+    fault = proxy.blackhole({"host.tunnel"})
     stop_stall = threading.Event()
     stall = threading.Thread(
-        target=_clear_after_first_tunnel_attempt, args=(proxy, stop_stall), daemon=True
+        target=_clear_after_first_tunnel_attempt, args=(proxy, fault, stop_stall), daemon=True
     )
     stall.start()
     try:
@@ -93,18 +95,12 @@ def test_start_brings_host_online_when_registration_outlasts_wait(
             yaml.safe_load((config_home / "config.yaml").read_text()).get("host") or {}
         ).get("host_id")
         assert host_id, f"`omnigent start` created no host identity:\n{output}"
+        assert start.returncode != 0 and "still running (pid" in output, (
+            "`omnigent start` should fail while the tunnel is held and leave the daemon "
+            f"running (exit {start.returncode}):\n{output}"
+        )
         with httpx.Client(base_url=base_url, trust_env=False) as client:
-            status_at_exit = _host_status(client, host_id)
-            if start.returncode == 0:
-                assert status_at_exit == "online", (
-                    f"`omnigent start` reported success before the host registered "
-                    f"(server says {status_at_exit}):\n{output}"
-                )
-            else:
-                assert "still running (pid" in output, (
-                    f"`omnigent start` failed without leaving the daemon running:\n{output}"
-                )
-            observed: list[str] = [status_at_exit]
+            observed: list[str] = []
 
             def _online() -> bool:
                 observed.append(_host_status(client, host_id))
