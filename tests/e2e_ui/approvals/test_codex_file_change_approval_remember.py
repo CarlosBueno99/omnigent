@@ -10,23 +10,17 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
-import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
-from tests._helpers.native_session import create_native_session
 from tests.e2e_ui.conftest import (
     _CODEX_MOCK_MODEL,
-    _bind_session_runner,
-    _ensure_runner_online,
-    _server_state,
-    _temp_omnigent_mock_config,
     configure_mock_llm,
+    native_codex_mock_session_context,
     reset_mock_llm,
     set_fallback_mock_llm,
 )
@@ -55,34 +49,15 @@ def codex_read_only_mock_session(
     The workspace is a scratch directory so the approved patch lands there
     rather than in the repository.
     """
-    respawned = _ensure_runner_online(live_server, tmp_path_factory)
-    runner_id = str(_server_state["runner_id"])
     workspace = tmp_path_factory.mktemp("codex-file-change-workspace")
-    with _temp_omnigent_mock_config(
-        mock_llm_server_url, "codex", workflow_owned=bool(_server_state.get("workflow_owned"))
-    ):
-        created = create_native_session(
-            httpx,
-            live_server,
-            harness="codex",
-            metadata={
-                "workspace": str(workspace),
-                "terminal_launch_args": _READ_ONLY_LAUNCH_ARGS,
-            },
-        )
-        session_id = str(created["session_id"])
-        _bind_session_runner(live_server, session_id, runner_id)
-        try:
-            yield (live_server, session_id, workspace)
-        finally:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-            if respawned is not None:
-                respawned.terminate()
-                try:
-                    respawned.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    respawned.kill()
-                    respawned.wait(timeout=5)
+    with native_codex_mock_session_context(
+        live_server,
+        mock_llm_server_url,
+        tmp_path_factory,
+        workspace=workspace,
+        terminal_launch_args=_READ_ONLY_LAUNCH_ARGS,
+    ) as (base_url, session_id):
+        yield (base_url, session_id, workspace)
 
 
 def _apply_patch_call(call_id: str, patch_body: str) -> dict:
