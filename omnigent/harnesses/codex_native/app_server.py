@@ -4807,6 +4807,7 @@ def build_codex_remote_args(
     codex_cli_version: tuple[int, int, int] | None = None,
     bypass_sandbox: bool = False,
     bypass_hook_trust: bool = False,
+    configured_codex_args: tuple[str, ...] = (),
 ) -> list[str]:
     """
     Build Codex CLI args for an app-server-backed TUI session.
@@ -4872,6 +4873,9 @@ def build_codex_remote_args(
         user to answer the prompt. Default ``False`` for interactive
         ``omnigent codex`` sessions where the user faces the terminal and
         can accept hooks normally.
+    :param configured_codex_args: Codex args from the harness config that
+        lead the argv verbatim, e.g. ``("--sandbox", "danger-full-access")``.
+        A resume that omits permission args strips them from these too.
     :returns: Codex argv tail after the executable.
     """
     # The runner owns the app-server and the TUI ``--remote`` attach it appends
@@ -4901,13 +4905,29 @@ def build_codex_remote_args(
     if thread_id is None:
         # Codex refuses --add-dir with --remote; app-server startup writes
         # those roots into the private config (see CodexNativeAppServer.start).
-        return [*override_args, *without_codex_add_dirs(passthrough), "--remote", remote_url]
+        return [
+            *configured_codex_args,
+            *override_args,
+            *without_codex_add_dirs(passthrough),
+            "--remote",
+            remote_url,
+        ]
     if not codex_remote_resume_omits_permission_args(codex_cli_version):
-        return [*override_args, *passthrough, "resume", "--remote", remote_url, thread_id]
+        return [
+            *configured_codex_args,
+            *override_args,
+            *passthrough,
+            "resume",
+            "--remote",
+            remote_url,
+            thread_id,
+        ]
     # Codex rejects explicit permission overrides on remote resume, even
     # when they match the app-server policy. config_overrides went to server
     # startup; codex_args went to preload's thread/resume call.
-    resume_args = _strip_codex_resume_permission_args((*override_args, *passthrough))
+    resume_args = _strip_codex_resume_permission_args(
+        (*configured_codex_args, *override_args, *passthrough)
+    )
     return [*resume_args, "resume", "--remote", remote_url, thread_id]
 
 

@@ -598,3 +598,53 @@ def test_remote_resume_preserves_settings_not_applied_by_preload(args: tuple[str
         thread_id="thread_test",
         remote_url="ws://127.0.0.1:9876",
     ) == [*args, "resume", "--remote", "ws://127.0.0.1:9876", "thread_test"]
+
+
+_CONFIGURED_CODEX_ARGS = (
+    "--model",
+    "test-model",
+    "--sandbox",
+    "danger-full-access",
+    "-c",
+    'approval_policy="never"',
+)
+_PROVIDER_OVERRIDE = ("-c", 'model_provider="test-provider"')
+_SESSION_ARGS = ("--ask-for-approval", "on-request")
+
+
+@pytest.mark.parametrize(
+    ("thread_id", "codex_cli_version", "expected"),
+    [
+        (
+            None,
+            (0, 154, 0),
+            [*_CONFIGURED_CODEX_ARGS, *_PROVIDER_OVERRIDE, *_SESSION_ARGS, "--remote"],
+        ),
+        (
+            "thread_test",
+            (0, 153, 1),
+            [*_CONFIGURED_CODEX_ARGS, *_PROVIDER_OVERRIDE, *_SESSION_ARGS, "resume", "--remote"],
+        ),
+        (
+            "thread_test",
+            (0, 154, 0),
+            ["--model", "test-model", *_PROVIDER_OVERRIDE, "resume", "--remote"],
+        ),
+    ],
+)
+def test_remote_args_lead_with_configured_codex_args(
+    thread_id: str | None,
+    codex_cli_version: tuple[int, int, int],
+    expected: list[str],
+) -> None:
+    """Configured Codex args lead the argv, and a 0.154+ resume drops their permissions."""
+    args = codex_native_app_server.build_codex_remote_args(
+        codex_args=_SESSION_ARGS,
+        thread_id=thread_id,
+        remote_url="ws://127.0.0.1:9876",
+        config_overrides=('model_provider="test-provider"',),
+        codex_cli_version=codex_cli_version,
+        configured_codex_args=_CONFIGURED_CODEX_ARGS,
+    )
+
+    assert args == [*expected, "ws://127.0.0.1:9876", *([thread_id] if thread_id else [])]
