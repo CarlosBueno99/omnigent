@@ -632,7 +632,14 @@ def _use_databricks_config_file(
     monkeypatch: pytest.MonkeyPatch, config_file: Path, contents: str | None
 ) -> None:
     """Resolve the Databricks workspace only from *config_file* (absent when ``None``)."""
-    for name in ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "DATABRICKS_CONFIG_PROFILE"):
+    for name in (
+        "DATABRICKS_HOST",
+        "DATABRICKS_TOKEN",
+        "DATABRICKS_CONFIG_PROFILE",
+        "DATABRICKS_CLIENT_ID",
+        "DATABRICKS_CLIENT_SECRET",
+        "DATABRICKS_AUTH_TYPE",
+    ):
         monkeypatch.delenv(name, raising=False)
     if contents is not None:
         config_file.write_text(contents)
@@ -2080,27 +2087,57 @@ def test_is_databricks_ai_gateway_url_rejects_lookalikes(gateway_url: str) -> No
     assert creds._is_databricks_ai_gateway_url(gateway_url) is False
 
 
+_WORKSPACE_HOST = "host = https://workspace.cloud.databricks.com\n"
+
+
 @pytest.mark.parametrize(
-    ("profile", "databricks_config", "expected"),
+    ("profile", "config_profile_env", "databricks_config", "expected"),
     [
-        pytest.param("prod", None, "https://workspace.cloud.databricks.com", id="unrecorded"),
+        pytest.param(
+            "prod", None, None, "https://workspace.cloud.databricks.com", id="unrecorded"
+        ),
         pytest.param(
             "prod",
-            "[prod]\nhost = https://workspace.cloud.databricks.com\nworkspace_id = 123\n",
+            None,
+            f"[prod]\n{_WORKSPACE_HOST}workspace_id = 123\n",
             "https://workspace.cloud.databricks.com",
             id="recorded-match",
         ),
         pytest.param(
             "prod",
-            "[prod]\nhost = https://workspace.cloud.databricks.com\nworkspace_id = 999\n",
+            None,
+            f"[prod]\n{_WORKSPACE_HOST}workspace_id = 999\n",
             None,
             id="recorded-mismatch",
         ),
         pytest.param(
             None,
-            "[DEFAULT]\nhost = https://workspace.cloud.databricks.com\nworkspace_id = 999\n",
             None,
-            id="default-host-mismatch",
+            f"[DEFAULT]\n{_WORKSPACE_HOST}workspace_id = 999\n",
+            None,
+            id="default-profile-mismatch",
+        ),
+        pytest.param(
+            None,
+            None,
+            f"[DEFAULT]\n{_WORKSPACE_HOST}[other]\n{_WORKSPACE_HOST}workspace_id = 999\n",
+            "https://workspace.cloud.databricks.com",
+            id="other-profile-on-same-host-ignored",
+        ),
+        pytest.param(
+            None,
+            "env",
+            f"[DEFAULT]\n{_WORKSPACE_HOST}workspace_id = 123\n"
+            f"[env]\n{_WORKSPACE_HOST}workspace_id = 999\n",
+            None,
+            id="env-profile-mismatch",
+        ),
+        pytest.param(
+            "prod",
+            None,
+            f"[prod]\n{_WORKSPACE_HOST}workspace_id = 12%3\n",
+            None,
+            id="unreadable-recorded-id",
         ),
     ],
 )
@@ -2108,6 +2145,7 @@ def test_workspace_url_for_dedicated_gateway_uses_matching_profile(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     profile: str | None,
+    config_profile_env: str | None,
     databricks_config: str | None,
     expected: str | None,
 ) -> None:
@@ -2115,6 +2153,8 @@ def test_workspace_url_for_dedicated_gateway_uses_matching_profile(
     from omnigent.runtime.credentials import databricks as db_creds_mod
 
     _use_databricks_config_file(monkeypatch, tmp_path / "databrickscfg", databricks_config)
+    if config_profile_env:
+        monkeypatch.setenv("DATABRICKS_CONFIG_PROFILE", config_profile_env)
 
     def resolve(requested_profile: str | None) -> db_creds_mod.WorkspaceCreds:
         assert requested_profile == profile

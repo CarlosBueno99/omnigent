@@ -220,17 +220,14 @@ def _databricks_workspace_url_for_gateway(
         workspace_url = resolve_databricks_workspace(profile).host
     except Exception:  # noqa: BLE001 — absent profile disables optional discovery
         return None
-    from omnigent.inner.databricks_executor import (
-        databrickscfg_workspace_id_for_host,
-        databrickscfg_workspace_id_for_profile,
-    )
+    from omnigent.inner.databricks_executor import databrickscfg_workspace_id_for_profile
 
     gateway_workspace_id = hostname.split(".", 1)[0]
-    recorded_workspace_id = (
-        databrickscfg_workspace_id_for_profile(profile)
-        if profile
-        else databrickscfg_workspace_id_for_host(workspace_url)
-    )
+    resolved_profile = profile or os.environ.get("DATABRICKS_CONFIG_PROFILE") or "DEFAULT"
+    try:
+        recorded_workspace_id = databrickscfg_workspace_id_for_profile(resolved_profile)
+    except Exception:  # noqa: BLE001 — an unreadable workspace_id cannot confirm the match
+        return None
     if gateway_workspace_id.isdecimal() and recorded_workspace_id not in (
         None,
         gateway_workspace_id,
