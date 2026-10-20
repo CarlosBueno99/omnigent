@@ -1115,8 +1115,7 @@ export function CodeViewer({
       )}
 
       {/* GitHub Light/Dark backgrounds match the shiki themes used by highlightCode.
-          Ligatures/contextual alternates are off so each character keeps its own cell;
-          a merged glyph (e.g. a `###` ligature) can hang ink past the selection wash. */}
+          No ligatures: a merged glyph such as `###` can draw outside its selection wash. */}
       <div
         ref={codeContainerRef}
         className="font-mono text-sm bg-white dark:bg-[#0d1117] [font-variant-ligatures:none] [font-feature-settings:'liga'_0,'calt'_0]"
