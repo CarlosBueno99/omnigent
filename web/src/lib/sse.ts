@@ -1,3 +1,4 @@
+import { parseNativePermissionDelivery } from "./nativePermissionDelivery";
 // Mirrors sdks/python-client/omnigent_client/_sse.py.
 //
 // Parses raw `text/event-stream` bytes into typed `StreamEvent`
@@ -783,6 +784,7 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
       conversationId,
       stage,
       error: typeof data.error === "string" ? data.error : null,
+      provider: typeof data.provider === "string" ? data.provider : undefined,
     } satisfies SessionSandboxStatusEvent;
   }
   if (eventType === "session.mcp_startup") {
@@ -1088,6 +1090,9 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
     ];
     return {
       type: "elicitation_request",
+      ...(p.native_delivery
+        ? { nativeDelivery: parseNativePermissionDelivery(p.native_delivery) }
+        : {}),
       elicitationId,
       targetSessionId:
         typeof targetSessionId === "string" && targetSessionId ? targetSessionId : null,
