@@ -336,6 +336,7 @@ _SIZE_QUESTION = {
     "options": [{"label": "Small"}, {"label": "Medium"}, {"label": "Large"}],
     "multiSelect": False,
 }
+# Two-question picker screens as captured from Claude Code 2.1.283.
 _COLOR_TAB = f"""\
 {_RULE}
 ←  ☐ Color  ☐ Size  ✔ Submit  →

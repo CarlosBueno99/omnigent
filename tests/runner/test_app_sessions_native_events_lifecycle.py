@@ -5705,10 +5705,17 @@ _QUESTION_ANSWER_EVENT = {
         ("claude-native", True, _QUESTION_ANSWER_EVENT, 200, 1),
         ("claude-native", False, _QUESTION_ANSWER_EVENT, 409, 1),
         ("claude-native", RuntimeError("tmux send-keys failed"), _QUESTION_ANSWER_EVENT, 409, 1),
+        (
+            "claude-native",
+            FileNotFoundError(2, "No such file", "tmux"),
+            _QUESTION_ANSWER_EVENT,
+            409,
+            1,
+        ),
         ("claude-native", True, {**_QUESTION_ANSWER_EVENT, "answers": ["Blue"]}, 400, 0),
         ("codex-native", True, _QUESTION_ANSWER_EVENT, 204, 0),
     ],
-    ids=["answered", "not-answerable", "tmux-error", "malformed", "other-harness"],
+    ids=["answered", "not-answerable", "tmux-error", "tmux-missing", "malformed", "other-harness"],
 )
 async def test_events_question_answer_reports_whether_the_picker_took_it(
     monkeypatch: pytest.MonkeyPatch,

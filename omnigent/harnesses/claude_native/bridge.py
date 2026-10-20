@@ -8278,6 +8278,7 @@ def answer_question_dialog(
     :param answers: Answer label per question text, e.g. ``{"Color?": "Blue"}``.
     :returns: ``True`` once the picker closed with the answers submitted.
     :raises RuntimeError: If tmux rejects a keystroke.
+    :raises OSError: If the tmux binary cannot be run.
     """
     plan = _question_answer_keys(questions, answers)
     payload = _read_json_file(bridge_dir / _TMUX_FILE)

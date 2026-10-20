@@ -163,6 +163,7 @@ def test_card_answer_reaches_subagent_after_permission_hook_exits(
             assert hooks, "Claude's permission hook was not waiting on the question"
             for pid in hooks:
                 os.kill(pid, signal.SIGTERM)
+            poll_until(lambda: not _permission_hook_pids(child_id), timeout_s=10, interval_s=0.2)
 
             page = request.getfixturevalue("page")
             page.goto(f"{live_server}/c/{parent_id}")

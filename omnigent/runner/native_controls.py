@@ -1129,7 +1129,7 @@ def build_native_controls(
                 questions=questions,
                 answers=answers,
             )
-        except (RuntimeError, ValueError):
+        except (RuntimeError, ValueError, OSError):
             _logger.warning(
                 "Could not answer the claude-native question picker for session=%s",
                 conv_id,
