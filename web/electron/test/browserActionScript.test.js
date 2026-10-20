@@ -151,7 +151,17 @@ it("presses, moves focus and releases across a task before clicking", async () =
     const menu = document.querySelector("#menu");
     menu.addEventListener("mousedown", () => Promise.resolve().then(() => log.push("rendered")));
 
-    assert.deepEqual(await click("#query"), [
+    let deliverTask;
+    window.MessageChannel = class {
+      port1 = { close() {} };
+      port2 = { postMessage: () => (deliverTask = () => this.port1.onmessage()) };
+    };
+    const pending = click("#query");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(log, ["pointerdown:query", "mousedown:query", "focusin:query", "rendered"]);
+    deliverTask();
+    window.MessageChannel = MessageChannel;
+    assert.deepEqual(await pending, [
       "pointerdown:query",
       "mousedown:query",
       "focusin:query",
