@@ -115,9 +115,9 @@ def test_cursor_question_card_keeps_non_ascii_text(
 
     thread = threading.Thread(target=_run_mirror, daemon=True)
     thread.start()
-    # Browser setup happens only now so a recording opens on the user's first view.
-    page = request.getfixturevalue("page")
     try:
+        # Browser setup happens only now so a recording opens on the user's first view.
+        page = request.getfixturevalue("page")
         page.goto(f"{base_url}/c/{session_id}")
 
         card = (
@@ -129,7 +129,6 @@ def test_cursor_question_card_keeps_non_ascii_text(
         form = card.locator(_FORM)
         expect(form).to_be_visible(timeout=_MOCK_ELICITATION_TIMEOUT_MS)
         card.scroll_into_view_if_needed()
-        page.wait_for_timeout(3000)  # hold on the rendered form (recording)
 
         rendered = form.inner_text()
         assert _PROMPT in rendered, f"question card shows {rendered!r}"
