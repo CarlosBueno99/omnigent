@@ -1582,6 +1582,36 @@ def test_codex_import_by_rotated_native_omnigent_id_reaches_current_thread(
         load_local_session("codex", original_session_id)
 
 
+@pytest.mark.parametrize(
+    "corrupt_state", ["1" * 5000, "[" * 200_000], ids=["oversized-integer", "deep-nesting"]
+)
+def test_codex_import_by_native_omnigent_id_skips_corrupt_bridge_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corrupt_state: str,
+) -> None:
+    """A corrupt state file in another bridge does not block the Omnigent id lookup."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "bridge-root")
+    omnigent_session_id = "3d4e5f6a7b8c49d0a1b2c3d4e5f6a7b8"
+    thread_id = "019f7777-0001-7000-8000-000000000024"
+    corrupt_bridge = codex_native_bridge.bridge_dir_for_bridge_id("corrupt-bridge")
+    corrupt_bridge.mkdir(parents=True)
+    (corrupt_bridge / "state.json").write_text(corrupt_state, encoding="utf-8")
+    codex_home = _write_codex_native_bridge_state(
+        codex_native_bridge.bridge_dir_for_bridge_id(omnigent_session_id),
+        session_id=omnigent_session_id,
+        thread_id=thread_id,
+    )
+    _write_codex_rollout(codex_home, thread_id, first_message="readable bridge turn")
+
+    imported = load_local_session("codex", omnigent_session_id)
+
+    assert imported.external_session_id == thread_id
+    assert _codex_item_texts(imported) == ["readable bridge turn"]
+
+
 def test_codex_discovery_skips_unreadable_private_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

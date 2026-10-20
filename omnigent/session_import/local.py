@@ -286,10 +286,17 @@ def _codex_native_storage_homes() -> tuple[Path, ...]:
 
 
 def _codex_native_thread_ids(omnigent_session_id: str) -> frozenset[str]:
-    """Return the Codex threads native bridges record for an Omnigent session id."""
+    """Return the Codex threads native bridges record for an Omnigent session id.
+
+    Several bridges can record the same id; the caller imports the newest matching rollout.
+    """
     thread_ids: set[str] = set()
     for bridge_dir in _codex_native_bridge_dirs():
-        state = read_bridge_state(bridge_dir)
+        try:
+            state = read_bridge_state(bridge_dir)
+        except (ValueError, RecursionError):
+            # The JSON decoder rejects oversized integers and deep nesting this way.
+            continue
         if state is not None and state.session_id == omnigent_session_id:
             thread_ids.add(state.thread_id)
     return frozenset(thread_ids)
