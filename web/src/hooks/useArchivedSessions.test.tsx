@@ -95,6 +95,7 @@ it.each(["updated_at", "created_at"] as const)(
     });
     await waitFor(() => expect(result.current.data?.pages[0].data[0].title).toBe("Recovered"));
     expect(fetch).toHaveBeenCalledTimes(2);
+    expect((fetch.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(true);
     client.clear();
   },
 );

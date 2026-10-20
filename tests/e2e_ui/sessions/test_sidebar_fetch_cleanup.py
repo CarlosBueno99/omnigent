@@ -307,10 +307,8 @@ def test_unanswered_session_list_offers_retry_instead_of_loading_forever(
         "created_at": 1,
         "updated_at": 1,
     }
-    retried: list[str] = []
 
     def answer(route: Route) -> None:
-        retried.append(route.request.url)
         pinned = "pinned" in parse_qs(urlparse(route.request.url).query)
         route.fulfill(json={"data": [] if pinned else [recovered], "has_more": False})
 
@@ -318,7 +316,6 @@ def test_unanswered_session_list_offers_retry_instead_of_loading_forever(
     sessions.get_by_role("button", name="Retry").click()
     expect(page.get_by_text("Recovered session", exact=True)).to_be_visible()
     expect(sessions.get_by_role("status")).to_have_count(0)
-    assert retried
 
 
 def test_templates_load_before_mine_and_discovery_reuses_its_request(

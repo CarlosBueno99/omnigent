@@ -39,9 +39,10 @@ the header menu), and each place is a separate entry point.
 - `unarchive`: offered on archived rows, in bulk selection, and in the header
   menu of an archived session.
 - `delete`: confirmed, then removed from the list and the server.
-- `slow-load-retry`: a sidebar session list still loading after 10 seconds shows
-  "Sessions are taking longer than usual." with **Retry**, which replaces the
-  pending request. Rows already shown, such as Pinned, stay visible.
+- `slow-load-retry`: the sidebar Sessions section, still loading after 10 seconds,
+  shows "Sessions are taking longer than usual." with **Retry**, which replaces the
+  pending request. Rows already shown, such as Pinned, stay visible. Expanded
+  project folders keep their plain "Loading…" footer.
 - `export`: Export in the header menu saves the transcript as a local file.
 - `unread`: Mark as unread flags a session to revisit and survives a reload,
   including for the session being viewed. Its dot appears once the turn is

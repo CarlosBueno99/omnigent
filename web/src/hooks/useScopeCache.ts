@@ -64,16 +64,20 @@ export function useScopeCache(
       const limit = current
         ? Math.min(current.windowSize ?? pageSize, maxRefreshSessions)
         : pageSize;
-      const page = await timeInitialConversationLoad(undefined, visibility, () =>
-        fetchConversationsPage({
-          searchQuery: "",
-          includeArchived: false,
-          visibility,
-          queryClient: client,
-          signal,
-          limit,
-          sortBy,
-        }),
+      const page = await timeInitialConversationLoad(
+        undefined,
+        visibility,
+        () =>
+          fetchConversationsPage({
+            searchQuery: "",
+            includeArchived: false,
+            visibility,
+            queryClient: client,
+            signal,
+            limit,
+            sortBy,
+          }),
+        signal,
       );
       return refreshScopeWindow(client.getQueryData<ScopeCacheData>(queryKey), page, limit, sortBy);
     },

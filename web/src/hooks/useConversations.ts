@@ -611,6 +611,7 @@ export async function timeInitialConversationLoad(
   pageParam: unknown,
   visibility: "mine" | "shared" | "archived" | undefined,
   fetchPage: () => Promise<ConversationsPage>,
+  signal?: AbortSignal,
 ): Promise<ConversationsPage> {
   if (
     initialListLoadTimed ||
@@ -620,6 +621,12 @@ export async function timeInitialConversationLoad(
     return fetchPage();
   initialListLoadTimed = true;
   const interaction = startTimedInteraction("list_sessions");
+  // Release the latch on abort, before a retry's replacement fetch starts.
+  const cancel = () => {
+    interaction.complete("cancelled");
+    initialListLoadTimed = false;
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
   try {
     const page = await fetchPage();
     interaction.complete();
@@ -627,6 +634,8 @@ export async function timeInitialConversationLoad(
   } catch (error) {
     interaction.fail();
     throw error;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
   }
 }
 
@@ -638,8 +647,8 @@ export function conversationsQueryKey(
   visibility: "mine" | "shared" | "archived" | undefined,
   sortBy: SessionSortBy,
 ): unknown[] {
-  // Unfiltered callers keep the base three-element key; filters are appended only
-  // when set, so each filtered list gets its own cache entry.
+  // Keys stay identical to existing cache entries; created_at lists always use the
+  // full six-element key.
   if (sortBy === "created_at") {
     return ["conversations", searchQuery, includeArchived, project ?? null, visibility, sortBy];
   }
@@ -671,7 +680,7 @@ export function useConversations(
   const queryKey = conversationsQueryKey(searchQuery, includeArchived, project, visibility, sortBy);
   const query = useInfiniteQuery({
     queryKey,
-    queryFn: async ({ pageParam }) => {
+    queryFn: async ({ pageParam, signal }) => {
       const fetchPage = () =>
         fetchConversationsPage({
           after: pageParam as string | undefined,
@@ -680,10 +689,11 @@ export function useConversations(
           project,
           visibility,
           queryClient,
+          signal,
           limit: sessionPageSize,
           sortBy,
         });
-      return timeInitialConversationLoad(pageParam, visibility, fetchPage);
+      return timeInitialConversationLoad(pageParam, visibility, fetchPage, signal);
     },
 
     initialPageParam: undefined as string | undefined,

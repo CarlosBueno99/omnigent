@@ -3481,6 +3481,14 @@ describe("Sidebar view options", () => {
       expect(status()).toHaveTextContent("Loading…");
       act(() => vi.advanceTimersByTime(1));
       expect(status()).toHaveTextContent("Sessions are taking longer than usual.");
+
+      openViewSubmenu("session-ordering-menu");
+      const updated = screen.getByRole("menuitemradio", { name: "Updated" });
+      fireEvent.mouseOver(updated);
+      fireEvent.click(updated);
+      expect(status()).toHaveTextContent("Loading…");
+      act(() => vi.advanceTimersByTime(SESSION_LIST_SLOW_LOAD_MS));
+      expect(status()).toHaveTextContent("Sessions are taking longer than usual.");
     } finally {
       vi.useRealTimers();
     }

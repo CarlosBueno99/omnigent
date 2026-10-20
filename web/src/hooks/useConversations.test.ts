@@ -313,14 +313,17 @@ describe("useConversations search timeout", () => {
   });
 
   it("does not bound an ordinary (non-search) list fetch", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
     renderSearch("");
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
 
     // Plain pagination is indexed/fast; adding a deadline could abort a
-    // legitimately larger page, so no signal is attached.
+    // legitimately larger page, so it carries only the query's cancellation signal.
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).not.toContain("search_query=");
-    expect(init.signal).toBeUndefined();
+    expect(timeout).not.toHaveBeenCalled();
+    expect(init.signal?.aborted).toBe(false);
+    timeout.mockRestore();
   });
 
   it("does not retry a client-side search timeout, but retries other errors", () => {
@@ -342,6 +345,39 @@ describe("useConversations search timeout", () => {
     // A genuine server/network error still retries (up to the default cap).
     expect(retry(0, new Error("500 Internal Server Error"))).toBe(true);
     expect(retry(3, new Error("500 Internal Server Error"))).toBe(false);
+  });
+});
+
+describe("list_sessions timing", () => {
+  it("hands a cancelled first load's timing to the load that replaces it", async () => {
+    vi.resetModules();
+    const [{ timeInitialConversationLoad }, { setOmnigentHostConfig }] = await Promise.all([
+      import("./useConversations"),
+      import("@/lib/host"),
+    ]);
+    const analytics = vi.fn();
+    setOmnigentHostConfig({ analytics });
+    const stalled = new AbortController();
+    void timeInitialConversationLoad(
+      undefined,
+      "mine",
+      () => new Promise(() => {}),
+      stalled.signal,
+    );
+    stalled.abort();
+    const page = { data: [], first_id: null, last_id: null, has_more: false };
+    await timeInitialConversationLoad(undefined, "mine", async () => page);
+    await timeInitialConversationLoad(undefined, "mine", async () => page);
+
+    const outcomes = analytics.mock.calls
+      .map(([event]) => event as { interactionKind: string; phase: string; status?: string })
+      .filter((event) => event.phase === "complete")
+      .map((event) => [event.interactionKind, event.status]);
+    expect(outcomes).toEqual([
+      ["list_sessions", "cancelled"],
+      ["list_sessions", "success"],
+    ]);
+    setOmnigentHostConfig({});
   });
 });
 
