@@ -258,13 +258,15 @@ text dumps alongside as machine-checkable evidence.
 
 **A pane capture that shows the symptom means the facet must be filmed**, even
 when the defect is a runner-side leak or a failed background request. When the
-app can no longer open the pane (for example, a leaked pane whose session was
-deleted), author a VHS tape as in the `cli` section that attaches a read-only
-tmux client with the socket and target your probe used:
-`tmux -S <socket> attach -r -t <target>`. Caption that the clip attaches to
-the pane outside the app, and end a `before` clip on
-`Wait+Screen /<symptom text>/`: a plain `Wait` checks only the last line, which
-is tmux's status bar.
+app can no longer open the pane (for example, a leaked pane whose Omnigent
+session was deleted while its tmux pane still runs), author an observer VHS tape.
+It uses the `cli` section's `Output`, `raw/` and render steps but types only the
+attach, not a user journey. Attach to the socket and target your own probe
+captured, never another run's or user's socket, without sending input or
+updating the session environment: `tmux -S <socket> attach -E -r -t <target>`.
+Caption that the clip attaches to the pane outside the app, and end a `before`
+clip on `Wait+Screen /<symptom text>/`: a plain `Wait` checks only the last
+line, which is tmux's status bar by default.
 
 **For a native-harness pane** (claude/codex/cursor/goose/hermes/kiro/… — the bug
 is in a real harness CLI's output), don't hand-roll the launch: the existing
