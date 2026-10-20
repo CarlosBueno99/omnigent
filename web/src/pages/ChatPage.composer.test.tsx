@@ -6245,7 +6245,9 @@ describe("Composer voice dictation", () => {
     }
   });
 
-  it("ends the voice take when the dictated message is sent", () => {
+  it("ends the voice take when the dictated message is sent from the touch layout", () => {
+    // On a coarse pointer the Send tap is the only way to submit.
+    onTestFinished(forceDesktopCoarsePointer());
     const onSend = vi.fn();
     render(<Composer {...composerProps({ onSend })} />);
     const mic = screen.getByRole("button", { name: "Voice dictation" });
