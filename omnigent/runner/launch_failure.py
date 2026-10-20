@@ -254,7 +254,7 @@ _CLIENT_UPDATE_REQUIRED = re.compile(
 _CONTENT_POLICY_REFUSAL = re.compile(
     r"safeguards flagged this message"
     r"|can['’]t help with this\. Start a new session to continue"
-    r"|appears to violate our Usage Policy",
+    r"|unable to respond to this request, which appears to violate our Usage Policy",
     re.IGNORECASE,
 )
 

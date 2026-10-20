@@ -274,7 +274,7 @@ def test_native_claude_provider_error_surfaces_in_chat_as_classified_pill(
     configure_mock_llm(mock_llm_server_url, provider_responses, key="default")
     baseline = _mock_request_count(mock_llm_server_url)
 
-    prompt = f"quota-{uuid.uuid4().hex[:8]} please say hello"
+    prompt = f"provider-{uuid.uuid4().hex[:8]} please say hello"
     composer = page.get_by_role("textbox", name="Message the agent")
     expect(composer).to_be_visible(timeout=30_000)
     composer.fill(prompt)

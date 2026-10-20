@@ -460,6 +460,7 @@ def test_content_policy_refusal_diagnosis_explains_the_block_and_recovery() -> N
     [
         "I can't help with this request right now.",
         "API Error: 400 Usage policy violation detected in tool schema",
+        "The reply said the prompt appears to violate our Usage Policy, so I rephrased it.",
         _GATEWAY_499_OUTPUT,
         "",
     ],
