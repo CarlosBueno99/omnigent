@@ -3328,6 +3328,39 @@ def test_auth_token_factory_refreshes_expired_oidc_token(
     assert factory() == "refreshed-jwt"
     assert refresh_calls, "the refresh path must have run"
 
+    # Once the grant is revoked, callbacks fail closed naming the re-login step;
+    # the SDK fallback's hint must not mask the lapsed Omnigent login.
+    from omnigent.inner.databricks_executor import DatabricksAuthError
+
+    def _sdk_not_logged_in(*_args: object, **_kwargs: object) -> None:
+        raise DatabricksAuthError("Databricks profile None is not authenticated.")
+
+    def _callback_error() -> str:
+        transport = httpx.MockTransport(lambda _request: httpx.Response(200))
+        with httpx.Client(auth=_RunnerDatabricksAuth(factory), transport=transport) as client:
+            with pytest.raises(httpx.RequestError) as blocked:
+                client.get("https://omnigent.example.com/v1/me")
+        return str(blocked.value)
+
+    monkeypatch.setattr("omnigent.cli_auth.databricks_request_headers", lambda *a, **k: {})
+    monkeypatch.setattr("omnigent.cli_auth.refresh_stored_token", lambda _url: None)
+    monkeypatch.setattr("omnigent.cli_auth.stored_token_status", lambda _url: "expired")
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda _url: None)
+    monkeypatch.setattr(
+        "omnigent.inner.databricks_executor._resolve_databricks_auth", _sdk_not_logged_in
+    )
+    lapsed_login = _callback_error()
+    assert lapsed_login.startswith(
+        "Databricks token refresh returned no token: the stored login expired; run `"
+    )
+    assert lapsed_login.endswith("login https://omnigent.example.com` to re-authenticate")
+
+    # Without a lapsed Omnigent login, the SDK's error explains the failure.
+    monkeypatch.setattr("omnigent.cli_auth.stored_token_status", lambda _url: "absent")
+    assert _callback_error() == (
+        "Databricks token refresh returned no token: Databricks profile None is not authenticated."
+    )
+
 
 @pytest.mark.parametrize(
     ("raw_value", "expected"),
