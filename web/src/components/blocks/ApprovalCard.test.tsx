@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { childSessionsQueryKey, type ChildSessionInfo } from "@/hooks/useChildSessions";
+import type { ClaudeQuestion } from "@/lib/askUserQuestion";
 import { BlockStream } from "@/lib/blockStream";
 import { buildBubbles, type RenderItem } from "@/lib/renderItems";
 import { parseEventLines } from "@/lib/sse";
@@ -1336,6 +1337,161 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     // ("wants to call AskUserQuestion") would read as if the prompt
     // were still outstanding.
     expect(screen.queryByText(/wants to call/)).toBeNull();
+  });
+
+  describe("unsent answers across a remount", () => {
+    const draftQuestions: ClaudeQuestion[] = [
+      {
+        question: "Pick a codename",
+        header: "",
+        options: [
+          { label: "Alpha", description: "" },
+          { label: "Bravo", description: "" },
+        ],
+        multiSelect: false,
+      },
+      {
+        question: "Describe the rollout",
+        header: "",
+        options: [{ label: "Staged", description: "" }],
+        multiSelect: false,
+      },
+    ];
+
+    function renderPendingQuestions(elicitationId: string, questions: ClaudeQuestion[]) {
+      return render(
+        <ApprovalCard
+          elicitationId={elicitationId}
+          message="Claude wants to call AskUserQuestion"
+          phase="pre_tool_use"
+          policyName="claude_native_permission"
+          contentPreview=""
+          requestedSchema={{}}
+          status="pending"
+          response={null}
+          askUserQuestion={{ questions }}
+        />,
+      );
+    }
+
+    function answerFirstAndTypeSecond() {
+      fireEvent.click(screen.getByLabelText("Alpha"));
+      fireEvent.click(screen.getByTestId("ask-user-question-next"));
+      fireEvent.change(screen.getByTestId("ask-user-question-custom-input"), {
+        target: { value: "Keep this partial answer" },
+      });
+    }
+
+    function expectFreshCard() {
+      expect(screen.getByTestId("ask-user-question-progress").textContent).toBe("Question 1 of 2:");
+      expect((screen.getByLabelText("Alpha") as HTMLInputElement).checked).toBe(false);
+      fireEvent.click(screen.getByTestId("ask-user-question-next"));
+      expect((screen.getByTestId("ask-user-question-custom-input") as HTMLInputElement).value).toBe(
+        "",
+      );
+    }
+
+    it("restores the carousel position, selection and typed text", () => {
+      const first = renderPendingQuestions("elic_draft_restore", draftQuestions);
+      answerFirstAndTypeSecond();
+      first.unmount();
+
+      renderPendingQuestions("elic_draft_restore", structuredClone(draftQuestions));
+
+      expect(screen.getByTestId("ask-user-question-progress").textContent).toBe("Question 2 of 2:");
+      expect((screen.getByTestId("ask-user-question-custom-input") as HTMLInputElement).value).toBe(
+        "Keep this partial answer",
+      );
+      expect(
+        (screen.getByTestId("ask-user-question-custom-toggle") as HTMLInputElement).checked,
+      ).toBe(true);
+      fireEvent.click(screen.getByTestId("ask-user-question-prev"));
+      expect((screen.getByLabelText("Alpha") as HTMLInputElement).checked).toBe(true);
+    });
+
+    it("starts fresh when the same elicitation id carries different questions", () => {
+      const first = renderPendingQuestions("elic_draft_reused", draftQuestions);
+      answerFirstAndTypeSecond();
+      first.unmount();
+
+      const [firstQuestion, ...rest] = draftQuestions;
+      renderPendingQuestions("elic_draft_reused", [
+        { ...firstQuestion!, question: "Pick another codename" },
+        ...rest,
+      ]);
+
+      expectFreshCard();
+    });
+
+    it("forgets the answers once they are submitted", () => {
+      const submitSpy = vi.fn().mockResolvedValue(undefined);
+      useChatStore.setState({ submitApproval: submitSpy } as Partial<
+        ReturnType<typeof useChatStore.getState>
+      >);
+      const first = renderPendingQuestions("elic_draft_submit", draftQuestions);
+      answerFirstAndTypeSecond();
+      fireEvent.click(screen.getByTestId("ask-user-question-submit"));
+      expect(submitSpy).toHaveBeenCalledWith("elic_draft_submit", "accept", {
+        "Pick a codename": "Alpha",
+        "Describe the rollout": "Keep this partial answer",
+      });
+      first.unmount();
+
+      renderPendingQuestions("elic_draft_submit", draftQuestions);
+
+      expectFreshCard();
+    });
+
+    it("forgets the answers once the question is cancelled", () => {
+      const submitSpy = vi.fn().mockResolvedValue(undefined);
+      useChatStore.setState({ submitApproval: submitSpy } as Partial<
+        ReturnType<typeof useChatStore.getState>
+      >);
+      const first = renderPendingQuestions("elic_draft_cancel", draftQuestions);
+      answerFirstAndTypeSecond();
+      fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+      expect(submitSpy).toHaveBeenCalledWith("elic_draft_cancel", "decline", undefined);
+      first.unmount();
+
+      renderPendingQuestions("elic_draft_cancel", draftQuestions);
+
+      expectFreshCard();
+    });
+
+    it("does not keep text typed into a secret question", () => {
+      const secretQuestions: ClaudeQuestion[] = [
+        {
+          id: "token",
+          question: "Paste the API token",
+          options: [],
+          multiSelect: false,
+          isSecret: true,
+        },
+        { id: "region", question: "Pick a region", options: [], multiSelect: false },
+      ];
+      const first = renderPendingQuestions("elic_draft_secret", secretQuestions);
+      fireEvent.change(screen.getByTestId("ask-user-question-custom-input"), {
+        target: { value: "sk-not-for-storage" },
+      });
+      fireEvent.click(screen.getByTestId("ask-user-question-next"));
+      fireEvent.change(screen.getByTestId("ask-user-question-custom-input"), {
+        target: { value: "eu-west" },
+      });
+      first.unmount();
+
+      renderPendingQuestions("elic_draft_secret", secretQuestions);
+
+      expect((screen.getByTestId("ask-user-question-custom-input") as HTMLInputElement).value).toBe(
+        "eu-west",
+      );
+      fireEvent.click(screen.getByTestId("ask-user-question-prev"));
+      expect((screen.getByTestId("ask-user-question-custom-input") as HTMLInputElement).value).toBe(
+        "",
+      );
+      expect(
+        (screen.getByTestId("ask-user-question-custom-toggle") as HTMLInputElement).checked,
+      ).toBe(false);
+    });
   });
 });
 
