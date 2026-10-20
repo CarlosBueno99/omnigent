@@ -686,6 +686,7 @@ describe("BlockRenderer dispatch", () => {
       ["Latency was above-average today.", false],
       ["Above all, the build is green.", false],
       ["The table above lists each step.", false],
+      ["The table above is a summary of the steps.", false],
       ["All set. The summary is above.", false],
       ["Error logs above 1GB were rotated.", false],
       ["Results above the baseline were flagged.", false],

@@ -488,7 +488,7 @@ const BACKWARD_REFERENCE = new RegExp(
     String.raw`\b(?:output|report|results?|logs?)\s+(?:is|are)\s+above(?=\s*(?:[.,;:!?)]|$))`,
     String.raw`\b(?:output|report|results?|logs?)\s+above\b(?!\s*(?:[\d$%]|(?:a|an|the)\b))`,
     String.raw`\b(?:shown|printed|displayed|listed|see)\s+above\b`,
-    String.raw`\babove(?:\s+(?:is|are)\b|\s*:)`,
+    String.raw`(?:^|[.!?]\s+|\n\s*)above(?:\s+(?:is|are)\b|\s*:)`,
     String.raw`\bscroll(?:ing)?\s+up\b`,
   ].join("|"),
   "i",
