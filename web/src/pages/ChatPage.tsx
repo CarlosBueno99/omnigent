@@ -88,7 +88,8 @@ import { PROJECT_LABEL_KEY } from "@/lib/sessionListCache";
 import { codexEffortLevelsForModel, findNativeModelOption } from "@/lib/codexNativeModels";
 import { modelConfigurationSourceRows } from "@/lib/modelConfigurationSource";
 import {
-  committedItemProvesDelivery,
+  takeFailedSendDraft,
+  restoredSendDraftUnchanged,
   composerAttachmentKey,
   consumePendingInitialPrompt,
   holdsInitialDraft,
@@ -130,7 +131,6 @@ import {
 import { useMentionBrowser } from "@/hooks/useMentionBrowser";
 import { getSessionDraft, promoteSessionDraft, setSessionDraft } from "@/lib/sessionDrafts";
 import {
-  restoreReplyDraft,
   serializeReplyDraft,
   snapshotReplyDraft,
   type ComposerDraft,
@@ -2840,64 +2840,21 @@ function ComposerImpl(
     // setMentionedItems is a stable useState setter (from useMentionBrowser).
   }, [pendingComposerAttachments, setMentionedItems]);
 
-  // Restore the text (and attachments) of a send that failed, so the user can
-  // fix and resend instead of retyping. The composer is empty in the normal
-  // case — `submit` clears it optimistically — so only fill it when the user
-  // hasn't already started something new; their in-progress text wins. Files
-  // are re-validated on the way in: when the upload itself was what failed
-  // (a 415 on an unsupported type), re-arming the same file would only fail
-  // again, so it's dropped with the same inline reason a fresh attach gives.
   useEffect(() => {
-    if (failedSendDraft === null) return;
-    if (failedSendDraft.conversationId !== conversationId) return;
-    // Wait for the draft-restore effect to settle this conversation's text
-    // into value/files. Reading the refs mid-switch would see the PREVIOUS
-    // conversation's draft and wrongly conclude the user is mid-sentence,
-    // dropping the failed message on the way back to the session it failed in.
-    if (settledConversationId !== conversationId) return;
-    // The send may have proven delivered since the render that scheduled this
-    // effect: its committed item landed under the send's stable id (see
-    // `retractDeliveredSendDraft`), so restoring now would prime a duplicate.
-    // Not so for a send the server refused: its item is persisted too, but the
-    // runner never took it, so the text must come back for a resend.
-    if (committedItemProvesDelivery(useChatStore.getState().blocks, failedSendDraft)) {
-      useChatStore.setState({ failedSendDraft: null });
-      return;
-    }
-    useChatStore.setState({
-      failedSendDraft: null,
-      pendingRetryStableId: failedSendDraft.stableId ?? null,
-    });
-    // The user started something new while the send was in flight — their
-    // in-progress text wins over a clobbering restore.
-    if (valueRef.current.trim() !== "" || filesRef.current.length > 0) {
-      useChatStore.setState({ pendingRetryStableId: null });
-      return;
-    }
-    pendingFailedSendRestore.current = failedSendDraft.stableId
-      ? { stableId: failedSendDraft.stableId, draft }
+    // A session switch must finish restoring its local draft before draining a failure.
+    if (!conversationId || settledConversationId !== conversationId) return;
+    const failed = takeFailedSendDraft(
+      conversationId,
+      valueRef.current.trim() !== "" || filesRef.current.length > 0,
+    );
+    if (!failed) return;
+    pendingFailedSendRestore.current = failed.stableId
+      ? { stableId: failed.stableId, draft }
       : null;
-    replaceText(failedSendDraft.text, failedSendDraft.replyDraft);
+    replaceText(failed.text, failed.replyDraft);
     textareaRef.current = tailTextareaRef.current;
     dirtyRef.current = true;
-    if (failedSendDraft.files.length > 0)
-      attachmentsRef.current.replaceFiles(failedSendDraft.files);
-    // Remember what was restored: if the "failed" send proves delivered (its
-    // stable id shows up as a committed item), the retraction effect below
-    // empties the composer instead of priming a duplicate send.
-    if (failedSendDraft.stableId) {
-      useChatStore.setState({
-        restoredSendDraft: {
-          conversationId: failedSendDraft.conversationId,
-          stableId: failedSendDraft.stableId,
-          text: failedSendDraft.text,
-          files: failedSendDraft.files,
-          replyDraft: failedSendDraft.replyDraft,
-          serverRefused: failedSendDraft.serverRefused,
-          delivered: false,
-        },
-      });
-    }
+    attachmentsRef.current.replaceFiles(failed.files);
     if (!isMobileRef.current) textareaRef.current?.focus();
   }, [failedSendDraft, conversationId, settledConversationId, replaceText, draft]);
 
@@ -2914,13 +2871,16 @@ function ComposerImpl(
     if (pending?.stableId === restoredSendDraft.stableId && pending.draft === draft) return;
     pendingFailedSendRestore.current = null;
     useChatStore.setState({ restoredSendDraft: null });
-    const expected = serializeReplyDraft(
-      restoreReplyDraft(restoredSendDraft.text, restoredSendDraft.replyDraft),
-    );
-    const filesUnedited =
-      filesRef.current.length === restoredSendDraft.files.length &&
-      filesRef.current.every((f) => restoredSendDraft.files.includes(f));
-    if (valueRef.current !== expected || !filesUnedited) return;
+    if (
+      !restoredSendDraftUnchanged(
+        restoredSendDraft,
+        restoredSendDraft.stableId,
+        valueRef.current,
+        filesRef.current,
+        snapshotReplyDraft(draft),
+      )
+    )
+      return;
     replaceText("");
     attachmentsRef.current.replaceFiles([]);
     dirtyRef.current = false;

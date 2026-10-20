@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { CanvasWorkspace } from "@/canvas/CanvasWorkspace";
 import { useLoadedConversations } from "@/hooks/useSidebarData";
+import { useIdentityReady } from "@/hooks/useViewerId";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled } from "@/lib/capabilities";
 import { Link, useParams } from "@/lib/routing";
@@ -347,6 +348,20 @@ function preventLinkDrop(event: DragEvent<HTMLElement>) {
   if (event.dataTransfer.types.includes("text/uri-list")) event.preventDefault();
 }
 
+function GridIdentityStatus() {
+  const ready = useIdentityReady();
+  if (!ready) return <p role="status">Loading grid…</p>;
+  return (
+    <>
+      <h1>Grid unavailable</h1>
+      <p>Your account identity is not available yet. Reload to retry.</p>
+      <Button variant="outline" onClick={() => window.location.reload()}>
+        Reload
+      </Button>
+    </>
+  );
+}
+
 export function GridWorkspace({
   children,
   onOpenSidebar,
@@ -400,19 +415,16 @@ export function GridWorkspace({
               componentId="grid.open_sidebar"
             />
           )}
-          <h1>Grid unavailable</h1>
           {grids ? (
-            <p>
-              This grid isn’t saved on this device. Open a session and drag another session into it
-              to create a grid.
-            </p>
+            <>
+              <h1>Grid unavailable</h1>
+              <p>
+                This grid isn’t saved on this device. Open a session and drag another session into
+                it to create a grid.
+              </p>
+            </>
           ) : (
-            <p>Your account identity is not available yet. Reload to retry.</p>
-          )}
-          {!grids && (
-            <Button variant="outline" onClick={() => window.location.reload()}>
-              Reload
-            </Button>
+            <GridIdentityStatus />
           )}
           <Button asChild variant="outline">
             <Link to="/">Back to sessions</Link>

@@ -45,51 +45,48 @@ function readTabs(sessionId: string | undefined): WorkspaceTabs {
 
 /** Session-owned tabs and guarded navigation; layout and URL state belong to the host. */
 export function useSessionWorkspace(sessionId: string | undefined) {
-  const [state, setState] = useState(() => ({ sessionId, tabs: readTabs(sessionId) }));
-  // Reset before committing, so an outgoing session cannot overwrite the incoming one's tabs.
-  if (state.sessionId !== sessionId) setState({ sessionId, tabs: readTabs(sessionId) });
-  const persisted = useRef(state);
+  const [initial, setInitial] = useState(() => ({ sessionId, tabs: readTabs(sessionId) }));
+  const [rightRailTab, setRightRailTab] = useState(initial.tabs.rightRailTab);
+  const [openPanels, setOpenPanels] = useState(initial.tabs.openPanels);
+  const [openFiles, setOpenFiles] = useState(initial.tabs.openFiles);
+  const [selectedFilePath, setSelectedFilePath] = useState(initial.tabs.selectedFilePath);
+  const [selectedTerminalKey, setSelectedTerminalKey] = useState(initial.tabs.selectedTerminalKey);
+  if (initial.sessionId !== sessionId) {
+    const tabs = readTabs(sessionId);
+    setInitial({ sessionId, tabs });
+    setRightRailTab(tabs.rightRailTab);
+    setOpenPanels(tabs.openPanels);
+    setOpenFiles(tabs.openFiles);
+    setSelectedFilePath(tabs.selectedFilePath);
+    setSelectedTerminalKey(tabs.selectedTerminalKey);
+  }
+  const snapshot = useMemo(
+    () => ({
+      sessionId,
+      rightRailTab,
+      openPanels,
+      openFiles,
+      selectedFilePath,
+      selectedTerminalKey,
+    }),
+    [sessionId, rightRailTab, openPanels, openFiles, selectedFilePath, selectedTerminalKey],
+  );
+  const persisted = useRef(snapshot);
   useEffect(() => {
     const previous = persisted.current;
-    persisted.current = state;
-    // Let the host apply URL/default overrides before writing a restored session.
-    if (previous !== state && previous.sessionId === state.sessionId && state.sessionId) {
-      writeSessionWorkspaceState(state.sessionId, state.tabs);
+    persisted.current = snapshot;
+    // Skip mount/session changes until the host has applied URL/default overrides.
+    if (previous !== snapshot && previous.sessionId === snapshot.sessionId && snapshot.sessionId) {
+      const { sessionId: ownerId, ...tabs } = snapshot;
+      writeSessionWorkspaceState(ownerId, tabs);
     }
-  }, [state]);
-  const setters = useMemo(() => {
-    const setter =
-      <K extends keyof WorkspaceTabs>(key: K) =>
-      (value: SetStateAction<WorkspaceTabs[K]>) => {
-        setState((previous) => {
-          const next = typeof value === "function" ? value(previous.tabs[key]) : value;
-          return Object.is(next, previous.tabs[key])
-            ? previous
-            : {
-                ...previous,
-                tabs: { ...previous.tabs, [key]: next },
-              };
-        });
-      };
-    return {
-      setRightRailTab: setter("rightRailTab"),
-      setOpenPanels: setter("openPanels"),
-      setOpenFiles: setter("openFiles"),
-      setSelectedFilePath: setter("selectedFilePath"),
-      setSelectedTerminalKey: setter("selectedTerminalKey"),
-    };
+  }, [snapshot]);
+  const selectRightRailTab = useCallback((next: RightRailTab | null) => {
+    setRightRailTab(next);
+    if (isDefaultWorkspaceTab(next) && !readPinnedWorkspaceTabs().includes(next)) {
+      setOpenPanels((previous) => (previous.includes(next) ? previous : [...previous, next]));
+    }
   }, []);
-  const selectRightRailTab = useCallback(
-    (next: RightRailTab | null) => {
-      setters.setRightRailTab(next);
-      if (isDefaultWorkspaceTab(next) && !readPinnedWorkspaceTabs().includes(next)) {
-        setters.setOpenPanels((previous) =>
-          previous.includes(next) ? previous : [...previous, next],
-        );
-      }
-    },
-    [setters],
-  );
   const guards = useRef(new Set<FileNavigationGuard>());
   const closePanel = useCallback(
     (
@@ -97,19 +94,14 @@ export function useSessionWorkspace(sessionId: string | undefined) {
       fallback = readInitialWorkspaceTab(),
       available?: (panel: DefaultWorkspaceTab) => boolean,
     ) => {
-      setState((previous) => {
-        const remaining = previous.tabs.openPanels.filter((panel) => panel !== tab);
-        return {
-          ...previous,
-          tabs: {
-            ...previous.tabs,
-            openPanels: remaining,
-            rightRailTab:
-              previous.tabs.rightRailTab === tab
-                ? (remaining.filter((panel) => available?.(panel) ?? true).at(-1) ?? fallback)
-                : previous.tabs.rightRailTab,
-          },
-        };
+      setOpenPanels((panels) => {
+        const remaining = panels.filter((panel) => panel !== tab);
+        setRightRailTab((selected) =>
+          selected === tab
+            ? (remaining.filter((panel) => available?.(panel) ?? true).at(-1) ?? fallback)
+            : selected,
+        );
+        return remaining;
       });
     },
     [],
@@ -133,8 +125,16 @@ export function useSessionWorkspace(sessionId: string | undefined) {
     [],
   );
   return {
-    ...state.tabs,
-    ...setters,
+    rightRailTab,
+    setRightRailTab,
+    openPanels,
+    setOpenPanels,
+    openFiles,
+    setOpenFiles,
+    selectedFilePath,
+    setSelectedFilePath,
+    selectedTerminalKey,
+    setSelectedTerminalKey,
     selectRightRailTab,
     closePanel,
     registerNavigationGuard,
@@ -158,7 +158,7 @@ export function useWorkspaceResources(
   },
   setSelectedTerminalKey: (value: SetStateAction<string | null>) => void,
 ) {
-  // Unknown level stays permissive; the server enforces file access.
+  // View grants share the conversation, not files. Unknown level defers to the server gate.
   const canBrowseWorkspace = isEditorLevel(permissionLevel) || shareWorkspaceFiles === true;
   const environmentQuery = useWorkspaceEnvironment(sessionId, { enabled: canBrowseWorkspace });
   const changedFilesQuery = useWorkspaceChangedFiles(sessionId, { enabled: canBrowseWorkspace });
@@ -172,14 +172,19 @@ export function useWorkspaceResources(
   );
   const { terminals } = useTerminals(sessionId ?? null, { reconcileWhilePending: terminalPending });
   const agentTerminal = useMemo(() => findAgentTerminal(terminals), [terminals]);
+  // The agent terminal belongs to the main view, not the workspace shell tabs.
   const railTerminals = useMemo(
     () => inventoryTerminals(terminals, terminalFirst),
     [terminals, terminalFirst],
   );
   const openTerminals = useMemo(() => railTerminals.map(terminalTabKey), [railTerminals]);
   const deleteTerminal = useDeleteTerminal(sessionId ?? "");
+  const [closeSession, setCloseSession] = useState(sessionId);
   const [terminalPendingClose, setTerminalPendingClose] = useState<string | null>(null);
-  useEffect(() => setTerminalPendingClose(null), [sessionId]);
+  if (closeSession !== sessionId) {
+    setCloseSession(sessionId);
+    setTerminalPendingClose(null);
+  }
   const confirmCloseTerminal = useCallback(() => {
     const key = terminalPendingClose;
     if (key === null) return;

@@ -4001,7 +4001,7 @@ describe("Right-rail tab switching — file viewer close", () => {
     expect(screen.getByTestId("files-panel")).toBeInTheDocument();
   });
 
-  it("closes the file viewer when the user clicks the close (X) button", () => {
+  it.each(["viewer", "tab"])("closes the file from its %s close button", (surface) => {
     setupFilesAvailable();
     renderShell("/c/conv_abc");
 
@@ -4010,9 +4010,11 @@ describe("Right-rail tab switching — file viewer close", () => {
 
     // Explicitly close the viewer with the X button (scoped to the inline rail viewer).
     fireEvent.click(
-      within(screen.getByTestId("file-viewer-inline")).getByRole("button", {
-        name: /file-viewer: close/i,
-      }),
+      surface === "tab"
+        ? screen.getByRole("button", { name: "Close README.md" })
+        : within(screen.getByTestId("file-viewer-inline")).getByRole("button", {
+            name: /file-viewer: close/i,
+          }),
     );
     // Failure: closeFileViewer did not clear selectedFilePath.
     expect(screen.queryByTestId("file-viewer-inline")).toBeNull();

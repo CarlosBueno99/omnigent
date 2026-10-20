@@ -946,15 +946,20 @@ it.each([
   },
 );
 
-it.each(["none", "text", "files"] as const)(
+it.each(["none", "text", "files", "quote"] as const)(
   "retracts late-delivered grid drafts only while unchanged (%s)",
   (edited) => {
     const entry = conversationRegistry.acquire(childId);
     const file = new File(["notes"], "notes.txt", { type: "text/plain" });
+    const replyDraft = snapshotReplyDraft({
+      text: "lost ack",
+      quotes: [{ id: "q", before: "", text: "Quoted selection" }],
+    })!;
     entry.setState({
       failedSendDraft: {
         conversationId: childId,
-        text: "lost ack",
+        text: serializeReplyDraft(replyDraft),
+        replyDraft,
         files: [file],
         stableId: "stable",
       },
@@ -965,17 +970,32 @@ it.each(["none", "text", "files"] as const)(
       fireEvent.change(screen.getByTestId("side-chat-input"), { target: { value: "edited" } });
     if (edited === "files")
       fireEvent.click(screen.getByRole("button", { name: /Remove notes.txt/i }));
+    if (edited === "quote") fireEvent.click(screen.getByRole("button", { name: "Remove quote" }));
     act(() =>
       entry.setState({
         restoredSendDraft: { ...entry.getState().restoredSendDraft!, delivered: true },
       }),
     );
     expect(screen.getByTestId("side-chat-input")).toHaveValue(
-      edited === "text" ? "edited" : edited === "files" ? "lost ack" : "",
+      edited === "text" ? "edited" : edited !== "none" ? "lost ack" : "",
     );
     expect(entry.getState().restoredSendDraft).toBeNull();
   },
 );
+
+it("revalidates failed attachments before restoring them", () => {
+  conversationRegistry.acquire(childId).setState({
+    failedSendDraft: {
+      conversationId: childId,
+      text: "Retry this",
+      files: [new File(["bytes"], "unsupported.exe")],
+    },
+  });
+  renderPane(<SideChatPane childId={childId} fullSession />);
+  expect(screen.getByTestId("side-chat-input")).toHaveValue("Retry this");
+  expect(useChatStore.getState().sideChatComposers[childId].files).toEqual([]);
+  expect(screen.getByText(/unsupported.exe.*can't be attached/)).toBeVisible();
+});
 
 it("keeps another conversation's failed draft untouched", () => {
   const entry = conversationRegistry.acquire(childId);
@@ -1041,10 +1061,16 @@ it.each(["none", "remove", "before"] as const)(
       expect(screen.queryByTestId("composer-reply-quote")).toBeNull();
       expect(screen.getByTestId("side-chat-input")).toHaveValue("Introduction");
     }
-    if (edit === "before")
+    if (edit === "before") {
+      const before = screen.getByRole("textbox", { name: "Reply text before quote 1" });
+      act(() => before.focus());
+      fireEvent.change(before, { target: { value: "" } });
+      expect(before).toHaveFocus();
+      expect(screen.getByRole("textbox", { name: "Reply text before quote 1" })).toBe(before);
       fireEvent.change(screen.getByRole("textbox", { name: "Reply text before quote 1" }), {
         target: { value: "Edited introduction" },
       });
+    }
     fireEvent.click(screen.getByTestId("side-chat-send"));
     await waitFor(() => expect(post).toHaveBeenCalledOnce());
     expect(post.mock.calls[0][1]).toMatchObject({

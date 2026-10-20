@@ -152,8 +152,8 @@ fills the grid area. Drag a cell titlebar onto another cell to swap positions,
 or focus the title and press Space, choose a cell with the arrow keys, and
 press Space again. Escape cancels. The sidebar's Delete grid menu action forgets
 only the grid, leaving sessions untouched. Unknown local grids show a recovery link.
-Until your account identity resolves, a grid URL offers Reload and Back to sessions
-without exposing saved grids.
+While account identity loads, a grid URL shows a loading state without exposing
+saved grids. If identity is unavailable, it offers Reload and Back to sessions.
 
 **Import:** open Settings → Import sessions, or choose **Import your recent
 sessions** on the empty landing. Choose a machine, harness, and recent count
@@ -341,7 +341,8 @@ plain `uv run pytest`, which starts a private server for the test.
   shared workspace contents and width persistence, grid-wide maximize, rejected
   drops without navigation, sidebar
   reopening/deletion, titlebar rearrangement and cancellation, narrow-view
-  workspaces, and missing/disabled grid routes. With the flag absent or false,
+  workspaces, workspace-tab closure, failed-send restoration, identity recovery,
+  and missing/disabled grid routes. With the flag absent or false,
   ordinary session routes retain native link dragging and expose no grid menus,
   drop targets, or saved-grid sidebar entries. Run with `--browser-ui-skip-build --video=on` after building.
   Layout combinations and malformed local storage have unit coverage in

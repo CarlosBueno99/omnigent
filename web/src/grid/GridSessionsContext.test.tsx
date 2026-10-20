@@ -16,8 +16,15 @@ vi.mock("./GridSessionPane", () => ({
   GridSessionPane: ({ sessionId }: { sessionId: string }) => <div>Session {sessionId}</div>,
 }));
 
-const identity = vi.hoisted(() => ({ viewer: "alice" as string | null, server: "one" }));
-vi.mock("@/hooks/useViewerId", () => ({ useViewerId: () => identity.viewer }));
+const identity = vi.hoisted(() => ({
+  viewer: "alice" as string | null,
+  server: "one",
+  ready: true,
+}));
+vi.mock("@/hooks/useViewerId", () => ({
+  useViewerId: () => identity.viewer,
+  useIdentityReady: () => identity.ready,
+}));
 vi.mock("@/lib/host", () => ({ getOmnigentServerIdentity: () => identity.server }));
 
 function Probe() {
@@ -81,6 +88,7 @@ function tree(path: string, enabled = true, workspace = false) {
 
 beforeEach(() => {
   identity.viewer = "alice";
+  identity.ready = true;
   identity.server = "one";
   localStorage.clear();
 });
@@ -206,8 +214,8 @@ it("waits for a resolved identity without reading or writing anonymous grids", (
   fireEvent(window, new StorageEvent("storage", { key: anonymousKey, storageArea: localStorage }));
   expect(screen.getByTestId("path")).toHaveTextContent("/c/first");
   expect(screen.getByTestId("count")).toHaveTextContent("0");
-  expect(read).not.toHaveBeenCalled();
-  expect(write).not.toHaveBeenCalled();
+  expect(read.mock.calls.filter(([key]) => key.startsWith("omnigent:session-grids:"))).toEqual([]);
+  expect(write.mock.calls.filter(([key]) => key.startsWith("omnigent:session-grids:"))).toEqual([]);
   identity.viewer = "alice";
   view.rerender(tree("/c/first"));
   fireEvent.click(screen.getByText("Split"));
@@ -229,7 +237,12 @@ it("shows an identity-unavailable grid until its viewer resolves, without affect
     JSON.stringify([{ id: "saved", layout }]),
   );
   identity.viewer = null;
+  identity.ready = false;
   const view = render(tree("/grid/saved", true, true));
+  expect(screen.getByRole("status")).toHaveTextContent("Loading grid");
+  expect(screen.queryByRole("button", { name: "Reload" })).toBeNull();
+  identity.ready = true;
+  view.rerender(tree("/grid/saved", true, true));
   expect(screen.getByRole("heading", { name: "Grid unavailable" })).toBeInTheDocument();
   expect(
     screen.getByText("Your account identity is not available yet. Reload to retry."),

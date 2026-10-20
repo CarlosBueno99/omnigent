@@ -1,3 +1,4 @@
+import { StrictMode, useLayoutEffect } from "react";
 import type * as UseTerminalsModule from "@/hooks/useTerminals";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -9,6 +10,7 @@ const resources = vi.hoisted(() => ({
   changes: vi.fn(),
   terminals: vi.fn(),
   remove: vi.fn(),
+  deleting: false,
 }));
 vi.mock("@/hooks/useWorkspaceChangedFiles", () => ({
   useWorkspaceEnvironment: resources.environment,
@@ -17,12 +19,18 @@ vi.mock("@/hooks/useWorkspaceChangedFiles", () => ({
 vi.mock("@/hooks/useTerminals", async (importOriginal) => ({
   ...(await importOriginal<typeof UseTerminalsModule>()),
   useTerminals: resources.terminals,
-  useDeleteTerminal: () => ({ mutate: resources.remove }),
+  useDeleteTerminal: () => ({
+    mutate: resources.remove,
+    isPending: resources.deleting,
+    variables: "one",
+  }),
 }));
 afterEach(() => {
   cleanup();
   localStorage.clear();
   vi.resetAllMocks();
+  vi.restoreAllMocks();
+  resources.deleting = false;
 });
 
 it("isolates persisted tabs across session switches and chains file guards", () => {
@@ -31,9 +39,12 @@ it("isolates persisted tabs across session switches and chains file guards", () 
     openFiles: ["two.md"],
     selectedTerminalKey: "terminal:shell",
   });
+  const writes = vi.spyOn(Storage.prototype, "setItem");
   const { result, rerender } = renderHook(({ id }) => useSessionWorkspace(id), {
     initialProps: { id: "first" },
+    wrapper: StrictMode,
   });
+  expect(writes).not.toHaveBeenCalled();
   act(() => result.current.setOpenFiles((files) => [...files, "draft.md"]));
   rerender({ id: "second" });
   expect(result.current.openFiles).toEqual(["two.md"]);
@@ -68,6 +79,7 @@ it("gates workspace reads and keeps agent terminals separate from user shells", 
       { id: "two", name: "sh", session: "two", running: true },
     ],
   });
+  const committed = vi.fn();
   const { result, rerender } = renderHook(
     ({ id, shared }) => {
       const workspace = useSessionWorkspace(id);
@@ -81,6 +93,9 @@ it("gates workspace reads and keeps agent terminals separate from user shells", 
         },
         workspace.setSelectedTerminalKey,
       );
+      useLayoutEffect(() => {
+        committed(id, resource.terminalPendingClose);
+      });
       return { workspace, resource };
     },
     { initialProps: { id: "first", shared: false } },
@@ -102,9 +117,14 @@ it("gates workspace reads and keeps agent terminals separate from user shells", 
   act(() => result.current.resource.confirmCloseTerminal());
   expect(result.current.workspace.selectedTerminalKey).toBe("terminal:two");
   expect(resources.remove).toHaveBeenCalledTimes(2);
+  resources.deleting = true;
   act(() => result.current.resource.setTerminalPendingClose("terminal:two"));
+  expect(result.current.resource.closingTerminalKey).toBe("terminal:one");
   rerender({ id: "second", shared: true });
   expect(result.current.resource.terminalPendingClose).toBeNull();
+  expect(committed.mock.calls.filter(([id]) => id === "second")).toEqual([["second", null]]);
+  act(() => result.current.resource.confirmCloseTerminal());
+  expect(resources.remove).toHaveBeenCalledTimes(2);
   expect(resources.environment).toHaveBeenLastCalledWith("second", { enabled: true });
   expect(resources.changes).toHaveBeenLastCalledWith("second", { enabled: true });
   expect(result.current.resource.isChangedPath("changed.md")).toBe(true);

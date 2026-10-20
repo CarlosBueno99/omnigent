@@ -6985,6 +6985,23 @@ export function committedItemProvesDelivery(
   );
 }
 
+/** Consume a failure only in its own composer; newer input and proven delivery win. */
+export function takeFailedSendDraft(conversationId: string, hasDraft: boolean) {
+  const state = setterForState(conversationId);
+  const failed = state?.failedSendDraft;
+  if (!state || !failed || failed.conversationId !== conversationId) return null;
+  const restore = !hasDraft && !committedItemProvesDelivery(state.blocks, failed);
+  setterFor(conversationId)({
+    failedSendDraft: null,
+    pendingRetryStableId: restore ? (failed.stableId ?? null) : null,
+    restoredSendDraft:
+      restore && failed.stableId
+        ? { ...failed, stableId: failed.stableId, delivered: false }
+        : null,
+  });
+  return restore ? failed : null;
+}
+
 /**
  * Whether a resend matches the restored failed-send draft exactly.
  *
@@ -6999,7 +7016,7 @@ export function committedItemProvesDelivery(
  * @param replyDraft - Outgoing reply metadata.
  * @returns `true` when nothing differs, or when no draft is tracked for the id.
  */
-function restoredSendDraftUnchanged(
+export function restoredSendDraftUnchanged(
   restored: ConversationState["restoredSendDraft"],
   stableId: string,
   text: string,

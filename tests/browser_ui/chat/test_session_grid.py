@@ -421,6 +421,8 @@ def test_grid_flag_off_and_unknown_local_grid(
         page.reload()
         expect(page.get_by_text("Grid unavailable", exact=True)).to_be_visible()
         expect(page.get_by_role("link", name="Back to sessions")).to_be_visible()
+        if features:
+            return
         browser_contract.json("/v1/me", {"user_id": None, "is_admin": True})
         page.reload()
         expect(

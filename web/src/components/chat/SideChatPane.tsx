@@ -43,7 +43,8 @@ import { ReplyDraftBlocks } from "@/components/composer/ReplyDraftBlocks";
 import { Button } from "@/components/ui/button";
 import {
   EMPTY_SIDE_CHAT_COMPOSER,
-  committedItemProvesDelivery,
+  takeFailedSendDraft,
+  restoredSendDraftUnchanged,
   ensureConversationStreamed,
   useChatStore,
 } from "@/store/chatStore";
@@ -66,6 +67,7 @@ import {
   serializeReplyDraft,
   snapshotReplyDraft,
 } from "@/lib/replyDraft";
+import { validateAttachments } from "@/lib/attachments";
 import { interrupt } from "@/lib/sessionsApi";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
 
@@ -453,25 +455,21 @@ function SideChatComposer({
   const { failedSendDraft, restoredSendDraft } = useConversationEntryState(
     pending ? null : childId,
   );
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [activeQuoteId, setActiveQuoteId] = useState<string | null>(null);
   useEffect(() => {
-    const entry = conversationRegistry.peek(childId);
-    const failed = entry?.getState().failedSendDraft;
-    if (!entry || !failed || failed.conversationId !== childId) return;
     const current = useChatStore.getState().sideChatComposers[childId] ?? EMPTY_SIDE_CHAT_COMPOSER;
-    entry.setState({ failedSendDraft: null, pendingRetryStableId: null });
-    if (committedItemProvesDelivery(entry.getState().blocks, failed)) return;
-    // A draft started while the request was in flight takes precedence.
-    if (current.text.trim() || current.files.length || current.quotes?.length) return;
+    const failed = takeFailedSendDraft(
+      childId,
+      !!(current.text.trim() || current.files.length || current.quotes?.length),
+    );
+    if (!failed) return;
+    const { accepted, errors } = validateAttachments(failed.files);
+    setAttachmentError(errors.length ? errors.join("\n") : null);
     updateComposer(childId, () => ({
       ...restoreReplyDraft(failed.text, failed.replyDraft),
-      files: failed.files,
+      files: accepted,
     }));
-    entry.setState({
-      pendingRetryStableId: failed.stableId ?? null,
-      restoredSendDraft: failed.stableId
-        ? { ...failed, stableId: failed.stableId, delivered: false }
-        : null,
-    });
   }, [childId, failedSendDraft, updateComposer]);
   useEffect(() => {
     const entry = conversationRegistry.peek(childId);
@@ -479,14 +477,18 @@ function SideChatComposer({
     if (!entry || !restored?.delivered || restored.conversationId !== childId) return;
     entry.setState({ restoredSendDraft: null });
     const current = useChatStore.getState().sideChatComposers[childId] ?? EMPTY_SIDE_CHAT_COMPOSER;
-    const serialized = serializeReplyDraft({
+    const draft = {
       text: current.text,
-      quotes: current.quotes ?? [],
-    });
+      quotes: (current.quotes ?? []).map((quote, index) => ({ ...quote, id: String(index) })),
+    };
     if (
-      serialized === restored.text &&
-      current.files.length === restored.files.length &&
-      current.files.every((file) => restored.files.includes(file))
+      restoredSendDraftUnchanged(
+        restored,
+        restored.stableId,
+        serializeReplyDraft(draft),
+        current.files,
+        snapshotReplyDraft(draft),
+      )
     )
       clearComposer(childId);
   }, [childId, restoredSendDraft, clearComposer]);
@@ -495,8 +497,10 @@ function SideChatComposer({
     [childId, updateComposer],
   );
   const setFiles = useCallback(
-    (mutate: (current: File[]) => File[]) =>
-      updateComposer(childId, (current) => ({ ...current, files: mutate(current.files) })),
+    (mutate: (current: File[]) => File[]) => {
+      setAttachmentError(null);
+      updateComposer(childId, (current) => ({ ...current, files: mutate(current.files) }));
+    },
     [childId, updateComposer],
   );
   const [interrupting, setInterrupting] = useState(false);
@@ -520,7 +524,7 @@ function SideChatComposer({
   const autoSend = pending ? undefined : draft;
   useEffect(() => {
     if (quote !== undefined || composer?.quotes?.length) textareaRef.current?.focus();
-  }, [quote, composer?.quotes]);
+  }, [quote, composer?.quotes?.length]);
   // Re-read the labels so a side chat the server just sealed turns read-only.
   const refreshLabels = useCallback(
     () => void queryClient.invalidateQueries({ queryKey: ["session", childId] }),
@@ -665,6 +669,7 @@ function SideChatComposer({
       return;
     }
     if (busy || !canSend || agentId === null) return;
+    setAttachmentError(null);
     // On in-process harnesses /help and skills resolve locally; native TUIs
     // (claude-native, codex-native) read the text themselves, and a quote or
     // attachment is always an ordinary message.
@@ -731,6 +736,7 @@ function SideChatComposer({
           }}
         />
       )}
+      {attachmentError && <ComposerFeedbackRow>{attachmentError}</ComposerFeedbackRow>}
       {commandNotice !== null && (
         <ComposerFeedbackRow data-testid="side-chat-command-notice">
           {commandNotice}
@@ -778,11 +784,12 @@ function SideChatComposer({
             quotes.length === 0 ? undefined : (
               <ReplyDraftBlocks
                 quotes={quotes}
-                activeTextId={null}
-                showTextInputs={quotes.some((item) => item.before !== "")}
+                activeTextId={activeQuoteId}
                 keyboard={{ submitWithModEnter: false, preventsKeyboardSubmit: false }}
                 disabled={!ready}
                 inputFor={(item) => ({
+                  onFocus: () => setActiveQuoteId(item.id),
+                  onBlur: () => setActiveQuoteId(null),
                   onChange: (event) => {
                     const before = event.target.value;
                     updateComposer(childId, (current) => ({

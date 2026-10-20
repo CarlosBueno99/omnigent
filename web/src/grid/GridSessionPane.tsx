@@ -245,7 +245,7 @@ export function GridSessionPane({
           <div
             data-testid="grid-move-ghost"
             className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-brand-accent bg-brand-accent/25"
-          ></div>
+          />
         )}
         <CloseShellDialog
           open={pendingClose !== null}
