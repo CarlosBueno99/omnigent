@@ -20,6 +20,8 @@ from omnigent.host.daemon_lifecycle import (
     record_flock_is_held,
 )
 from omnigent.host.identity import HostIdentity
+from omnigent.util import open_file_limit
+from omnigent.util.open_file_limit import OpenFileLimit
 
 
 def _write_record(path: Path, pid: int) -> None:
@@ -233,6 +235,9 @@ def test_background_daemon_claims_record_before_connecting(
         "load_or_create_host_identity",
         lambda: HostIdentity(host_id="host_elected", name="elected"),
     )
+    monkeypatch.setattr(
+        open_file_limit, "raise_soft_open_file_limit", lambda: OpenFileLimit(10240, 2**63 - 1)
+    )
 
     connected: list[str] = []
 
@@ -249,6 +254,7 @@ def test_background_daemon_claims_record_before_connecting(
     assert payload["pid"] == os.getpid()
     assert payload["host_id"] == "host_elected"
     assert payload["config_sig"] == "config-signature"
+    assert payload["open_file_limit"] == 10240
     assert connected == [f"{target}|{target}"]
     assert record_flock_is_held(daemon_record_path(target, base_dir=tmp_path)) is False
 
@@ -271,6 +277,7 @@ def test_background_daemon_loser_exits_before_connecting(
         "omnigent.host.connect.run_host_process",
         lambda **_kw: pytest.fail("losing daemon must not connect"),
     )
+    monkeypatch.setattr(open_file_limit, "raise_soft_open_file_limit", lambda: None)
     owner = DaemonLifecycleLock.for_target(target, base_dir=tmp_path, pid=4242)
     assert owner.acquire() is True
     try:
