@@ -48,6 +48,12 @@ class ForkVisibilityFaults:
             item.get("id") in self.fork_ids or title.startswith(_FORK_TITLE_PREFIX)
         )
 
+    def diagnostics(self) -> str:
+        return (
+            f"lists={self.list_responses} dropped={self.dropped_push_items} "
+            f"frames={self.forwarded_frame_types}"
+        )
+
     def elapsed(self) -> float | None:
         if self.lag_started_at is None:
             return None
@@ -176,8 +182,10 @@ def test_fork_row_while_list_lags_and_push_misses_fork(
         page.wait_for_timeout(1_000)
         if row.count() == 0 or not row.first.is_visible():
             gaps.append(faults.elapsed())
-    assert any(r["removed_fork_ids"] for r in faults.list_responses), faults.list_responses
-    assert gaps == [], f"fork row disappeared at {gaps}s while the list lagged"
+    assert any(r["removed_fork_ids"] for r in faults.list_responses), faults.diagnostics()
+    assert gaps == [], (
+        f"fork row disappeared at {gaps}s while the list lagged; {faults.diagnostics()}"
+    )
 
     page.reload()
     expect(row).to_be_visible(timeout=_ROW_TIMEOUT_MS)

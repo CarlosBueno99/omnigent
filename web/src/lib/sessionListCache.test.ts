@@ -617,12 +617,8 @@ describe("insertCreatedRowIntoCaches", () => {
     expect(ids(qc, ["conversations", "old", false])).toEqual(["old"]);
     expect(ids(qc, ["conversations", "", true, null, "archived"])).toEqual(["gone"]);
     expect(recentlyCreatedSessions.get("fork")).toEqual(row);
-  });
 
-  it("does not duplicate a row a list already holds", () => {
-    const qc = new QueryClient();
-    qc.setQueryData(["conversations", "", false], data([conv("fork"), conv("old")]));
-    insertCreatedRowIntoCaches(qc, conv("fork"));
+    insertCreatedRowIntoCaches(qc, row);
     expect(ids(qc, ["conversations", "", false])).toEqual(["fork", "old"]);
   });
 });
