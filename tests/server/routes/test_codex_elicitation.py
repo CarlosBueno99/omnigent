@@ -176,15 +176,26 @@ class TestCodexFileChangeApprovalPersistence:
         assert response == {"decision": "approved_for_session"}
 
     @pytest.mark.parametrize(
-        ("action", "decision"),
-        [("accept", "accept"), ("decline", "decline"), ("cancel", "cancel")],
+        ("build_response", "method", "action", "decision"),
+        [
+            (_codex_file_change_approval_response, _FILE_CHANGE_METHOD, "accept", "accept"),
+            (_codex_file_change_approval_response, _FILE_CHANGE_METHOD, "decline", "decline"),
+            (_codex_file_change_approval_response, _FILE_CHANGE_METHOD, "cancel", "cancel"),
+            (_codex_apply_patch_approval_response, _APPLY_PATCH_METHOD, "accept", "approved"),
+            (_codex_apply_patch_approval_response, _APPLY_PATCH_METHOD, "decline", "denied"),
+            (_codex_apply_patch_approval_response, _APPLY_PATCH_METHOD, "cancel", "abort"),
+        ],
     )
-    def test_one_time_verdicts_keep_plain_decisions(self, action: str, decision: str) -> None:
+    def test_one_time_verdicts_keep_plain_decisions(
+        self,
+        build_response: Callable[[ElicitationResult, str, dict[str, Any]], dict[str, Any]],
+        method: str,
+        action: str,
+        decision: str,
+    ) -> None:
         result = ElicitationResult.model_validate({"action": action})
 
-        response = _codex_file_change_approval_response(result, _FILE_CHANGE_METHOD, {})
-
-        assert response == {"decision": decision}
+        assert build_response(result, method, {}) == {"decision": decision}
 
     @pytest.mark.parametrize(
         ("build_response", "method", "decline", "accept"),
