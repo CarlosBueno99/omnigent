@@ -246,12 +246,21 @@ async def test_wedged_launching_dispatch_fails_loudly_to_parent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_started_dispatch_is_not_reaped_by_launch_liveness() -> None:
+@pytest.mark.parametrize(
+    "start_reported_before_prompt_accepted",
+    [False, True],
+    ids=["running-edge", "codex-start-reported-before-prompt-accepted"],
+)
+async def test_started_dispatch_is_not_reaped_by_launch_liveness(
+    start_reported_before_prompt_accepted: bool,
+) -> None:
     """
     A dispatch that produced a real edge must never be launch-reaped.
 
     Once the child has reported ``running`` (the launch proof), the liveness
     budget no longer applies — a long-running healthy child is not a wedge.
+    A codex child's start report can also beat the runner's own note that
+    Codex accepted the prompt; the later note must not re-arm the bound.
     """
 
     parent_id = uuid.uuid4().hex
@@ -266,7 +275,11 @@ async def test_started_dispatch_is_not_reaped_by_launch_liveness() -> None:
     )
 
     try:
+        if start_reported_before_prompt_accepted:
+            subagent_work.note_subagent_child_start_reported(child_id)
         subagent_work.mark_subagent_work_started(child_id)
+        if start_reported_before_prompt_accepted:
+            subagent_work.await_subagent_child_start_report(child_id)
         assert entry.status == "running"
         reaped = subagent_work.reap_stalled_subagent_launches(
             now=entry.created_at + 10_000.0, timeout_s=180.0

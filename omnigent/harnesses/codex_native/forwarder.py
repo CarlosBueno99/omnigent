@@ -550,6 +550,9 @@ class _CodexForwarderState:
     # block. Reasoning is transient — it has no completed conversation item;
     # the block finalizes when the turn's assistant message arrives.
     reasoning_stream_item_id: str | None = None
+    # Latest turn whose ``running`` edge this connection published, so a turn
+    # whose ``turn/started`` was missed publishes it once from its first item.
+    running_reported_turn_id: str | None = None
     turn_diff_by_turn: dict[str, str] = field(default_factory=dict)
     # Whether model output has already settled the synthesized MCP startup
     # round. The round is seeded once per forwarder connection (never on
@@ -2298,6 +2301,13 @@ async def supervise_forwarder(
                         parent_thread_id=target.thread_id,
                         event=event,
                     )
+                    await _post_missed_turn_start(
+                        ap_client,
+                        session_id=target.session_id,
+                        bridge_dir=bridge_dir,
+                        event=event,
+                        forwarder_state=forwarder_state,
+                    )
                     await _handle_event(
                         ap_client,
                         session_id=target.session_id,
@@ -3852,6 +3862,9 @@ async def _maybe_handle_turn_event(
                 await delta_coalescer.flush()
             await _handle_turn_started(client, session_id, bridge_dir, params)
             if forwarder_state is not None and bridge_dir is not None:
+                forwarder_state.running_reported_turn_id = _turn_id_from_payload(
+                    params.get("turn")
+                ) or _turn_id_from_payload(params)
                 # A new turn opens a fresh reasoning block: the next reasoning
                 # delta must emit ``response.reasoning.started`` again.
                 forwarder_state.reasoning_stream_item_id = None
@@ -5035,6 +5048,52 @@ async def _handle_turn_started(
     """
     edge = _turn_started_status_edge(bridge_dir, params)
     await _post_turn_status_edge(client, session_id, edge)
+
+
+async def _post_missed_turn_start(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    bridge_dir: Path,
+    event: CodexMessage,
+    forwarder_state: _CodexForwarderState,
+) -> None:
+    """
+    Publish ``running`` for the active turn when its ``turn/started`` was missed.
+
+    A fresh thread's subscription lands after its first turn started, so the
+    turn's first live item (normally its ``userMessage``) is the earliest sign
+    this connection gets that Codex began it. Resume replay is excluded: it
+    publishes its own verdict from the resumed turn's status.
+
+    :param client: HTTP client for Omnigent event posts.
+    :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
+    :param bridge_dir: Native Codex bridge directory.
+    :param event: Live Codex notification envelope.
+    :param forwarder_state: Mutable state for this forwarder connection.
+    :returns: None.
+    """
+    params = event.get("params")
+    if event.get("method") not in {"item/started", "item/completed"} or not isinstance(
+        params, dict
+    ):
+        return
+    turn_id = _turn_id_from_payload(params)
+    if turn_id is None or turn_id == forwarder_state.running_reported_turn_id:
+        return
+    state = read_bridge_state(bridge_dir)
+    if (
+        state is None
+        or state.active_turn_id != turn_id
+        or params.get("threadId") != state.thread_id
+    ):
+        return
+    forwarder_state.running_reported_turn_id = turn_id
+    await _post_turn_status_edge(
+        client,
+        session_id,
+        _CodexTurnStatusEdge(status="running", turn_id=turn_id, source="item:recovered"),
+    )
 
 
 def _turn_started_status_edge(
