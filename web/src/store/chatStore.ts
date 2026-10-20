@@ -1404,6 +1404,11 @@ let queryClient: QueryClient | null = null;
 const streamEventRevisions = new Map<string, number>();
 conversationRegistry.subscribeDisposed((id) => streamEventRevisions.delete(id));
 
+// Conversations whose stream delivered a status edge after the bind snapshot
+// set their status. That edge is newer than any first-open re-read.
+const liveStatusSinceBind = new Set<string>();
+conversationRegistry.subscribeDisposed((id) => liveStatusSinceBind.delete(id));
+
 // Reconnects share a binding; only one usage request may hydrate it at a time.
 const sessionUsageHydrations = new WeakSet<AbortController>();
 const sessionUsageRevisions = new WeakMap<ConversationEntry, { cost: number; models: number }>();
@@ -1801,7 +1806,7 @@ export const ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS = 15_000;
 // The snapshot read on each stream open can carry a stale status that the stream
 // never replays, so re-read it at these delays instead of waiting for the 60s
 // reconcile. Each re-read is guarded and idempotent (reconcileActiveSessionStatus).
-export const RECONNECT_STATUS_CATCHUP_DELAYS_MS = [3_000, 8_000, 20_000] as const;
+export const STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS = [3_000, 8_000, 20_000] as const;
 // A reverse proxy serves 404 for the stream route for the ~10-60s a backend
 // container takes to restart (upgrade, config change, re-seed bounce), so a
 // 404 mid-restart must not be treated as permanent. Bound the retries instead
@@ -4888,6 +4893,7 @@ async function bindStream(
         }[],
       };
     });
+    liveStatusSinceBind.delete(id);
     if (session.usageIncluded === false) void hydrateSessionUsage(id);
     racedNativeModelOptions.delete(id);
   } catch (err) {
@@ -5842,13 +5848,14 @@ export async function startStreamPump(
   };
   // Re-read at each catch-up delay, replacing any prior burst: the full status
   // (on screen only) and, while a launch shows, its stage on screen or not.
-  const scheduleStatusCatchup = (): void => {
+  // After a first open, a live status edge ends the status re-reads.
+  const scheduleStatusCatchup = (reconnecting: boolean): void => {
     if (typeof window === "undefined") return;
     clearCatchupTimers();
-    catchupTimers = RECONNECT_STATUS_CATCHUP_DELAYS_MS.map((delayMs) =>
+    catchupTimers = STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS.map((delayMs) =>
       window.setTimeout(() => {
         if (controller.signal.aborted || isConversationDisposed(id)) return;
-        runGuardedStatusReconcile();
+        if (reconnecting || !liveStatusSinceBind.has(id)) runGuardedStatusReconcile();
         const launch = get().sandboxStatus;
         if (launch !== null && launch.stage !== "failed") void reconcileLaunchStatus(id, set, get);
       }, delayMs),
@@ -6053,7 +6060,7 @@ export async function startStreamPump(
         // Neither bindStream's nor reconcileOnReconnect's snapshot is final: a
         // status or launch stage that changed before this open subscribed is
         // never re-sent, so re-read both over the next ~20s.
-        scheduleStatusCatchup();
+        scheduleStatusCatchup(reconnecting);
         let reason = await pumpPromise;
 
         // Presence or host changes abort only the attempt; a live outer
@@ -8713,6 +8720,9 @@ async function* tapSessionEvents(
   for await (const event of events) {
     if (!isConversationDisposed(conversationId)) {
       streamEventRevisions.set(conversationId, (streamEventRevisions.get(conversationId) ?? 0) + 1);
+      if (event.type === "session_status" && event.conversationId === conversationId) {
+        liveStatusSinceBind.add(conversationId);
+      }
     }
     if (event.type === "session_status" || event.type === "session_interrupted") {
       beforeTurnEdge?.();

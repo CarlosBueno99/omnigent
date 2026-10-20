@@ -69,7 +69,7 @@ import { type ChildSessionInfo, childSessionsQueryKey } from "@/hooks/useChildSe
 import {
   ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS,
   ACTIVE_SESSION_STATUS_RECONCILE_TIMEOUT_MS,
-  RECONNECT_STATUS_CATCHUP_DELAYS_MS,
+  STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS,
   beginLocalConversation,
   committedItemProvesDelivery,
   takeFailedSendDraft,
@@ -950,7 +950,7 @@ describe("chatStore — lazy subtree usage", () => {
     }
 
     async function passOpenStatusCatchup(): Promise<void> {
-      await vi.advanceTimersByTimeAsync(Math.max(...RECONNECT_STATUS_CATCHUP_DELAYS_MS));
+      await vi.advanceTimersByTimeAsync(Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
       await drainAsync();
     }
 
@@ -12799,7 +12799,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
 
   /** Run past the post-open status re-reads so only the periodic reconcile reads status. */
   async function passOpenStatusCatchup(sink: StreamSink): Promise<void> {
-    await advanceWithHeartbeats(sink, Math.max(...RECONNECT_STATUS_CATCHUP_DELAYS_MS));
+    await advanceWithHeartbeats(sink, Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
     await drainAsync();
   }
 
@@ -13326,7 +13326,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       seedSessionItems("conv_interrupted_retry", [assistantMessage("resp_1", "canonical answer")]);
       sinks[0]!.error();
       // The reconnect's first backfill attempt fails (itemAttempts === 1). The
-      // post-reconnect catch-up burst (RECONNECT_STATUS_CATCHUP_DELAYS_MS, first
+      // post-reconnect catch-up burst (STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS, first
       // at 3s) re-reads status, which — with the interrupted preview still
       // present — retries the failed final-item backfill. So the canonical item
       // recovers within seconds rather than waiting out the 60s periodic
@@ -13453,7 +13453,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     expect(snapshotGets).toBe(1);
     expect(useChatStore.getState().sessionStatus).toBe("idle");
 
-    await vi.advanceTimersByTimeAsync(RECONNECT_STATUS_CATCHUP_DELAYS_MS[0]);
+    await vi.advanceTimersByTimeAsync(STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS[0]);
     await drainAsync(2);
 
     expect(sinks).toHaveLength(1);
@@ -13464,7 +13464,65 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       state: "streaming",
     });
 
+    await vi.advanceTimersByTimeAsync(Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
+    await drainAsync(2);
+    expect(snapshotGets).toBe(STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS.length + 1);
+    expect(useChatStore.getState().sessionStatus).toBe("running");
+
     releaseConversation("conv_first_open_stale");
+    sinks[0]!.push("data: [DONE]\n\n");
+    sinks[0]!.close();
+    await drainAsync(2);
+  });
+
+  it("keeps a live status edge over stale first-open re-reads", async () => {
+    seedSession("conv_first_open_live", []);
+    const sinks = routeStreamOpens();
+    const normalFetch = fetchMock.getMockImplementation()!;
+    let snapshotGets = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://test.local");
+      if (
+        url.pathname === "/v1/sessions/conv_first_open_live" &&
+        url.searchParams.get("include_usage") !== "true" &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        snapshotGets += 1;
+        // Every read reports idle, including any taken after the turn starts.
+        return Promise.resolve(
+          mockResponse({
+            id: "conv_first_open_live",
+            agent_id: "agent_xyz",
+            status: "idle",
+            created_at: 0,
+            items: [],
+            labels: {},
+          }),
+        );
+      }
+      return normalFetch(input, init);
+    });
+
+    await useChatStore.getState().switchTo("conv_first_open_live");
+    await drainAsync(2);
+    expect(snapshotGets).toBe(1);
+    sinks[0]!.push(
+      sse("session.status", {
+        conversation_id: "conv_first_open_live",
+        status: "running",
+        response_id: "resp_live",
+      }),
+    );
+    await drainAsync(2);
+    expect(useChatStore.getState().sessionStatus).toBe("running");
+
+    await vi.advanceTimersByTimeAsync(Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
+    await drainAsync(2);
+
+    expect(snapshotGets).toBe(1);
+    expect(useChatStore.getState().sessionStatus).toBe("running");
+
+    releaseConversation("conv_first_open_live");
     sinks[0]!.push("data: [DONE]\n\n");
     sinks[0]!.close();
     await drainAsync(2);
@@ -14559,7 +14617,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await drainAsync();
 
     // Each post-open re-read and the periodic read issues its own request.
-    expect(snapshotFetches).toBe(RECONNECT_STATUS_CATCHUP_DELAYS_MS.length + 1);
+    expect(snapshotFetches).toBe(STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS.length + 1);
     expect(bound.get().sessionStatus).toBe("idle");
 
     resolveSharedQuery!({ source: "older request" });
