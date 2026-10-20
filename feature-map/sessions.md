@@ -475,6 +475,9 @@ plain `uv run pytest`, which starts a private server for the test.
   It covers missing and stale runner bindings, reload persistence, and retry
   without duplicate transcript input. Repeat with `--device='iPhone 13'` for
   the mobile entry point; keep browser evidence outside the checkout.
+  `tests/e2e_ui/sessions/test_session_host_offline.py::test_offline_host_composer_offers_visible_reconnect_below`
+  stops the host under an open idle session and clicks the reconnect pill below
+  the composer.
 - **`reconnect`, stopped session (own environment):**
   `tests/e2e_ui/sessions/test_sidebar_stop.py::test_stopped_session_shows_reconnect_affordance`
 - **`reconnect`, completed turn after host handoff (own environment):**
@@ -499,7 +502,7 @@ plain `uv run pytest`, which starts a private server for the test.
   including after reload. Only model replies and stale persistence are staged.
   Requires Claude Code and tmux; machine-managed Claude credentials need an
   isolated container for the local model endpoint.
-- **`reconnect`, host offline (own environment):**
+- **`reconnect`, host offline:**
   `tests/e2e_ui/sessions/test_host_badge.py::test_host_badge_offline_host_keeps_name_and_pill_offers_reconnect_below`
 - **`stop`, `archive`, active sub-agents (own environment):**
   `tests/e2e/test_parent_stop_subagents_e2e.py::test_native_parent_teardown_preserves_child_outcome`

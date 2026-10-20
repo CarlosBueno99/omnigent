@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import time
 import uuid
 from collections.abc import Callable
@@ -174,19 +173,6 @@ def test_offline_native_host_preserves_failed_turn_and_retry(
 
 _OFFLINE_PLACEHOLDER = "Session offline — reconnect below to continue"
 
-# Rendered text of controls laid out at or below the composer's top edge; screen-reader-only
-# spans are excluded by their clipped size.
-_VISIBLE_CONTROL_TEXTS_BELOW = """(composer) => {
-  const composerTop = composer.getBoundingClientRect().top;
-  return [...document.querySelectorAll("button, a, [role=button]")]
-    .filter((node) => {
-      const rect = node.getBoundingClientRect();
-      return rect.width >= 8 && rect.height >= 8 && rect.top >= composerTop
-        && getComputedStyle(node).visibility !== "hidden";
-    })
-    .map((node) => ({ text: node.innerText.trim(), label: node.getAttribute("aria-label") }));
-}"""
-
 
 def test_offline_host_composer_offers_visible_reconnect_below(
     built_spa: None,
@@ -212,12 +198,13 @@ def test_offline_host_composer_offers_visible_reconnect_below(
         expect(composer).to_have_attribute("placeholder", _OFFLINE_PLACEHOLDER, timeout=60_000)
         expect(composer).to_be_disabled()
 
-        controls = composer.evaluate(_VISIBLE_CONTROL_TEXTS_BELOW)
-        reconnect_controls = [
-            control for control in controls if re.search("reconnect", control["text"], re.I)
-        ]
-        assert reconnect_controls, f"no visible reconnect control below the composer: {controls}"
+        pill = page.get_by_test_id("disconnected-indicator")
+        expect(pill).to_have_text("Host is offline — click to reconnect")
+        pill_box, composer_box = pill.bounding_box(), composer.bounding_box()
+        assert pill_box is not None and composer_box is not None, (pill_box, composer_box)
+        composer_bottom = composer_box["y"] + composer_box["height"]
+        assert pill_box["y"] >= composer_bottom, (pill_box, composer_box)
 
-        page.get_by_text(re.compile("reconnect", re.I)).filter(visible=True).last.click()
+        pill.click()
         expect(page.get_by_test_id("reconnect-session-dialog")).to_be_visible()
         expect(page.get_by_test_id("reconnect-session-command")).to_contain_text("omnigent host")
