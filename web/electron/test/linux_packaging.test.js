@@ -75,11 +75,12 @@ function runPostInstall({ apparmorEnabled = false } = {}) {
     recordCalls("apparmor_status", apparmorEnabled ? 0 : 1);
     const script = path.join(tmp, "after-install.sh");
     fs.writeFileSync(script, renderDebScript(DEB_AFTER_INSTALL));
-    const result = spawnSync("bash", [script], {
+    const result = spawnSync("/bin/bash", [script], {
       encoding: "utf8",
-      env: { PATH: `${bin}:/usr/bin:/bin`, LANG: "C" },
+      env: { PATH: bin, LANG: "C" },
     });
     assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /command not found/);
     return fs.existsSync(callLog) ? fs.readFileSync(callLog, "utf8").trim().split("\n") : [];
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -92,17 +93,27 @@ function chromeSandboxModes(calls) {
     .map((call) => call.split(" ")[1]);
 }
 
-/** Script paragraphs other than the chrome-sandbox setup, without comment lines. */
-function stepsBesidesSandboxSetup(script) {
-  return script
-    .split(/\n\s*\n/)
-    .filter((paragraph) => !paragraph.includes("chrome-sandbox"))
-    .map((paragraph) =>
-      paragraph
-        .split("\n")
-        .filter((line) => !/^\s*#(?!!)/.test(line))
-        .join("\n"),
-    );
+/** electron-builder 26.15.3's root-run namespace probe, which the fork replaces. */
+const UPSTREAM_SANDBOX_SETUP = [
+  "if ! { [[ -L /proc/self/ns/user ]] && unshare --user true; }; then",
+  "    chmod 4755 '/opt/${sanitizedProductName}/chrome-sandbox' || true",
+  "else",
+  "    chmod 0755 '/opt/${sanitizedProductName}/chrome-sandbox' || true",
+  "fi",
+].join("\n");
+
+/** Split a script's paragraphs, without comment lines, into chrome-sandbox setup and the rest. */
+function splitSandboxSetup(script) {
+  const paragraphs = script.split(/\n\s*\n/).map((paragraph) =>
+    paragraph
+      .split("\n")
+      .filter((line) => !/^\s*#(?!!)/.test(line))
+      .join("\n"),
+  );
+  return {
+    sandboxSetup: paragraphs.filter((paragraph) => paragraph.includes("chrome-sandbox")),
+    otherSteps: paragraphs.filter((paragraph) => !paragraph.includes("chrome-sandbox")),
+  };
 }
 
 describe("Linux .deb packaging", { skip: process.platform !== "linux" }, () => {
@@ -136,11 +147,11 @@ describe("Linux .deb packaging", { skip: process.platform !== "linux" }, () => {
         fs.existsSync(upstreamTemplate),
         `re-sync with electron-builder: ${upstreamTemplate} is gone`,
       );
-      assert.deepEqual(
-        stepsBesidesSandboxSetup(fs.readFileSync(DEB_AFTER_INSTALL, "utf8")),
-        stepsBesidesSandboxSetup(fs.readFileSync(upstreamTemplate, "utf8")),
-        `re-sync ${packageConfig.build.deb.afterInstall} with ${upstreamTemplate}`,
-      );
+      const fork = splitSandboxSetup(fs.readFileSync(DEB_AFTER_INSTALL, "utf8"));
+      const upstream = splitSandboxSetup(fs.readFileSync(upstreamTemplate, "utf8"));
+      const resync = `re-sync ${packageConfig.build.deb.afterInstall} with ${upstreamTemplate}`;
+      assert.deepEqual(fork.otherSteps, upstream.otherSteps, resync);
+      assert.deepEqual(upstream.sandboxSetup, [UPSTREAM_SANDBOX_SETUP], resync);
     },
   );
 });

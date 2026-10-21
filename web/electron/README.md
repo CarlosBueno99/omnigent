@@ -833,7 +833,8 @@ cannot create user namespaces (Ubuntu 24.04+ with
 probes that as the root installer, leaves the helper `0755`, and the app then
 aborts at launch unless started with `--no-sandbox`. Re-sync the script with the
 upstream template when upgrading electron-builder; `test/linux_packaging.test.js`
-fails when they drift, but skips that check unless electron-builder is installed.
+fails when they drift. That check needs electron-builder installed, so CI runs it
+only on dependency-only PRs.
 
 macOS apps, including unpackaged development, default to V2 onboarding only when the MDM preference
 `databricksInternalFeaturesEnabled` is `true`, for both new and existing profiles.
