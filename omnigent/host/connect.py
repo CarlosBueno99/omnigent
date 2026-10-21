@@ -63,6 +63,7 @@ from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_CAPABILITIES,
+    LAUNCH_HANDLER_FAILED_ERROR_CODE,
     RUNNER_LOG_TAIL_HEADING,
     WORKSPACE_MISSING_ERROR_CODE,
     HostConnectionErrorFrame,
@@ -1330,6 +1331,9 @@ class HostProcess:
         # Status queries wait for this runner's queued launch before deciding
         # that an unregistered runner is unknown.
         self._pending_runner_launches: dict[str, set[asyncio.Future[None]]] = {}
+        # Launch request ids whose runner process has been spawned; a handler
+        # fault after that point is not reported as a failed launch.
+        self._spawned_launch_requests: set[str] = set()
         # Strong refs to in-flight frame tasks (create_task results are
         # otherwise GC-able); each discards itself on completion.
         self._frame_tasks: set[asyncio.Task[None]] = set()
@@ -1740,11 +1744,22 @@ class HostProcess:
         :param frame: Launch request that failed.
         :param error: Human-readable failure reason.
         :param error_code: Optional machine-readable failure category.
-        :param error_category: Fault attribution for an uncoded failure; a coded
-            preflight refusal uses its code's mapping instead.
+        :param error_category: Fault attribution for a failure whose code has no
+            mapping of its own; a coded preflight refusal uses its code's
+            mapping instead.
         :returns: Failed result frame for the server.
         """
         session_id = frame.session_id or "<unknown>"
+        # An unmapped code must not erase the caller's attribution, or a host
+        # fault reads as UNKNOWN rather than HOST. The server guards the same
+        # way when it logs the refusal.
+        mapped_category = category_for_code(error_code) if error_code else ErrorCategory.UNKNOWN
+        if mapped_category is ErrorCategory.UNKNOWN:
+            mapped_category = error_category
+        mapped_phase = phase_for_code(error_code) if error_code else ErrorPhase.UNKNOWN
+        if mapped_phase is ErrorPhase.UNKNOWN:
+            # This frame is a launch regardless of how the code is mapped.
+            mapped_phase = ErrorPhase.RUNNER_LAUNCH
         diagnostic_lines = error.splitlines()
         diagnostic = diagnostic_lines[0] if diagnostic_lines else error
         _logger.warning(
@@ -1763,13 +1778,9 @@ class HostProcess:
                 host_request_id=frame.request_id,
                 stage="runner_launch",
                 error_code=error_code or "runner_spawn_failed",
-                error_category=(
-                    category_for_code(error_code) if error_code else error_category
-                ).value,
+                error_category=mapped_category.value,
                 error_impact=ErrorImpact.BLOCKING.value,
-                error_phase=(
-                    phase_for_code(error_code) if error_code else ErrorPhase.RUNNER_LAUNCH
-                ).value,
+                error_phase=mapped_phase.value,
             ),
         )
         print(
@@ -2026,6 +2037,8 @@ class HostProcess:
                     frame,
                     f"failed to spawn runner: {exc}",
                 )
+        # A runner now exists and may connect on its own.
+        self._spawned_launch_requests.add(frame.request_id)
 
         if proc.poll() is not None:
             # The runner died before Popen returned — its actual error
@@ -5042,12 +5055,40 @@ class HostProcess:
                 )
             # Register before queuing; keep the lifecycle lock as the first
             # await so launch/stop frames still acquire it in arrival order.
+            launch_fault: BaseException | None = None
+            launch_result: HostLaunchRunnerResultFrame | None = None
             try:
                 async with self._runner_lifecycle_lock:
                     launch_result = await self._handle_launch(frame)
+            except Exception as exc:  # noqa: BLE001 — a pre-spawn fault still owes a result
+                launch_fault = exc
+                # Do not report failure after spawn: servers may terminate the
+                # launch or revoke its binding before the runner connects.
+                # Before the spawn no runner can connect, and staying silent
+                # would make the server wait out its result timeout as if the
+                # host were merely slow.
+                if frame.request_id not in self._spawned_launch_requests:
+                    launch_result = self._launch_failed(
+                        frame,
+                        f"host failed to handle the launch request: {exc}",
+                        error_code=LAUNCH_HANDLER_FAILED_ERROR_CODE,
+                    )
             finally:
+                self._spawned_launch_requests.discard(frame.request_id)
                 completion.set_result(None)
-            await self._send_text(ws, encode_host_frame(launch_result))
+            if launch_result is not None:
+                try:
+                    await self._send_text(ws, encode_host_frame(launch_result))
+                except ConnectionClosed:
+                    if launch_fault is None:
+                        raise
+                    # The answer was lost with the tunnel; the fault (re-raised
+                    # below, chain intact) is still the diagnostic to record.
+            if launch_fault is not None:
+                # Answered, but still unexplained: re-raise so the frame task
+                # records the traceback, which is the only diagnostic an
+                # unexpected fault leaves behind.
+                raise launch_fault
         elif isinstance(frame, HostStopRunnerFrame):
             async with self._runner_lifecycle_lock:
                 stop_result = await self._handle_stop(frame)
