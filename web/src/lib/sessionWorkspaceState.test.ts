@@ -151,6 +151,35 @@ describe("sessionWorkspaceState", () => {
     expect(stored).toEqual(Array.from({ length: 20 }, (_, i) => `terminal:t${i + 5}`));
   });
 
+  it("keeps manual browser tab names only for open tabs", () => {
+    writeSessionWorkspaceState("conv_names", {
+      openBrowsers: ["a", "b"],
+      browserNames: { a: "Docs", b: "Dev server", gone: "Closed tab" },
+    });
+    expect(readSessionWorkspaceState("conv_names").browserNames).toEqual({
+      a: "Docs",
+      b: "Dev server",
+    });
+
+    writeSessionWorkspaceState("conv_names", { openBrowsers: ["b"] });
+    expect(readSessionWorkspaceState("conv_names").browserNames).toEqual({ b: "Dev server" });
+  });
+
+  it("drops malformed browser tab names from storage", () => {
+    localStorage.setItem(
+      "omnigent:session-workspace-state",
+      JSON.stringify([
+        {
+          id: "conv_bad",
+          state: { openBrowsers: ["a", "b", "c"], browserNames: { a: "Docs", b: 7, c: "  " } },
+        },
+        { id: "conv_list", state: { openBrowsers: ["a"], browserNames: ["Docs"] } },
+      ]),
+    );
+    expect(readSessionWorkspaceState("conv_bad").browserNames).toEqual({ a: "Docs" });
+    expect(readSessionWorkspaceState("conv_list").browserNames).toBeUndefined();
+  });
+
   it("caps the persisted browser tabs at 20, keeping the most recent", () => {
     const browsers = Array.from({ length: 25 }, (_, i) => `browser:b${i}`);
     writeSessionWorkspaceState("conv_browsers", { openBrowsers: browsers });

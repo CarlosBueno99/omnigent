@@ -345,9 +345,9 @@ def test_agent_reaches_for_embedded_browser_on_neutral_browse_ask(
             "the transcript) — it used its own web tooling instead. Tool "
             f"calls this turn were: {call_names!r}"
         )
-        browser_tab = rail.get_by_role("tab", name="Browser 1", exact=True)
+        browser_tab = rail.get_by_role("tab", name="New tab", exact=True)
         expect(browser_tab).to_have_attribute("aria-selected", "true")
-        expect(rail.get_by_role("button", name="Close Browser 1", exact=True)).to_be_visible()
+        expect(rail.get_by_role("button", name="Close New tab", exact=True)).to_be_visible()
     finally:
         httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
         if respawned is not None:
