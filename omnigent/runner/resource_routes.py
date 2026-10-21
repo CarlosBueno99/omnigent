@@ -119,6 +119,7 @@ def register_resource_routes(
     _pi_terminal_ensure_locks: dict[str, asyncio.Lock],
     _publish_event: Callable[[str, Mapping[str, object]], None],
     _qwen_terminal_ensure_locks: dict[str, asyncio.Lock],
+    _rebind_claude_bridge: Callable[[str, str], Coroutine[Any, Any, None]],
     _record_session_claude_launch_config: Callable[[str, ClaudeNativeUcodeConfig | None], None],
     _repl_terminal_ensure_locks: dict[str, asyncio.Lock],
     _repop_pending_cost_popup_on_attach: Callable[[str, str, str], Coroutine[Any, Any, None]],
@@ -396,6 +397,7 @@ def register_resource_routes(
                 server_client=server_client,
                 event_dispatcher=getattr(app.state, "runner_event_dispatcher", None),
                 ensure_comment_relay=_ensure_comment_relay_started,
+                rebind_bridge=_rebind_claude_bridge,
             )
             _ensure_build: (
                 Callable[[NativeLaunchContext], Awaitable[NativeLaunchContext]] | None
@@ -1019,6 +1021,34 @@ def register_resource_routes(
             order=order,
         )
 
+    @app.get("/v1/sessions/{session_id}/resources/environments/{environment_id}/content-search")
+    async def search_environment_content(
+        session_id: str,
+        environment_id: str,
+        q: str = Query(min_length=1, max_length=4096, pattern=r".*\S.*"),
+        case_sensitive: bool = False,
+        regex: bool = False,
+        include: str = Query(default="", max_length=4096),
+        exclude: str = Query(default="", max_length=4096),
+        limit: int = Query(default=500, ge=1, le=500),
+    ) -> JSONResponse:
+        """Search live file contents inside the session's environment."""
+        from omnigent.runner.content_search import search_content
+
+        agent_spec = await _require_os_env(session_id)
+        await _ensure_session_registered(session_id)
+        env = resource_registry.resolve_environment(session_id, environment_id, agent_spec)
+        result = await search_content(
+            env,
+            q,
+            case_sensitive=case_sensitive,
+            regex=regex,
+            include=include,
+            exclude=exclude,
+            limit=limit,
+        )
+        return JSONResponse(result)
+
     @app.get("/v1/sessions/{session_id}/resources/environments/{environment_id}/search")
     async def search_environment_files(
         session_id: str,
@@ -1378,6 +1408,23 @@ def register_resource_routes(
             account=body.get("account"),
             remote=body.get("remote"),
             pr_url=body.get("pr_url"),
+        )
+
+    @app.get("/v1/sessions/{session_id}/resources/github/labels")
+    async def read_github_labels(session_id: str, pr_url: str | None = None) -> JSONResponse:
+        return await _github_call(session_id, "pr_labels", pr_url=pr_url)
+
+    @app.post("/v1/sessions/{session_id}/resources/github/labels")
+    async def update_github_labels_route(session_id: str, request: Request) -> JSONResponse:
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get("pr_url"), str):
+            raise HTTPException(status_code=400, detail="Expected a pull request URL")
+        return await _github_call(
+            session_id,
+            "update_pr_labels",
+            pr_url=body["pr_url"],
+            add=body.get("add", []),
+            remove=body.get("remove", []),
         )
 
     @app.get(

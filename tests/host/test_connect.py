@@ -65,6 +65,8 @@ from omnigent.host.frames import (
     HostModelOptionsResultFrame,
     HostPluginsFrame,
     HostPluginsResultFrame,
+    HostRefreshHarnessesFrame,
+    HostRefreshHarnessesResultFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
@@ -98,6 +100,7 @@ from omnigent.runner.identity import (
     token_bound_runner_id,
 )
 from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
+from tests._helpers.providers import isolate_provider_resolution
 
 pytestmark = pytest.mark.asyncio
 
@@ -118,6 +121,14 @@ def _isolated_model_catalog_store(
     """
     store_dir = tmp_path_factory.mktemp("model_catalog_store")
     monkeypatch.setattr("omnigent.models.model_catalog_store._data_dir", lambda: store_dir)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_provider_resolution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Keep model-options frames independent of the developer's provider setup."""
+    isolate_provider_resolution(monkeypatch, tmp_path_factory.mktemp("config_home"))
 
 
 @pytest.fixture(autouse=True)
@@ -4909,6 +4920,72 @@ def test_handle_create_dir_expands_tilde(tmp_path: Path, monkeypatch) -> None:
 # ── host.install_harness handler ────────────────────────
 
 
+async def test_handle_refresh_harnesses_bypasses_cache_and_returns_fresh_maps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forced refresh invalidates login cache before the full re-probe."""
+    import omnigent.host.connect as connect
+
+    calls: list[str] = []
+
+    def _invalidate() -> None:
+        calls.append("invalidate")
+
+    def _configured() -> dict[str, bool]:
+        calls.append("configured")
+        return {"codex-native": True}
+
+    def _gateway() -> dict[str, bool]:
+        calls.append("gateway")
+        return {"codex-native": False}
+
+    monkeypatch.setattr(connect, "invalidate_harness_login_probe_cache", _invalidate)
+    monkeypatch.setattr(connect, "configured_harness_map", _configured)
+    monkeypatch.setattr(connect, "gateway_inference_map", _gateway)
+
+    result = _make_host_process()._handle_refresh_harnesses(
+        HostRefreshHarnessesFrame(request_id="refresh-1")
+    )
+
+    assert isinstance(result, HostRefreshHarnessesResultFrame)
+    assert result.status == "ok"
+    assert result.configured_harnesses == {"codex-native": True}
+    assert result.gateway_inference == {"codex-native": False}
+    assert calls == ["invalidate", "configured", "gateway"]
+
+
+async def test_dispatch_refresh_harnesses_uses_guard_and_updates_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh dispatch guards its probes, publishes the result, and updates readiness."""
+    host = _make_host_process()
+    request = HostRefreshHarnessesFrame(request_id="refresh-dispatch-1")
+    result = HostRefreshHarnessesResultFrame(
+        request_id=request.request_id,
+        status="ok",
+        configured_harnesses={"codex-native": True},
+        gateway_inference={"codex-native": False},
+    )
+    guarded: list[Callable[[], HostRefreshHarnessesResultFrame]] = []
+
+    async def _guard(
+        operation: Callable[[], HostRefreshHarnessesResultFrame],
+    ) -> HostRefreshHarnessesResultFrame:
+        guarded.append(operation)
+        return operation()
+
+    monkeypatch.setattr(host, "_run_host_subprocess_in_thread", _guard)
+    monkeypatch.setattr(host, "_handle_refresh_harnesses", lambda frame: result)
+    tunnel = _FakeTunnel()
+
+    await host._dispatch_host_frame(tunnel, request)  # type: ignore[arg-type]
+
+    assert len(guarded) == 1
+    assert decode_host_frame(tunnel.sent[0]) == result
+    assert host._configured_harnesses == {"codex-native": True}
+    assert host._gateway_inference == {"codex-native": False}
+
+
 def test_handle_install_harness_success_returns_refreshed_readiness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4923,6 +5000,7 @@ def test_handle_install_harness_success_returns_refreshed_readiness(
     # Not yet installed, so the handler runs the installer.
     monkeypatch.setattr(connect, "harness_cli_installed", lambda key: False)
     monkeypatch.setattr(connect, "try_install_harness_cli", lambda key: (True, None))
+    monkeypatch.setattr(connect, "harness_cli_version", lambda key: ("2.1.295", ">=2.1.161"))
     monkeypatch.setattr(
         connect,
         "configured_harness_map",
@@ -4938,6 +5016,7 @@ def test_handle_install_harness_success_returns_refreshed_readiness(
     assert result.status == "ok"
     assert result.error is None
     assert result.configured_harnesses == {"claude-native": True, "codex-native": "needs-auth"}
+    assert result.version == "2.1.295"
 
 
 def test_handle_install_harness_already_installed_skips_installer(
@@ -4954,6 +5033,9 @@ def test_handle_install_harness_already_installed_skips_installer(
     import omnigent.host.connect as connect
 
     monkeypatch.setattr(connect, "harness_cli_installed", lambda key: True)
+    monkeypatch.setattr(
+        connect, "harness_cli_version", lambda key: ("1.18.4", ">=1.17.7, <1.19.0")
+    )
 
     def _must_not_install(key: str) -> tuple[bool, str | None]:
         raise AssertionError("installer ran despite the harness already being installed")
@@ -4967,6 +5049,37 @@ def test_handle_install_harness_already_installed_skips_installer(
     )
 
     assert result.status == "ok"
+    assert result.configured_harnesses == {"opencode-native": True}
+    assert result.version == "1.18.4"
+
+
+def test_handle_install_harness_upgrades_outdated_cli_in_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A present but unsupported CLI runs the installer and reports its new version."""
+    import omnigent.host.connect as connect
+
+    installed: list[str] = []
+    monkeypatch.setattr(connect, "harness_cli_installed", lambda key: False)
+
+    def _upgrade(key: str) -> tuple[bool, str | None]:
+        installed.append(key)
+        return True, None
+
+    monkeypatch.setattr(connect, "try_install_harness_cli", _upgrade)
+    monkeypatch.setattr(
+        connect, "harness_cli_version", lambda key: ("1.18.4", ">=1.17.7, <1.19.0")
+    )
+    monkeypatch.setattr(connect, "configured_harness_map", lambda: {"opencode-native": True})
+
+    host = _make_host_process()
+    result = host._handle_install_harness(
+        HostInstallHarnessFrame(request_id="upgrade-1", harness="opencode")
+    )
+
+    assert installed == ["opencode"]
+    assert result.status == "ok"
+    assert result.version == "1.18.4"
     assert result.configured_harnesses == {"opencode-native": True}
 
 
@@ -8121,6 +8234,113 @@ async def test_handle_launch_leaves_other_sessions_runners_alone(
     _cleanup_host(host)
 
 
+def _sleeping_popen() -> Callable[..., subprocess.Popen[bytes]]:
+    original_popen = subprocess.Popen
+
+    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        return original_popen(
+            ["sleep", "30"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    return _fake_popen
+
+
+async def test_handle_launch_keeps_a_runner_the_server_did_not_name(
+    tmp_path: Path,
+) -> None:
+    """A relaunch after /clear leaves the moved runner alone.
+
+    /clear hands the session's runner to its successor and unbinds the old
+    session, so its relaunch names no superseded runner; stopping by session
+    id would kill the successor's runner and every sub-agent running on it.
+    """
+    host = _make_host_process()
+    host._auth_token_factory = lambda: "host-bootstrap-bearer"
+    host._auth_token_factory_resolved = True
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_sleeping_popen()):
+        moved = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="req_a",
+                binding_token="tok_moved",
+                workspace=str(workspace),
+                session_id="conv_cleared",
+                superseded_runner_ids=(),
+            )
+        )
+        relaunch = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="req_b",
+                binding_token="tok_relaunch",
+                workspace=str(workspace),
+                session_id="conv_cleared",
+                superseded_runner_ids=(),
+            )
+        )
+
+    assert moved.status == "launched" and relaunch.status == "launched"
+    assert moved.runner_id in host._runners
+    assert host._runners[moved.runner_id].proc.poll() is None
+    assert relaunch.runner_id in host._runners
+    _cleanup_host(host)
+
+
+async def test_handle_launch_stops_only_the_named_superseded_runner(
+    tmp_path: Path,
+) -> None:
+    """A named supersession stops that runner, whatever session launched it."""
+    host = _make_host_process()
+    host._auth_token_factory = lambda: "host-bootstrap-bearer"
+    host._auth_token_factory_resolved = True
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_sleeping_popen()):
+        # Launched for the pre-/clear session, now bound to its successor.
+        moved = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="req_a",
+                binding_token="tok_src",
+                workspace=str(workspace),
+                session_id="conv_source",
+            )
+        )
+        moved_handle = host._runners[moved.runner_id]
+        sibling = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="req_b",
+                binding_token="tok_sib",
+                workspace=str(workspace),
+                session_id="conv_successor",
+                superseded_runner_ids=(),
+            )
+        )
+        replacement = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="req_c",
+                binding_token="tok_succ",
+                workspace=str(workspace),
+                session_id="conv_successor",
+                superseded_runner_ids=(moved.runner_id,),
+            )
+        )
+
+    assert replacement.status == "launched"
+    assert moved.runner_id not in host._runners
+    for _ in range(70):
+        if moved_handle.proc.poll() is not None:
+            break
+        await asyncio.sleep(0.1)
+    assert moved_handle.proc.poll() is not None, "the named runner must be stopped"
+    assert sibling.runner_id in host._runners, "an unnamed runner must stay tracked"
+    assert host._runners[sibling.runner_id].proc.poll() is None
+    _cleanup_host(host)
+
+
 async def test_handle_launch_spawn_failure_preserves_previous_runner(
     tmp_path: Path,
 ) -> None:
@@ -8818,6 +9038,58 @@ async def test_github_pr_update_reports_lock_contention_on_host(
     assert registry.path.read_bytes() == before
     assert host._handle_fs_write(frame).status == "ok"
     assert (target in {entry.url for entry in registry.list()}) == (action == "attach")
+
+
+def test_github_label_ops_are_served_on_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host lists and edits a tracked PR's labels when the runner is offline."""
+    from omnigent.host.frames import HostFsRequestFrame, HostFsWriteFrame
+    from omnigent.runner import github_resource
+    from omnigent.runner.session_prs import PullRequestRef, SessionPrRegistry
+
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(github_resource, "_pr_token", lambda *_a: None)
+    calls: list[list[str]] = []
+    bug = {"name": "bug", "color": "d73a4a", "description": None}
+
+    def gh(argv: list[str], **_kwargs: object) -> tuple[int, str, str]:
+        calls.append(argv)
+        return 0, json.dumps([{**bug, "color": "D73A4A"}]), ""
+
+    monkeypatch.setattr(github_resource, "_gh", gh)
+    url = "https://github.com/example/one/pull/42"
+    SessionPrRegistry("session").record(
+        [PullRequestRef.from_url(url)], relationship="created", source="test"
+    )
+    host = _make_host_process()
+    try:
+        listed = host._handle_fs_request(
+            HostFsRequestFrame(
+                request_id="labels",
+                op="github_labels",
+                workspace=str(tmp_path),
+                session_id="session",
+                params={"pr_url": url},
+            )
+        )
+        edited = host._handle_fs_write(
+            HostFsWriteFrame(
+                request_id="labels-update",
+                op="github_labels_update",
+                workspace=str(tmp_path),
+                session_id="session",
+                params={"pr_url": url, "add": ["bug"], "session_id": "untrusted"},
+            )
+        )
+    finally:
+        _cleanup_host(host)
+
+    assert listed.status == "ok", listed
+    assert listed.payload == {"object": "list", "data": [bug], "has_more": False}
+    assert edited.status == "ok", edited
+    assert edited.payload == {"object": "session.github.pr_labels", "labels": [bug]}
+    assert calls[1][-3:] == ["repos/example/one/issues/42/labels", "-f", "labels[]=bug"]
 
 
 def test_fs_search_reuses_the_changed_files_snapshot_across_requests(
