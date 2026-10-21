@@ -1,5 +1,6 @@
 import { type KeyboardEvent, type RefObject, useRef, useState } from "react";
 
+import { insertComposerText } from "@/components/composer/ChatComposer";
 import type { MentionItem, MentionState } from "@/lib/composerMentions";
 import { composerAttachmentKey } from "@/store/chatStore";
 import type { WorkspaceFile } from "@/hooks/useWorkspaceChangedFiles";
@@ -43,30 +44,6 @@ export interface MentionBrowser {
 }
 
 /**
- * Replace ``[start, end)`` via the browser's editing command so the edit joins
- * the native undo stack (assigning ``.value`` would wipe it). Best-effort: the
- * caller's ``setText`` still lands the text where the command is unavailable.
- */
-function replaceRangeViaEditingCommand(
-  ta: HTMLTextAreaElement | null,
-  start: number,
-  end: number,
-  replacement: string,
-): void {
-  if (!ta || typeof document === "undefined" || typeof document.execCommand !== "function") {
-    return;
-  }
-  ta.focus();
-  ta.setSelectionRange(start, end);
-  try {
-    if (replacement === "") document.execCommand("delete");
-    else document.execCommand("insertText", false, replacement);
-  } catch {
-    // Refused command; the caller's controlled rewrite still lands the text.
-  }
-}
-
-/**
  * Shared ``@``-file-mention controller for the in-session composer and the
  * new-session launcher. Owns the selection index, the tagged-chip list, and
  * the attach/drill/remove + keyboard behaviour; the composer owns the token
@@ -100,10 +77,14 @@ export function useMentionBrowser(params: MentionBrowserParams): MentionBrowser 
     setMentionIndex(mentionEntryKeys.length > 0 ? 0 : -1);
   }
 
-  // Swap the active token for ``replacement``: natively first (keeps undo),
-  // then through React, which only reassigns ``.value`` when the DOM differs.
+  // Edit the textarea as typed input so the browser keeps its undo history;
+  // assigning ``.value`` through state alone would clear it.
   const replaceMentionToken = (token: MentionState, replacement: string) => {
-    replaceRangeViaEditingCommand(textareaRef.current, token.start, token.end, replacement);
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.focus();
+      insertComposerText(textarea, replacement, token.start, token.end);
+    }
     setText(text.slice(0, token.start) + replacement + text.slice(token.end));
   };
 
