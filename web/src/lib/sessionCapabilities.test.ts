@@ -52,7 +52,7 @@ describe("session action restrictions", () => {
     });
   });
 
-  it("keeps both actions available for ordinary hosts", () => {
+  it("keeps all actions available for ordinary hosts", () => {
     expect(sessionActionRestrictions({ labels: {} }, { sandbox_provider: null })).toEqual({
       forkDisabledReason: undefined,
       sideChatDisabledReason: undefined,

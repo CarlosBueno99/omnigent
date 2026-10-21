@@ -4551,6 +4551,25 @@ describe("Composer /side on a fork-restricted session", () => {
     expect(screen.getByTestId("slash-menu-item-help")).toBeVisible();
     expect(screen.queryByTestId("slash-menu-item-side")).toBeNull();
   });
+
+  it("keeps Codex's in-process /side listed and sends it to the runner", () => {
+    useChatStore.setState({ sessionHarness: "codex-native" });
+    const createSideChat = vi.spyOn(sessionsApi, "createSideChat");
+    const onSend = vi.fn();
+    // Native wrappers get no onSendSlashCommand; their slash commands go out as plaintext.
+    render(<Composer {...composerProps({ onSend })} />);
+    const ta = textarea();
+
+    fireEvent.change(ta, { target: { value: "/" } });
+    expect(screen.getByTestId("slash-menu-item-side")).toBeVisible();
+
+    fireEvent.change(ta, { target: { value: "/side resize the panel" } });
+    fireEvent.keyDown(ta, { key: "Enter" });
+
+    expect(screen.queryByText(SANDBOX_SIDE_CHAT_UNSUPPORTED)).toBeNull();
+    expect(createSideChat).not.toHaveBeenCalled();
+    expect(onSend.mock.calls[0]?.[0]).toBe("/side resize the panel");
+  });
 });
 
 // Attaching a file via the paperclip button routes through the hidden file
