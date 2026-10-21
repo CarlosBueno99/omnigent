@@ -609,11 +609,7 @@ def test_login_with_busy_callback_port_names_the_port(
 def test_login_with_busy_callback_port_and_old_cli_names_the_port(
     monkeypatch: pytest.MonkeyPatch, token_dir: Path, tmp_path: Path
 ) -> None:
-    """Old CLI + busy 127.0.0.1:8020 → the error names the port, not the network.
-
-    A pre-v0.265.0 CLI dies on the callback bind before any workspace traffic,
-    so the "workspace unreachable (VPN / IP access lists)" hint is misleading.
-    """
+    """Old CLI + busy 127.0.0.1:8020 → the error names the port, not the network."""
     from omnigent.onboarding import databricks_config as db_cfg_mod
 
     fake = _FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})])

@@ -220,6 +220,7 @@ def _databricks_cli_version(databricks_bin: str) -> tuple[int, int, int] | None:
             [databricks_bin, "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=_CLI_VERSION_TIMEOUT_SECONDS,
             check=False,
         )
