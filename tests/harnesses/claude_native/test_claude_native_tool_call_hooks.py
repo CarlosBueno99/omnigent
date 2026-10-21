@@ -243,7 +243,6 @@ def test_delivered_observation_is_not_replayed_after_a_slow_relay_response(
     assert proc.stdout == ""
     # The hook returns at curl's budget rather than waiting out the relay's response.
     assert elapsed < _HOOK_BUDGET_S + 1.5
-    # The relay recorded the observation once and the Python observer never replayed it.
     assert [request.path for request in relay.received] == ["/hook/observe-tool"]
     assert not ran_marker.exists()
 
@@ -253,8 +252,8 @@ def test_delivered_observation_is_not_replayed_after_a_slow_relay_response(
 def test_stale_env_token_replays_through_the_python_observer(
     tmp_path: Path, relay: _Relay
 ) -> None:
-    """A restart can leave a stale env token while tool_relay.json has the new one: curl
-    gets 401, so the hook replays into the Python observer, which reads the fresh token."""
+    """An HTTP error, such as a 401 for a stale env token, replays into the Python
+    observer, which reads the current token from tool_relay.json."""
     bridge_dir = _bridge_dir_with_relay(tmp_path, relay.url)
     (bridge_dir / "tool_relay.env").write_text(
         f"OMNIGENT_RELAY_URL='{relay.url}'\nOMNIGENT_RELAY_TOKEN='stale'\n"
@@ -269,8 +268,7 @@ def test_stale_env_token_replays_through_the_python_observer(
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == ""
-    # curl is rejected with the stale env token, then the Python observer records
-    # with the fresh JSON token, so the observation reaches the relay exactly once.
+    # curl's stale token gets a 401; the Python observer retries with the fresh JSON token.
     assert [request.authorization for request in relay.received] == [
         "Bearer stale",
         "Bearer fresh",
