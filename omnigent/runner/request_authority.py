@@ -128,6 +128,8 @@ async def native_snapshot(
     Older native protocols and unverified terminal inputs fail closed. Bounded
     pages prevent a long-running native turn from producing an unbounded read.
     """
+    from omnigent.harnesses.codex_native.app_server import CodexAppServerResponseError
+
     invalid = RequestAuthority((), verified=False)
     if not state.native_turn_id or not state.snapshot().verified:
         return invalid
@@ -151,8 +153,34 @@ async def native_snapshot(
         params: dict[str, object] = {"threadId": thread_id, "turnId": turn_id, "limit": 256}
         if cursor is not None:
             params["cursor"] = cursor
-        response = await client.request("thread/items/list", params)
-        entries, cursor = _native_page(response)
+        try:
+            response = await client.request("thread/items/list", params)
+        except CodexAppServerResponseError as exc:
+            # Codex 0.142 exposes complete live-turn receipts without item pagination.
+            missing_method = exc.code == -32601 or (
+                exc.code == -32600 and "unknown variant `thread/items/list`" in (exc.message or "")
+            )
+            if cursor is not None or not missing_method:
+                raise
+            response = await client.request(
+                "thread/turns/list",
+                {"threadId": thread_id, "limit": 1, "sortDirection": "desc", "itemsView": "full"},
+            )
+            turns, _ = _native_page(response)
+            if (
+                len(turns) != 1
+                or turns[0].get("id") != turn_id
+                or turns[0].get("status") != "inProgress"
+                or turns[0].get("itemsView") != "full"
+            ):
+                return invalid
+            items = turns[0].get("items")
+            if not isinstance(items, list) or len(items) > 16 * 256:
+                return invalid
+            entries = [{"turnId": turn_id, "item": item} for item in items]
+            cursor = None
+        else:
+            entries, cursor = _native_page(response)
         for entry in entries:
             if entry.get("turnId") != turn_id:
                 return invalid
@@ -186,6 +214,11 @@ async def native_snapshot(
         },
     )
     turns, _ = _native_page(response)
-    if not input_ids or not turns or turns[0].get("id") != turn_id:
+    if (
+        not input_ids
+        or not turns
+        or turns[0].get("id") != turn_id
+        or turns[0].get("status") != "inProgress"
+    ):
         return invalid
     return RequestAuthority(tuple(input_ids))

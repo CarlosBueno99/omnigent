@@ -128,6 +128,9 @@ def _tool_output(mock: str, observed: list[dict], call_id: str) -> str:
             and item.get("call_id") == call_id
         ):
             output = item["output"]
+            # Older Codex wraps the MCP content array in a timed text result.
+            if isinstance(output, str) and output.startswith("Wall time:"):
+                output = json.loads(output.split("\nOutput:\n", 1)[1])
             if isinstance(output, str):
                 return output
             return "\n".join(
