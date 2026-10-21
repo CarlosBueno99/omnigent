@@ -904,7 +904,7 @@ def test_stop_reports_a_transition_that_settles_unusable(
     gone: bool,
     stop_calls: list[float],
 ) -> None:
-    """A stop or wait ending in failure or deletion raises instead of reporting the sandbox parked."""
+    """A stop or wait ending in failure or deletion raises instead of reporting it parked."""
     launcher = DaytonaSandboxLauncher()
     sandbox_id = launcher.provision("a")
     sandbox = fake_daytona.sandboxes[sandbox_id]
