@@ -473,8 +473,6 @@ def test_first_served_codex_model_skips_unserved_listing_entries() -> None:
     assert seen == ["system.ai.gpt-5-6-sol", "system.ai.gpt-5-5", "system.ai.glm-5-2"]
 
 
-
-
 def test_first_served_codex_model_rejects_a_not_found_validation_error() -> None:
     """A 400 naming the gateway's not-found code is a rejection, not a confirmation."""
     seen: list[str] = []
@@ -486,5 +484,3 @@ def test_first_served_codex_model_rejects_a_not_found_validation_error() -> None
     )
     assert picked == "system.ai.glm-5-2"
     assert seen == ["system.ai.gpt-5-6-sol", "system.ai.glm-5-2"]
-
-
