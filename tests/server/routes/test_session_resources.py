@@ -43,6 +43,8 @@ from omnigent.server.host_registry import HostRegistry
 from omnigent.server.routes.sessions import _ancestor_session_ids, create_sessions_router
 from omnigent.server.schemas import SessionEventInput
 from omnigent.stores.host_store import HostStore
+from tests._helpers.polling import poll_until_async
+from tests.budgets import budget
 from tests.server.routes.test_shell_permission_gate import _StubPermissionStore
 
 
@@ -3178,6 +3180,48 @@ async def test_github_info_proxies_to_runner(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_github_label_edit_relays_the_runner_refusal(client: httpx.AsyncClient) -> None:
+    """A provider refusal keeps the runner's status and message for the panel."""
+    from omnigent.runner import github_resource
+    from omnigent.server.routes import _host_filesystem
+    from omnigent.server.routes.sessions import routes_resources
+
+    path = "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources/github/labels"
+    detail = "The GitHub account on the host cannot edit this pull request's labels."
+    fake_runner = _FakeRunnerClient(responses={path: (400, {"detail": detail})})
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+    timeouts: list[float | None] = []
+    proxy_get, proxy_post = fake_runner.get, fake_runner.post
+
+    async def get(url: str, *, params: Any = None, timeout: float | None = None) -> httpx.Response:
+        timeouts.append(timeout)
+        return await proxy_get(url, params=params, timeout=timeout)
+
+    async def post(url: str, *, json: Any = None, timeout: float | None = None) -> httpx.Response:
+        timeouts.append(timeout)
+        return await proxy_post(url, json=json, timeout=timeout)
+
+    fake_runner.get, fake_runner.post = get, post  # type: ignore[method-assign]
+
+    resp = await client.post(
+        path, json={"pr_url": "https://github.com/acme/widgets/pull/17", "add": ["bug"]}
+    )
+    malformed = await client.post(path, json={"add": ["bug"]})
+    await client.get(path, params={"pr_url": "https://github.com/acme/widgets/pull/17"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == detail
+    assert malformed.status_code == 400
+    # The server and the host tunnel both outwait the runner's label request budget.
+    assert timeouts == [routes_resources._LABEL_PROXY_TIMEOUT_S] * 2
+    assert github_resource._LABEL_REQUEST_SECONDS < routes_resources._LABEL_PROXY_TIMEOUT_S
+    assert github_resource._LABEL_REQUEST_SECONDS < _host_filesystem._FS_TIMEOUT_S
+    assert fake_runner.post_json_calls == [
+        (path, {"pr_url": "https://github.com/acme/widgets/pull/17", "add": ["bug"], "remove": []})
+    ]
+
+
+@pytest.mark.asyncio
 async def test_github_changes_proxies_to_runner(client: httpx.AsyncClient) -> None:
     """GET /resources/github/changes proxies the PR file list to the runner."""
     fake_runner = _FakeRunnerClient(payload={"object": "list", "data": [], "has_more": False})
@@ -6187,7 +6231,7 @@ async def test_claude_native_cancelled_mirror_still_settles_its_held_entries(
 
     try:
         request = asyncio.create_task(persist())
-        await asyncio.to_thread(store.first_append_started.wait, 5)
+        assert await asyncio.to_thread(store.first_append_started.wait, budget(5))
         request.cancel()
         with pytest.raises(asyncio.CancelledError):
             await request
@@ -6199,10 +6243,15 @@ async def test_claude_native_cancelled_mirror_still_settles_its_held_entries(
         assert pending_inputs.resolve_matching_text(sid, "still here?").matched is None
 
         store.release_first_append.set()
-        for _attempt in range(200):
-            if not pending_inputs.snapshot_for(sid):
-                break
-            await asyncio.sleep(0.01)
+        # Settlement precedes title seeding and publication of the final receipt.
+        await poll_until_async(
+            lambda: any(
+                event.get("type") == "session.input.consumed"
+                and event["data"]["cleared_pending_id"] == matched
+                for _conversation_id, event in published
+            ),
+            timeout_s=budget(5),
+        )
 
         assert pending_inputs.snapshot_for(sid) == []
         assert [item.type for item in store.appended_items] == ["message", "error", "message"]
@@ -9611,6 +9660,7 @@ async def test_sibling_environment_routes_are_not_gzipped(
         ("/changes", "github_changes"),
         ("/diff", "github_pr_diff"),
         ("/diff/new.py", "github_diff"),
+        ("/labels", "github_labels"),
     ],
 )
 async def test_selected_pr_reaches_offline_host(
@@ -9659,6 +9709,32 @@ async def test_pr_attachment_uses_bound_session_when_runner_offline(
     assert response.status_code == 200, response.text
     assert captured["op"] == "github_prs_update"
     assert captured["params"] == {"url": url, "action": "attach", "session_id": _OFFLINE_SESSION}
+
+
+async def test_pr_label_edit_reaches_offline_host(
+    offline_env_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.server.routes import _host_filesystem
+
+    captured: dict[str, Any] = {}
+    labels = {"object": "session.github.pr_labels", "labels": []}
+
+    async def write(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return labels
+
+    monkeypatch.setattr(_host_filesystem, "write_workspace_from_host", write)
+    url = "https://github.com/example/second/pull/42"
+    response = await offline_env_client.post(
+        f"/v1/sessions/{_OFFLINE_SESSION}/resources/github/labels",
+        json={"pr_url": url, "remove": ["bug"]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == labels
+    assert captured["op"] == "github_labels_update"
+    assert captured["session_id"] == _OFFLINE_SESSION
+    assert captured["params"] == {"pr_url": url, "add": [], "remove": ["bug"]}
 
 
 @pytest.mark.asyncio

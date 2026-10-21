@@ -111,6 +111,7 @@ from omnigent.server.routes.extensions import create_extensions_router
 from omnigent.server.routes.harnesses import create_harnesses_router
 from omnigent.server.routes.imports import create_imports_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
+from omnigent.server.routes.preferences import create_preferences_router
 from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
@@ -149,6 +150,7 @@ from omnigent.stores.conversation_store import (
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
+from omnigent.stores.preference_store import PreferenceStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 
@@ -1355,6 +1357,8 @@ def create_app(
     extension_state: ExtensionPluginState | None = None,
     base_path: str | None = None,
     host_sharded: bool = False,
+    *,
+    preference_store: PreferenceStore | None = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI application with all routes mounted.
@@ -1388,6 +1392,7 @@ def create_app(
         starts an :class:`ScheduledTaskScheduler` that arms a timer per
         active task and fires the injected ``on_fire`` callback on
         schedule. ``None`` disables the scheduler entirely.
+    :param preference_store: Optional shared-preference API; no launcher adoption.
     :param project_store: Store for first-class projects (owner-private
         containers that group sessions). ``None`` disables the
         ``/v1/projects`` CRUD endpoints.
@@ -3497,6 +3502,13 @@ def create_app(
             tags=["projects"],
         )
 
+    if preference_store is not None:
+        app.include_router(
+            create_preferences_router(preference_store, auth_provider),
+            prefix="/v1",
+            tags=["preferences"],
+        )
+
     # ── Tunnel lifecycle callbacks (Step 8.5 crash recovery) ───
 
     # Pending per-runner grace timers: a disconnect schedules the
@@ -4029,6 +4041,22 @@ def create_app(
                         and (conv.id in eager_root_ids or needs_eager_recovery(conv))
                     )
                     # Idle trees reinitialize on demand; active trees recover now.
+                    if not initialize_runtime:
+                        if conv.agent_id is None:
+                            reason = "no_agent"
+                        elif conv.archived:
+                            reason = "archived"
+                        else:
+                            reason = "idle"
+                        _logger.info(
+                            "Deferred runner session init until first use: session=%s reason=%s",
+                            conv.id,
+                            reason,
+                            extra=debug_event(
+                                "runner_session_init_deferred",
+                                reason=reason,
+                            ),
+                        )
                     if initialize_runtime:
                         response = await runner_session_initializer.initialize(
                             conv,
