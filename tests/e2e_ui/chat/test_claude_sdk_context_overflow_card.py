@@ -166,7 +166,8 @@ def test_claude_sdk_prompt_too_long_cards_read_as_context_overflow(
         mark("journey complete")
 
         assert [card["headline"] for card in cards] == [_OVERFLOW_HEADLINE] * len(cards), cards
-        # Claude Code's plain and approximate forms state no explicit pair, so cards keep its text.
+        # The pinned CLI rewrites the mock's explicit pair into plain and approximate forms on
+        # purpose: users see that text, and neither form states an explicit pair.
         assert all("Prompt is too long" in card["detail"] for card in cards), cards
         assert any("(limit 1000000)" in card["detail"] for card in cards), cards
         last_error = snapshot.get("last_task_error") or {}

@@ -764,7 +764,7 @@ def _is_context_overflow_error(
     """
     if event.get("type") != "response.failed":
         return None
-    # Read ``response.error`` first, as server persistence does; fall back when it is unusable.
+    # Prefer ``response.error``, the field persistence stores; fall back when it is unusable.
     response = event.get("response")
     error = response.get("error") if isinstance(response, dict) else None
     if not isinstance(error, dict) or not error:
