@@ -333,7 +333,8 @@ def _resolve_timeout_s(configured: int | None, env_var: str, default: int) -> in
     :param env_var: Environment variable consulted when *configured* is ``None``.
     :param default: Built-in budget when neither is set.
     :returns: The budget in seconds.
-    :raises click.ClickException: When the env override is not a number.
+    :raises click.ClickException: When the env override is not a positive,
+        finite number.
     """
     if configured is not None:
         return configured
@@ -341,9 +342,12 @@ def _resolve_timeout_s(configured: int | None, env_var: str, default: int) -> in
     if raw is None:
         return default
     try:
-        return int(float(raw))
-    except ValueError as exc:
-        raise click.ClickException(f"{env_var} must be a number of seconds") from exc
+        value = int(float(raw))
+    except (ValueError, OverflowError):
+        value = 0
+    if value <= 0:
+        raise click.ClickException(f"{env_var} must be a positive number of seconds")
+    return value
 
 
 def _resolve_pod_ready_timeout_s(configured: int | None) -> int:
@@ -359,7 +363,7 @@ def _resolve_pod_ready_timeout_s(configured: int | None) -> int:
     :param configured: The launcher's ``pod_ready_timeout_s`` constructor
         argument, or ``None`` when the bundle didn't set it.
     :returns: The timeout in seconds to wait for the Pod to reach ``Running``.
-    :raises click.ClickException: When the env override is not a number.
+    :raises click.ClickException: When the env override is not a positive number.
     """
     return _resolve_timeout_s(configured, _POD_READY_TIMEOUT_ENV_VAR, _POD_READY_TIMEOUT_S)
 
@@ -376,7 +380,7 @@ def _resolve_workspace_prep_timeout_s(configured: int | None) -> int:
     :param configured: The launcher's ``workspace_prep_timeout_s`` constructor
         argument, or ``None`` when the bundle didn't set it.
     :returns: Seconds the running init container may take before the launch fails.
-    :raises click.ClickException: When the env override is not a number.
+    :raises click.ClickException: When the env override is not a positive number.
     """
     return _resolve_timeout_s(
         configured, _WORKSPACE_PREP_TIMEOUT_ENV_VAR, _WORKSPACE_PREP_TIMEOUT_S
@@ -1164,9 +1168,9 @@ def _terminal_failure(pod: object) -> tuple[str, str] | None:
 
     - The **Pod phase** is ``Failed`` (the Job controller gave up after
       exhausting ``backoffLimit``), OR
-    - The host container is in ``CrashLoopBackOff`` (the kubelet is still
-      retrying, but the container is crash-looping and unlikely to self-heal
-      during the launch window).
+    - The host or workspace-prep container is in ``CrashLoopBackOff`` (the
+      kubelet is still retrying, but the container is crash-looping and
+      unlikely to self-heal during the launch window).
 
     :param pod: A ``V1Pod`` read from the API.
     :returns: The failed container name + summary, or ``None``.
@@ -1208,6 +1212,16 @@ def _terminal_failure(pod: object) -> tuple[str, str] | None:
                     f"host container is crash-looping "
                     f"(restarts: {restart_count}, CrashLoopBackOff)"
                 )
+    for cs in getattr(status, "init_container_statuses", None) or []:
+        waiting = getattr(getattr(cs, "state", None), "waiting", None)
+        if (
+            getattr(cs, "name", None) == _INIT_CONTAINER_NAME
+            and getattr(waiting, "reason", None) == "CrashLoopBackOff"
+        ):
+            restart_count = getattr(cs, "restart_count", "?")
+            return _INIT_CONTAINER_NAME, (
+                f"workspace prep is crash-looping (restarts: {restart_count}, CrashLoopBackOff)"
+            )
 
     return None
 
@@ -1255,19 +1269,25 @@ def _current_wait_reason(pod: object) -> str | None:
     return None
 
 
-def _workspace_prep_running(pod: object) -> bool:
+def _workspace_prep_state(pod: object) -> Literal["running", "completed"] | None:
     """
-    Whether the workspace-prep init container is currently running — the Pod
-    is scheduled, its image pulled, and the clone is under way.
+    Report the workspace-prep init container's progress: ``"running"`` while
+    the clone is under way, ``"completed"`` once it exited cleanly.
 
     :param pod: A ``V1Pod`` read from the API.
-    :returns: ``True`` while the init container is in the running state.
+    :returns: The state, or ``None`` before the container starts or while it
+        waits to be restarted after a failure.
     """
     status = getattr(pod, "status", None)
     for cs in getattr(status, "init_container_statuses", None) or []:
         if getattr(cs, "name", None) == _INIT_CONTAINER_NAME:
-            return getattr(getattr(cs, "state", None), "running", None) is not None
-    return False
+            state = getattr(cs, "state", None)
+            if getattr(state, "running", None) is not None:
+                return "running"
+            terminated = getattr(state, "terminated", None)
+            if terminated is not None and getattr(terminated, "exit_code", None) == 0:
+                return "completed"
+    return None
 
 
 class KubernetesSandboxLauncher(SandboxHostLauncher):
@@ -1786,6 +1806,7 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
         budget_s = pod_ready_timeout_s
         deadline = time.monotonic() + budget_s
         preparing = False
+        clone_started = False
         last_reason: str | None = None
         pod_name: str | None = None
         while True:
@@ -1815,6 +1836,7 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
                     # preemption, node drain) — re-discover instead of failing.
                     replaced_pod_name = pod_name
                     pod_name = None
+                    clone_started = False
                     if preparing:
                         preparing = False
                         budget_s = pod_ready_timeout_s
@@ -1875,17 +1897,17 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
                         namespace, pod_name, f"container cannot start ({fatal})"
                     )
                 )
-            # Track the Pod's phase each poll: the clone gets its own budget while
-            # its init container runs, but a replacement Pod or a main container
-            # stalled after the clone falls back to the tight pod-ready budget.
-            prep_now = _workspace_prep_running(pod)
-            if prep_now and not preparing:
-                preparing = True
+            # The clone budget starts once per Pod and survives init-container
+            # restarts; a finished clone or a replacement Pod returns to the
+            # pod-ready budget.
+            prep_state = _workspace_prep_state(pod)
+            if prep_state == "running" and not clone_started:
+                clone_started = preparing = True
                 budget_s = prep_timeout_s
                 deadline = time.monotonic() + prep_timeout_s
                 if on_stage is not None and cloning:
                     on_stage("cloning")
-            elif preparing and not prep_now:
+            elif prep_state == "completed" and preparing:
                 preparing = False
                 budget_s = pod_ready_timeout_s
                 deadline = time.monotonic() + pod_ready_timeout_s

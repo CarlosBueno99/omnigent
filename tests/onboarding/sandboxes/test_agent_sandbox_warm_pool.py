@@ -1118,7 +1118,7 @@ def test_start_waits_for_in_progress_workspace_preparation(
 ) -> None:
     """Workspace preparation (the clone) outlasting the pod-ready budget is not a failure."""
     monkeypatch.delenv(k8s._POD_READY_TIMEOUT_ENV_VAR, raising=False)
-    monkeypatch.delenv("OMNIGENT_K8S_WORKSPACE_PREP_TIMEOUT_S", raising=False)
+    monkeypatch.delenv(k8s._WORKSPACE_PREP_TIMEOUT_ENV_VAR, raising=False)
     clone_seconds = 300.0
     clock = {"now": 0.0}
     monkeypatch.setattr(warm.time, "monotonic", lambda: clock["now"])
