@@ -87,9 +87,7 @@ function observeWebAuthnRequests(report) {
   }
 }
 
-// Electron has no passkey sheet, so let the shell show its own security-key
-// prompt. Windows shows its native WebAuthn dialog instead. Only the main frame
-// is observed; the preload never runs in (possibly cross-origin) subframes.
+// Windows has a native WebAuthn dialog; the preload only runs in the top frame.
 if (process.platform !== "win32" && typeof contextBridge.executeInMainWorld === "function") {
   try {
     contextBridge.executeInMainWorld({

@@ -1030,7 +1030,8 @@ also hides when the page navigates. Requests that show no browser prompt
 (`mediation` `"conditional"` for passkey autofill, `"silent"` or `"immediate"`)
 get none, and Windows keeps its native WebAuthn dialog instead. Only the top
 frame is observed, so WebAuthn calls from iframes, embedded browser views, or
-sign-in popups show no prompt.
+sign-in popups show no prompt. Observing a request marks its promise as handled,
+so a page that ignores a failed request gets no `unhandledrejection` event.
 
 The shell intentionally does **not** enable Electron's Touch ID platform
 authenticator (`app.configureWebAuthn`). Doing so routes the entire WebAuthn

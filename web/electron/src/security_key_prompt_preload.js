@@ -1,6 +1,4 @@
-// Preload for the security-key prompt (security-key-prompt/index.html).
-// The main process matches every message to the prompt window by sender, so
-// this bridge is inert if it ever ends up attached to anything else.
+// Preload for security-key-prompt/index.html; main matches its IPC to the prompt by sender.
 
 "use strict";
 
