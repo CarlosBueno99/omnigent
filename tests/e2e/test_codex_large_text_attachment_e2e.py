@@ -15,7 +15,7 @@ import yaml
 from tests._helpers.polling import poll_until
 from tests._helpers.server_runner import server_runner
 from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
-from tests.e2e.conftest import configure_mock_llm, get_mock_requests
+from tests.e2e.conftest import get_mock_requests, set_fallback_mock_llm
 
 
 @pytest.mark.skipif(
@@ -77,7 +77,8 @@ def test_large_file_and_paste_reach_native_codex_and_keep_history(
                 ),
                 ([{"type": "input_text", "text": paste}], "LARGE_PASTE_DELIVERED"),
             ):
-                configure_mock_llm(isolated_mock_llm_server_url, [{"text": answer}], key=model)
+                # Auxiliary native requests can share the model's response queue.
+                set_fallback_mock_llm(isolated_mock_llm_server_url, key=model, text=answer)
                 sent = client.post(
                     f"/v1/sessions/{session}/events",
                     json={"type": "message", "data": {"role": "user", "content": content}},
