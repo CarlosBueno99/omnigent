@@ -292,9 +292,33 @@ def test_harness_shaped_overflow_classifies_with_its_detail(
             status="failed", error={"code": "RuntimeError", "message": message}
         ),
     )
-    overflow = _is_context_overflow_error(event.model_dump(mode="json"))
-    assert overflow is not None
-    assert overflow[2] == expected_detail
+    assert _is_context_overflow_error(event.model_dump(mode="json")) == (
+        1000000,
+        1006037,
+        expected_detail,
+    )
+
+
+@pytest.mark.parametrize(
+    ("top_level_error", "expected"),
+    [
+        pytest.param({}, (1000000, 1006037, _APPROXIMATE_OVERFLOW), id="empty-legacy-error"),
+        pytest.param({"code": "RuntimeError", "message": "boom"}, None, id="legacy-error-wins"),
+    ],
+)
+def test_overflow_reads_response_error_only_without_a_legacy_error(
+    top_level_error: dict[str, str], expected: tuple[int, int, str] | None
+) -> None:
+    """The top-level ``error`` mirror takes precedence whenever it is populated."""
+    event: dict[str, object] = {
+        "type": "response.failed",
+        "error": top_level_error,
+        "response": {
+            "status": "failed",
+            "error": {"code": "RuntimeError", "message": _APPROXIMATE_OVERFLOW},
+        },
+    }
+    assert _is_context_overflow_error(event) == expected
 
 
 def test_content_length_phrase_without_sizes_is_not_overflow() -> None:

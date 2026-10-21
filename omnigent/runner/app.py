@@ -788,6 +788,10 @@ def _is_context_overflow_error(
     actual_gt_max = re.search(r"(\d{4,})\D*>\D*(\d{4,})", msg)
     if actual_gt_max is not None:
         return int(actual_gt_max.group(2)), int(actual_gt_max.group(1)), None
+    # Claude Code's approximate form: "~1006037 tokens (limit 1000000)".
+    actual_with_limit = re.search(r"(\d{4,}) tokens \(limit (\d{4,})\)", msg)
+    if actual_with_limit is not None:
+        return int(actual_with_limit.group(2)), int(actual_with_limit.group(1)), raw
 
     # Without an explicit pair these counts are guesses, so keep the original text.
     numbers = re.findall(r"(\d{4,})", msg)
