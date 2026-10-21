@@ -6840,25 +6840,28 @@ def _runner_reject_detail(response: httpx.Response) -> str:
     return f"{code}: {detail}" if code else detail
 
 
-async def _reconnected_runner_turn_status(
+async def _reconnected_runner_has_message(
     session_id: str,
     conv: Conversation,
     runner_client: httpx.AsyncClient,
     conversation_store: ConversationStore,
     *,
+    item_id: str,
     runner_router: RunnerRouter | None,
-) -> str | None:
+) -> bool | None:
     """
-    Wait for a session's dropped runner tunnel to reconnect and read its turn status.
+    Wait for a session's dropped runner tunnel to reconnect and ask whether it got a message.
 
     :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
     :param conv: Conversation row for *session_id*.
     :param runner_client: HTTP client pointed at the session's runner.
     :param conversation_store: Store the relay persists the turn's items to.
+    :param item_id: Persisted item id the lost forward carried as ``persisted_item_id``.
     :param runner_router: Router used to wait for the runner to reconnect.
         ``None`` gives up immediately.
-    :returns: ``"running"`` or ``"idle"`` from the reconnected runner, or ``None``
-        when the same runner did not come back to serve the session.
+    :returns: Whether the reconnected runner already accepted the message, or
+        ``None`` when the same runner did not come back to serve the session or
+        cannot report its received messages.
     """
     runner_id = conv.runner_id
 
@@ -6886,16 +6889,21 @@ async def _reconnected_runner_turn_status(
     if current is None or current.runner_id != runner_id or runner_is_leaving():
         return None
     status: object = None
+    received: object = None
     try:
         await _ensure_runner_relay_ready(
             session_id, runner_id, runner_client, conversation_store, conversation=current
         )
         response = await runner_client.get(
-            f"/v1/sessions/{session_id}", timeout=_RUNNER_STATUS_PROBE_TIMEOUT_S
+            f"/v1/sessions/{session_id}",
+            params={"message_item_id": item_id},
+            timeout=_RUNNER_STATUS_PROBE_TIMEOUT_S,
         )
         if response.status_code == 200:
             payload = response.json()
-            status = payload.get("status") if isinstance(payload, dict) else None
+            if isinstance(payload, dict):
+                status = payload.get("status")
+                received = payload.get("message_received")
     except (httpx.HTTPError, ConnectionError, OmnigentError, ValueError):
         _logger.warning(
             "Could not read session=%s from reconnected runner %s",
@@ -6905,16 +6913,17 @@ async def _reconnected_runner_turn_status(
             extra={"session_id": session_id},
         )
         return None
-    if status not in ("running", "idle"):
+    if status not in ("running", "idle") or not isinstance(received, bool):
         _logger.warning(
-            "Reconnected runner %s cannot take session=%s (status=%s)",
+            "Reconnected runner %s cannot take session=%s (status=%s, message_received=%s)",
             runner_id,
             session_id,
             status,
+            received,
             extra={"session_id": session_id},
         )
         return None
-    return str(status)
+    return received
 
 
 async def _forward_event_to_runner(
@@ -7416,8 +7425,8 @@ async def _forward_event_to_runner(
     if _effective_harness is not None and _effective_harness != "auto":
         runner_body["harness_override"] = _effective_harness
 
-    # A follow-up sent mid-turn is queued behind the running turn, which a
-    # reconnect cannot tell apart from a delivered message.
+    # A mid-turn session is re-initialized when its runner reconnects, and that
+    # recovery can replay a trailing follow-up on its own.
     resumable_after_tunnel_loss = (
         body.type == "message"
         and _session_status_cache.get(session_id, conv.live_status) not in _MID_TURN_STATUSES
@@ -7436,20 +7445,25 @@ async def _forward_event_to_runner(
         except (httpx.HTTPError, ConnectionError) as exc:
             if not (resumable_after_tunnel_loss and _is_runner_tunnel_loss(exc)):
                 raise
-            runner_turn_status = await _reconnected_runner_turn_status(
-                session_id, conv, runner_client, conversation_store, runner_router=runner_router
+            runner_has_message = await _reconnected_runner_has_message(
+                session_id,
+                conv,
+                runner_client,
+                conversation_store,
+                item_id=persisted_items[0].id,
+                runner_router=runner_router,
             )
-            if runner_turn_status == "running":
-                # The lost forward reached the runner, which started its turn.
+            if runner_has_message is None:
+                raise
+            if runner_has_message:
                 _forward_resp = None
-            elif runner_turn_status == "idle":
+            else:
+                # The runner drops this redelivery if the lost forward is still ingesting.
                 _forward_resp = await runner_client.post(
                     f"/v1/sessions/{session_id}/events",
                     json=runner_body,
                     timeout=_RUNNER_FORWARD_TIMEOUT,
                 )
-            else:
-                raise
         # httpx only raises on transport errors, so a rejection (e.g. a 400 on a
         # malformed body, or a 501 from a runner with no process manager) would
         # otherwise read as a started turn: input.consumed would tell the client
@@ -8293,7 +8307,7 @@ _RELAY_TELEMETRY_SCHEMA = "runner_stream_recovery.v1"
 # stalled and re-registers once it can (observed: 24 s). Hold the message that
 # long before failing it instead of discarding it on a drop the runner outlives.
 _NATIVE_TERMINAL_ENSURE_RECONNECT_GRACE_S: float = 30.0
-# A new message whose forward the same drop cuts waits as long for its turn.
+# Turn forwards reuse the terminal-ensure reconnect grace.
 _TURN_FORWARD_RECONNECT_GRACE_S: float = _NATIVE_TERMINAL_ENSURE_RECONNECT_GRACE_S
 # Session statuses that mean a turn was in flight. A runner going away
 # only interrupts work in one of these states; from any other state the

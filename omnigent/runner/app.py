@@ -20,7 +20,7 @@ import re
 import tempfile
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -220,6 +220,9 @@ _SESSION_INIT_CANCEL_TIMEOUT_S = 20.0
 
 # Pending questions outlive prompt delivery; poll outside the turn watchdog.
 _CLAUDE_PENDING_PROMPT_POLL_S = 0.5
+
+# A forward redelivered after a tunnel drop arrives within seconds of the original.
+_RECEIVED_ITEM_IDS_PER_SESSION = 16
 
 
 def _warn_unresolved_sub_agent(session_id: str | None, sub_agent_name: str) -> None:
@@ -1409,6 +1412,8 @@ def create_runner_app(
     _model_dialog_watchers: set[asyncio.Task[None]] = set()
     _session_message_buffers: dict[str, list[dict[str, Any]]] = {}
     app.state.session_message_buffers = _session_message_buffers
+    # ``persisted_item_id`` values of the messages each session recently accepted.
+    _session_received_item_ids: dict[str, deque[str]] = {}
     _claude_prompt_waiters: dict[str, asyncio.Task[None]] = {}
     app.state.claude_prompt_waiters = _claude_prompt_waiters
     _author_attribution_sessions: set[str] = set()
@@ -3279,7 +3284,10 @@ def create_runner_app(
         )
 
     @app.get("/v1/sessions/{session_id}")
-    async def get_session(session_id: str) -> JSONResponse:
+    async def get_session(
+        session_id: str,
+        message_item_id: str | None = Query(default=None),
+    ) -> JSONResponse:
         if process_manager is None:
             return JSONResponse(
                 status_code=501,
@@ -3340,21 +3348,21 @@ def create_runner_app(
                     ),
                 },
             )
-        return JSONResponse(
-            status_code=200,
-            content={
-                "id": session_id,
-                "agent_id": agent_id,
-                "status": status,
-                "created_at": int(created_at),
-                "title": None,
-                "labels": {},
-                "runner_id": None,
-                "reasoning_effort": None,
-                "items": [],
-                "permission_level": None,
-            },
-        )
+        content: dict[str, Any] = {
+            "id": session_id,
+            "agent_id": agent_id,
+            "status": status,
+            "created_at": int(created_at),
+            "title": None,
+            "labels": {},
+            "runner_id": None,
+            "reasoning_effort": None,
+            "items": [],
+            "permission_level": None,
+        }
+        if message_item_id is not None:
+            content["message_received"] = _message_received(session_id, message_item_id)
+        return JSONResponse(status_code=200, content=content)
 
     @app.delete("/v1/sessions/{session_id}")
     async def delete_session(session_id: str) -> JSONResponse:
@@ -3407,6 +3415,7 @@ def create_runner_app(
         _ingest_next_seq.pop(session_id, None)
         _ingest_now_serving.pop(session_id, None)
         _ingest_cond.pop(session_id, None)
+        _session_received_item_ids.pop(session_id, None)
         _codex_terminal_ensure_locks.pop(session_id, None)
         _claude_terminal_ensure_locks.pop(session_id, None)
         _pi_terminal_ensure_locks.pop(session_id, None)
@@ -3829,6 +3838,18 @@ def create_runner_app(
     )
     _native_pane_names = _sign_in_watch.native_pane_names
     _start_sign_in_watch = _sign_in_watch.start_sign_in_watch
+
+    def _note_message_received(conv_id: str, message_body: Mapping[str, Any]) -> None:
+        """Record that *conv_id* accepted the persisted item *message_body* carries."""
+        item_id = message_body.get("persisted_item_id")
+        if isinstance(item_id, str) and item_id:
+            _session_received_item_ids.setdefault(
+                conv_id, deque(maxlen=_RECEIVED_ITEM_IDS_PER_SESSION)
+            ).append(item_id)
+
+    def _message_received(conv_id: str, item_id: object) -> bool:
+        """Return whether *conv_id* already accepted the message for *item_id*."""
+        return isinstance(item_id, str) and item_id in _session_received_item_ids.get(conv_id, ())
 
     def _begin_turn_slot(conv_id: str) -> None:
         """Bind the ``None`` sentinel and stamp a fresh epoch for the new turn.
@@ -6500,6 +6521,16 @@ def create_runner_app(
                 while _ingest_now_serving.get(conversation_id, 0) != _seq:
                     await _cond.wait()
             try:
+                if _message_received(conversation_id, message_body.get("persisted_item_id")):
+                    _logger.info(
+                        "post_session_events: dropping redelivered message conv=%s",
+                        conversation_id,
+                        extra={"session_id": conversation_id},
+                    )
+                    return JSONResponse(
+                        status_code=202,
+                        content={"status": "duplicate", "detail": "Message already received."},
+                    )
                 _raw_content = message_body.get("content")
                 if isinstance(_raw_content, list):
                     message_body["content"] = await _resolve_forwarded_message_content(
@@ -6530,6 +6561,7 @@ def create_runner_app(
                         conversation_id,
                         [],
                     ).append(message_body)
+                    _note_message_received(conversation_id, message_body)
                     if _can_forward and process_manager is not None:
                         try:
                             _hc = await process_manager.get_client(conversation_id, "any")
@@ -6587,6 +6619,7 @@ def create_runner_app(
                         _session_message_buffers.setdefault(conversation_id, []).append(
                             message_body
                         )
+                        _note_message_received(conversation_id, message_body)
                         _start_claude_prompt_waiter(conversation_id, pending_bridge_dir)
                         _logger.info(
                             "post_session_events: buffering message for pending Claude prompt "
@@ -6618,6 +6651,7 @@ def create_runner_app(
                     loaded.append(new_item)
                     _session_histories[conversation_id] = loaded
 
+                _note_message_received(conversation_id, message_body)
                 _begin_turn_slot(conversation_id)
                 _logger.info(
                     "post_session_events: starting background turn conv=%s",

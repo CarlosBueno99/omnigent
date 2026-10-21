@@ -765,10 +765,11 @@ def test_message_sent_as_the_tunnel_closes_is_delivered_after_reconnect(
         proxy.hold()
         try:
             send = pool.submit(_send_user_message, stack.client, session_id, message)
+            # The server persists the message just before forwarding it.
             _poll_until(
-                lambda: proxy.held_chunks > 0,
+                lambda: sends_and_replies()[0] == 1 and proxy.held_chunks > 0,
                 timeout=10.0,
-                what="the server to forward the message into the held runner tunnel",
+                what="the server to persist the message and forward it into the held tunnel",
             )
             time.sleep(1.0)
             assert not send.done(), "the send finished before the tunnel was cut"
@@ -780,9 +781,6 @@ def test_message_sent_as_the_tunnel_closes_is_delivered_after_reconnect(
             send.result(timeout=60.0)
         except httpx.HTTPStatusError as exc:
             stack.wait_runner_online()
-            if sends_and_replies()[0] == 0:
-                # A refusal that persisted nothing leaves the draft with the client to retry.
-                return
             deadline = time.monotonic() + 20.0
             while time.monotonic() < deadline and sends_and_replies()[1] == 0:
                 time.sleep(0.5)

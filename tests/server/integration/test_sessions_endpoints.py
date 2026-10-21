@@ -12890,10 +12890,11 @@ def _cut_forward_runner(
     failure_mode: str,
     forwards: list[dict[str, Any]],
     *,
-    runner_status: str | None,
+    runner_session: dict[str, Any] | None,
     cut_redelivery: bool = False,
+    message_reads: list[str | None] | None = None,
 ) -> httpx.AsyncClient:
-    """Runner whose first message forward a tunnel drop cuts, reporting *runner_status* after."""
+    """Runner whose first message forward a tunnel drop cuts, then serving *runner_session*."""
 
     def cut() -> NoReturn:
         if failure_mode == "tunnel_closed":
@@ -12908,9 +12909,11 @@ def _cut_forward_runner(
                 cut()
             return httpx.Response(202, json={})
         if request.method == "GET" and request.url.path == f"/v1/sessions/{session_id}":
-            if runner_status is None:
+            if message_reads is not None:
+                message_reads.append(request.url.params.get("message_item_id"))
+            if runner_session is None:
                 return httpx.Response(404, json={"error": "not_found"})
-            return httpx.Response(200, json={"id": session_id, "status": runner_status})
+            return httpx.Response(200, json={"id": session_id, **runner_session})
         return httpx.Response(202, json={})
 
     return httpx.AsyncClient(transport=httpx.MockTransport(runner), base_url="http://runner")
@@ -12925,8 +12928,13 @@ _TUNNEL_CUT_MESSAGE = {
 
 
 @pytest.mark.parametrize(
-    ("failure_mode", "runner_status"),
-    [("tunnel_closed", "idle"), ("runner_offline", "idle"), ("tunnel_closed", "running")],
+    ("failure_mode", "runner_status", "message_received"),
+    [
+        ("tunnel_closed", "idle", False),
+        ("runner_offline", "idle", False),
+        ("tunnel_closed", "idle", True),
+        ("tunnel_closed", "running", True),
+    ],
 )
 async def test_message_forward_cut_by_tunnel_drop_is_delivered_after_reconnect(
     client: httpx.AsyncClient,
@@ -12934,6 +12942,7 @@ async def test_message_forward_cut_by_tunnel_drop_is_delivered_after_reconnect(
     monkeypatch: pytest.MonkeyPatch,
     failure_mode: str,
     runner_status: str,
+    message_received: bool,
 ) -> None:
     """A new message whose forward a tunnel drop cuts reaches its runner once it is back."""
     from omnigent.runner.routing import RunnerRouter
@@ -12944,11 +12953,16 @@ async def test_message_forward_cut_by_tunnel_drop_is_delivered_after_reconnect(
     sid = session["id"]
     SqlAlchemyConversationStore(db_uri).replace_runner_id(sid, "message-runner")
     forwards: list[dict[str, Any]] = []
+    message_reads: list[str | None] = []
     wait_for_runner = AsyncMock(return_value=True)
     monkeypatch.setattr(RunnerRouter, "wait_for_runner", wait_for_runner)
     monkeypatch.setattr("omnigent.server.routes.sessions._ensure_runner_relay_ready", AsyncMock())
     async with _cut_forward_runner(
-        sid, failure_mode, forwards, runner_status=runner_status
+        sid,
+        failure_mode,
+        forwards,
+        runner_session={"status": runner_status, "message_received": message_received},
+        message_reads=message_reads,
     ) as runner_client:
         _route_to_runner(monkeypatch, runner_client)
 
@@ -12958,10 +12972,11 @@ async def test_message_forward_cut_by_tunnel_drop_is_delivered_after_reconnect(
     wait_for_runner.assert_awaited_once_with(
         "message-runner", timeout_s=orchestration_module._TURN_FORWARD_RECONNECT_GRACE_S
     )
+    assert message_reads == [forwards[0]["persisted_item_id"]]
     assert forwards[0]["tools"] == _TUNNEL_CUT_MESSAGE["tools"]
     assert forwards[0]["model_override"] == "model-x"
-    # A runner already running the lost forward's turn must not get the message twice.
-    assert forwards == ([forwards[0]] if runner_status == "running" else [forwards[0]] * 2)
+    # A runner that already accepted the lost forward must not get the message twice.
+    assert forwards == ([forwards[0]] if message_received else [forwards[0]] * 2)
     snapshot = (await client.get(f"/v1/sessions/{sid}")).json()
     assert [item["type"] for item in snapshot["items"]] == ["message"]
     assert snapshot["status"] != "failed"
@@ -12974,6 +12989,7 @@ async def test_message_forward_cut_by_tunnel_drop_is_delivered_after_reconnect(
         "runner_lost_session",
         "rebound_during_wait",
         "relay_unavailable",
+        "runner_cannot_report_messages",
         "redelivery_cut",
         "runner_handed_off",
         "server_shutting_down",
@@ -13007,6 +13023,11 @@ async def test_message_forward_cut_by_tunnel_drop_stays_unavailable_without_deli
         if scenario == "relay_unavailable" and wait_for_runner.await_count:
             raise OmnigentError("relay unavailable", code=ErrorCode.RUNNER_UNAVAILABLE)
 
+    # An older runner serves the session without reporting the messages it received.
+    runner_sessions: dict[str, dict[str, Any] | None] = {
+        "runner_lost_session": None,
+        "runner_cannot_report_messages": {"status": "idle"},
+    }
     wait_for_runner = AsyncMock(side_effect=reconnect)
     monkeypatch.setattr(RunnerRouter, "wait_for_runner", wait_for_runner)
     monkeypatch.setattr("omnigent.server.routes.sessions._ensure_runner_relay_ready", relay_ready)
@@ -13025,7 +13046,9 @@ async def test_message_forward_cut_by_tunnel_drop_stays_unavailable_without_deli
             sid,
             "tunnel_closed",
             forwards,
-            runner_status=None if scenario == "runner_lost_session" else "idle",
+            runner_session=runner_sessions.get(
+                scenario, {"status": "idle", "message_received": False}
+            ),
             cut_redelivery=scenario == "redelivery_cut",
         ) as runner_client:
             _route_to_runner(monkeypatch, runner_client)

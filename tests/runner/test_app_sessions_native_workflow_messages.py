@@ -202,6 +202,65 @@ async def test_turn_sequencing_buffers_concurrent_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_redelivered_message_is_acknowledged_without_running_again() -> None:
+    """A message re-sent with an accepted ``persisted_item_id`` starts no second turn."""
+    gate = asyncio.Event()
+    app, _pm, hc = _build_blocking_app(gate)
+    session_id = "6f1c0d3e9b8a4c2d8e7f6a5b4c3d2e1f"
+    events_url = f"/v1/sessions/{session_id}/events"
+
+    def message(text: str) -> dict[str, Any]:
+        return {
+            "type": "message",
+            "role": "user",
+            "model": "test-agent",
+            "content": [{"type": "input_text", "text": text}],
+            "harness": "openai-agents",
+            "persisted_item_id": f"item_{text}",
+        }
+
+    async with _runner_client(app) as client:
+
+        async def send(text: str) -> str:
+            return (await client.post(events_url, json=message(text))).json()["status"]
+
+        async def read_session(**params: str) -> dict[str, Any]:
+            return (await client.get(f"/v1/sessions/{session_id}", params=params)).json()
+
+        await client.post(
+            "/v1/sessions",
+            json={"session_id": session_id, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
+        )
+        assert await send("first") == "accepted"
+        await asyncio.sleep(0.05)
+        assert await send("second") == "buffered"
+        mid_turn_redeliveries = [await send("first"), await send("second")]
+        buffered = list(app.state.session_message_buffers[session_id])
+        received = {
+            item_id: (await read_session(message_item_id=item_id)).get("message_received")
+            for item_id in ("item_first", "item_second", "item_third")
+        }
+        plain_read = await read_session()
+
+        gate.set()
+        for _ in range(500):
+            settled = not app.state.session_message_buffers.get(session_id)
+            if settled and (await read_session())["status"] == "idle":
+                break
+            await asyncio.sleep(0.01)
+        harness_turns = len(hc.posted_bodies)
+        redelivery_after_turn = await send("first")
+        await asyncio.sleep(0.05)
+
+    assert mid_turn_redeliveries == ["duplicate", "duplicate"]
+    assert [entry["persisted_item_id"] for entry in buffered] == ["item_second"]
+    assert received == {"item_first": True, "item_second": True, "item_third": False}
+    assert "message_received" not in plain_read
+    assert redelivery_after_turn == "duplicate"
+    assert len(hc.posted_bodies) == harness_turns
+
+
+@pytest.mark.asyncio
 async def test_turn_lifecycle_events() -> None:
     """Turn start/complete lifecycle events appear on the session stream."""
     app, _pm, _hc = _build_lifecycle_app()
