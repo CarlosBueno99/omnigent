@@ -221,8 +221,9 @@ async def test_redelivered_message_is_acknowledged_without_running_again() -> No
 
     async with _runner_client(app) as client:
 
-        async def send(text: str) -> str:
-            return (await client.post(events_url, json=message(text))).json()["status"]
+        async def send(text: str) -> tuple[str, bool | None]:
+            reply = (await client.post(events_url, json=message(text))).json()
+            return reply["status"], reply.get("turn_active")
 
         async def read_session(**params: str) -> dict[str, Any]:
             return (await client.get(f"/v1/sessions/{session_id}", params=params)).json()
@@ -231,9 +232,9 @@ async def test_redelivered_message_is_acknowledged_without_running_again() -> No
             "/v1/sessions",
             json={"session_id": session_id, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
         )
-        assert await send("first") == "accepted"
+        assert await send("first") == ("accepted", None)
         await asyncio.sleep(0.05)
-        assert await send("second") == "buffered"
+        assert await send("second") == ("buffered", None)
         mid_turn_redeliveries = [await send("first"), await send("second")]
         buffered = list(app.state.session_message_buffers[session_id])
         received = {
@@ -252,11 +253,11 @@ async def test_redelivered_message_is_acknowledged_without_running_again() -> No
         redelivery_after_turn = await send("first")
         await asyncio.sleep(0.05)
 
-    assert mid_turn_redeliveries == ["duplicate", "duplicate"]
+    assert mid_turn_redeliveries == [("duplicate", True), ("duplicate", True)]
     assert [entry["persisted_item_id"] for entry in buffered] == ["item_second"]
     assert received == {"item_first": True, "item_second": True, "item_third": False}
     assert "message_received" not in plain_read
-    assert redelivery_after_turn == "duplicate"
+    assert redelivery_after_turn == ("duplicate", False)
     # One turn for "first", then one for the buffered "second".
     assert len(hc.posted_bodies) == harness_turns == 2
 

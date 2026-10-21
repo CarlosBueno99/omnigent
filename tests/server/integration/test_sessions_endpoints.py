@@ -13137,6 +13137,52 @@ async def test_message_redelivery_rejected_after_reconnect_fails_with_reason(
     assert "harness_spawn_failed" in snapshot["last_task_error"]["message"]
 
 
+@pytest.mark.parametrize("turn_active", [False, True])
+async def test_message_runner_already_received_releases_sender_without_turn(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    turn_active: bool,
+) -> None:
+    """A message the runner drops as already received publishes idle unless a turn runs."""
+
+    def runner(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/events"):
+            return httpx.Response(
+                202,
+                json={
+                    "status": "duplicate",
+                    "detail": "Message already received.",
+                    "turn_active": turn_active,
+                },
+            )
+        return httpx.Response(202, json={})
+
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    sid = session["id"]
+    published: list[tuple[str, dict[str, Any]]] = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(runner), base_url="http://runner"
+    ) as runner_client:
+        _route_to_runner(monkeypatch, runner_client)
+        _capture_published(monkeypatch, published)
+
+        response = await client.post(
+            f"/v1/sessions/{sid}/events",
+            json={
+                "type": "message",
+                "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            },
+        )
+
+    assert response.status_code == 202, response.text
+    session_events = [
+        event.get("status", event["type"]) for event_sid, event in published if event_sid == sid
+    ]
+    expected = ["session.input.consumed"] + ([] if turn_active else ["idle"])
+    assert session_events == expected
+
+
 async def test_message_forward_rejection_surfaces_failed_with_reason(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

@@ -3851,9 +3851,11 @@ def create_runner_app(
     def _note_message_received(conv_id: str, item_id: object) -> None:
         """Record that *conv_id* accepted the message persisted as *item_id*."""
         if isinstance(item_id, str) and item_id:
-            _session_received_item_ids.setdefault(
+            received = _session_received_item_ids.setdefault(
                 conv_id, deque(maxlen=_RECEIVED_ITEM_IDS_PER_SESSION)
-            ).append(item_id)
+            )
+            if item_id not in received:
+                received.append(item_id)
 
     def _message_received(conv_id: str, item_id: object) -> bool:
         """Return whether *conv_id* already accepted the message for *item_id*."""
@@ -6535,9 +6537,21 @@ def create_runner_app(
                         conversation_id,
                         extra={"session_id": conversation_id},
                     )
+                    turn_active = (
+                        conversation_id in _active_turns
+                        or bool(_session_message_buffers.get(conversation_id))
+                        or (
+                            process_manager is not None
+                            and process_manager.has_active_turn(conversation_id)
+                        )
+                    )
                     return JSONResponse(
                         status_code=202,
-                        content={"status": "duplicate", "detail": "Message already received."},
+                        content={
+                            "status": "duplicate",
+                            "detail": "Message already received.",
+                            "turn_active": turn_active,
+                        },
                     )
                 _raw_content = message_body.get("content")
                 if isinstance(_raw_content, list):

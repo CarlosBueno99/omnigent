@@ -6840,6 +6840,23 @@ def _runner_reject_detail(response: httpx.Response) -> str:
     return f"{code}: {detail}" if code else detail
 
 
+def _runner_dropped_message_without_turn(response: httpx.Response) -> bool:
+    """
+    Return whether the runner dropped an already-received message and has no turn to run.
+
+    :param response: The runner's 2xx response to the forwarded message.
+    :returns: ``True`` only for a ``duplicate`` answer reporting no active turn.
+    """
+    payload: object = None
+    with contextlib.suppress(ValueError, AttributeError):
+        payload = response.json()
+    return (
+        isinstance(payload, dict)
+        and payload.get("status") == "duplicate"
+        and payload.get("turn_active") is False
+    )
+
+
 async def _reconnected_runner_has_message(
     session_id: str,
     conv: Conversation,
@@ -7528,6 +7545,9 @@ async def _forward_event_to_runner(
         # Publish input.consumed AFTER the forward succeeds —
         # the runner has the message and will start the turn.
         _publish_input_consumed(session_id, persisted_items[0])
+        if _forward_resp is not None and _runner_dropped_message_without_turn(_forward_resp):
+            # No turn will publish an idle edge to release the sender's composer.
+            _publish_status(session_id, "idle")
         _logger.info(
             "turn dispatched to runner for session=%s",
             session_id,
