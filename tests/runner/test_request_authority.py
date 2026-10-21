@@ -8,6 +8,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from omnigent.harnesses.codex_native.app_server import CodexAppServerResponseError
 from omnigent.runner.request_authority import (
     RequesterClient,
     TurnAuthority,
@@ -126,10 +127,11 @@ async def test_parallel_http_and_nested_calls_preserve_each_snapshot():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize(
-    "mode", ["consumed", "terminal", "missing-client-id", "replacement", "pending"]
+    "mode", ["consumed", "terminal", "missing-client-id", "replacement", "completed", "pending"]
 )
-async def test_native_consumed_inputs_are_checked_against_rpc_receipts(mode):
+async def test_native_consumed_inputs_are_checked_against_rpc_receipts(mode, legacy):
     input_id = uuid4().hex
     state = TurnAuthority(RequestAuthority((input_id,)), native_turn_id="turn-1")
     page = {"result": {"data": [{"id": "turn-1", "status": "inProgress"}]}}
@@ -141,12 +143,32 @@ async def test_native_consumed_inputs_are_checked_against_rpc_receipts(mode):
     if mode == "pending":
         state.begin_injection("injection-1", RequestAuthority((uuid4().hex,)))
     last_page = {"result": {"data": [{"id": "turn-2"}]}} if mode == "replacement" else page
+    if mode == "completed":
+        last_page = {"result": {"data": [{"id": "turn-1", "status": "completed"}]}}
     client = AsyncMock()
     client.request.side_effect = [
         page,
+        *(
+            [
+                CodexAppServerResponseError(
+                    {"code": -32600, "message": "unknown variant `thread/items/list`"}
+                )
+            ]
+            if legacy
+            else []
+        ),
         {
             "result": {
-                "data": [{"turnId": "turn-1", "item": item}],
+                "data": [
+                    {
+                        "id": "turn-1",
+                        "status": "inProgress",
+                        "itemsView": "full",
+                        "items": [item],
+                    }
+                ]
+                if legacy
+                else [{"turnId": "turn-1", "item": item}],
                 "nextCursor": None,
             }
         },
@@ -156,8 +178,64 @@ async def test_native_consumed_inputs_are_checked_against_rpc_receipts(mode):
     assert result.verified is (mode == "consumed")
     if mode == "consumed":
         assert result.input_ids == (input_id,)
+        client.request.assert_any_call(
+            "thread/turns/list" if legacy else "thread/items/list",
+            {"threadId": "thread", "limit": 1, "sortDirection": "desc", "itemsView": "full"}
+            if legacy
+            else {"threadId": "thread", "turnId": "turn-1", "limit": 256},
+        )
     if mode == "pending":
         client.request.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "summary",
+        "wrong-turn",
+        "completed",
+        "malformed",
+        "oversized",
+        "duplicate",
+        "rpc-error",
+        "bad-page",
+    ],
+)
+async def test_native_receipt_fallback_fails_closed(fault):
+    input_id = uuid4().hex
+    state = TurnAuthority(RequestAuthority((input_id,)), native_turn_id="turn-1")
+    page = {"result": {"data": [{"id": "turn-1", "status": "inProgress"}]}}
+    item = {"type": "userMessage", "clientId": input_id}
+    turn = {"id": "turn-1", "status": "inProgress", "itemsView": "full", "items": [item]}
+    if fault == "summary":
+        turn["itemsView"] = "summary"
+    elif fault == "wrong-turn":
+        turn["id"] = "turn-2"
+    elif fault == "completed":
+        turn["status"] = "completed"
+    elif fault == "malformed":
+        turn["items"] = [None]
+    elif fault == "oversized":
+        turn["items"] = [item] * 4097
+    elif fault == "duplicate":
+        turn["items"] = [item, item]
+    error = CodexAppServerResponseError({"code": -32601, "message": "Method not found"})
+    if fault == "rpc-error":
+        error = CodexAppServerResponseError({"code": -32600, "message": "Invalid cursor"})
+    client = AsyncMock()
+    client.request.side_effect = [
+        page,
+        {} if fault == "bad-page" else error,
+        {"result": {"data": [turn]}},
+        page,
+    ]
+    if fault in {"rpc-error", "bad-page"}:
+        with pytest.raises(CodexAppServerResponseError if fault == "rpc-error" else ValueError):
+            await native_snapshot(client, "thread", state)
+        assert client.request.call_count == 2
+    else:
+        assert not (await native_snapshot(client, "thread", state)).verified
 
 
 @pytest.mark.parametrize("enabled", [False, True])
