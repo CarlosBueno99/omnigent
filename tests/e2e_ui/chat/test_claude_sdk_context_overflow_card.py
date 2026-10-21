@@ -62,7 +62,9 @@ def _create_claude_sdk_session(base_url: str, runner_id: str, mock_url: str) -> 
 
 
 def _snapshot(base_url: str, session_id: str) -> dict[str, object]:
-    return httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0).json()
+    response = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+    response.raise_for_status()
+    return response.json()
 
 
 def _post_heartbeat(base_url: str, session_id: str) -> None:
@@ -90,7 +92,6 @@ def _wait_for_failure_card(
     headline = card.get_by_test_id("error-headline")
     expect(headline).to_be_visible(timeout=15_000)
     mark("card visible")
-    controls = [text.strip() for text in card.get_by_role("button").all_inner_texts()]
     page.wait_for_timeout(_HOLD_MS)
     toggle = card.locator('button[aria-expanded="false"]')
     if toggle.count():
@@ -102,7 +103,6 @@ def _wait_for_failure_card(
     page.wait_for_timeout(_HOLD_MS)
     return {
         "headline": headline.inner_text(),
-        "controls": [c for c in controls if c],
         "detail": detail.inner_text(),
     }
 
@@ -166,8 +166,9 @@ def test_claude_sdk_prompt_too_long_cards_read_as_context_overflow(
         mark("journey complete")
 
         assert [card["headline"] for card in cards] == [_OVERFLOW_HEADLINE] * len(cards), cards
-        # The CLI rewrites the mock's explicit pair, so the card keeps its original text.
+        # Claude Code's plain and approximate forms state no explicit pair, so cards keep its text.
         assert all("Prompt is too long" in card["detail"] for card in cards), cards
+        assert any("(limit 1000000)" in card["detail"] for card in cards), cards
         last_error = snapshot.get("last_task_error") or {}
         assert last_error.get("code") == "context_length_exceeded", last_error
     finally:
