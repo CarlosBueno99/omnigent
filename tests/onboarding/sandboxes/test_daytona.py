@@ -878,6 +878,13 @@ def test_stop_settles_each_state_without_conflicting_transitions(
             [900.0],
         ),
         (_FakeSandboxState.STOPPING, _FakeSandboxState.DESTROYED, "no longer exists", True, []),
+        (
+            _FakeSandboxState.STOPPING,
+            _FakeSandboxState.ERROR,
+            "failed with state: error",
+            False,
+            [],
+        ),
         (_FakeSandboxState.ARCHIVING, _FakeSandboxState.ERROR, "in state 'error'", False, []),
         (_FakeSandboxState.ARCHIVING, _FakeSandboxState.DESTROYED, "no longer exists", True, []),
         (
