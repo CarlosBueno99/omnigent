@@ -1242,9 +1242,11 @@ describe("WorkspacePanel browser tab", () => {
 /** Desktop bridge stub whose views report URLs like the Electron shell does. */
 function installBrowserUrlBridge(initialUrls: Record<string, string> = {}) {
   const urlListeners = new Set<(payload: { conversationId: string; url: string }) => void>();
+  const browserSetSuppressed = vi.fn().mockResolvedValue({ ok: true });
   Object.assign(window, {
     omnigentDesktop: {
       kind: "electron",
+      browserSetSuppressed,
       browserOpenOrNavigate: vi.fn().mockResolvedValue({ ok: true }),
       browserClose: vi.fn().mockResolvedValue({ ok: true }),
       browserHasView: vi.fn((viewId: string) =>
@@ -1262,6 +1264,7 @@ function installBrowserUrlBridge(initialUrls: Record<string, string> = {}) {
     },
   });
   return {
+    browserSetSuppressed,
     navigate: (tabId: string, url: string) =>
       act(() => {
         for (const listener of urlListeners) {
@@ -1329,6 +1332,19 @@ describe("WorkspacePanel browser tab names", () => {
     expect(screen.getByRole("tab", { name: "Dev server" })).toBeInTheDocument();
   });
 
+  it("caps a long URL label when it seeds the rename field", () => {
+    openTwoTabs();
+    const bridge = installBrowserUrlBridge();
+    renderWorkspace({ showBrowserTab: true, rightRailTab: "browser" });
+    const longLabel = `example.com/${"a".repeat(100)}`;
+    bridge.navigate("tab-a", `https://${longLabel}`);
+
+    fireEvent.doubleClick(screen.getByRole("tab", { name: longLabel }));
+    expect(screen.getByRole("textbox", { name: "Browser tab name" })).toHaveValue(
+      longLabel.slice(0, 80),
+    );
+  });
+
   it("renames from the context menu and resets back to the URL label", async () => {
     openTwoTabs();
     const bridge = installBrowserUrlBridge();
@@ -1336,12 +1352,14 @@ describe("WorkspacePanel browser tab names", () => {
     bridge.navigate("tab-b", "https://docs.python.org/3/library/json.html");
     const tab = screen.getByRole("tab", { name: "docs.python.org/…/library/json.html" });
 
-    // A fresh tab has nothing to reset.
+    // A fresh tab has nothing to reset. The native view hides while the menu is open.
     fireEvent.contextMenu(tab);
     expect(await screen.findByRole("menuitem", { name: "Rename" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Reset name" })).toBeNull();
+    expect(bridge.browserSetSuppressed).toHaveBeenLastCalledWith(true);
     fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
     const field = await screen.findByRole("textbox", { name: "Browser tab name" });
+    expect(bridge.browserSetSuppressed).toHaveBeenLastCalledWith(false);
     fireEvent.change(field, { target: { value: "JSON docs" } });
     fireEvent.blur(field);
     expect(screen.getByRole("tab", { name: "JSON docs" })).toBeInTheDocument();

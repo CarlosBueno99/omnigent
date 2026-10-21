@@ -190,7 +190,8 @@ function BrowserTabNameInput({
   onCommit: (value: string) => void;
   onCancel: () => void;
 }) {
-  const [value, setValue] = useState(initialValue);
+  // maxLength only limits typing, so cap a long URL label used as the start value.
+  const [value, setValue] = useState(() => initialValue.slice(0, BROWSER_TAB_NAME_MAX_CHARS));
   const inputRef = useRef<HTMLInputElement>(null);
   const settledRef = useRef(false);
   const composingRef = useRef(false);

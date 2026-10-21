@@ -28,6 +28,7 @@ function installBridge(hasView: (viewId: string) => Promise<{ exists: boolean; u
   });
   return {
     urlListeners,
+    closedListeners,
     navigate: (viewId: string, url: string) =>
       act(() => urlListeners.forEach((listener) => listener({ conversationId: viewId, url }))),
     closeView: (viewId: string) =>
@@ -81,6 +82,20 @@ describe("useBrowserTabUrls", () => {
     expect(result.current).toEqual({ "tab-one": "https://newer.example/" });
   });
 
+  it("keeps a close that lands before the existing-view snapshot", async () => {
+    let finishProbe!: (value: { exists: boolean; url?: string }) => void;
+    const bridge = installBridge(
+      () =>
+        new Promise((resolve) => {
+          finishProbe = resolve;
+        }),
+    );
+    const { result } = renderHook(() => useBrowserTabUrls("session-a", ["tab-one"]));
+    bridge.closeView(browserViewId("session-a", "tab-one"));
+    await act(async () => finishProbe({ exists: true, url: "https://stale.example/" }));
+    expect(result.current).toEqual({});
+  });
+
   it("does nothing outside a browser-capable shell", () => {
     const { result } = renderHook(() => useBrowserTabUrls("session-a", ["tab-one"]));
     expect(result.current).toEqual({});
@@ -90,7 +105,9 @@ describe("useBrowserTabUrls", () => {
     const bridge = installBridge(() => Promise.resolve({ exists: false }));
     const { unmount } = renderHook(() => useBrowserTabUrls("session-a", ["tab-one"]));
     expect(bridge.urlListeners.size).toBe(1);
+    expect(bridge.closedListeners.size).toBe(1);
     unmount();
     expect(bridge.urlListeners.size).toBe(0);
+    expect(bridge.closedListeners.size).toBe(0);
   });
 });

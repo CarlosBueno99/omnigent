@@ -8,6 +8,7 @@
 
 import type { RightRailTab } from "@/shell/railTabs";
 import type { DefaultWorkspaceTab } from "./workspaceTabPreferences";
+import { BROWSER_TAB_NAME_MAX_CHARS } from "./browserTabLabel";
 
 const WORKSPACE_PANEL_TABS: readonly DefaultWorkspaceTab[] = [
   "files",
@@ -133,12 +134,12 @@ function sanitize(entry: unknown): SessionWorkspaceState {
     record.browserNames !== null &&
     !Array.isArray(record.browserNames)
   ) {
-    state.browserNames = Object.fromEntries(
-      Object.entries(record.browserNames).filter(
-        (named): named is [string, string] =>
-          typeof named[1] === "string" && named[1].trim().length > 0,
-      ),
-    );
+    const names: Record<string, string> = {};
+    for (const [tabId, name] of Object.entries(record.browserNames)) {
+      const kept = typeof name === "string" ? name.trim().slice(0, BROWSER_TAB_NAME_MAX_CHARS) : "";
+      if (kept) names[tabId] = kept;
+    }
+    state.browserNames = names;
   }
   if (Array.isArray(record.openSideChats)) {
     state.openSideChats = [

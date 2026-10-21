@@ -10,7 +10,11 @@ describe("browserUrlLabel", () => {
     ["https://github.com/omnigent-ai/omnigent/pull/123", "github.com/…/pull/123"],
     ["https://example.com/a%20b/c/d%20e", "example.com/…/c/d e"],
     ["https://example.com/bad%E0%A4%A/x/y", "example.com/…/x/y"],
+    ["http://[::1]:3000/x", "[::1]:3000/x"],
+    ["https://example.com/a/b/", "example.com/a/b"],
+    ["https://example.com/a%2Fb", "example.com/a/b"],
     ["file:///Users/me/report.html", "report.html"],
+    ["file:///", "file:///"],
     ["data:text/plain,hello", "data:text/plain,hello"],
     ["not a url", "not a url"],
     ["", NEW_BROWSER_TAB_LABEL],
@@ -20,6 +24,12 @@ describe("browserUrlLabel", () => {
     [undefined, NEW_BROWSER_TAB_LABEL],
   ])("labels %j as %j", (url, label) => {
     expect(browserUrlLabel(url)).toBe(label);
+  });
+
+  it("shortens a long URL that has no host", () => {
+    const dataUrl = `data:text/html;base64,${"A".repeat(5000)}`;
+    expect(browserUrlLabel(dataUrl)).toBe(`${dataUrl.slice(0, 60)}…`);
+    expect(browserUrlLabel("x".repeat(70))).toBe(`${"x".repeat(60)}…`);
   });
 });
 

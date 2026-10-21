@@ -55,6 +55,11 @@ function writeBrowserTabsState(conversationId: string, next: BrowserTabsState): 
   });
 }
 
+function withOpenTabNames(state: BrowserTabsState): BrowserTabsState {
+  const names = Object.entries(state.names).filter(([tabId]) => state.tabs.includes(tabId));
+  return { ...state, names: Object.fromEntries(names) };
+}
+
 function withAgentBrowserSelected(current: BrowserTabsState): BrowserTabsState {
   return {
     ...current,
@@ -81,9 +86,10 @@ export function useBrowserTabs(conversationId: string) {
 
   const update = useCallback(
     (mutate: (current: BrowserTabsState) => BrowserTabsState) => {
-      writeBrowserTabsState(conversationId, mutate(readBrowserTabsState(conversationId)));
-      // Re-read so names pruned on write (closed tabs) leave the hook state too.
-      setState(readBrowserTabsState(conversationId));
+      // Keep the next state in memory so a failed storage write leaves the tabs usable.
+      const next = withOpenTabNames(mutate(readBrowserTabsState(conversationId)));
+      writeBrowserTabsState(conversationId, next);
+      setState(next);
     },
     [conversationId],
   );

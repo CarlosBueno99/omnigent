@@ -4,6 +4,15 @@ export const NEW_BROWSER_TAB_LABEL = "New tab";
 /** Longest manual browser-tab name the rename field accepts. */
 export const BROWSER_TAB_NAME_MAX_CHARS = 80;
 
+/** Longest label for a URL without a host, such as a `data:` page. */
+const RAW_URL_LABEL_MAX_CHARS = 60;
+
+function clampRawLabel(text: string): string {
+  return text.length > RAW_URL_LABEL_MAX_CHARS
+    ? `${text.slice(0, RAW_URL_LABEL_MAX_CHARS)}…`
+    : text;
+}
+
 function decodeSegment(segment: string): string {
   try {
     return decodeURIComponent(segment);
@@ -24,7 +33,7 @@ export function browserUrlLabel(url: string | null | undefined): string {
   try {
     parsed = new URL(trimmed);
   } catch {
-    return trimmed;
+    return clampRawLabel(trimmed);
   }
   const segments = parsed.pathname.split("/").filter(Boolean).map(decodeSegment);
   if (parsed.protocol === "http:" || parsed.protocol === "https:") {
@@ -34,7 +43,7 @@ export function browserUrlLabel(url: string | null | undefined): string {
     return segments.length > 2 ? `${host}/…/${tail}` : `${host}/${tail}`;
   }
   if (parsed.protocol === "file:") return segments.at(-1) ?? trimmed;
-  return trimmed;
+  return clampRawLabel(trimmed);
 }
 
 /** The visible name of a browser tab: its manual name, else its URL label. */

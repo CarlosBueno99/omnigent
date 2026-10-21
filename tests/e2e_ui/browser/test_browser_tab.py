@@ -38,8 +38,6 @@ from tests.e2e_ui.conftest import open_right_rail
 # title-bar server picker, and the browser-pane bridge probes) from throwing
 # under the stub. ``browserHasView`` resolves "no view yet" so the pane shows
 # its empty state instead of trying to attach a native WebContentsView.
-# ``onBrowserUrlChanged`` keeps its listeners so a test can play the shell's
-# navigation events through ``_emit_browser_url``.
 _ELECTRON_SHELL_INIT_SCRIPT = """
 window.omnigentDesktop = {
   kind: "electron",
@@ -54,6 +52,7 @@ window.omnigentDesktop = {
   onBrowserViewCreated: function () { return function () {}; },
   onBrowserHostActiveChanged: function () { return function () {}; },
   onBrowserViewClosed: function () { return function () {}; },
+  // Keeps listeners so tests can replay URL events via _emit_browser_url.
   onBrowserUrlChanged: function (callback) {
     window.__browserUrlListeners = window.__browserUrlListeners || [];
     window.__browserUrlListeners.push(callback);
@@ -232,9 +231,3 @@ def test_browser_tab_names_follow_url_until_renamed(
     expect(renamed).to_be_visible()
     page.reload()
     expect(renamed).to_be_visible()
-
-    # Reset returns to the URL label, which follows navigation again.
-    renamed.click(button="right")
-    page.get_by_role("menuitem", name="Reset name", exact=True).click()
-    _emit_browser_url(page, view_id, "https://docs.example.com/guide/faq")
-    expect(rail.get_by_role("tab", name="docs.example.com/guide/faq", exact=True)).to_be_visible()

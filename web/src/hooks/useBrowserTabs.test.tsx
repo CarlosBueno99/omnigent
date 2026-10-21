@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { emitBrowserActionRequest } from "@/lib/browserActionBus";
-import { readSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
+import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import {
   AGENT_BROWSER_TAB_ID,
   browserViewId,
@@ -114,6 +114,25 @@ describe("browser soft tabs", () => {
     await act(() => result.current.close(secondId));
     expect(result.current.names).toEqual({});
     expect(readSessionWorkspaceState("session-a").browserNames).toBeUndefined();
+  });
+
+  it("still shows a change when the workspace state cannot be saved", () => {
+    writeSessionWorkspaceState("session-a", {
+      openBrowsers: ["saved"],
+      selectedBrowserId: "saved",
+    });
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+    try {
+      const { result } = renderHook(() => useBrowserTabs("session-a"));
+      act(() => result.current.rename("saved", "Docs"));
+      expect(result.current.names).toEqual({ saved: "Docs" });
+      act(() => result.current.add());
+      expect(result.current.tabs).toEqual(["saved", result.current.selected]);
+    } finally {
+      setItem.mockRestore();
+    }
   });
 
   it("creates independent views and restores the selection on remount", () => {

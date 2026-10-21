@@ -171,12 +171,18 @@ describe("sessionWorkspaceState", () => {
       JSON.stringify([
         {
           id: "conv_bad",
-          state: { openBrowsers: ["a", "b", "c"], browserNames: { a: "Docs", b: 7, c: "  " } },
+          state: {
+            openBrowsers: ["a", "b", "c", "d"],
+            browserNames: { a: " Docs ", b: 7, c: "  ", d: "y".repeat(100) },
+          },
         },
         { id: "conv_list", state: { openBrowsers: ["a"], browserNames: ["Docs"] } },
       ]),
     );
-    expect(readSessionWorkspaceState("conv_bad").browserNames).toEqual({ a: "Docs" });
+    expect(readSessionWorkspaceState("conv_bad").browserNames).toEqual({
+      a: "Docs",
+      d: "y".repeat(80),
+    });
     expect(readSessionWorkspaceState("conv_list").browserNames).toBeUndefined();
   });
 
