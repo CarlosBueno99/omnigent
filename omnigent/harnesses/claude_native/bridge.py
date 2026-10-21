@@ -6302,22 +6302,12 @@ def _permissions_dialog_visible(pane: str) -> bool:
     """
     Return whether Claude Code's ``/permissions`` dialog is on screen.
 
-    The dialog is a settings surface Escape dismisses, not a decision Claude
-    is waiting on, yet it looks like both things the bridge must not type
-    into: its rule lists end in the decision prompts' "Enter to select · Esc
-    to cancel" footer, and their framed search box puts a ``❯``-led row under
-    a rule exactly like the composer. The tab footer is read from the region
-    below the last box rule, clamped to the last :data:`_PROMPT_SCAN_TAIL_LINES`
-    rows so a framed snippet quoted in the transcript above a box-less screen
-    cannot widen it; a free composer shows only its mode footer there. The
-    rule editor and save-location
-    screens, which lack tab hints, are read from their headline within the
-    last :data:`_DIALOG_SCAN_TAIL_LINES` rows, and only under their own
-    "Enter to submit/confirm" footer with no navigation hint, which a question
-    echoing those words still carries. Both reads require an Escape hint in
-    that footer region, so dialog chrome quoted in a transcript above a free
-    composer never qualifies. Rows are joined and lowercased before matching,
-    since a narrow pane wraps the footer and Claude Code's casing drifts.
+    The dialog is a settings surface Escape dismisses, though its footers match
+    the decision prompts' and its search box mimics the composer. Rule lists are
+    recognized by the tab footer below the last box rule (within the last
+    :data:`_PROMPT_SCAN_TAIL_LINES` rows); the rule editor and save-location
+    screens by their headline over an "Enter to submit/confirm" footer that
+    carries no question navigation hint. Both require an Escape hint there.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: ``True`` when any ``/permissions`` screen holds the terminal.
