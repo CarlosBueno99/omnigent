@@ -21,6 +21,21 @@ from omnigent.util.json_types import JsonObject as _JsonObject
 
 _logger = logging.getLogger("omnigent.runner.app")
 
+_INPUT_ITEM_TYPES = frozenset({"message", "function_call", "function_call_output", "error"})
+
+
+def _trailing_user_message_id(items: list[_JsonObject]) -> str | None:
+    """Return the id of the stored user message that converted *items* end with."""
+    for item in reversed(items):
+        item_type = item.get("type")
+        if item_type == "compaction":
+            return None
+        if item_type in _INPUT_ITEM_TYPES:
+            item_id = item.get("id")
+            is_user_message = item_type == "message" and item.get("role", "user") == "user"
+            return item_id if is_user_message and isinstance(item_id, str) else None
+    return None
+
 
 class _LoadHistoryAsInputFn(Protocol):
     async def __call__(
@@ -47,6 +62,7 @@ def build_session_history(
     _persist_cancellation_items: Callable[[str, list[_JsonObject]], Coroutine[Any, Any, None]],
     _session_histories: dict[str, list[_JsonObject]],
     _session_spec_cache: dict[str, _SpecEntry | None],
+    _trailing_user_message_item_ids: dict[str, str],
     server_client: httpx.AsyncClient,
 ) -> SessionHistory:
     """Build the session-history helpers over the runner app's session state.
@@ -143,6 +159,11 @@ def build_session_history(
         if drop_item_id is not None:
             all_items = [it for it in all_items if it.get("id") != drop_item_id]
 
+        trailing_id = _trailing_user_message_id(all_items)
+        if trailing_id is None:
+            _trailing_user_message_item_ids.pop(session_id, None)
+        else:
+            _trailing_user_message_item_ids[session_id] = trailing_id
         converted = _convert_raw_items_to_input(all_items)
         # Items are persisted pre-resolution, so reloaded history can still
         # carry raw file_id blocks (the runner has no file/artifact stores).
@@ -207,12 +228,7 @@ def build_session_history(
         _skipped_types: list[str] = []
         for item in remaining:
             item_type = item.get("type")
-            if item_type not in (
-                "message",
-                "function_call",
-                "function_call_output",
-                "error",
-            ):
+            if item_type not in _INPUT_ITEM_TYPES:
                 _skipped_types.append(str(item_type))
             if item_type == "message":
                 result.append(

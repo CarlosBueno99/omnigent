@@ -217,7 +217,7 @@ class _TunnelIngressProxy:
         self._flowing = threading.Event()
         self._flowing.set()
         self.rejected_connections = 0
-        self.held_chunks = 0
+        self.held_server_to_runner_chunks = 0
         proxy = self
 
         class _Handler(socketserver.BaseRequestHandler):
@@ -248,12 +248,15 @@ class _TunnelIngressProxy:
         with contextlib.suppress(OSError):
             sock.close()
 
-    def _pipe(self, source: socket.socket, destination: socket.socket) -> None:
+    def _pipe(
+        self, source: socket.socket, destination: socket.socket, *, server_to_runner: bool
+    ) -> None:
         try:
             while chunk := source.recv(65536):
                 if not self._flowing.is_set():
-                    with self._lock:
-                        self.held_chunks += 1
+                    if server_to_runner:
+                        with self._lock:
+                            self.held_server_to_runner_chunks += 1
                     self._flowing.wait()
                 destination.sendall(chunk)
         except OSError:
@@ -290,10 +293,11 @@ class _TunnelIngressProxy:
             forward = threading.Thread(
                 target=self._pipe,
                 args=(client, upstream),
+                kwargs={"server_to_runner": False},
                 daemon=True,
             )
             forward.start()
-            self._pipe(upstream, client)
+            self._pipe(upstream, client, server_to_runner=True)
             forward.join(timeout=1.0)
         except OSError:
             self._close_socket(client)
@@ -767,11 +771,10 @@ def test_message_sent_as_the_tunnel_closes_is_delivered_after_reconnect(
             send = pool.submit(_send_user_message, stack.client, session_id, message)
             # The server persists the message just before forwarding it.
             _poll_until(
-                lambda: sends_and_replies()[0] == 1 and proxy.held_chunks > 0,
+                lambda: sends_and_replies()[0] == 1 and proxy.held_server_to_runner_chunks > 0,
                 timeout=10.0,
                 what="the server to persist the message and forward it into the held tunnel",
             )
-            time.sleep(1.0)
             assert not send.done(), "the send finished before the tunnel was cut"
             proxy.begin_blackout()
         finally:
@@ -797,6 +800,11 @@ def test_message_sent_as_the_tunnel_closes_is_delivered_after_reconnect(
         what="the reconnected runner to answer the message",
     )
     assert sends_and_replies() == (1, 1), _session_blob(stack.client, session_id)[:3000]
+    # The tunnel loss cut this session's forward, not just other traffic.
+    assert (
+        f"Turn forward lost the runner tunnel for session={session_id}"
+        in stack.process_log.read_text()
+    )
 
 
 @pytest.mark.parametrize(

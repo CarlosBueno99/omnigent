@@ -221,7 +221,7 @@ _SESSION_INIT_CANCEL_TIMEOUT_S = 20.0
 # Pending questions outlive prompt delivery; poll outside the turn watchdog.
 _CLAUDE_PENDING_PROMPT_POLL_S = 0.5
 
-# A forward redelivered after a tunnel drop arrives within seconds of the original.
+# Recent accepted ids per session; covers redelivery after a tunnel drop.
 _RECEIVED_ITEM_IDS_PER_SESSION = 16
 
 
@@ -1455,6 +1455,8 @@ def create_runner_app(
 
     _session_histories = _session_histories_ref
     _last_server_item_id: dict[str, str] = {}
+    # Stored id of the user message each session's last loaded history ends with.
+    _trailing_user_message_item_ids: dict[str, str] = {}
     _session_event_queues = _session_event_queues_ref
     app.state.session_event_queues = _session_event_queues
     _session_inboxes = _session_inboxes_ref
@@ -3090,7 +3092,9 @@ def create_runner_app(
                 recovery_turn = "history_resume"
                 if last_type == "message":
                     # The replayed message's own forward can still be redelivered.
-                    _note_message_received(session_id, _last_server_item_id.get(session_id))
+                    _note_message_received(
+                        session_id, _trailing_user_message_item_ids.get(session_id)
+                    )
                 _begin_turn_slot(session_id)
                 _publish_turn_status(session_id, "running")
                 msg_body = {
@@ -3491,6 +3495,7 @@ def create_runner_app(
             _binding.relay.close()
         _session_histories.pop(session_id, None)
         _last_server_item_id.pop(session_id, None)
+        _trailing_user_message_item_ids.pop(session_id, None)
         _session_event_queues.pop(session_id, None)
         _session_inboxes.pop(session_id, None)
         _subagent_recovery_done.discard(session_id)
@@ -3823,6 +3828,7 @@ def create_runner_app(
         _persist_cancellation_items=_persist_cancellation_items,
         _session_histories=_session_histories,
         _session_spec_cache=_session_spec_cache,
+        _trailing_user_message_item_ids=_trailing_user_message_item_ids,
         server_client=server_client,
     )
     _append_cancellation_items = _session_history.append_cancellation_items

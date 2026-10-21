@@ -1,17 +1,13 @@
 """Tests for suppress_recovery_turn in the session-init protocol.
 
-Regression coverage for the race where a server-persisted message appears in
-the runner's history load during create_session and causes a recovery turn to
-start before the server forwards that message.
+The server can call session-init *after* persisting a message (the
+managed-sandbox-wake / relaunch path) and then forward that message, so the
+runner's history load already holds it:
 
-The race is exercised via two paths:
-1. SDK harness: the server calls session-init *after* persisting the message
-   (the managed-sandbox-wake / relaunch path) and then forwards the message.
-   Without suppress_recovery_turn the runner would run the message as a
-   recovery turn built from history and drop the forward as a redelivery.
-2. The fix: suppress_recovery_turn=True in the session-init envelope causes
-   the runner to skip the recovery-turn check, leaving _active_turns empty so
-   the forward triggers the turn exactly once.
+1. With suppress_recovery_turn=True the runner skips the recovery-turn check,
+   leaving _active_turns empty so the forward starts the turn exactly once.
+2. Without it the runner runs the message as a recovery turn built from history
+   and drops the later forward of the same persisted item as a redelivery.
 """
 
 from __future__ import annotations

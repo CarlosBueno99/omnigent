@@ -6860,8 +6860,8 @@ async def _reconnected_runner_has_message(
     :param runner_router: Router used to wait for the runner to reconnect.
         ``None`` gives up immediately.
     :returns: Whether the reconnected runner already accepted the message, or
-        ``None`` when the same runner did not come back to serve the session or
-        cannot report its received messages.
+        ``None`` when the same runner did not come back to serve the session,
+        cannot report its received messages, or cannot take a re-post.
     """
     runner_id = conv.runner_id
 
@@ -6885,7 +6885,17 @@ async def _reconnected_runner_has_message(
         runner_id, timeout_s=_TURN_FORWARD_RECONNECT_GRACE_S
     ):
         return None
-    current = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+    try:
+        current = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+    except Exception:  # noqa: BLE001 — an unreadable row proves nothing
+        _logger.warning(
+            "Could not re-read session=%s after runner %s reconnected",
+            session_id,
+            runner_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+        return None
     if current is None or current.runner_id != runner_id or runner_is_leaving():
         return None
     status: object = None
@@ -6913,7 +6923,9 @@ async def _reconnected_runner_has_message(
             extra={"session_id": session_id},
         )
         return None
-    if status not in ("running", "idle") or not isinstance(received, bool):
+    if received is True:
+        return True
+    if status not in ("running", "idle") or received is not False:
         _logger.warning(
             "Reconnected runner %s cannot take session=%s (status=%s, message_received=%s)",
             runner_id,
@@ -7425,8 +7437,7 @@ async def _forward_event_to_runner(
     if _effective_harness is not None and _effective_harness != "auto":
         runner_body["harness_override"] = _effective_harness
 
-    # A mid-turn session is re-initialized when its runner reconnects, and that
-    # recovery can replay a trailing follow-up on its own.
+    # Only start-of-turn messages; reconnect recovery handles mid-turn follow-ups.
     resumable_after_tunnel_loss = (
         body.type == "message"
         and _session_status_cache.get(session_id, conv.live_status) not in _MID_TURN_STATUSES
@@ -8307,7 +8318,7 @@ _RELAY_TELEMETRY_SCHEMA = "runner_stream_recovery.v1"
 # stalled and re-registers once it can (observed: 24 s). Hold the message that
 # long before failing it instead of discarding it on a drop the runner outlives.
 _NATIVE_TERMINAL_ENSURE_RECONNECT_GRACE_S: float = 30.0
-# Turn forwards reuse the terminal-ensure reconnect grace.
+# Same stall window as terminal ensure: the runner re-registers within ~24s.
 _TURN_FORWARD_RECONNECT_GRACE_S: float = _NATIVE_TERMINAL_ENSURE_RECONNECT_GRACE_S
 # Session statuses that mean a turn was in flight. A runner going away
 # only interrupts work in one of these states; from any other state the

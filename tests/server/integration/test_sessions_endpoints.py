@@ -12892,6 +12892,7 @@ def _cut_forward_runner(
     *,
     runner_session: dict[str, Any] | None,
     cut_redelivery: bool = False,
+    redelivery_status: int = 202,
     message_reads: list[str | None] | None = None,
 ) -> httpx.AsyncClient:
     """Runner whose first message forward a tunnel drop cuts, then serving *runner_session*."""
@@ -12907,6 +12908,11 @@ def _cut_forward_runner(
             forwards.append(json.loads(request.content))
             if len(forwards) == 1 or cut_redelivery:
                 cut()
+            if redelivery_status >= 400:
+                return httpx.Response(
+                    redelivery_status,
+                    json={"error": "harness_spawn_failed", "detail": "harness spawn failed"},
+                )
             return httpx.Response(202, json={})
         if request.method == "GET" and request.url.path == f"/v1/sessions/{session_id}":
             if message_reads is not None:
@@ -12933,7 +12939,10 @@ _TUNNEL_CUT_MESSAGE = {
         ("tunnel_closed", "idle", False),
         ("runner_offline", "idle", False),
         ("tunnel_closed", "idle", True),
+        ("tunnel_closed", "running", False),
         ("tunnel_closed", "running", True),
+        # The runner took the message before its turn failed.
+        ("tunnel_closed", "failed", True),
     ],
 )
 async def test_message_forward_cut_by_tunnel_drop_is_delivered_after_reconnect(
@@ -12992,7 +13001,11 @@ async def test_message_forward_cut_by_tunnel_drop_is_delivered_after_reconnect(
         "runner_cannot_report_messages",
         "redelivery_cut",
         "runner_handed_off",
+        "handed_off_during_wait",
         "server_shutting_down",
+        "shutdown_during_wait",
+        "binding_unreadable",
+        "runner_failed",
         "mid_turn_follow_up",
     ],
 )
@@ -13014,9 +13027,30 @@ async def test_message_forward_cut_by_tunnel_drop_stays_unavailable_without_deli
     conversation_store.replace_runner_id(sid, "message-runner")
     forwards: list[dict[str, Any]] = []
 
+    binding_reads_to_fail = 0
+    read_binding = SqlAlchemyConversationStore.get_conversation
+
+    def get_conversation(store: SqlAlchemyConversationStore, *args: Any, **kwargs: Any) -> Any:
+        nonlocal binding_reads_to_fail
+        if binding_reads_to_fail:
+            binding_reads_to_fail -= 1
+            raise RuntimeError("store unavailable")
+        return read_binding(store, *args, **kwargs)
+
     async def reconnect(runner_id: str, *, timeout_s: float) -> bool:
+        nonlocal binding_reads_to_fail
         if scenario == "rebound_during_wait":
             conversation_store.replace_runner_id(sid, "replacement-runner")
+        if scenario == "handed_off_during_wait":
+            monkeypatch.setattr(
+                orchestration_module.shutdown_state, "runner_handoff_reason", lambda _: "rebalance"
+            )
+        if scenario == "shutdown_during_wait":
+            monkeypatch.setattr(
+                orchestration_module.shutdown_state, "server_shutting_down", lambda: True
+            )
+        if scenario == "binding_unreadable":
+            binding_reads_to_fail = 1
         return scenario != "reconnect_timeout"
 
     async def relay_ready(*args: object, **kwargs: object) -> None:
@@ -13027,8 +13061,10 @@ async def test_message_forward_cut_by_tunnel_drop_stays_unavailable_without_deli
     runner_sessions: dict[str, dict[str, Any] | None] = {
         "runner_lost_session": None,
         "runner_cannot_report_messages": {"status": "idle"},
+        "runner_failed": {"status": "failed", "message_received": False},
     }
     wait_for_runner = AsyncMock(side_effect=reconnect)
+    monkeypatch.setattr(SqlAlchemyConversationStore, "get_conversation", get_conversation)
     monkeypatch.setattr(RunnerRouter, "wait_for_runner", wait_for_runner)
     monkeypatch.setattr("omnigent.server.routes.sessions._ensure_runner_relay_ready", relay_ready)
     if scenario == "runner_handed_off":
@@ -13065,6 +13101,40 @@ async def test_message_forward_cut_by_tunnel_drop_stays_unavailable_without_deli
     snapshot = (await client.get(f"/v1/sessions/{sid}")).json()
     assert [item["type"] for item in snapshot["items"]] == ["message"]
     assert snapshot["status"] != "failed"
+
+
+async def test_message_redelivery_rejected_after_reconnect_fails_with_reason(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner that rejects the re-posted message fails the session with its reason."""
+    from omnigent.runner.routing import RunnerRouter
+
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    sid = session["id"]
+    SqlAlchemyConversationStore(db_uri).replace_runner_id(sid, "message-runner")
+    forwards: list[dict[str, Any]] = []
+    monkeypatch.setattr(RunnerRouter, "wait_for_runner", AsyncMock(return_value=True))
+    monkeypatch.setattr("omnigent.server.routes.sessions._ensure_runner_relay_ready", AsyncMock())
+    async with _cut_forward_runner(
+        sid,
+        "tunnel_closed",
+        forwards,
+        runner_session={"status": "idle", "message_received": False},
+        redelivery_status=503,
+    ) as runner_client:
+        _route_to_runner(monkeypatch, runner_client)
+
+        response = await client.post(f"/v1/sessions/{sid}/events", json=_TUNNEL_CUT_MESSAGE)
+
+    assert response.status_code == 503, response.text
+    assert len(forwards) == 2
+    snapshot = (await client.get(f"/v1/sessions/{sid}")).json()
+    assert snapshot["status"] == "failed", snapshot
+    assert snapshot["last_task_error"]["code"] == "runner_rejected_event"
+    assert "harness_spawn_failed" in snapshot["last_task_error"]["message"]
 
 
 async def test_message_forward_rejection_surfaces_failed_with_reason(

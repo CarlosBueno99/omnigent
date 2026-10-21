@@ -257,7 +257,8 @@ async def test_redelivered_message_is_acknowledged_without_running_again() -> No
     assert received == {"item_first": True, "item_second": True, "item_third": False}
     assert "message_received" not in plain_read
     assert redelivery_after_turn == "duplicate"
-    assert len(hc.posted_bodies) == harness_turns
+    # One turn for "first", then one for the buffered "second".
+    assert len(hc.posted_bodies) == harness_turns == 2
 
 
 @pytest.mark.asyncio
@@ -1518,11 +1519,26 @@ async def _fake_auto_create_codex_terminal(
 
 
 @pytest.mark.asyncio
-async def test_session_creation_auto_starts_turn_for_unanswered_user_message() -> None:
+@pytest.mark.parametrize(
+    "trailing_items",
+    [
+        pytest.param([], id="message-last"),
+        pytest.param(
+            [{"id": "item_2", "type": "reasoning", "summary": []}],
+            id="non-input-item-after-message",
+        ),
+    ],
+)
+async def test_session_creation_auto_starts_turn_for_unanswered_user_message(
+    trailing_items: list[dict[str, Any]],
+) -> None:
     """POST /v1/sessions with history ending in a user message starts a recovery turn.
 
     Breakage this catches: if _run_turn_bg's incomplete-turn detection
     is removed, the session stays idle and the harness receives no POST.
+
+    :param trailing_items: Stored items after the user message that are not
+        replayed as harness input.
     """
     import asyncio as _aio
 
@@ -1533,6 +1549,7 @@ async def test_session_creation_auto_starts_turn_for_unanswered_user_message() -
             "role": "user",
             "content": [{"type": "input_text", "text": "hello"}],
         },
+        *trailing_items,
     ]
     app, _pm, hc = _build_recovery_app(history)
 
