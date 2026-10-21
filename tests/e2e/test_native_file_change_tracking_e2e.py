@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -43,7 +44,19 @@ def _observer_command(harness: str, bridge_dir: Path) -> list[str]:
     return shlex.split(str(hook["command"]))
 
 
-@pytest.mark.parametrize("harness", ["claude_native", "codex_native", "claude_native_registered"])
+@pytest.mark.parametrize(
+    "harness",
+    [
+        "claude_native",
+        "codex_native",
+        pytest.param(
+            "claude_native_registered",
+            marks=pytest.mark.skipif(
+                shutil.which("curl") is None, reason="the registered hook's fast path needs curl"
+            ),
+        ),
+    ],
+)
 async def test_native_write_reaches_changes_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: str
 ) -> None:

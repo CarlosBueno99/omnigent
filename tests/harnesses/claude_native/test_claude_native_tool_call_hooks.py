@@ -136,29 +136,30 @@ def test_every_tool_call_hooks_return_without_waiting_on_an_interpreter(
     tmp_path: Path, relay: _Relay
 ) -> None:
     bridge_dir = _bridge_dir_with_relay(tmp_path, relay.url)
-    slow_python = _fake_python(tmp_path, f"sleep {_SLOW_INTERPRETER_S}")
+    spawned = tmp_path / "interpreter.spawned"
+    slow_python = _fake_python(
+        tmp_path, f": > {shlex.quote(str(spawned))}; sleep {_SLOW_INTERPRETER_S}"
+    )
     settings = build_hook_settings(
         bridge_dir, python_executable=str(slow_python), ap_server_url="http://127.0.0.1:8787"
     )
 
-    waited_on_interpreter: dict[str, float] = {}
+    spawned_interpreter: list[str] = []
     for event in ("PreToolUse", "PostToolUse"):
         commands = _every_tool_call_commands(settings, event)
         assert commands, f"{event} registers no every-tool hook"
         for command in commands:
-            started = time.monotonic()
             proc = _run_hook(command, event)
-            elapsed = time.monotonic() - started
             assert proc.returncode == 0, (event, command, proc.stderr)
             if "observe-tool" in command:
                 # Claude parses PostToolUse stdout as hook output; the observer has none.
                 assert proc.stdout == ""
-            if elapsed >= _HOOK_BUDGET_S:
-                waited_on_interpreter[f"{event}: {command}"] = round(elapsed, 2)
+            if spawned.exists():
+                spawned_interpreter.append(f"{event}: {command}")
+                spawned.unlink()
 
-    assert not waited_on_interpreter, (
-        "hooks on Claude's blocking tool-call path waited on the interpreter: "
-        f"{waited_on_interpreter}"
+    assert not spawned_interpreter, (
+        f"hooks on Claude's blocking tool-call path spawned the interpreter: {spawned_interpreter}"
     )
     # Returning quickly must not mean skipping the observation.
     observed = [request for request in relay.received if request.path == "/hook/observe-tool"]
