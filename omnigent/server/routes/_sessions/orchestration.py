@@ -5804,6 +5804,18 @@ def _native_terminal_runtime(conv: Conversation) -> tuple[str, str, str]:
     )
 
 
+def _is_runner_tunnel_loss(exc: httpx.HTTPError | ConnectionError) -> bool:
+    """
+    Return whether a runner request failed because the runner tunnel went away.
+
+    :param exc: Transport failure raised by a runner request.
+    :returns: ``True`` for a tunnel lost under or before the request.
+    """
+    # A bare ConnectionError is a tunnel dropped under the request; a
+    # ConnectError is a runner already offline when it was sent.
+    return isinstance(exc, ConnectionError | httpx.ConnectError)
+
+
 async def _ensure_native_terminal_ready(
     runner_client: httpx.AsyncClient,
     session_id: str,
@@ -5861,11 +5873,6 @@ async def _ensure_native_terminal_ready(
             timeout=10.0,
         )
 
-    def _is_tunnel_loss(exc: httpx.HTTPError | ConnectionError) -> bool:
-        # A bare ConnectionError is a tunnel dropped under the request; a
-        # ConnectError is a runner already offline when it was sent.
-        return isinstance(exc, ConnectionError | httpx.ConnectError)
-
     def _transport_failure(exc: httpx.HTTPError | ConnectionError) -> _NativeTerminalEnsureOutcome:
         # WSTunnelTransport raises bare ConnectionError on tunnel close
         # ("tunnel closed before request completed"); without this clause
@@ -5879,7 +5886,7 @@ async def _ensure_native_terminal_ready(
             exc_info=exc,
             extra={"session_id": session_id},
         )
-        if conv.host_id is not None and _is_tunnel_loss(exc):
+        if conv.host_id is not None and _is_runner_tunnel_loss(exc):
             # A lost tunnel doesn't show the terminal failed to boot; refuse the send
             # so the client keeps the message, instead of consuming it into a failed turn.
             raise OmnigentError(
@@ -5893,7 +5900,7 @@ async def _ensure_native_terminal_ready(
     try:
         resp = await _post_ensure()
     except (httpx.HTTPError, ConnectionError) as exc:
-        if runner_router is None or conv.runner_id is None or not _is_tunnel_loss(exc):
+        if runner_router is None or conv.runner_id is None or not _is_runner_tunnel_loss(exc):
             return _transport_failure(exc)
         _logger.warning(
             "%s terminal ensure lost the runner tunnel for session=%s; waiting up to "
@@ -6838,6 +6845,92 @@ def _runner_reject_detail(response: httpx.Response) -> str:
     return f"{code}: {detail}" if code else detail
 
 
+async def _resume_message_after_tunnel_loss(
+    session_id: str,
+    conv: Conversation,
+    runner_client: httpx.AsyncClient,
+    conversation_store: ConversationStore,
+    *,
+    runner_router: RunnerRouter | None,
+    initializer: RunnerSessionInitializer | None,
+) -> bool:
+    """
+    Start a persisted message's turn once its runner's dropped tunnel reconnects.
+
+    The lost forward may already have reached the runner, so it is not posted
+    again. Session init without recovery suppression instead replays the
+    trailing user item, and only when the runner has not started a turn itself.
+
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    :param conv: Conversation row for *session_id*.
+    :param runner_client: HTTP client pointed at the session's runner.
+    :param conversation_store: Store the relay persists the turn's items to.
+    :param runner_router: Router used to wait for the runner to reconnect.
+        ``None`` gives up immediately.
+    :param initializer: Initializer shared with the runner-connect hook.
+        ``None`` gives up immediately.
+    :returns: ``True`` when the reconnected runner reports a turn running.
+    """
+    runner_id = conv.runner_id
+    if (
+        runner_router is None
+        or initializer is None
+        or runner_id is None
+        # A draining replica does not get its runners back.
+        or shutdown_state.server_shutting_down()
+    ):
+        return False
+    _logger.warning(
+        "Turn forward lost the runner tunnel for session=%s; waiting up to %.0fs for "
+        "runner %s to reconnect",
+        session_id,
+        _TURN_FORWARD_RECONNECT_GRACE_S,
+        runner_id,
+        extra={"session_id": session_id},
+    )
+    if not await runner_router.wait_for_runner(
+        runner_id, timeout_s=_TURN_FORWARD_RECONNECT_GRACE_S
+    ):
+        return False
+    try:
+        await _ensure_runner_relay_ready(
+            session_id, runner_id, runner_client, conversation_store, conversation=conv
+        )
+        response = await initializer.initialize(
+            conv, runner_client, timeout=_RUNNER_SESSION_INIT_TIMEOUT_S
+        )
+        response.raise_for_status()
+    except (httpx.HTTPError, ConnectionError, OmnigentError, ValueError):
+        _logger.warning(
+            "Could not resume session=%s on reconnected runner %s",
+            session_id,
+            runner_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+        return False
+    payload: object = None
+    with contextlib.suppress(ValueError):
+        payload = response.json()
+    status = payload.get("status") if isinstance(payload, dict) else None
+    if status != "running":
+        _logger.warning(
+            "Reconnected runner %s started no turn for session=%s (status=%s)",
+            runner_id,
+            session_id,
+            status,
+            extra={"session_id": session_id},
+        )
+        return False
+    _logger.info(
+        "Runner %s reconnected and resumed the forwarded message for session=%s",
+        runner_id,
+        session_id,
+        extra={"session_id": session_id},
+    )
+    return True
+
+
 async def _forward_event_to_runner(
     session_id: str,
     conv: Conversation,
@@ -6852,6 +6945,8 @@ async def _forward_event_to_runner(
     host_store: HostStore | None = None,
     agent_revision: str | None = None,
     startup_input_id: str | None = None,
+    runner_router: RunnerRouter | None = None,
+    runner_session_initializer: RunnerSessionInitializer | None = None,
 ) -> str:
     """
     Persist a user event and forward it to the runner.
@@ -6885,6 +6980,10 @@ async def _forward_event_to_runner(
         ``None`` reads as unknown, which counts as backed.
     :param agent_revision: The agent's effective bundle and selection revision; the
         runner rebuilds the session's spec when it changes.
+    :param runner_router: Router used to wait out a runner tunnel that drops
+        under a new message's forward. ``None`` fails the forward immediately.
+    :param runner_session_initializer: Initializer that starts the message on
+        the reconnected runner. ``None`` fails the forward immediately.
     :returns: The store-assigned id of the persisted item.
     """
     import uuid
@@ -7334,15 +7433,38 @@ async def _forward_event_to_runner(
     if _effective_harness is not None and _effective_harness != "auto":
         runner_body["harness_override"] = _effective_harness
 
+    # A follow-up sent mid-turn is queued behind the running turn, which a
+    # reconnect cannot tell apart from a delivered message.
+    resumable_after_tunnel_loss = (
+        body.type == "message"
+        and _session_status_cache.get(session_id, conv.live_status) not in _MID_TURN_STATUSES
+    )
     # The runner's sessions-native POST returns 202 immediately
     # and starts the turn as a background task. No streaming
     # response to drain — events flow through GET /stream.
     try:
-        _forward_resp = await runner_client.post(
-            f"/v1/sessions/{session_id}/events",
-            json=runner_body,
-            timeout=_RUNNER_FORWARD_TIMEOUT,
-        )
+        _forward_resp: httpx.Response | None
+        try:
+            _forward_resp = await runner_client.post(
+                f"/v1/sessions/{session_id}/events",
+                json=runner_body,
+                timeout=_RUNNER_FORWARD_TIMEOUT,
+            )
+        except (httpx.HTTPError, ConnectionError) as exc:
+            if not (
+                resumable_after_tunnel_loss
+                and _is_runner_tunnel_loss(exc)
+                and await _resume_message_after_tunnel_loss(
+                    session_id,
+                    conv,
+                    runner_client,
+                    conversation_store,
+                    runner_router=runner_router,
+                    initializer=runner_session_initializer,
+                )
+            ):
+                raise
+            _forward_resp = None
         # httpx only raises on transport errors, so a rejection (e.g. a 400 on a
         # malformed body, or a 501 from a runner with no process manager) would
         # otherwise read as a started turn: input.consumed would tell the client
@@ -7352,7 +7474,7 @@ async def _forward_event_to_runner(
         # this only catches "the runner never took the message". Checked on the
         # status rather than via ``raise_for_status`` so the runner-client fakes
         # that only expose ``status_code`` behave as they do in production.
-        if _forward_resp.status_code >= 400:
+        if _forward_resp is not None and _forward_resp.status_code >= 400:
             # The live runner took nothing, so ``idle`` would read as a finished
             # turn that never ran. Persist the reason: the status edge is
             # SSE-only and would vanish on reload. Not strictly terminal — the
@@ -7490,10 +7612,8 @@ async def _forward_event_to_runner(
                 )
     except (httpx.HTTPError, ConnectionError) as exc:
         # Transport failure — the runner never answered. The message is already
-        # persisted (invariant I1), and a trailing user item is what
-        # ``create_session`` replays as a recovery turn when the runner
-        # reconnects, so this really is a queued message rather than a failure.
-        # Keep publishing ``idle`` so the composer is released for a retry.
+        # persisted (invariant I1) but no turn started for it. Keep publishing
+        # ``idle`` so the composer is released for a retry.
         _logger.exception(
             "Forward to runner failed for session=%s",
             session_id,
@@ -7740,6 +7860,7 @@ async def _dispatch_session_event_to_runner_impl(
     background_titles_enabled: bool = True,
     agent_revision: str | None = None,
     startup_input: StartupInputContext | None = None,
+    runner_session_initializer: RunnerSessionInitializer | None = None,
 ) -> _SessionEventDispatchResult:
     """
     Forward an item-event to the runner with harness-aware dispatch.
@@ -7814,6 +7935,8 @@ async def _dispatch_session_event_to_runner_impl(
         an older host row gets.
     :param agent_revision: The agent's effective bundle and selection revision, stamped on
         both native and non-native forwards to invalidate runner caches.
+    :param runner_session_initializer: Initializer that starts a non-native
+        message on its runner after a tunnel drop cuts the forward.
     :returns: A :class:`_SessionEventDispatchResult` carrying the
         persisted item id (non-native) or the pending-input id
         (claude-native message bypass).
@@ -8170,6 +8293,8 @@ async def _dispatch_session_event_to_runner_impl(
         host_store=host_store,
         agent_revision=agent_revision,
         startup_input_id=startup_input.input_id if startup_input is not None else None,
+        runner_router=runner_router,
+        runner_session_initializer=runner_session_initializer,
     )
     return _SessionEventDispatchResult(item_id=item_id, pending_id=None)
 
@@ -8187,6 +8312,8 @@ _RELAY_TELEMETRY_SCHEMA = "runner_stream_recovery.v1"
 # stalled and re-registers once it can (observed: 24 s). Hold the message that
 # long before failing it instead of discarding it on a drop the runner outlives.
 _NATIVE_TERMINAL_ENSURE_RECONNECT_GRACE_S: float = 30.0
+# A new message whose forward the same drop cuts waits as long for its turn.
+_TURN_FORWARD_RECONNECT_GRACE_S: float = _NATIVE_TERMINAL_ENSURE_RECONNECT_GRACE_S
 # Session statuses that mean a turn was in flight. A runner going away
 # only interrupts work in one of these states; from any other state the
 # departure is a benign disconnect, carried by liveness rather than a

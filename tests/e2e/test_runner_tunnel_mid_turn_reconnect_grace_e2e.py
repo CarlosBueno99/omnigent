@@ -4,6 +4,7 @@ Real server and runner processes communicate through the production WebSocket
 tunnel and a TCP ingress proxy. A deterministic mock LLM holds an openai-agents
 turn in flight while the proxy cuts the tunnel and returns HTTP 503. The runner
 then reconnects to the original server or a second server sharing its database.
+Another case cuts the tunnel while the proxy holds a user message's forward.
 
 The cross-replica case also covers an unavailable conversation database on the
 old replica, with metadata in a separate database. Only queries on A's
@@ -31,6 +32,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -205,14 +207,17 @@ def _poll_until(condition: Callable[[], bool], *, timeout: float, what: str) -> 
 
 
 class _TunnelIngressProxy:
-    """TCP proxy that can cut live sockets and temporarily answer HTTP 503."""
+    """TCP proxy that can hold bytes, cut live sockets, and temporarily answer HTTP 503."""
 
     def __init__(self, backend_host: str, backend_port: int) -> None:
         self._backend = (backend_host, backend_port)
         self._lock = threading.Lock()
         self._reject = False
         self._live_sockets: set[socket.socket] = set()
+        self._flowing = threading.Event()
+        self._flowing.set()
         self.rejected_connections = 0
+        self.held_chunks = 0
         proxy = self
 
         class _Handler(socketserver.BaseRequestHandler):
@@ -246,6 +251,10 @@ class _TunnelIngressProxy:
     def _pipe(self, source: socket.socket, destination: socket.socket) -> None:
         try:
             while chunk := source.recv(65536):
+                if not self._flowing.is_set():
+                    with self._lock:
+                        self.held_chunks += 1
+                    self._flowing.wait()
                 destination.sendall(chunk)
         except OSError:
             # Expected when begin_blackout() or teardown cuts a socket mid-pipe;
@@ -308,6 +317,14 @@ class _TunnelIngressProxy:
         with self._lock:
             self._reject = False
 
+    def hold(self) -> None:
+        """Stop relaying bytes on every connection until release()."""
+        self._flowing.clear()
+
+    def release(self) -> None:
+        """Resume relaying; bytes held for a severed socket are dropped."""
+        self._flowing.set()
+
     def retarget(self, backend_host: str, backend_port: int) -> None:
         """Forward new connections to a different server replica."""
         with self._lock:
@@ -315,6 +332,7 @@ class _TunnelIngressProxy:
 
     def close(self) -> None:
         """Stop the proxy and close all active sockets."""
+        self.release()
         self.end_blackout()
         with self._lock:
             sockets = list(self._live_sockets)
@@ -706,6 +724,81 @@ def test_mid_turn_tunnel_blackout_recovers_without_failed_edge(
         f"Session {session_id} still carries a persisted runner_disconnected label after "
         f"recovery; snapshot={snapshot_text[:2000]}"
     )
+
+
+def test_message_sent_as_the_tunnel_closes_is_delivered_after_reconnect(
+    reconnect_stack: _ReconnectStack,
+    mock_llm_server_url: str,
+) -> None:
+    """A send whose runner forward is cut by a tunnel close must reach the reconnected runner."""
+    stack = reconnect_stack
+    proxy = stack.proxy
+    assert proxy is not None
+    reset_mock_llm(mock_llm_server_url)
+    model = f"runner-send-close-{uuid.uuid4().hex[:8]}"
+    configure_mock_llm(mock_llm_server_url, [{"text": _ANSWER}], key=model)
+    agent_name = register_inline_agent(
+        stack.client,
+        name=f"runner-send-close-{uuid.uuid4().hex[:8]}",
+        harness="openai-agents",
+        model=model,
+        profile="",
+        prompt="Return the configured answer.",
+        mock_llm_base_url=f"{mock_llm_server_url}/v1",
+    )
+    session_id = create_runner_bound_session(
+        stack.client,
+        agent_name=agent_name,
+        runner_id=stack.runner_id,
+    )
+    message = "Please reply once the connection is back."
+
+    def sends_and_replies() -> tuple[int, int]:
+        items = _session_snapshot(stack.client, session_id).get("items", [])
+        roles = [((item.get("data") or {}).get("role"), json.dumps(item)) for item in items]
+        return (
+            sum(role == "user" and message in text for role, text in roles),
+            sum(role == "assistant" and _ANSWER in text for role, text in roles),
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        proxy.hold()
+        try:
+            send = pool.submit(_send_user_message, stack.client, session_id, message)
+            _poll_until(
+                lambda: proxy.held_chunks > 0,
+                timeout=10.0,
+                what="the server to forward the message into the held runner tunnel",
+            )
+            time.sleep(1.0)
+            assert not send.done(), "the send finished before the tunnel was cut"
+            proxy.begin_blackout()
+        finally:
+            proxy.release()
+            proxy.end_blackout()
+        try:
+            send.result(timeout=60.0)
+        except httpx.HTTPStatusError as exc:
+            stack.wait_runner_online()
+            if sends_and_replies()[0] == 0:
+                # A refusal that persisted nothing leaves the draft with the client to retry.
+                return
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline and sends_and_replies()[1] == 0:
+                time.sleep(0.5)
+            pytest.fail(
+                f"The send was rejected with HTTP {exc.response.status_code} after persisting "
+                f"the message; (sends, replies)={sends_and_replies()} 20s after the same runner "
+                f"reconnected; body={exc.response.text[:500]}"
+            )
+
+    stack.wait_runner_online()
+    _poll_until(
+        lambda: sends_and_replies()[1] > 0,
+        timeout=60.0,
+        what="the reconnected runner to answer the message",
+    )
+    assert sends_and_replies() == (1, 1), _session_blob(stack.client, session_id)[:3000]
 
 
 @pytest.mark.parametrize(
