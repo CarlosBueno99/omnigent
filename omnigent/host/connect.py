@@ -639,6 +639,8 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # claude-sdk executor reads this and forwards it as CLAUDE_CODE_ENTRYPOINT;
         # the daemon→runner strip would otherwise drop it. Not a secret.
         "OMNIGENT_CLAUDE_CODE_ENTRYPOINT",
+        # Claude-family background-title model override (a model alias). Not a secret.
+        "OMNIGENT_BACKGROUND_TITLE_CLAUDE_MODEL",
         # Testing knob: override the context window size for compaction
         # trigger threshold. Not a secret — a plain integer.
         "AP_CONTEXT_WINDOW_OVERRIDE",

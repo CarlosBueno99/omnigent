@@ -1148,6 +1148,32 @@ def _claude_settings_payload(
     return json.dumps(settings, separators=(",", ":")) if settings else None
 
 
+def _claude_user_settings_env() -> dict[str, str]:
+    """Read the ``env`` block of Claude Code's user ``settings.json``.
+
+    Uses ``$CLAUDE_CONFIG_DIR/settings.json`` when set, else
+    ``~/.claude/settings.json``, matching Claude Code's user settings scope.
+
+    :returns: The string-valued entries, e.g.
+        ``{"ANTHROPIC_BEDROCK_BASE_URL": "https://gateway.example"}``; empty
+        when the file is missing, unreadable, or has no ``env`` object.
+    """
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    config_dir = (
+        pathlib.Path(configured).expanduser() if configured else pathlib.Path.home() / ".claude"
+    )
+    try:
+        settings = json.loads((config_dir / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    env = settings.get("env") if isinstance(settings, dict) else None
+    if not isinstance(env, dict):
+        return {}
+    return {
+        key: value for key, value in env.items() if isinstance(key, str) and isinstance(value, str)
+    }
+
+
 def _resolve_gateway_env(
     profile: str | None = None,
     *,
@@ -1808,12 +1834,6 @@ class ClaudeSDKExecutor(Executor):
         self._extra_env[_CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV] = "true"
         if entrypoint := os.environ.get("OMNIGENT_CLAUDE_CODE_ENTRYPOINT"):
             self._extra_env["CLAUDE_CODE_ENTRYPOINT"] = entrypoint
-
-        # Bedrock mode: the gateway endpoint lives only in the user settings
-        # file, which the hermetic skills_filter="none" title spawns don't load
-        # (setting_sources=[]). Carry it via _extra_env so it reaches the CLI.
-        if bedrock_base_url := os.environ.get("ANTHROPIC_BEDROCK_BASE_URL"):
-            self._extra_env.setdefault("ANTHROPIC_BEDROCK_BASE_URL", bedrock_base_url)
 
         # Retry policy → Anthropic SDK env vars passed to the Claude
         # CLI subprocess. ``ANTHROPIC_MAX_RETRIES`` and
@@ -2694,6 +2714,12 @@ class ClaudeSDKExecutor(Executor):
         bundle_plugins: list[Any] = []  # type: ignore[explicit-any]  # SdkPluginConfig is a TypedDict — typed Any here to keep the import lazy
         if self._bundle_dir is not None and (self._bundle_dir / "skills").is_dir():
             bundle_plugins.append({"type": "local", "path": str(self._bundle_dir)})
+        if resolved.setting_sources == []:
+            # The CLI then skips the user settings env, which can hold the provider endpoint.
+            env = {**_claude_user_settings_env(), **env}
+        max_output_tokens = cfg.extra.get("max_tokens")
+        if max_output_tokens is not None:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(int(max_output_tokens))
         options_kwargs: dict[str, Any] = {  # type: ignore[explicit-any]  # ClaudeAgentOptions accepts mixed-typed kwargs (str / list / dict / callable / etc.)
             "tools": base_tools,
             "system_prompt": system_prompt or None,
@@ -2724,6 +2750,9 @@ class ClaudeSDKExecutor(Executor):
             options_kwargs["setting_sources"] = resolved.setting_sources
         if reasoning_effort is not None:
             options_kwargs["effort"] = reasoning_effort
+        if max_output_tokens is not None:
+            # Claude Code needs max_tokens above any thinking budget, so a small cap disables it.
+            options_kwargs["thinking"] = {"type": "disabled"}
         # Databricks opus/fable endpoints reject thinking.type="enabled"
         # (HTTP 400); they require "adaptive" instead (those tiers are
         # adaptive-only). Sonnet is fine, so scope to those tiers only.
