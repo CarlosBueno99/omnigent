@@ -242,7 +242,7 @@ def test_delivered_observation_is_not_replayed_after_a_slow_relay_response(
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == ""
     # The hook returns at curl's budget rather than waiting out the relay's response.
-    assert elapsed < _SLOW_RELAY_S
+    assert elapsed < _HOOK_BUDGET_S + 1.5
     # The relay recorded the observation once and the Python observer never replayed it.
     assert [request.path for request in relay.received] == ["/hook/observe-tool"]
     assert not ran_marker.exists()
