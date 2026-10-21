@@ -677,7 +677,7 @@ class SandboxLifecycle(ABC):
         :class:`SandboxCapabilityError`. Providers that implement
         :meth:`resume` may override it to park an idle sandbox at
         storage-only cost. Implementations must treat an already stopped
-        sandbox as success.
+        or archived sandbox as success.
 
         :param sandbox_id: The sandbox to stop, e.g. ``"sb-a1b2c3"``.
         :raises SandboxCapabilityError: When the provider cannot stop a
