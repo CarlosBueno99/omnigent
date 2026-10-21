@@ -511,6 +511,51 @@ describe("cross-device read-state (server revisions)", () => {
     expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
   });
 
+  it("replays the highest-revision value held while this device's PUT was in flight", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 6_000, viewer_read_state_revision: 1 }]);
+    let resolvePut: (response: unknown) => void = () => {};
+    authFetch.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePut = resolve;
+      }),
+    );
+
+    mod.markConversationUnread("conv-1", 5_000);
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 7_000, viewer_read_state_revision: 3 }]);
+    // Older list responses, from another replica or a server without revisions, arrive after it.
+    mod.seedReadState([
+      { id: "conv-1", viewer_last_seen: 4_999, viewer_unread: true, viewer_read_state_revision: 2 },
+    ]);
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 4_999, viewer_unread: true }]);
+
+    resolvePut({ ok: true, status: 200, json: async () => ({ revision: 2 }) });
+    await settlePuts();
+
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
+    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
+  });
+
+  it("applies a newer value held during a PUT that fails before the first seed", async () => {
+    const mod = await loadFresh();
+    let resolvePut: (response: unknown) => void = () => {};
+    authFetch.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePut = resolve;
+      }),
+    );
+
+    mod.markConversationUnread("conv-1", 5_000);
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 7_000, viewer_read_state_revision: 3 }]);
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+
+    resolvePut({ ok: false, status: 503, json: async () => ({}) });
+    await settlePuts();
+
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
+    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
+  });
+
   it("applies a Mark as unread made elsewhere while this device was closed", async () => {
     const mod = await loadFresh();
     respondWithRevision(1);

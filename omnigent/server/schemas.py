@@ -2998,10 +2998,7 @@ class SessionListItem(BaseModel):
         dot suppression on the client. ``False`` by default.
     :param viewer_read_state_revision: Epoch-microsecond revision of the
         *requesting user's* latest read-state write for this session, or
-        ``None`` when there is none. Increases with every write, so a
-        client can apply a read or "Mark as unread" from the user's other
-        devices and ignore an older value. In-memory only, like
-        ``viewer_last_seen``.
+        ``None``. Increases with every write; in-memory only.
     :param search_snippet: Excerpt of the chat content that matched the
         request's ``search_query``, centered on the match with ``…``
         marking elided ends, so the search UI can show *where* a session

@@ -45,7 +45,7 @@ let appliedRevision: LastSeenMap = {};
 // In-flight PUTs per conversation. Server values for these are deferred: they
 // can predate the local write that is still landing.
 const pendingWrites = new Map<string, number>();
-// The newest list value deferred per conversation, replayed once its PUTs settle.
+// The highest-revision list value deferred per conversation, replayed once its PUTs settle.
 const deferredSeeds = new Map<string, ReadStateSeed>();
 
 // localStorage persistence. Best-effort everywhere: storage can be
@@ -122,11 +122,10 @@ export function nowSeconds(): number {
 
 /**
  * Pushes the calling user's read-state for one conversation to the server.
- * Best-effort and fire-and-forget: a failed PUT leaves the optimistic local
- * mirror in place, which the next mutation or a reload reconciles. Skips the
- * call when there's no baseline to report (nothing meaningful to sync).
- * Records the revision the server assigned, so list values that predate this
- * write are ignored when they arrive later.
+ * Best-effort and fire-and-forget: a failed PUT keeps the optimistic local
+ * mirror until a newer server value arrives. Skips the call when there's no
+ * baseline to report. Records the revision the server assigned, so list
+ * values that predate this write are ignored when they arrive later.
  */
 async function syncReadState(conversationId: string): Promise<void> {
   const lastSeen = lastSeenMap[conversationId];
@@ -219,30 +218,29 @@ function mergeUnrevisionedReadState(conv: ReadStateSeed, server: number | undefi
 }
 
 /**
- * Merges the conversation list (the server's per-viewer read path) into the
- * local mirror, on load and on every later list or stream update. A server
- * read-state whose revision is newer than the one last applied here is
- * adopted (see {@link adoptServerReadState}), so reads and "Mark as unread"
- * from the user's other devices show up without a reload; older revisions are
- * ignored. A value for a conversation whose PUT is in flight waits for the PUT.
- * A value without a revision is max-merged on the first seed only. A session
- * with no baseline on either side seeds to its `updated_at` ("read as of
- * load"): pod-independent, so a replica that can't see the user's read-state
- * can never freeze a row's dot off. Flips {@link hydrated} on the first call
- * (even for an empty list) so the automatic mark-seen can resume.
+ * Merges list and stream read-state into the local mirror: newer revisions
+ * are adopted, values for a conversation with a PUT in flight wait for it, and
+ * revisionless values merge on the first seed only. A session with no baseline
+ * seeds to its `updated_at`; the first call flips {@link hydrated}.
  */
 export function seedReadState(conversations: readonly ReadStateSeed[]): void {
   let changed = false;
   let revisionsChanged = false;
   for (const conv of conversations) {
+    const revision = conv.viewer_read_state_revision;
     if (pendingWrites.has(conv.id)) {
-      deferredSeeds.set(conv.id, conv);
+      const heldRevision = deferredSeeds.get(conv.id)?.viewer_read_state_revision;
+      if (
+        typeof heldRevision !== "number" ||
+        (typeof revision === "number" && revision >= heldRevision)
+      ) {
+        deferredSeeds.set(conv.id, conv);
+      }
       continue;
     }
     const firstSeed = !seeded.has(conv.id);
     seeded.add(conv.id);
     const server = typeof conv.viewer_last_seen === "number" ? conv.viewer_last_seen : undefined;
-    const revision = conv.viewer_read_state_revision;
     if (typeof revision === "number") {
       const applied = appliedRevision[conv.id];
       if (applied === undefined || revision > applied) {
