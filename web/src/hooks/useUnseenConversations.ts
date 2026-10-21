@@ -7,8 +7,7 @@
 // on a pod that never saw the user's read-state PUT, so its
 // `viewer_last_seen` / `viewer_unread` fields can be null even for a
 // session the user has read. The local copy is therefore the durable
-// source; a server value applies only when its revision is newer than the
-// last one applied here. Cross-device sync is best-effort by design.
+// source; server values apply only with a newer revision (best-effort).
 //
 // A conversation is "unseen" when its server-side updated_at exceeds the
 // stored baseline. A conversation with no baseline anywhere seeds to its
@@ -42,9 +41,11 @@ const explicitlyUnread = new Set<string>();
 // Server revision (epoch µs) of the newest read-state applied per
 // conversation, from the list or from this tab's own PUT response.
 let appliedRevision: LastSeenMap = {};
-// In-flight PUTs per conversation. Server values for these are deferred: they
+// Conversations with a PUT in flight. Server values for these are deferred: they
 // can predate the local write that is still landing.
-const pendingWrites = new Map<string, number>();
+const pendingWrites = new Set<string>();
+// Conversations changed again while their PUT was in flight; resent once it settles.
+const queuedWrites = new Set<string>();
 // The highest-revision list value deferred per conversation, replayed once its PUTs settle.
 const deferredSeeds = new Map<string, ReadStateSeed>();
 
@@ -121,23 +122,40 @@ export function nowSeconds(): number {
 }
 
 /**
- * Pushes the calling user's read-state for one conversation to the server.
- * Best-effort and fire-and-forget: a failed PUT keeps the optimistic local
- * mirror until a newer server value arrives. Skips the call when there's no
- * baseline to report. Records the revision the server assigned, so list
- * values that predate this write are ignored when they arrive later.
+ * Pushes one conversation's read-state, one PUT at a time so the server gets
+ * this tab's writes in order. Fire-and-forget: a failed PUT keeps the local
+ * mirror until a newer server value arrives.
  */
 async function syncReadState(conversationId: string): Promise<void> {
-  const lastSeen = lastSeenMap[conversationId];
-  if (lastSeen === undefined) return;
-  pendingWrites.set(conversationId, (pendingWrites.get(conversationId) ?? 0) + 1);
+  if (lastSeenMap[conversationId] === undefined) return;
+  if (pendingWrites.has(conversationId)) {
+    queuedWrites.add(conversationId);
+    return;
+  }
+  pendingWrites.add(conversationId);
+  do {
+    queuedWrites.delete(conversationId);
+    // oxlint-disable-next-line no-await-in-loop
+    await putReadState(conversationId);
+  } while (queuedWrites.has(conversationId));
+  pendingWrites.delete(conversationId);
+  const deferred = deferredSeeds.get(conversationId);
+  deferredSeeds.delete(conversationId);
+  if (deferred) seedReadState([deferred]);
+}
+
+/** PUTs the current read-state and records the revision the server assigned. */
+async function putReadState(conversationId: string): Promise<void> {
   try {
     const response = await authenticatedFetch(
       `/v1/sessions/${encodeURIComponent(conversationId)}/read-state`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ last_seen: lastSeen, unread: explicitlyUnread.has(conversationId) }),
+        body: JSON.stringify({
+          last_seen: lastSeenMap[conversationId],
+          unread: explicitlyUnread.has(conversationId),
+        }),
       },
     );
     if (!response.ok) return;
@@ -148,16 +166,7 @@ async function syncReadState(conversationId: string): Promise<void> {
       persistToStorage();
     }
   } catch {
-    // Network/auth errors or a bodiless response must not break the UI; local state stays.
-  } finally {
-    const remaining = (pendingWrites.get(conversationId) ?? 1) - 1;
-    if (remaining > 0) pendingWrites.set(conversationId, remaining);
-    else {
-      pendingWrites.delete(conversationId);
-      const deferred = deferredSeeds.get(conversationId);
-      deferredSeeds.delete(conversationId);
-      if (deferred) seedReadState([deferred]);
-    }
+    // Best-effort: keep local state on any failure, including a bodiless 204.
   }
 }
 
@@ -218,10 +227,9 @@ function mergeUnrevisionedReadState(conv: ReadStateSeed, server: number | undefi
 }
 
 /**
- * Merges list and stream read-state into the local mirror: newer revisions
- * are adopted, values for a conversation with a PUT in flight wait for it, and
- * revisionless values merge on the first seed only. A session with no baseline
- * seeds to its `updated_at`; the first call flips {@link hydrated}.
+ * Adopts newer-revision server state, defers values during an in-flight PUT,
+ * and max-merges revisionless values on first seed only. A session with no
+ * baseline seeds to its `updated_at`; the first call flips {@link hydrated}.
  */
 export function seedReadState(conversations: readonly ReadStateSeed[]): void {
   let changed = false;
@@ -289,6 +297,7 @@ export function resetReadStateForTests(): void {
   explicitlyUnread.clear();
   appliedRevision = {};
   pendingWrites.clear();
+  queuedWrites.clear();
   deferredSeeds.clear();
   seeded.clear();
   hydrated = false;

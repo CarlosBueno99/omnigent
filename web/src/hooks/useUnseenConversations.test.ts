@@ -48,6 +48,12 @@ function putCount(): number {
     .length;
 }
 
+async function settlePuts(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
 function setWindowFocused(focused: boolean): void {
   vi.spyOn(document, "hasFocus").mockReturnValue(focused);
 }
@@ -192,6 +198,7 @@ describe("markConversationRead", () => {
     const mod = await loadFresh();
     mod.seedReadState([]);
     mod.markConversationUnread("conv-1", 5_000);
+    await settlePuts();
     authFetch.mockClear();
     // Client wall clock (4000) lags the row's updated_at (5000) — the
     // baseline must still clear the dot by anchoring at updated_at.
@@ -397,12 +404,6 @@ describe("cross-device read-state (server revisions)", () => {
     authFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ revision }) });
   }
 
-  async function settlePuts(): Promise<void> {
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 0);
-    });
-  }
-
   it("applies a newer read from another device to an already-seeded session", async () => {
     const mod = await loadFresh();
     mod.seedReadState([
@@ -536,25 +537,40 @@ describe("cross-device read-state (server revisions)", () => {
     expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
   });
 
-  it("applies a newer value held during a PUT that fails before the first seed", async () => {
-    const mod = await loadFresh();
-    let resolvePut: (response: unknown) => void = () => {};
-    authFetch.mockReturnValue(
-      new Promise((resolve) => {
-        resolvePut = resolve;
-      }),
-    );
+  it.each([
+    ["fails", { ok: false, status: 503, json: async () => ({}) }],
+    [
+      "returns a bodiless 204",
+      {
+        ok: true,
+        status: 204,
+        json: async () => {
+          throw new SyntaxError("Unexpected end of JSON input");
+        },
+      },
+    ],
+  ])(
+    "applies a newer value held during a PUT that %s before the first seed",
+    async (_, response) => {
+      const mod = await loadFresh();
+      let resolvePut: (response: unknown) => void = () => {};
+      authFetch.mockReturnValue(
+        new Promise((resolve) => {
+          resolvePut = resolve;
+        }),
+      );
 
-    mod.markConversationUnread("conv-1", 5_000);
-    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 7_000, viewer_read_state_revision: 3 }]);
-    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+      mod.markConversationUnread("conv-1", 5_000);
+      mod.seedReadState([{ id: "conv-1", viewer_last_seen: 7_000, viewer_read_state_revision: 3 }]);
+      expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
 
-    resolvePut({ ok: false, status: 503, json: async () => ({}) });
-    await settlePuts();
+      resolvePut(response);
+      await settlePuts();
 
-    expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
-    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
-  });
+      expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
+      expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
+    },
+  );
 
   it("applies a Mark as unread made elsewhere while this device was closed", async () => {
     const mod = await loadFresh();
@@ -617,7 +633,7 @@ describe("cross-device read-state (server revisions)", () => {
     expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
   });
 
-  it("keeps the newest revision when overlapping PUTs resolve out of order", async () => {
+  it("sends a conversation's writes one at a time, so the latest action reaches the server last", async () => {
     const mod = await loadFresh();
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: 1_000, viewer_read_state_revision: 1 }]);
     const resolvers: ((response: unknown) => void)[] = [];
@@ -629,9 +645,23 @@ describe("cross-device read-state (server revisions)", () => {
     );
     mod.markConversationUnread("conv-1", 5_000);
     mod.markConversationRead("conv-1", 6_000);
-    resolvers[1]({ ok: true, status: 200, json: async () => ({ revision: 20 }) });
-    await settlePuts();
+    expect(putCount()).toBe(1);
+    expect(lastPutBody()?.unread).toBe(true);
+
     resolvers[0]({ ok: true, status: 200, json: async () => ({ revision: 10 }) });
+    await settlePuts();
+    expect(putCount()).toBe(2);
+    expect(lastPutBody()?.unread).toBe(false);
+    // The first write's echo arrives while the second is in flight.
+    mod.seedReadState([
+      {
+        id: "conv-1",
+        viewer_last_seen: 4_999,
+        viewer_unread: true,
+        viewer_read_state_revision: 10,
+      },
+    ]);
+    resolvers[1]({ ok: true, status: 200, json: async () => ({ revision: 20 }) });
     await settlePuts();
 
     // Another device's unread landed between this device's two writes.
@@ -644,6 +674,7 @@ describe("cross-device read-state (server revisions)", () => {
       },
     ]);
 
+    expect(putCount()).toBe(2);
     expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
     expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
   });
