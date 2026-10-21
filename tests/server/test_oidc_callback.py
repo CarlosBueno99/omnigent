@@ -64,6 +64,7 @@ def _cli_pkce_pair() -> tuple[str, str]:
 def _oidc_config(
     skip_email_verification: bool = False,
     email_claim: str = "email",
+    require_reauth: bool = True,
 ) -> OIDCConfig:
     """Build a generic-OIDC config over plain HTTP (so TestClient cookies stick).
 
@@ -74,6 +75,8 @@ def _oidc_config(
         as ``OMNIGENT_OIDC_SKIP_EMAIL_VERIFICATION`` would.
     :param email_claim: Claim carrying the email identity, as
         ``OMNIGENT_OIDC_EMAIL_CLAIM`` would set it.
+    :param require_reauth: Verify ``auth_time`` on forced re-authentication,
+        as ``OMNIGENT_OIDC_REQUIRE_REAUTH`` would set it.
     """
     return OIDCConfig(
         issuer=_ISSUER,
@@ -93,6 +96,7 @@ def _oidc_config(
         allow_invites=False,
         skip_email_verification=skip_email_verification,
         email_claim=email_claim,
+        require_reauth=require_reauth,
     )
 
 
@@ -587,6 +591,28 @@ def test_reauth_callback_rejects_missing_auth_time(
     assert resp.cookies.get("ap_session") is None
 
 
+@pytest.mark.parametrize("callback_client", [{"require_reauth": False}], indirect=True)
+@pytest.mark.parametrize(
+    "auth_time_offset", [pytest.param(None, id="missing"), pytest.param(-3600, id="stale")]
+)
+def test_reauth_callback_opt_out_skips_auth_time_check(
+    callback_client: tuple[TestClient, _IdpKeys],
+    auth_time_offset: int | None,
+) -> None:
+    """With the operator opt-out, IdPs that omit or reuse auth_time can sign in."""
+    client, keys = callback_client
+    reauth_at = int(time.time())
+    claims: dict[str, object] = {"email": "alice@example.com", "email_verified": True}
+    if auth_time_offset is not None:
+        claims["auth_time"] = reauth_at + auth_time_offset
+
+    resp = _do_callback_reauth(client, keys.sign_id_token(claims), reauth_at=reauth_at)
+
+    assert resp.status_code == 302, resp.text
+    decoded = jwt.decode(resp.cookies["ap_session"], _TEST_SECRET, algorithms=["HS256"])
+    assert decoded["sub"] == "alice@example.com"
+
+
 def test_non_reauth_callback_ignores_auth_time(
     callback_client: tuple[TestClient, _IdpKeys],
 ) -> None:
@@ -655,11 +681,19 @@ def test_cli_ticket_generic_oidc_reauth_round_trip(
 
 
 @pytest.mark.parametrize(
+    ("callback_client", "idp_sends_auth_time"),
+    [
+        pytest.param({}, True, id="auth-time-verified"),
+        pytest.param({"require_reauth": False}, False, id="reauth-opt-out-without-auth-time"),
+    ],
+    indirect=["callback_client"],
+)
+@pytest.mark.parametrize(
     "login_kind",
     ["ordinary_session", "other_ticket", "legacy_state"],
 )
 def test_cli_approval_requires_authentication_for_its_ticket(
-    callback_client: tuple[TestClient, _IdpKeys], login_kind: str
+    callback_client: tuple[TestClient, _IdpKeys], idp_sends_auth_time: bool, login_kind: str
 ) -> None:
     client, keys = callback_client
     verifier, challenge = _cli_pkce_pair()
@@ -682,7 +716,8 @@ def test_cli_approval_requires_authentication_for_its_ticket(
             if cookie.name == _AUTH_STATE_COOKIE_PLAIN:
                 cookie.value = jwt.encode(state, _TEST_SECRET, algorithm="HS256")
     claims: dict[str, object] = {"email": "alice@example.com", "email_verified": True}
-    claims["auth_time"] = int(time.time())
+    if idp_sends_auth_time:
+        claims["auth_time"] = int(time.time())
     client.app.state.pending_id_token[0] = keys.sign_id_token(claims)
     callback = client.get(
         "/auth/callback",
@@ -709,7 +744,8 @@ def test_cli_approval_requires_authentication_for_its_ticket(
     state = jwt.decode(
         client.cookies[_AUTH_STATE_COOKIE_PLAIN], _TEST_SECRET, algorithms=["HS256"]
     )
-    claims["auth_time"] = state["reauth_at"]
+    if idp_sends_auth_time:
+        claims["auth_time"] = state["reauth_at"]
     client.app.state.pending_id_token[0] = keys.sign_id_token(claims)
     callback = client.get(
         "/auth/callback",
