@@ -207,6 +207,7 @@ describe("ImportSessionsPanel", () => {
     });
 
     expect(screen.queryByTestId("import-limit-select")).toBeNull();
+    expect(screen.getByRole("switch", { name: "Replace existing snapshot" })).not.toBeChecked();
     const idInput = screen.getByTestId("import-session-id");
     expect(screen.getByTestId("import-submit")).toBeDisabled();
     fireEvent.change(idInput, { target: { value: "  session-exact  " } });
@@ -219,8 +220,23 @@ describe("ImportSessionsPanel", () => {
         25,
         expect.any(Function),
         "session-exact",
+        false,
       ),
     );
+  });
+
+  it("offers replacing an earlier import only for a session by ID", () => {
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_1", name: "mac-laptop", owner: "alice", status: "online" }],
+    } as unknown as ReturnType<typeof useHosts>);
+
+    renderPanel();
+    expect(screen.queryByTestId("import-replace-toggle")).toBeNull();
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "session" } });
+
+    expect(
+      screen.getByRole("switch", { name: "Replace existing snapshot" }),
+    ).toHaveAccessibleDescription(/replace that copy with the latest transcript/);
   });
 });
 
@@ -255,6 +271,7 @@ it("Retry failed preserves the original request after leaving Settings", async (
   fireEvent.change(screen.getByTestId("import-session-id"), {
     target: { value: "thread-to-retry" },
   });
+  fireEvent.click(screen.getByText("Replace existing snapshot"));
   fireEvent.click(screen.getByTestId("import-submit"));
   expect(importLocalSessionsMock).toHaveBeenLastCalledWith(
     "host_2",
@@ -262,6 +279,7 @@ it("Retry failed preserves the original request after leaving Settings", async (
     50,
     expect.any(Function),
     "thread-to-retry",
+    true,
   );
   first.unmount();
   finish(failed);
@@ -272,6 +290,7 @@ it("Retry failed preserves the original request after leaving Settings", async (
   expect(screen.getAllByRole("combobox")[0]).toHaveValue("host_2");
   expect(screen.getAllByRole("combobox")[2]).toHaveValue("codex");
   expect(screen.getByTestId("import-session-id")).toHaveValue("thread-to-retry");
+  expect(screen.getByTestId("import-replace-toggle")).toBeChecked();
   fireEvent.change(screen.getAllByRole("combobox")[0], { target: { value: "host_1" } });
   fireEvent.click(screen.getByTestId("import-retry"));
   await waitFor(() => expect(importLocalSessionsMock).toHaveBeenCalledTimes(2));
@@ -281,5 +300,6 @@ it("Retry failed preserves the original request after leaving Settings", async (
     50,
     expect.any(Function),
     "thread-to-retry",
+    true,
   );
 });

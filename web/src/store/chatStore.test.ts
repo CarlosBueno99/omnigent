@@ -89,6 +89,7 @@ import {
   type FrameScheduler,
   type PendingUserMessage,
   bindConversationForTest,
+  discardConversation,
   releaseConversation,
 } from "./chatStore";
 import { conversationRegistry } from "./conversationRegistry";
@@ -1164,6 +1165,30 @@ describe("chatStore — switchTo", () => {
     await tick();
     await tick();
     expect(useChatStore.getState().blocks).toHaveLength(1);
+  });
+
+  it("loads a discarded conversation from a fresh snapshot instead of its retained entry", async () => {
+    seedSession("conv_replaced", [userMessage("resp_old", "first prompt")]);
+    await useChatStore.getState().switchTo("conv_replaced");
+    expect(useChatStore.getState().blocks).toHaveLength(1);
+
+    // The server replaced the transcript under the same id, with new item ids.
+    seedSession("conv_replaced", [
+      userMessage("resp_new_1", "first prompt"),
+      userMessage("resp_new_2", "follow-up"),
+    ]);
+    discardConversation("conv_replaced");
+    expect(useChatStore.getState().conversationId).toBeNull();
+    expect(conversationRegistry.peek("conv_replaced")).toBeUndefined();
+
+    await useChatStore.getState().switchTo("conv_replaced");
+    const contents = useChatStore
+      .getState()
+      .blocks.map((block) => (block as UserMessageBlock).content);
+    expect(contents).toEqual([
+      [{ type: "input_text", text: "first prompt" }],
+      [{ type: "input_text", text: "follow-up" }],
+    ]);
   });
 
   it("scopes the background-task pill state to the active conversation", async () => {

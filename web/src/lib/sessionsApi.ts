@@ -575,7 +575,8 @@ function toImportFailureRef(evt: Record<string, unknown>): ImportFailureRef {
  * host reads + normalizes its own transcripts over the tunnel (they live on
  * that machine, not the server); already-imported sessions are skipped.
  * Passing `sessionId` loads that exact session from `source` without listing
- * local history. Otherwise, `source` may be "all" for every harness at once.
+ * local history; `force` then replaces an earlier import of it with the current
+ * transcript. Otherwise, `source` may be "all" for every harness at once.
  *
  * Prefers the streaming endpoint `POST /v1/imports/local/stream` (NDJSON):
  * `onSession` fires for each newly imported session as its frame lands, so
@@ -593,8 +594,15 @@ export async function importLocalSessions(
   limit: number,
   onSession?: (session: ImportedSessionRef) => void,
   sessionId?: string,
+  force = false,
 ): Promise<LocalImportResult> {
-  const body = { host_id: hostId, source, limit, session_id: sessionId };
+  const body = {
+    host_id: hostId,
+    source,
+    limit,
+    session_id: sessionId,
+    ...(force ? { force: true } : {}),
+  };
   const res = await authenticatedFetch("/v1/imports/local/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Omnigent-Client": getClientSurface() },
@@ -1250,6 +1258,20 @@ export async function getSessionUsage(
     totalCostUsd: wire.total_cost_usd ?? null,
     usageByModel: usageByModelFromWire(wire.usage_by_model),
   };
+}
+
+/** Read a session's server `updated_at` (seconds) without loading its transcript. */
+export async function getSessionUpdatedAt(sessionId: string): Promise<number> {
+  const params = new URLSearchParams({
+    include_items: "false",
+    include_liveness: "false",
+    include_usage: "false",
+  });
+  const res = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}?${params.toString()}`,
+  );
+  const wire = await readJsonOrThrow<{ created_at: number; updated_at?: number | null }>(res);
+  return wire.updated_at ?? wire.created_at;
 }
 
 /** One page of a session's committed items, in chronological order. */

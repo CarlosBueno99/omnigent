@@ -533,13 +533,21 @@ export function hydrateLocalConversation(
 export function removeLocalConversation(tempConvId: string): boolean {
   const wasViewing = useChatStore.getState().conversationId === tempConvId;
   removeConvRow(tempConvId);
-  if (wasViewing) {
+  discardConversation(tempConvId);
+  return wasViewing;
+}
+
+/**
+ * Leave a conversation if it is on screen and drop its registry entry, so the
+ * next visit loads it again from the server.
+ */
+export function discardConversation(id: string): void {
+  if (useChatStore.getState().conversationId === id) {
     // Reset the store to the landing state first (switchTo(null) does the full
     // mirrored-field reset), THEN release the entry.
     void useChatStore.getState().switchTo(null);
   }
-  conversationRegistry.release(tempConvId);
-  return wasViewing;
+  conversationRegistry.release(id);
 }
 
 /**

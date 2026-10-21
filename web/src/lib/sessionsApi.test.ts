@@ -20,6 +20,7 @@ import {
   getSession,
   getSessionSlim,
   getSessionUsage,
+  getSessionUpdatedAt,
   importLocalSessions,
   interrupt,
   listRunners,
@@ -1264,6 +1265,25 @@ describe("getSession", () => {
   });
 });
 
+describe("getSessionUpdatedAt", () => {
+  it("reads the timestamp without loading the transcript", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockJsonResponse({ id: "conv_a", created_at: 1_700_000_000, updated_at: 1_700_000_123 }),
+    );
+
+    expect(await getSessionUpdatedAt("conv_a")).toBe(1_700_000_123);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/v1/sessions/conv_a?include_items=false&include_liveness=false&include_usage=false",
+    );
+  });
+
+  it("falls back to the creation time for a session never updated", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ id: "conv_b", created_at: 1_700_000_000 }));
+
+    expect(await getSessionUpdatedAt("conv_b")).toBe(1_700_000_000);
+  });
+});
+
 describe("getSessionUsage", () => {
   it("requests usage without items, liveness, or runner-backed state refresh", async () => {
     fetchMock.mockResolvedValueOnce(
@@ -1850,6 +1870,26 @@ describe("importLocalSessions", () => {
       source: "codex",
       limit: 25,
       session_id: "session-exact",
+    });
+  });
+
+  it("asks the server to replace an earlier import of the exact session", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockNdjsonResponse([
+        JSON.stringify({ event: "session", session_id: "c1", title: "Exact" }),
+        JSON.stringify({ event: "done", imported: 1, already_imported: 0, failed: 0 }),
+      ]),
+    );
+
+    await importLocalSessions("host_1", "claude", 25, undefined, "session-exact", true);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      host_id: "host_1",
+      source: "claude",
+      limit: 25,
+      session_id: "session-exact",
+      force: true,
     });
   });
 
