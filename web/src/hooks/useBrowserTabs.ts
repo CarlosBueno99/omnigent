@@ -86,7 +86,7 @@ export function useBrowserTabs(conversationId: string) {
 
   const update = useCallback(
     (mutate: (current: BrowserTabsState) => BrowserTabsState) => {
-      // Keep the next state in memory so a failed storage write leaves the tabs usable.
+      // Drop names of closed tabs so memory matches what is saved.
       const next = withOpenTabNames(mutate(readBrowserTabsState(conversationId)));
       writeBrowserTabsState(conversationId, next);
       setState(next);

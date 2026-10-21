@@ -1332,7 +1332,7 @@ describe("WorkspacePanel browser tab names", () => {
     expect(screen.getByRole("tab", { name: "Dev server" })).toBeInTheDocument();
   });
 
-  it("caps a long URL label when it seeds the rename field", () => {
+  it("caps a long URL label in the rename field without pinning it", () => {
     openTwoTabs();
     const bridge = installBrowserUrlBridge();
     renderWorkspace({ showBrowserTab: true, rightRailTab: "browser" });
@@ -1340,9 +1340,12 @@ describe("WorkspacePanel browser tab names", () => {
     bridge.navigate("tab-a", `https://${longLabel}`);
 
     fireEvent.doubleClick(screen.getByRole("tab", { name: longLabel }));
-    expect(screen.getByRole("textbox", { name: "Browser tab name" })).toHaveValue(
-      longLabel.slice(0, 80),
-    );
+    const field = screen.getByRole("textbox", { name: "Browser tab name" });
+    expect(field).toHaveValue(longLabel.slice(0, 80));
+    fireEvent.keyDown(field, { key: "Enter" });
+    bridge.navigate("tab-a", "https://example.com/next");
+    expect(screen.getByRole("tab", { name: "example.com/next" })).toBeInTheDocument();
+    expect(readSessionWorkspaceState("conv_ws").browserNames).toBeUndefined();
   });
 
   it("renames from the context menu and resets back to the URL label", async () => {
@@ -1394,6 +1397,26 @@ describe("WorkspacePanel browser tab names", () => {
     fireEvent.keyDown(field, { key: "Enter" });
     expect(screen.getByRole("tab", { name: "staging.example.com/app" })).toBeInTheDocument();
     expect(readSessionWorkspaceState("conv_ws").browserNames).toBeUndefined();
+  });
+
+  it("types digits into a name without switching the rail, then refocuses the tab", () => {
+    openTwoTabs();
+    const bridge = installBrowserUrlBridge();
+    const { onRightRailTabChange } = renderWorkspace({
+      showBrowserTab: true,
+      rightRailTab: "browser",
+    });
+    bridge.navigate("tab-a", "http://localhost:3000/");
+    onRightRailTabChange.mockClear();
+
+    fireEvent.keyDown(screen.getByRole("tab", { name: "localhost:3000" }), { key: "F2" });
+    const field = screen.getByRole("textbox", { name: "Browser tab name" });
+    const digit = fireEvent.keyDown(field, { key: "2" });
+    fireEvent.change(field, { target: { value: "Dev server 2" } });
+    expect(digit).toBe(true);
+    expect(onRightRailTabChange).not.toHaveBeenCalled();
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(screen.getByRole("tab", { name: "Dev server 2" })).toHaveFocus();
   });
 
   it("does not pin the URL label when a rename is saved unchanged", () => {

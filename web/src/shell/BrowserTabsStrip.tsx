@@ -7,20 +7,21 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { SuppressBrowserView } from "@/hooks/useSuppressBrowserView";
-import { BROWSER_TAB_NAME_MAX_CHARS, browserTabLabel } from "@/lib/browserTabLabel";
+import {
+  BROWSER_TAB_NAME_MAX_CHARS,
+  browserTabLabel,
+  browserTabNameSeed,
+} from "@/lib/browserTabLabel";
 import { isImeCompositionKeyEvent } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 export interface BrowserTabsStripProps {
-  /** Ordered open browser tab ids. */
   tabs: readonly string[];
-  /** Selected tab id while the Browser rail mode is active, else null. */
+  /** Null unless the Browser rail mode is active. */
   activeTabId: string | null;
-  /** Manual names keyed by tab id. */
   names: Readonly<Record<string, string>>;
-  /** Current page URL keyed by tab id; absent until the tab loads a page. */
+  /** Absent until the tab loads a page. */
   urls: Readonly<Record<string, string>>;
-  /** Ref attached to the active tab so the rail can scroll it into view. */
   activeTabRef: Ref<HTMLDivElement>;
   onSelect: (tabId: string) => void;
   onClose: (tabId: string) => void;
@@ -79,14 +80,27 @@ function BrowserTab({
   const [editing, setEditing] = useState(false);
   // Rename starts once the menu has closed; the closing menu would steal focus.
   const renameFromMenuRef = useRef(false);
+  const tabButtonRef = useRef<HTMLButtonElement>(null);
+  // Enter or Escape hands focus back to the tab; a blur leaves it where it went.
+  const refocusTabRef = useRef(false);
+  useEffect(() => {
+    if (editing || !refocusTabRef.current) return;
+    refocusTabRef.current = false;
+    tabButtonRef.current?.focus();
+  }, [editing]);
+
+  const finishEditing = (byKeyboard: boolean) => {
+    refocusTabRef.current = byKeyboard;
+    setEditing(false);
+  };
   const label = browserTabLabel(manualName, url);
   const urlLabel = browserTabLabel(null, url);
 
-  const commitRename = (value: string) => {
-    setEditing(false);
+  const commitRename = (value: string, byKeyboard: boolean) => {
+    finishEditing(byKeyboard);
     const trimmed = value.trim();
     // Saving the untouched URL label must not pin it as a manual name.
-    if (manualName === null && trimmed === urlLabel) return;
+    if (manualName === null && trimmed === browserTabNameSeed(urlLabel).trim()) return;
     if (trimmed === (manualName ?? "")) return;
     onRename(trimmed);
   };
@@ -110,11 +124,12 @@ function BrowserTab({
               <BrowserTabNameInput
                 initialValue={label}
                 onCommit={commitRename}
-                onCancel={() => setEditing(false)}
+                onCancel={() => finishEditing(true)}
               />
             </span>
           ) : (
             <button
+              ref={tabButtonRef}
               type="button"
               role="tab"
               aria-selected={active}
@@ -187,11 +202,11 @@ function BrowserTabNameInput({
   onCancel,
 }: {
   initialValue: string;
-  onCommit: (value: string) => void;
+  onCommit: (value: string, byKeyboard: boolean) => void;
   onCancel: () => void;
 }) {
   // maxLength only limits typing, so cap a long URL label used as the start value.
-  const [value, setValue] = useState(() => initialValue.slice(0, BROWSER_TAB_NAME_MAX_CHARS));
+  const [value, setValue] = useState(() => browserTabNameSeed(initialValue));
   const inputRef = useRef<HTMLInputElement>(null);
   const settledRef = useRef(false);
   const composingRef = useRef(false);
@@ -201,20 +216,20 @@ function BrowserTabNameInput({
     inputRef.current?.select();
   }, []);
 
-  const settle = (commit: boolean) => {
+  const settle = (commit: boolean, byKeyboard: boolean) => {
     if (settledRef.current) return;
     settledRef.current = true;
-    if (commit) onCommit(value);
+    if (commit) onCommit(value, byKeyboard);
     else onCancel();
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    // The field owns every key, so rail shortcuts such as 1-9 must not act on typing.
+    event.stopPropagation();
     if (isImeCompositionKeyEvent(event, composingRef.current)) return;
     if (event.key !== "Enter" && event.key !== "Escape") return;
     event.preventDefault();
-    // The field owns these keys; rail and app shortcuts must not also act.
-    event.stopPropagation();
-    settle(event.key === "Enter");
+    settle(event.key === "Enter", true);
   };
 
   return (
@@ -232,7 +247,7 @@ function BrowserTabNameInput({
         composingRef.current = false;
       }}
       onKeyDown={handleKeyDown}
-      onBlur={() => settle(true)}
+      onBlur={() => settle(true, false)}
       className="w-40 min-w-0 rounded bg-transparent px-0.5 text-ui font-medium outline-1 outline-ring"
     />
   );

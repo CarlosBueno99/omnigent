@@ -7,15 +7,21 @@ export const BROWSER_TAB_NAME_MAX_CHARS = 80;
 /** Longest label for a URL without a host, such as a `data:` page. */
 const RAW_URL_LABEL_MAX_CHARS = 60;
 
+// Bidi, zero-width and control characters could disguise a decoded path segment.
+const SPOOFABLE_CHARS = /[\p{Cc}\p{Cf}]/u;
+
 function clampRawLabel(text: string): string {
-  return text.length > RAW_URL_LABEL_MAX_CHARS
-    ? `${text.slice(0, RAW_URL_LABEL_MAX_CHARS)}…`
+  // Count code points so an emoji or other astral character is never split.
+  const chars = Array.from(text);
+  return chars.length > RAW_URL_LABEL_MAX_CHARS
+    ? `${chars.slice(0, RAW_URL_LABEL_MAX_CHARS).join("")}…`
     : text;
 }
 
 function decodeSegment(segment: string): string {
   try {
-    return decodeURIComponent(segment);
+    const decoded = decodeURIComponent(segment);
+    return SPOOFABLE_CHARS.test(decoded) ? segment : decoded;
   } catch {
     return segment;
   }
@@ -35,6 +41,7 @@ export function browserUrlLabel(url: string | null | undefined): string {
   } catch {
     return clampRawLabel(trimmed);
   }
+  if (parsed.protocol === "about:" && parsed.pathname === "blank") return NEW_BROWSER_TAB_LABEL;
   const segments = parsed.pathname.split("/").filter(Boolean).map(decodeSegment);
   if (parsed.protocol === "http:" || parsed.protocol === "https:") {
     const host = parsed.host.replace(/^www\./, "");
@@ -44,6 +51,11 @@ export function browserUrlLabel(url: string | null | undefined): string {
   }
   if (parsed.protocol === "file:") return segments.at(-1) ?? trimmed;
   return clampRawLabel(trimmed);
+}
+
+/** Starting value of the rename field: the label cut to the name limit. */
+export function browserTabNameSeed(label: string): string {
+  return label.slice(0, BROWSER_TAB_NAME_MAX_CHARS);
 }
 
 /** The visible name of a browser tab: its manual name, else its URL label. */

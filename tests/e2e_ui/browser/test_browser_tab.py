@@ -31,7 +31,7 @@ from tests.e2e_ui.conftest import open_right_rail
 # Minimal stand-in for the Electron preload bridge. Runs before any app script
 # on every navigation (add_init_script), so the SPA's feature detection
 # (``supportsBrowser()`` in nativeBridge.ts) sees a browser-capable shell. Every
-# method the web layer may call is a guarded no-op: ``kind`` marks the native
+# method but ``onBrowserUrlChanged`` is a guarded no-op: ``kind`` marks the native
 # shell, ``browserOpenOrNavigate`` is the capability marker that gates the
 # Browser tab (a shell too old to ship the embedded browser lacks it, so the
 # tab hides), and the rest keep unrelated native calls (badge, notify, the
@@ -155,10 +155,12 @@ def test_no_browser_tab_in_plain_browser(
     open_right_rail(page)
     rail = page.get_by_role("complementary", name="Workspace")
 
-    # The Files/Agents tabs prove the rail rendered; the Browser tab must be
-    # absent (not merely hidden) in a non-Electron shell.
+    # The Agents tab proves the rail rendered; the new-tab menu must not offer
+    # Browser in a non-Electron shell.
     expect(rail.get_by_role("tab", name=re.compile("Agents"))).to_be_visible()
-    expect(rail.get_by_role("tab", name=re.compile("Browser"))).to_have_count(0)
+    rail.get_by_role("button", name="Open new", exact=True).click()
+    expect(page.get_by_role("menuitem").first).to_be_visible()
+    expect(page.get_by_role("menuitem", name="Browser", exact=True)).to_have_count(0)
 
 
 def test_multiple_browser_soft_tabs(page: Page, seeded_session: tuple[str, str]) -> None:
@@ -227,7 +229,11 @@ def test_browser_tab_names_follow_url_until_renamed(
     renamed = rail.get_by_role("tab", name="Install guide", exact=True)
     expect(renamed).to_be_visible()
 
+    # The tooltip shows the new URL once the event has rendered; the name stays.
     _emit_browser_url(page, view_id, "https://docs.example.com/guide/upgrade")
+    expect(renamed.locator("xpath=..")).to_have_attribute(
+        "title", "https://docs.example.com/guide/upgrade"
+    )
     expect(renamed).to_be_visible()
     page.reload()
     expect(renamed).to_be_visible()

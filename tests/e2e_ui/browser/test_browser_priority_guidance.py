@@ -322,7 +322,7 @@ def test_agent_reaches_for_embedded_browser_on_neutral_browse_ask(
         # must create and select its closable soft tab on demand.
         open_right_rail(page)
         rail = page.get_by_role("complementary", name="Workspace")
-        expect(rail.get_by_role("tab", name=re.compile("Browser"))).to_have_count(0)
+        expect(rail.get_by_role("button", name="Close New tab", exact=True)).to_have_count(0)
 
         _send(page, _NEUTRAL_BROWSE_ASK)
 

@@ -15,6 +15,9 @@ describe("browserUrlLabel", () => {
     ["https://example.com/a%2Fb", "example.com/a/b"],
     ["file:///Users/me/report.html", "report.html"],
     ["file:///", "file:///"],
+    ["about:blank#top", "New tab"],
+    ["https://evil.test/%E2%80%AEmoc.elgoog", "evil.test/%E2%80%AEmoc.elgoog"],
+    ["https://example.com/a%0Ab", "example.com/a%0Ab"],
     ["data:text/plain,hello", "data:text/plain,hello"],
     ["not a url", "not a url"],
     ["", NEW_BROWSER_TAB_LABEL],
@@ -30,6 +33,9 @@ describe("browserUrlLabel", () => {
     const dataUrl = `data:text/html;base64,${"A".repeat(5000)}`;
     expect(browserUrlLabel(dataUrl)).toBe(`${dataUrl.slice(0, 60)}…`);
     expect(browserUrlLabel("x".repeat(70))).toBe(`${"x".repeat(60)}…`);
+    // Cut by code point, never through an emoji.
+    const emojiUrl = `data:${"x".repeat(54)}${"😀".repeat(3)}`;
+    expect(browserUrlLabel(emojiUrl)).toBe(`data:${"x".repeat(54)}😀…`);
   });
 });
 
