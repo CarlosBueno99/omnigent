@@ -413,6 +413,7 @@ def test_managed_runner_callback_authenticates_end_to_end(
     assert denied.status_code == 403
     with httpx.Client(base_url=base_url) as client:
         client.cookies.set("ap_session", factory())
+        assert client.get("/v1/sessions?visibility=all").status_code == 200
         assert client.post("/auth/magic").status_code == 401
 
 

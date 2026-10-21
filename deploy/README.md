@@ -305,10 +305,12 @@ the actual native apps in staging checks before publishing a mobile build.
 
 The 0.20.0 credential format signs issuance purpose, workspace and, for managed
 runners, runner identity. Older access tokens and cookies are rejected because
-they cannot distinguish a runner from a normal sign-in. Plan a fresh browser
+they cannot distinguish a runner from a normal sign-in. Plan a fresh browser/CLI
 sign-in and runner reconnect when upgrading. Existing valid refresh grants can
 issue the new access-token format; refresh does not change a grant's scope or
-absolute lifetime. Keep server replicas on the same credential format.
+absolute lifetime. Older CLI/chat clients refresh only near local token expiry,
+so a 401 does not immediately renew their token: run `omnigent login <server-url>`
+and retry. Keep server replicas on the same credential format.
 
 Password, OIDC, native-app and magic-link login remain supported. First-party
 CLI/native tokens retain their existing API permissions. Runner credentials

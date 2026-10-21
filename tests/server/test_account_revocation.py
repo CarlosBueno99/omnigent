@@ -228,12 +228,30 @@ def test_password_rotation_revokes_issued_credentials_and_keeps_work(setup_app, 
     assert mint_runner_token().status_code == 200
 
 
-def test_admin_self_reset_keeps_admin_signed_in(setup_app):
+@pytest.mark.parametrize(
+    ("issue_refresh", "purpose"),
+    [(False, "session"), (True, "client")],
+    ids=["session-cookie", "client-bearer"],
+)
+def test_admin_self_reset_keeps_admin_signed_in(setup_app, issue_refresh, purpose):
+    import jwt
+
     admin, _alice, _stores, _ = setup_app
+    login = admin.post(
+        "/auth/login",
+        json={"username": "admin", "password": "admin-pw-12345", "issue_refresh": issue_refresh},
+    )
+    assert login.status_code == 200, login.text
     copied = TestClient(admin.app)
     copied.cookies.update(admin.cookies)
+    if issue_refresh:
+        admin.cookies.clear()
+        admin.headers["Authorization"] = f"Bearer {login.json()['token']}"
     reset = admin.post("/auth/users/admin/reset")
     assert reset.status_code == 200, reset.text
+    claims = jwt.decode(reset.cookies["ap_session"], options={"verify_signature": False})
+    assert claims["credential_purpose"] == purpose
+    admin.headers.pop("Authorization", None)
     assert admin.get("/auth/users").status_code == 200
     assert copied.get("/auth/me").status_code == 401
 
