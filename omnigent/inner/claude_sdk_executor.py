@@ -44,7 +44,12 @@ from typing import Any, NamedTuple, Protocol, TypeAlias, cast
 
 from omnigent._platform import resolve_cli_binary, stable_user_id
 from omnigent.cli_invocation import cli_invocation
-from omnigent.databricks_ai_gateway import is_databricks_ai_gateway_url
+from omnigent.databricks_ai_gateway import (
+    CLAUDE_CODE_AGENT,
+    is_databricks_ai_gateway_url,
+    is_ug_route,
+    with_gateway_attribution_lines,
+)
 from omnigent.inner import _proc
 from omnigent.inner.bundle_skills import ensure_bundle_plugin_manifest
 from omnigent.inner.hook_scripts import subagent_router
@@ -835,6 +840,7 @@ class _ClaudeClientState:
     model: str | None
     loop: asyncio.AbstractEventLoop | None = None
     task: asyncio.Task[None] | None = None
+    effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1259,6 +1265,11 @@ def _resolve_gateway_env(
     # that cannot negotiate betas keeps the original workaround.
     if is_databricks_ai_gateway_url(base_url):
         gateway_env["CLAUDE_CODE_USE_GATEWAY"] = "1"
+        gateway_env[_ANTHROPIC_CUSTOM_HEADERS_ENV] = with_gateway_attribution_lines(
+            gateway_env[_ANTHROPIC_CUSTOM_HEADERS_ENV],
+            CLAUDE_CODE_AGENT,
+            via_ug=is_ug_route(base_url),
+        )
     else:
         gateway_env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
     return gateway_env
@@ -1597,6 +1608,7 @@ class ClaudeSDKExecutor(Executor):
         agent_name: str | None = None,
         skills_filter: str | list[str] = "all",
         api_key_helper: str | None = None,
+        system_prompt_preset: str | None = None,
     ) -> None:
         """Create a ClaudeSDKExecutor.
 
@@ -1609,6 +1621,8 @@ class ClaudeSDKExecutor(Executor):
                 sandbox the Claude CLI process itself on supported Linux
                 hosts, but does not enable native OS tools.
             model: Override the model name.
+            system_prompt_preset: Set to ``claude_code`` to append agent
+                instructions to Claude Code's prompt. Unset preserves the custom prompt.
             permission_mode: SDK permission mode (default: auto
                 so the agent runs autonomously with background safety checks).
             gateway: If True, route through a vendor-neutral gateway
@@ -1680,6 +1694,9 @@ class ClaudeSDKExecutor(Executor):
                 f"Databricks provider with `{cli_invocation()} setup`, to route through "
                 "the Databricks Anthropic gateway."
             )
+        if system_prompt_preset not in (None, "claude_code"):
+            raise ValueError("system_prompt_preset must be 'claude_code' or unset")
+        self._system_prompt_preset = system_prompt_preset
         self._cwd = cwd
         self._os_env_spec = os_env
         self._os_env = os_env is not None
@@ -1700,7 +1717,7 @@ class ClaudeSDKExecutor(Executor):
         # ``--plugin-dir <bundle>`` produces clean
         # ``<agent-name>:<skill-name>`` labels in Claude's skill
         # listing instead of the auto-derived tmpdir basename.
-        if self._bundle_dir is not None:
+        if self._bundle_dir is not None and (self._bundle_dir / "skills").is_dir():
             try:
                 ensure_bundle_plugin_manifest(self._bundle_dir, self._agent_name)
             except OSError as exc:
@@ -1953,6 +1970,7 @@ class ClaudeSDKExecutor(Executor):
                 model=model,
                 loop=asyncio.get_running_loop(),
                 task=current_task,
+                effort=getattr(options, "effort", None),
             )
             self._clients[session_key] = state
             return client
@@ -2507,6 +2525,13 @@ class ClaudeSDKExecutor(Executor):
         from claude_agent_sdk.types import StreamEvent as _StreamEvent
 
         cfg = config or ExecutorConfig()
+        try:
+            reasoning_effort = validate_effort(
+                cfg.extra.get("reasoning_effort"), "Claude Agent SDK", CLAUDE_EFFORTS
+            )
+        except ValueError as exc:
+            yield ExecutorError(message=describe_exception(exc), retryable=False)
+            return
 
         session_key = self._session_key(messages)
         crashed_reason = self._crashed_sessions.get(session_key)
@@ -2529,6 +2554,14 @@ class ClaudeSDKExecutor(Executor):
             # completion with no assistant text instead of an empty string.
             yield TurnComplete(response=None)
             return
+
+        state = self._clients.get(session_key)
+        if state is not None and state.effort != reasoning_effort and prompt != "/compact":
+            # Effort is a launch option. Rebuild with history for conversational
+            # turns, but let /compact operate on the existing client's context.
+            await self._close_live_client(session_key)
+            resume_session = False
+            prompt = self._build_prompt(messages, resume_session=False)
 
         # Build MCP tools from Omnigent tool schemas
         mcp_tools = _build_mcp_tools(tools, self._tool_executor) if tools else []
@@ -2659,7 +2692,7 @@ class ClaudeSDKExecutor(Executor):
         # ``name`` (and thus the skill-listing prefix) comes from
         # the manifest written at construction time.
         bundle_plugins: list[Any] = []  # type: ignore[explicit-any]  # SdkPluginConfig is a TypedDict — typed Any here to keep the import lazy
-        if self._bundle_dir is not None:
+        if self._bundle_dir is not None and (self._bundle_dir / "skills").is_dir():
             bundle_plugins.append({"type": "local", "path": str(self._bundle_dir)})
         options_kwargs: dict[str, Any] = {  # type: ignore[explicit-any]  # ClaudeAgentOptions accepts mixed-typed kwargs (str / list / dict / callable / etc.)
             "tools": base_tools,
@@ -2678,6 +2711,12 @@ class ClaudeSDKExecutor(Executor):
             "extra_args": {"no-session-persistence": None},
             "max_buffer_size": 10 * 1024 * 1024,
         }
+        if self._system_prompt_preset == "claude_code":
+            options_kwargs["system_prompt"] = {
+                "type": "preset",
+                "preset": "claude_code",
+                "append": system_prompt,
+            }
         # Only forward ``setting_sources`` when explicitly set.
         # ``None`` lets the SDK apply its default
         # (``["user", "project"]`` when ``skills`` is non-None).
@@ -2689,13 +2728,6 @@ class ClaudeSDKExecutor(Executor):
         # branch).
         if resolved.setting_sources is not None:
             options_kwargs["setting_sources"] = resolved.setting_sources
-        try:
-            reasoning_effort = validate_effort(
-                cfg.extra.get("reasoning_effort"), "Claude Agent SDK", CLAUDE_EFFORTS
-            )
-        except ValueError as exc:
-            yield ExecutorError(message=describe_exception(exc), retryable=False)
-            return
         if reasoning_effort is not None:
             options_kwargs["effort"] = reasoning_effort
         # Databricks opus/fable endpoints reject thinking.type="enabled"
@@ -2748,12 +2780,14 @@ class ClaudeSDKExecutor(Executor):
 
         # Log the full configuration for debugging
         logger.info(
-            "ClaudeSDKExecutor: model=%s, gateway=%s, base_url=%s, tools=%d, thinking=%r",
+            "ClaudeSDKExecutor: model=%s, gateway=%s, base_url=%s, tools=%d, thinking=%r, "
+            "system_prompt_preset=%s",
             model or "(default)",
             self._gateway,
             env.get("ANTHROPIC_BASE_URL", "(not set)"),
             len(tools),
             options_kwargs.get("thinking"),
+            self._system_prompt_preset or "custom",
         )
 
         # Run the query, streaming events as they arrive.
