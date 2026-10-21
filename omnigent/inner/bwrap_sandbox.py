@@ -601,13 +601,7 @@ class BwrapSandboxBackend(SandboxBackend):
             seen_reexpose.add(key)
             bwrap_args.extend(reexpose[i : i + 3])
 
-        # Re-expose explicit policy grants the mask hid. The same
-        # last-mount-wins ordering that lets the mask beat the broad
-        # binds above also voids an explicit read/write grant living at
-        # or under a masked dotpath (e.g. write_paths
-        # ["~/.omnigent/codex-native"] with cwd=$HOME). Scoped to
-        # exactly the granted paths; dotfiles inside a re-exposed grant
-        # are re-masked. See :func:`_grant_reexpose_after_mask`.
+        # Re-bind explicit grants hidden by dotfile masks, then restore nested denies.
         bwrap_args.extend(_grant_reexpose_after_mask(policy, mask_args, cwd_resolved, argv))
 
         # AF_UNIX control-socket masks. A denied socket
@@ -1157,11 +1151,13 @@ def _grant_reexpose_after_mask(
     Replayed grants and replayed masks are emitted sorted by path depth
     (shallowest first), so under bwrap's last-mount-wins layering the
     most specific mount decides each path: a grant inside a mask stays
-    visible, a mask inside a grant stays hidden, a deeper grant inside
-    that mask stays visible, and overlapping read/write grants keep the
-    main bind pass's write-over-read precedence. A mask sorts before an
-    equal-path grant, so an explicitly granted dotpath beats its own
-    walker mask. Two deny levers still beat a grant:
+    visible, a mask inside a grant stays hidden, and a deeper grant
+    inside that mask stays visible. A mask sorts before an equal-path
+    grant, so an explicitly granted dotpath beats its own walker mask.
+    Overlapping read/write grants keep the main bind pass's
+    write-over-read precedence: a read root that a replayed write grant
+    reaches with no mask in between is not re-bound read-only. Two deny
+    levers still beat a grant:
 
     - an operator-declared ``mask_paths`` entry at or above the grant
       is never lifted: the grant under it is not re-exposed and the
@@ -1200,10 +1196,10 @@ def _grant_reexpose_after_mask(
     def _covered(path: Path, covers: Sequence[Path]) -> bool:
         return any(_is_within(path, c, resolve=False) for c in covers)
 
-    # (depth, tie, tokens) layers, emitted depth-sorted so the deepest
-    # mount lands last and wins. Masks tie-sort before grants so an
-    # equal-path grant is emitted after its mask.
-    layers: list[tuple[int, int, list[str]]] = []
+    # (depth, tie, dest, tokens) layers, emitted depth-sorted so the
+    # deepest mount lands last and wins. Masks tie-sort before grants so
+    # an equal-path grant is emitted after its mask.
+    layers: list[tuple[int, int, Path, list[str]]] = []
     seen: set[str] = set()
     reexposed_dirs: list[Path] = []
     for flag, path, is_dir in grants:
@@ -1215,7 +1211,7 @@ def _grant_reexpose_after_mask(
             continue
         if _covered(path, operator_masks):
             continue
-        layers.append((len(path.parts), 1, [flag, str(path), str(path)]))
+        layers.append((len(path.parts), 1, path, [flag, str(path), str(path)]))
         if is_dir:
             reexposed_dirs.append(path)
 
@@ -1234,7 +1230,7 @@ def _grant_reexpose_after_mask(
         if key in seen_masks:
             return
         seen_masks.add(key)
-        layers.append((len(dest.parts), 0, tokens))
+        layers.append((len(dest.parts), 0, dest, tokens))
 
     if reexposed_dirs:
         # Original mask entries (walker hits and operator mask_paths)
@@ -1283,7 +1279,17 @@ def _grant_reexpose_after_mask(
 
     layers.sort(key=lambda layer: (layer[0], layer[1]))
     out: list[str] = []
-    for _, _, tokens in layers:
+    emitted: list[tuple[Path, list[str]]] = []
+    for _, _, dest, tokens in layers:
+        if tokens[0] == "--ro-bind-try":
+            cover = next(
+                (t for p, t in reversed(emitted) if _is_within(dest, p, resolve=False)), None
+            )
+            # A read root already reached by a replayed write grant with no
+            # mask in between stays writable, as in the main bind pass.
+            if cover is not None and cover[0] == "--bind-try" and cover[1] != "/dev/null":
+                continue
+        emitted.append((dest, tokens))
         out.extend(tokens)
     return out
 

@@ -1,32 +1,14 @@
-"""Regression: an explicit write grant nested under a cwd dotdir is
-voided by the dotfile mask (linux_bwrap backend).
+"""Regression: explicit linux_bwrap grants under a masked cwd dotpath.
 
-The user journey: start a codex-native session whose os_env bundle sets
-``sandbox: {type: linux_bwrap, write_paths: ["~/.omnigent/codex-native"]}``
-with the session workspace at ``$HOME``. The launcher emits the grant as
-``--bind-try ~/.omnigent/codex-native`` and later emits the dotfile mask
-``--tmpfs ~/.omnigent``. bwrap resolves overlapping mounts
-last-mount-wins, so the mask hides the granted subtree: the codex TUI's
-private CODEX_HOME vanishes, codex exits instantly ("Error finding codex
-home ... but that path does not exist"), and the session fails with
-"Codex app-server never started a thread (startup timed out)". The same
-ordering voids the claude CLI wrap's auth grants (``~/.claude.json``,
-``~/.claude/.credentials.json``), dropping claude-native into first-run
-onboarding.
+With the workspace at ``$HOME``, the dotfile mask of ``~/.omnigent`` (or
+the ``/dev/null`` overlay of ``~/.claude.json``) is emitted after the
+grant binds and must not void codex-native's ``write_paths`` bridge
+directory or the claude CLI wrap's auth grants.
 
-Two layers, so the bug is pinned on any Linux host:
-
-- The ``*_in_argv`` tests need no user namespaces: they replay bwrap's
-  documented last-mount-wins semantics over the generated argv and
-  assert every explicitly granted path stays effectively visible.
-- ``test_read_through_granted_path_under_home_cwd`` drives the real
-  sandboxed helper end-to-end (skips on hosts where bwrap cannot create
-  a namespace, e.g. seccomp-restricted CI).
-
-``test_read_through_granted_path_with_project_cwd`` is the control: the
-identical grant with a project workspace (no ``.omnigent`` mask in the
-profile) isolates any failure of the home-cwd tests to the
-mask-after-grant ordering rather than the grant itself.
+- The ``*_in_argv`` tests replay bwrap's last-mount-wins semantics over
+  the generated argv, so they need no user namespaces.
+- The runtime tests drive the real sandboxed helper and skip where bwrap
+  cannot create a namespace; the project-cwd test is their control.
 """
 
 from __future__ import annotations
@@ -42,6 +24,7 @@ from omnigent.inner.bwrap_sandbox import BwrapSandboxBackend
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import create_os_environment
 from tests.inner.sandbox.conftest import _repo_root_for_pythonpath, run_async
+from tests.inner.test_bwrap_sandbox import _last_covering_mount
 
 _BWRAP = shutil.which("bwrap")
 
@@ -71,35 +54,16 @@ def _bwrap_functional() -> bool:
     return proc.returncode == 0
 
 
-def _effective_mount(argv: list[str], path: Path) -> str:
-    """Replay bwrap's last-mount-wins semantics over *argv* for *path*.
+requires_bwrap_namespace = pytest.mark.skipif(
+    not _bwrap_functional(),
+    reason="bwrap cannot create namespaces on this host",
+)
 
-    :param argv: The generated ``bwrap`` argv.
-    :param path: Absolute path to evaluate inside the namespace.
-    :returns: ``"exposed"`` when the last mount covering *path* binds
-        real host content, ``"masked"`` when it is a ``--tmpfs`` or
-        ``/dev/null`` overlay, ``"invisible"`` when no mount covers it.
-    """
-    probe = str(path)
-    state = "invisible"
-    i = 0
-    while i < len(argv):
-        token = argv[i]
-        if token == "--":
-            break
-        if token in ("--bind", "--bind-try", "--ro-bind", "--ro-bind-try"):
-            src, dst = argv[i + 1], argv[i + 2]
-            if probe == dst or probe.startswith(dst.rstrip("/") + "/"):
-                state = "masked" if src == "/dev/null" else "exposed"
-            i += 3
-        elif token == "--tmpfs":
-            dst = argv[i + 1]
-            if probe == dst or probe.startswith(dst.rstrip("/") + "/"):
-                state = "masked"
-            i += 2
-        else:
-            i += 1
-    return state
+
+def _exposed(argv: list[str], path: Path) -> bool:
+    """Whether the last mount covering *path* binds real host content."""
+    mount = _last_covering_mount(argv, path)
+    return mount is not None and mount[0] != "--tmpfs" and mount[1] != "/dev/null"
 
 
 def _home_with_codex_bridge(base: Path) -> tuple[Path, Path]:
@@ -152,14 +116,14 @@ def test_codex_bridge_grant_survives_dotdir_mask_in_argv(tmp_path: Path) -> None
         argv[i] in ("--bind", "--bind-try") and argv[i + 1] == grant for i in range(len(argv) - 2)
     ), f"precondition: the write grant must be emitted at all. argv: {argv}"
 
-    assert _effective_mount(argv, codex_home / "config.toml") == "exposed", (
+    assert _exposed(argv, codex_home / "config.toml"), (
         "the --tmpfs mask of ~/.omnigent is emitted after the --bind-try of "
         "the granted ~/.omnigent/codex-native subtree and wins "
         f"(last-mount-wins), voiding the explicit write grant. argv: {argv}"
     )
 
     # Deny-wins must survive any fix: sibling content stays hidden.
-    assert _effective_mount(argv, home / ".omnigent" / "chat.db") != "exposed", (
+    assert not _exposed(argv, home / ".omnigent" / "chat.db"), (
         f"~/.omnigent content outside the grant must stay masked. argv: {argv}"
     )
 
@@ -203,16 +167,13 @@ def test_claude_auth_grants_survive_dotfile_masks_in_argv(tmp_path: Path) -> Non
         home / ".claude" / ".credentials.json",
         home / ".claude" / "sessions",
     ):
-        assert _effective_mount(argv, granted) == "exposed", (
+        assert _exposed(argv, granted), (
             f"explicitly granted {granted} is hidden by a later dotfile mask "
             f"(last-mount-wins). argv: {argv}"
         )
 
 
-@pytest.mark.skipif(
-    not _bwrap_functional(),
-    reason="bwrap cannot create namespaces on this host",
-)
+@requires_bwrap_namespace
 def test_read_through_granted_path_under_home_cwd(
     tmp_path: Path,
     sandbox_pythonpath_env: None,
@@ -239,10 +200,7 @@ def test_read_through_granted_path_under_home_cwd(
     )
 
 
-@pytest.mark.skipif(
-    not _bwrap_functional(),
-    reason="bwrap cannot create namespaces on this host",
-)
+@requires_bwrap_namespace
 def test_read_through_granted_path_with_project_cwd(
     tmp_path: Path,
     sandbox_pythonpath_env: None,
@@ -268,10 +226,7 @@ def test_read_through_granted_path_with_project_cwd(
     assert "gpt-5-codex" in str(result.get("content", ""))
 
 
-@pytest.mark.skipif(
-    not _bwrap_functional(),
-    reason="bwrap cannot create namespaces on this host",
-)
+@requires_bwrap_namespace
 def test_write_through_granted_child_of_read_root_under_home_cwd(
     tmp_path: Path,
     sandbox_pythonpath_env: None,
@@ -312,10 +267,47 @@ def test_write_through_granted_child_of_read_root_under_home_cwd(
     )
 
 
-@pytest.mark.skipif(
-    not _bwrap_functional(),
-    reason="bwrap cannot create namespaces on this host",
-)
+@requires_bwrap_namespace
+def test_write_through_read_child_of_write_root_under_home_cwd(
+    tmp_path: Path,
+    sandbox_pythonpath_env: None,
+) -> None:
+    """End-to-end: a read root nested under a write root stays writable
+    while its ungranted dotfiles stay hidden.
+    """
+    home = tmp_path / "home"
+    write_parent = home / ".cfg" / "service"
+    read_child = write_parent / "readonly"
+    read_child.mkdir(parents=True)
+    (read_child / ".env").write_text("SECRET=1\n")
+
+    spec = OSEnvSpec(
+        type="caller_process",
+        cwd=str(home),
+        sandbox=OSEnvSandboxSpec(
+            type="linux_bwrap",
+            read_paths=[_repo_root_for_pythonpath(), str(read_child)],
+            write_paths=[str(write_parent)],
+            allow_network=False,
+        ),
+    )
+    os_env = create_os_environment(spec)
+    try:
+        written = run_async(os_env.write(str(read_child / "data.txt"), "written\n"))
+        dotfile = run_async(os_env.read(str(read_child / ".env")))
+    finally:
+        os_env.close()
+
+    assert "error" not in written, (
+        f"write into the read root nested under the write root failed: {written}"
+    )
+    assert (read_child / "data.txt").read_text() == "written\n"
+    assert "error" in dotfile or "SECRET" not in str(dotfile.get("content", "")), (
+        f"an ungranted dotfile inside the nested read root leaked: {dotfile}"
+    )
+
+
+@requires_bwrap_namespace
 def test_granted_file_stays_visible_while_masked_siblings_stay_hidden(
     tmp_path: Path,
     sandbox_pythonpath_env: None,

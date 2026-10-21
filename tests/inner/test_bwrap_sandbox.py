@@ -1240,6 +1240,8 @@ def _last_covering_mount(argv: list[str], path: Path) -> tuple[str, str] | None:
     i = 0
     while i < len(argv):
         token = argv[i]
+        if token == "--":
+            break
         if token in ("--bind", "--bind-try", "--ro-bind", "--ro-bind-try"):
             dst = argv[i + 2]
             if probe == dst or probe.startswith(dst.rstrip("/") + "/"):
@@ -1281,6 +1283,43 @@ def test_wrap_launcher_argv_write_grant_survives_overlapping_read_root_reexpose(
     verb, _ = _last_covering_mount(argv, read_root / "settings.ini") or ("", "")
     assert verb == "--ro-bind-try", (
         f"the read root outside the write child must stay read-only. argv: {argv}"
+    )
+
+
+def test_wrap_launcher_argv_write_parent_still_wins_nested_read_grant_after_reexpose(
+    tmp_path: Path,
+) -> None:
+    """
+    A read root nested under a re-exposed write root stays writable, as
+    in the main bind pass; a read root behind a mask inside the write
+    root stays read-only, and ungranted dotfiles stay masked.
+    """
+    cwd = tmp_path.resolve(strict=False)
+    write_parent = cwd / ".cfg" / "service"
+    read_child = write_parent / "readonly"
+    read_child.mkdir(parents=True)
+    (read_child / ".env").write_text("SECRET=1")
+    masked_read = write_parent / ".private" / "data"
+    masked_read.mkdir(parents=True)
+
+    backend = _make_backend()
+    policy = _make_policy(
+        tmp_path, write_roots=[write_parent], read_roots=[read_child, masked_read]
+    )
+    argv = backend.wrap_launcher_argv([sys.executable, "-c", "pass"], policy, tmp_path)
+
+    assert _last_covering_mount(argv, read_child / "new.txt") == (
+        "--bind-try",
+        str(write_parent),
+    ), (
+        "the read root nested under the write root was replayed read-only on top "
+        f"of its writable parent. argv: {argv}"
+    )
+    assert _last_covering_mount(argv, read_child / ".env") == ("--bind-try", "/dev/null"), (
+        f"an ungranted dotfile inside the nested read root leaked. argv: {argv}"
+    )
+    assert _last_covering_mount(argv, masked_read / "x") == ("--ro-bind-try", str(masked_read)), (
+        f"a read root behind a mask inside the write root must stay read-only. argv: {argv}"
     )
 
 
