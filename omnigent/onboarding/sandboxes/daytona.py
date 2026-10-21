@@ -480,6 +480,7 @@ class DaytonaSandboxLauncher(SandboxLauncher):
             return
         if handle.state == daytona.SandboxState.STARTED:
             handle.stop(timeout=_RESUME_TIMEOUT_S)
+            self._stop_existing(handle, sandbox_id)
             return
         raise _unusable_state_error(handle, sandbox_id, "stopped")
 
