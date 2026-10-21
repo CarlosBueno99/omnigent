@@ -477,6 +477,8 @@ async def test_accounts_auth_checks_once_per_request_without_blocking_loop(setup
             "user": user,
             "actor": current_account_user(),
             "generation": account_generation(user) if user is not None else None,
+            "purpose": auth.get_credential_purpose(request),
+            "runner": auth.get_runner_id(request),
         }
 
     transport = httpx.ASGITransport(app=admin.app)
@@ -496,7 +498,13 @@ async def test_accounts_auth_checks_once_per_request_without_blocking_loop(setup
             response = await pending
         generation = stores["account_store"].get_user("alice").account_generation
         assert response.status_code == 200, response.text
-        assert response.json() == {"user": "alice", "actor": "alice", "generation": generation}
+        assert response.json() == {
+            "user": "alice",
+            "actor": "alice",
+            "generation": generation,
+            "purpose": "session",
+            "runner": None,
+        }
         assert checked == [generation]
         assert (await member.get("/auth/me")).status_code == 200
         assert current_account_user() == caller_identity
@@ -520,12 +528,16 @@ def test_cached_auth_identity_does_not_cross_provider_or_workspace(setup_app):
     @admin.app.get("/_test/auth-isolation")
     def isolated_identity(request: Request):
         assert auth.get_user_id(request) == "alice"
+        assert auth.get_credential_purpose(request) == "session"
         with workspace_scope(42):
             assert auth.get_user_id(request) is None
+            assert auth.get_credential_purpose(request) is None
             assert current_account_user() is None
         assert other_provider.get_user_id(request) is None
+        assert other_provider.get_credential_purpose(request) is None
         assert current_account_user() is None
         assert auth.get_user_id(request) == "alice"
+        assert auth.get_credential_purpose(request) == "session"
         return {"actor": current_account_user()}
 
     response = alice.get("/_test/auth-isolation")

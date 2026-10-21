@@ -15,6 +15,12 @@ be able to write resources without a separate Omnigent account.
 - `login-auto-detect`: `omnigent login <url>` detects the server's sign-in mode.
   States: accounts, OIDC, header mode, Databricks-fronted, and a workspace URL
   with an org selector.
+- `credential-provenance`: accounts/OIDC tokens retain signed issuance purpose
+  across bearer and cookie transport, refresh and magic handoff. Managed runner
+  tokens carry the runner identity and cannot access account administration or
+  mint magic credentials; discovery and scheduling keep their existing ACLs.
+  Legacy access tokens require sign-in or refresh after the 0.20.0 format change.
+  This does not grant session-link approval or confine all work APIs.
 - `cli-browser-ticket-consent`: an OIDC sign-in opens a ticket-specific browser
   login and then an **Authorize sign-in** page. Compare its code with the CLI,
   choose **Approve** to complete sign-in, or **Deny** to stop it. Signing in
@@ -118,6 +124,13 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
   approve to complete the waiting CLI. Start a separate login and deny it to
   confirm polling stops; closing the page without deciding must leave it pending.
   Older clients should see upgrade instructions and stop polling.
+- **`credential-provenance`:** run
+  `tests/e2e/test_managed_runner_http_auth.py` for real accounts-server HTTP
+  callbacks and refresh, and `tests/e2e_ui/auth/test_oidc_login_flow.py` for
+  browser/CLI sign-in against a local fake IdP. Component suites cover magic
+  redemption, device/first-party refresh, revocation and native token exchange.
+  Actual desktop/mobile apps and managed custom-provider adoption need separate
+  verification.
 - **`proxy-env`:**
   `tests/e2e/test_login_accounts_proxy_env.py::test_login_detects_accounts_auth_despite_proxy_env`
   (starts its own accounts server; run with plain `uv run pytest`).
