@@ -53,12 +53,8 @@ def _trust_tmp_bridge_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 
 @pytest.fixture
 def relay(request: pytest.FixtureRequest) -> Iterator[_Relay]:
-    """Stand-in tool relay that allows every policy call and records each POST.
-
-    Indirect params model the delivered-but-unhelpful cases: ``response_delay_s``
-    holds the answer back past the hook's budget, and ``required_token`` rejects
-    any other bearer with 401 (a stale advertisement after a relay restart).
-    """
+    """Stand-in relay that allows every policy call and records each POST.
+    ``response_delay_s`` answers after the hook budget; ``required_token`` 401s other bearers."""
     options: dict[str, Any] = getattr(request, "param", {})
     response_delay_s: float = options.get("response_delay_s", 0.0)
     required_token: str | None = options.get("required_token")
@@ -256,10 +252,8 @@ def test_delivered_observation_is_not_replayed_after_a_slow_relay_response(
 def test_stale_env_token_replays_through_the_python_observer(
     tmp_path: Path, relay: _Relay
 ) -> None:
-    """A relay restart can leave a stale token in the env file while the JSON
-    advertisement already carries the new one. curl (reading the env) is rejected
-    with 401, so the hook must replay into the Python observer, which reads the
-    fresh JSON token and records the observation instead of dropping it."""
+    """A restart can leave a stale env token while tool_relay.json has the new one: curl
+    gets 401, so the hook replays into the Python observer, which reads the fresh token."""
     bridge_dir = _bridge_dir_with_relay(tmp_path, relay.url)
     (bridge_dir / "tool_relay.env").write_text(
         f"OMNIGENT_RELAY_URL='{relay.url}'\nOMNIGENT_RELAY_TOKEN='stale'\n"

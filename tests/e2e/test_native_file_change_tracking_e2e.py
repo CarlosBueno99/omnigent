@@ -28,11 +28,8 @@ _SESSION_ID = "conv_owned"
 
 
 def _observer_command(harness: str, bridge_dir: Path) -> list[str]:
-    """Observer hook invocation; ``claude_native_registered`` is the exact
-    command ``build_hook_settings`` registers (the curl fast path). Its Python
-    fallback points at a missing interpreter, so a clean exit with the change
-    recorded proves curl delivered rather than the interpreter the fix drops
-    from the hot path."""
+    """Observer hook invocation. ``claude_native_registered`` runs the registered command
+    with a missing fallback interpreter, so a recorded change proves curl delivered it."""
     if harness == "claude_native_registered":
         settings = bridge.build_hook_settings(bridge_dir, python_executable="/nonexistent-python")
         [command] = [
