@@ -131,6 +131,7 @@ describe("WebAuthn request observer", () => {
     vm.runInContext(
       `globalThis.CredentialsContainer = class CredentialsContainer {
         get(options) {
+          if (options?.illegal) throw new TypeError("Illegal invocation");
           return new Promise((resolve, reject) => calls.push({ options, resolve, reject }));
         }
         create(options) {
@@ -195,12 +196,31 @@ describe("WebAuthn request observer", () => {
     assert.deepEqual(rejections, []);
   });
 
-  it("ignores passkey autofill and non-WebAuthn credential requests", async () => {
+  it("ignores requests without a browser prompt and non-WebAuthn requests", async () => {
     const { realm, pending } = loadObserver();
-    vm.runInContext("credentials.get({ publicKey: {}, mediation: 'conditional' })", realm);
+    for (const mediation of ["conditional", "silent", "immediate"]) {
+      vm.runInContext(`credentials.get({ publicKey: {}, mediation: "${mediation}" })`, realm);
+    }
     vm.runInContext("credentials.get({ password: true })", realm);
     vm.runInContext("credentials.get()", realm);
     await settle();
+    assert.deepEqual(pending(), []);
+
+    vm.runInContext("credentials.get({ publicKey: {}, mediation: 'required' })", realm);
+    assert.deepEqual(pending(), [true]);
+  });
+
+  it("leaves unreadable options and native errors to the page", () => {
+    const { realm, pending } = loadObserver();
+    const request = vm.runInContext(
+      "credentials.get({ get publicKey() { throw new Error('getter'); } })",
+      realm,
+    );
+    assert.equal(request instanceof vm.runInContext("Promise", realm), true);
+    assert.throws(
+      () => vm.runInContext("credentials.get({ publicKey: {}, illegal: true })", realm),
+      /Illegal invocation/,
+    );
     assert.deepEqual(pending(), []);
   });
 

@@ -88,8 +88,11 @@ function createBannerWindows({
     };
     parent.on("closed", onParentClosed);
     banner.on("closed", () => {
-      banners.delete(parent);
-      onClosed?.(parent);
+      // A replacement may already be registered if this banner was destroyed before `closed`.
+      if (banners.get(parent) === banner) {
+        banners.delete(parent);
+        onClosed?.(parent);
+      }
       if (!parent.isDestroyed()) {
         parent.removeListener("resize", reposition);
         parent.removeListener("move", reposition);

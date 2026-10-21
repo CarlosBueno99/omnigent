@@ -33,16 +33,16 @@
       body {
         margin: 0;
         height: 100vh;
-        /* 8px gutter for the card's radius and shadow; matches PROMPT_WIDTH and
-           PROMPT_HEIGHT in src/security_key_prompt.js. */
+        /* 8px gutter for the card's radius and shadow; src/security_key_prompt.js
+           sets the window size. */
         padding: 8px;
         background: transparent;
         font-family: ui-sans-serif, system-ui, sans-serif;
         font-size: 13px;
       }
       #card {
-        /* Sized to its text; the extra window height absorbs font differences. */
-        max-height: 100%;
+        /* Fills the window, so no transparent area catches clicks meant for the page. */
+        height: 100%;
         display: flex;
         align-items: flex-start;
         gap: 12px;

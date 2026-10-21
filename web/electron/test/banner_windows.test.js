@@ -194,9 +194,11 @@ describe("security-key prompt", () => {
     const h = securityKeyHarness();
     h.report(true);
     const [prompt] = h.created;
-    prompt.bounds = null;
-    h.win.emit("resize");
-    assert.ok(prompt.bounds);
+    for (const event of ["resize", "move"]) {
+      prompt.bounds = null;
+      h.win.emit(event);
+      assert.ok(prompt.bounds, `follows the parent's ${event}`);
+    }
 
     h.win.destroyed = true;
     h.win.emit("closed");
@@ -254,5 +256,19 @@ describe("return banner", () => {
     assert.notEqual(recreated, bannerWindow);
     h.send("omnigent:return-banner-go-back", { sender: recreated.webContents });
     assert.equal(h.win.loadedUrl, undefined);
+  });
+
+  it("keeps a replacement banner when the old one reports closed late", () => {
+    const h = returnBannerHarness();
+    h.banner.show(h.win, "https://host.example/app");
+    const [stale] = h.created;
+    stale.destroyed = true;
+    h.banner.show(h.win, "https://host.example/app");
+    const replacement = h.created[1];
+    stale.emit("closed");
+
+    assert.equal(h.win.listenerCount("closed"), 1, "only the replacement follows the parent");
+    h.send("omnigent:return-banner-go-back", { sender: replacement.webContents });
+    assert.equal(h.win.loadedUrl, "https://host.example/app");
   });
 });

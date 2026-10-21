@@ -57,12 +57,22 @@ function observeWebAuthnRequests(report) {
     // A Proxy keeps the method's name and length and a native toString.
     descriptor.value = new Proxy(descriptor.value, {
       apply(target, thisArg, args) {
+        let prompted = false;
+        try {
+          const options = args[0];
+          const mediation = options?.mediation;
+          // Autofill (conditional), silent and immediate mediation show no browser prompt.
+          prompted =
+            Boolean(options?.publicKey) &&
+            (mediation === undefined || mediation === "optional" || mediation === "required");
+        } catch {
+          // Unreadable options are left to the native call.
+        }
         const result = apply(target, thisArg, args);
-        const options = args[0];
-        // Conditional mediation is passkey autofill, which shows no prompt.
-        if (options?.publicKey && options.mediation !== "conditional") {
+        if (prompted) {
           try {
-            // `then` consults the page-controlled Promise species, so it may throw.
+            // `then` consults the page-controlled Promise species, so it may throw. Observing
+            // the promise also marks a rejection handled, which only affects unhandledrejection.
             apply(then, result, [settle, settle]);
             pending += 1;
             safeReport(true);
