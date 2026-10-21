@@ -5805,12 +5805,7 @@ def _native_terminal_runtime(conv: Conversation) -> tuple[str, str, str]:
 
 
 def _is_runner_tunnel_loss(exc: httpx.HTTPError | ConnectionError) -> bool:
-    """
-    Return whether a runner request failed because the runner tunnel went away.
-
-    :param exc: Transport failure raised by a runner request.
-    :returns: ``True`` for a tunnel lost under or before the request.
-    """
+    """Return whether a runner request failed because the runner tunnel went away."""
     # A bare ConnectionError is a tunnel dropped under the request; a
     # ConnectError is a runner already offline when it was sent.
     return isinstance(exc, ConnectionError | httpx.ConnectError)
@@ -6845,21 +6840,16 @@ def _runner_reject_detail(response: httpx.Response) -> str:
     return f"{code}: {detail}" if code else detail
 
 
-async def _resume_message_after_tunnel_loss(
+async def _reconnected_runner_turn_status(
     session_id: str,
     conv: Conversation,
     runner_client: httpx.AsyncClient,
     conversation_store: ConversationStore,
     *,
     runner_router: RunnerRouter | None,
-    initializer: RunnerSessionInitializer | None,
-) -> bool:
+) -> str | None:
     """
-    Start a persisted message's turn once its runner's dropped tunnel reconnects.
-
-    The lost forward may already have reached the runner, so it is not posted
-    again. Session init without recovery suppression instead replays the
-    trailing user item, and only when the runner has not started a turn itself.
+    Wait for a session's dropped runner tunnel to reconnect and read its turn status.
 
     :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
     :param conv: Conversation row for *session_id*.
@@ -6867,19 +6857,19 @@ async def _resume_message_after_tunnel_loss(
     :param conversation_store: Store the relay persists the turn's items to.
     :param runner_router: Router used to wait for the runner to reconnect.
         ``None`` gives up immediately.
-    :param initializer: Initializer shared with the runner-connect hook.
-        ``None`` gives up immediately.
-    :returns: ``True`` when the reconnected runner reports a turn running.
+    :returns: ``"running"`` or ``"idle"`` from the reconnected runner, or ``None``
+        when the same runner did not come back to serve the session.
     """
     runner_id = conv.runner_id
-    if (
-        runner_router is None
-        or initializer is None
-        or runner_id is None
-        # A draining replica does not get its runners back.
-        or shutdown_state.server_shutting_down()
-    ):
-        return False
+
+    def runner_is_leaving() -> bool:
+        return (
+            shutdown_state.server_shutting_down()
+            or shutdown_state.runner_handoff_reason(runner_id) is not None
+        )
+
+    if runner_router is None or runner_id is None or runner_is_leaving():
+        return None
     _logger.warning(
         "Turn forward lost the runner tunnel for session=%s; waiting up to %.0fs for "
         "runner %s to reconnect",
@@ -6891,44 +6881,40 @@ async def _resume_message_after_tunnel_loss(
     if not await runner_router.wait_for_runner(
         runner_id, timeout_s=_TURN_FORWARD_RECONNECT_GRACE_S
     ):
-        return False
+        return None
+    current = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+    if current is None or current.runner_id != runner_id or runner_is_leaving():
+        return None
+    status: object = None
     try:
         await _ensure_runner_relay_ready(
-            session_id, runner_id, runner_client, conversation_store, conversation=conv
+            session_id, runner_id, runner_client, conversation_store, conversation=current
         )
-        response = await initializer.initialize(
-            conv, runner_client, timeout=_RUNNER_SESSION_INIT_TIMEOUT_S
+        response = await runner_client.get(
+            f"/v1/sessions/{session_id}", timeout=_RUNNER_STATUS_PROBE_TIMEOUT_S
         )
-        response.raise_for_status()
+        if response.status_code == 200:
+            payload = response.json()
+            status = payload.get("status") if isinstance(payload, dict) else None
     except (httpx.HTTPError, ConnectionError, OmnigentError, ValueError):
         _logger.warning(
-            "Could not resume session=%s on reconnected runner %s",
+            "Could not read session=%s from reconnected runner %s",
             session_id,
             runner_id,
             exc_info=True,
             extra={"session_id": session_id},
         )
-        return False
-    payload: object = None
-    with contextlib.suppress(ValueError):
-        payload = response.json()
-    status = payload.get("status") if isinstance(payload, dict) else None
-    if status != "running":
+        return None
+    if status not in ("running", "idle"):
         _logger.warning(
-            "Reconnected runner %s started no turn for session=%s (status=%s)",
+            "Reconnected runner %s cannot take session=%s (status=%s)",
             runner_id,
             session_id,
             status,
             extra={"session_id": session_id},
         )
-        return False
-    _logger.info(
-        "Runner %s reconnected and resumed the forwarded message for session=%s",
-        runner_id,
-        session_id,
-        extra={"session_id": session_id},
-    )
-    return True
+        return None
+    return str(status)
 
 
 async def _forward_event_to_runner(
@@ -6946,7 +6932,6 @@ async def _forward_event_to_runner(
     agent_revision: str | None = None,
     startup_input_id: str | None = None,
     runner_router: RunnerRouter | None = None,
-    runner_session_initializer: RunnerSessionInitializer | None = None,
 ) -> str:
     """
     Persist a user event and forward it to the runner.
@@ -6982,8 +6967,6 @@ async def _forward_event_to_runner(
         runner rebuilds the session's spec when it changes.
     :param runner_router: Router used to wait out a runner tunnel that drops
         under a new message's forward. ``None`` fails the forward immediately.
-    :param runner_session_initializer: Initializer that starts the message on
-        the reconnected runner. ``None`` fails the forward immediately.
     :returns: The store-assigned id of the persisted item.
     """
     import uuid
@@ -7451,20 +7434,22 @@ async def _forward_event_to_runner(
                 timeout=_RUNNER_FORWARD_TIMEOUT,
             )
         except (httpx.HTTPError, ConnectionError) as exc:
-            if not (
-                resumable_after_tunnel_loss
-                and _is_runner_tunnel_loss(exc)
-                and await _resume_message_after_tunnel_loss(
-                    session_id,
-                    conv,
-                    runner_client,
-                    conversation_store,
-                    runner_router=runner_router,
-                    initializer=runner_session_initializer,
-                )
-            ):
+            if not (resumable_after_tunnel_loss and _is_runner_tunnel_loss(exc)):
                 raise
-            _forward_resp = None
+            runner_turn_status = await _reconnected_runner_turn_status(
+                session_id, conv, runner_client, conversation_store, runner_router=runner_router
+            )
+            if runner_turn_status == "running":
+                # The lost forward reached the runner, which started its turn.
+                _forward_resp = None
+            elif runner_turn_status == "idle":
+                _forward_resp = await runner_client.post(
+                    f"/v1/sessions/{session_id}/events",
+                    json=runner_body,
+                    timeout=_RUNNER_FORWARD_TIMEOUT,
+                )
+            else:
+                raise
         # httpx only raises on transport errors, so a rejection (e.g. a 400 on a
         # malformed body, or a 501 from a runner with no process manager) would
         # otherwise read as a started turn: input.consumed would tell the client
@@ -7860,7 +7845,6 @@ async def _dispatch_session_event_to_runner_impl(
     background_titles_enabled: bool = True,
     agent_revision: str | None = None,
     startup_input: StartupInputContext | None = None,
-    runner_session_initializer: RunnerSessionInitializer | None = None,
 ) -> _SessionEventDispatchResult:
     """
     Forward an item-event to the runner with harness-aware dispatch.
@@ -7935,8 +7919,6 @@ async def _dispatch_session_event_to_runner_impl(
         an older host row gets.
     :param agent_revision: The agent's effective bundle and selection revision, stamped on
         both native and non-native forwards to invalidate runner caches.
-    :param runner_session_initializer: Initializer that starts a non-native
-        message on its runner after a tunnel drop cuts the forward.
     :returns: A :class:`_SessionEventDispatchResult` carrying the
         persisted item id (non-native) or the pending-input id
         (claude-native message bypass).
@@ -8294,7 +8276,6 @@ async def _dispatch_session_event_to_runner_impl(
         agent_revision=agent_revision,
         startup_input_id=startup_input.input_id if startup_input is not None else None,
         runner_router=runner_router,
-        runner_session_initializer=runner_session_initializer,
     )
     return _SessionEventDispatchResult(item_id=item_id, pending_id=None)
 

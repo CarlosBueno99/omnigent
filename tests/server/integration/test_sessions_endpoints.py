@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -12888,47 +12888,54 @@ async def test_message_forward_failure_surfaces_runner_unavailable(
 def _cut_forward_runner(
     session_id: str,
     failure_mode: str,
-    init_suppressions: list[bool],
+    forwards: list[dict[str, Any]],
     *,
-    turn_started_on_resume: bool,
+    runner_status: str | None,
+    cut_redelivery: bool = False,
 ) -> httpx.AsyncClient:
-    """Runner whose message forward is lost to a tunnel drop and whose init reports a turn."""
-    from omnigent.runner.session_init_protocol import SESSION_INIT_PAYLOAD_KEY
+    """Runner whose first message forward a tunnel drop cuts, reporting *runner_status* after."""
+
+    def cut() -> NoReturn:
+        if failure_mode == "tunnel_closed":
+            # What WSTunnelTransport raises when the tunnel dies under the request.
+            raise ConnectionError("tunnel closed before request completed")
+        raise httpx.ConnectError("runner offline")
 
     def runner(request: httpx.Request) -> httpx.Response:
         if request.url.path == f"/v1/sessions/{session_id}/events":
-            if failure_mode == "tunnel_closed":
-                # What WSTunnelTransport raises when the tunnel dies under the request.
-                raise ConnectionError("tunnel closed before request completed")
-            raise httpx.ConnectError("runner offline")
-        if request.url.path == "/v1/sessions":
-            suppressed = json.loads(request.content)[SESSION_INIT_PAYLOAD_KEY][
-                "suppress_recovery_turn"
-            ]
-            init_suppressions.append(suppressed)
-            # The runner replays the trailing user item only on an unsuppressed init.
-            running = turn_started_on_resume and not suppressed
-            return httpx.Response(
-                201,
-                json={
-                    "session_init_protocol_version": 2,
-                    "status": "running" if running else "idle",
-                },
-            )
+            forwards.append(json.loads(request.content))
+            if len(forwards) == 1 or cut_redelivery:
+                cut()
+            return httpx.Response(202, json={})
+        if request.method == "GET" and request.url.path == f"/v1/sessions/{session_id}":
+            if runner_status is None:
+                return httpx.Response(404, json={"error": "not_found"})
+            return httpx.Response(200, json={"id": session_id, "status": runner_status})
         return httpx.Response(202, json={})
 
     return httpx.AsyncClient(transport=httpx.MockTransport(runner), base_url="http://runner")
 
 
-@pytest.mark.parametrize("failure_mode", ["tunnel_closed", "runner_offline"])
-async def test_message_forward_cut_by_tunnel_drop_starts_turn_after_reconnect(
+_TUNNEL_CUT_MESSAGE = {
+    "type": "message",
+    "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+    "model_override": "model-x",
+    "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
+}
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "runner_status"),
+    [("tunnel_closed", "idle"), ("runner_offline", "idle"), ("tunnel_closed", "running")],
+)
+async def test_message_forward_cut_by_tunnel_drop_is_delivered_after_reconnect(
     client: httpx.AsyncClient,
-    app: Any,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     failure_mode: str,
+    runner_status: str,
 ) -> None:
-    """A new message whose forward a tunnel drop cuts is answered once its runner is back."""
+    """A new message whose forward a tunnel drop cuts reaches its runner once it is back."""
     from omnigent.runner.routing import RunnerRouter
     from omnigent.server.routes._sessions import orchestration as orchestration_module
 
@@ -12936,35 +12943,25 @@ async def test_message_forward_cut_by_tunnel_drop_starts_turn_after_reconnect(
     session = await _create_session(client, agent["id"])
     sid = session["id"]
     SqlAlchemyConversationStore(db_uri).replace_runner_id(sid, "message-runner")
-    init_suppressions: list[bool] = []
-
-    async def reconnect(runner_id: str, *, timeout_s: float) -> bool:
-        # The disconnect hook retires readiness cached for the dropped tunnel.
-        app.state.runner_session_initializer.invalidate_runner(runner_id)
-        return True
-
-    wait_for_runner = AsyncMock(side_effect=reconnect)
+    forwards: list[dict[str, Any]] = []
+    wait_for_runner = AsyncMock(return_value=True)
     monkeypatch.setattr(RunnerRouter, "wait_for_runner", wait_for_runner)
     monkeypatch.setattr("omnigent.server.routes.sessions._ensure_runner_relay_ready", AsyncMock())
     async with _cut_forward_runner(
-        sid, failure_mode, init_suppressions, turn_started_on_resume=True
+        sid, failure_mode, forwards, runner_status=runner_status
     ) as runner_client:
         _route_to_runner(monkeypatch, runner_client)
 
-        response = await client.post(
-            f"/v1/sessions/{sid}/events",
-            json={
-                "type": "message",
-                "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
-            },
-        )
+        response = await client.post(f"/v1/sessions/{sid}/events", json=_TUNNEL_CUT_MESSAGE)
 
     assert response.status_code == 202, response.text
     wait_for_runner.assert_awaited_once_with(
         "message-runner", timeout_s=orchestration_module._TURN_FORWARD_RECONNECT_GRACE_S
     )
-    # Only the post-reconnect init lets the runner replay the persisted message.
-    assert init_suppressions.count(False) == 1
+    assert forwards[0]["tools"] == _TUNNEL_CUT_MESSAGE["tools"]
+    assert forwards[0]["model_override"] == "model-x"
+    # A runner already running the lost forward's turn must not get the message twice.
+    assert forwards == ([forwards[0]] if runner_status == "running" else [forwards[0]] * 2)
     snapshot = (await client.get(f"/v1/sessions/{sid}")).json()
     assert [item["type"] for item in snapshot["items"]] == ["message"]
     assert snapshot["status"] != "failed"
@@ -12972,16 +12969,24 @@ async def test_message_forward_cut_by_tunnel_drop_starts_turn_after_reconnect(
 
 @pytest.mark.parametrize(
     "scenario",
-    ["reconnect_timeout", "runner_started_no_turn", "mid_turn_follow_up", "server_shutting_down"],
+    [
+        "reconnect_timeout",
+        "runner_lost_session",
+        "rebound_during_wait",
+        "relay_unavailable",
+        "redelivery_cut",
+        "runner_handed_off",
+        "server_shutting_down",
+        "mid_turn_follow_up",
+    ],
 )
-async def test_message_forward_cut_by_tunnel_drop_stays_unavailable_without_resumed_turn(
+async def test_message_forward_cut_by_tunnel_drop_stays_unavailable_without_delivery(
     client: httpx.AsyncClient,
-    app: Any,
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
 ) -> None:
-    """A cut forward still fails as unavailable when no turn is known to have started."""
+    """A cut forward still fails as unavailable when its runner cannot take it again."""
     from omnigent.runner.routing import RunnerRouter
     from omnigent.server.routes import sessions as sessions_module
     from omnigent.server.routes._sessions import orchestration as orchestration_module
@@ -12989,16 +12994,26 @@ async def test_message_forward_cut_by_tunnel_drop_stays_unavailable_without_resu
     agent = await create_test_agent(client)
     session = await _create_session(client, agent["id"])
     sid = session["id"]
-    SqlAlchemyConversationStore(db_uri).replace_runner_id(sid, "message-runner")
-    init_suppressions: list[bool] = []
+    conversation_store = SqlAlchemyConversationStore(db_uri)
+    conversation_store.replace_runner_id(sid, "message-runner")
+    forwards: list[dict[str, Any]] = []
 
     async def reconnect(runner_id: str, *, timeout_s: float) -> bool:
-        app.state.runner_session_initializer.invalidate_runner(runner_id)
+        if scenario == "rebound_during_wait":
+            conversation_store.replace_runner_id(sid, "replacement-runner")
         return scenario != "reconnect_timeout"
+
+    async def relay_ready(*args: object, **kwargs: object) -> None:
+        if scenario == "relay_unavailable" and wait_for_runner.await_count:
+            raise OmnigentError("relay unavailable", code=ErrorCode.RUNNER_UNAVAILABLE)
 
     wait_for_runner = AsyncMock(side_effect=reconnect)
     monkeypatch.setattr(RunnerRouter, "wait_for_runner", wait_for_runner)
-    monkeypatch.setattr("omnigent.server.routes.sessions._ensure_runner_relay_ready", AsyncMock())
+    monkeypatch.setattr("omnigent.server.routes.sessions._ensure_runner_relay_ready", relay_ready)
+    if scenario == "runner_handed_off":
+        monkeypatch.setattr(
+            orchestration_module.shutdown_state, "runner_handoff_reason", lambda _: "rebalance"
+        )
     if scenario == "server_shutting_down":
         monkeypatch.setattr(
             orchestration_module.shutdown_state, "server_shutting_down", lambda: True
@@ -13009,28 +13024,21 @@ async def test_message_forward_cut_by_tunnel_drop_stays_unavailable_without_resu
         async with _cut_forward_runner(
             sid,
             "tunnel_closed",
-            init_suppressions,
-            turn_started_on_resume=scenario != "runner_started_no_turn",
+            forwards,
+            runner_status=None if scenario == "runner_lost_session" else "idle",
+            cut_redelivery=scenario == "redelivery_cut",
         ) as runner_client:
             _route_to_runner(monkeypatch, runner_client)
 
-            response = await client.post(
-                f"/v1/sessions/{sid}/events",
-                json={
-                    "type": "message",
-                    "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
-                },
-            )
+            response = await client.post(f"/v1/sessions/{sid}/events", json=_TUNNEL_CUT_MESSAGE)
     finally:
         sessions_module._session_status_cache.pop(sid, None)
 
     assert response.status_code == 503, response.text
     assert response.json()["error"]["code"] == "runner_unavailable"
-    if scenario in ("mid_turn_follow_up", "server_shutting_down"):
-        wait_for_runner.assert_not_awaited()
-    else:
-        wait_for_runner.assert_awaited_once()
-    assert init_suppressions.count(False) == (1 if scenario == "runner_started_no_turn" else 0)
+    waits = scenario not in ("runner_handed_off", "server_shutting_down", "mid_turn_follow_up")
+    assert wait_for_runner.await_count == int(waits)
+    assert len(forwards) == (2 if scenario == "redelivery_cut" else 1)
     snapshot = (await client.get(f"/v1/sessions/{sid}")).json()
     assert [item["type"] for item in snapshot["items"]] == ["message"]
     assert snapshot["status"] != "failed"

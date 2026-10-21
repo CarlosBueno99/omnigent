@@ -3261,7 +3261,6 @@ def register_events_routes(
             # one; absent, the dispatch forwards as before.
             host_registry=getattr(request.app.state, "host_registry", None),
             startup_input=request if isinstance(request, StartupInputContext) else None,
-            runner_session_initializer=initializer,
         )
         if pending_background_title is not None:
             pending_background_title.schedule(expected_seed_title=conv.title)
