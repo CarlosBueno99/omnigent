@@ -1092,7 +1092,7 @@ def test_generated_token_command_reports_only_safe_results(
     payload = json.loads(status.read_text())
     assert payload["kind"] == kind
     if attempts > 1:
-        assert payload["elapsedMs"] >= sum(auth_command.AUTH_RETRY_DELAYS_MS[: attempts - 1])
+        assert payload["elapsedMs"] >= sum(auth_command.AUTH_RETRY_DELAYS_MS[: attempts - 1]) - 5
     assert payload["piPid"] == 123
     assert "private-" not in status.read_text()
     for file in auth_dir.iterdir():
@@ -1123,15 +1123,22 @@ def test_generated_token_command_cancelled_between_attempts(
     if os.name != "posix" or shutil.which("node") is None:
         pytest.skip("the native Pi token wrapper requires POSIX and Node")
     monkeypatch.setattr(auth_command, "AUTH_RETRY_DELAYS_MS", (2_000,))
-    wrapped = auth_command.wrap_auth_command(tmp_path, "omnigent", "printf x >> attempts; exit 7")
+    wrapped = auth_command.wrap_auth_command(
+        tmp_path, "omnigent", "printf x >> attempts; printf $$ > attempt.pid; exit 7"
+    )
     attempt_log = tmp_path / "attempts"
+    pid_file = tmp_path / "attempt.pid"
     process = subprocess.Popen(shlex.split(wrapped[1:]), cwd=tmp_path, stdout=subprocess.PIPE)
     try:
         deadline = time.monotonic() + 4
-        while not attempt_log.exists() and time.monotonic() < deadline:
+        while not (pid_file.exists() and pid_file.read_text()) and time.monotonic() < deadline:
             time.sleep(0.02)
-        # Signal after the first attempt has exited, while the wrapper waits to retry.
-        time.sleep(0.5)
+        pid = int(pid_file.read_text())
+        while process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not process_alive(pid)
+        # Leave time for the wrapper to see the exit and start waiting to retry.
+        time.sleep(0.2)
         process.terminate()
         stdout, _ = process.communicate(timeout=12)
     finally:

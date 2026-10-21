@@ -348,11 +348,14 @@ def test_pi_native_token_failure_recovers_without_replaying_tools(
         (workspace / "auth-mode").write_text("fail_once")
         before = len(requests)
         runs_before = len(helper_runs())
+        errors_before = {item["id"] for item in items() if item["type"] == "error"}
         send("Continue after one failed token refresh.")
 
         def transient_outcome() -> str | None:
             current = items()
-            if any(item["type"] == "error" for item in current):
+            if any(
+                item["type"] == "error" and item["id"] not in errors_before for item in current
+            ):
                 return "error"
             return "reply" if "AUTH-TRANSIENT-OK" in json.dumps(current) else None
 
