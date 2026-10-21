@@ -1116,6 +1116,34 @@ def test_wrap_launcher_argv_reexposes_write_grant_under_masked_dotdir(
     )
 
 
+def test_wrap_launcher_argv_grant_equal_to_masked_dotdir_keeps_nested_dotfiles_masked(
+    tmp_path: Path,
+) -> None:
+    """
+    Granting the masked dotdir itself re-binds it whole, but the dotfiles
+    nested inside it stay masked.
+    """
+    cwd = tmp_path.resolve(strict=False)
+    dotdir = cwd / ".omnigent"
+    dotdir.mkdir()
+    (dotdir / "chat.db").write_text("data")
+    (dotdir / ".env").write_text("SECRET=1")
+
+    backend = _make_backend()
+    policy = _make_policy(tmp_path, write_roots=[dotdir])
+    argv = backend.wrap_launcher_argv([sys.executable, "-c", "pass"], policy, tmp_path)
+
+    assert _has_pair_single_dest(argv, "--tmpfs", str(dotdir)), (
+        f"precondition: the cwd scan should mask {dotdir}. argv: {argv}"
+    )
+    assert _last_covering_mount(argv, dotdir / "chat.db") == ("--bind-try", str(dotdir)), (
+        f"the granted dotdir must win over its own mask. argv: {argv}"
+    )
+    assert _last_covering_mount(argv, dotdir / ".env") == ("--bind-try", "/dev/null"), (
+        f"a dotfile inside the granted dotdir leaked. argv: {argv}"
+    )
+
+
 def test_wrap_launcher_argv_reexposes_write_file_masked_by_devnull(
     tmp_path: Path,
 ) -> None:

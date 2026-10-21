@@ -83,56 +83,22 @@ def test_read_through_granted_path_under_home_cwd(
 
 
 @requires_bwrap_namespace
-def test_write_through_granted_child_of_read_root_under_home_cwd(
+def test_overlapping_read_and_write_grants_keep_write_precedence_under_home_cwd(
     tmp_path: Path,
     sandbox_pythonpath_env: None,
 ) -> None:
-    """End-to-end: a write grant nested under a read root stays writable.
+    """End-to-end: overlapping grants under a masked cwd dotdir keep the
+    main bind pass's write-over-read precedence after they are replayed.
 
-    Both grants live under a masked cwd dotdir, so both are replayed
-    after the mask; the read-only parent must not be mounted on top of
-    the writable child, and the parent itself must stay read-only.
-    """
-    home = tmp_path / "home"
-    read_root = home / ".cfg" / "service"
-    write_child = read_root / "child"
-    write_child.mkdir(parents=True)
-
-    spec = OSEnvSpec(
-        type="caller_process",
-        cwd=str(home),
-        sandbox=OSEnvSandboxSpec(
-            type="linux_bwrap",
-            read_paths=[_repo_root_for_pythonpath(), str(read_root)],
-            write_paths=[str(write_child)],
-            allow_network=False,
-        ),
-    )
-    os_env = create_os_environment(spec)
-    try:
-        granted = run_async(os_env.write(str(write_child / "data.txt"), "written\n"))
-        denied = run_async(os_env.write(str(read_root / "nope.txt"), "denied\n"))
-    finally:
-        os_env.close()
-
-    assert "error" not in granted, (
-        f"write into the granted child under an overlapping read root failed: {granted}"
-    )
-    assert "error" in denied, (
-        f"the read root outside the write child must stay read-only: {denied}"
-    )
-
-
-@requires_bwrap_namespace
-def test_write_through_read_child_of_write_root_under_home_cwd(
-    tmp_path: Path,
-    sandbox_pythonpath_env: None,
-) -> None:
-    """End-to-end: a read root nested under a write root stays writable
+    A write child under a read root stays writable while the read root
+    stays read-only, and a read child under a write root stays writable
     while its ungranted dotfiles stay hidden.
     """
     home = tmp_path / "home"
-    write_parent = home / ".cfg" / "service"
+    read_root = home / ".cfg" / "read-parent"
+    write_child = read_root / "child"
+    write_child.mkdir(parents=True)
+    write_parent = home / ".cfg" / "write-parent"
     read_child = write_parent / "readonly"
     read_child.mkdir(parents=True)
     (read_child / ".env").write_text("SECRET=1\n")
@@ -142,20 +108,30 @@ def test_write_through_read_child_of_write_root_under_home_cwd(
         cwd=str(home),
         sandbox=OSEnvSandboxSpec(
             type="linux_bwrap",
-            read_paths=[_repo_root_for_pythonpath(), str(read_child)],
-            write_paths=[str(write_parent)],
+            read_paths=[_repo_root_for_pythonpath(), str(read_root), str(read_child)],
+            write_paths=[str(write_child), str(write_parent)],
             allow_network=False,
         ),
     )
     os_env = create_os_environment(spec)
     try:
-        written = run_async(os_env.write(str(read_child / "data.txt"), "written\n"))
+        child_write = run_async(os_env.write(str(write_child / "data.txt"), "written\n"))
+        root_write = run_async(os_env.write(str(read_root / "nope.txt"), "denied\n"))
+        nested_write = run_async(os_env.write(str(read_child / "data.txt"), "written\n"))
         dotfile = run_async(os_env.read(str(read_child / ".env")))
     finally:
         os_env.close()
 
-    assert "error" not in written, (
-        f"write into the read root nested under the write root failed: {written}"
+    assert "error" not in child_write, (
+        f"write into the granted child under an overlapping read root failed: {child_write}"
+    )
+    assert (write_child / "data.txt").read_text() == "written\n"
+    assert "error" in root_write, (
+        f"the read root outside the write child must stay read-only: {root_write}"
+    )
+    assert not (read_root / "nope.txt").exists(), "write leaked through the read-only root"
+    assert "error" not in nested_write, (
+        f"write into the read root nested under the write root failed: {nested_write}"
     )
     assert (read_child / "data.txt").read_text() == "written\n"
     assert "error" in dotfile or "SECRET" not in str(dotfile.get("content", "")), (

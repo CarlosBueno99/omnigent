@@ -1106,20 +1106,14 @@ def _grant_reexpose_after_mask(
     interpreter_binds: Sequence[str] = (),
 ) -> list[str]:
     """
-    Re-expose explicit policy grants ON TOP of dotfile masks.
+    Re-bind grants shadowed by dotfile masks, then replay the masks nested inside them.
 
-    Under bwrap's last-mount-wins layering, a dotfile mask emitted after
-    the grant binds voids any ``write_paths`` / ``write_files`` /
-    ``read_paths`` grant at or under it: ``--tmpfs ~/.omnigent`` empties a
-    granted ``~/.omnigent/codex-native`` and a ``/dev/null`` overlay blanks
-    a granted ``~/.claude.json``. This re-binds exactly the hidden grants,
-    never the masked dotdir itself, then replays the masks and interpreter
-    binds inside them plus a fresh dotfile scan of each re-exposed
-    directory, depth-sorted so the most specific mount decides each path.
-    Operator ``mask_paths`` at or above a grant are never lifted,
-    ``mask_scan_skip_roots`` content is never re-masked, and a read-only
-    layer that a replayed write grant reaches with no mask in between is
-    skipped, keeping the main bind pass's write-over-read precedence.
+    A mask emitted after the grant binds would otherwise void a grant at or
+    under it, e.g. ``--tmpfs ~/.omnigent`` empties a granted
+    ``~/.omnigent/codex-native``. Only grant paths are re-bound, so a masked
+    dotdir is exposed only when it is itself granted, minus its nested
+    dotfiles. Layers are depth-sorted so the deepest mount wins; operator
+    ``mask_paths`` and write-over-read precedence are preserved.
 
     :param policy: Resolved sandbox policy carrying the grant lists.
     :param mask_args: The mask args produced by
@@ -1168,9 +1162,7 @@ def _grant_reexpose_after_mask(
     seen_masks: set[str] = set()
 
     def _add_mask(tokens: list[str], dest: Path) -> None:
-        """Queue a mask that must win back over a re-exposed grant."""
-        # Only masks strictly inside a re-exposed grant were shadowed by
-        # the re-expose bind; anything else is already in effect.
+        """Queue a mask strictly inside a re-exposed grant; others are already in effect."""
         if not tokens or not any(
             _is_within(dest, g, resolve=False) and not _is_within(g, dest, resolve=False)
             for g in reexposed_dirs
