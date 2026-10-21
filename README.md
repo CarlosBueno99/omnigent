@@ -366,7 +366,7 @@ see step 3.)
 **🔎 Deep Research** is a single agent that answers a question with a cited,
 cross-checked report. It plans sub-queries, searches the live web and reads
 full pages through an MCP search server, and verifies each claim across
-independent sources. It's also the simplest example to copy from: one agent
+independent sources. It's also the easiest example to copy from: one agent
 plus one `tools/mcp/*.yaml` server, no sub-agents.
 
 **Prefer the browser?** One command starts the local server and registers this
