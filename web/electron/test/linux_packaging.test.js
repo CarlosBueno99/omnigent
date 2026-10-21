@@ -15,7 +15,7 @@ const EXECUTABLE = packageConfig.name.toLowerCase();
 const INSTALL_DIR = `/opt/${PRODUCT_NAME}`;
 const CHROME_SANDBOX = `${INSTALL_DIR}/chrome-sandbox`;
 
-/** Every command the post-install script runs that could modify the host. */
+/** Host commands the post-install script looks up on PATH. */
 const HOST_TOOLS = [
   "chmod",
   "cp",
@@ -38,8 +38,9 @@ function upstreamAfterInstallTemplate() {
       require.resolve("app-builder-lib/package.json", { paths: [electronBuilderDir] }),
     );
     return path.join(appBuilderLib, "templates", "linux", "after-install.tpl");
-  } catch {
-    return null;
+  } catch (error) {
+    if (error.code === "MODULE_NOT_FOUND") return null;
+    throw error;
   }
 }
 
@@ -152,6 +153,9 @@ describe("Linux .deb packaging", { skip: process.platform !== "linux" }, () => {
       const resync = `re-sync ${packageConfig.build.deb.afterInstall} with ${upstreamTemplate}`;
       assert.deepEqual(fork.otherSteps, upstream.otherSteps, resync);
       assert.deepEqual(upstream.sandboxSetup, [UPSTREAM_SANDBOX_SETUP], resync);
+      assert.deepEqual(fork.sandboxSetup, [
+        "chmod 4755 '/opt/${sanitizedProductName}/chrome-sandbox' || true",
+      ]);
     },
   );
 });
