@@ -182,10 +182,9 @@ _HOME_DIR: str = "/home/omnigent"
 _CONTAINER_NAME: str = "host"
 _INIT_CONTAINER_NAME: str = "workspace-prep"
 
-# Tight pod-start budget consumed before the shared online poll, so scheduling
-# or image-pull failures fail fast. Raise via ``sandbox.kubernetes.pod_ready_timeout_s``
-# or :data:`_POD_READY_TIMEOUT_ENV_VAR`. Clone time is bounded separately by
-# _WORKSPACE_PREP_TIMEOUT_S.
+# Tight pod-start budget so scheduling or image-pull failures fail fast; raise via
+# ``sandbox.kubernetes.pod_ready_timeout_s`` or :data:`_POD_READY_TIMEOUT_ENV_VAR`.
+# Clone time is bounded separately by _WORKSPACE_PREP_TIMEOUT_S.
 _POD_READY_TIMEOUT_S: int = 90
 _POD_READY_POLL_S: float = 2.0
 
@@ -1275,21 +1274,26 @@ def _current_wait_reason(pod: object) -> str | None:
 def _workspace_prep_state(pod: object) -> Literal["running", "completed"] | None:
     """
     Report the workspace-prep init container's progress: ``"running"`` while
-    the clone is under way, ``"completed"`` once it exited cleanly.
+    the clone is under way or retrying after a failure, ``"completed"`` once it
+    exited cleanly.
 
     :param pod: A ``V1Pod`` read from the API.
-    :returns: The state, or ``None`` before the container starts or while it
-        waits to be restarted after a failure.
+    :returns: The state, or ``None`` before the container first starts.
     """
     status = getattr(pod, "status", None)
     for cs in getattr(status, "init_container_statuses", None) or []:
         if getattr(cs, "name", None) == _INIT_CONTAINER_NAME:
             state = getattr(cs, "state", None)
-            if getattr(state, "running", None) is not None:
-                return "running"
             terminated = getattr(state, "terminated", None)
             if terminated is not None and getattr(terminated, "exit_code", None) == 0:
                 return "completed"
+            # A clone that fails within one poll is only seen as a restart.
+            if (
+                getattr(state, "running", None) is not None
+                or terminated is not None
+                or (getattr(cs, "restart_count", 0) or 0) > 0
+            ):
+                return "running"
     return None
 
 
@@ -1792,15 +1796,15 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
         online poll.
 
         The pod-ready budget bounds scheduling and the image pull. Once the
-        workspace-prep init container is observed running, the wait switches
-        to the workspace-prep budget: a clone takes as long as the repository
-        is large, and a Pod that got this far is alive, not stuck.
+        repository clone is seen running, the wait switches to the
+        workspace-prep budget.
 
         :param namespace: Namespace the Job lives in.
         :param job_name: The Job whose child Pod to wait on.
-        :param on_stage: Progress observer told ``"cloning"`` when the init
-            container starts and *cloning* is set.
-        :param cloning: Whether the init container clones repositories.
+        :param on_stage: Progress observer told ``"cloning"`` when the clone
+            starts.
+        :param cloning: Whether the init container clones repositories; without
+            a clone, workspace prep stays on the pod-ready budget.
         :raises click.ClickException: On a terminal state or timeout.
         """
         from kubernetes.client.rest import ApiException
@@ -1907,11 +1911,12 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
             # restarts; a finished clone or a replacement Pod returns to the
             # pod-ready budget.
             prep_state = _workspace_prep_state(pod)
-            if prep_state == "running" and not clone_started:
+            if prep_state == "running" and cloning and not clone_started:
                 clone_started = preparing = True
                 budget_s = prep_timeout_s
                 deadline = time.monotonic() + prep_timeout_s
-                if on_stage is not None and cloning:
+                self._extend_for_workspace_prep(namespace, job_name, prep_timeout_s)
+                if on_stage is not None:
                     on_stage("cloning")
             elif prep_state == "completed" and preparing:
                 preparing = False
@@ -1938,6 +1943,18 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
                     )
                 )
             time.sleep(_POD_READY_POLL_S)
+
+    def _extend_for_workspace_prep(
+        self, namespace: str, workload_name: str, prep_timeout_s: int
+    ) -> None:
+        """
+        Keep the workload alive while its clone runs. Jobs have no expiry to
+        extend; see :class:`~omnigent.onboarding.sandboxes.agent_sandbox.AgentSandboxLauncher`.
+
+        :param namespace: Namespace the workload lives in.
+        :param workload_name: The workload whose clone just started.
+        :param prep_timeout_s: The clone budget now in effect.
+        """
 
     def _pod_failure_message(
         self,

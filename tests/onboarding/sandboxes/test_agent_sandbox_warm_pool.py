@@ -10,6 +10,7 @@ import sys
 import time
 import types
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1113,10 +1114,12 @@ def test_incompatible_claimed_profile_preserves_allocation_before_activation(
     harness.core.delete_namespaced_persistent_volume_claim.assert_not_called()
 
 
+@pytest.mark.parametrize("extension_fails", [False, True])
 def test_start_waits_for_in_progress_workspace_preparation(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, extension_fails: bool
 ) -> None:
-    """Workspace preparation (the clone) outlasting the pod-ready budget is not a failure."""
+    """Workspace preparation (the clone) outlasting the pod-ready budget is not a failure,
+    even when extending the Sandbox deadline for it fails."""
     monkeypatch.delenv(k8s._POD_READY_TIMEOUT_ENV_VAR, raising=False)
     monkeypatch.delenv(k8s._WORKSPACE_PREP_TIMEOUT_ENV_VAR, raising=False)
     clone_seconds = 300.0
@@ -1135,6 +1138,9 @@ def test_start_waits_for_in_progress_workspace_preparation(
         return json.dumps({"stage": stage, "generation": _GENERATION})
 
     monkeypatch.setattr(harness.launcher, "_exec", MagicMock(side_effect=execute))
+    patch_sandbox = harness.custom.patch_namespaced_custom_object
+    if extension_fails:
+        patch_sandbox.side_effect = [None, None, _ApiError(503)]
     stages: list[str] = []
     repo = RepoWorkspace("https://github.com/example/monorepo.git", None, "monorepo")
 
@@ -1145,6 +1151,15 @@ def test_start_waits_for_in_progress_workspace_preparation(
     assert result == "/home/omnigent/workspace/monorepo"
     assert clock["now"] >= clone_seconds > k8s._POD_READY_TIMEOUT_S
     assert stages == ["starting", "cloning"]
+    boot, during_clone = (
+        datetime.strptime(call.args[5]["spec"]["shutdownTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=UTC
+        )
+        for call in patch_sandbox.call_args_list
+        if call.args[3] == warm.SANDBOX_PLURAL
+    )
+    extension_s = (during_clone - boot).total_seconds()
+    assert abs(extension_s - k8s._WORKSPACE_PREP_TIMEOUT_S) <= 2
 
 
 @pytest.mark.parametrize(
