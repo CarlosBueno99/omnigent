@@ -121,13 +121,13 @@ describe("server-page update bridge", () => {
 });
 
 describe("WebAuthn request observer", () => {
-  // Runs the observer the way Electron does: serialized into a separate realm
-  // that has the page's CredentialsContainer.
-  function loadObserver() {
+  // Serializes the observer into a realm with the page's CredentialsContainer, as
+  // executeInMainWorld does; only the desktop e2e crosses the real bridge.
+  function loadObserver({ report } = {}) {
     let script;
     const h = loadPreload({ executeInMainWorld: (s) => (script = s) });
     assert.equal(typeof script?.func, "function");
-    const realm = vm.createContext({ report: script.args[0] });
+    const realm = vm.createContext({ report: report ?? script.args[0] });
     vm.runInContext(
       `globalThis.CredentialsContainer = class CredentialsContainer {
         get(options) {
@@ -137,8 +137,8 @@ describe("WebAuthn request observer", () => {
           return new Promise((resolve, reject) => calls.push({ options, resolve, reject }));
         }
       };
-      var calls = [];
-      var credentials = new CredentialsContainer();
+      globalThis.calls = [];
+      globalThis.credentials = new CredentialsContainer();
       (${script.func})(report);`,
       realm,
     );
@@ -150,21 +150,49 @@ describe("WebAuthn request observer", () => {
       setImmediate(resolve);
     });
 
-  it("reports the first WebAuthn request and the last one settling", async () => {
+  it("reports every WebAuthn request and the last one settling", async () => {
     const { realm, pending } = loadObserver();
     const first = vm.runInContext("credentials.get({ publicKey: {} })", realm);
+    // A later request re-shows a prompt the user dismissed while the first one waits.
     const second = vm.runInContext("credentials.create({ publicKey: {} })", realm);
-    assert.deepEqual(pending(), [true]);
+    assert.deepEqual(pending(), [true, true]);
 
     vm.runInContext("calls[0].resolve('credential')", realm);
     assert.equal(await first, "credential");
     await settle();
-    assert.deepEqual(pending(), [true]);
+    assert.deepEqual(pending(), [true, true]);
 
     vm.runInContext("calls[1].reject(new Error('NotAllowedError'))", realm);
     await assert.rejects(second, /NotAllowedError/);
     await settle();
-    assert.deepEqual(pending(), [true, false]);
+    assert.deepEqual(pending(), [true, true, false]);
+  });
+
+  it("does not count a request whose promise it cannot observe", () => {
+    const { realm, pending } = loadObserver();
+    vm.runInContext("Promise.prototype.constructor = 1", realm);
+    vm.runInContext("credentials.get({ publicKey: {} })", realm);
+    assert.deepEqual(pending(), []);
+  });
+
+  it("keeps report errors out of the page", async () => {
+    const rejections = [];
+    const onRejection = (reason) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const { realm } = loadObserver({
+        report: () => {
+          throw new Error("bridge gone");
+        },
+      });
+      const request = vm.runInContext("credentials.get({ publicKey: {} })", realm);
+      vm.runInContext("calls[0].resolve('credential')", realm);
+      assert.equal(await request, "credential");
+      await settle();
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+    assert.deepEqual(rejections, []);
   });
 
   it("ignores passkey autofill and non-WebAuthn credential requests", async () => {

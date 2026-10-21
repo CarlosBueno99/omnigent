@@ -1,7 +1,5 @@
-// Stand-in Databricks Apps front door for desktop e2e runs: an HTTPS server
-// reached as `https://<name>.aws.databricksapps.com` that sends signed-out
-// visitors to an Okta-style factor page asking for a security key or biometric
-// authenticator via WebAuthn, then proxies signed-in traffic to `upstreamUrl`.
+// Stand-in Databricks Apps front door: sends signed-out visitors to an Okta-style
+// WebAuthn factor page, then proxies signed-in traffic to `upstreamUrl`.
 
 "use strict";
 
@@ -36,15 +34,13 @@ const report = (event, detail = {}) =>
   fetch("/events", { method: "POST", body: JSON.stringify({ event, ...detail }) });
 const b64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 (async () => {
-  const platform = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
-  await report("platform_authenticator", { available: platform });
   await report("get_started");
   try {
     await navigator.credentials.get({ publicKey: {
       challenge: crypto.getRandomValues(new Uint8Array(32)),
       rpId: "localhost",
       allowCredentials: [{ type: "public-key", id: b64(${JSON.stringify(CREDENTIAL_ID)}),
-        transports: (new URLSearchParams(location.search).get("transports") ?? "usb,nfc,internal,hybrid").split(",") }],
+        transports: ["usb", "nfc", "internal", "hybrid"] }],
       userVerification: "preferred",
       timeout: 120000,
     } });
@@ -87,24 +83,20 @@ function generateCertificate(dir, hostname) {
   if (result.status !== 0) {
     throw new Error(`openssl could not create the front-door certificate: ${result.stderr}`);
   }
-  return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath), certPath };
+  return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
 }
 
 const hasSession = (req) =>
   (req.headers.cookie ?? "").split(";").some((part) => part.trim() === `${SESSION_COOKIE}=ok`);
 
 /**
- * @param {{ upstreamUrl: string, scratchDir: string, hostname?: string }} options
- * @returns {Promise<{ serverUrl: string, hostname: string, idpOrigin: string,
- *   credentialId: string, events: Array<{ event: string, at: number }>,
- *   preloadPath: string, launchEnv: Record<string, string>,
- *   close: () => Promise<void> }>}
+ * @param {{ upstreamUrl: string, scratchDir: string }} options
+ * @returns {Promise<{ serverUrl: string, idpOrigin: string, credentialId: string,
+ *   events: Array<{ event: string, at: number }>, preloadPath: string,
+ *   launchEnv: Record<string, string>, close: () => Promise<void> }>}
  */
-async function startFakeAppsFrontDoor({
-  upstreamUrl,
-  scratchDir,
-  hostname = "omnigent-repro.aws.databricksapps.com",
-}) {
+async function startFakeAppsFrontDoor({ upstreamUrl, scratchDir }) {
+  const hostname = "omnigent-repro.aws.databricksapps.com";
   const upstream = new URL(upstreamUrl);
   const serverUrl = `https://${hostname}`;
   const events = [];
@@ -148,7 +140,7 @@ async function startFakeAppsFrontDoor({
     if (url.pathname === "/.auth/callback") {
       const back = url.searchParams.get("return") ?? "/";
       res.writeHead(302, {
-        Location: back.startsWith("/") ? back : "/",
+        Location: /^\/(?![/\\])/.test(back) ? back : "/",
         "Set-Cookie": `${SESSION_COOKIE}=ok; Path=/; Secure; HttpOnly; SameSite=Lax`,
       });
       res.end();
@@ -225,14 +217,11 @@ async function startFakeAppsFrontDoor({
 
   return {
     serverUrl,
-    hostname,
-    frontDoorPort,
     launchEnv: { no_proxy: noProxy, NO_PROXY: noProxy },
     idpOrigin,
     credentialId: CREDENTIAL_ID,
     events,
     preloadPath,
-    certPath: tls.certPath,
     close: async () => {
       for (const server of [frontDoor, idp]) {
         server.closeAllConnections?.();
@@ -245,4 +234,4 @@ async function startFakeAppsFrontDoor({
   };
 }
 
-module.exports = { startFakeAppsFrontDoor, CREDENTIAL_ID };
+module.exports = { startFakeAppsFrontDoor };

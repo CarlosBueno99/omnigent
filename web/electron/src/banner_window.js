@@ -1,8 +1,5 @@
-// Shell-owned banner windows: at most one lazily created, frameless,
-// transparent child window per shell window, top-centred over its content and
-// shown without taking focus. The parent may be on a foreign, untrusted page,
-// so a banner loads a bundled page with a narrow preload, and callers match
-// its IPC to the banner by sender.
+// One lazily created, non-focusing child banner per shell window. The parent may show
+// an untrusted page, so banners load a bundled page with a narrow preload; match IPC by sender.
 
 "use strict";
 
@@ -73,8 +70,11 @@ function createBannerWindows({
         preload: preloadPath,
         contextIsolation: true,
         nodeIntegration: false,
+        sandbox: true,
       },
     });
+    banner.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    banner.webContents.on("will-navigate", (event) => event.preventDefault());
     if (platform === "darwin") banner.excludedFromShownWindowsMenu = true;
     banners.set(parent, banner);
     void banner.loadFile(page);

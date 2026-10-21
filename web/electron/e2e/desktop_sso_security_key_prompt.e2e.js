@@ -6,6 +6,7 @@
 
 const { describe, it, before, after } = require("node:test");
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -20,6 +21,11 @@ const {
 const { startFakeAppsFrontDoor } = require("./fixtures/fakeAppsFrontDoor");
 
 const deps = desktopDepsAvailable();
+// The stand-in front door needs openssl for its TLS certificate.
+const missingDeps = [
+  ...deps.missing,
+  ...(spawnSync("openssl", ["version"]).error ? ["openssl"] : []),
+];
 const RECORD_DIR =
   process.env.OMNIGENT_DESKTOP_RECORD_DIR ||
   path.join(__dirname, "recordings", "desktop-sso-security-key-prompt");
@@ -89,7 +95,7 @@ function promptState(electronApp) {
 
 describe(
   "desktop shell — Databricks App SSO with a security key factor",
-  { skip: deps.ok ? false : `missing deps: ${deps.missing.join(", ")}` },
+  { skip: missingDeps.length > 0 ? `missing deps: ${missingDeps.join(", ")}` : false },
   () => {
     let tmpDir;
     let server;
@@ -125,6 +131,21 @@ describe(
 
     const idpEvents = () => frontDoor.events.map(({ event }) => event);
 
+    async function waitForShownPrompt(app) {
+      const requested = await waitFor(() => idpEvents().includes("get_started"), 30_000);
+      assert.ok(requested, "sign-in never reached the security-key step");
+      const prompt = await waitFor(async () => {
+        const state = await promptState(app.electronApp);
+        return state?.shown ? state : null;
+      }, PROMPT_WAIT_MS);
+      assert.ok(
+        prompt,
+        `no security-key prompt within ${PROMPT_WAIT_MS / 1000}s of the WebAuthn request; ` +
+          `IdP events ${JSON.stringify(idpEvents())}`,
+      );
+      return prompt;
+    }
+
     it(
       "shows a security-key prompt while sign-in waits for the key",
       { timeout: 120_000 },
@@ -137,19 +158,8 @@ describe(
         });
         try {
           await connectWithKey(app, false);
-          const requested = await waitFor(() => idpEvents().includes("get_started"), 30_000);
-          assert.ok(requested, "sign-in never reached the security-key step");
-
-          const prompt = await waitFor(async () => {
-            const state = await promptState(app.electronApp);
-            return state?.shown ? state : null;
-          }, PROMPT_WAIT_MS);
-          assert.ok(
-            prompt,
-            `no security-key prompt within ${PROMPT_WAIT_MS / 1000}s of the WebAuthn request; ` +
-              `IdP events ${JSON.stringify(idpEvents())}`,
-          );
-          const { bounds, parent } = prompt;
+          const { bounds, parent } = await waitForShownPrompt(app);
+          assert.ok(parent, "the prompt has no parent window");
           assert.ok(
             bounds.x >= parent.x &&
               bounds.x + bounds.width <= parent.x + parent.width &&
@@ -158,7 +168,11 @@ describe(
             `prompt ${JSON.stringify(bounds)} is outside the app window ${JSON.stringify(parent)}`,
           );
 
-          const page = app.electronApp.windows().find((win) => win.url().endsWith(PROMPT_PAGE));
+          const page = await waitFor(
+            () => app.electronApp.windows().find((win) => win.url().endsWith(PROMPT_PAGE)),
+            5000,
+          );
+          assert.ok(page, "the prompt window has no Playwright page");
           await page.getByText("Use your security key").waitFor({ state: "visible" });
           const clipped = await page.evaluate(
             () => document.getElementById("card").getBoundingClientRect().bottom > innerHeight,
@@ -181,15 +195,19 @@ describe(
           );
         } finally {
           // Stop the display capture first so the clip ends on the window, not teardown.
-          await app.stopDisplayCapture();
-          await app.electronApp.close();
+          try {
+            await app.stopDisplayCapture();
+          } finally {
+            await app.electronApp.close();
+          }
           saveRecording(RECORD_DIR, "sso-security-key-prompt");
+          fs.rmSync(app.userDataDir, { recursive: true, force: true });
         }
       },
     );
 
     it(
-      "completes sign-in with a touched key and leaves no prompt behind",
+      "shows the prompt for a touched key's sign-in and hides it once signed in",
       { timeout: 120_000 },
       async () => {
         frontDoor.events.length = 0;
@@ -199,14 +217,32 @@ describe(
           env: frontDoor.launchEnv,
         });
         try {
+          // A touched key answers at once, so record that the prompt was shown at all.
+          await app.electronApp.evaluate(({ app: electronApp }) => {
+            globalThis.shownWindowIds = new Set();
+            electronApp.on("browser-window-created", (_event, win) => {
+              win.on("show", () => globalThis.shownWindowIds.add(win.id));
+            });
+          });
           await connectWithKey(app, true);
           await app.window.getByText("What should we build?").waitFor({ timeout: 30_000 });
           assert.ok(idpEvents().includes("get_resolved"), JSON.stringify(idpEvents()));
-          assert.notEqual((await promptState(app.electronApp))?.shown, true);
+          const promptWasShown = await app.electronApp.evaluate(({ BrowserWindow }, page) => {
+            const prompt = BrowserWindow.getAllWindows().find((win) =>
+              win.webContents.getURL().endsWith(page),
+            );
+            return Boolean(prompt && globalThis.shownWindowIds.has(prompt.id));
+          }, PROMPT_PAGE);
+          assert.ok(promptWasShown, "the prompt never showed during the key's sign-in");
+          assert.equal((await promptState(app.electronApp))?.shown, false);
         } finally {
-          await app.stopDisplayCapture();
-          await app.electronApp.close();
+          try {
+            await app.stopDisplayCapture();
+          } finally {
+            await app.electronApp.close();
+          }
           saveRecording(RECORD_DIR, "sso-security-key-sign-in");
+          fs.rmSync(app.userDataDir, { recursive: true, force: true });
         }
       },
     );

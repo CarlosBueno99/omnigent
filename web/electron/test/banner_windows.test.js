@@ -20,6 +20,9 @@ class Window extends EventEmitter {
     this.visible = false;
     this.webContents = new EventEmitter();
     this.webContents.mainFrame = { name: "main" };
+    this.webContents.setWindowOpenHandler = (handler) => {
+      this.webContents.windowOpenHandler = handler;
+    };
   }
   isDestroyed() {
     return this.destroyed;
@@ -115,6 +118,13 @@ describe("security-key prompt", () => {
     assert.equal(prompt.options.webPreferences.preload, "/app/src/security_key_prompt_preload.js");
     assert.equal(prompt.options.webPreferences.contextIsolation, true);
     assert.equal(prompt.options.webPreferences.nodeIntegration, false);
+    assert.equal(prompt.options.webPreferences.sandbox, true);
+    assert.deepEqual(prompt.webContents.windowOpenHandler(), { action: "deny" });
+    let navigationBlocked = false;
+    prompt.webContents.emit("will-navigate", {
+      preventDefault: () => (navigationBlocked = true),
+    });
+    assert.equal(navigationBlocked, true);
     assert.deepEqual(prompt.bounds, {
       x: CONTENT.x + (CONTENT.width - PROMPT_WIDTH) / 2,
       y: CONTENT.y + BANNER_INSET + BANNER_HEIGHT,
@@ -135,8 +145,26 @@ describe("security-key prompt", () => {
     h.report(true, h.fromPage(other));
     h.report(true, { sender: h.win.webContents, senderFrame: { name: "iframe" } });
     h.report(true, { sender: new EventEmitter(), senderFrame: null });
+    const embeddedView = new EventEmitter();
+    embeddedView.mainFrame = { name: "embedded" };
+    h.owners.set(embeddedView, h.win);
+    h.report(true, { sender: embeddedView, senderFrame: embeddedView.mainFrame });
     h.report("true");
     assert.equal(h.created.length, 0);
+  });
+
+  it("keeps each shell window's prompt separate", () => {
+    const h = securityKeyHarness();
+    const other = h.shellWindow();
+    h.shellWindows.add(other);
+    h.report(true);
+    h.report(true, h.fromPage(other));
+    const [prompt, otherPrompt] = h.created;
+    assert.equal(otherPrompt.options.parent, other);
+
+    h.report(false, h.fromPage(other));
+    assert.equal(otherPrompt.visible, false);
+    assert.equal(prompt.visible, true);
   });
 
   it("hides when the user dismisses it, and only for the prompt's own sender", () => {
@@ -199,6 +227,7 @@ describe("return banner", () => {
     assert.equal(bannerWindow.visible, true);
     assert.equal(bannerWindow.file, "/app/return-banner/index.html");
     assert.equal(bannerWindow.excludedFromShownWindowsMenu, true);
+    assert.equal(bannerWindow.options.webPreferences.sandbox, true);
     assert.equal(bannerWindow.bounds.y, CONTENT.y + BANNER_INSET);
 
     h.send("omnigent:return-banner-go-back", { sender: h.win.webContents });

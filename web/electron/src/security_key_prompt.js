@@ -1,10 +1,6 @@
-// Shell-owned "Use your security key" prompt.
-//
-// Electron does not ship the browser's passkey sheet, so a page's WebAuthn
-// request reaches a security key with nothing on screen. The shell preload
-// reports pending requests from a shell window's page (see preload.js); this
-// shows a banner below the return banner's slot until the request settles,
-// the page navigates, or the user dismisses it.
+// Shell-owned "Use your security key" prompt. Electron has no passkey sheet, so this
+// shows while a shell page's WebAuthn request (reported by preload.js) is pending,
+// until it settles, the page navigates, or the user dismisses it.
 
 "use strict";
 

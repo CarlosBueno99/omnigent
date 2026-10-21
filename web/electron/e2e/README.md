@@ -40,8 +40,9 @@ backend — no real provider creds.
 - `desktop_sso_security_key_prompt.e2e.js` — connect to a stand-in Databricks
   App (`fixtures/fakeAppsFrontDoor.js`) whose in-window SSO asks for a security
   key, with a CDP virtual authenticator as the key. Asserts the shell's
-  security-key prompt appears while the page waits and that a touched key
-  signs in with no prompt left behind.
+  security-key prompt appears while the page waits, Dismiss leaves the request
+  waiting, and a touched key's sign-in shows and then hides the prompt. Needs
+  `openssl`.
 - `desktop_connect.e2e.js` — the reference test to **copy** for a desktop bug:
   launch → setup page → type URL → Connect → land in the shell. Its `.webm` is
   the desktop journey footage.

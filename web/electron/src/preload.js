@@ -29,7 +29,7 @@ if (process.platform === "darwin") {
 }
 
 /**
- * Runs in the page's main world. Calls `report(true)` when the first modal
+ * Runs in the page's main world. Calls `report(true)` whenever a modal
  * WebAuthn get/create starts and `report(false)` when the last one settles.
  * Must stay self-contained: executeInMainWorld serializes it.
  * @param {(pending: boolean) => void} report
@@ -40,9 +40,16 @@ function observeWebAuthnRequests(report) {
   const apply = Reflect.apply;
   const then = Promise.prototype.then;
   let pending = 0;
+  const safeReport = (value) => {
+    try {
+      report(value);
+    } catch {
+      // Keep the observer's own errors, e.g. during unload, out of the page.
+    }
+  };
   const settle = () => {
     pending -= 1;
-    if (pending === 0) report(false);
+    if (pending === 0) safeReport(false);
   };
   for (const name of ["get", "create"]) {
     const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
@@ -54,9 +61,14 @@ function observeWebAuthnRequests(report) {
         const options = args[0];
         // Conditional mediation is passkey autofill, which shows no prompt.
         if (options?.publicKey && options.mediation !== "conditional") {
-          pending += 1;
-          if (pending === 1) report(true);
-          apply(then, result, [settle, settle]);
+          try {
+            // `then` consults the page-controlled Promise species, so it may throw.
+            apply(then, result, [settle, settle]);
+            pending += 1;
+            safeReport(true);
+          } catch {
+            // An unobservable request must not leave the prompt up.
+          }
         }
         return result;
       },
@@ -66,7 +78,8 @@ function observeWebAuthnRequests(report) {
 }
 
 // Electron has no passkey sheet, so let the shell show its own security-key
-// prompt. Windows shows its native WebAuthn dialog instead.
+// prompt. Windows shows its native WebAuthn dialog instead. Only the main frame
+// is observed; the preload never runs in (possibly cross-origin) subframes.
 if (process.platform !== "win32" && typeof contextBridge.executeInMainWorld === "function") {
   try {
     contextBridge.executeInMainWorld({
