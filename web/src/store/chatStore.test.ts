@@ -1206,8 +1206,16 @@ describe("chatStore — switchTo", () => {
       userMessage("resp_new_1", "first prompt"),
       userMessage("resp_new_2", "follow-up"),
     ]);
+    conversationRegistry.peek("conv_open")!.setState({
+      pendingUserMessages: [
+        { tempId: "pend_unsent", content: [{ type: "input_text", text: "draft" }] },
+      ],
+    });
     await reloadConversation("conv_open");
     expect(useChatStore.getState().conversationId).toBe("conv_open");
+    expect(useChatStore.getState().pendingUserMessages.map((p) => p.tempId)).toEqual([
+      "pend_unsent",
+    ]);
     const contents = useChatStore
       .getState()
       .blocks.map((block) => (block as UserMessageBlock).content);

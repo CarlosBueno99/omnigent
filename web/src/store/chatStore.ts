@@ -552,9 +552,15 @@ export function discardConversation(id: string): void {
 
 /** Drop a conversation's cached copy; if it is on screen, load it again in place. */
 export function reloadConversation(id: string): Promise<void> {
-  const wasViewing = useChatStore.getState().conversationId === id;
-  discardConversation(id);
-  return wasViewing ? useChatStore.getState().switchTo(id) : Promise.resolve();
+  if (useChatStore.getState().conversationId !== id) {
+    conversationRegistry.release(id);
+    return Promise.resolve();
+  }
+  const entry = conversationRegistry.peek(id);
+  // A stopped stream sends switchTo down its re-bind path, which keeps unsent messages.
+  if (entry !== undefined) abortConversationStream(entry);
+  void useChatStore.getState().switchTo(null);
+  return useChatStore.getState().switchTo(id);
 }
 
 /**

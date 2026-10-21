@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -1086,12 +1087,16 @@ async def test_local_import_by_id_force_refreshes_drifted_session(
     assert _stored_texts(conversation.id) == [text for _role, text in post_drift]
 
 
+_RESUMED_REFUSAL = "This session was resumed in Omnigent, so it can't be replaced."
+
+
 @pytest.mark.parametrize(
     "case,expected_reason",
     [
         ("owner", None),
-        ("resumed_in_omnigent", "This session was resumed in Omnigent, so it can't be replaced."),
-        ("resumed_then_unbound", "This session was resumed in Omnigent, so it can't be replaced."),
+        ("resumed_in_omnigent", _RESUMED_REFUSAL),
+        ("resumed_then_unbound", _RESUMED_REFUSAL),
+        ("resumed_during_import", _RESUMED_REFUSAL),
         ("shared_editor", "Only the owner of the imported session can replace it."),
         ("other_harness", "Only a session imported from this harness can be replaced."),
     ],
@@ -1171,6 +1176,16 @@ async def test_forced_local_import_replaces_only_an_unused_import_the_caller_own
                     ],
                 )
             store.clear_runner_id(session_id)
+        elif case == "resumed_during_import":
+            resolve_create = imports_module.resolve_project_session_create
+
+            async def _resume_then_resolve(**kwargs: Any) -> Any:
+                assert store.set_runner_id(session_id, "runner_resumed")
+                return await resolve_create(**kwargs)
+
+            monkeypatch.setattr(
+                imports_module, "resolve_project_session_create", _resume_then_resolve
+            )
         elif case == "shared_editor":
             permission_store.grant(caller, session_id, LEVEL_EDIT)
         elif case == "other_harness":

@@ -53,7 +53,7 @@ function spyInvalidate(queryClient: QueryClient) {
 
 beforeEach(() => {
   importMock.mockReset();
-  reloadMock.mockReset();
+  reloadMock.mockReset().mockResolvedValue(undefined);
   updatedAtMock.mockReset();
   markReadMock.mockReset();
   useSessionImportStore.setState({
@@ -143,6 +143,7 @@ describe("useSessionImportStore", () => {
   });
 
   it("drops cached copies of each session a forced import replaced and marks it read", async () => {
+    reloadMock.mockRejectedValue(new Error("Snapshot fetch failed"));
     updatedAtMock.mockImplementation(async (id) => {
       if (id === "c1") return 1_700_000_123;
       throw new Error("Session lookup failed");

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
 import secrets
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, cast, get_args
@@ -19,7 +20,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from omnigent.db.utils import builtin_agent_id
 from omnigent.db.workspace_cache import WorkspaceScopedCache
-from omnigent.entities import Conversation, NewConversationItem, parse_item_data
+from omnigent.entities import NewConversationItem, parse_item_data
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import HostImportLocalByIdFrame, HostImportLocalFrame, encode_host_frame
 from omnigent.native.native_coding_agents import native_coding_agent_for_harness
@@ -366,6 +367,7 @@ def create_imports_router(
         project_id: str | None = None,
         host_id: str | None = None,
         replace_conversation_id: str | None = None,
+        replace_guard: Callable[[], Awaitable[str | None]] | None = None,
     ) -> tuple[str, str | None]:
         """Create the conversation, append items, stamp import labels, grant owner.
 
@@ -378,7 +380,8 @@ def create_imports_router(
         resuming defaults to the machine the workspace lives on; bound only
         alongside a workspace (the ``ck_conversations_workspace_required_for_host``
         check constraint). Caller authorizes any ``replace_conversation_id``;
-        replacement waits until validation succeeds. Returns ``(conversation id, title)``.
+        replacement waits until validation succeeds, then ``replace_guard`` may
+        refuse it with a reason. Returns ``(conversation id, title)``.
         """
         native_agent = native_coding_agent_for_harness(f"{source}-native")
         if native_agent is None:
@@ -422,6 +425,9 @@ def create_imports_router(
         resolved_host_id = resolved_create.body.host_id
         title = (native_title or "").strip() or title_from_items(items)
         if replace_conversation_id is not None:
+            refusal = await replace_guard() if replace_guard is not None else None
+            if refusal is not None:
+                raise OmnigentError(refusal, code=ErrorCode.FORBIDDEN)
             await conversation_store.delete_conversation(replace_conversation_id)
         try:
             conversation = await asyncio.to_thread(
@@ -546,15 +552,18 @@ def create_imports_router(
         return user_id, host_conn
 
     async def _replacement_refusal(
-        existing: Conversation, source: ImportSource, user_id: str | None
+        conversation_id: str, source: ImportSource, user_id: str | None
     ) -> str | None:
-        """Return why a forced import must not replace ``existing``, or ``None``."""
+        """Return why a forced import must not replace ``conversation_id``, or ``None``."""
         try:
             await require_access(
-                user_id, existing.id, LEVEL_OWNER, permission_store, conversation_store
+                user_id, conversation_id, LEVEL_OWNER, permission_store, conversation_store
             )
         except OmnigentError:
             return "Only the owner of the imported session can replace it."
+        existing = await asyncio.to_thread(conversation_store.get_conversation, conversation_id)
+        if existing is None:
+            return None
         if existing.labels.get(IMPORT_SOURCE_LABEL_KEY) != source:
             return "Only a session imported from this harness can be replaced."
         if existing.runner_id is not None or await _has_items_added_after_import(existing.id):
@@ -659,11 +668,6 @@ def create_imports_router(
                 if existing is not None and not body.force:
                     counts["already_imported"] += 1
                     continue
-                if existing is not None:
-                    refusal = await _replacement_refusal(existing, source, user_id)
-                    if refusal is not None:
-                        _fail(external_session_id, source, refusal)
-                        continue
                 try:
                     items = [ImportItemInput.model_validate(raw).to_item() for raw in raw_items]
                     workspace = session.get("workspace")
@@ -677,6 +681,11 @@ def create_imports_router(
                         native_title=native_title if isinstance(native_title, str) else None,
                         host_id=body.host_id,
                         replace_conversation_id=existing.id if existing is not None else None,
+                        replace_guard=(
+                            functools.partial(_replacement_refusal, existing.id, source, user_id)
+                            if existing is not None
+                            else None
+                        ),
                     )
                 except OmnigentError as exc:
                     # A create that lost the dedup race collides on the deterministic

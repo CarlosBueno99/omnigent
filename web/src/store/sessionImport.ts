@@ -66,7 +66,9 @@ export const useSessionImportStore = create<SessionImportState>((set, get) => ({
         set((state) => ({ importedCount: state.importedCount + 1 }));
         // A replaced session keeps its id, so cached copies of the old transcript must go.
         if (force) {
-          void reloadConversation(id);
+          reloadConversation(id).catch(() => {
+            // The replacement succeeded; opening the session again reloads it.
+          });
           void queryClient.invalidateQueries({ queryKey: ["session", id] });
           seenMarks.push(markReplacedSessionSeen(id));
         }
