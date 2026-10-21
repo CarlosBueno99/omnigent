@@ -1107,10 +1107,9 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
       setDefaultPin({ sessionId: conversationId, url: info.data.selected_pr_url });
     }
   }, [conversationId, selected, info.data?.selected_pr_url]);
-  // With no associations there is no picker to replace a pick that fails to load. The error
-  // doesn't say whether the PR was unlinked, so forget it only once the session's list confirms.
-  const pickFailed =
-    !!pick && !associations && !!info.error && !(info.error instanceof RunnerOfflineError);
+  // A failed load doesn't say whether the PR was unlinked (cached data may still show it), so
+  // forget the pick only once the session's PR list confirms.
+  const pickFailed = !!pick && !!info.error && !(info.error instanceof RunnerOfflineError);
   useEffect(() => {
     if (!pick || !pickFailed) return;
     let current = true;

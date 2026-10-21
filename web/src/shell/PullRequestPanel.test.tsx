@@ -184,7 +184,7 @@ beforeEach(() => {
   window.localStorage.clear();
   clearSessionPrPicks();
   updateSessionPr.mockReset();
-  fetchPullRequestInfo.mockReset();
+  fetchPullRequestInfo.mockReset().mockRejectedValue(new Error("Session PR list not mocked"));
   // Fire the observer callback immediately on observe so lazy sections mount.
   class IO {
     private cb: IntersectionObserverCallback;
@@ -1986,7 +1986,7 @@ describe("session PR selection", () => {
     await pickSecondPrAndUnmount();
     vi.mocked(usePullRequestInfo).mockClear();
     fetchPullRequestInfo.mockResolvedValue(trackedPrInfo([firstPr]).data);
-    // The server proxy reports an untracked PR as a generic runner failure.
+    // The proxy reports the runner's "not associated" 400 as a generic 502.
     state.info = { isLoading: false, error: new Error("502 Bad Gateway"), isFetching: false };
     renderPanel();
     expect(usePullRequestInfo).toHaveBeenNthCalledWith(1, "conv_1", {
@@ -2000,6 +2000,24 @@ describe("session PR selection", () => {
       }),
     );
     expect(fetchPullRequestInfo).toHaveBeenCalledWith("conv_1");
+  });
+
+  it("forgets an unlinked pick while its cached PR list still shows it", async () => {
+    await pickSecondPrAndUnmount();
+    vi.mocked(usePullRequestInfo).mockClear();
+    fetchPullRequestInfo.mockResolvedValue(trackedPrInfo([firstPr]).data);
+    state.info = { ...trackedPrInfo([firstPr, secondPr]), error: new Error("502 Bad Gateway") };
+    renderPanel();
+    expect(usePullRequestInfo).toHaveBeenNthCalledWith(1, "conv_1", {
+      poll: true,
+      prUrl: secondPr,
+    });
+    await waitFor(() =>
+      expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
+        poll: true,
+        prUrl: firstPr,
+      }),
+    );
   });
 
   it.each([
