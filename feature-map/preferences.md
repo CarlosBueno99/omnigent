@@ -170,7 +170,13 @@ client/API evidence, not automatic host sync, launcher adoption, or Arclet proof
 uv run --no-sync pytest tests/test_preference_client.py --reruns 0 -q -rs
 ```
 
-The component matrix covers causal offline edits, malformed or stale replies,
+The process client requests two-row pages to exercise full traversal before
+adopting a snapshot, including after server restart. The component matrix covers
+later-page disconnects, changed revisions/identities, duplicate entries, repeated
+cursors, and malformed pages: the prior cache and outbox remain intact, and a
+fresh retry can converge. These cases extend the same `shared-client` recipe.
+
+The component matrix also covers causal offline edits, malformed or stale replies,
 identity changes, cancellation, local writers, sync locking, and outbox limits.
 Its HTTP transport is simulated; the mapped process test covers real transport.
 

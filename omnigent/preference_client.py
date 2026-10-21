@@ -17,10 +17,13 @@ import httpx
 from filelock import FileLock
 
 from omnigent.preference_sync import (
+    MAX_CONFLICTS,
     MAX_KEYS,
+    PREFERENCE_PAGE_SIZE,
     Name,
     PreferenceMutation,
     PreferenceNamespace,
+    PreferencePage,
     PreferenceResult,
     PreferenceSnapshot,
     ProtocolModel,
@@ -30,6 +33,67 @@ from omnigent.preference_sync import (
 )
 
 _PATH = "/v1/preferences/shared"
+
+
+async def read_preference_snapshot(
+    client: httpx.AsyncClient,
+    *,
+    identity: PreferenceNamespace | None = None,
+    page_size: int = PREFERENCE_PAGE_SIZE,
+) -> PreferenceSnapshot:
+    """Collect one revision atomically; HTTP/cursor failures discard partial pages.
+
+    Callers with an established binding must supply it. An unbound caller may
+    inspect the authenticated namespace, but must confirm it before adoption.
+    """
+    if type(page_size) is not int or not 1 <= page_size <= PREFERENCE_PAGE_SIZE:
+        raise ValueError("Invalid preference page size")
+    entries, conflicts = [], []
+    entry_keys, conflict_ids, cursors = set(), set(), set()
+    cursor = None
+    revision = None
+    for _ in range(MAX_KEYS + MAX_CONFLICTS + 1):
+        params = {"limit": str(page_size)}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = await client.get(_PATH, params=params)
+        response.raise_for_status()
+        page = PreferencePage.model_validate_json(response.content)
+        if identity is None:
+            identity = page.identity
+        if page.identity != identity:
+            raise ValueError("Preference snapshot belongs to another identity")
+        if revision is None:
+            revision = page.revision
+        if page.revision != revision:
+            raise ValueError("Preference revision changed between pages")
+        count = len(page.entries) + len(page.conflicts)
+        if count > page_size or (page.next_cursor is not None and count == 0):
+            raise ValueError("Invalid preference page boundary")
+        for entry in page.entries:
+            key = entry.key.storage_key()
+            if key in entry_keys:
+                raise ValueError("Duplicate preference entry across pages")
+            entry_keys.add(key)
+            entries.append(entry)
+        for conflict in page.conflicts:
+            if conflict.operation_id in conflict_ids:
+                raise ValueError("Duplicate preference conflict across pages")
+            if conflict.identity != identity:
+                raise ValueError("Preference conflict belongs to another identity")
+            conflict_ids.add(conflict.operation_id)
+            conflicts.append(conflict)
+        if len(entries) > MAX_KEYS or len(conflicts) > MAX_CONFLICTS:
+            raise ValueError("Preference snapshot exceeds limits")
+        if page.next_cursor is None:
+            return PreferenceSnapshot(
+                identity=identity, revision=revision, entries=entries, conflicts=conflicts
+            )
+        if page.next_cursor in cursors:
+            raise ValueError("Preference cursor did not advance")
+        cursors.add(page.next_cursor)
+        cursor = page.next_cursor
+    raise ValueError("Preference pagination did not terminate")
 
 
 class _Binding(ProtocolModel):
@@ -238,7 +302,11 @@ class PreferenceClient:
             connection.execute("DELETE FROM outbox WHERE sequence = ?", (sequence,))
 
     async def sync(
-        self, client: httpx.AsyncClient, *, max_operations: int = 100
+        self,
+        client: httpx.AsyncClient,
+        *,
+        max_operations: int = 100,
+        page_size: int = PREFERENCE_PAGE_SIZE,
     ) -> PreferenceSnapshot:
         """Verify identity, deliver a bounded batch, then fetch authoritative state.
 
@@ -252,9 +320,9 @@ class PreferenceClient:
         with FileLock(str(self.path) + ".sync.lock", timeout=0):
 
             async def refresh() -> PreferenceSnapshot:
-                response = await client.get(_PATH)
-                response.raise_for_status()
-                snapshot = PreferenceSnapshot.model_validate_json(response.content)
+                snapshot = await read_preference_snapshot(
+                    client, identity=self._binding.identity, page_size=page_size
+                )
                 await asyncio.to_thread(self._accept_snapshot, snapshot)
                 return snapshot
 

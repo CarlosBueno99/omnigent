@@ -30,7 +30,11 @@ def peers(tmp_path, db_uri):
 def transport(store, *, user="alice", after_write=None):
     def handle(request):
         if request.method == "GET":
-            result = store.read(user_id=user)
+            result = store.read(
+                user_id=user,
+                limit=int(request.url.params.get("limit", 100)),
+                cursor=request.url.params.get("cursor"),
+            )
         else:
             operation = PreferenceMutation.model_validate_json(request.content)
             result = store.apply(operation, user_id=user)
@@ -232,6 +236,9 @@ async def test_outbox_limit_and_invalid_edit_leave_existing_work(peers, monkeypa
     async with httpx.AsyncClient(base_url="http://test", transport=transport(store)) as http:
         with pytest.raises(ValueError, match="nonnegative"):
             await local.sync(http, max_operations=-1)
+        for page_size in (0, 101, True):
+            with pytest.raises(ValueError, match="page size"):
+                await local.sync(http, page_size=page_size)
         await local.sync(http)
     with pytest.raises(ValueError):
         local.enqueue(MODEL, False)
@@ -263,3 +270,104 @@ async def test_discard_uncertain_head_preserves_successor_conflicts(peers):
         assert await remote.sync(http) == snapshot
         with pytest.raises(ValueError, match="first queued"):
             local.discard(first)
+
+
+@pytest.mark.asyncio
+async def test_paginated_refresh_is_atomic_and_retry_preserves_outbox(peers):
+    store, (local, remote) = peers
+    async with httpx.AsyncClient(base_url="http://test", transport=transport(store)) as http:
+        await local.sync(http)
+        await remote.sync(http)
+        for index in range(5):
+            remote.enqueue(
+                SharedPreferenceKey(
+                    kind="plugin",
+                    name={"ecosystem": "claude", "source": "test", "name": str(index)},
+                ),
+                False,
+            )
+        expected = await remote.sync(http, page_size=2)
+        assert await local.sync(http, page_size=2) == expected
+    local.enqueue(MODEL, "offline")
+    cached, pending = local.cached(), local.pending()
+    requests = []
+
+    def changed(request):
+        requests.append(request)
+        assert request.method == "GET"
+        if request.url.params.get("cursor"):
+            return httpx.Response(409)
+        page = store.read(user_id="alice", limit=2)
+        return httpx.Response(200, json=page.model_dump(mode="json"))
+
+    async with httpx.AsyncClient(
+        base_url="http://test", transport=httpx.MockTransport(changed)
+    ) as http:
+        with pytest.raises(httpx.HTTPStatusError):
+            await local.sync(http, page_size=2)
+    assert len(requests) == 2
+    assert local.cached() == cached and local.pending() == pending
+    async with httpx.AsyncClient(base_url="http://test", transport=transport(store)) as http:
+        result = await local.sync(http, page_size=2)
+    assert local.pending() == [] and any(entry.value == "offline" for entry in result.entries)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "identity",
+        "revision",
+        "duplicate",
+        "cursor",
+        "empty",
+        "oversize",
+        "malformed",
+        "disconnect",
+    ],
+)
+async def test_bad_later_page_never_replaces_cache_or_sends_edits(peers, fault):
+    store, (local, _) = peers
+    async with httpx.AsyncClient(base_url="http://test", transport=transport(store)) as http:
+        await local.sync(http)
+        local.enqueue(MODEL, "a")
+        await local.sync(http)
+    local.enqueue(MODEL, "pending")
+    cached, pending = local.cached(), local.pending()
+    count = 0
+
+    def handle(request):
+        nonlocal count
+        count += 1
+        assert request.method == "GET"
+        page = store.read(user_id="alice").model_dump(mode="json")
+        if count == 1:
+            page["next_cursor"] = "next"
+            return httpx.Response(200, json=page)
+        page["entries"] = [
+            {**page["entries"][0], "key": {"kind": "model", "name": "opencode_model"}}
+        ]
+        if fault == "identity":
+            page["identity"]["user_id"] = "bob"
+        elif fault == "revision":
+            page["revision"] += 1
+        elif fault == "duplicate":
+            page["entries"][0]["key"] = MODEL.model_dump(mode="json")
+        elif fault == "cursor":
+            page["next_cursor"] = "next"
+        elif fault == "empty":
+            page.update(entries=[], next_cursor="other")
+        elif fault == "oversize":
+            page["entries"] *= 2
+        elif fault == "malformed":
+            page.pop("next_cursor")
+        else:
+            raise httpx.ReadError("injected disconnect", request=request)
+        return httpx.Response(200, json=page)
+
+    async with httpx.AsyncClient(
+        base_url="http://test", transport=httpx.MockTransport(handle)
+    ) as http:
+        with pytest.raises((ValueError, httpx.ReadError)):
+            await local.sync(http, page_size=1)
+    assert count == 2 and local.cached() == cached and local.pending() == pending

@@ -128,7 +128,7 @@ async def drive():
     async with httpx.AsyncClient(base_url=url, trust_env=False, timeout=10,
         headers={'X-Forwarded-Email': 'alice@example.test'},
         event_hooks={'response': [lose_reply]} if action == 'lose-ack' else {}) as http:
-        await local.sync(http)
+        await local.sync(http, page_size=2)
 try:
     if action == 'enqueue':
         for edit in json.loads(payload):

@@ -32,10 +32,20 @@ The cache does not write YAML or mark import/adoption complete.
 
 Each `sync` first checks the server identity and refreshes state, delivers at
 most 100 queued operations by default, then refreshes again if it sent anything.
-An empty outbox costs one GET; one edit costs GET + POST + GET. Pass
+Each refresh follows revision-bound pages of at most 100 combined values/conflicts.
+An empty outbox costs one GET for a small snapshot; larger snapshots need one GET
+per page. One edit costs a complete read, one POST, then another complete read. Pass
 `max_operations=0` to refresh without sending. A bounded batch may leave work
 pending; the caller decides its next retry/reconnect schedule. There is no timer
 or background worker in this slice.
+
+Pages are held in memory until the traversal completes at one revision. A 409
+revision change, identity mismatch, repeated cursor, duplicate entry, malformed
+page, or network failure leaves the previous complete cache intact. A failed
+initial read sends no queued edits; retry starts at the first page. The caller
+owns retry/backoff. `page_size` can request smaller pages; a partial page never
+becomes the authoritative cache. `read_preference_snapshot(http, identity=...)`
+provides the same validated traversal without a disk cache; benchmarks reuse it.
 
 ## Persistence and recovery
 

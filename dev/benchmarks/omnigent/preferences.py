@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import httpx
 
-from omnigent.preference_client import PreferenceClient
+from omnigent.preference_client import PreferenceClient, read_preference_snapshot
 from omnigent.preference_sync import (
     PreferenceMutation,
     PreferenceResult,
@@ -36,9 +36,7 @@ def _plugin(index: int) -> SharedPreferenceKey:
 
 
 async def _read(http: httpx.AsyncClient) -> PreferenceSnapshot:
-    response = await http.get(_PATH)
-    response.raise_for_status()
-    return PreferenceSnapshot.model_validate_json(response.content)
+    return await read_preference_snapshot(http)
 
 
 async def _post(http: httpx.AsyncClient, operation: PreferenceMutation) -> PreferenceResult:
