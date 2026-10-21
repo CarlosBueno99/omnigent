@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import json
 import math
@@ -11637,15 +11638,12 @@ async def _create_session_from_existing_agent(
     # A child of a full-access parent keeps that stance unless its own spec or
     # the request chose one; otherwise it stops on prompts nobody expects.
     if validated_launch_args is None and _parent_for_routing is not None:
-        parent_harness = await asyncio.to_thread(
-            _native_pane_harness,
+        validated_launch_args = await asyncio.to_thread(
+            _inherited_full_access_launch_args,
             _parent_for_routing,
-            agent_store=agent_store,
-            agent_cache=agent_cache,
-        )
-        validated_launch_args = _inherited_full_access_launch_args(
-            _parent_for_routing,
-            parent_harness=parent_harness,
+            resolve_parent_harness=functools.partial(
+                _native_pane_harness, agent_store=agent_store, agent_cache=agent_cache
+            ),
             child_harness=selected_harness,
             child_spec=sub_spec if body.sub_agent_name else own_spec,
         )
@@ -12007,6 +12005,7 @@ def _create_session_from_bundle(
     inference_model: str | None = None,
     created_by: str | None = None,
     agent_store: AgentStore | None = None,
+    parent: Conversation | None = None,
 ) -> CreatedSessionResponse:
     """
     Validate, store, and persist a bundled session request.
@@ -12037,6 +12036,8 @@ def _create_session_from_bundle(
         owner. ``None`` in single-user mode.
     :param agent_store: Store holding the uploader's agents. ``None``
         gives every upload its own row.
+    :param parent: The caller-authorized parent row for a child upload;
+        ``None`` leaves the child to its spec's permission stance.
     :returns: Response with the new session id.
     :raises OmnigentError: If bundle validation or agent insert
         integrity checks fail, or the parent session vanished
@@ -12073,13 +12074,10 @@ def _create_session_from_bundle(
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
         if terminal_launch_args is None:
-            parent = conversation_store.get_conversation(metadata.parent_session_id)
             terminal_launch_args = _inherited_full_access_launch_args(
                 parent,
-                parent_harness=(
-                    _native_pane_harness(parent, agent_store=agent_store)
-                    if parent is not None
-                    else None
+                resolve_parent_harness=functools.partial(
+                    _native_pane_harness, agent_store=agent_store
                 ),
                 child_harness=_spec_harness(spec),
                 child_spec=spec,

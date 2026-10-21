@@ -774,5 +774,6 @@ export function isOwnElicitation(
   block: Pick<ElicitationBlock, "targetSessionId">,
   conversationId: string | null,
 ): boolean {
-  return block.targetSessionId == null || block.targetSessionId === conversationId;
+  const target = block.targetSessionId;
+  return target === null || target === undefined || target === conversationId;
 }

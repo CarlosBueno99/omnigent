@@ -1319,6 +1319,7 @@ def register_core_routes(
                 inference_model,
                 created_by=user_id,
                 agent_store=agent_store,
+                parent=parent_conv,
             )
         session_created(
             result.session_id,

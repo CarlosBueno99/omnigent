@@ -409,7 +409,7 @@ def _inherited(
     child_spec = _spec_with_config(child_config or {"harness": child_harness or ""})
     return _inherited_full_access_launch_args(
         parent,
-        parent_harness=parent_harness,
+        resolve_parent_harness=lambda _parent: parent_harness,
         child_harness=child_harness,
         child_spec=child_spec,
     )
@@ -553,7 +553,34 @@ def test_inheritance_needs_parent_spec_and_child_harness() -> None:
     assert _inherited(parent, "codex-native", child_harness=None) is None
     assert (
         _inherited_full_access_launch_args(
-            parent, parent_harness="codex-native", child_harness="claude-native", child_spec=None
+            parent,
+            resolve_parent_harness=lambda _parent: "codex-native",
+            child_harness="claude-native",
+            child_spec=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "child_config",
+    [{"harness": "omnigent"}, {"harness": "claude-native", "permission_mode": "default"}],
+    ids=["unmapped-child-harness", "child-spec-stance"],
+)
+def test_parent_harness_is_resolved_only_when_child_can_inherit(
+    child_config: dict[str, object],
+) -> None:
+    """Creates whose child cannot inherit skip the parent's agent lookup."""
+
+    def resolve_parent_harness(_parent: Conversation) -> str:
+        raise AssertionError("parent harness resolved for a child that cannot inherit")
+
+    assert (
+        _inherited_full_access_launch_args(
+            _parent(list(_CODEX_FULL_ACCESS_PRESET)),
+            resolve_parent_harness=resolve_parent_harness,
+            child_harness=str(child_config["harness"]),
+            child_spec=_spec_with_config(child_config),
         )
         is None
     )

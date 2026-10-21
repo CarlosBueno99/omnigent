@@ -10294,8 +10294,8 @@ def _derive_terminal_launch_args_from_spec(
     return None
 
 
-# Each native harness's launch args for the cross-harness "full access" stance
-# (the web permission picker's Bypass / Full access / Yolo / Skip options).
+# Each native harness's launch args for the cross-harness "full access" stance;
+# keep in sync with the web permission presets in web/src/lib/nativeHarnessModes.ts.
 _FULL_ACCESS_LAUNCH_ARGS: Final[dict[str, tuple[str, ...]]] = {
     _CLAUDE_NATIVE_HARNESS: ("--permission-mode", "bypassPermissions"),
     _CODEX_NATIVE_HARNESS: ("--sandbox", "danger-full-access", "--ask-for-approval", "never"),
@@ -10360,7 +10360,7 @@ def _session_runs_with_full_access(conv: Conversation, harness: str | None) -> b
 def _inherited_full_access_launch_args(
     parent: Conversation | None,
     *,
-    parent_harness: str | None,
+    resolve_parent_harness: Callable[[Conversation], str | None],
     child_harness: str | None,
     child_spec: AgentSpec | None,
 ) -> list[str] | None:
@@ -10373,7 +10373,8 @@ def _inherited_full_access_launch_args(
     explicit spec choice (e.g. ``yolo: false``) still wins.
 
     :param parent: The parent session row, or ``None`` for a top-level create.
-    :param parent_harness: The parent's resolved harness, e.g. ``"codex-native"``.
+    :param resolve_parent_harness: Resolves the parent's harness, e.g. to
+        ``"codex-native"``; called only when the child could inherit.
     :param child_harness: The child's harness, e.g. ``"claude-native"``.
     :param child_spec: The child's trusted spec; ``None`` skips inheritance.
     :returns: The child's full-access launch args, e.g.
@@ -10381,13 +10382,13 @@ def _inherited_full_access_launch_args(
     """
     if parent is None or child_spec is None or child_harness is None:
         return None
-    if any(
+    full_access_args = _FULL_ACCESS_LAUNCH_ARGS.get(child_harness)
+    if full_access_args is None or any(
         child_spec.executor.config.get(key) not in (None, "")
         for key in _SPEC_PERMISSION_STANCE_KEYS
     ):
         return None
-    full_access_args = _FULL_ACCESS_LAUNCH_ARGS.get(child_harness)
-    if full_access_args is None or not _session_runs_with_full_access(parent, parent_harness):
+    if not _session_runs_with_full_access(parent, resolve_parent_harness(parent)):
         return None
     return list(full_access_args)
 
