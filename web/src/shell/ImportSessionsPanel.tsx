@@ -53,7 +53,14 @@ export function ImportSessionsPanel() {
   const [limit, setLimit] = useState(request?.limit ?? 25);
   const [mode, setMode] = useState<ImportMode>(request?.sessionId ? "session" : "recent");
   const [sessionId, setSessionId] = useState(request?.sessionId ?? "");
-  const [replaceExisting, setReplaceExisting] = useState(request?.force === true);
+  // A clean run turns replacing off, so a later import never replaces by accident.
+  const finishedCleanly = result !== null && result.failed === 0;
+  const [replaceExisting, setReplaceExisting] = useState(
+    request?.force === true && !finishedCleanly,
+  );
+  useEffect(() => {
+    if (finishedCleanly) setReplaceExisting(false);
+  }, [finishedCleanly]);
 
   // Default to the caller's current online machine — the transcripts are read
   // on the host, so there's nothing to import without one.

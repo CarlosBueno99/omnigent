@@ -1,17 +1,15 @@
-"""E2E: an imported Claude session that kept growing on the host can be refreshed.
+"""E2E: re-importing a grown Claude session by ID can replace its stale snapshot.
 
 A real host daemon owns a transcript written by the real Claude Code CLI against
 the mock model. The user batch-imports it from Settings › Import sessions, keeps
 chatting in Claude Code on the host, then re-imports the session by id. A plain
-re-import is skipped by design, so the panel must offer a way to replace the
-stale snapshot with the latest transcript.
+re-import is skipped; Replace existing snapshot shows the new turn.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import uuid
@@ -26,10 +24,9 @@ from playwright.sync_api import Page, expect
 from tests._helpers.host import Host, isolated_host
 from tests.e2e_ui.conftest import configure_mock_llm
 
-pytestmark = pytest.mark.min_server_version("0.16.0")
+pytestmark = pytest.mark.min_server_version("0.20.0")
 
 _CLAUDE_MODEL = "claude-sonnet-4-20250514"
-_HOLD_MS = 2500
 
 # Ambient harness homes would redirect the host's transcript scan away from its HOME.
 _HARNESS_HOME_OVERRIDES: dict[str, str | None] = {
@@ -162,7 +159,6 @@ def test_reimport_by_id_can_refresh_drifted_claude_session(
     claude_host: _ClaudeHost,
 ) -> None:
     page: Page = request.getfixturevalue("page")
-    panel = page.get_by_test_id("import-sessions-panel")
     result = page.get_by_test_id("import-result")
 
     _open_import_panel(page, live_server, claude_host)
@@ -170,7 +166,6 @@ def test_reimport_by_id_can_refresh_drifted_claude_session(
     page.get_by_role("option", name="Claude Code").click()
     page.get_by_test_id("import-submit").click()
     expect(result).to_contain_text("Imported 1", timeout=120_000)
-    page.wait_for_timeout(_HOLD_MS)
 
     _run_claude(claude_host, "--resume", claude_host.session_id, claude_host.follow_up_prompt)
     assert claude_host.follow_up_prompt in _transcript_text(claude_host)
@@ -179,29 +174,16 @@ def test_reimport_by_id_can_refresh_drifted_claude_session(
     _choose_claude_session_by_id(page, claude_host)
     page.get_by_test_id("import-submit").click()
     expect(result).to_contain_text("Imported 0, 1 already imported", timeout=120_000)
-    page.wait_for_timeout(_HOLD_MS)
 
     _open_imported_session(page, live_server, claude_host)
-    page.wait_for_timeout(_HOLD_MS)
     follow_up = page.get_by_role("log").get_by_text(claude_host.follow_up_prompt)
-    follow_up_shown = follow_up.count() > 0
+    expect(follow_up).to_have_count(0)
 
     _open_import_panel(page, live_server, claude_host)
     _choose_claude_session_by_id(page, claude_host)
-    page.wait_for_timeout(_HOLD_MS)
-    replace_option = panel.get_by_label(re.compile("replace|refresh", re.IGNORECASE))
-    try:
-        expect(replace_option).to_be_visible(timeout=10_000)
-    except AssertionError:
-        pytest.fail(
-            "Session by ID offers no way to replace the stale imported snapshot "
-            f"(opened session showed the follow-up turn: {follow_up_shown}); "
-            f"panel text: {panel.inner_text()!r}"
-        )
-    replace_option.click()
+    page.get_by_role("switch", name="Replace existing snapshot").click()
     page.get_by_test_id("import-submit").click()
     expect(result).to_have_text("Imported 1.", timeout=120_000)
 
     _open_imported_session(page, live_server, claude_host)
     expect(follow_up).to_be_visible(timeout=30_000)
-    page.wait_for_timeout(_HOLD_MS)

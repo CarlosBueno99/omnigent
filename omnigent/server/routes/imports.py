@@ -635,6 +635,7 @@ def create_imports_router(
             if (
                 not isinstance(external_session_id, str)
                 or not isinstance(raw_items, list)
+                or not raw_items
                 or source is None
                 # Mirror the /imports item cap so one oversized transcript can't
                 # balloon a batch import's memory.

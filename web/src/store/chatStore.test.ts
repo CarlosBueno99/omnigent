@@ -90,6 +90,7 @@ import {
   type PendingUserMessage,
   bindConversationForTest,
   discardConversation,
+  reloadConversation,
   releaseConversation,
 } from "./chatStore";
 import { conversationRegistry } from "./conversationRegistry";
@@ -1182,6 +1183,31 @@ describe("chatStore — switchTo", () => {
     expect(conversationRegistry.peek("conv_replaced")).toBeUndefined();
 
     await useChatStore.getState().switchTo("conv_replaced");
+    const contents = useChatStore
+      .getState()
+      .blocks.map((block) => (block as UserMessageBlock).content);
+    expect(contents).toEqual([
+      [{ type: "input_text", text: "first prompt" }],
+      [{ type: "input_text", text: "follow-up" }],
+    ]);
+  });
+
+  it("reloads a replaced conversation in place only when it is on screen", async () => {
+    seedSession("conv_background", [userMessage("resp_bg", "background prompt")]);
+    seedSession("conv_open", [userMessage("resp_old", "first prompt")]);
+    await useChatStore.getState().switchTo("conv_background");
+    await useChatStore.getState().switchTo("conv_open");
+
+    await reloadConversation("conv_background");
+    expect(useChatStore.getState().conversationId).toBe("conv_open");
+    expect(conversationRegistry.peek("conv_background")).toBeUndefined();
+
+    seedSession("conv_open", [
+      userMessage("resp_new_1", "first prompt"),
+      userMessage("resp_new_2", "follow-up"),
+    ]);
+    await reloadConversation("conv_open");
+    expect(useChatStore.getState().conversationId).toBe("conv_open");
     const contents = useChatStore
       .getState()
       .blocks.map((block) => (block as UserMessageBlock).content);

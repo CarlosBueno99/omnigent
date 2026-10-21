@@ -8,18 +8,18 @@ import {
   type ImportedSessionRef,
   type LocalImportResult,
 } from "@/lib/sessionsApi";
-import { discardConversation } from "@/store/chatStore";
+import { reloadConversation } from "@/store/chatStore";
 import { useSessionImportStore } from "./sessionImport";
 
 vi.mock("@/lib/sessionsApi", () => ({
   importLocalSessions: vi.fn(),
   getSessionUpdatedAt: vi.fn(),
 }));
-vi.mock("@/store/chatStore", () => ({ discardConversation: vi.fn() }));
+vi.mock("@/store/chatStore", () => ({ reloadConversation: vi.fn() }));
 vi.mock("@/hooks/useUnseenConversations", () => ({ markConversationRead: vi.fn() }));
 
 const importMock = vi.mocked(importLocalSessions);
-const discardMock = vi.mocked(discardConversation);
+const reloadMock = vi.mocked(reloadConversation);
 const updatedAtMock = vi.mocked(getSessionUpdatedAt);
 const markReadMock = vi.mocked(markConversationRead);
 
@@ -53,7 +53,7 @@ function spyInvalidate(queryClient: QueryClient) {
 
 beforeEach(() => {
   importMock.mockReset();
-  discardMock.mockReset();
+  reloadMock.mockReset();
   updatedAtMock.mockReset();
   markReadMock.mockReset();
   useSessionImportStore.setState({
@@ -136,7 +136,7 @@ describe("useSessionImportStore", () => {
       false,
     );
     stream.session({ id: "c1", title: "One" });
-    expect(discardMock).not.toHaveBeenCalled();
+    expect(reloadMock).not.toHaveBeenCalled();
     stream.resolve(DONE);
     await first;
     expect(updatedAtMock).not.toHaveBeenCalled();
@@ -168,7 +168,7 @@ describe("useSessionImportStore", () => {
 
     stream.session({ id: "c1", title: "One" });
     stream.session({ id: "c2", title: "Two" });
-    expect(discardMock).toHaveBeenCalledWith("c1");
+    expect(reloadMock).toHaveBeenCalledWith("c1");
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["session", "c1"] });
     stream.resolve(DONE);
     await run;
@@ -176,6 +176,23 @@ describe("useSessionImportStore", () => {
     expect(markReadMock).toHaveBeenCalledWith("c1", 1_700_000_123);
     expect(useSessionImportStore.getState().result).toEqual(DONE);
     expect(useSessionImportStore.getState().error).toBeNull();
+  });
+
+  it("ignores force when importing recent sessions", async () => {
+    importMock.mockImplementation(async (_host, _source, _limit, onSession) => {
+      onSession?.({ id: "c1", title: "One" });
+      return DONE;
+    });
+    const queryClient = new QueryClient();
+    spyInvalidate(queryClient);
+
+    await useSessionImportStore
+      .getState()
+      .start({ hostId: "host_1", source: "claude", limit: 25, force: true }, queryClient);
+
+    expect(importMock).toHaveBeenCalledWith("host_1", "claude", 25, expect.any(Function));
+    expect(reloadMock).not.toHaveBeenCalled();
+    expect(markReadMock).not.toHaveBeenCalled();
   });
 
   it("refreshes the session list every 5s only while the import is in flight", async () => {

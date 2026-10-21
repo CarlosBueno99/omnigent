@@ -550,6 +550,13 @@ export function discardConversation(id: string): void {
   conversationRegistry.release(id);
 }
 
+/** Drop a conversation's cached copy; if it is on screen, load it again in place. */
+export function reloadConversation(id: string): Promise<void> {
+  const wasViewing = useChatStore.getState().conversationId === id;
+  discardConversation(id);
+  return wasViewing ? useChatStore.getState().switchTo(id) : Promise.resolve();
+}
+
 /**
  * A user message awaiting its `session.input.consumed` event.
  *

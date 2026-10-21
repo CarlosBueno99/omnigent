@@ -863,6 +863,13 @@ async def test_local_import_stream_reports_failure_reasons(
             "title": None,
             "source": "claude",
         }
+        yield {
+            "external_session_id": "empty-1",
+            "workspace": None,
+            "items": [],
+            "title": None,
+            "source": "claude",
+        }
         # A session the host enumerated but couldn't read (no frame, only a
         # reason on the terminal done frame).
         if isinstance(stats, dict):
@@ -915,12 +922,13 @@ async def test_local_import_stream_reports_failure_reasons(
     # The host-read failure keeps its source-session identity through the wire.
     assert {(f["external_session_id"], f["source"]) for f in failed} == {
         ("bad-1", "claude"),
+        ("empty-1", "claude"),
         ("unreadable-1", "codex"),
     }
     done = events[-1]
     assert done["event"] == "done"
-    assert (done["imported"], done["failed"]) == (1, 2)
-    assert len(done["failures"]) == 2
+    assert (done["imported"], done["failed"]) == (1, 3)
+    assert len(done["failures"]) == 3
 
 
 async def test_local_import_id_collision_counts_as_already_imported(

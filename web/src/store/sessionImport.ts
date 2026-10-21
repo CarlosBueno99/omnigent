@@ -11,7 +11,7 @@ import {
   type ImportSourceSelector,
   type LocalImportResult,
 } from "@/lib/sessionsApi";
-import { discardConversation } from "@/store/chatStore";
+import { reloadConversation } from "@/store/chatStore";
 
 export interface SessionImportRequest {
   hostId: string;
@@ -59,13 +59,14 @@ export const useSessionImportStore = create<SessionImportState>((set, get) => ({
     const refreshList = () => void queryClient.invalidateQueries({ queryKey: ["conversations"] });
     const refresh = setInterval(refreshList, LIST_REFRESH_MS);
     try {
-      const { hostId, source, limit, sessionId, force = false } = request;
+      const { hostId, source, limit, sessionId } = request;
+      const force = sessionId !== undefined && request.force === true;
       const seenMarks: Promise<void>[] = [];
       const onSession = ({ id }: ImportedSessionRef) => {
         set((state) => ({ importedCount: state.importedCount + 1 }));
         // A replaced session keeps its id, so cached copies of the old transcript must go.
         if (force) {
-          discardConversation(id);
+          void reloadConversation(id);
           void queryClient.invalidateQueries({ queryKey: ["session", id] });
           seenMarks.push(markReplacedSessionSeen(id));
         }

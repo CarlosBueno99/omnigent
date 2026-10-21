@@ -238,6 +238,45 @@ describe("ImportSessionsPanel", () => {
       screen.getByRole("switch", { name: "Replace existing snapshot" }),
     ).toHaveAccessibleDescription(/replace that copy with the latest transcript/);
   });
+
+  it("turns replacing off after a forced import succeeds, including after a remount", async () => {
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_1", name: "mac-laptop", owner: "alice", status: "online" }],
+    } as unknown as ReturnType<typeof useHosts>);
+    importLocalSessionsMock.mockResolvedValue({
+      imported: 1,
+      alreadyImported: 0,
+      failed: 0,
+      sessions: [],
+      failures: [],
+    });
+    const replaceToggle = () => screen.getByRole("switch", { name: "Replace existing snapshot" });
+
+    const first = renderPanel();
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "session" } });
+    fireEvent.change(screen.getByTestId("import-session-id"), {
+      target: { value: "session-exact" },
+    });
+    fireEvent.click(replaceToggle());
+    expect(replaceToggle()).toBeChecked();
+    fireEvent.click(screen.getByTestId("import-submit"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("import-result")).toHaveTextContent("Imported 1."),
+    );
+    expect(importLocalSessionsMock).toHaveBeenLastCalledWith(
+      "host_1",
+      "claude",
+      25,
+      expect.any(Function),
+      "session-exact",
+      true,
+    );
+    expect(replaceToggle()).not.toBeChecked();
+    first.unmount();
+    renderPanel();
+    expect(replaceToggle()).not.toBeChecked();
+  });
 });
 
 it("Retry failed preserves the original request after leaving Settings", async () => {
