@@ -14,7 +14,7 @@ from pydantic import TypeAdapter
 
 from omnigent.runner import create_runner_app
 from omnigent.runner.app import _is_context_overflow_error
-from omnigent.server.schemas import FailedEvent, ServerStreamEvent
+from omnigent.server.schemas import FailedEvent, FailedResponseObject, ServerStreamEvent
 from omnigent.spec.types import AgentSpec
 from tests.runner.conftest import (
     _drain_session_event_queue,
@@ -174,6 +174,40 @@ async def test_context_overflow_preserves_a_valid_queued_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_harness_prompt_too_long_failure_is_normalized_to_context_overflow() -> None:
+    # Scaffold harnesses such as claude-sdk report the failure only under response.error.
+    message = (
+        "inner executor error: Prompt is too long · the request is ~1006037 tokens "
+        "(limit 1000000) but this conversation is only ~4274 tokens — the rest is "
+        "system prompt, tool definitions, and attachments. A single-exchange "
+        "conversation cannot be compacted; reduce attached files/tools or start "
+        "with less context."
+    )
+    harness = _ScriptedHarnessClient(
+        [
+            _sse({"type": "response.created", "response": {"id": "resp_test"}}),
+            _sse(
+                {
+                    "type": "response.failed",
+                    "source": "harness",
+                    "response": {
+                        "id": "resp_test",
+                        "status": "failed",
+                        "error": {"code": "RuntimeError", "message": message},
+                    },
+                }
+            ),
+        ]
+    )
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(harness),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    error = await _assert_failure_on_both_streams(app, source="llm")
+    assert error["code"] == "context_length_exceeded"
+
+
+@pytest.mark.asyncio
 async def test_content_length_cap_failure_is_normalized_to_context_overflow() -> None:
     """A byte-cap rejection surfaced by the harness classifies as a context overflow."""
     harness = _ScriptedHarnessClient(
@@ -230,6 +264,37 @@ def test_byte_cap_rejection_classifies_as_overflow_without_inversion() -> None:
     assert actual_tokens > max_tokens
     # The complete raw rejection is carried through once for the error detail.
     assert detail == message
+
+
+_APPROXIMATE_OVERFLOW = (
+    "inner executor error: Prompt is too long · the request is ~1006037 tokens "
+    "(limit 1000000) but this conversation is only ~4274 tokens."
+)
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_detail"),
+    [
+        pytest.param(_APPROXIMATE_OVERFLOW, _APPROXIMATE_OVERFLOW, id="approximate-counts"),
+        pytest.param(
+            "prompt is too long: 1006037 tokens > 1000000 maximum", None, id="explicit-pair"
+        ),
+    ],
+)
+def test_harness_shaped_overflow_classifies_with_its_detail(
+    message: str, expected_detail: str | None
+) -> None:
+    """A harness failure, which has no top-level ``error``, is still an overflow."""
+    event = FailedEvent(
+        type="response.failed",
+        source="harness",
+        response=FailedResponseObject(
+            status="failed", error={"code": "RuntimeError", "message": message}
+        ),
+    )
+    overflow = _is_context_overflow_error(event.model_dump(mode="json"))
+    assert overflow is not None
+    assert overflow[2] == expected_detail
 
 
 def test_content_length_phrase_without_sizes_is_not_overflow() -> None:

@@ -759,12 +759,18 @@ def _is_context_overflow_error(
 
     :param event: The parsed SSE event dict.
     :returns: ``(max_tokens, actual_tokens, detail_message)`` on overflow, else
-        ``None``. ``detail_message`` carries a byte-cap rejection's raw text and
-        is ``None`` for token-shaped overflows, which have no extra detail.
+        ``None``. ``detail_message`` carries the raw rejection text unless it
+        states an explicit ``actual > max`` token pair, which needs no extra detail.
     """
     if event.get("type") != "response.failed":
         return None
-    error = cast(_JsonObject, event.get("error", {}))
+    # Harness failures carry the error under ``response``; ``error`` is the legacy mirror.
+    error = event.get("error")
+    response = event.get("response")
+    if not error and isinstance(response, dict):
+        error = response.get("error")
+    if not isinstance(error, dict):
+        return None
     raw = str(error.get("message", ""))
     msg = raw.lower()
     # Parse byte-cap rejections (request first, limit second) ahead of the
@@ -783,12 +789,13 @@ def _is_context_overflow_error(
     if actual_gt_max is not None:
         return int(actual_gt_max.group(2)), int(actual_gt_max.group(1)), None
 
+    # Without an explicit pair these counts are guesses, so keep the original text.
     numbers = re.findall(r"(\d{4,})", msg)
     if len(numbers) >= 2:
-        return int(numbers[-2]), int(numbers[-1]), None
+        return int(numbers[-2]), int(numbers[-1]), raw
     if len(numbers) == 1:
-        return int(numbers[0]), int(numbers[0]) + 1, None
-    return 128000, 128001, None
+        return int(numbers[0]), int(numbers[0]) + 1, raw
+    return 128000, 128001, raw
 
 
 def _response_failed_payload(
