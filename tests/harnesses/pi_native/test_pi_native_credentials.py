@@ -1043,6 +1043,7 @@ def _fails_first(first_attempt: str) -> str:
         (_fails_first("printf stale; exit 7") + "printf private-token", "ok", "private-token", 2),
         (_fails_first("exit 0") + "printf private-token", "ok", "private-token", 2),
         (_fails_first("exit 7") + "sleep 20", "timeout", "", 2),
+        (_fails_first("exit 7") + "true", "empty", "", 3),
     ],
 )
 def test_generated_token_command_reports_only_safe_results(
@@ -1114,6 +1115,34 @@ def test_generated_token_command_without_retry_delays_runs_once(tmp_path: Path) 
     assert (tmp_path / "attempts").read_text() == "x"
     status = config.with_name(config.name + ".result.json")
     assert json.loads(status.read_text())["kind"] == "failed_exit"
+
+
+def test_generated_token_command_cancelled_between_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.name != "posix" or shutil.which("node") is None:
+        pytest.skip("the native Pi token wrapper requires POSIX and Node")
+    monkeypatch.setattr(auth_command, "AUTH_RETRY_DELAYS_MS", (2_000,))
+    wrapped = auth_command.wrap_auth_command(tmp_path, "omnigent", "printf x >> attempts; exit 7")
+    attempt_log = tmp_path / "attempts"
+    process = subprocess.Popen(shlex.split(wrapped[1:]), cwd=tmp_path, stdout=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 4
+        while not attempt_log.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        # Signal after the first attempt has exited, while the wrapper waits to retry.
+        time.sleep(0.5)
+        process.terminate()
+        stdout, _ = process.communicate(timeout=12)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=4)
+    assert process.returncode == 1
+    assert stdout == b""
+    assert attempt_log.read_text() == "x"
+    status = next((tmp_path / auth_command.AUTH_DIR_NAME).glob("*.result.json"))
+    assert json.loads(status.read_text())["kind"] == "cancelled"
 
 
 def test_provider_launch_returns_env_and_args(tmp_path: Path) -> None:
