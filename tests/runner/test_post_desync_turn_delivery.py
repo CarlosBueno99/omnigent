@@ -22,6 +22,7 @@ import pytest
 from starlette.responses import StreamingResponse
 
 from omnigent.errors import OmnigentError
+from omnigent.runner import app as runner_app
 from omnigent.runner import create_runner_app
 from omnigent.runtime.harnesses._scaffold import (
     HarnessApp,
@@ -38,7 +39,6 @@ from tests.runner.helpers import NullServerClient
 _CONV_ID = "ac1dbeef245985f541fd686eb2a32b73"
 _AGENT_ID = "965906f5d9fb596610dda599a80faaee"
 _INPUT_STABLE_ID = "7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d"
-_RETRY_HINT = "Please retry your message"
 _REJECTION_LOG = "harness rejected turn delivery for"
 
 
@@ -132,8 +132,8 @@ class _ScaffoldBackedHarnessClient:
         return httpx.Response(status, request=request)
 
 
-class _DeadHarnessProcessManager(_FakeProcessManager):
-    """Reports no live harness until a named-harness lookup respawns a fresh scaffold."""
+class _ScaffoldProcessManager(_FakeProcessManager):
+    """A dead or released harness stays gone until a named-harness lookup respawns it."""
 
     def __init__(self, client: _ScaffoldBackedHarnessClient) -> None:
         super().__init__(client)  # type: ignore[arg-type]
@@ -147,6 +147,10 @@ class _DeadHarnessProcessManager(_FakeProcessManager):
             self.process_dead = False
             self._scaffold_client.scaffold = _EchoHarness()
         return await super().get_client(conversation_id, harness, env)
+
+    async def release(self, conversation_id: str, **kwargs: Any) -> None:
+        await super().release(conversation_id, **kwargs)
+        self.process_dead = True
 
 
 def _make_app(pm: _FakeProcessManager) -> Any:
@@ -163,9 +167,10 @@ def _make_app(pm: _FakeProcessManager) -> Any:
     )
 
 
-def _setup() -> tuple[Any, _ScaffoldBackedHarnessClient]:
+def _setup() -> tuple[Any, _ScaffoldBackedHarnessClient, _ScaffoldProcessManager]:
     client = _ScaffoldBackedHarnessClient(_EchoHarness(), _CONV_ID)
-    return _make_app(_FakeProcessManager(client)), client  # type: ignore[arg-type]
+    pm = _ScaffoldProcessManager(client)
+    return _make_app(pm), client, pm
 
 
 def _message_body(text: str) -> dict[str, Any]:
@@ -191,13 +196,15 @@ def _parse_sse(buf: str) -> list[dict[str, Any]]:
     return events
 
 
-async def _post_turn(app: Any, text: str, *, streaming: bool) -> httpx.Response:
+async def _post_event(app: Any, body: dict[str, Any], *, streaming: bool) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
     suffix = "?stream=true" if streaming else ""
     async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
-        return await client.post(
-            f"/v1/sessions/{_CONV_ID}/events{suffix}", json=_message_body(text)
-        )
+        return await client.post(f"/v1/sessions/{_CONV_ID}/events{suffix}", json=body)
+
+
+async def _post_turn(app: Any, text: str, *, streaming: bool) -> httpx.Response:
+    return await _post_event(app, _message_body(text), streaming=streaming)
 
 
 async def _drive_turn(app: Any, text: str) -> list[dict[str, Any]]:
@@ -267,7 +274,7 @@ async def _desync_via_dropped_turn(app: Any, client: _ScaffoldBackedHarnessClien
 async def test_next_message_after_midturn_drop_starts_fresh_turn(
     streaming: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
-    app, client = _setup()
+    app, client, pm = _setup()
     with caplog.at_level(logging.ERROR, logger="omnigent.runner.app"):
         await _desync_via_dropped_turn(app, client)
         if streaming:
@@ -284,7 +291,8 @@ async def test_next_message_after_midturn_drop_starts_fresh_turn(
     assert rejections == []
     assert client.interrupt_statuses == [204]
     assert client.completed_turns == 1
-    assert _CONV_ID not in app.state.desynced_sessions
+    assert pm.released == []
+    assert _CONV_ID not in app.state.stale_harness_turns
 
 
 @pytest.mark.asyncio
@@ -293,7 +301,7 @@ async def test_next_message_after_harness_finished_dropped_turn_completes(
     streaming: bool,
 ) -> None:
     """With nothing left to interrupt (the harness answers 404), the message still runs."""
-    app, client = _setup()
+    app, client, pm = _setup()
     await _desync_via_dropped_turn(app, client)
     assert client.dropped_stream is not None
     async for _ in client.dropped_stream.body_iterator:
@@ -308,14 +316,13 @@ async def test_next_message_after_harness_finished_dropped_turn_completes(
         assert _statuses(_drain_session_events(app))[-1]["status"] != "failed"
     assert client.interrupt_statuses == [404]
     assert client.completed_turns == 1
-    assert _CONV_ID not in app.state.desynced_sessions
+    assert pm.released == []
+    assert _CONV_ID not in app.state.stale_harness_turns
 
 
 @pytest.mark.asyncio
 async def test_next_message_after_harness_process_died_starts_fresh_turn() -> None:
-    client = _ScaffoldBackedHarnessClient(_EchoHarness(), _CONV_ID)
-    pm = _DeadHarnessProcessManager(client)
-    app = _make_app(pm)
+    app, client, pm = _setup()
     await _desync_via_dropped_turn(app, client)
     pm.process_dead = True
 
@@ -323,18 +330,19 @@ async def test_next_message_after_harness_process_died_starts_fresh_turn() -> No
 
     assert _completed(turn2), turn2
     assert client.interrupt_statuses == []
-    assert _CONV_ID not in app.state.desynced_sessions
+    assert _CONV_ID not in app.state.stale_harness_turns
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "background"])
-@pytest.mark.parametrize("failure", ["connection", "status"])
-async def test_unacknowledged_interrupt_fails_readably_and_stays_recoverable(
+@pytest.mark.parametrize("failure", ["unreachable", "refused"])
+async def test_unacknowledged_interrupt_restarts_harness_before_delivery(
     monkeypatch: pytest.MonkeyPatch, streaming: bool, failure: str
 ) -> None:
-    app, client = _setup()
+    """An unreachable harness (e.g. its socket is gone) or a refused interrupt respawns it."""
+    app, client, pm = _setup()
     await _desync_via_dropped_turn(app, client)
-    stale_ctx = client.scaffold._active_turn_ctx
+    stale_scaffold = client.scaffold
     original_post = client.post
 
     async def _failing_interrupt(
@@ -342,77 +350,72 @@ async def test_unacknowledged_interrupt_fails_readably_and_stays_recoverable(
     ) -> httpx.Response:
         if json.get("type") != "interrupt":
             return await original_post(url, json=json, timeout=timeout)
-        if failure == "connection":
+        if failure == "unreachable":
             raise httpx.ConnectError("synthetic interrupt connection failure")
-        return httpx.Response(503, request=httpx.Request("POST", url))
+        return httpx.Response(500, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(client, "post", _failing_interrupt)
-    resp = await _post_turn(app, "second message", streaming=streaming)
     if streaming:
-        assert resp.status_code == 503, resp.text
-        assert resp.json()["error"] == "harness_reconciliation_failed"
+        turn2 = await _drive_turn(app, "second message")
+        assert not _failures(turn2), f"turn 2 must not fail: {turn2}"
+        assert _completed(turn2), turn2
     else:
-        assert resp.status_code == 202, resp.text
-        await _wait_for_turn_slot_release(app)
+        await _run_background_turn(app, "second message")
+        events = _drain_session_events(app)
+        assert not _failures(events), events
+        assert _statuses(events)[-1]["status"] != "failed", events
 
-    events = _drain_session_events(app)
-    if not streaming:
-        [undelivered] = _failures(events)
-        assert undelivered["input_stable_id"] == _INPUT_STABLE_ID
-        assert undelivered["response"]["error"]["undelivered"] is True
-    message = _statuses(events)[-1]["error"]["message"]
-    assert _statuses(events)[-1]["status"] == "failed"
-    assert _RETRY_HINT in message, message
-    assert not message.lstrip().startswith("{"), message
-    assert client.deliveries == 1
-    assert client.scaffold._active_turn_ctx is stale_ctx
-    assert _CONV_ID in app.state.desynced_sessions
-    assert _CONV_ID not in app.state.active_turns
-
-    monkeypatch.setattr(client, "post", original_post)
-    turn3 = await _drive_turn(app, "third message")
-    assert _completed(turn3), turn3
-    assert client.interrupt_statuses == [204]
-    assert _CONV_ID not in app.state.desynced_sessions
+    assert pm.released == [_CONV_ID]
+    assert client.scaffold is not stale_scaffold
+    assert client.deliveries == 2
+    assert client.completed_turns == 1
+    assert _CONV_ID not in app.state.stale_harness_turns
 
 
 @pytest.mark.asyncio
-async def test_cancelling_reconciliation_releases_the_background_turn_slot(
+async def test_interrupt_during_reconciliation_cancels_turn_and_keeps_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, client = _setup()
+    app, client, _pm = _setup()
     await _desync_via_dropped_turn(app, client)
+    outcomes: list[str] = []
+    original_mark = runner_app.mark_subagent_work_terminal
+
+    def _record_outcome(child_session_id: str, *, status: str, **kwargs: Any) -> Any:
+        outcomes.append(status)
+        return original_mark(child_session_id, status=status, **kwargs)
+
+    monkeypatch.setattr(runner_app, "mark_subagent_work_terminal", _record_outcome)
     entered = asyncio.Event()
-    release = asyncio.Event()
+    unblock = asyncio.Event()
     original_post = client.post
 
-    async def _blocked_interrupt(
+    async def _block_first_interrupt(
         url: str, *, json: dict[str, Any], timeout: Any = None
     ) -> httpx.Response:
-        if json.get("type") == "interrupt":
+        if json.get("type") == "interrupt" and not entered.is_set():
             entered.set()
-            await release.wait()
+            await unblock.wait()
         return await original_post(url, json=json, timeout=timeout)
 
-    monkeypatch.setattr(client, "post", _blocked_interrupt)
+    monkeypatch.setattr(client, "post", _block_first_interrupt)
     resp = await _post_turn(app, "second message", streaming=False)
     assert resp.status_code == 202, resp.text
     task = app.state.active_turns[_CONV_ID]
     try:
         await asyncio.wait_for(entered.wait(), timeout=2)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        interrupt = await _post_event(app, {"type": "interrupt"}, streaming=False)
+        assert interrupt.status_code == 204, interrupt.text
         assert task.cancelled()
         assert _CONV_ID not in app.state.active_turns
-        assert _CONV_ID in app.state.desynced_sessions
+        assert outcomes == ["cancelled"]
+        assert _CONV_ID in app.state.stale_harness_turns
 
-        monkeypatch.setattr(client, "post", original_post)
         retry = await _drive_turn(app, "retry after cancellation")
         assert _completed(retry), retry
-        assert client.interrupt_statuses == [204]
+        assert _CONV_ID not in app.state.stale_harness_turns
     finally:
-        release.set()
+        unblock.set()
         if not task.done():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

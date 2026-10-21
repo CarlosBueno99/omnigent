@@ -1420,6 +1420,9 @@ def create_runner_app(
     # Desynced conversations; cleared when a fresh turn binds.
     _desynced_sessions: set[str] = set()
     app.state.desynced_sessions = _desynced_sessions
+    # Harnesses that may still hold a turn the runner stopped streaming.
+    _stale_harness_turns: set[str] = set()
+    app.state.stale_harness_turns = _stale_harness_turns
     # Required-terminal exits whose handler released the session's harness
     # subprocess. The release closes the httpx client an in-flight
     # ``proxy_stream`` is reading, which surfaces there as a transport error;
@@ -3401,6 +3404,7 @@ def create_runner_app(
         _recovery_turn_ids.pop(session_id, None)
         _desync_terminalized.pop(session_id, None)
         _desynced_sessions.discard(session_id)
+        _stale_harness_turns.discard(session_id)
         _required_terminal_exit_errors.pop(session_id, None)
         _native_pane_status.pop(session_id, None)
         _native_interrupt_runner.clear_pending_interrupt(session_id)
@@ -3894,6 +3898,7 @@ def create_runner_app(
         # Transport-loss ending desyncs harness from runner; flag for clean rebind.
         if error is not None and error.get("code") == "connection_error":
             _desynced_sessions.add(conv_id)
+            _stale_harness_turns.add(conv_id)
         has_buffered = bool(_session_message_buffers.get(conv_id))
         was_interrupted = conv_id in _interrupted_sessions
         # Suppress terminal only if desync recovery claimed the token for THIS generation's epoch.
@@ -4069,25 +4074,27 @@ def create_runner_app(
             )
             return False
 
-    async def _reconcile_desynced_harness(conv_id: str) -> dict[str, Any] | None:
-        """Clear the previous harness turn before a fresh delivery.
+    async def _reconcile_stale_harness_turn(manager: HarnessProcessManager, conv_id: str) -> None:
+        """Clear a turn the harness kept after the runner stopped streaming it.
 
-        :param conv_id: Session whose previous runner stream disconnected.
-        :returns: A retryable error when interruption could not be confirmed.
+        A harness that does not acknowledge the interrupt is released, so the
+        delivery that follows respawns it rather than injecting into the stale turn.
+
+        :param manager: Process manager that owns the conversation's harness.
+        :param conv_id: Session about to receive a fresh delivery, e.g. ``"conv_abc123"``.
         """
-        if conv_id not in _desynced_sessions:
-            return None
+        if conv_id not in _stale_harness_turns:
+            return
         if not await _forward_harness_interrupt(
             conv_id, turn_epoch=_turn_bind_epoch.get(conv_id, 0)
         ):
-            return {
-                "code": "harness_reconciliation_failed",
-                "message": (
-                    "The previous agent turn could not be interrupted. Please retry your message."
-                ),
-            }
-        _desynced_sessions.discard(conv_id)
-        return None
+            _logger.warning(
+                "restarting harness for %s: its stale turn could not be interrupted",
+                conv_id,
+                extra={"session_id": conv_id},
+            )
+            await manager.release(conv_id)
+        _stale_harness_turns.discard(conv_id)
 
     async def _cancel_inprocess_turn(conv_id: str) -> None:
         # Distinguish "no live turn" (absent) from a stream-mode turn (present as
@@ -4158,6 +4165,7 @@ def create_runner_app(
             extra={"session_id": conv_id},
         )
         _desynced_sessions.add(conv_id)
+        _stale_harness_turns.add(conv_id)
         # Capture entry epoch; an advance during teardown means a replacement ran.
         _entry_epoch = _turn_bind_epoch.get(conv_id, 0)
         # Release markers before any await so concurrent callers see no live turn.
@@ -4906,10 +4914,11 @@ def create_runner_app(
         # Capture our own task so the finally floor can identity-compare before
         # clearing the slot (see below).
         _own_task = asyncio.current_task()
-        # Clear a stale publish-once token (e.g. left set by a wedged stream that
-        # never reached its own _on_proxy_stream_end) so it can't suppress this
-        # turn's legitimate terminal publish. A desync marker stays until delivery
-        # reconciles the harness.
+        # A fresh turn is binding: whatever desync the previous turn ended on is
+        # resolved now. Also clear a stale publish-once token (e.g. left set by a
+        # wedged stream that never reached its own _on_proxy_stream_end) so it
+        # can't suppress this turn's legitimate terminal publish.
+        _desynced_sessions.discard(conv)
         _desync_terminalized.pop(conv, None)
         handed_off = [False]
         # Locate any uncoded exception logged below in the turn phase (this task's
@@ -5456,12 +5465,8 @@ def create_runner_app(
     ) -> Response:
         manager = cast(HarnessProcessManager, process_manager)
         # A harness that missed its dropped stream still holds that turn and would
-        # treat this fresh delivery as an injection (204), so interrupt it first.
-        if recovery_error := await _reconcile_desynced_harness(conv_id):
-            return JSONResponse(
-                status_code=503,
-                content={"error": recovery_error["code"], "detail": recovery_error["message"]},
-            )
+        # treat this fresh delivery as an injection (204), so clear that turn first.
+        await _reconcile_stale_harness_turn(manager, conv_id)
         harness_name = dispatch.harness if dispatch else cast(str | None, body.get("harness"))
         spawn_env = (
             dispatch.spawn_env if dispatch else cast(dict[str, str] | None, body.get("spawn_env"))
