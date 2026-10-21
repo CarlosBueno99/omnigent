@@ -25,7 +25,7 @@ _SLOW_INTERPRETER_S = 2.0
 _HOOK_BUDGET_S = 1.0
 # A relay that records the observation but answers only after the hook's one-second
 # curl budget; the hook must stop waiting at the budget, not after this.
-_SLOW_RELAY_S = _HOOK_BUDGET_S + 1.0
+_SLOW_RELAY_S = _HOOK_BUDGET_S + 3.0
 _PAYLOAD: dict[str, Any] = {
     "session_id": "claude-session",
     "tool_name": "Bash",

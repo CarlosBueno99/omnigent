@@ -2481,8 +2481,8 @@ def build_hook_settings(
 
     observer_hook = hook_settings(bridge_dir, python, "omnigent.harnesses.claude_native.hook")
     observer_python = _pin_runner_tmpdir(cast(str, observer_hook["command"]))
-    # Claude blocks on PostToolUse hooks: curl the relay and replay into Python only when it
-    # rejected or never got the payload; a timeout means the relay is still recording it.
+    # Claude blocks on PostToolUse hooks: curl the relay, replaying into Python on rejection or
+    # failed delivery. A timeout is not retried, like the old observer's single 1 s attempt.
     relay_env_quoted = shlex.quote(str(bridge_dir / _TOOL_RELAY_ENV_FILE))
     observer_hook["command"] = (
         "p=$(cat); "
