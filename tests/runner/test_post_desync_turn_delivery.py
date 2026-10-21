@@ -1,11 +1,6 @@
-"""The next message after a dropped runner<->harness stream must start a fresh turn.
+"""The next message after a dropped runner<->harness stream must start a fresh harness turn.
 
-A harness that missed its dropped stream still holds that turn's context and
-answers a fresh delivery with ``204`` (sessions-native injection), which the
-runner reports as ``harness rejected turn delivery ... with status 204``. These
-tests drive the real runner against the real ``HarnessApp`` start/inject and
-interrupt logic; only the in-process transport is substituted so the stream
-can be severed deterministically.
+A real ``HarnessApp`` sits behind an in-process transport that severs the first stream.
 """
 
 from __future__ import annotations
@@ -33,6 +28,7 @@ from omnigent.runtime.harnesses._scaffold import (
 from omnigent.runtime.harnesses.process_manager import NoLiveHarnessError
 from omnigent.server.schemas import CreateResponseRequest, OutputTextDeltaEvent
 from omnigent.spec.types import AgentSpec
+from tests._helpers.polling import poll_until_async
 from tests.runner.conftest import _FakeProcessManager
 from tests.runner.helpers import NullServerClient
 
@@ -50,11 +46,7 @@ class _EchoHarness(HarnessApp):
 
 
 class _ScaffoldBackedHarnessClient:
-    """Runner-facing harness client that routes turns and interrupts into a real scaffold.
-
-    The first delivered turn is dropped mid-stream without iterating it, leaving
-    the scaffold's ``_active_turn_ctx`` set as a lost runner stream does.
-    """
+    """Routes turns and interrupts into a real scaffold, dropping the first stream mid-turn."""
 
     def __init__(self, scaffold: HarnessApp, conv_id: str) -> None:
         self.scaffold = scaffold
@@ -222,18 +214,10 @@ async def _drive_turn(app: Any, text: str) -> list[dict[str, Any]]:
     return _parse_sse(buf)
 
 
-async def _wait_for_turn_slot_release(app: Any) -> None:
-    for _ in range(300):
-        if _CONV_ID not in app.state.active_turns:
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError("background turn never released its slot")
-
-
 async def _run_background_turn(app: Any, text: str) -> None:
     resp = await _post_turn(app, text, streaming=False)
     assert resp.status_code == 202, resp.text
-    await _wait_for_turn_slot_release(app)
+    await poll_until_async(lambda: _CONV_ID not in app.state.active_turns, timeout_s=3.0)
 
 
 def _drain_session_events(app: Any) -> list[dict[str, Any]]:
