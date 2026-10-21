@@ -1,7 +1,7 @@
 #!/bin/bash
 # .deb post-install script, derived from electron-builder's default
-# after-install.tpl. It renders ${executable} and ${sanitizedProductName};
-# keep other variables unbraced so they are not treated as macros.
+# after-install.tpl. electron-builder expands every dollar-brace macro in this
+# file, so write shell variables without braces.
 
 if type update-alternatives >/dev/null 2>&1; then
     # Remove previous link if it doesn't use update-alternatives
