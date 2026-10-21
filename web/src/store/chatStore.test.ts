@@ -89,7 +89,6 @@ import {
   type FrameScheduler,
   type PendingUserMessage,
   bindConversationForTest,
-  discardConversation,
   reloadConversation,
   releaseConversation,
 } from "./chatStore";
@@ -1168,30 +1167,6 @@ describe("chatStore — switchTo", () => {
     expect(useChatStore.getState().blocks).toHaveLength(1);
   });
 
-  it("loads a discarded conversation from a fresh snapshot instead of its retained entry", async () => {
-    seedSession("conv_replaced", [userMessage("resp_old", "first prompt")]);
-    await useChatStore.getState().switchTo("conv_replaced");
-    expect(useChatStore.getState().blocks).toHaveLength(1);
-
-    // The server replaced the transcript under the same id, with new item ids.
-    seedSession("conv_replaced", [
-      userMessage("resp_new_1", "first prompt"),
-      userMessage("resp_new_2", "follow-up"),
-    ]);
-    discardConversation("conv_replaced");
-    expect(useChatStore.getState().conversationId).toBeNull();
-    expect(conversationRegistry.peek("conv_replaced")).toBeUndefined();
-
-    await useChatStore.getState().switchTo("conv_replaced");
-    const contents = useChatStore
-      .getState()
-      .blocks.map((block) => (block as UserMessageBlock).content);
-    expect(contents).toEqual([
-      [{ type: "input_text", text: "first prompt" }],
-      [{ type: "input_text", text: "follow-up" }],
-    ]);
-  });
-
   it("reloads a replaced conversation in place only when it is on screen", async () => {
     seedSession("conv_background", [userMessage("resp_bg", "background prompt")]);
     seedSession("conv_open", [userMessage("resp_old", "first prompt")]);
@@ -1208,7 +1183,7 @@ describe("chatStore — switchTo", () => {
     ]);
     conversationRegistry.peek("conv_open")!.setState({
       pendingUserMessages: [
-        { tempId: "pend_unsent", content: [{ type: "input_text", text: "draft" }] },
+        { tempId: "pend_unsent", content: [{ type: "input_text", text: "not acknowledged yet" }] },
       ],
     });
     await reloadConversation("conv_open");

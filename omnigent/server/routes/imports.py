@@ -381,7 +381,9 @@ def create_imports_router(
         alongside a workspace (the ``ck_conversations_workspace_required_for_host``
         check constraint). Caller authorizes any ``replace_conversation_id``;
         replacement waits until validation succeeds, then ``replace_guard`` may
-        refuse it with a reason. Returns ``(conversation id, title)``.
+        refuse it with a reason. Resume does not take the import lock, so one
+        landing between the guard and the delete is not caught. Returns
+        ``(conversation id, title)``.
         """
         native_agent = native_coding_agent_for_harness(f"{source}-native")
         if native_agent is None:
@@ -571,8 +573,8 @@ def create_imports_router(
         return None
 
     async def _has_items_added_after_import(conversation_id: str) -> bool:
-        # An import writes its transcript in one append, so all imported items
-        # share a timestamp; a later one came from use in Omnigent.
+        # One append stamps every imported item with the same second; a later
+        # stamp means the session was used in Omnigent.
         first, last = await asyncio.gather(
             asyncio.to_thread(conversation_store.list_items, conversation_id, limit=1),
             asyncio.to_thread(
@@ -599,7 +601,8 @@ def create_imports_router(
         session as its frame arrives, so a large batch never buffers. Raises
         ``OmnigentError`` if the host read drops mid-stream, after the sessions
         read so far are already committed (retry is idempotent, and re-import of a
-        success comes back as already-imported, never a duplicate).
+        success comes back as already-imported unless ``force`` replaces it, never
+        a duplicate).
         """
         assert host_registry is not None  # guaranteed by _resolve_import_target
         # Each session carries its own source (an "all" import mixes harnesses),

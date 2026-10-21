@@ -277,6 +277,34 @@ describe("ImportSessionsPanel", () => {
     renderPanel();
     expect(replaceToggle()).not.toBeChecked();
   });
+
+  it("keeps replacing on when a forced import replaced nothing", async () => {
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_1", name: "mac-laptop", owner: "alice", status: "online" }],
+    } as unknown as ReturnType<typeof useHosts>);
+    // A server that ignores `force` reports the session as already imported.
+    importLocalSessionsMock.mockResolvedValue({
+      imported: 0,
+      alreadyImported: 1,
+      failed: 0,
+      sessions: [],
+      failures: [],
+    });
+    const replaceToggle = () => screen.getByRole("switch", { name: "Replace existing snapshot" });
+
+    renderPanel();
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "session" } });
+    fireEvent.change(screen.getByTestId("import-session-id"), {
+      target: { value: "session-exact" },
+    });
+    fireEvent.click(replaceToggle());
+    fireEvent.click(screen.getByTestId("import-submit"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("import-result")).toHaveTextContent("1 already imported"),
+    );
+    expect(replaceToggle()).toBeChecked();
+  });
 });
 
 it("Retry failed preserves the original request after leaving Settings", async () => {

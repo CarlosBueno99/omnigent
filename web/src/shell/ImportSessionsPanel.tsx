@@ -53,8 +53,9 @@ export function ImportSessionsPanel() {
   const [limit, setLimit] = useState(request?.limit ?? 25);
   const [mode, setMode] = useState<ImportMode>(request?.sessionId ? "session" : "recent");
   const [sessionId, setSessionId] = useState(request?.sessionId ?? "");
-  // A clean run turns replacing off, so a later import never replaces by accident.
-  const finishedCleanly = result !== null && result.failed === 0;
+  // A run that neither failed nor skipped a session turns replacing off, so a
+  // later import never replaces by accident.
+  const finishedCleanly = result !== null && result.failed === 0 && result.alreadyImported === 0;
   const [replaceExisting, setReplaceExisting] = useState(
     request?.force === true && !finishedCleanly,
   );

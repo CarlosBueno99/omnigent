@@ -41,6 +41,7 @@ const LIST_REFRESH_MS = 5000;
 // Replacing is the user's own update, so it must not flag the session unread.
 async function markReplacedSessionSeen(id: string): Promise<void> {
   try {
+    // Use the server's timestamp; this client's clock can lag behind it.
     const session = await getSessionSlim(id);
     markConversationRead(id, session.updatedAt ?? session.createdAt);
   } catch {
