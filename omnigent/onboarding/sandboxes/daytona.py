@@ -460,11 +460,14 @@ class DaytonaSandboxLauncher(SandboxLauncher):
             return
         if handle.state == daytona.SandboxState.STOPPING:
             click.echo("  → waiting for sandbox to stop")
+            # The SDK wait also returns once the sandbox is destroyed.
             handle.wait_for_sandbox_stop(timeout=_RESUME_TIMEOUT_S)
+            self._stop_existing(handle, sandbox_id)
             return
         if handle.state == daytona.SandboxState.ARCHIVING:
             click.echo("  → waiting for sandbox to archive")
             self._wait_for_archive(handle, sandbox_id)
+            self._stop_existing(handle, sandbox_id)
             return
         if handle.state in {
             daytona.SandboxState.STARTING,

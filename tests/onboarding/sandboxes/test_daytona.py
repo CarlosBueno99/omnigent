@@ -252,14 +252,20 @@ class _FakeSandbox:
         self.state = _FakeSandboxState.STOPPED
 
     def wait_for_sandbox_start(self, timeout: float | None = 60) -> None:
-        """Record the wait and settle an in-flight start as STARTED."""
+        """Record the wait and settle an in-flight start, as STARTED by default."""
         self.start_waits.append(timeout)
-        self.state = _FakeSandboxState.STARTED
+        self._settle(_FakeSandboxState.STARTED)
 
     def wait_for_sandbox_stop(self, timeout: float | None = 60) -> None:
-        """Record the wait and settle an in-flight stop as STOPPED."""
+        """Record the wait and settle an in-flight stop, as STOPPED by default."""
         self.stop_waits.append(timeout)
-        self.state = _FakeSandboxState.STOPPED
+        self._settle(_FakeSandboxState.STOPPED)
+
+    def _settle(self, target: _FakeSandboxState) -> None:
+        """Poll like the SDK waits: take the next scripted state, raising on failure."""
+        self.state = self.refresh_states.pop(0) if self.refresh_states else target
+        if self.state in {_FakeSandboxState.ERROR, _FakeSandboxState.BUILD_FAILED}:
+            raise _FakeDaytonaError(f"Sandbox {self.id} failed with state: {self.state.value}")
 
     def set_autostop_interval(self, interval: int) -> None:
         """Record the configured idle auto-stop interval."""
@@ -851,6 +857,37 @@ def test_stop_settles_each_state_without_conflicting_transitions(
     assert sandbox.stop_calls == stop_calls
     assert sandbox.state in {_FakeSandboxState.STOPPED, _FakeSandboxState.ARCHIVED}
     assert sandbox.start_calls == []
+    assert fake_daytona.deleted == []
+
+
+@pytest.mark.parametrize(
+    ("state", "settled", "message", "gone"),
+    [
+        (_FakeSandboxState.STOPPING, _FakeSandboxState.DESTROYED, "no longer exists", True),
+        (_FakeSandboxState.ARCHIVING, _FakeSandboxState.ERROR, "in state 'error'", False),
+        (_FakeSandboxState.ARCHIVING, _FakeSandboxState.DESTROYED, "no longer exists", True),
+        (_FakeSandboxState.STARTING, _FakeSandboxState.ERROR, "failed with state: error", False),
+    ],
+)
+def test_stop_reports_a_transition_that_settles_unusable(
+    fake_daytona: _FakeDaytonaState,
+    state: _FakeSandboxState,
+    settled: _FakeSandboxState,
+    message: str,
+    gone: bool,
+) -> None:
+    """A wait ending in failure or deletion raises instead of reporting the sandbox parked."""
+    launcher = DaytonaSandboxLauncher()
+    sandbox_id = launcher.provision("a")
+    sandbox = fake_daytona.sandboxes[sandbox_id]
+    sandbox.state = state
+    sandbox.refresh_states = [settled]
+
+    with pytest.raises(click.ClickException, match=message) as exc:
+        launcher.stop(sandbox_id)
+
+    assert isinstance(exc.value, SandboxGoneError) is gone
+    assert sandbox.stop_calls == []
     assert fake_daytona.deleted == []
 
 
