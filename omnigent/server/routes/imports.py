@@ -644,7 +644,6 @@ def create_imports_router(
             if (
                 not isinstance(external_session_id, str)
                 or not isinstance(raw_items, list)
-                or not raw_items
                 or source is None
                 # Mirror the /imports item cap so one oversized transcript can't
                 # balloon a batch import's memory.
@@ -654,6 +653,11 @@ def create_imports_router(
                     external_session_id,
                     session_source,
                     "This session's transcript was malformed or too large to import.",
+                )
+                continue
+            if not raw_items:
+                _fail(
+                    external_session_id, session_source, "This session has no messages to import."
                 )
                 continue
             # The guard above rejected None and anything outside valid_sources

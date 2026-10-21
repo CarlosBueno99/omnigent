@@ -145,6 +145,7 @@ interface SessionResponseWire {
    */
   background_tasks?: BackgroundTaskInfo[] | null;
   created_at: number;
+  updated_at?: number | null;
   /**
    * Human-readable session title, e.g. ``"researcher:auth"`` for a
    * sub-agent or a user-supplied string for a top-level session.
@@ -333,6 +334,7 @@ function sessionFromWire(wire: SessionResponseWire): Session {
     backgroundTaskCount: wire.background_task_count ?? undefined,
     backgroundTasks: parseBackgroundTasks(wire.background_tasks),
     createdAt: wire.created_at,
+    updatedAt: wire.updated_at ?? undefined,
     title: wire.title ?? null,
     labels: wire.labels,
     projectId: wire.project_id ?? null,
@@ -1258,20 +1260,6 @@ export async function getSessionUsage(
     totalCostUsd: wire.total_cost_usd ?? null,
     usageByModel: usageByModelFromWire(wire.usage_by_model),
   };
-}
-
-/** Read a session's server `updated_at` (seconds) without loading its transcript. */
-export async function getSessionUpdatedAt(sessionId: string): Promise<number> {
-  const params = new URLSearchParams({
-    include_items: "false",
-    include_liveness: "false",
-    include_usage: "false",
-  });
-  const res = await authenticatedFetch(
-    `/v1/sessions/${encodeURIComponent(sessionId)}?${params.toString()}`,
-  );
-  const wire = await readJsonOrThrow<{ created_at: number; updated_at?: number | null }>(res);
-  return wire.updated_at ?? wire.created_at;
 }
 
 /** One page of a session's committed items, in chronological order. */

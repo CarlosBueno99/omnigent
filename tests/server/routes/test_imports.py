@@ -916,15 +916,11 @@ async def test_local_import_stream_reports_failure_reasons(
     events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
     assert [e["title"] for e in events if e["event"] == "session"] == ["Good one"]
     failed = [e for e in events if e["event"] == "failed"]
-    assert {f["reason"] for f in failed} == {
-        "This session's transcript was malformed or too large to import.",
-        "No visible messages to import.",
-    }
     # The host-read failure keeps its source-session identity through the wire.
-    assert {(f["external_session_id"], f["source"]) for f in failed} == {
-        ("bad-1", "claude"),
-        ("empty-1", "claude"),
-        ("unreadable-1", "codex"),
+    assert {(f["external_session_id"], f["source"], f["reason"]) for f in failed} == {
+        ("bad-1", "claude", "This session's transcript was malformed or too large to import."),
+        ("empty-1", "claude", "This session has no messages to import."),
+        ("unreadable-1", "codex", "No visible messages to import."),
     }
     done = events[-1]
     assert done["event"] == "done"

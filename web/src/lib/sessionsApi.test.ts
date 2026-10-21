@@ -20,7 +20,6 @@ import {
   getSession,
   getSessionSlim,
   getSessionUsage,
-  getSessionUpdatedAt,
   importLocalSessions,
   interrupt,
   listRunners,
@@ -1095,6 +1094,7 @@ describe("getSession", () => {
         agent_id: "agent_xyz",
         status: "idle",
         created_at: 1704067200,
+        updated_at: 1704067260,
         items: [],
         usage_included: false,
         total_cost_usd: null,
@@ -1109,6 +1109,7 @@ describe("getSession", () => {
       "/v1/sessions/conv_abc?include_items=false&include_liveness=false&include_usage=false",
     );
     expect(session.agentId).toBe("agent_xyz");
+    expect(session.updatedAt).toBe(1704067260);
     expect(session.items).toEqual([]);
     expect(session.usageIncluded).toBe(false);
     expect(session.totalCostUsd).toBeNull();
@@ -1262,25 +1263,6 @@ describe("getSession", () => {
     );
     const session = await getSession("conv_top");
     expect(session.parentSessionId).toBeNull();
-  });
-});
-
-describe("getSessionUpdatedAt", () => {
-  it("reads the timestamp without loading the transcript", async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockJsonResponse({ id: "conv_a", created_at: 1_700_000_000, updated_at: 1_700_000_123 }),
-    );
-
-    expect(await getSessionUpdatedAt("conv_a")).toBe(1_700_000_123);
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      "/v1/sessions/conv_a?include_items=false&include_liveness=false&include_usage=false",
-    );
-  });
-
-  it("falls back to the creation time for a session never updated", async () => {
-    fetchMock.mockResolvedValueOnce(mockJsonResponse({ id: "conv_b", created_at: 1_700_000_000 }));
-
-    expect(await getSessionUpdatedAt("conv_b")).toBe(1_700_000_000);
   });
 });
 

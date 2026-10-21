@@ -5,7 +5,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { create } from "zustand";
 import { markConversationRead } from "@/hooks/useUnseenConversations";
 import {
-  getSessionUpdatedAt,
+  getSessionSlim,
   importLocalSessions,
   type ImportedSessionRef,
   type ImportSourceSelector,
@@ -41,7 +41,8 @@ const LIST_REFRESH_MS = 5000;
 // Replacing is the user's own update, so it must not flag the session unread.
 async function markReplacedSessionSeen(id: string): Promise<void> {
   try {
-    markConversationRead(id, await getSessionUpdatedAt(id));
+    const session = await getSessionSlim(id);
+    markConversationRead(id, session.updatedAt ?? session.createdAt);
   } catch {
     // Read state is cosmetic; the replacement itself already succeeded.
   }
