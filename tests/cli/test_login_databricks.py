@@ -117,13 +117,15 @@ def token_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @dataclass
 class _FakeLoginProcess:
     """Stand-in for the ``databricks auth login`` ``Popen`` handle: the first ``stalls``
-    ``wait`` calls time out, then it exits with ``returncode`` (or every ``wait`` raises
-    ``raise_on_wait``)."""
+    ``wait`` calls time out, then it exits with ``returncode`` (or each ``wait`` raises
+    ``raise_on_wait`` until it is signalled). ``events`` records waits and signals in order."""
 
     stalls: int = 0
     returncode: int = 0
     raise_on_wait: type[BaseException] | None = None
+    ignores_terminate: bool = False
     wait_timeouts: list[float | None] = field(default_factory=list)
+    events: list[str] = field(default_factory=list)
     terminated: bool = False
     killed: bool = False
     args: tuple[str, ...] = ("databricks", "auth", "login")
@@ -136,9 +138,12 @@ class _FakeLoginProcess:
 
     def wait(self, timeout: float | None = None) -> int:
         self.wait_timeouts.append(timeout)
-        if self.raise_on_wait is not None:
+        self.events.append("wait")
+        if self.killed or (self.terminated and not self.ignores_terminate):
+            return self.returncode
+        if self.raise_on_wait is not None and not self.terminated:
             raise self.raise_on_wait()
-        if self.terminated or self.killed or len(self.wait_timeouts) > self.stalls:
+        if not self.terminated and len(self.wait_timeouts) > self.stalls:
             return self.returncode
         raise subprocess.TimeoutExpired("databricks auth login", timeout or 0)
 
@@ -150,9 +155,11 @@ class _FakeLoginProcess:
 
     def terminate(self) -> None:
         self.terminated = True
+        self.events.append("terminate")
 
     def kill(self) -> None:
         self.killed = True
+        self.events.append("kill")
 
 
 def _patch_login_env(
@@ -696,9 +703,10 @@ def test_login_gives_up_when_browser_callback_never_arrives(
     result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
 
     assert result.exit_code != 0
-    assert process.terminated
+    assert process.events == ["wait", "wait", "terminate", "wait"]
     # The hint delay and the remaining wait add up to the overall budget.
     assert sum(process.wait_timeouts[:2]) == cli_mod._BROWSER_LOGIN_TIMEOUT_S
+    assert process.wait_timeouts[2] == cli_mod._BROWSER_LOGIN_STOP_GRACE_S
     assert "Timed out after 10 minutes waiting for the browser" in result.output
     assert "ssh -L 8020:localhost:8020 -N <this-host>" in result.output
     assert load_databricks_workspace_host(_APPS_URL) is None
@@ -772,8 +780,8 @@ def test_login_reports_databricks_cli_failure(
 def test_login_kills_databricks_cli_on_keyboard_interrupt(
     monkeypatch: pytest.MonkeyPatch, token_dir: Path
 ) -> None:
-    """Ctrl+C during the wait aborts the command and does not leave the CLI running."""
-    process = _FakeLoginProcess(raise_on_wait=KeyboardInterrupt)
+    """Ctrl+C during the wait aborts the command; a CLI ignoring SIGTERM is killed and reaped."""
+    process = _FakeLoginProcess(raise_on_wait=KeyboardInterrupt, ignores_terminate=True)
     _patch_login_env(
         monkeypatch,
         fake_httpx=_FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})]),
@@ -785,7 +793,8 @@ def test_login_kills_databricks_cli_on_keyboard_interrupt(
 
     assert result.exit_code == 1
     assert "Aborted!" in result.output
-    assert process.killed
+    assert process.events == ["wait", "terminate", "wait", "kill", "wait"]
+    assert process.wait_timeouts[1:] == [cli_mod._BROWSER_LOGIN_STOP_GRACE_S, None]
 
 
 def test_foreign_subprocess_calls_stay_out_of_the_login_recorder(

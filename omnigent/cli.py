@@ -13016,6 +13016,7 @@ def _login_and_mint_workspace_auth_info(
 _BROWSER_LOGIN_CALLBACK_PORT = 8020
 _BROWSER_LOGIN_HINT_DELAY_S = 30.0
 _BROWSER_LOGIN_TIMEOUT_S = 600.0
+_BROWSER_LOGIN_STOP_GRACE_S = 5.0
 # Set by the sandbox bootstrap for the in-sandbox login whose callback port it forwards itself.
 _BROWSER_LOGIN_CALLBACK_FORWARDED_ENV = "OMNIGENT_LOGIN_CALLBACK_FORWARDED"
 
@@ -13044,7 +13045,7 @@ def _wait_for_browser_login(
 ) -> int:
     """Wait for ``databricks auth login`` and return its exit code, printing a notice (plus
     *guidance*, unless empty or already *guidance_shown*) once the wait looks stuck; after
-    ``_BROWSER_LOGIN_TIMEOUT_S`` the CLI is terminated and ``click.ClickException`` raised."""
+    ``_BROWSER_LOGIN_TIMEOUT_S`` it raises ``click.ClickException`` and leaves the CLI running."""
     minutes = int(_BROWSER_LOGIN_TIMEOUT_S // 60)
     try:
         return proc.wait(timeout=_BROWSER_LOGIN_HINT_DELAY_S)
@@ -13055,12 +13056,21 @@ def _wait_for_browser_login(
     try:
         return proc.wait(timeout=_BROWSER_LOGIN_TIMEOUT_S - _BROWSER_LOGIN_HINT_DELAY_S)
     except subprocess.TimeoutExpired:
-        proc.terminate()
         timed_out = (
             f"Timed out after {minutes} minutes waiting for the browser to finish the "
             "Databricks login."
         )
         raise click.ClickException(f"{timed_out} {guidance}" if guidance else timed_out) from None
+
+
+def _stop_browser_login(proc: subprocess.Popen[bytes]) -> None:
+    """Terminate ``databricks auth login``, kill it if it outlives the grace period, reap it."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=_BROWSER_LOGIN_STOP_GRACE_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 
 
 def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None) -> None:
@@ -13083,12 +13093,9 @@ def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None
     shared ``DEFAULT`` profile. The OAuth grant itself stays host-keyed,
     so :func:`_databricks_workspace_token` still resolves it by host.
 
-    The CLI completes only when the browser reaches ``localhost:8020`` on
-    this machine; in an SSH session that is said up front, and any login
-    still running after :data:`_BROWSER_LOGIN_HINT_DELAY_S` gets the same
-    guidance instead of silence. The sandbox bootstrap forwards that port
-    itself and sets :data:`_BROWSER_LOGIN_CALLBACK_FORWARDED_ENV` so the
-    login it drives only prints the notice.
+    Callback guidance is printed up front in an SSH session and with the
+    stall notice otherwise, unless :data:`_BROWSER_LOGIN_CALLBACK_FORWARDED_ENV`
+    says the sandbox bootstrap forwards the callback port itself.
     """
     databricks_bin = shutil.which("databricks")
     if databricks_bin is None:
@@ -13122,7 +13129,7 @@ def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None
                 proc, guidance=guidance, guidance_shown=in_ssh_session
             )
         except BaseException:
-            proc.kill()
+            _stop_browser_login(proc)
             raise
     if returncode != 0:
         raise click.ClickException(

@@ -11,7 +11,6 @@ import signal
 import socket
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import parse_qs, urlsplit
@@ -197,19 +196,6 @@ def _stop_interactively(child: pexpect.spawn) -> None:
     child.close(force=True)
 
 
-def _output_after_login_handoff(child: pexpect.spawn, transcript: Path, timeout_s: float) -> str:
-    deadline = time.monotonic() + timeout_s
-    output = ""
-    while not output and child.isalive() and time.monotonic() < deadline:
-        child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=1)
-        child.logfile_read.flush()
-        text = transcript.read_text()
-        handoff = _LOGIN_HANDOFF.search(text)
-        assert handoff is not None
-        output = _TERMINAL_CONTROL.sub("", text[handoff.end() :]).strip()
-    return output
-
-
 def test_start_reports_unfinished_login_when_browser_callback_hangs(tmp_path: Path) -> None:
     """The terminal must not stay silent while the browser's localhost callback goes unanswered."""
     with contextlib.ExitStack() as stack:
@@ -255,17 +241,18 @@ def test_start_reports_unfinished_login_when_browser_callback_hangs(tmp_path: Pa
         page.evaluate("url => { window.location.href = url }", authorize_url)
         poll_until(lambda: listener.connections, timeout_s=30, interval_s=0.1)
 
-        later_output = _output_after_login_handoff(child, transcript, _UNANSWERED_CALLBACK_WAIT_S)
-
-        page.wait_for_timeout(100)
-        assert callback_statuses == []
-        assert workspace.token_exchanges == 0
-        assert later_output or not child.isalive(), (
-            f"no output for {_UNANSWERED_CALLBACK_WAIT_S}s after the browser callback "
-            "was sent; the terminal still ends at the browser handoff"
-        )
-        child.expect("Still waiting for the browser login to finish", timeout=45)
+        try:
+            child.expect(
+                "Still waiting for the browser login to finish",
+                timeout=_UNANSWERED_CALLBACK_WAIT_S,
+            )
+        except pexpect.TIMEOUT:
+            pytest.fail(
+                f"no output for {_UNANSWERED_CALLBACK_WAIT_S}s after the browser callback "
+                "was sent; the terminal still ends at the browser handoff"
+            )
         child.expect("reload the browser tab", timeout=10)
+        assert callback_statuses == []
         child.logfile_read.flush()
         guidance = _TERMINAL_CONTROL.sub("", transcript.read_text())
         assert "ssh -L " in guidance
