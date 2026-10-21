@@ -200,7 +200,7 @@ def test_reimport_by_id_can_refresh_drifted_claude_session(
         )
     replace_option.click()
     page.get_by_test_id("import-submit").click()
-    expect(result).to_be_visible(timeout=120_000)
+    expect(result).to_have_text("Imported 1.", timeout=120_000)
 
     _open_imported_session(page, live_server, claude_host)
     expect(follow_up).to_be_visible(timeout=30_000)

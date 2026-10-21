@@ -13,6 +13,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from omnigent.db.utils import builtin_agent_id
+from omnigent.entities import NewConversationItem
+from omnigent.entities.conversation import MessageData
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER, UnifiedAuthProvider
 from omnigent.server.host_registry import HostRegistry
@@ -1081,11 +1083,12 @@ async def test_local_import_by_id_force_refreshes_drifted_session(
     [
         ("owner", None),
         ("resumed_in_omnigent", "This session was resumed in Omnigent, so it can't be replaced."),
+        ("resumed_then_unbound", "This session was resumed in Omnigent, so it can't be replaced."),
         ("shared_editor", "Only the owner of the imported session can replace it."),
         ("other_harness", "Only a session imported from this harness can be replaced."),
     ],
 )
-async def test_forced_local_import_replaces_only_an_unbound_import_the_caller_owns(
+async def test_forced_local_import_replaces_only_an_unused_import_the_caller_owns(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     case: str,
@@ -1094,6 +1097,9 @@ async def test_forced_local_import_replaces_only_an_unbound_import_the_caller_ow
     """A forced re-import keeps a session it must not delete and reports why."""
     from omnigent.server.routes import imports as imports_module
     from omnigent.session_import import IMPORT_SOURCE_LABEL_KEY
+    from omnigent.stores.conversation_store import (
+        sqlalchemy_store as sqlalchemy_conversation_store,
+    )
 
     _seed_claude_agent(db_uri)
     caller = "alice@example.com"
@@ -1139,6 +1145,24 @@ async def test_forced_local_import_replaces_only_an_unbound_import_the_caller_ow
         session_id = first.json()["sessions"][0]["session_id"]
         if case == "resumed_in_omnigent":
             assert store.set_runner_id(session_id, "runner_resumed")
+        elif case == "resumed_then_unbound":
+            assert store.set_runner_id(session_id, "runner_resumed")
+            imported_at = store.list_items(session_id).data[0].created_at
+            with monkeypatch.context() as later:
+                later.setattr(sqlalchemy_conversation_store, "now_epoch", lambda: imported_at + 60)
+                store.append(
+                    session_id,
+                    [
+                        NewConversationItem(
+                            type="message",
+                            response_id="claude:omnigent-turn",
+                            data=MessageData(
+                                role="user", content=[{"type": "input_text", "text": "continue"}]
+                            ),
+                        )
+                    ],
+                )
+            store.clear_runner_id(session_id)
         elif case == "shared_editor":
             permission_store.grant(caller, session_id, LEVEL_EDIT)
         elif case == "other_harness":

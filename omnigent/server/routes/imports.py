@@ -557,11 +557,22 @@ def create_imports_router(
             return "Only the owner of the imported session can replace it."
         if existing.labels.get(IMPORT_SOURCE_LABEL_KEY) != source:
             return "Only a session imported from this harness can be replaced."
-        # Replacement deletes the session without the runner-side cleanup of a
-        # full session delete, so a session that ever had a runner is kept.
-        if existing.runner_id is not None:
+        if existing.runner_id is not None or await _has_items_added_after_import(existing.id):
             return "This session was resumed in Omnigent, so it can't be replaced."
         return None
+
+    async def _has_items_added_after_import(conversation_id: str) -> bool:
+        # An import writes its transcript in one append, so all imported items
+        # share a timestamp; a later one came from use in Omnigent.
+        first, last = await asyncio.gather(
+            asyncio.to_thread(conversation_store.list_items, conversation_id, limit=1),
+            asyncio.to_thread(
+                conversation_store.list_items, conversation_id, limit=1, order="desc"
+            ),
+        )
+        return (
+            bool(first.data and last.data) and last.data[0].created_at != first.data[0].created_at
+        )
 
     async def _import_local_core(
         body: LocalImportRequest,

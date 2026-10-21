@@ -1,7 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { markConversationSeen } from "@/hooks/useUnseenConversations";
+import { markConversationRead } from "@/hooks/useUnseenConversations";
 import {
   getSessionUpdatedAt,
   importLocalSessions,
@@ -16,12 +16,12 @@ vi.mock("@/lib/sessionsApi", () => ({
   getSessionUpdatedAt: vi.fn(),
 }));
 vi.mock("@/store/chatStore", () => ({ discardConversation: vi.fn() }));
-vi.mock("@/hooks/useUnseenConversations", () => ({ markConversationSeen: vi.fn() }));
+vi.mock("@/hooks/useUnseenConversations", () => ({ markConversationRead: vi.fn() }));
 
 const importMock = vi.mocked(importLocalSessions);
 const discardMock = vi.mocked(discardConversation);
 const updatedAtMock = vi.mocked(getSessionUpdatedAt);
-const markSeenMock = vi.mocked(markConversationSeen);
+const markReadMock = vi.mocked(markConversationRead);
 
 const DONE: LocalImportResult = {
   imported: 2,
@@ -55,7 +55,7 @@ beforeEach(() => {
   importMock.mockReset();
   discardMock.mockReset();
   updatedAtMock.mockReset();
-  markSeenMock.mockReset();
+  markReadMock.mockReset();
   useSessionImportStore.setState({
     importing: false,
     importedCount: 0,
@@ -142,7 +142,7 @@ describe("useSessionImportStore", () => {
     expect(updatedAtMock).not.toHaveBeenCalled();
   });
 
-  it("drops cached copies of each session a forced import replaced and marks it seen", async () => {
+  it("drops cached copies of each session a forced import replaced and marks it read", async () => {
     updatedAtMock.mockImplementation(async (id) => {
       if (id === "c1") return 1_700_000_123;
       throw new Error("Session lookup failed");
@@ -172,8 +172,8 @@ describe("useSessionImportStore", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["session", "c1"] });
     stream.resolve(DONE);
     await run;
-    expect(markSeenMock).toHaveBeenCalledTimes(1);
-    expect(markSeenMock).toHaveBeenCalledWith("c1", 1_700_000_123);
+    expect(markReadMock).toHaveBeenCalledTimes(1);
+    expect(markReadMock).toHaveBeenCalledWith("c1", 1_700_000_123);
     expect(useSessionImportStore.getState().result).toEqual(DONE);
     expect(useSessionImportStore.getState().error).toBeNull();
   });

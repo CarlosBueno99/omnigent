@@ -220,7 +220,7 @@ export function ImportSessionsPanel() {
             </label>
             <p id="import-replace-existing-help" className="text-sm text-muted-foreground">
               If this session was already imported, replace that copy with the latest transcript.
-              Comments and sharing on the old copy are removed.
+              The old copy's comments, sharing, labels, project, and custom title are removed.
             </p>
           </div>
           <Switch
