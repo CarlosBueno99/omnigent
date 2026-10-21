@@ -476,6 +476,8 @@ class DaytonaSandboxLauncher(SandboxLauncher):
             # Daytona rejects a stop while a start is in flight.
             click.echo(f"  → waiting for sandbox (state: {handle.state.value})")
             handle.wait_for_sandbox_start(timeout=_RESUME_TIMEOUT_S)
+            self._stop_existing(handle, sandbox_id)
+            return
         if handle.state == daytona.SandboxState.STARTED:
             handle.stop(timeout=_RESUME_TIMEOUT_S)
             return

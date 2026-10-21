@@ -262,7 +262,7 @@ class _FakeSandbox:
         self._settle(_FakeSandboxState.STOPPED)
 
     def _settle(self, target: _FakeSandboxState) -> None:
-        """Poll like the SDK waits: take the next scripted state, raising on failure."""
+        """Take the next scripted state, raising on failure states."""
         self.state = self.refresh_states.pop(0) if self.refresh_states else target
         if self.state in {_FakeSandboxState.ERROR, _FakeSandboxState.BUILD_FAILED}:
             raise _FakeDaytonaError(f"Sandbox {self.id} failed with state: {self.state.value}")
@@ -833,6 +833,7 @@ def test_stop_parks_sandbox_for_in_place_resume(fake_daytona: _FakeDaytonaState)
         (_FakeSandboxState.ARCHIVING, [_FakeSandboxState.ARCHIVED], [], [], []),
         (_FakeSandboxState.STARTING, [], [900.0], [], [900.0]),
         (_FakeSandboxState.RESTORING, [], [900.0], [], [900.0]),
+        (_FakeSandboxState.STARTING, [_FakeSandboxState.STOPPED], [900.0], [], []),
     ],
 )
 def test_stop_settles_each_state_without_conflicting_transitions(
