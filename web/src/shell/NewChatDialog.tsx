@@ -1703,7 +1703,12 @@ export function AgentHarnessPicker({
         : harnessWarningBadgeText(readiness.reason, collapsedBadge);
     const warningMessage =
       blockedReason ??
-      harnessWarningMessage(agent.display_name, host?.display_name ?? host?.name, readiness.reason, agent.harness);
+      harnessWarningMessage(
+        agent.display_name,
+        host?.display_name ?? host?.name,
+        readiness.reason,
+        agent.harness,
+      );
     return (
       <HarnessPickerEntry
         key={agent.id}
