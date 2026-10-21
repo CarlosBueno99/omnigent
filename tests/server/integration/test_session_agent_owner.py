@@ -183,6 +183,11 @@ async def test_only_owner_can_update_terminal_launch_args(
     assert response.status_code == 200, response.text
     response = await auth_client.get(path, headers=owner)
     assert response.json()["terminal_launch_args"] == []
+    new_labels = change.get("labels")
+    if isinstance(new_labels, dict):
+        response = await auth_client.patch(path, json={"labels": new_labels}, headers=owner)
+        assert response.status_code == 200, response.text
+        assert new_labels.items() <= response.json()["labels"].items()
     for value in ("1", "0"):
         response = await auth_client.patch(
             path,
