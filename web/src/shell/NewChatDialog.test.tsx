@@ -2865,6 +2865,8 @@ describe("Run on this machine (desktop host enrollment)", () => {
     const userAgent = vi
       .spyOn(navigator, "userAgent", "get")
       .mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+    // An unrelated stopped host is hidden and must not replace the action with a notice.
+    mockHosts([host("offline", 2)]);
     renderLanding();
     await act(async () => {});
     await openHostMenu();
@@ -2873,6 +2875,10 @@ describe("Run on this machine (desktop host enrollment)", () => {
     expect(item).toHaveTextContent("This Mac");
     expect(within(item).getByTestId("new-chat-landing-use-this-machine")).toHaveTextContent(
       "Use this machine",
+    );
+    expect(screen.queryByTestId("new-chat-landing-host-host_2")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-host-menu")).not.toHaveTextContent(
+      "No hosts online.",
     );
     userAgent.mockRestore();
   });
@@ -2890,6 +2896,7 @@ describe("Run on this machine (desktop host enrollment)", () => {
   it("shows Use this machine on a known local host after it disconnects", async () => {
     mockHosts([
       { host_id: "this-machine", name: "jackson-laptop", owner: "me", status: "offline" },
+      host("offline", 2),
     ]);
     renderLanding();
     await act(async () => {});
@@ -2901,6 +2908,13 @@ describe("Run on this machine (desktop host enrollment)", () => {
     expect(screen.getByTestId("new-chat-landing-use-this-machine")).toHaveTextContent(
       "Use this machine",
     );
+    // The reconnect action stays outside the collapsed offline group.
+    expect(screen.queryByTestId("new-chat-landing-host-host_2")).toBeNull();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Offline hosts (1)" }));
+    expect(
+      within(screen.getByRole("group", { name: "Offline hosts" })).getAllByRole("menuitem"),
+    ).toHaveLength(1);
+    expect(screen.getAllByTestId("new-chat-landing-run-on-this-machine")).toHaveLength(1);
   });
 
   it("hides Use this machine while the local host is connected", async () => {
@@ -2965,6 +2979,365 @@ describe("Run on this machine (desktop host enrollment)", () => {
   });
 });
 
+describe("desktop Arclet credential preflight", () => {
+  const checkDbcert = vi.fn<() => Promise<NativeBridgeModule.DbcertStatusResult>>();
+  const refreshDbcert = vi.fn<() => Promise<NativeBridgeModule.DbcertRefreshResult>>();
+  const arcletInfo = { managed_sandboxes_enabled: true, sandbox_provider: "arclet" };
+
+  beforeEach(() => {
+    setupLandingMocks();
+    vi.mocked(isElectronShell).mockReturnValue(true);
+    vi.mocked(getDesktopFeatures).mockResolvedValue({
+      databricksInternalFeatures: true,
+      canRefreshDbcert: true,
+    });
+    Object.defineProperty(window, "omnigentDesktop", {
+      configurable: true,
+      value: { kind: "electron", checkDbcert, refreshDbcert },
+    });
+    checkDbcert.mockReset().mockResolvedValue({ ok: true, valid: true });
+    refreshDbcert.mockReset().mockResolvedValue({ ok: true });
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as Response);
+  });
+
+  afterEach(() => {
+    cleanup();
+    Reflect.deleteProperty(window, "omnigentDesktop");
+    vi.mocked(isElectronShell).mockReturnValue(false);
+    vi.mocked(getDesktopFeatures).mockResolvedValue(null);
+  });
+
+  async function start() {
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "Keep this task while I sign in" },
+    });
+    await waitFor(() => expect(screen.getByTestId("new-chat-landing-submit")).toBeEnabled());
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+  }
+
+  it("checks valid credentials before creating exactly one Arclet without sign-in", async () => {
+    let finish!: (result: { ok: true; valid: boolean }) => void;
+    checkDbcert.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    renderLanding(arcletInfo);
+    await start();
+    await waitFor(() => expect(checkDbcert).toHaveBeenCalledOnce());
+    expect(authenticatedFetchMock).not.toHaveBeenCalled();
+    expect(checkDbcert).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("new-chat-landing-dbcert-status")).toHaveTextContent(
+      "Checking laptop credentials",
+    );
+    expect(screen.getByRole("button", { name: "Skip" })).toBeEnabled();
+    expect(screen.getByTestId("new-chat-landing-input")).toBeDisabled();
+    expect(screen.getByTestId("new-chat-landing-host-chip")).toBeDisabled();
+    expect(screen.getByTestId("new-chat-landing-repo-chip")).toBeDisabled();
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toBeDisabled();
+    fireEvent.drop(screen.getByTestId("new-chat-landing"), {
+      dataTransfer: fileDrag([new File(["notes"], "late-attachment.txt", { type: "text/plain" })]),
+    });
+    expect(screen.queryByText("late-attachment.txt")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel launch" })).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-submit")).toBeDisabled();
+    expect(authenticatedFetchMock).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByTestId("new-chat-landing-input"), { key: "Enter" });
+    await act(async () => finish({ ok: true, valid: true }));
+    const { body } = await readCreateBody();
+    expect(body).toMatchObject({ host_type: "managed", sandbox_provider: "arclet" });
+    expect(setPendingInitialPrompt).toHaveBeenCalledWith(
+      "conv_new",
+      expect.objectContaining({ text: "Keep this task while I sign in" }),
+    );
+    expect(
+      authenticatedFetchMock.mock.calls.filter(([url]) => url === "/v1/sessions"),
+    ).toHaveLength(1);
+    expect(refreshDbcert).not.toHaveBeenCalled();
+  });
+
+  it("blocks invalid credentials with a refresh banner, then waits for an explicit launch", async () => {
+    const analytics = vi.fn();
+    setOmnigentHostConfig({ analytics });
+    const startEvent = {
+      type: "click",
+      componentId: "new_chat.start_session",
+      componentKind: "button",
+    };
+    checkDbcert.mockResolvedValueOnce({ ok: true, valid: false });
+    let finishRefresh!: (result: { ok: true }) => void;
+    refreshDbcert.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishRefresh = resolve;
+      }),
+    );
+    renderLanding(arcletInfo);
+    await start();
+    const refresh = await screen.findByRole("button", { name: "Refresh dbcert" });
+    expect(screen.getByText(/Your laptop's dbcert is missing or expired/)).toBeTruthy();
+    expect(authenticatedFetchMock).not.toHaveBeenCalled();
+    expect(refreshDbcert).not.toHaveBeenCalled();
+    expect(analytics).not.toHaveBeenCalledWith(startEvent);
+    expect(screen.getByTestId("new-chat-landing-input")).toHaveValue(
+      "Keep this task while I sign in",
+    );
+    fireEvent.click(refresh);
+    expect(refreshDbcert).toHaveBeenCalledOnce();
+    expect(refreshDbcert).toHaveBeenCalledWith({ skipArcaSync: true });
+    expect(screen.getByRole("button", { name: "Refreshing…" })).toBeDisabled();
+    expect(authenticatedFetchMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId("new-chat-landing-input")).toBeEnabled();
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "Use the task edited during sign-in" },
+    });
+    await act(async () => finishRefresh({ ok: true }));
+    expect(checkDbcert).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/Your laptop's dbcert is missing or expired/)).toBeNull();
+    expect(authenticatedFetchMock).not.toHaveBeenCalled();
+    expect(analytics).not.toHaveBeenCalledWith(startEvent);
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    const { body } = await readCreateBody();
+    expect(body).toMatchObject({ host_type: "managed", sandbox_provider: "arclet" });
+    expect(checkDbcert).toHaveBeenCalledTimes(3);
+    expect(refreshDbcert).toHaveBeenCalledOnce();
+    expect(setPendingInitialPrompt).toHaveBeenCalledWith(
+      "conv_new",
+      expect.objectContaining({ text: "Use the task edited during sign-in" }),
+    );
+    expect(
+      analytics.mock.calls.filter(([event]) => event.componentId === startEvent.componentId),
+    ).toEqual([[startEvent]]);
+  });
+
+  it.each([false, true])(
+    "locks the draft while checking capabilities and supports Skip (skip=%s)",
+    async (skip) => {
+      let finishFeatures!: (features: Awaited<ReturnType<typeof getDesktopFeatures>>) => void;
+      const pendingFeatures = new Promise<Awaited<ReturnType<typeof getDesktopFeatures>>>(
+        (resolve) => {
+          finishFeatures = resolve;
+        },
+      );
+      renderLanding(arcletInfo);
+      fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+        target: { value: "Keep this task during the capability check" },
+      });
+      await waitFor(() => expect(screen.getByTestId("new-chat-landing-submit")).toBeEnabled());
+      vi.mocked(getDesktopFeatures).mockReturnValueOnce(pendingFeatures);
+      fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+      expect(screen.getByTestId("new-chat-landing-input")).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Skip" })).toBeEnabled();
+      expect(checkDbcert).not.toHaveBeenCalled();
+      expect(authenticatedFetchMock).not.toHaveBeenCalled();
+      if (skip) {
+        fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+        await readCreateBody();
+      }
+      await act(async () =>
+        finishFeatures({ databricksInternalFeatures: true, canRefreshDbcert: true }),
+      );
+      await readCreateBody();
+      expect(checkDbcert).toHaveBeenCalledTimes(skip ? 0 : 1);
+      expect(refreshDbcert).not.toHaveBeenCalled();
+      expect(setPendingInitialPrompt).toHaveBeenCalledWith(
+        "conv_new",
+        expect.objectContaining({ text: "Keep this task during the capability check" }),
+      );
+    },
+  );
+
+  it("clears the previous refresh warning while a new check is pending", async () => {
+    let finishCheck!: (result: { ok: true; valid: boolean }) => void;
+    checkDbcert.mockResolvedValueOnce({ ok: true, valid: false }).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishCheck = resolve;
+      }),
+    );
+    renderLanding(arcletInfo);
+    await start();
+    await screen.findByRole("button", { name: "Refresh dbcert" });
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await waitFor(() => expect(checkDbcert).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("new-chat-landing-dbcert-status")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Refresh dbcert" })).toBeNull();
+    await act(async () => finishCheck({ ok: true, valid: false }));
+    await screen.findByRole("button", { name: "Refresh dbcert" });
+    expect(authenticatedFetchMock).not.toHaveBeenCalled();
+    expect(refreshDbcert).not.toHaveBeenCalled();
+  });
+
+  it("does not bypass the credential check when the banner is dismissed", async () => {
+    checkDbcert.mockResolvedValue({ ok: true, valid: false });
+    renderLanding(arcletInfo);
+    await start();
+    await screen.findByRole("button", { name: "Refresh dbcert" });
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByRole("button", { name: "Refresh dbcert" })).toBeNull();
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await screen.findByRole("button", { name: "Refresh dbcert" });
+    expect(checkDbcert).toHaveBeenCalledTimes(2);
+    expect(authenticatedFetchMock).not.toHaveBeenCalled();
+    expect(refreshDbcert).not.toHaveBeenCalled();
+  });
+
+  it("keeps the draft and shows a credential error without provisioning, then allows retry", async () => {
+    checkDbcert.mockResolvedValueOnce({
+      ok: false,
+      error: "dbcert is not installed on this laptop. Install dbcert, then try again.",
+    });
+    renderLanding(arcletInfo);
+    await start();
+    expect(await screen.findByTestId("new-chat-landing-error")).toHaveTextContent("Install dbcert");
+    expect(authenticatedFetchMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId("new-chat-landing-input")).toHaveValue(
+      "Keep this task while I sign in",
+    );
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await readCreateBody();
+    expect(checkDbcert).toHaveBeenCalledTimes(2);
+    expect(refreshDbcert).not.toHaveBeenCalled();
+  });
+
+  it.each<NativeBridgeModule.DbcertStatusResult>([
+    { ok: true, valid: true },
+    { ok: true, valid: false },
+    { ok: false, error: "Couldn't check credentials" },
+  ])(
+    "skips a pending check and launches once, ignoring its late result (%j)",
+    async (lateResult) => {
+      let finish!: (result: NativeBridgeModule.DbcertStatusResult) => void;
+      checkDbcert.mockReturnValueOnce(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      renderLanding(arcletInfo);
+      await start();
+      const skip = await screen.findByRole("button", { name: "Skip" });
+      expect(authenticatedFetchMock).not.toHaveBeenCalled();
+      fireEvent.click(skip);
+      fireEvent.click(skip);
+      fireEvent.keyDown(screen.getByTestId("new-chat-landing-input"), { key: "Enter" });
+      const { body } = await readCreateBody();
+      expect(body).toMatchObject({ host_type: "managed", sandbox_provider: "arclet" });
+      expect(setPendingInitialPrompt).toHaveBeenCalledWith(
+        "conv_new",
+        expect.objectContaining({ text: "Keep this task while I sign in" }),
+      );
+      expect(screen.queryByTestId("new-chat-landing-dbcert-status")).toBeNull();
+      await act(async () => finish(lateResult));
+      expect(
+        authenticatedFetchMock.mock.calls.filter(([url]) => url === "/v1/sessions"),
+      ).toHaveLength(1);
+      expect(checkDbcert).toHaveBeenCalledOnce();
+      expect(refreshDbcert).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Refresh dbcert" })).toBeNull();
+      expect(screen.queryByTestId("new-chat-landing-error")).toBeNull();
+    },
+  );
+
+  it("checks credentials again after a skipped launch fails", async () => {
+    let finish!: (result: { ok: true; valid: boolean }) => void;
+    checkDbcert.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    authenticatedFetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({ detail: "Temporary launch failure" }),
+      text: async () => "Temporary launch failure",
+    } as Response);
+    renderLanding(arcletInfo);
+    await start();
+    fireEvent.click(await screen.findByRole("button", { name: "Skip" }));
+    expect(await screen.findByTestId("new-chat-landing-error")).toHaveTextContent(
+      "Temporary launch failure",
+    );
+    checkDbcert.mockResolvedValueOnce({ ok: true, valid: false });
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await screen.findByRole("button", { name: "Refresh dbcert" });
+    await act(async () => finish({ ok: true, valid: true }));
+    expect(checkDbcert).toHaveBeenCalledTimes(2);
+    expect(
+      authenticatedFetchMock.mock.calls.filter(([url]) => url === "/v1/sessions"),
+    ).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Refresh dbcert" })).toBeEnabled();
+    expect(refreshDbcert).not.toHaveBeenCalled();
+    expect(screen.getByTestId("new-chat-landing-input")).toHaveValue(
+      "Keep this task while I sign in",
+    );
+  });
+
+  it.each([false, true])(
+    "does not provision after leaving the form during a check (skip=%s)",
+    async (skip) => {
+      let finish!: (result: { ok: true; valid: boolean }) => void;
+      checkDbcert.mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const mounted = renderLanding(arcletInfo);
+      await start();
+      await waitFor(() => expect(checkDbcert).toHaveBeenCalledOnce());
+      if (skip) fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+      mounted.unmount();
+      await act(async () => finish({ ok: true, valid: true }));
+      expect(authenticatedFetchMock).not.toHaveBeenCalled();
+      renderLanding(arcletInfo);
+      expect(screen.getByTestId("new-chat-landing-input")).toHaveValue(
+        "Keep this task while I sign in",
+      );
+    },
+  );
+
+  it.each([
+    "browser",
+    "older shell",
+    "legacy renewal shell",
+    "partial shell",
+    "disabled feature",
+    "missing feature flag",
+    "other provider",
+    "connected host",
+  ])("does not invoke laptop credential checks or renewal for %s", async (kind) => {
+    if (kind === "browser" || kind === "older shell") {
+      Object.defineProperty(window, "omnigentDesktop", {
+        configurable: true,
+        value: kind === "older shell" ? { kind: "electron" } : undefined,
+      });
+    }
+    if (kind === "legacy renewal shell" || kind === "partial shell") {
+      Object.defineProperty(window, "omnigentDesktop", {
+        configurable: true,
+        value:
+          kind === "legacy renewal shell"
+            ? { kind: "electron", ensureDbcert: refreshDbcert, refreshDbcert }
+            : { kind: "electron", checkDbcert },
+      });
+    }
+    if (kind === "disabled feature") vi.mocked(getDesktopFeatures).mockResolvedValue(null);
+    if (kind === "missing feature flag")
+      vi.mocked(getDesktopFeatures).mockResolvedValue({ databricksInternalFeatures: true });
+    if (kind === "connected host") localStorage.setItem("omnigent:last-host-choice", "host_1");
+    renderLanding({
+      ...arcletInfo,
+      sandbox_provider: kind === "other provider" ? "modal" : "arclet",
+    });
+    await start();
+    await readCreateBody();
+    expect(checkDbcert).not.toHaveBeenCalled();
+    expect(refreshDbcert).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("new-chat-landing-dbcert-status")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Refresh dbcert" })).toBeNull();
+  });
+});
+
 describe("Run on Arca (Databricks-internal, MDM-gated)", () => {
   beforeEach(() => {
     setupLandingMocks();
@@ -3009,7 +3382,7 @@ describe("Run on Arca (Databricks-internal, MDM-gated)", () => {
     expect(screen.queryByTestId("new-chat-landing-run-on-arca")).toBeNull();
   });
 
-  it("hides Run on Arca while preserving the remembered online host row", async () => {
+  it("lists the remembered online host under My machines and hides Run on Arca", async () => {
     // The row is recognized by the host id remembered at connect time — a
     // host's name (machine hostname) is deliberately not matched against
     // anything from `arca status`.
@@ -3020,6 +3393,15 @@ describe("Run on Arca (Databricks-internal, MDM-gated)", () => {
 
     const row = await screen.findByTestId("new-chat-landing-host-arca-1");
     expect(row.textContent).toContain("Arca instance");
+    // As in the browser picker: a My machines row with a status dot, not a
+    // Cloud row with the cloud icon.
+    expect(
+      screen.getByText("My machines").compareDocumentPosition(row) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByText("Cloud")).toBeNull();
+    expect(row.querySelector(".bg-success")).not.toBeNull();
+    expect(row.querySelector("svg")).toBeNull();
     expect(screen.queryByTestId("new-chat-landing-run-on-arca")).toBeNull();
     fireEvent.click(row);
     await waitFor(() => expect(localStorage.getItem("omnigent:last-host-choice")).toBe("arca-1"));
@@ -3035,6 +3417,12 @@ describe("Run on Arca (Databricks-internal, MDM-gated)", () => {
     expect(await screen.findByTestId("new-chat-landing-run-on-arca")).toHaveTextContent(
       /^Run on Arca$/,
     );
+    // The host row itself still lists under My machines.
+    const row = await screen.findByTestId("new-chat-landing-host-arca-1");
+    expect(
+      screen.getByText("My machines").compareDocumentPosition(row) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("recaptures an already-running host through the same reconnect action", async () => {
@@ -3089,6 +3477,8 @@ describe("Run on Arca (Databricks-internal, MDM-gated)", () => {
       expect(await screen.findByTestId("new-chat-landing-run-on-arca")).toHaveTextContent(
         /^Run on Arca$/,
       );
+      // A stopped instance is reached through Run on Arca, not a dead Cloud row.
+      expect(screen.queryByTestId("new-chat-landing-host-arca-1")).toBeNull();
     },
   );
 
@@ -3268,7 +3658,7 @@ describe("NewChatLandingScreen", () => {
         RECENT_KEY,
         JSON.stringify({ host_1: ["/Users/corey/repo"], host_2: ["/work/repo"] }),
       );
-      mockHosts([host("online", 1), host("offline", 2)]);
+      mockHosts([host("online", 1), host("offline", 2), host("offline", 3)]);
       renderLanding({ managed_sandboxes_enabled: managedSandboxesEnabled });
 
       const chip = screen.getByTestId("new-chat-landing-host-chip");
@@ -3289,11 +3679,124 @@ describe("NewChatLandingScreen", () => {
         "data-active",
         "true",
       );
+      // The remembered host stays visible without also appearing in the offline group.
+      expect(screen.queryByTestId("new-chat-landing-host-host_3")).toBeNull();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Offline hosts (1)" }));
+      expect(
+        within(screen.getByRole("group", { name: "Offline hosts" })).getAllByRole("menuitem"),
+      ).toHaveLength(1);
+      expect(screen.getAllByTestId("new-chat-landing-host-host_2")).toHaveLength(1);
+      expect(screen.getByTestId("new-chat-landing-host-host_1")).not.toHaveAttribute(
+        "aria-disabled",
+      );
       fireEvent.click(screen.getByTestId("new-chat-landing-host-host_1"));
       await waitFor(() => expect(screen.getByTestId("new-chat-landing-submit")).toBeEnabled());
       expect(localStorage.getItem("omnigent:last-host-choice")).toBe("host_1");
     },
   );
+
+  it("keeps offline hosts collapsed and reveals them five at a time", async () => {
+    mockHosts([
+      host("online", 1),
+      // API recency order deliberately differs from name/id order.
+      ...[4, 2, 8, 3, 6, 7, 5, 10, 9, 12, 13, 11].map((i) => host("offline", i)),
+    ]);
+    renderLanding();
+
+    const chip = screen.getByTestId("new-chat-landing-host-chip");
+    await waitFor(() => expect(chip).toHaveAccessibleName(/, Online$/));
+    fireEvent.pointerDown(chip, { button: 0 });
+    const toggle = screen.getByRole("menuitem", { name: "Offline hosts (12)" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("new-chat-landing-host-host_2")).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const offline = screen.getByRole("group", { name: "Offline hosts" });
+    expect(within(offline).getAllByRole("menuitem")).toHaveLength(5);
+    expect(
+      within(offline)
+        .getAllByRole("menuitem")
+        .map((row) => row.getAttribute("data-testid")),
+    ).toEqual([4, 2, 8, 3, 6].map((i) => `new-chat-landing-host-host_${i}`));
+    expect(screen.getByTestId("new-chat-landing-host-host_2")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.queryByTestId("new-chat-landing-host-host_7")).toBeNull();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Show more (7 remaining)" }));
+    expect(within(offline).getAllByRole("menuitem")).toHaveLength(10);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Show more (2 remaining)" }));
+    expect(within(offline).getAllByRole("menuitem")).toHaveLength(12);
+    expect(screen.queryByRole("menuitem", { name: /Show more/ })).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("group", { name: "Offline hosts" })).toBeNull();
+    fireEvent.click(toggle);
+    expect(
+      within(screen.getByRole("group", { name: "Offline hosts" })).getAllByRole("menuitem"),
+    ).toHaveLength(5);
+    fireEvent.click(screen.getByTestId("new-chat-landing-host-host_1"));
+    fireEvent.pointerDown(chip, { button: 0 });
+    expect(screen.getByRole("menuitem", { name: "Offline hosts (12)" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it.each([
+    {
+      name: "no hosts",
+      hosts: [] as Host[],
+      chip: /No host selected/,
+      text: "No hosts connected yet.",
+    },
+    {
+      name: "every host offline",
+      hosts: [host("offline", 1), host("offline", 2)],
+      chip: /No host selected/,
+      text: "No hosts online.",
+    },
+    {
+      name: "only a cloud host",
+      hosts: [
+        { host_id: "cloud-1", name: "team-cloud-box", owner: "me", status: "online" },
+      ] as Host[],
+      chip: /, Online$/,
+      text: "No hosts connected yet.",
+    },
+  ])(
+    "explains an empty My machines list ($name) instead of listing dead rows",
+    async ({ hosts, chip: chipName, text }) => {
+      mockHosts(hosts);
+      renderLanding();
+
+      const chip = screen.getByTestId("new-chat-landing-host-chip");
+      await waitFor(() => expect(chip).toHaveAccessibleName(chipName));
+      fireEvent.pointerDown(chip, { button: 0 });
+      const menu = screen.getByTestId("new-chat-landing-host-menu");
+      expect(menu.querySelectorAll('[data-testid^="new-chat-landing-host-host_"]')).toHaveLength(0);
+      expect(menu).toHaveTextContent(text);
+    },
+  );
+
+  it("keeps the My machines notice when only a cloud host is online", async () => {
+    mockHosts([
+      { host_id: "cloud-1", name: "team-cloud-box", owner: "me", status: "online" },
+      host("offline", 2),
+    ]);
+    renderLanding();
+
+    const chip = screen.getByTestId("new-chat-landing-host-chip");
+    await waitFor(() =>
+      expect(chip).toHaveAccessibleName(/^Host: (This machine|team-cloud-box), Online$/),
+    );
+    fireEvent.pointerDown(chip, { button: 0 });
+    const menu = screen.getByTestId("new-chat-landing-host-menu");
+    expect(screen.getByTestId("new-chat-landing-host-cloud-1")).toBeVisible();
+    expect(screen.queryByTestId("new-chat-landing-host-host_2")).toBeNull();
+    expect(menu).toHaveTextContent("No hosts online.");
+  });
 
   it.each(["offline", "missing"])(
     "blocks creation when the selected host becomes %s and recovers when it returns",
@@ -3321,6 +3824,65 @@ describe("NewChatLandingScreen", () => {
       );
     },
   );
+
+  it.each([
+    {
+      state: "an online host",
+      remembered: "host_2",
+      hosts: [host("online", 1), host("online", 2)],
+      info: {},
+      rows: ["Host: machine-2", "Status: Connected"],
+    },
+    {
+      state: "an offline host",
+      remembered: "host_2",
+      hosts: [host("online", 1), host("offline", 2)],
+      info: {},
+      rows: ["Host: machine-2", "Status: Disconnected"],
+    },
+    {
+      state: "a sandbox",
+      remembered: null,
+      hosts: [host("online", 1)],
+      info: { managed_sandboxes_enabled: true },
+      rows: ["Host: New Sandbox", "Status: Starts when you send"],
+    },
+  ])(
+    "names $state and its connection in the host chip tooltip",
+    async ({ remembered, hosts, info, rows }) => {
+      if (remembered) localStorage.setItem("omnigent:last-host-choice", remembered);
+      mockHosts(hosts);
+      renderLanding(info);
+
+      fireEvent.focus(screen.getByTestId("new-chat-landing-host-chip"));
+      await waitFor(() => {
+        const tooltip = screen.getByTestId("new-chat-landing-host-tooltip");
+        for (const row of rows) expect(tooltip).toHaveTextContent(row);
+      });
+      const tooltip = screen.getByTestId("new-chat-landing-host-tooltip");
+      // Same surface and bold keys as the agent pill's tooltip, sized to its text.
+      expect(tooltip).toHaveClass("bg-popover", "text-popover-foreground", "w-max", "max-w-64");
+      expect(tooltip).not.toHaveClass("w-64");
+      for (const key of within(tooltip).getAllByText(/^(Host|Status):$/)) {
+        expect(key).toHaveClass("font-semibold");
+      }
+    },
+  );
+
+  it("names no host in the host chip tooltip when the remembered host is gone", async () => {
+    localStorage.setItem("omnigent:last-host-choice", "host_2");
+    mockHosts([host("online", 1)]);
+    renderLanding();
+
+    const chip = screen.getByTestId("new-chat-landing-host-chip");
+    await waitFor(() =>
+      expect(chip).toHaveAccessibleName(expect.stringContaining("No host selected")),
+    );
+    fireEvent.focus(chip);
+    const tooltip = await screen.findByTestId("new-chat-landing-host-tooltip");
+    expect(tooltip).toHaveTextContent("Host: None");
+    expect(tooltip).not.toHaveTextContent("Status:");
+  });
 
   it("uses a home-specific focus shadow without a resting shadow or focus border", () => {
     renderLanding();
@@ -3451,7 +4013,8 @@ describe("NewChatLandingScreen", () => {
       "md:h-7",
     );
     expect(hostChip).toHaveClass("justify-center");
-    expect(hostChip).toHaveAttribute("title", "Host: This machine, Online");
+    expect(hostChip).toHaveAccessibleName("Host: This machine, Online");
+    expect(hostChip).not.toHaveAttribute("title");
     expect(permission).toHaveClass(
       "h-8",
       "w-auto",
@@ -3905,6 +4468,10 @@ describe("NewChatLandingScreen", () => {
     expect(summary).toHaveClass("text-right");
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a1"));
     expect(screen.getByTestId("new-chat-landing-agent-models")).toHaveTextContent("Opus");
+    expect(screen.getByTestId("new-chat-landing-agent-model-opus")).toHaveAttribute(
+      "title",
+      "system.ai.claude-opus-4-6",
+    );
   });
 
   it.each([true, false])(
@@ -4693,7 +5260,7 @@ describe("NewChatLandingScreen", () => {
     ["Mozilla/5.0 (X11; Linux x86_64)", "This machine"],
     ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "This Mac"],
     ["unknown-browser", "machine-1"],
-  ])("keeps compact controls accessibly named for %s", (userAgent, label) => {
+  ])("keeps compact controls accessibly named for %s", async (userAgent, label) => {
     vi.spyOn(navigator, "userAgent", "get").mockReturnValue(userAgent);
     renderLanding();
 
@@ -4701,13 +5268,17 @@ describe("NewChatLandingScreen", () => {
     const workspaceTrigger = screen.getByTestId("new-chat-landing-workspace-chip");
     expect(hostTrigger).toHaveAccessibleName(`Host: ${label}, Online`);
     expect(workspaceTrigger).toHaveAccessibleName("Working directory: /Users/corey/repo");
-    expect(hostTrigger).toHaveAttribute("title", `Host: ${label}, Online`);
+    expect(hostTrigger).not.toHaveAttribute("title");
     expect(within(hostTrigger).getByTestId("new-chat-landing-host-status")).toHaveClass(
       "bg-success",
     );
     expect(within(hostTrigger).getByTestId("new-chat-landing-host-icon")).toBeTruthy();
     expect(within(workspaceTrigger).getByText("repo")).toHaveClass("truncate");
     expect(screen.getByTestId("new-chat-landing-branch-chip")).toBeVisible();
+    fireEvent.focus(hostTrigger);
+    expect(await screen.findByTestId("new-chat-landing-host-tooltip")).toHaveTextContent(
+      `Host: ${label}`,
+    );
   });
 
   it("keeps placeholder worktrees from relabeling the selected directory", async () => {
@@ -7143,6 +7714,54 @@ describe("NewChatLandingScreen", () => {
     await waitFor(() => expect(screen.queryByTestId("new-chat-landing-error")).toBeNull());
   });
 
+  it.each([undefined, true])(
+    "includes managed first input only when the server accepts it durably (%s)",
+    async (durableInitialInput) => {
+      renderLanding({
+        managed_sandboxes_enabled: true,
+        durable_initial_input: durableInitialInput,
+      });
+      const { body } = await submitAndReadBody("finish after I close the tab");
+      expect(body.host_type).toBe("managed");
+      expect(body.initial_items).toBeUndefined();
+      expect(body.initial_input).toEqual(
+        durableInitialInput
+          ? {
+              type: "message",
+              data: {
+                role: "user",
+                content: [{ type: "input_text", text: "finish after I close the tab" }],
+              },
+            }
+          : undefined,
+      );
+    },
+  );
+
+  it("uploads managed first-message files in the create request", async () => {
+    renderLanding({ managed_sandboxes_enabled: true, durable_initial_input: true });
+    const file = new File(["saved context"], "context.txt", { type: "text/plain" });
+    fireEvent.change(screen.getByTestId("new-chat-landing-file-input"), {
+      target: { files: [file] },
+    });
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "use the attachment" },
+    });
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await waitFor(() =>
+      expect(authenticatedFetchMock.mock.calls.some(([url]) => url === "/v1/sessions")).toBe(true),
+    );
+    const [, init] = authenticatedFetchMock.mock.calls.find(([url]) => url === "/v1/sessions")!;
+    const form = (init as RequestInit).body as FormData;
+    expect(form).toBeInstanceOf(FormData);
+    expect(form.getAll("initial_files")).toEqual([file]);
+    expect(JSON.parse(form.get("metadata") as string)).toMatchObject({
+      host_type: "managed",
+      initial_input: { type: "message", data: { role: "user" } },
+    });
+    expect(new Headers(init?.headers).has("Content-Type")).toBe(false);
+  });
+
   it("shows the default hero heading in the normal new-session flow (no project)", async () => {
     // Without a `?project=` param the session is unfiled — the hero keeps its
     // generic prompt, and there is no project chip in the tray.
@@ -7279,6 +7898,14 @@ describe("NewChatLandingScreen", () => {
       body: { detail: "managed host did not come online within 120s" },
       expected: "managed host did not come online within 120s",
     },
+    {
+      // Usually a duplicate of this create already holds the id; resending
+      // would start a second session.
+      name: "chosen host id conflict",
+      status: 409,
+      body: { error: { code: "already_exists", message: "host 0123 already exists" } },
+      expected: "host 0123 already exists",
+    },
   ])("surfaces the $name from a failed managed create", async ({ status, body, expected }) => {
     authenticatedFetchMock.mockResolvedValue({
       ok: false,
@@ -7299,7 +7926,36 @@ describe("NewChatLandingScreen", () => {
       expect(screen.getByTestId("new-chat-landing-error").textContent).toContain(expected),
     );
     expect(screen.queryByTestId("new-chat-landing-provisioning")).toBeNull();
+    expect(authenticatedFetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it.each([true, false])(
+    "chooses the sandbox host's id only on a server that accepts it (%s)",
+    async (accepts) => {
+      authenticatedFetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "conv_new" }),
+      } as unknown as Response);
+      renderLanding({
+        managed_sandboxes_enabled: true,
+        sandbox_provider: "modal",
+        request_managed_sandbox_host_id: accepts,
+      });
+      fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+        target: { value: "audit the repo" },
+      });
+      fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+      await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+      const [, init] = authenticatedFetchMock.mock.calls[0];
+      const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+      expect(body.host_type).toBe("managed");
+      if (accepts) {
+        expect(body.host_id).toMatch(/^[0-9a-f]{32}$/);
+      } else {
+        expect("host_id" in body).toBe(false);
+      }
+    },
+  );
 
   it("sends the added repositories as the managed workspaces list", async () => {
     authenticatedFetchMock.mockResolvedValue({

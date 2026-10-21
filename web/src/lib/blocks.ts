@@ -1,3 +1,4 @@
+import type { NativePermissionDelivery } from "./nativePermissionDelivery";
 // Mirrors sdks/python-client/omnigent_client/_blocks.py.
 //
 // Hand-ported. When _blocks.py changes, update this file and the
@@ -12,7 +13,7 @@ import { capitalizeAgentName } from "./agentLabels";
 import { agentRootName } from "./forkHarness";
 import { nativeCodingAgentForAgentName } from "./nativeCodingAgents";
 import type { RoutingDecisionExtras } from "./routingDecision";
-import type { CodexPersistMode, RememberScope, Response } from "./types";
+import type { AgyPermission, CodexPersistMode, RememberScope, Response } from "./types";
 
 /**
  * Metadata attached to every stream block.
@@ -603,6 +604,9 @@ export interface ResponseEndBlock {
  * dictates as the next stream events.
  */
 export interface ElicitationBlock {
+  nativeDelivery?: NativePermissionDelivery;
+  /** Positive native resolution evidence; snapshot absence alone is insufficient. */
+  nativeDeliveryResolved?: boolean;
   type: "elicitation";
   ctx: BlockContext;
   elicitationId: string;
@@ -707,6 +711,12 @@ export interface ElicitationBlock {
   rememberScope?: RememberScope | null;
   /** Codex-native MCP approval persistence modes advertised by the request. */
   codexPersistModes?: CodexPersistMode[];
+  /**
+   * Agy-native permission prompts only: the action description and
+   * advertised always-allow persist pattern agy's own prompt shows, so
+   * the card can render them. Null for every other elicitation.
+   */
+  agyPermission?: AgyPermission | null;
 }
 
 /** Union of all block types. */
