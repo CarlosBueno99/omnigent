@@ -37,6 +37,7 @@ import asyncio
 import base64
 import contextlib
 import hmac
+import itertools
 import json
 import logging
 import os
@@ -55,6 +56,7 @@ from importlib.resources import files
 from typing import Any, NotRequired, Protocol, TypeAlias, TypedDict, cast
 from urllib.parse import urlparse as _urlparse
 
+from omnigent.databricks_ai_gateway import PI_AGENT, gateway_attribution_headers, is_ug_route
 from omnigent.harnesses.pi_native.credentials import (
     _databricks_workspace_url_for_gateway,
     _is_databricks_ai_gateway_url,
@@ -68,6 +70,7 @@ from omnigent.models.pi_model_compatibility import (
     SYSTEM_AI_RESPONSES_KEYWORDS,
     databricks_model_aliases,
     enrich_databricks_model_catalog,
+    pi_generic_model_json_entry,
     pi_model_is_reasoning,
     pi_model_json_entry,
     unsupported_in_pi,
@@ -197,6 +200,7 @@ class _PiProviderConfig(TypedDict):
     models: list[_JsonObject]
     authHeader: NotRequired[bool]
     compat: NotRequired[_JsonObject]
+    headers: NotRequired[dict[str, str]]
 
 
 class _PiModelsConfig(TypedDict):
@@ -838,7 +842,6 @@ def _build_models_json(
         "supportsDeveloperRole": False,
         "supportsStore": False,
         "supportsStrictMode": False,
-        "supportsReasoningEffort": False,
     }
     provider_models: dict[str, list[_JsonObject]] = {
         "databricks-openai": [],
@@ -905,7 +908,6 @@ def _build_models_json(
                     "supportsDeveloperRole": False,
                     "supportsStore": False,
                     "supportsStrictMode": False,
-                    "supportsReasoningEffort": False,
                     "supportsUsageInStreaming": False,
                 },
                 "models": provider_models["databricks-mlflow"],
@@ -921,7 +923,6 @@ def _build_models_json(
                     "supportsDeveloperRole": False,
                     "supportsStore": False,
                     "supportsStrictMode": False,
-                    "supportsReasoningEffort": False,
                     # Gemini/Qwen/Llama/inkling models reject stream_options
                     # (which carries include_usage) with 400 "unknown field".
                     "supportsUsageInStreaming": False,
@@ -951,10 +952,21 @@ def _build_models_json(
             # provider-side 400 on image turns — a deliberate trade (loud error
             # over silent loss), since most current gateway models are
             # multimodal and text-only turns are unaffected.
-            entry: _JsonObject = {"id": model, "input": ["text", "image"]}
-            if pi_model_is_reasoning(model):
-                entry["reasoning"] = True
+            if any(
+                url == provider["baseUrl"] and not _is_databricks_gateway_base_url(url)
+                for url in (base_urls or {}).values()
+            ):
+                entry = dict(pi_generic_model_json_entry(model))
+            else:
+                entry = {"id": model, "input": ["text", "image"]}
+                if pi_model_is_reasoning(model):
+                    entry["reasoning"] = True
             provider["models"] = [*provider["models"], entry]
+    for provider_config in config["providers"].values():
+        if _is_databricks_ai_gateway_url(provider_config["baseUrl"]):
+            provider_config["headers"] = gateway_attribution_headers(
+                PI_AGENT, via_ug=is_ug_route(provider_config["baseUrl"])
+            )
     return config
 
 
@@ -1603,6 +1615,7 @@ def _try_sandbox_pi(
     os_env: OSEnvSpec | None,
     cwd: str | None,
     spawn_env_names: Sequence[str] | None = None,
+    extra_read_roots: Sequence[pathlib.Path] | None = None,
 ) -> SandboxedPiCli:
     """Wrap the Pi CLI in a sandbox if ``os_env`` requests it.
 
@@ -1617,6 +1630,9 @@ def _try_sandbox_pi(
         anything else its environment picks up — defense in depth
         against host-env leakage into the sandbox. ``None`` skips the
         prune.
+    :param extra_read_roots: Directories granted read-only alongside Pi's
+        own installation, e.g. the bundle resource directories passed to
+        Pi via ``--skill`` / ``--extension``.
     """
     if os_env is None:
         return SandboxedPiCli(launch_path=pi_path, sandboxed=False)
@@ -1644,7 +1660,7 @@ def _try_sandbox_pi(
             (parent for parent in executable.parents if parent.name == "node_modules"),
             executable.parent,
         )
-        sandbox = with_additional_read_roots(sandbox, [pi_dir])
+        sandbox = with_additional_read_roots(sandbox, [pi_dir, *(extra_read_roots or ())])
         home_pi = pathlib.Path(os.path.expanduser("~/.pi"))
         sandbox = with_additional_write_roots(sandbox, [home_pi])
         sandbox = with_spawn_env_allowlist(sandbox, spawn_env_names)
@@ -1681,7 +1697,11 @@ def _resolve_pi_skill_args(
       not an error.
 
     Pi's ``--skill`` flag accepts a directory path, not a name, so
-    the resolver looks up named skills under ``<bundle>/skills/``.
+    the resolver looks up named skills under ``<bundle>/skills/`` and
+    Pi's own project layout ``<bundle>/.pi/skills/`` (``skills/`` wins
+    when both ship the same name). Pi would discover ``.pi/skills``
+    itself, but only relative to its cwd — the session workspace, not
+    the bundle — so bundled skills always need the explicit flag.
     Host-installed Pi skills aren't accessible by name without
     knowing Pi's internal extension layout, so the named-list mode
     only resolves bundle skills.
@@ -1698,11 +1718,12 @@ def _resolve_pi_skill_args(
     """
     bundle_skills: dict[str, pathlib.Path] = {}
     if bundle_dir is not None:
-        skills_root = bundle_dir / "skills"
-        if skills_root.is_dir():
+        for skills_root in (bundle_dir / "skills", bundle_dir / ".pi" / "skills"):
+            if not skills_root.is_dir():
+                continue
             for child in sorted(skills_root.iterdir()):
                 if child.is_dir() and (child / "SKILL.md").is_file():
-                    bundle_skills[child.name] = child
+                    bundle_skills.setdefault(child.name, child)
 
     if skills_filter == "all":
         # Pi auto-discovers host skills; we explicitly add bundled
@@ -1726,6 +1747,138 @@ def _resolve_pi_skill_args(
     # no explicit skills). The harness wrap's resolver should
     # have validated upstream, so this branch is belt-and-suspenders.
     return []
+
+
+# Bundle-root context-file candidates, in Pi's own precedence order
+# (mirrors Pi's cwd-based project context loader).
+_PI_BUNDLE_CONTEXT_FILE_CANDIDATES = (
+    "AGENTS.override.md",
+    "AGENTS.md",
+    "AGENTS.MD",
+    "CLAUDE.md",
+    "CLAUDE.MD",
+)
+
+
+def _pi_extension_dir_entries(ext_dir: pathlib.Path) -> list[pathlib.Path]:
+    """Resolve one extension directory to its entry-point file(s)."""
+    manifest_path = ext_dir / "package.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "PiExecutor: could not read extension manifest %s: %s", manifest_path, exc
+            )
+            manifest = None
+        pi_field = manifest.get("pi") if isinstance(manifest, dict) else None
+        raw_entries = pi_field.get("extensions") if isinstance(pi_field, dict) else None
+        if isinstance(raw_entries, list):
+            root = ext_dir.resolve()
+            entries: list[pathlib.Path] = []
+            for entry in raw_entries:
+                candidate = (ext_dir / entry).resolve() if isinstance(entry, str) else None
+                if (
+                    candidate is not None
+                    and candidate.is_file()
+                    and candidate.is_relative_to(root)
+                ):
+                    entries.append(ext_dir / entry)
+                else:
+                    logger.warning(
+                        "PiExecutor: skipping manifest extension entry %r in %s "
+                        "(not a file inside the extension dir)",
+                        entry,
+                        manifest_path,
+                    )
+            if entries:
+                return entries
+    for name in ("index.ts", "index.js"):
+        entry = ext_dir / name
+        if entry.is_file():
+            return [entry]
+    return []
+
+
+def _resolve_pi_bundle_extension_entries(extensions_dir: pathlib.Path) -> list[pathlib.Path]:
+    """Discover extension entry files under a bundle's ``.pi/extensions``."""
+    root_entries = _pi_extension_dir_entries(extensions_dir)
+    if root_entries:
+        return root_entries
+    entries: list[pathlib.Path] = []
+    try:
+        children = sorted(extensions_dir.iterdir())
+    except OSError as exc:
+        logger.warning(
+            "PiExecutor: could not list bundle extensions dir %s: %s", extensions_dir, exc
+        )
+        return entries
+    for child in children:
+        if child.name.startswith(".") or child.name == "node_modules":
+            continue
+        if child.is_file() and child.suffix in (".ts", ".js"):
+            entries.append(child)
+        elif child.is_dir():
+            entries.extend(_pi_extension_dir_entries(child))
+    return entries
+
+
+def _resolve_pi_bundle_extension_args(bundle_dir: pathlib.Path | None) -> list[str]:
+    """Pass bundled extension entry files explicitly; Pi's cwd is the workspace."""
+    if bundle_dir is None:
+        return []
+    extensions_dir = bundle_dir / ".pi" / "extensions"
+    if not extensions_dir.is_dir():
+        return []
+    args: list[str] = []
+    for entry in _resolve_pi_bundle_extension_entries(extensions_dir):
+        args.extend(["--extension", str(entry)])
+    return args
+
+
+def _pi_bundle_resource_roots(
+    bundle_dir: pathlib.Path | None, args: Sequence[str]
+) -> list[pathlib.Path]:
+    """Grant selected resource roots; sandbox tmpfs hides extracted bundles.
+
+    Granting only the bundle root would leave .pi hidden by the dotfile mask.
+    """
+    if bundle_dir is None:
+        return []
+    passed = {
+        pathlib.Path(value)
+        for flag, value in itertools.pairwise(args)
+        if flag in ("--skill", "--extension")
+    }
+    roots = (
+        bundle_dir / "skills",
+        bundle_dir / ".pi" / "skills",
+        bundle_dir / ".pi" / "extensions",
+    )
+    return [root for root in roots if any(path.is_relative_to(root) for path in passed)]
+
+
+def _squash_ws(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _read_pi_bundle_context(bundle_dir: pathlib.Path | None) -> str | None:
+    """Read the first readable bundle context file in Pi's precedence order."""
+    if bundle_dir is None:
+        return None
+    for candidate in _PI_BUNDLE_CONTEXT_FILE_CANDIDATES:
+        context_file = bundle_dir / candidate
+        if not context_file.is_file():
+            continue
+        try:
+            content = context_file.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            logger.warning(
+                "PiExecutor: could not read bundle context file %s: %s", context_file, exc
+            )
+            continue
+        return content or None
+    return None
 
 
 def _extract_pi_turn_usage(
@@ -1885,7 +2038,8 @@ class PiExecutor(Executor):
 
         :param cwd: Working directory for the Pi subprocess.
         :param context_files: Allow Pi to automatically load context files such
-            as AGENTS.md and CLAUDE.md. Explicit agent instructions are unaffected.
+            as AGENTS.md and CLAUDE.md, including the one at the bundle root.
+            Explicit agent instructions are unaffected.
         :param system_prompt_mode: ``append`` retains Pi's base prompt;
             ``replace`` uses Omnigent's composed instructions as the base.
         :param os_env: Optional OS environment / sandbox spec.  When set, the
@@ -1932,9 +2086,15 @@ class PiExecutor(Executor):
             budget. ``None`` resolves to ``RetryPolicy()`` defaults.
             See Phase 1f of ``designs/RETRY_ACROSS_HARNESSES.md``.
         :param bundle_dir: The agent bundle's extracted on-disk path.
-            When set, ``<bundle_dir>/skills/<dir>/SKILL.md`` files
-            are exposed to Pi via ``--skill <path>`` based on
-            *skills_filter*. ``None`` skips bundle-skill wiring.
+            When set, ``<bundle_dir>/skills/<dir>/SKILL.md`` and
+            ``<bundle_dir>/.pi/skills/<dir>/SKILL.md`` files are exposed
+            to Pi via ``--skill <path>`` based on *skills_filter*,
+            ``<bundle_dir>/.pi/extensions`` via ``--extension``, and a
+            bundle-root context file (``AGENTS.md`` et al.) is appended
+            to the composed system prompt when *context_files* allows.
+            A sandboxed Pi is granted read access to the resource
+            directories it is passed. ``None`` skips all bundle-resource
+            wiring.
         :param agent_name: Optional agent display name. Reserved for
             future use; currently unused by Pi.
         :param skills_filter: Host-skill filter (``"all"`` / ``"none"``
@@ -2037,6 +2197,10 @@ class PiExecutor(Executor):
         # ``_build_env_and_dir`` copies ``self._extra_args`` so this
         # extension is read-only after init.
         self._extra_args.extend(_resolve_pi_skill_args(skills_filter, bundle_dir))
+        self._extra_args.extend(_resolve_pi_bundle_extension_args(bundle_dir))
+        # The bundle-root context file is an automatic context file like the
+        # workspace ones Pi discovers, so ``context_files=False`` drops it too.
+        self._bundle_context = _read_pi_bundle_context(bundle_dir) if context_files else None
         # Set by Session._wire_sdk_executor().
         self._tool_executor: ToolExecutor | None = None
 
@@ -2073,6 +2237,7 @@ class PiExecutor(Executor):
             os_env,
             cwd,
             spawn_env_names=[*self._env, "PI_CODING_AGENT_DIR"],
+            extra_read_roots=_pi_bundle_resource_roots(bundle_dir, self._extra_args),
         )
         self._pi_launch_path = sandboxed.launch_path
         self._sandboxed = sandboxed.sandboxed
@@ -2358,7 +2523,7 @@ class PiExecutor(Executor):
         tools: list[ToolSpec],
         tool_server_port: int | None,
         tool_server_token: str | None,
-        model: str | None,
+        models_json: _PiModelsConfig | None,
     ) -> PiSubprocessConfig:
         """Build env dict, temp dir, and extra CLI args for a Pi subprocess.
 
@@ -2369,12 +2534,11 @@ class PiExecutor(Executor):
             (:attr:`_ToolServer.token`), embedded in the generated
             extension so requests authenticate. Non-``None`` whenever
             *tool_server_port* is.
-        :param model: The resolved model id this subprocess will run, e.g.
-            ``"moonshotai/kimi-k2.6"``; registered in the generated
-            ``models.json`` on the gateway path so the
-            ``provider/<model>`` selector resolves. ``None`` when no model
-            is pinned (Pi picks its own default).
+        :param models_json: Provider configuration resolved off-loop before
+            allocating session files; ``None`` for Pi-owned configuration.
         """
+        if self._gateway and models_json is None:
+            raise ValueError("Gateway provider configuration must be resolved before startup")
         env = dict(self._env)
         tmp_parent = None
         if self._sandboxed:
@@ -2384,18 +2548,11 @@ class PiExecutor(Executor):
         extra_args: list[str] = list(self._extra_args)
 
         if self._gateway:
-            effective_model = model
             assert tool_server_port is not None and tool_server_token is not None
+            assert models_json is not None
             auth_client = _write_gateway_auth_client(tmp_dir, tool_server_port, tool_server_token)
-            models_json = _build_models_json(
-                self._gateway_workspace_url or self._databricks_host,
-                f"!node {shlex.quote(str(auth_client))}",
-                self._base_urls_override,
-                model=effective_model,
-                catalog_models=self._gateway_model_entries or (),
-                model_wire_apis=self._gateway_model_wire_apis,
-                openai_wire_api=self._openai_wire_api,
-            )
+            for provider in models_json["providers"].values():
+                provider["apiKey"] = f"!node {shlex.quote(str(auth_client))}"
             models_path = os.path.join(tmp_dir, "models.json")
             with open(models_path, "w") as f:
                 json.dump(models_json, f)
@@ -2409,6 +2566,10 @@ class PiExecutor(Executor):
                 pathlib.Path(tmp_dir),
                 overlay=self._retry_policy.pi.settings(),
             )
+            from omnigent.inner.pi_gateway import pi_gateway_extension_args
+
+            assert models_json is not None
+            extra_args.extend(pi_gateway_extension_args(pathlib.Path(tmp_dir), models_json))
 
         # Pi natively supports retry config via ``.pi/settings.json``
         # (see ``RetryPolicy.pi.settings()`` for schema). On the non-gateway
@@ -2536,6 +2697,13 @@ class PiExecutor(Executor):
         )
         state.applied_thinking = thinking
 
+    def _with_bundle_context(self, system_prompt: str) -> str:
+        """Append bundle context unless the prompt already starts with it."""
+        context = self._bundle_context
+        if not context or _squash_ws(system_prompt).startswith(_squash_ws(context)):
+            return system_prompt
+        return f"{system_prompt}\n\n{context}" if system_prompt else context
+
     async def _ensure_rpc(
         self,
         session_key: str,
@@ -2565,6 +2733,18 @@ class PiExecutor(Executor):
             return state.rpc
 
         wire_catalog = await self._load_gateway_model_wire_apis()
+        models_json = None
+        if self._gateway:
+            models_json = await run_sync_on_thread(
+                _build_models_json,
+                self._gateway_workspace_url or self._databricks_host,
+                "",  # The session's credential helper is attached when writing models.json.
+                self._base_urls_override,
+                model=effective_model,
+                catalog_models=self._gateway_model_entries or (),
+                model_wire_apis=wire_catalog,
+                openai_wire_api=self._openai_wire_api,
+            )
 
         if state.rpc is not None:
             await state.rpc.close()
@@ -2572,7 +2752,7 @@ class PiExecutor(Executor):
         tool_server_port = await self._ensure_tool_server(tools)
         tool_server_token = self._tool_server.token if self._tool_server is not None else None
         subprocess_config = self._build_env_and_dir(
-            tools, tool_server_port, tool_server_token, effective_model
+            tools, tool_server_port, tool_server_token, models_json
         )
         env = subprocess_config.env
         tmp_dir = subprocess_config.tmp_dir
@@ -2600,7 +2780,7 @@ class PiExecutor(Executor):
             env=env,
             cwd=self._cwd,
             model=pi_model or None,
-            system_prompt=system_prompt or None,
+            system_prompt=self._with_bundle_context(system_prompt) or None,
             system_prompt_mode=self._system_prompt_mode,
             thinking=thinking,
             extra_args=extra_args or None,
