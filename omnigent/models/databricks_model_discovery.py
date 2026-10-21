@@ -501,13 +501,10 @@ def first_served_codex_model(
                 ) as response:
                     confirmed = _codex_probe_confirms_model(response)
             except httpx.ConnectError:
-                # A refused connection or DNS failure means the route itself is
-                # down, so no candidate can answer; keep the ranked default.
+                # Route down; no candidate can answer.
                 return None
             except httpx.HTTPError:
-                # A per-candidate failure (a connect or read timeout, a dropped
-                # answer) says nothing about the remaining candidates, so one
-                # slow probe cannot re-pin an unserved default: skip and go on.
+                # Per-candidate failure; skip and try next.
                 continue
             if confirmed:
                 return model_id
