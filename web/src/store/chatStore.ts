@@ -399,12 +399,22 @@ export function beginLocalConversation(
 
 /** Whether a temporary conversation still owns its unsent first message. */
 export function hasPendingLocalMessage(tempConvId: string): boolean {
-  return (
-    conversationRegistry
-      .peek(tempConvId)
-      ?.getState()
-      .pendingUserMessages.some((message) => message.initialDraft !== undefined) ?? false
-  );
+  const state = conversationRegistry.peek(tempConvId)?.getState();
+  return state !== undefined && holdsInitialDraft(state);
+}
+
+/** Whether a first message is still held for startup; nothing queued may overtake it. */
+export function holdsInitialDraft(state: Pick<ConversationState, "pendingUserMessages">): boolean {
+  return state.pendingUserMessages.some((message) => message.initialDraft !== undefined);
+}
+
+/** Keep a conversation's queued messages from sending until the user retries each one. */
+function suspendQueuedMessages(conversationId: string): void {
+  setActive((s) => ({
+    queuedMessages: s.queuedMessages.map((m) =>
+      m.conversationId === conversationId ? { ...m, requiresRetry: true } : m,
+    ),
+  }));
 }
 
 /**
@@ -1405,15 +1415,50 @@ function modelSelectionPending(state: ConversationState): boolean {
   );
 }
 
-/** Keep the draft local while native model startup or a model switch is pending. */
-function waitForModelSelection(conversationId: string, tempId: string): Promise<boolean> {
+// A native CLI can't take input until its sandbox is up, and a launch can take
+// minutes; the server holds a message for less than that.
+function nativeSandboxLaunching(state: ConversationState): boolean {
+  return (
+    state.isNativeTerminalSession &&
+    state.sandboxStatus !== null &&
+    state.sandboxStatus.stage !== "failed"
+  );
+}
+
+// Restores a draft held through a launch whose end never reaches this tab; well
+// past the time any launch is allowed to take.
+const SANDBOX_LAUNCH_MAX_WAIT_MS = 20 * 60_000;
+
+/** Whether a message sent now is held locally for startup rather than posted. */
+function wouldHoldSend(state: ConversationState): boolean {
+  return (
+    modelSelectionPending(state) ||
+    nativeSandboxLaunching(state) ||
+    (state.sessionModelSeeded && state.sessionHarness === null)
+  );
+}
+
+/**
+ * Keep the draft local while native model startup or a model switch is pending,
+ * or while a native session's sandbox launches.
+ */
+function waitForInitialDispatch(conversationId: string, tempId: string): Promise<boolean> {
   return new Promise((resolve, reject) => {
+    // One deadline at a time: the launch's while the sandbox starts, then the model's.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let deadline: "launch" | "model" | undefined;
     const finish = (ready: boolean, error?: Error) => {
       clearTimeout(timer);
       unsubscribe();
       unsubscribeDisposed();
       if (error) reject(error);
       else resolve(ready);
+    };
+    const expireAfter = (phase: "launch" | "model", ms: number, message: string) => {
+      if (deadline === phase) return;
+      clearTimeout(timer);
+      deadline = phase;
+      timer = setTimeout(() => finish(false, new Error(message)), ms);
     };
     const check = () => {
       const entry = conversationRegistry.peek(conversationId);
@@ -1429,8 +1474,29 @@ function waitForModelSelection(conversationId: string, tempId: string): Promise<
           false,
           state.conversationLoadError ?? new Error("Session failed before the message was sent."),
         );
-      } else if (!modelSelectionPending(state)) {
+      } else if (state.isNativeTerminalSession && state.sandboxStatus?.stage === "failed") {
+        const reason = state.sandboxStatus.error;
+        finish(
+          false,
+          new Error(
+            `The session's managed sandbox failed to launch${reason ? `: ${reason}` : "."}`,
+          ),
+        );
+      } else if (!modelSelectionPending(state) && !nativeSandboxLaunching(state)) {
         finish(true);
+      } else if (nativeSandboxLaunching(state)) {
+        // The model can only start once the sandbox is up.
+        expireAfter(
+          "launch",
+          SANDBOX_LAUNCH_MAX_WAIT_MS,
+          "The sandbox did not finish launching. Please retry the message.",
+        );
+      } else {
+        expireAfter(
+          "model",
+          SEND_CHAIN_MAX_WAIT_MS,
+          "The model did not finish starting. Please retry the message.",
+        );
       }
     };
     const unsubscribe = conversationRegistry.subscribe((id) => {
@@ -1439,11 +1505,6 @@ function waitForModelSelection(conversationId: string, tempId: string): Promise<
     const unsubscribeDisposed = conversationRegistry.subscribeDisposed((id) => {
       if (id === conversationId) finish(false);
     });
-    const timer = setTimeout(
-      () =>
-        finish(false, new Error("The model did not finish starting. Please retry the message.")),
-      SEND_CHAIN_MAX_WAIT_MS,
-    );
     check();
   });
 }
@@ -2058,6 +2119,9 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     const agentId = target?.agentId ?? s.boundAgentId;
     if (target === undefined || agentId === null) return;
     if (target.command === "compact" && rejectBusyCompact(target.conversationId)) return;
+    // Nothing can be steered past a first message still held for startup; it stays queued.
+    const targetState = setterForState(target.conversationId);
+    if (targetState !== null && holdsInitialDraft(targetState)) return;
     // Remove BEFORE the POST so a concurrent flush can't also send it.
     setActive({ queuedMessages: s.queuedMessages.filter((m) => m.queueId !== queueId) });
     void s.send(target.text, agentId, target.files, queuedSendOptions(target));
@@ -2067,6 +2131,13 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     const s = get();
     const own = s.queuedMessages.filter((m) => m.conversationId === conversationId);
     if (own.length === 0) return;
+    const state = setterForState(conversationId);
+    if (state !== null && holdsInitialDraft(state)) return;
+    // When the first one will be held for startup, the rest stay queued behind it.
+    if (state !== null && wouldHoldSend(state)) {
+      s.steerMessage(own[0]!.queueId);
+      return;
+    }
     // SDK buffers compact; Pi interrupts and Codex requires idle.
     // Drain their prefix first so compaction cannot interrupt those messages.
     const compactIndex =
@@ -2107,7 +2178,12 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // sub-agents) outlives it, so the server accepts a new turn immediately —
     // mirror `shouldQueueSend`. Only the local send lifecycle (`streaming`) and
     // an actively `running` turn gate the flush. No agent → nothing to send to.
-    if (s.conversationId === null || s.boundAgentId === null || s.sessionStatus === "running") {
+    if (
+      s.conversationId === null ||
+      s.boundAgentId === null ||
+      s.sessionStatus === "running" ||
+      holdsInitialDraft(s)
+    ) {
       return;
     }
     if (s.status === "streaming") {
@@ -2174,6 +2250,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       if (statusById.get(conversationId) !== "idle") continue;
       // The sidebar can still say idle while a compact control starts.
       const local = setterForState(conversationId);
+      if (local !== null && holdsInitialDraft(local)) continue;
       if (
         local?.sessionHarness === "codex-native" ||
         local?.sessionHarness === "claude-sdk" ||
@@ -2363,9 +2440,6 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // their `/side` text never reaches `send`.
     const opensSideChat =
       usesNativeSideChatFork(get().sessionHarness) && isSideChatCommand(text.trim());
-    if (opensSideChat) {
-      useChatStore.setState({ awaitingSideChatFor: pinnedId ?? get().conversationId });
-    }
     const targetState = pinnedId === null ? get() : setterForState(pinnedId);
     const compacts =
       opts?.command === "compact" || isCompactControl(targetState?.sessionHarness, text, files);
@@ -2373,15 +2447,48 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       opts?.onError?.("Compact is disabled while a chat is in progress");
       return;
     }
+    // Nothing may overtake a first message still held for startup: queue behind it.
+    if (
+      !compacts &&
+      !opts?.reusePendingTempId &&
+      targetState !== null &&
+      holdsInitialDraft(targetState)
+    ) {
+      const target = pinnedId ?? get().conversationId;
+      if (opts?.onError !== undefined) {
+        // Callers with their own failure handling take the message back, e.g. the queue.
+        opts.onError("This session is still starting. Try again once it has started.");
+      } else if (target !== null) {
+        // Queue it behind the held message, in the session it was meant for.
+        queueSeq += 1;
+        const queuedFor = target === get().conversationId ? get() : setterForState(target);
+        const queuedAgentId = queuedFor?.boundAgentId ?? agentId;
+        setActive((s) => ({
+          queuedMessages: [
+            ...s.queuedMessages,
+            {
+              queueId: `q_${queueSeq}`,
+              text,
+              stableId,
+              conversationId: target,
+              agentId: queuedAgentId,
+              ...(files && files.length > 0 ? { files } : {}),
+              ...(opts?.replyDraft ? { replyDraft: opts.replyDraft } : {}),
+            },
+          ],
+        }));
+      }
+      return;
+    }
+    if (opensSideChat) {
+      useChatStore.setState({ awaitingSideChatFor: pinnedId ?? get().conversationId });
+    }
     const skipPendingBubble = opensSideChat || compacts;
     const initialDraft =
       opts?.reusePendingTempId != null
         ? targetState?.pendingUserMessages.find((p) => p.tempId === opts.reusePendingTempId)
             ?.initialDraft
-        : !skipPendingBubble &&
-            targetState &&
-            (modelSelectionPending(targetState) ||
-              (targetState.sessionModelSeeded && targetState.sessionHarness === null))
+        : !skipPendingBubble && targetState && wouldHoldSend(targetState)
           ? { text, files: files ?? [] }
           : undefined;
     // Non-native sends persist at POST time, so only a native session leaves
@@ -2492,7 +2599,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // otherwise resolve that id, find an empty chain, and overtake this POST.
       const sessionId = await ensureBoundSession(agentId, get, opts, submitConversationId, rekey);
       postedSessionId = sessionId;
-      if (initialDraft && !(await waitForModelSelection(sessionId, tempId))) return;
+      if (initialDraft && !(await waitForInitialDispatch(sessionId, tempId))) return;
 
       if (compacts) {
         // Compact controls emit turn status edges, but no user
@@ -2629,6 +2736,11 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // (`failedSendDraft` is conversation-scoped); the composer reads whichever
       // conversation is active and guards on the id before restoring.
       const draftSessionId = postedSessionId ?? submitConversationId;
+      // A first message that never left the browser goes back to the composer;
+      // what was queued behind it waits for an explicit retry rather than going first.
+      if (initialDraft && !initialDispatched && draftSessionId !== null) {
+        suspendQueuedMessages(draftSessionId);
+      }
       // A coded error confirms refusal; a transport failure leaves delivery
       // unknown unless this retries a previously refused send.
       const answeredWithRefusal = err instanceof ApiError && err.code !== null;
@@ -2867,6 +2979,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         sendLatchedAt: null,
         failedSendDraft: { ...draft, conversationId: sessionId },
       });
+      // What was queued behind it must not go first; it waits for an explicit retry.
+      suspendQueuedMessages(sessionId);
       // A local follow-up must not prevent Interrupt from stopping earlier work.
       if (
         state.activeResponse?.state !== "streaming" &&
@@ -4797,6 +4911,21 @@ function dropEphemeralInFlightBlocks(
 const RECONNECT_BACKFILL_MAX_PAGES = 4;
 
 /**
+ * Launch stages are not replayed, so a launch last seen in flight takes a snapshot's
+ * stage; one that settled unseen starts the runner grace a live `ready` would.
+ */
+function launchSnapshotPatch(
+  session: Session,
+  state: Pick<ConversationState, "sandboxStatus">,
+): Partial<Pick<ConversationState, "sandboxStatus" | "runnerLaunchedAt">> {
+  if (state.sandboxStatus === null || state.sandboxStatus.stage === "failed") return {};
+  const sandboxStatus = session.sandboxStatus ?? null;
+  return sandboxStatus === null
+    ? { sandboxStatus, runnerLaunchedAt: Date.now() }
+    : { sandboxStatus };
+}
+
+/**
  * Session-snapshot state every reconnect path recovers: `sessionStatus`,
  * token/context/cost counters, the MCP startup band, and — when the turn
  * ended during the gap —
@@ -4819,6 +4948,7 @@ function reconnectStatusPatch(
   const patch: Partial<ChatState> = {
     sessionStatus: session.status,
     ...mcpStartupSnapshotPatch(session, s, launchBeforeFetch),
+    ...launchSnapshotPatch(session, s),
   };
   // Recover the background-shell tally across the gap too, so the spinner
   // returns to "N background tasks still running" rather than vanishing on reconnect.
@@ -4875,6 +5005,22 @@ function reconnectStatusPatch(
     patch.status = "streaming";
   }
   return patch;
+}
+
+/**
+ * Re-read only a launch's stage, on screen or not. Live events that leave the launch
+ * alone can't void the read; a launch update that lands during it wins instead.
+ */
+async function reconcileLaunchStatus(id: string, set: Setter, get: Getter): Promise<void> {
+  const before = get().sandboxStatus;
+  let session: Session;
+  try {
+    session = await getSessionSlim(id);
+  } catch {
+    return;
+  }
+  if (isConversationDisposed(id)) return;
+  set((s) => (s.sandboxStatus === before ? launchSnapshotPatch(session, s) : {}));
 }
 
 /**
@@ -5507,6 +5653,20 @@ export async function startStreamPump(
     for (const timer of catchupTimers) window.clearTimeout(timer);
     catchupTimers = [];
   };
+  // Re-read at each catch-up delay, replacing any prior burst: the full status if asked
+  // (on screen only) and, while a launch shows, its stage on screen or not.
+  const scheduleStatusCatchup = (withStatus: boolean): void => {
+    if (typeof window === "undefined") return;
+    clearCatchupTimers();
+    catchupTimers = RECONNECT_STATUS_CATCHUP_DELAYS_MS.map((delayMs) =>
+      window.setTimeout(() => {
+        if (controller.signal.aborted || isConversationDisposed(id)) return;
+        if (withStatus) runGuardedStatusReconcile();
+        const launch = get().sandboxStatus;
+        if (launch !== null && launch.stage !== "failed") void reconcileLaunchStatus(id, set, get);
+      }, delayMs),
+    );
+  };
   // Consecutive 404s only — reset on any non-404 outcome (success or a
   // different-status failure), so a 404 has to persist across attempts to
   // count toward the cap below.
@@ -5709,17 +5869,11 @@ export async function startStreamPump(
           // settles shortly after reconnect clears in seconds. Guarded +
           // idempotent, and scoped to the active conversation by
           // reconcileActiveSessionStatus itself.
-          if (typeof window !== "undefined") {
-            // Cancel any prior burst so recurring reconnects don't accumulate
-            // timers on the long-lived controller.
-            clearCatchupTimers();
-            catchupTimers = RECONNECT_STATUS_CATCHUP_DELAYS_MS.map((delayMs) =>
-              window.setTimeout(() => {
-                if (controller.signal.aborted || isConversationDisposed(id)) return;
-                runGuardedStatusReconcile();
-              }, delayMs),
-            );
-          }
+          scheduleStatusCatchup(true);
+        } else {
+          // A launch's `ready` sent before this first open subscribed is in no snapshot
+          // read yet, so re-read its stage over the next ~20 s while it still shows.
+          scheduleStatusCatchup(false);
         }
         let reason = await pumpPromise;
 
