@@ -870,6 +870,13 @@ def test_stop_settles_each_state_without_conflicting_transitions(
             True,
             [900.0],
         ),
+        (
+            _FakeSandboxState.STARTED,
+            _FakeSandboxState.ERROR,
+            "failed with state: error",
+            False,
+            [900.0],
+        ),
         (_FakeSandboxState.STOPPING, _FakeSandboxState.DESTROYED, "no longer exists", True, []),
         (_FakeSandboxState.ARCHIVING, _FakeSandboxState.ERROR, "in state 'error'", False, []),
         (_FakeSandboxState.ARCHIVING, _FakeSandboxState.DESTROYED, "no longer exists", True, []),
@@ -890,7 +897,7 @@ def test_stop_reports_a_transition_that_settles_unusable(
     gone: bool,
     stop_calls: list[float],
 ) -> None:
-    """A wait ending in failure or deletion raises instead of reporting the sandbox parked."""
+    """A stop or wait ending in failure or deletion raises instead of reporting the sandbox parked."""
     launcher = DaytonaSandboxLauncher()
     sandbox_id = launcher.provision("a")
     sandbox = fake_daytona.sandboxes[sandbox_id]
