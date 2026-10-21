@@ -30,8 +30,9 @@ from tests.e2e_ui.conftest import open_right_rail
 
 # Minimal stand-in for the Electron preload bridge. Runs before any app script
 # on every navigation (add_init_script), so the SPA's feature detection
-# (``supportsBrowser()`` in nativeBridge.ts) sees a browser-capable shell. Every
-# method but ``onBrowserUrlChanged`` is a guarded no-op: ``kind`` marks the native
+# (``supportsBrowser()`` in nativeBridge.ts) sees a browser-capable shell. Most
+# methods are guarded no-ops (``onBrowserUrlChanged`` records listeners so tests
+# can emit navigation events): ``kind`` marks the native
 # shell, ``browserOpenOrNavigate`` is the capability marker that gates the
 # Browser tab (a shell too old to ship the embedded browser lacks it, so the
 # tab hides), and the rest keep unrelated native calls (badge, notify, the

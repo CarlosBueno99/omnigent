@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { browserTabLabel, browserUrlLabel, NEW_BROWSER_TAB_LABEL } from "./browserTabLabel";
+import {
+  browserTabLabel,
+  browserTabNameSeed,
+  browserUrlLabel,
+  NEW_BROWSER_TAB_LABEL,
+  normalizeBrowserTabName,
+} from "./browserTabLabel";
 
 describe("browserUrlLabel", () => {
   it.each([
@@ -29,6 +35,12 @@ describe("browserUrlLabel", () => {
     expect(browserUrlLabel(url)).toBe(label);
   });
 
+  it("shortens a long web URL label", () => {
+    expect(browserUrlLabel(`https://example.com/${"a".repeat(100)}`)).toBe(
+      `example.com/${"a".repeat(48)}…`,
+    );
+  });
+
   it("shortens a long URL that has no host", () => {
     const dataUrl = `data:text/html;base64,${"A".repeat(5000)}`;
     expect(browserUrlLabel(dataUrl)).toBe(`${dataUrl.slice(0, 60)}…`);
@@ -36,6 +48,16 @@ describe("browserUrlLabel", () => {
     // Cut by code point, never through an emoji.
     const emojiUrl = `data:${"x".repeat(54)}${"😀".repeat(3)}`;
     expect(browserUrlLabel(emojiUrl)).toBe(`data:${"x".repeat(54)}😀…`);
+  });
+});
+
+describe("browser tab name limits", () => {
+  it("trims and caps manual names by code point", () => {
+    expect(normalizeBrowserTabName("  Docs  ")).toBe("Docs");
+    expect(normalizeBrowserTabName("   ")).toBe("");
+    expect(normalizeBrowserTabName(`${"x".repeat(79)}😀😀`)).toBe(`${"x".repeat(79)}😀`);
+    expect(browserTabNameSeed(`${"x".repeat(79)}😀😀`)).toBe(`${"x".repeat(79)}😀`);
+    expect(browserTabNameSeed("Docs")).toBe("Docs");
   });
 });
 

@@ -4,18 +4,28 @@ export const NEW_BROWSER_TAB_LABEL = "New tab";
 /** Longest manual browser-tab name the rename field accepts. */
 export const BROWSER_TAB_NAME_MAX_CHARS = 80;
 
-/** Longest label for a URL without a host, such as a `data:` page. */
-const RAW_URL_LABEL_MAX_CHARS = 60;
+/** Longest URL label; the full URL stays in the tab tooltip. */
+const URL_LABEL_MAX_CHARS = 60;
 
 // Bidi, zero-width and control characters could disguise a decoded path segment.
 const SPOOFABLE_CHARS = /[\p{Cc}\p{Cf}]/u;
 
-function clampRawLabel(text: string): string {
-  // Count code points so an emoji or other astral character is never split.
-  const chars = Array.from(text);
-  return chars.length > RAW_URL_LABEL_MAX_CHARS
-    ? `${chars.slice(0, RAW_URL_LABEL_MAX_CHARS).join("")}…`
-    : text;
+/** First `max` code points of `text`, so an emoji is never split. */
+export function truncateCodePoints(text: string, max: number): string {
+  // A code point is at most two UTF-16 units; bound the work for huge data: URLs.
+  const prefix = text.slice(0, max * 2);
+  const chars = Array.from(prefix);
+  return chars.length > max ? chars.slice(0, max).join("") : prefix;
+}
+
+function clampUrlLabel(text: string): string {
+  const cut = truncateCodePoints(text, URL_LABEL_MAX_CHARS);
+  return cut === text ? text : `${cut}…`;
+}
+
+/** A manual name as stored: trimmed and capped; blank means no name. */
+export function normalizeBrowserTabName(name: string): string {
+  return truncateCodePoints(name.trim(), BROWSER_TAB_NAME_MAX_CHARS).trim();
 }
 
 function decodeSegment(segment: string): string {
@@ -39,23 +49,23 @@ export function browserUrlLabel(url: string | null | undefined): string {
   try {
     parsed = new URL(trimmed);
   } catch {
-    return clampRawLabel(trimmed);
+    return clampUrlLabel(trimmed);
   }
   if (parsed.protocol === "about:" && parsed.pathname === "blank") return NEW_BROWSER_TAB_LABEL;
   const segments = parsed.pathname.split("/").filter(Boolean).map(decodeSegment);
   if (parsed.protocol === "http:" || parsed.protocol === "https:") {
     const host = parsed.host.replace(/^www\./, "");
-    if (segments.length === 0) return host;
+    if (segments.length === 0) return clampUrlLabel(host);
     const tail = segments.slice(-2).join("/");
-    return segments.length > 2 ? `${host}/…/${tail}` : `${host}/${tail}`;
+    return clampUrlLabel(segments.length > 2 ? `${host}/…/${tail}` : `${host}/${tail}`);
   }
   if (parsed.protocol === "file:") return segments.at(-1) ?? trimmed;
-  return clampRawLabel(trimmed);
+  return clampUrlLabel(trimmed);
 }
 
 /** Starting value of the rename field: the label cut to the name limit. */
 export function browserTabNameSeed(label: string): string {
-  return label.slice(0, BROWSER_TAB_NAME_MAX_CHARS);
+  return truncateCodePoints(label, BROWSER_TAB_NAME_MAX_CHARS);
 }
 
 /** The visible name of a browser tab: its manual name, else its URL label. */

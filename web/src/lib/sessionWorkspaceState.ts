@@ -8,7 +8,7 @@
 
 import type { RightRailTab } from "@/shell/railTabs";
 import type { DefaultWorkspaceTab } from "./workspaceTabPreferences";
-import { BROWSER_TAB_NAME_MAX_CHARS } from "./browserTabLabel";
+import { normalizeBrowserTabName } from "./browserTabLabel";
 
 const WORKSPACE_PANEL_TABS: readonly DefaultWorkspaceTab[] = [
   "files",
@@ -136,10 +136,10 @@ function sanitize(entry: unknown): SessionWorkspaceState {
   ) {
     const names: Record<string, string> = {};
     for (const [tabId, name] of Object.entries(record.browserNames)) {
-      const kept = typeof name === "string" ? name.trim().slice(0, BROWSER_TAB_NAME_MAX_CHARS) : "";
+      const kept = typeof name === "string" ? normalizeBrowserTabName(name) : "";
       if (kept) names[tabId] = kept;
     }
-    state.browserNames = names;
+    if (Object.keys(names).length > 0) state.browserNames = names;
   }
   if (Array.isArray(record.openSideChats)) {
     state.openSideChats = [
@@ -176,12 +176,14 @@ function readStore(): Store {
   }
 }
 
-function writeStore(store: Store): void {
-  if (typeof window === "undefined") return;
+function writeStore(store: Store): boolean {
+  if (typeof window === "undefined") return false;
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+    return true;
   } catch {
     // Storage quota/access errors must not break panel interactions.
+    return false;
   }
 }
 
@@ -192,10 +194,19 @@ export function readSessionWorkspaceState(conversationId: string): SessionWorksp
 }
 
 /** Merge a partial update into one session's persisted workspace state. */
+/** Merge a patch into one session's persisted workspace state. */
 export function writeSessionWorkspaceState(
   conversationId: string,
   patch: SessionWorkspaceState,
 ): void {
+  saveSessionWorkspaceState(conversationId, patch);
+}
+
+/** Like `writeSessionWorkspaceState`, but returns false when storage rejected the write. */
+export function saveSessionWorkspaceState(
+  conversationId: string,
+  patch: SessionWorkspaceState,
+): boolean {
   const store = readStore();
   const existingIdx = store.findIndex((e) => e.id === conversationId);
   const prev = existingIdx >= 0 ? store[existingIdx].state : {};
@@ -230,7 +241,7 @@ export function writeSessionWorkspaceState(
   if (store.length > MAX_SESSIONS) {
     store.splice(0, store.length - MAX_SESSIONS);
   }
-  writeStore(store);
+  return writeStore(store);
 }
 
 /** Let existing chats follow a changed default while keeping their open tabs and layout. */

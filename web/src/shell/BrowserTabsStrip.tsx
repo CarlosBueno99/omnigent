@@ -77,7 +77,9 @@ function BrowserTab({
   onClose,
   onRename,
 }: BrowserTabProps) {
-  const [editing, setEditing] = useState(false);
+  // The field's start value while renaming, else null.
+  const [editSeed, setEditSeed] = useState<string | null>(null);
+  const editing = editSeed !== null;
   // Rename starts once the menu has closed; the closing menu would steal focus.
   const renameFromMenuRef = useRef(false);
   const tabButtonRef = useRef<HTMLButtonElement>(null);
@@ -91,17 +93,17 @@ function BrowserTab({
 
   const finishEditing = (byKeyboard: boolean) => {
     refocusTabRef.current = byKeyboard;
-    setEditing(false);
+    setEditSeed(null);
   };
   const label = browserTabLabel(manualName, url);
-  const urlLabel = browserTabLabel(null, url);
+  const startEditing = () => setEditSeed(browserTabNameSeed(label));
 
   const commitRename = (value: string, byKeyboard: boolean) => {
+    const seed = editSeed ?? "";
     finishEditing(byKeyboard);
     const trimmed = value.trim();
-    // Saving the untouched URL label must not pin it as a manual name.
-    if (manualName === null && trimmed === browserTabNameSeed(urlLabel).trim()) return;
-    if (trimmed === (manualName ?? "")) return;
+    // Saving the untouched field must not pin a URL label, even after a navigation.
+    if (trimmed === seed.trim() || trimmed === (manualName ?? "")) return;
     onRename(trimmed);
   };
 
@@ -122,7 +124,7 @@ function BrowserTab({
             <span className="flex items-center gap-1">
               <GlobeIcon className="size-4 shrink-0" />
               <BrowserTabNameInput
-                initialValue={label}
+                initialValue={editSeed}
                 onCommit={commitRename}
                 onCancel={() => finishEditing(true)}
               />
@@ -143,12 +145,12 @@ function BrowserTab({
               onClick={onSelect}
               onDoubleClick={(event) => {
                 event.preventDefault();
-                setEditing(true);
+                startEditing();
               }}
               onKeyDown={(event) => {
                 if (event.key === "F2") {
                   event.preventDefault();
-                  setEditing(true);
+                  startEditing();
                 }
               }}
             >
@@ -172,7 +174,7 @@ function BrowserTab({
           if (!renameFromMenuRef.current) return;
           renameFromMenuRef.current = false;
           event.preventDefault();
-          setEditing(true);
+          startEditing();
         }}
       >
         <SuppressBrowserView />
@@ -205,8 +207,7 @@ function BrowserTabNameInput({
   onCommit: (value: string, byKeyboard: boolean) => void;
   onCancel: () => void;
 }) {
-  // maxLength only limits typing, so cap a long URL label used as the start value.
-  const [value, setValue] = useState(() => browserTabNameSeed(initialValue));
+  const [value, setValue] = useState(initialValue);
   const inputRef = useRef<HTMLInputElement>(null);
   const settledRef = useRef(false);
   const composingRef = useRef(false);

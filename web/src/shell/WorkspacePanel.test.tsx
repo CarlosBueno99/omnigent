@@ -1332,18 +1332,18 @@ describe("WorkspacePanel browser tab names", () => {
     expect(screen.getByRole("tab", { name: "Dev server" })).toBeInTheDocument();
   });
 
-  it("caps a long URL label in the rename field without pinning it", () => {
+  it("does not pin an untouched long label, even if the page navigates during the rename", () => {
     openTwoTabs();
     const bridge = installBrowserUrlBridge();
     renderWorkspace({ showBrowserTab: true, rightRailTab: "browser" });
-    const longLabel = `example.com/${"a".repeat(100)}`;
-    bridge.navigate("tab-a", `https://${longLabel}`);
+    bridge.navigate("tab-a", `https://example.com/${"a".repeat(100)}`);
+    const shortened = `example.com/${"a".repeat(48)}…`;
 
-    fireEvent.doubleClick(screen.getByRole("tab", { name: longLabel }));
+    fireEvent.doubleClick(screen.getByRole("tab", { name: shortened }));
     const field = screen.getByRole("textbox", { name: "Browser tab name" });
-    expect(field).toHaveValue(longLabel.slice(0, 80));
-    fireEvent.keyDown(field, { key: "Enter" });
+    expect(field).toHaveValue(shortened);
     bridge.navigate("tab-a", "https://example.com/next");
+    fireEvent.keyDown(field, { key: "Enter" });
     expect(screen.getByRole("tab", { name: "example.com/next" })).toBeInTheDocument();
     expect(readSessionWorkspaceState("conv_ws").browserNames).toBeUndefined();
   });

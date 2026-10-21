@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { onBrowserActionRequest } from "@/lib/browserActionBus";
 import { onInAppLinkOpen } from "@/lib/openLinkInApp";
-import { BROWSER_TAB_NAME_MAX_CHARS } from "@/lib/browserTabLabel";
-import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
+import { normalizeBrowserTabName } from "@/lib/browserTabLabel";
+import { readSessionWorkspaceState, saveSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 
 /** Stable soft-tab id for the browser view driven by agents and opted-in links. */
 export const AGENT_BROWSER_TAB_ID = "agent-browser";
@@ -32,12 +32,16 @@ interface BrowserTabsState {
 }
 
 const agentNavigationEpochs = new Map<string, number>();
+// Tab state whose last save failed (e.g. a full localStorage), so later changes still build on it.
+const unsavedBrowserTabs = new Map<string, BrowserTabsState>();
 
 function agentNavigationEpoch(conversationId: string): number {
   return agentNavigationEpochs.get(conversationId) ?? 0;
 }
 
 function readBrowserTabsState(conversationId: string): BrowserTabsState {
+  const unsaved = unsavedBrowserTabs.get(conversationId);
+  if (unsaved) return unsaved;
   const saved = readSessionWorkspaceState(conversationId);
   const tabs = saved.openBrowsers ?? [];
   return {
@@ -48,11 +52,13 @@ function readBrowserTabsState(conversationId: string): BrowserTabsState {
 }
 
 function writeBrowserTabsState(conversationId: string, next: BrowserTabsState): void {
-  writeSessionWorkspaceState(conversationId, {
+  const saved = saveSessionWorkspaceState(conversationId, {
     openBrowsers: next.tabs,
     selectedBrowserId: next.selected,
     browserNames: next.names,
   });
+  if (saved) unsavedBrowserTabs.delete(conversationId);
+  else unsavedBrowserTabs.set(conversationId, next);
 }
 
 function withOpenTabNames(state: BrowserTabsState): BrowserTabsState {
@@ -123,7 +129,7 @@ export function useBrowserTabs(conversationId: string) {
 
   /** Set a tab's manual name; a blank name returns it to its URL label. */
   const rename = (tabId: string, name: string) => {
-    const trimmed = name.trim().slice(0, BROWSER_TAB_NAME_MAX_CHARS);
+    const trimmed = normalizeBrowserTabName(name);
     update((current) => {
       if (!current.tabs.includes(tabId)) return current;
       const names = Object.fromEntries(

@@ -1,20 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { getBrowserPaneBridge } from "@/components/BrowserPane/browserPaneBridge";
 import { browserViewId } from "@/hooks/useBrowserTabs";
-import { supportsBrowser } from "@/lib/nativeBridge";
-
-/** Subset of the desktop bridge used to follow each browser view's URL. */
-interface BrowserUrlBridge {
-  browserHasView?: (viewId: string) => Promise<{ exists: boolean; url?: string }>;
-  onBrowserUrlChanged?: (
-    callback: (payload: { conversationId: string; url: string }) => void,
-  ) => () => void;
-  onBrowserViewClosed?: (callback: (payload: { conversationId: string }) => void) => () => void;
-}
-
-function urlBridge(): BrowserUrlBridge | null {
-  if (!supportsBrowser()) return null;
-  return (window as unknown as { omnigentDesktop?: BrowserUrlBridge }).omnigentDesktop ?? null;
-}
 
 /**
  * Current page URL of every open browser tab in a session, keyed by tab id.
@@ -33,7 +19,7 @@ export function useBrowserTabUrls(
   }, [conversationId]);
 
   useEffect(() => {
-    const bridge = urlBridge();
+    const bridge = getBrowserPaneBridge();
     if (!bridge) return;
     const viewIds = new Set(
       tabKey === "" ? [] : tabKey.split("\n").map((tabId) => browserViewId(conversationId, tabId)),
@@ -49,21 +35,28 @@ export function useBrowserTabUrls(
         current[viewId] === url ? current : { ...current, [viewId]: url },
       );
     });
-    const unsubscribeClosed = bridge.onBrowserViewClosed?.(({ conversationId: viewId }) => {
-      if (!viewIds.has(viewId)) return;
-      updatedByEvent.add(viewId);
+    const forget = (viewId: string) =>
       setUrlsByViewId((current) => {
         if (!(viewId in current)) return current;
         return Object.fromEntries(
           Object.entries(current).filter(([knownViewId]) => knownViewId !== viewId),
         );
       });
+    const unsubscribeClosed = bridge.onBrowserViewClosed?.(({ conversationId: viewId }) => {
+      if (!viewIds.has(viewId)) return;
+      updatedByEvent.add(viewId);
+      forget(viewId);
     });
     for (const viewId of viewIds) {
       void bridge
         .browserHasView?.(viewId)
         .then((view) => {
-          if (cancelled || updatedByEvent.has(viewId) || !view?.exists || !view.url) return;
+          if (cancelled || updatedByEvent.has(viewId)) return;
+          // A reopened tab id must not keep the URL of its previous view.
+          if (!view?.exists || !view.url) {
+            forget(viewId);
+            return;
+          }
           const url = view.url;
           setUrlsByViewId((current) =>
             current[viewId] === url ? current : { ...current, [viewId]: url },

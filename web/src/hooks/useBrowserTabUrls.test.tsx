@@ -68,6 +68,25 @@ describe("useBrowserTabUrls", () => {
     expect(result.current).toEqual({ "tab-two": "https://two.example/" });
   });
 
+  it("forgets a URL when a reopened tab has no view yet", async () => {
+    let exists = true;
+    installBridge(() =>
+      Promise.resolve(exists ? { exists, url: "https://old.example/" } : { exists: false }),
+    );
+    const { result, rerender } = renderHook(({ tabs }) => useBrowserTabUrls("session-a", tabs), {
+      initialProps: { tabs: [AGENT_BROWSER_TAB_ID] },
+    });
+    await act(async () => {});
+    expect(result.current).toEqual({ [AGENT_BROWSER_TAB_ID]: "https://old.example/" });
+
+    // The view went away without a close event reaching this hook.
+    exists = false;
+    rerender({ tabs: [] });
+    rerender({ tabs: [AGENT_BROWSER_TAB_ID] });
+    await act(async () => {});
+    expect(result.current).toEqual({});
+  });
+
   it("keeps a navigation that lands before the existing-view snapshot", async () => {
     let finishProbe!: (value: { exists: boolean; url?: string }) => void;
     const bridge = installBridge(

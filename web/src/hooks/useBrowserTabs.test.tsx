@@ -116,7 +116,7 @@ describe("browser soft tabs", () => {
     expect(readSessionWorkspaceState("session-a").browserNames).toBeUndefined();
   });
 
-  it("still shows a change when the workspace state cannot be saved", () => {
+  it("keeps every change while storage rejects writes, and saves them once it recovers", () => {
     writeSessionWorkspaceState("session-a", {
       openBrowsers: ["saved"],
       selectedBrowserId: "saved",
@@ -124,15 +124,26 @@ describe("browser soft tabs", () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new DOMException("quota", "QuotaExceededError");
     });
+    const { result } = renderHook(() => useBrowserTabs("session-a"));
+    let added: string[] = [];
     try {
-      const { result } = renderHook(() => useBrowserTabs("session-a"));
       act(() => result.current.rename("saved", "Docs"));
-      expect(result.current.names).toEqual({ saved: "Docs" });
       act(() => result.current.add());
-      expect(result.current.tabs).toEqual(["saved", result.current.selected]);
+      added = [result.current.selected!];
+      act(() => result.current.add());
+      added = [...added, result.current.selected!];
+      expect(result.current.names).toEqual({ saved: "Docs" });
+      expect(result.current.tabs).toEqual(["saved", ...added]);
     } finally {
       setItem.mockRestore();
     }
+
+    act(() => result.current.select("saved"));
+    expect(readSessionWorkspaceState("session-a")).toMatchObject({
+      openBrowsers: ["saved", ...added],
+      selectedBrowserId: "saved",
+      browserNames: { saved: "Docs" },
+    });
   });
 
   it("creates independent views and restores the selection on remount", () => {
