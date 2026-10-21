@@ -129,7 +129,8 @@ class LocalImportRequest(BaseModel):
     tunnel — the transcripts live on the caller's machine, not the server. A
     supplied ``session_id`` loads that exact session without enumerating local
     history. ``force`` replaces an earlier import of that exact session with
-    the host's current transcript, like ``/imports`` with ``force``.
+    the host's current transcript, unless the caller doesn't own it or it was
+    resumed in Omnigent.
     """
 
     host_id: str
