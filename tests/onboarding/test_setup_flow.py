@@ -47,7 +47,7 @@ def _port_preflight_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the scripted logins independent of the test host's own port 8020."""
     monkeypatch.setattr(
         "omnigent.onboarding.databricks_config.databricks_login_port_conflict",
-        lambda _bin: None,
+        lambda _bin, **_kwargs: None,
     )
 
 
@@ -272,7 +272,7 @@ def test_login_profile_port_conflict_skips_login(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         db_cfg_mod,
         "databricks_login_port_conflict",
-        lambda _bin: "Port 8020 is busy [x]; upgrade.",
+        lambda _bin, **_kwargs: "Port 8020 is busy [x]; upgrade.",
     )
     console, out = _console()
 
@@ -280,6 +280,26 @@ def test_login_profile_port_conflict_skips_login(monkeypatch: pytest.MonkeyPatch
 
     assert calls == []
     assert "Port 8020 is busy [x]; upgrade." in out.getvalue()
+
+
+def test_login_profile_failure_names_busy_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A login that fails while the callback port is busy prints the port message too."""
+    from omnigent.onboarding import databricks_config as db_cfg_mod
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", _run_returning(1, calls))
+    monkeypatch.setattr(
+        db_cfg_mod,
+        "databricks_login_port_conflict",
+        lambda _bin, *, login_failed=False: "Port 8020 is busy [x]." if login_failed else None,
+    )
+    console, out = _console()
+
+    assert _login_profile(_CLI, _OSS, console) is False
+
+    assert len(calls) == 1
+    assert "failed (exit 1)" in out.getvalue()
+    assert "Port 8020 is busy [x]." in out.getvalue()
 
 
 # ── silent aliasing ──────────────────────────────────────────

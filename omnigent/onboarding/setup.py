@@ -334,6 +334,9 @@ def _login_profile(cli: str, spec: ProfileSpec, console: Console) -> bool:
         return False
     if result.returncode != 0:
         console.print(f"  [red]failed (exit {result.returncode})[/red]")
+        conflict = databricks_login_port_conflict(cli, login_failed=True)
+        if conflict is not None:
+            console.print(f"  [red]{escape(conflict)}[/red]")
         return False
     console.print(f"  [green]✓ {spec.name}[/green]")
     time.sleep(_OAUTH_BETWEEN_LOGIN_SLEEP_SECONDS)

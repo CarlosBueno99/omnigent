@@ -223,7 +223,7 @@ def _databricks_cli_version(databricks_bin: str) -> tuple[int, int, int] | None:
             timeout=_CLI_VERSION_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return None
     if result.returncode != 0:
         return None

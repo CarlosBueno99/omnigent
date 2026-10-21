@@ -318,7 +318,12 @@ def test_databricks_cli_version_parses_output(tmp_path: Path) -> None:
 @_posix_shell_cli
 @pytest.mark.parametrize(
     "body",
-    ["echo garbage", "echo 'Databricks CLI v0.244.0'; exit 1", "echo 'Databricks CLI v0.0.0-dev'"],
+    [
+        "echo garbage",
+        "echo 'Databricks CLI v0.244.0'; exit 1",
+        "echo 'Databricks CLI v0.0.0-dev'",
+        "printf '\\377Databricks CLI v0.244.0\\n'",
+    ],
 )
 def test_databricks_cli_version_none_for_unusable_output(tmp_path: Path, body: str) -> None:
     assert _databricks_cli_version(_fake_cli(tmp_path, body)) is None
