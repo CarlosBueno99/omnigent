@@ -284,7 +284,7 @@ The sync journeys also use the production client's private SQLite cache/outbox.
 
 | Journey suffix | Timed work |
 | --- | --- |
-| `read` | Full snapshot GET, validated against seeded state |
+| `read` | Collect every snapshot page, validated against seeded state |
 | `write` | Changed-value POST; a separate untimed GET verifies persistence |
 | `retry` | Repeat a known operation; require its exact original receipt |
 | `refresh` | Fetch and persist the authoritative snapshot in a local cache |
@@ -331,8 +331,13 @@ disabled control. Compare identical workloads on the same host. The JSON config
 records the gate and corpus sizes. Server CPU/RSS is process-wide; it does not
 measure the database container's memory.
 
-A one-edit client sync uses three HTTP requests; refresh and retry each use one.
-The write journey's request count includes its untimed verification GET, as with
+Reads use the production client's revision-bound page collector. Each page holds
+at most 100 values and conflicts combined. With the default 32 keys, a one-edit
+sync uses three HTTP requests and a refresh uses one. With 512 keys and no
+conflicts, refresh uses six GETs and a one-edit sync uses thirteen requests.
+Receipt history does not add pages; retry always uses one POST. A changed
+revision between pages fails the sample rather than silently retrying it.
+The write journey's request count includes its untimed verification GETs, as with
 project ordering. `--network-delay-ms 50` injects delay per HTTP request,
 including setup: label these samples simulated network latency, not a WAN test.
 The feature-map client/server process tests remain the correctness evidence;
