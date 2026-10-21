@@ -1026,8 +1026,8 @@ def test_write_models_config_is_owner_only(tmp_path: Path) -> None:
     assert written["providers"]["omnigent"]["apiKey"] == "sk-secret"
 
 
-def _first_attempt_exits(code: int) -> str:
-    return f"[ -e failed-once ] || {{ : > failed-once; exit {code}; }}; "
+def _fails_first(first_attempt: str) -> str:
+    return f"[ -e failed-once ] || {{ : > failed-once; {first_attempt}; }}; "
 
 
 @pytest.mark.parametrize(
@@ -1040,9 +1040,9 @@ def _first_attempt_exits(code: int) -> str:
         ("head -c 1048577 /dev/zero | tr '\\0' x", "output_limit", "", 1),
         ("sleep 20", "timeout", "", 1),
         ("", "invalid_command", "", 0),
-        (_first_attempt_exits(7) + "printf private-token", "ok", "private-token", 2),
-        (_first_attempt_exits(0) + "printf private-token", "ok", "private-token", 2),
-        (_first_attempt_exits(7) + "sleep 20", "timeout", "", 2),
+        (_fails_first("printf stale; exit 7") + "printf private-token", "ok", "private-token", 2),
+        (_fails_first("exit 0") + "printf private-token", "ok", "private-token", 2),
+        (_fails_first("exit 7") + "sleep 20", "timeout", "", 2),
     ],
 )
 def test_generated_token_command_reports_only_safe_results(
@@ -1056,7 +1056,7 @@ def test_generated_token_command_reports_only_safe_results(
     if os.name != "posix" or shutil.which("node") is None:
         pytest.skip("the native Pi token wrapper requires POSIX and Node")
     if kind == "timeout":
-        monkeypatch.setattr(auth_command, "AUTH_TIMEOUT_MS", 3_000)
+        monkeypatch.setattr(auth_command, "AUTH_TIMEOUT_MS", 2_000)
     command = command and "printf x >> attempts; " + command
     provider = creds.PiProviderConfig(
         provider_id="omnigent",

@@ -69,6 +69,8 @@ function retryOrFinish(kind, command, retryDelays) {
   killHelper();
   child = undefined;
   retryTimer = setTimeout(() => {
+    // A stalled event loop can run this after the deadline; the deadline timer finishes then.
+    if (performance.now() >= deadline) return;
     try {
       runAttempt(command, rest);
     } catch (_) {
