@@ -1108,7 +1108,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
     }
   }, [conversationId, selected, info.data?.selected_pr_url]);
   // A failed load doesn't say whether the PR was unlinked (cached data may still show it), so
-  // forget the pick only once the session's PR list confirms.
+  // forget the pick only once a recent session PR list leaves it out.
   const pickFailed = !!pick && !!info.error && !(info.error instanceof RunnerOfflineError);
   useEffect(() => {
     if (!pick || !pickFailed) return;
@@ -1117,6 +1117,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
       .fetchQuery({
         queryKey: ["github-info", conversationId],
         queryFn: () => fetchPullRequestInfo(conversationId),
+        staleTime: 30_000,
       })
       .then((sessionInfo) => {
         if (current && sessionInfo.prs && !sessionInfo.prs.some((pr) => pr.url === pick)) {

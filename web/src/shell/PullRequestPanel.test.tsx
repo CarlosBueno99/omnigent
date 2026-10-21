@@ -24,6 +24,7 @@ const state = vi.hoisted(() => ({
     data?: PullRequestInfo;
     isLoading: boolean;
     error: unknown;
+    errorUpdatedAt?: number;
     isFetching: boolean;
   } | null,
   changes: null as {
@@ -2044,6 +2045,19 @@ describe("session PR selection", () => {
       poll: true,
       prUrl: secondPr,
     });
+  });
+
+  it("reuses a recent session PR list while a remembered pick keeps failing", async () => {
+    await pickSecondPrAndUnmount();
+    fetchPullRequestInfo.mockResolvedValue(trackedPrInfo([firstPr, secondPr]).data);
+    const failedLoad = { isLoading: false, error: new Error("502 Bad Gateway"), isFetching: false };
+    state.info = { ...failedLoad, errorUpdatedAt: 1 };
+    const { rerender } = renderPanel();
+    await waitFor(() => expect(fetchPullRequestInfo).toHaveBeenCalledTimes(1));
+    state.info = { ...failedLoad, errorUpdatedAt: 2 };
+    rerender(<PullRequestPanel conversationId="conv_1" />);
+    await flushPendingWork();
+    expect(fetchPullRequestInfo).toHaveBeenCalledTimes(1);
   });
 
   it("remembers each session's own pick across session switches", async () => {
