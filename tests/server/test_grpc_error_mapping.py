@@ -124,20 +124,44 @@ async def test_permission_denied_maps_to_403(
 
 
 @pytest.mark.parametrize("implementation", ["vendored", "grpcio"])
+@pytest.mark.parametrize(
+    ("method", "suffix"),
+    [
+        pytest.param("GET", "", id="session-open"),
+        pytest.param("POST", "/events", id="follow-up-send"),
+    ],
+)
 async def test_resource_exhausted_maps_to_retryable_503(
     catchall_client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     implementation: str,
+    method: str,
+    suffix: str,
 ) -> None:
     session = await create_test_session(catchall_client, name="exhausted-test")
     # A store whose per-read gate is a gRPC call fails this way when the backend's
     # concurrent-request budget is saturated; the condition clears on retry.
     exhausted = Mock(side_effect=_rpc_error("RESOURCE_EXHAUSTED", implementation, _LIMIT_DETAILS))
     monkeypatch.setattr(SqlAlchemyConversationStore, "get_conversation", exhausted)
+    kwargs = {}
+    if method == "POST":
+        kwargs["json"] = {
+            "type": "external_conversation_item",
+            "data": {
+                "item_type": "message",
+                "item_data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "follow-up"}],
+                },
+                "response_id": "resp_follow_up",
+            },
+        }
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="omnigent.server.app"):
-        response = await catchall_client.get(f"/v1/sessions/{session['id']}")
+        response = await catchall_client.request(
+            method, f"/v1/sessions/{session['id']}{suffix}", **kwargs
+        )
 
     exhausted.assert_called()
     assert response.status_code == 503, response.text
