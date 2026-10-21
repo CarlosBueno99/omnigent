@@ -1838,19 +1838,40 @@ def test_delete_user_revokes_durable_authority(accounts_app: TestClient, tmp_pat
     assert alice.get("/auth/me").status_code == 401
 
 
-def test_change_own_password_round_trip(accounts_app: TestClient) -> None:
+@pytest.mark.parametrize(
+    ("issue_refresh", "purpose"),
+    [(False, "session"), (True, "client")],
+    ids=["session-cookie", "client-bearer"],
+)
+def test_change_own_password_round_trip(
+    accounts_app: TestClient, issue_refresh: bool, purpose: str
+) -> None:
     """POST /auth/users/me/password rotates the password.
 
     Correct old password → 204, new password works on the next
     login, old password stops working. Covers the happy path
     that the self-serve UX depends on.
     """
-    admin = _login(accounts_app, "admin", "admin-pw-12345")
+    import jwt
+
+    admin = accounts_app
+    login = admin.post(
+        "/auth/login",
+        json={"username": "admin", "password": "admin-pw-12345", "issue_refresh": issue_refresh},
+    )
+    assert login.status_code == 200, login.text
+    if issue_refresh:
+        admin.cookies.clear()
+        admin.headers["Authorization"] = f"Bearer {login.json()['token']}"
     resp = admin.post(
         "/auth/users/me/password",
         json={"old_password": "admin-pw-12345", "new_password": "new-strong-pw-1"},
     )
     assert resp.status_code == 204, resp.text
+    claims = jwt.decode(resp.cookies["ap_session"], options={"verify_signature": False})
+    assert claims["credential_purpose"] == purpose
+    admin.headers.pop("Authorization", None)
+    assert admin.get("/auth/me").json()["id"] == "admin"
 
     from fastapi.testclient import TestClient as _TC
 
