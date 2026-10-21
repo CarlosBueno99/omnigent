@@ -32,6 +32,7 @@ from omnigent.harnesses.codex_native.app_server import (
     CodexAppServerResponseError,
     CodexMessage,
     client_for_transport,
+    is_no_active_turn_error,
 )
 from omnigent.harnesses.codex_native.bridge import (
     CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
@@ -2838,6 +2839,41 @@ async def _wait_for_refused_turn_id(bridge_dir: Path, thread_id: str) -> str | N
     return None
 
 
+async def _interrupt_refused_turn(
+    client: CodexAppServerClient, *, thread_id: str, turn_id: str
+) -> None:
+    """
+    Interrupt a turn the forwarder cannot follow, waiting out turn startup.
+
+    Codex rejects ``turn/interrupt`` with "no active turn" for a moment after
+    ``turn/start`` returns, so that rejection is retried within the wait.
+
+    :param client: Codex app-server client used to interrupt the turn.
+    :param thread_id: Codex thread id, e.g. ``"thread_123"``.
+    :param turn_id: Codex turn id to interrupt, e.g. ``"turn_123"``.
+    :returns: None; a failed interrupt is logged.
+    """
+    polls = int(_REFUSED_SUBSCRIPTION_TURN_WAIT_SECONDS / _SUBSCRIBE_RETRY_DELAY_SECONDS)
+    for poll in range(polls + 1):
+        if poll:
+            await _sleep(_SUBSCRIBE_RETRY_DELAY_SECONDS)
+        try:
+            await client.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+            return
+        except asyncio.CancelledError:
+            raise
+        except CodexAppServerResponseError as exc:
+            if is_no_active_turn_error(exc) and poll < polls:
+                continue
+            _logger.warning("Codex turn interrupt after a refused subscription failed: %s", exc)
+            return
+        except Exception:  # noqa: BLE001 - the failure is surfaced either way.
+            _logger.warning(
+                "Codex turn interrupt after a refused subscription failed", exc_info=True
+            )
+            return
+
+
 async def _fail_turn_after_refused_subscription(
     client: CodexAppServerClient,
     ap_client: httpx.AsyncClient,
@@ -2871,12 +2907,7 @@ async def _fail_turn_after_refused_subscription(
         return
     if forwarder_state is not None:
         forwarder_state.surfaced_terminal_error_turns.add(turn_id)
-    try:
-        await client.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
-    except asyncio.CancelledError:
-        raise
-    except Exception:  # noqa: BLE001 - the failure is surfaced either way.
-        _logger.warning("Codex turn interrupt after a refused subscription failed", exc_info=True)
+    await _interrupt_refused_turn(client, thread_id=thread_id, turn_id=turn_id)
     clear_active_turn_id_if_matches(bridge_dir, turn_id)
     reason = refusal.message or str(refusal)
     async with _conversation_item_delivery_scope(session_id):

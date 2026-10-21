@@ -833,6 +833,69 @@ def test_subscribe_until_ready_fails_turn_recorded_after_the_refusal(
 
 
 @pytest.mark.parametrize(
+    "startup_rejections",
+    [pytest.param(2, id="turn-still-starting"), pytest.param(None, id="turn-never-interruptible")],
+)
+def test_subscribe_until_ready_retries_interrupt_while_refused_turn_starts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    startup_rejections: int | None,
+) -> None:
+    """Codex's "no active turn" answer during turn startup is retried within the wait."""
+    _write_forwarder_bridge(tmp_path, active_turn_id="turn_123")
+    fake_client = _FakeCodexAppServerClient()
+    posted: list[dict[str, Any]] = []
+    delays: list[float] = []
+    interrupts = 0
+
+    async def refuse_resume_while_turn_starts(
+        method: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        nonlocal interrupts
+        fake_client.requests.append((method, params))
+        if method == "thread/resume":
+            raise _list_turns_refusal()
+        interrupts += 1
+        if startup_rejections is None or interrupts <= startup_rejections:
+            raise codex_native_app_server.CodexAppServerResponseError(
+                {"code": -32600, "message": "no active turn to interrupt"}
+            )
+        return {"result": {}}
+
+    monkeypatch.setattr(fake_client, "request", refuse_resume_while_turn_starts)
+
+    async def recording_sleep(delay: float) -> None:
+        delays.append(delay)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(codex_native_forwarder, "_sleep", recording_sleep)
+
+    async def run() -> None:
+        async with _recording_forwarder_client(posted) as client:
+            await asyncio.wait_for(
+                codex_native_forwarder._subscribe_until_ready(
+                    fake_client,  # type: ignore[arg-type]
+                    client,
+                    session_id="conv_123",
+                    bridge_dir=tmp_path,
+                    thread_id="thread_123",
+                    usage_coalescer=_usage_coalescer(client),
+                    elicitation_tracker=_elicitation_tracker(),
+                ),
+                timeout=5.0,
+            )
+
+    asyncio.run(run())
+
+    wait = codex_native_forwarder._REFUSED_SUBSCRIPTION_TURN_WAIT_SECONDS
+    retry_delay = codex_native_forwarder._SUBSCRIBE_RETRY_DELAY_SECONDS
+    retries = int(wait / retry_delay) if startup_rejections is None else startup_rejections
+    assert interrupts == retries + 1
+    assert delays == [retry_delay] * retries
+    assert [failure["response_id"] for failure in _failed_statuses(posted)] == ["codex_turn_123"]
+
+
+@pytest.mark.parametrize(
     ("error", "active_turn_id", "waits_for_turn"),
     [
         pytest.param(
