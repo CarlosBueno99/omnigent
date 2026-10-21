@@ -614,6 +614,8 @@ def test_login_with_busy_callback_port_and_old_cli_names_the_port(
     A pre-v0.265.0 CLI dies on the callback bind before any workspace traffic,
     so the "workspace unreachable (VPN / IP access lists)" hint is misleading.
     """
+    from omnigent.onboarding import databricks_config as db_cfg_mod
+
     fake = _FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})])
     _patch_login_env(
         monkeypatch,
@@ -621,9 +623,10 @@ def test_login_with_busy_callback_port_and_old_cli_names_the_port(
         cached_tokens=[None],
         databricks_bin=_versioned_legacy_databricks_cli(tmp_path),
     )
+    # Simulated so this test never races the real-port test on another xdist worker.
+    monkeypatch.setattr(db_cfg_mod, "_oauth_callback_port_busy", lambda: True)
 
-    with _callback_port_busy():
-        result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
+    result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
 
     assert result.exit_code != 0
     assert "8020" in result.output, result.output
