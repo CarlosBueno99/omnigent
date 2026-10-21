@@ -12,11 +12,15 @@ implements them separately, so a fix for one harness does not reach the others.
 - `launch-web`: pick the harness in the new-session composer and start a session.
 - `launch-cli`: `omnigent <name>` starts the harness in the user's terminal with
   an Omnigent session behind it.
+- `gemini-gateways`: configure native Gemini URL/key or Databricks profile routing,
+  repair conflicting defaults, and keep the connection across tool turns.
 - `needs-auth`: a harness without usable credentials is shown as needing
   sign-in, with a repair hint, instead of failing after launch. A harness the
   host has not configured can be hidden from the picker.
 - `model-and-effort`: the harness's own model catalog, and reasoning effort where
   the harness declares it. The web picker should offer what the CLI offers.
+- `smart-routing`: Pi applies the chosen route before inference from the
+  composer or native terminal; a tool turn and follow-up retain history.
 - `approvals`: tool calls the harness gates show an approval card in chat, and
   the answer reaches the harness. A sub-agent's card also docks below its
   parent's terminal in Terminal view.
@@ -77,6 +81,10 @@ Repeat the Chat and header-menu Terminal paths at phone width. A locally
 launched `omnigent claude` session is a separate launch path; inspect its linked
 Chat session as well as the local terminal.
 
+**Pi Smart Routing:** enable Smart Routing for the session, then send a task
+from Chat or type it into the native Pi terminal. Follow a completed tool call
+with a question about its result; verify the routed model and retained history.
+
 **CLI:** run `omnigent <name>` from the matrix below; add `--resume` with or
 without a session ID to resume.
 
@@ -89,6 +97,10 @@ added from the Agents panel, starts in its harness's full-access mode unless its
 spec declares a permission stance or the create request passes launch args.
 Smart Routing (`auto`) children do not inherit it. Changing the parent's mode
 later does not change children it already started.
+
+**Native Gemini setup:** run `omni setup` → Antigravity → Configure native agy
+API key / gateway. If existing providers conflict, choose the Gemini default
+before entering the harness menu. Then start a new CLI or web session.
 
 **Approval inbox:** open Inbox in the sidebar to answer a pending permission
 without opening its session. Antigravity's Chat and Inbox cards both offer
@@ -167,6 +179,15 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
   --output="$VERIFY_EVIDENCE/native-harnesses"
 ```
 
+**Pi Smart Routing (own environment):**
+`tests/e2e/test_pi_native_smart_routing.py::test_pi_native_smart_routing_applies_pick`
+starts the real CLI/server/runner/Pi with scripted routing and model replies.
+It covers composer API and session-owned TUI input, verifies the actual served
+model, then checks the follow-up request retains the tool result and first answer.
+Run with a real Pi CLI on PATH and retries disabled. Composer API evidence
+does not cover browser clicks; scripted routing does not establish live judge
+quality. Broader Smart Routing journeys remain outside this Pi-specific recipe.
+
 **Launch settings (own environment):** connect a host with Claude/Codex
 configured, and put a command and two args under
 `harness.claude-native` / `harness.codex-native` in its `~/.omnigent/config.yaml`.
@@ -183,6 +204,20 @@ grid and repeat. An older host shows an update message; an older server hides
 the extra fields. Resolver and raw-tunnel checks:
 `tests/host/test_harness_startup.py`,
 `tests/server/integration/test_host_tunnel_route.py::test_startup_http_through_real_tunnel`.
+
+**Native agy gateways (own environment):** `omni setup` → Antigravity →
+Configure native agy API key / gateway → Add a credential offers a native Gemini
+URL/key or a local Databricks profile. The gateway must speak native Gemini;
+OpenAI Responses and Chat Completions endpoints are not supported.
+`tests/e2e_ui/shells/test_antigravity_gateway_setup.py` owns fresh daemon/host
+processes and a fake Gemini upstream. With agy and tmux installed, run
+`OMNIGENT_E2E_ANTIGRAVITY=mock uv run pytest tests/e2e_ui/shells/test_antigravity_gateway_setup.py --ui-skip-build`.
+The journeys check setup, file tools, reload/recall, process resume without
+duplicate history, and browser repair guidance. They use simulated upstreams;
+live external-gateway compatibility remains unverified. See [the gateway
+guide](../docs/native-agy-gateways.md) for live smoke steps.
+The reader/server replay regression is
+`tests/server/integration/test_sessions_external_item_idempotency.py::test_agy_reader_restart_preserves_messages_and_tool_pairs`.
 
 Cross-harness journeys:
 

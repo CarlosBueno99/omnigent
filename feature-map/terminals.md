@@ -41,6 +41,8 @@ with their own terminal retain the switcher.
   off while a rail-opened shell owns the main view.
 - On a phone, use the view mode choice in the header menu.
 - Choose Resume when the terminal shows as stopped.
+- With `grid_sessions_display_ui` enabled, use each grid cell's header switch.
+  The shortcut targets the active cell; shells remain in the shared Workspace.
 - A sub-agent's pending approval docks below the agent terminal in Terminal
   view; answer it there without switching to Chat.
 
@@ -74,6 +76,10 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
 ```
 
 - **`agent-terminal-view`:**
+  Grid cells: `tests/browser_ui/chat/test_session_grid.py` covers two real xterm
+  surfaces against mocked terminal WebSockets, independent input, narrow-screen
+  switches and keeping connections across view changes. Run without a server
+  using `--browser-ui-skip-build --reruns 0 --video=on`.
   `tests/e2e_ui/shells/test_new_shell.py::test_starting_terminal_view_shows_loading_without_resume`,
   `tests/e2e_ui/shells/test_new_shell.py::test_stopped_terminal_view_keeps_resume`.
   A sub-agent approval answered from the dock below the terminal:
