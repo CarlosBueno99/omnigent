@@ -130,19 +130,17 @@ export function AskUserQuestionForm({
     return initial;
   });
 
-  // Untouched cards keep no draft, so they cannot evict real ones.
-  const [initialAnswers] = useState(() =>
-    draft ? null : { selections, customSelected, customInputs },
-  );
   useEffect(() => {
-    if (
-      initialAnswers &&
+    // Untouched cards keep no draft, so they cannot evict real ones.
+    const untouched =
       currentIndex === 0 &&
-      selections === initialAnswers.selections &&
-      customSelected === initialAnswers.customSelected &&
-      customInputs === initialAnswers.customInputs
-    ) {
-      clearAskUserQuestionDraft(elicitationId);
+      Object.values(selections).every((selection) => selection.length === 0) &&
+      !Object.values(customSelected).some(Boolean) &&
+      Object.values(customInputs).every((text) => text === "");
+    if (untouched) {
+      if (getAskUserQuestionDraft(elicitationId, questions)) {
+        clearAskUserQuestionDraft(elicitationId);
+      }
       return;
     }
     const draftSelections = { ...selections };
@@ -161,15 +159,7 @@ export function AskUserQuestionForm({
       customSelected: draftSelected,
       customInputs: draftInputs,
     });
-  }, [
-    elicitationId,
-    questions,
-    initialAnswers,
-    currentIndex,
-    selections,
-    customSelected,
-    customInputs,
-  ]);
+  }, [elicitationId, questions, currentIndex, selections, customSelected, customInputs]);
 
   const handleSingleSelect = (key: string, label: string) => {
     // Single-select mutex: clicking a real option clears the

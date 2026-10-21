@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { ClaudeQuestion } from "./askUserQuestion";
 import {
   type AskUserQuestionDraft,
+  clearAskUserQuestionDraft,
   getAskUserQuestionDraft,
   saveAskUserQuestionDraft,
 } from "./askUserQuestionDrafts";
@@ -17,6 +18,19 @@ const draft: AskUserQuestionDraft = {
 };
 
 describe("askUserQuestionDrafts", () => {
+  beforeEach(() => {
+    for (let index = 0; index <= 20; index++) clearAskUserQuestionDraft(`elic_${index}`);
+  });
+
+  it("restores a draft only for the questions it was saved with", () => {
+    saveAskUserQuestionDraft("elic_0", questions, draft);
+
+    expect(getAskUserQuestionDraft("elic_0", structuredClone(questions))).toEqual(draft);
+    expect(
+      getAskUserQuestionDraft("elic_0", [{ ...questions[0]!, question: "Pick a zone" }]),
+    ).toBeUndefined();
+  });
+
   it("keeps only the 20 most recently saved drafts", () => {
     for (let index = 0; index < 20; index++) {
       saveAskUserQuestionDraft(`elic_${index}`, questions, draft);

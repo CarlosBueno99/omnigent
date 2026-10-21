@@ -25,6 +25,7 @@ import * as commentInboxHook from "@/hooks/useCommentInbox";
 import * as sessionsApi from "@/lib/sessionsApi";
 import {
   type AskUserQuestionDraft,
+  clearAskUserQuestionDraft,
   getAskUserQuestionDraft,
   saveAskUserQuestionDraft,
 } from "@/lib/askUserQuestionDrafts";
@@ -40,7 +41,7 @@ vi.mock("@/components/blocks/ApprovalCard", async (importActual) => {
   const actual = await importActual<typeof approvalCard>();
   return {
     ApprovalCard: (props: ComponentProps<typeof actual.ApprovalCard>) => {
-      if (props.nativeDelivery) return <actual.ApprovalCard {...props} />;
+      if (props.nativeDelivery || props.askUserQuestion) return <actual.ApprovalCard {...props} />;
       const { elicitationId, message, status, allowAutoMode, onSubmit, requester } = props;
       return (
         <div data-testid="approval-card" data-status={status}>
@@ -164,6 +165,8 @@ afterEach(() => {
   vi.clearAllMocks();
   resetReadStateForTests();
   localStorage.clear();
+  clearAskUserQuestionDraft("eli_1");
+  clearAskUserQuestionDraft("eli_question");
 });
 
 /** A finished session whose latest turn the viewer hasn't opened yet. */
@@ -291,6 +294,30 @@ describe("InboxPage approval items", () => {
     // name, not the raw `**Bash**` markers.
     expect(within(toggle).getByText("Bash", { selector: "strong" })).toBeInTheDocument();
     expect(toggle.textContent).not.toContain("**");
+  });
+
+  it("keeps a question card's answers when its row is collapsed and reopened", async () => {
+    const row = conversation({ id: "sess_1" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [
+        rawElicitation("eli_question", "Claude has questions", {
+          ask_user_question: { questions: draftQuestions },
+        }),
+      ],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    renderPage();
+
+    fireEvent.change(await screen.findByTestId("ask-user-question-custom-input"), {
+      target: { value: "eu-west" },
+    });
+    const item = screen.getByTestId("inbox-item");
+    fireEvent.click(within(item).getByRole("button", { name: /My Session/ }));
+    await waitFor(() => expect(item).toHaveAttribute("data-expanded", "false"));
+    expect(screen.queryByTestId("ask-user-question-form")).not.toBeInTheDocument();
+    fireEvent.click(within(item).getByRole("button", { name: /My Session/ }));
+
+    expect(await screen.findByTestId("ask-user-question-custom-input")).toHaveValue("eu-west");
   });
 
   it("previews a policy prompt's command verbatim in the collapsed row", async () => {

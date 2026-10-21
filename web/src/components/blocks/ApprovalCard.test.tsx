@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { childSessionsQueryKey, type ChildSessionInfo } from "@/hooks/useChildSessions";
 import type { ClaudeQuestion } from "@/lib/askUserQuestion";
-import { getAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
+import { getAskUserQuestionDraft, saveAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
 import { BlockStream } from "@/lib/blockStream";
 import type { ElicitationBlock } from "@/lib/blocks";
 import { buildBubbles, type RenderItem } from "@/lib/renderItems";
@@ -1449,13 +1449,44 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     });
 
     it("keeps no draft for a card nobody answered", () => {
+      const [firstQuestion, ...rest] = draftQuestions;
+      const otherQuestions = [{ ...firstQuestion!, question: "Pick another codename" }, ...rest];
+      const otherDraft = {
+        currentIndex: 1,
+        selections: {},
+        customSelected: {},
+        customInputs: { "Describe the rollout": "Saved for other questions" },
+      };
+      saveAskUserQuestionDraft("elic_draft_untouched", otherQuestions, otherDraft);
+
       const first = renderPendingQuestions("elic_draft_untouched", draftQuestions);
       expect(getAskUserQuestionDraft("elic_draft_untouched", draftQuestions)).toBeUndefined();
+      expect(getAskUserQuestionDraft("elic_draft_untouched", otherQuestions)).toEqual(otherDraft);
       fireEvent.click(screen.getByTestId("ask-user-question-next"));
       fireEvent.click(screen.getByTestId("ask-user-question-prev"));
       first.unmount();
 
       expect(getAskUserQuestionDraft("elic_draft_untouched", draftQuestions)).toBeUndefined();
+    });
+
+    it("drops the draft once a restored card's answers are undone", () => {
+      const regionQuestions: ClaudeQuestion[] = [
+        {
+          question: "Pick regions",
+          header: "",
+          options: [{ label: "eu-west", description: "" }],
+          multiSelect: true,
+        },
+      ];
+      const first = renderPendingQuestions("elic_draft_undone", regionQuestions);
+      fireEvent.click(screen.getByLabelText("eu-west"));
+      first.unmount();
+      expect(getAskUserQuestionDraft("elic_draft_undone", regionQuestions)).toBeDefined();
+
+      renderPendingQuestions("elic_draft_undone", regionQuestions);
+      fireEvent.click(screen.getByLabelText("eu-west"));
+
+      expect(getAskUserQuestionDraft("elic_draft_undone", regionQuestions)).toBeUndefined();
     });
 
     it.each([
