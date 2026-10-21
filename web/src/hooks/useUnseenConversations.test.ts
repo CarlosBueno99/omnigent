@@ -633,6 +633,19 @@ describe("cross-device read-state (server revisions)", () => {
     expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
   });
 
+  it("keeps the applied revision when a PUT returns an older one", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 6_000, viewer_read_state_revision: 5 }]);
+    // A replica whose clock lags assigns this later write a lower revision.
+    respondWithRevision(3);
+    mod.markConversationUnread("conv-1", 5_000);
+    await settlePuts();
+
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 7_000, viewer_read_state_revision: 4 }]);
+
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+  });
+
   it("sends a conversation's writes one at a time, so the latest action reaches the server last", async () => {
     const mod = await loadFresh();
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: 1_000, viewer_read_state_revision: 1 }]);
