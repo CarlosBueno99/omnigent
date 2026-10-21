@@ -489,6 +489,28 @@ describe("cross-device read-state (server revisions)", () => {
     expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true);
   });
 
+  it("applies a newer value that arrived while this device's PUT was in flight", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 6_000, viewer_read_state_revision: 1 }]);
+    let resolvePut: (response: unknown) => void = () => {};
+    authFetch.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePut = resolve;
+      }),
+    );
+
+    mod.markConversationUnread("conv-1", 5_000);
+    // Another device's read lands after this write and streams in before its PUT returns.
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 7_000, viewer_read_state_revision: 3 }]);
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+
+    resolvePut({ ok: true, status: 200, json: async () => ({ revision: 2 }) });
+    await settlePuts();
+
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
+    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
+  });
+
   it("applies a Mark as unread made elsewhere while this device was closed", async () => {
     const mod = await loadFresh();
     respondWithRevision(1);
@@ -522,6 +544,75 @@ describe("cross-device read-state (server revisions)", () => {
 
     expect(reloaded.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
     expect(reloaded.isExplicitlyUnread("conv-1")).toBe(false);
+  });
+
+  it("applies another device's Mark as unread to a session this device only seeded", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: null, updated_at: 5_000 }]);
+
+    const reloaded = await reloadKeepingStorage();
+    reloaded.seedReadState([
+      { id: "conv-1", viewer_last_seen: 4_999, viewer_unread: true, viewer_read_state_revision: 1 },
+    ]);
+
+    expect(reloaded.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true);
+  });
+
+  it("records no revision from a failed PUT", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 6_000, viewer_read_state_revision: 1 }]);
+    authFetch.mockResolvedValue({ ok: false, status: 503, json: async () => ({ revision: 9 }) });
+    mod.markConversationUnread("conv-1", 5_000);
+    await settlePuts();
+
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 6_000, viewer_read_state_revision: 1 }]);
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 7_000, viewer_read_state_revision: 2 }]);
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
+  });
+
+  it("keeps the newest revision when overlapping PUTs resolve out of order", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 1_000, viewer_read_state_revision: 1 }]);
+    const resolvers: ((response: unknown) => void)[] = [];
+    authFetch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    mod.markConversationUnread("conv-1", 5_000);
+    mod.markConversationRead("conv-1", 6_000);
+    resolvers[1]({ ok: true, status: 200, json: async () => ({ revision: 20 }) });
+    await settlePuts();
+    resolvers[0]({ ok: true, status: 200, json: async () => ({ revision: 10 }) });
+    await settlePuts();
+
+    // Another device's unread landed between this device's two writes.
+    mod.seedReadState([
+      {
+        id: "conv-1",
+        viewer_last_seen: 4_999,
+        viewer_unread: true,
+        viewer_read_state_revision: 15,
+      },
+    ]);
+
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(false);
+    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(false);
+  });
+
+  it("applies a revisioned flag without a server baseline, keeping the local one", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 4_999, viewer_read_state_revision: 1 }]);
+
+    mod.seedReadState([
+      { id: "conv-1", viewer_last_seen: null, viewer_unread: true, viewer_read_state_revision: 2 },
+    ]);
+
+    expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true);
   });
 });
 

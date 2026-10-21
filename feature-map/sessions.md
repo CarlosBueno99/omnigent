@@ -45,7 +45,7 @@ the header menu), and each place is a separate entry point.
   idle; approval and error indicators can take precedence. A row showing the
   unread dot offers Mark as read instead. Bulk selection also offers these actions.
   Reading a session or marking it read or unread reaches the user's other open
-  clients without a reload.
+  clients on their next session-list update, without a reload.
 - `project`: Add to project (Move session once filed) puts a session in a
   project folder from the row menu, the header menu, or the header's folder tag.
 - `project-rename`: the project menu opens a dialog with the name selected;

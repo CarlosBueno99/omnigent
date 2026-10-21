@@ -207,6 +207,7 @@ def test_read_state_is_scoped_per_user() -> None:
     assert alice_item.viewer_unread is True  # type: ignore[attr-defined]
     assert bob_item.viewer_unread is False  # type: ignore[attr-defined]
     assert bob_item.viewer_last_seen is None  # type: ignore[attr-defined]
+    assert bob_item.viewer_read_state_revision is None  # type: ignore[attr-defined]
     del client, app
 
 

@@ -7,11 +7,8 @@
 // on a pod that never saw the user's read-state PUT, so its
 // `viewer_last_seen` / `viewer_unread` fields can be null even for a
 // session the user has read. The local copy is therefore the durable
-// source. Every server write carries a revision, and the mirror applies a
-// server value only when its revision is newer than the last one applied
-// here: a read or "Mark as unread" on another device shows up live, while an
-// older value from a lagging replica or an earlier poll is ignored.
-// Cross-device sync is best-effort across replicas by design.
+// source; a server value applies only when its revision is newer than the
+// last one applied here. Cross-device sync is best-effort by design.
 //
 // A conversation is "unseen" when its server-side updated_at exceeds the
 // stored baseline. A conversation with no baseline anywhere seeds to its
@@ -45,9 +42,11 @@ const explicitlyUnread = new Set<string>();
 // Server revision (epoch µs) of the newest read-state applied per
 // conversation, from the list or from this tab's own PUT response.
 let appliedRevision: LastSeenMap = {};
-// In-flight PUTs per conversation. Server values for these are skipped: they
+// In-flight PUTs per conversation. Server values for these are deferred: they
 // can predate the local write that is still landing.
 const pendingWrites = new Map<string, number>();
+// The newest list value deferred per conversation, replayed once its PUTs settle.
+const deferredSeeds = new Map<string, ReadStateSeed>();
 
 // localStorage persistence. Best-effort everywhere: storage can be
 // missing (SSR), full, or blocked — the in-memory mirror always works.
@@ -142,6 +141,7 @@ async function syncReadState(conversationId: string): Promise<void> {
         body: JSON.stringify({ last_seen: lastSeen, unread: explicitlyUnread.has(conversationId) }),
       },
     );
+    if (!response.ok) return;
     const body: unknown = await response.json();
     const revision = (body as { revision?: unknown } | null)?.revision;
     if (typeof revision === "number" && revision > (appliedRevision[conversationId] ?? 0)) {
@@ -153,7 +153,12 @@ async function syncReadState(conversationId: string): Promise<void> {
   } finally {
     const remaining = (pendingWrites.get(conversationId) ?? 1) - 1;
     if (remaining > 0) pendingWrites.set(conversationId, remaining);
-    else pendingWrites.delete(conversationId);
+    else {
+      pendingWrites.delete(conversationId);
+      const deferred = deferredSeeds.get(conversationId);
+      deferredSeeds.delete(conversationId);
+      if (deferred) seedReadState([deferred]);
+    }
   }
 }
 
@@ -219,7 +224,7 @@ function mergeUnrevisionedReadState(conv: ReadStateSeed, server: number | undefi
  * read-state whose revision is newer than the one last applied here is
  * adopted (see {@link adoptServerReadState}), so reads and "Mark as unread"
  * from the user's other devices show up without a reload; older revisions are
- * ignored, as is any value for a conversation whose PUT is still in flight.
+ * ignored. A value for a conversation whose PUT is in flight waits for the PUT.
  * A value without a revision is max-merged on the first seed only. A session
  * with no baseline on either side seeds to its `updated_at` ("read as of
  * load"): pod-independent, so a replica that can't see the user's read-state
@@ -230,7 +235,10 @@ export function seedReadState(conversations: readonly ReadStateSeed[]): void {
   let changed = false;
   let revisionsChanged = false;
   for (const conv of conversations) {
-    if (pendingWrites.has(conv.id)) continue;
+    if (pendingWrites.has(conv.id)) {
+      deferredSeeds.set(conv.id, conv);
+      continue;
+    }
     const firstSeed = !seeded.has(conv.id);
     seeded.add(conv.id);
     const server = typeof conv.viewer_last_seen === "number" ? conv.viewer_last_seen : undefined;
@@ -283,6 +291,7 @@ export function resetReadStateForTests(): void {
   explicitlyUnread.clear();
   appliedRevision = {};
   pendingWrites.clear();
+  deferredSeeds.clear();
   seeded.clear();
   hydrated = false;
   try {
