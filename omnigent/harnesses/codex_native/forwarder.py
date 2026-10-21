@@ -85,6 +85,9 @@ _logger = logging.getLogger(__name__)
 _AGENT_NAME = "codex-native-ui"
 _SUBSCRIBE_RETRY_DELAY_SECONDS = 0.2
 _REFUSED_SUBSCRIPTION_TURN_WAIT_SECONDS = 10.0
+_REFUSED_SUBSCRIPTION_POLLS = int(
+    _REFUSED_SUBSCRIPTION_TURN_WAIT_SECONDS / _SUBSCRIBE_RETRY_DELAY_SECONDS
+)
 # JSON-RPC "method not found"; Codex also uses it for an operation its build
 # does not support, e.g. ``list_turns is not supported yet``.
 _CODEX_UNSUPPORTED_REQUEST_CODE = -32601
@@ -2850,8 +2853,7 @@ async def _wait_for_refused_turn_id(bridge_dir: Path, thread_id: str) -> str | N
     :returns: The active turn id, e.g. ``"turn_123"``, or ``None`` when none
         is recorded for *thread_id* within the wait.
     """
-    polls = int(_REFUSED_SUBSCRIPTION_TURN_WAIT_SECONDS / _SUBSCRIBE_RETRY_DELAY_SECONDS)
-    for poll in range(polls + 1):
+    for poll in range(_REFUSED_SUBSCRIPTION_POLLS + 1):
         if poll:
             await _sleep(_SUBSCRIBE_RETRY_DELAY_SECONDS)
         state = read_bridge_state(bridge_dir)
@@ -2876,10 +2878,10 @@ async def _interrupt_refused_turn(
     :param turn_id: Codex turn id to interrupt, e.g. ``"turn_123"``.
     :returns: The turn's outcome for the failure message: ``"was stopped"``,
         ``"had already ended"`` when Codex reports no active turn throughout
-        the wait, or :data:`_REFUSED_TURN_MAY_BE_RUNNING`.
+        the wait, or :data:`_REFUSED_TURN_MAY_BE_RUNNING`. A turn that "had
+        already ended" may have finished normally; its unfollowed output is lost.
     """
-    polls = int(_REFUSED_SUBSCRIPTION_TURN_WAIT_SECONDS / _SUBSCRIBE_RETRY_DELAY_SECONDS)
-    for poll in range(polls + 1):
+    for poll in range(_REFUSED_SUBSCRIPTION_POLLS + 1):
         if poll:
             await _sleep(_SUBSCRIBE_RETRY_DELAY_SECONDS)
         try:
