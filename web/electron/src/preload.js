@@ -28,6 +28,56 @@ if (process.platform === "darwin") {
   window.addEventListener("resize", syncTitlebarZoom);
 }
 
+/**
+ * Runs in the page's main world. Calls `report(true)` when the first modal
+ * WebAuthn get/create starts and `report(false)` when the last one settles.
+ * Must stay self-contained: executeInMainWorld serializes it.
+ * @param {(pending: boolean) => void} report
+ */
+function observeWebAuthnRequests(report) {
+  const prototype = globalThis.CredentialsContainer?.prototype;
+  if (!prototype) return;
+  const apply = Reflect.apply;
+  const then = Promise.prototype.then;
+  let pending = 0;
+  const settle = () => {
+    pending -= 1;
+    if (pending === 0) report(false);
+  };
+  for (const name of ["get", "create"]) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    if (typeof descriptor?.value !== "function") continue;
+    // A Proxy keeps the method's name and length and a native toString.
+    descriptor.value = new Proxy(descriptor.value, {
+      apply(target, thisArg, args) {
+        const result = apply(target, thisArg, args);
+        const options = args[0];
+        // Conditional mediation is passkey autofill, which shows no prompt.
+        if (options?.publicKey && options.mediation !== "conditional") {
+          pending += 1;
+          if (pending === 1) report(true);
+          apply(then, result, [settle, settle]);
+        }
+        return result;
+      },
+    });
+    Object.defineProperty(prototype, name, descriptor);
+  }
+}
+
+// Electron has no passkey sheet, so let the shell show its own security-key
+// prompt. Windows shows its native WebAuthn dialog instead.
+if (process.platform !== "win32" && typeof contextBridge.executeInMainWorld === "function") {
+  try {
+    contextBridge.executeInMainWorld({
+      func: observeWebAuthnRequests,
+      args: [(pending) => ipcRenderer.send("omnigent:webauthn-pending", pending === true)],
+    });
+  } catch (error) {
+    console.warn("[omnigent] WebAuthn prompt unavailable on this page:", error);
+  }
+}
+
 // Collapse the update states the in-page UpdateBanner renders on
 // (available / downloading / downloaded / error-security) to `idle` so the server page can
 // never show a banner — that UI is shell-owned (the corner overlay). Kept here

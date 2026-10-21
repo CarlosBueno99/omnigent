@@ -2823,6 +2823,12 @@ describe("return-to-server banner wiring (src/main.js)", () => {
     assert.match(liveCode, /returnBanner\.registerIpc\(\)/);
   });
 
+  it("wires the security-key prompt to shell windows", () => {
+    assert.match(liveCode, /isShellWindow:\s*\(win\)\s*=>\s*windows\.has\(win\)/);
+    assert.match(liveCode, /securityKeyPrompt\.attach\(win\)/);
+    assert.match(liveCode, /securityKeyPrompt\.registerIpc\(\)/);
+  });
+
   it("shows the banner after a foreign commit outlasts the delay, hides on return", async () => {
     // End-to-end through the REAL createWindow + away_banner (return_banner
     // stubbed): the regression this guards is the banner never appearing

@@ -1019,10 +1019,16 @@ reconnect this machine explicitly from the host menu when you want it.
 ## Passkeys (WebAuthn)
 
 External security keys (e.g. a YubiKey) work out of the box: Chromium's
-content layer speaks CTAP to the key directly. That's also why the flow is
-_invisible_ — the passkey sheet you see in Chrome/Safari is browser chrome,
-which Electron doesn't ship. Touching the key completes the ceremony with no
-UI.
+content layer speaks CTAP to the key directly. The passkey sheet you see in
+Chrome/Safari is browser chrome, which Electron doesn't ship, so the shell
+shows its own **Use your security key** prompt below the return banner while a
+shell window's page waits on `navigator.credentials.get()`/`create()`. The
+shell preload observes those calls in the page's world
+(`contextBridge.executeInMainWorld`) and reports only when the first request
+starts and the last one settles; the prompt also hides when the page navigates
+or the user dismisses it. Passkey autofill (`mediation: "conditional"`) shows
+no prompt, and Windows keeps its native WebAuthn dialog instead. Embedded
+browser views and sign-in popups don't get the prompt.
 
 The shell intentionally does **not** enable Electron's Touch ID platform
 authenticator (`app.configureWebAuthn`). Doing so routes the entire WebAuthn
