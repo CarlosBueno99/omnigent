@@ -687,41 +687,68 @@ def test_login_explains_callback_when_browser_login_stalls(
     assert "Logged in as alice@example.com" in result.output
 
 
-@pytest.mark.parametrize(
-    ("after_terminate", "stop_events"),
-    [
-        ("exit", ["terminate", "wait"]),
-        ("ignore", ["terminate", "wait", "kill", "wait"]),
-    ],
-)
+@pytest.mark.parametrize("callback_forwarded", [False, True])
 def test_login_gives_up_when_browser_callback_never_arrives(
-    monkeypatch: pytest.MonkeyPatch,
-    token_dir: Path,
-    after_terminate: Literal["exit", "ignore"],
-    stop_events: list[str],
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path, callback_forwarded: bool
 ) -> None:
-    """Past the overall budget the CLI is stopped (killed if it ignores SIGTERM) and reaped,
-    and the error names the callback."""
+    """Past the overall budget the CLI is stopped and the error names the callback, without
+    forwarding advice when the bootstrap forwards it."""
     from omnigent.cli_auth import load_databricks_workspace_host
 
-    process = _FakeLoginProcess(stalls=2, after_terminate=after_terminate)
+    process = _FakeLoginProcess(stalls=2)
     _patch_login_env(
         monkeypatch,
         fake_httpx=_FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})]),
         cached_tokens=[None],
         login_process=process,
+        callback_forwarded=callback_forwarded,
     )
 
     result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
 
     assert result.exit_code != 0
-    assert process.events == ["wait", "wait", *stop_events]
+    assert process.events == ["wait", "wait", "terminate", "wait"]
     # The hint delay and the remaining wait add up to the overall budget.
     assert sum(process.wait_timeouts[:2]) == cli_mod._BROWSER_LOGIN_TIMEOUT_S
-    assert process.wait_timeouts[2] == cli_mod._BROWSER_LOGIN_STOP_GRACE_S
     assert "Timed out after 10 minutes waiting for the browser" in result.output
-    assert "ssh -L 8020:localhost:8020 -N <this-host>" in result.output
+    assert ("ssh -L 8020:localhost:8020 -N <this-host>" in result.output) is not callback_forwarded
     assert load_databricks_workspace_host(_APPS_URL) is None
+
+
+@pytest.mark.parametrize(
+    ("after_terminate", "stop_events", "stop_timeouts"),
+    [
+        ("exit", ["terminate", "wait"], [cli_mod._BROWSER_LOGIN_STOP_GRACE_S]),
+        (
+            "ignore",
+            ["terminate", "wait", "kill", "wait"],
+            [cli_mod._BROWSER_LOGIN_STOP_GRACE_S, None],
+        ),
+        (
+            "interrupt",
+            ["terminate", "wait", "kill", "wait"],
+            [cli_mod._BROWSER_LOGIN_STOP_GRACE_S, None],
+        ),
+    ],
+    ids=["exits", "ignores_sigterm", "second_interrupt"],
+)
+def test_stop_browser_login_terminates_then_kills_a_lingering_cli(
+    after_terminate: Literal["exit", "ignore", "interrupt"],
+    stop_events: list[str],
+    stop_timeouts: list[float | None],
+) -> None:
+    """SIGTERM first; a CLI that outlives the grace wait, or a second Ctrl+C during it, is
+    killed and reaped."""
+    process = _FakeLoginProcess(after_terminate=after_terminate)
+
+    if after_terminate == "interrupt":
+        with pytest.raises(KeyboardInterrupt):
+            cli_mod._stop_browser_login(process)  # type: ignore[arg-type]
+    else:
+        cli_mod._stop_browser_login(process)  # type: ignore[arg-type]
+
+    assert process.events == stop_events
+    assert process.wait_timeouts == stop_timeouts
 
 
 def test_login_explains_callback_upfront_in_ssh_session(
@@ -808,15 +835,11 @@ def test_login_reports_databricks_cli_failure(
     assert not process.terminated and not process.killed
 
 
-@pytest.mark.parametrize("after_terminate", ["ignore", "interrupt"])
-def test_login_kills_databricks_cli_on_keyboard_interrupt(
-    monkeypatch: pytest.MonkeyPatch,
-    token_dir: Path,
-    after_terminate: Literal["ignore", "interrupt"],
+def test_login_stops_databricks_cli_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path
 ) -> None:
-    """Ctrl+C aborts the login; a CLI that ignores SIGTERM, or a second Ctrl+C during the
-    grace wait, still gets the CLI killed and reaped."""
-    process = _FakeLoginProcess(raise_on_wait=KeyboardInterrupt, after_terminate=after_terminate)
+    """Ctrl+C aborts the login and stops the CLI."""
+    process = _FakeLoginProcess(raise_on_wait=KeyboardInterrupt)
     _patch_login_env(
         monkeypatch,
         fake_httpx=_FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})]),
@@ -828,8 +851,7 @@ def test_login_kills_databricks_cli_on_keyboard_interrupt(
 
     assert result.exit_code == 1
     assert "Aborted!" in result.output
-    assert process.events == ["wait", "terminate", "wait", "kill", "wait"]
-    assert process.wait_timeouts[1:] == [cli_mod._BROWSER_LOGIN_STOP_GRACE_S, None]
+    assert process.events == ["wait", "terminate", "wait"]
 
 
 def test_foreign_subprocess_calls_stay_out_of_the_login_recorder(
