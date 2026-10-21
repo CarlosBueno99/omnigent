@@ -280,6 +280,7 @@ from omnigent.server.routes._sessions.helpers import (
     _get_runner_client,
     _handle_advise_models_mcp,
     _HostRunnerStopAttempt,
+    _inherited_full_access_launch_args,
     _invalidate_runner_backed_snapshot_state,
     _is_codex_native_subagent,
     _is_kiro_native_session,
@@ -11633,6 +11634,22 @@ async def _create_session_from_existing_agent(
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
 
+    # A child of a full-access parent keeps that stance unless its own spec or
+    # the request chose one; otherwise it stops on prompts nobody expects.
+    if validated_launch_args is None and _parent_for_routing is not None:
+        parent_harness = await asyncio.to_thread(
+            _native_pane_harness,
+            _parent_for_routing,
+            agent_store=agent_store,
+            agent_cache=agent_cache,
+        )
+        validated_launch_args = _inherited_full_access_launch_args(
+            _parent_for_routing,
+            parent_harness=parent_harness,
+            child_harness=selected_harness,
+            child_spec=sub_spec if body.sub_agent_name else own_spec,
+        )
+
     if reasoning_effort is None:
         effort_spec: AgentSpec | None = sub_spec if sub_spec is not None else own_spec
         spec_effort = effort_spec.executor.reasoning_effort if effort_spec is not None else None
@@ -12055,6 +12072,18 @@ def _create_session_from_bundle(
                 f"invalid terminal_launch_args in bundled child spec: {exc}",
                 code=ErrorCode.INVALID_INPUT,
             ) from exc
+        if terminal_launch_args is None:
+            parent = conversation_store.get_conversation(metadata.parent_session_id)
+            terminal_launch_args = _inherited_full_access_launch_args(
+                parent,
+                parent_harness=(
+                    _native_pane_harness(parent, agent_store=agent_store)
+                    if parent is not None
+                    else None
+                ),
+                child_harness=_spec_harness(spec),
+                child_spec=spec,
+            )
         metadata = metadata.model_copy(update={"terminal_launch_args": terminal_launch_args})
     elif metadata.terminal_launch_args is None:
         # Top-level bundle create (the ``omnigent run <dir>`` shape): honor the

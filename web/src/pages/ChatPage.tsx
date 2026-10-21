@@ -267,6 +267,7 @@ import { GoalDialog, CommandGoalDialog, GoalStatusPill, useGoalState } from "@/c
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { ConnectionIndicator } from "./ChatIndicators";
+import { TerminalSubagentApprovals } from "@/components/chat/TerminalSubagentApprovals";
 import { Transcript } from "@/components/chat/Transcript";
 
 /** Server-info as consumers see it: the probe's result, or "loading". */
@@ -1715,6 +1716,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
           onSurfaceElement={isActive ? setTerminalSurfaceEl : undefined}
           readOnly={entry.readOnly}
         />
+        {isShown && <TerminalSubagentApprovals />}
         {isShown && (
           <ConnectionIndicator liveness={liveness} onShowReconnectHelp={onShowReconnectHelp} />
         )}

@@ -1774,6 +1774,121 @@ async def test_multipart_child_derives_native_bypass_args_from_uploaded_spec(
     assert child.json()["terminal_launch_args"] == expected_args
 
 
+async def test_claude_child_of_full_access_codex_session_inherits_bypass(
+    client: httpx.AsyncClient,
+) -> None:
+    """A Claude child spawned by a Full-access Codex session launches without approval prompts."""
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    codex = await create_test_agent(
+        client,
+        name="full-access-codex-parent",
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+        include_llm=False,
+    )
+    claude = await create_test_agent(
+        client,
+        name="spawned-claude-child",
+        executor={"type": "omnigent", "config": {"harness": "claude-native"}},
+        include_llm=False,
+    )
+    full_access_args = ["--sandbox", "danger-full-access", "--ask-for-approval", "never"]
+    parent = await client.post(
+        "/v1/sessions",
+        json={"agent_id": codex["id"], "terminal_launch_args": full_access_args},
+    )
+    assert parent.status_code == 201, parent.text
+    assert parent.json()["terminal_launch_args"] == full_access_args
+
+    output = await execute_tool(
+        tool_name="sys_session_create",
+        arguments=json.dumps({"agent_id": claude["id"], "title": "Commit range review"}),
+        server_client=client,
+        conversation_id=parent.json()["id"],
+    )
+
+    handle = json.loads(output)
+    assert "error" not in handle, handle
+    child = await client.get(f"/v1/sessions/{handle['conversation_id']}")
+    assert child.status_code == 200, child.text
+    assert child.json()["parent_session_id"] == parent.json()["id"]
+    assert child.json()["terminal_launch_args"] == ["--permission-mode", "bypassPermissions"]
+
+
+async def _create_full_access_codex_session(client: httpx.AsyncClient, name: str) -> str:
+    """Create a Codex session launched with the Full access preset and return its id."""
+    codex = await create_test_agent(
+        client,
+        name=name,
+        executor={"type": "omnigent", "config": {"harness": "codex-native"}},
+        include_llm=False,
+    )
+    parent = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": codex["id"],
+            "terminal_launch_args": [
+                "--sandbox",
+                "danger-full-access",
+                "--ask-for-approval",
+                "never",
+            ],
+        },
+    )
+    assert parent.status_code == 201, parent.text
+    return parent.json()["id"]
+
+
+async def test_multipart_claude_child_of_full_access_codex_session_inherits_bypass(
+    client: httpx.AsyncClient,
+) -> None:
+    """A bundled Claude child of a Full access Codex session launches in bypass mode."""
+    parent_id = await _create_full_access_codex_session(client, "bundle-full-access-parent")
+    child_bundle = build_agent_bundle(
+        name="bundle-claude-child",
+        executor={"type": "omnigent", "config": {"harness": "claude-native"}},
+        include_llm=False,
+    )
+
+    resp = await client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({"parent_session_id": parent_id})},
+        files={"bundle": ("agent.tar.gz", child_bundle, "application/gzip")},
+    )
+
+    assert resp.status_code == 201, resp.text
+    child = await client.get(f"/v1/sessions/{resp.json()['session_id']}")
+    assert child.status_code == 200, child.text
+    assert child.json()["terminal_launch_args"] == ["--permission-mode", "bypassPermissions"]
+
+
+async def test_explicit_child_launch_args_override_inherited_full_access(
+    client: httpx.AsyncClient,
+) -> None:
+    """Launch args sent with the child create, even none, replace the inherited stance."""
+    parent_id = await _create_full_access_codex_session(client, "explicit-args-parent")
+    claude = await create_test_agent(
+        client,
+        name="explicit-args-claude-child",
+        executor={"type": "omnigent", "config": {"harness": "claude-native"}},
+        include_llm=False,
+    )
+
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": claude["id"],
+            "parent_session_id": parent_id,
+            "terminal_launch_args": [],
+        },
+    )
+
+    assert resp.status_code == 201, resp.text
+    child = await client.get(f"/v1/sessions/{resp.json()['id']}")
+    assert child.status_code == 200, child.text
+    assert child.json()["terminal_launch_args"] == []
+
+
 async def test_multipart_create_with_unknown_parent_404s(
     client: httpx.AsyncClient,
 ) -> None:
