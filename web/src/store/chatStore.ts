@@ -6059,9 +6059,7 @@ export async function startStreamPump(
         if (reconnecting) {
           await reconcileOnReconnect(id, set, get, ignoredNativeMessageIds);
         }
-        // Neither bindStream's nor reconcileOnReconnect's snapshot is final: a
-        // status or launch stage that changed before this open subscribed is
-        // never re-sent, so re-read both over the next ~20s.
+        // Open-time snapshots can miss a status or launch stage set before subscribe; re-read both.
         scheduleStatusCatchup(reconnecting);
         let reason = await pumpPromise;
 

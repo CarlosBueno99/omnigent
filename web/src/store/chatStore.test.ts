@@ -1001,6 +1001,7 @@ describe("chatStore — lazy subtree usage", () => {
       await passOpenStatusCatchup();
       const initialSnapshots = metadataSnapshotCount();
       const readsBeforePeriodic = readUsage.mock.calls.length;
+      expect(readsBeforePeriodic).toBe(1);
       readUsage.mockImplementation(() => pending);
 
       await advanceReconcileInterval();
