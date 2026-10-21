@@ -13485,7 +13485,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
 
     await vi.advanceTimersByTimeAsync(Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
     await drainAsync(2);
-    expect(snapshotReads()).toBe(STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS.length + 1);
+    expect(snapshotReads()).toBe(2);
     expect(useChatStore.getState().sessionStatus).toBe("running");
 
     await releaseBoundStream("conv_first_open_stale", sinks);
@@ -13494,7 +13494,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
   it.each([
     ["running", "idle"],
     ["waiting", "running"],
-  ] as const)("keeps a %s first-open snapshot over stale %s re-reads", async (bound, stale) => {
+  ] as const)("keeps a %s first-open snapshot over a stale %s", async (bound, stale) => {
     const id = `conv_first_open_${bound}`;
     seedSession(id, []);
     const sinks = routeStreamOpens();
@@ -13507,7 +13507,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await vi.advanceTimersByTimeAsync(Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
     await drainAsync(2);
 
-    expect(snapshotReads()).toBe(STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS.length + 1);
+    expect(snapshotReads()).toBe(1);
     expect(useChatStore.getState().sessionStatus).toBe(bound);
 
     await releaseBoundStream(id, sinks);
@@ -13563,7 +13563,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
       releaseBindSnapshot();
       await switching;
       await drainAsync(2);
-      expect(useChatStore.getState().sessionStatus).toBe("idle");
+      if (live === "idle") expect(useChatStore.getState().sessionStatus).toBe("idle");
 
       await vi.advanceTimersByTimeAsync(Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
       await drainAsync(2);
@@ -13615,6 +13615,92 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     expect(useChatStore.getState().sessionStatus).toBe("running");
 
     await releaseBoundStream("conv_rebind_marker", sinks);
+  });
+
+  it("ignores a late status from the stream that a send rebind replaced", async () => {
+    seedSession("conv_rebind_late", []);
+    const sinks = routeStreamOpens();
+    // The failed first load keeps its stream open, so send aborts it and rebinds.
+    const snapshotReads = routeSnapshotStatuses("conv_rebind_late", (read) => {
+      if (read === 1) return "error";
+      return read === 2 ? "idle" : "running";
+    });
+
+    await useChatStore.getState().switchTo("conv_rebind_late");
+    await drainAsync(2);
+    await useChatStore
+      .getState()
+      .send("after the failed load", "agent_xyz")
+      .catch(() => undefined);
+    await drainAsync(2);
+    expect(sinks).toHaveLength(2);
+    expect(snapshotReads()).toBe(2);
+    sinks[0]!.push(sse("session.status", { conversation_id: "conv_rebind_late", status: "idle" }));
+    await drainAsync(2);
+
+    await vi.advanceTimersByTimeAsync(STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS[0]);
+    await drainAsync(2);
+
+    expect(snapshotReads()).toBe(3);
+    expect(useChatStore.getState().sessionStatus).toBe("running");
+
+    await releaseBoundStream("conv_rebind_late", sinks);
+  });
+
+  it("drops a first-open re-read that a live idle edge overtakes", async () => {
+    seedSession("conv_first_open_overtaken", []);
+    const sinks = routeStreamOpens();
+    let releaseReRead!: () => void;
+    const reReadHeld = new Promise<void>((resolve) => {
+      releaseReRead = resolve;
+    });
+    const snapshotReads = routeSnapshotStatuses("conv_first_open_overtaken", async (read) => {
+      if (read === 1) return "idle";
+      await reReadHeld;
+      return "running";
+    });
+
+    await useChatStore.getState().switchTo("conv_first_open_overtaken");
+    await drainAsync(2);
+    await vi.advanceTimersByTimeAsync(STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS[0]);
+    await drainAsync(2);
+    expect(snapshotReads()).toBe(2);
+    sinks[0]!.push(
+      sse("session.status", { conversation_id: "conv_first_open_overtaken", status: "idle" }),
+    );
+    await drainAsync(2);
+    releaseReRead();
+    await drainAsync(2);
+    expect(useChatStore.getState().sessionStatus).toBe("idle");
+
+    await vi.advanceTimersByTimeAsync(Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
+    await drainAsync(2);
+
+    expect(snapshotReads()).toBe(2);
+    expect(useChatStore.getState().sessionStatus).toBe("idle");
+    await releaseBoundStream("conv_first_open_overtaken", sinks);
+  });
+
+  it("skips first-open re-reads once the conversation is off screen", async () => {
+    seedSession("conv_first_open_left", []);
+    seedSession("conv_first_open_other", []);
+    const sinks = routeStreamOpens();
+    const snapshotReads = routeSnapshotStatuses("conv_first_open_left", (read) =>
+      read === 1 ? "idle" : "running",
+    );
+
+    await useChatStore.getState().switchTo("conv_first_open_left");
+    await drainAsync(2);
+    await useChatStore.getState().switchTo("conv_first_open_other");
+    await drainAsync(2);
+    expect(sinks).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(Math.max(...STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS));
+    await drainAsync(2);
+
+    expect(snapshotReads()).toBe(1);
+    await releaseBoundStream("conv_first_open_other", sinks);
+    await releaseBoundStream("conv_first_open_left", sinks.slice(0, 1));
   });
 
   it("suppresses delayed previews after snapshot-only completion recovery", async () => {
@@ -14705,8 +14791,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
     await advanceWithHeartbeats(sink, ACTIVE_SESSION_STATUS_RECONCILE_INTERVAL_MS);
     await drainAsync();
 
-    // Each post-open re-read and the periodic read issues its own request.
-    expect(snapshotFetches).toBe(STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS.length + 1);
+    expect(snapshotFetches).toBe(1);
     expect(bound.get().sessionStatus).toBe("idle");
 
     resolveSharedQuery!({ source: "older request" });

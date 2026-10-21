@@ -1404,9 +1404,9 @@ let queryClient: QueryClient | null = null;
 const streamEventRevisions = new Map<string, number>();
 conversationRegistry.subscribeDisposed((id) => streamEventRevisions.delete(id));
 
-// Latest status each conversation's own stream delivered since its bind began.
-const liveStatusSinceBind = new Map<string, SessionStatus>();
-conversationRegistry.subscribeDisposed((id) => liveStatusSinceBind.delete(id));
+// Latest status each binding's own stream delivered, keyed by its controller so a
+// late event from a replaced binding cannot reach the new one.
+const liveStatusByBinding = new WeakMap<AbortController, SessionStatus>();
 
 // Reconnects share a binding; only one usage request may hydrate it at a time.
 const sessionUsageHydrations = new WeakSet<AbortController>();
@@ -4606,7 +4606,6 @@ async function bindStream(
     return;
   }
   set({ abortController: controller });
-  liveStatusSinceBind.delete(id);
 
   // Opening a conversation URL with no session list loaded yet leaves the
   // session→host map empty, so the SSE stream
@@ -5200,8 +5199,8 @@ async function reconcileLaunchStatus(id: string, set: Setter, get: Getter): Prom
  *
  * A stream pump can keep receiving heartbeats while missing a lifecycle event.
  * Periodically re-read durable status, discarding a snapshot if any semantic
- * stream event arrives during the fetch. `raiseOnly` applies only an
- * idle-to-running recovery.
+ * stream event arrives during the fetch. `raiseOnly` reads only while the
+ * screen shows idle and applies only a running result.
  */
 async function reconcileActiveSessionStatus(
   id: string,
@@ -5214,7 +5213,8 @@ async function reconcileActiveSessionStatus(
     queryClient === null ||
     controller.signal.aborted ||
     conversationRegistry.getActive()?.id !== id ||
-    get().abortController !== controller
+    get().abortController !== controller ||
+    (raiseOnly && get().sessionStatus !== "idle")
   ) {
     return;
   }
@@ -5258,7 +5258,7 @@ async function reconcileActiveSessionStatus(
   ) {
     return;
   }
-  if (raiseOnly && (session.status !== "running" || current.sessionStatus !== "idle")) return;
+  if (raiseOnly && session.status !== "running") return;
   set((s) => {
     const patch = reconnectStatusPatch(session, s, stateBeforeFetch.mcpStartupLaunch);
     const blocks = snapshotCompactionSpinners(s.blocks, s.activeResponse, patch.activeResponse);
@@ -5854,7 +5854,7 @@ export async function startStreamPump(
     catchupTimers = STREAM_OPEN_STATUS_CATCHUP_DELAYS_MS.map((delayMs) =>
       window.setTimeout(() => {
         if (controller.signal.aborted || isConversationDisposed(id)) return;
-        const liveStatus = liveStatusSinceBind.get(id);
+        const liveStatus = liveStatusByBinding.get(controller);
         if (reconnecting || liveStatus === undefined || liveStatus === "running") {
           runGuardedStatusReconcile(!reconnecting);
         }
@@ -6645,6 +6645,7 @@ export async function pumpStreamEvents(
         // edge's adoption and cleanup (e.g. of a "Compacting…" spinner) see it.
         flush();
       },
+      (status) => liveStatusByBinding.set(controller, status),
     ),
     id,
     ignoredMessages,
@@ -8718,12 +8719,13 @@ async function* tapSessionEvents(
   conversationId: string,
   onElicitationResolved?: (elicitationId: string) => void,
   beforeTurnEdge?: () => void,
+  onOwnStatus?: (status: SessionStatus) => void,
 ): AsyncIterable<StreamEvent> {
   for await (const event of events) {
     if (!isConversationDisposed(conversationId)) {
       streamEventRevisions.set(conversationId, (streamEventRevisions.get(conversationId) ?? 0) + 1);
       if (event.type === "session_status" && event.conversationId === conversationId) {
-        liveStatusSinceBind.set(conversationId, event.status);
+        onOwnStatus?.(event.status);
       }
     }
     if (event.type === "session_status" || event.type === "session_interrupted") {
