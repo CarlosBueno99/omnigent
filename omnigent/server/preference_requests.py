@@ -31,6 +31,7 @@ class _Limits:
     )
 
 
+# custom-lint: disable-next=workspace-scoped-cache -- Global budget; rates use workspace keys.
 _limits: WeakKeyDictionary[asyncio.AbstractEventLoop, _Limits] = WeakKeyDictionary()
 
 
