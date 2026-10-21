@@ -24,7 +24,8 @@ import pytest
 
 from omnigent.spec.types import MCPServerConfig, RetryPolicy
 from omnigent.tools.mcp import McpServerConnection
-from tests.tools.net_helpers import free_port, wait_for_listen
+from tests._helpers.live_server import find_free_port
+from tests.tools.net_helpers import wait_for_listen
 
 _EXPIRING_AUTH_SERVER = str(
     Path(__file__).parent / "fixtures" / "expiring_auth_http_mcp_server.py"
@@ -54,7 +55,7 @@ def expiring_auth_http_mcp(
     and ``base_url`` is the origin the test hits ``/arm`` and ``/reset``
     on to toggle the 401 outage.
     """
-    port = free_port()
+    port = find_free_port()
     server = subprocess.Popen(
         [sys.executable, _EXPIRING_AUTH_SERVER, str(port)],
         stdout=subprocess.DEVNULL,

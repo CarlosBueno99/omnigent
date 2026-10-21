@@ -6,13 +6,6 @@ import socket
 import time
 
 
-def free_port() -> int:
-    """Reserve an ephemeral localhost port and return it."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
 def wait_for_listen(port: int, timeout_s: float = 30.0) -> None:
     """Poll until ``127.0.0.1:port`` accepts a TCP connection."""
     deadline = time.monotonic() + timeout_s
