@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
 import { BACKGROUND_SESSION_TITLES_STORAGE_KEY } from "@/lib/backgroundSessionTitlesPreferences";
+import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import * as host from "@/lib/host";
 import {
   readTerminalClipboardPreference,
@@ -20,14 +21,14 @@ import type { ElectronUpdateBridge, UpdateConfig, UpdateStatus } from "@/lib/nat
 const mocks = vi.hoisted(() => ({
   setTheme: vi.fn(),
   theme: "system" as string,
+  isEmbedded: false,
   archiveMutate: vi.fn(),
   deleteMutate: vi.fn(),
   bulkArchiveMutate: vi.fn(),
   bulkDeleteMutate: vi.fn(),
   accountsEnabled: true,
-  harnessSettingsEnabled: false,
   importSessionsPanel: vi.fn(() => null),
-  reviewImportsPanel: vi.fn(() => null),
+  enabledConnections: [] as string[],
   // login_url: non-null for any sign-in mode (accounts OR OIDC), null in
   // header mode. Gates the Account section.
   loginUrl: "/login" as string | null,
@@ -52,20 +53,17 @@ const mocks = vi.hoisted(() => ({
 vi.mock("next-themes", () => ({
   useTheme: () => ({ theme: mocks.theme, systemTheme: "light", setTheme: mocks.setTheme }),
 }));
-vi.mock("@/lib/embedded", () => ({ useIsEmbedded: () => false }));
+vi.mock("@/lib/embedded", () => ({ useIsEmbedded: () => mocks.isEmbedded }));
 vi.mock("@/lib/CapabilitiesContext", () => ({
   useServerInfo: () => ({
     accounts_enabled: mocks.accountsEnabled,
     login_url: mocks.loginUrl,
     single_user: mocks.singleUser,
-    features: { harness_settings_ui: mocks.harnessSettingsEnabled },
+    enabled_connections: mocks.enabledConnections,
   }),
 }));
 vi.mock("@/shell/ImportSessionsPanel", () => ({
   ImportSessionsPanel: mocks.importSessionsPanel,
-}));
-vi.mock("@/components/onboarding/HostImportReview", () => ({
-  ReviewImportsPanel: mocks.reviewImportsPanel,
 }));
 vi.mock("@/lib/accountsApi", () => ({
   logout: vi.fn(),
@@ -75,6 +73,7 @@ vi.mock("@/lib/identity", () => ({
   resolveIdentity: () => Promise.resolve(mocks.me?.id ?? null),
   getCurrentIsAdmin: () => mocks.me?.is_admin ?? false,
   getCurrentUserId: () => mocks.me?.id ?? null,
+  subscribeIdentity: () => () => {},
 }));
 vi.mock("@/hooks/useConversations", async () => {
   // A stateful mock that emulates useInfiniteQuery pagination: it tracks how
@@ -192,6 +191,9 @@ vi.mock("@/pages/MembersPage", () => ({
 vi.mock("@/pages/PoliciesPage", () => ({
   PoliciesPage: () => <div>policies-page-stub</div>,
 }));
+vi.mock("@/components/McpRegistry", () => ({
+  McpRegistryConnections: () => <div>mcp-accounts-stub</div>,
+}));
 
 import { SettingsPage } from "./SettingsPage";
 
@@ -233,10 +235,10 @@ beforeEach(() => {
   mocks.fetchNextPage.mockReset();
   mocks.conversationQuery.mockReset();
   mocks.theme = "system";
+  mocks.isEmbedded = false;
   mocks.accountsEnabled = true;
-  mocks.harnessSettingsEnabled = false;
   mocks.importSessionsPanel.mockClear();
-  mocks.reviewImportsPanel.mockClear();
+  mocks.enabledConnections = [];
   mocks.loginUrl = "/login";
   mocks.me = { id: "alice", is_admin: false };
   mocks.conversations = [];
@@ -263,23 +265,28 @@ afterEach(() => {
 });
 
 describe("Import sessions", () => {
-  it.each([true, false])(
-    "shows Harness imports only with Harnesses settings disabled (enabled=%s)",
-    (enabled) => {
-      mocks.harnessSettingsEnabled = enabled;
-      renderPage("/settings/import");
+  it("keeps session imports without the legacy Harness imports section", () => {
+    renderPage("/settings/import");
 
-      expect(screen.getByRole("heading", { name: "Import from a machine" })).toBeTruthy();
-      expect(mocks.importSessionsPanel).toHaveBeenCalled();
-      if (enabled) {
-        expect(screen.queryByRole("heading", { name: "Harness imports" })).toBeNull();
-        expect(mocks.reviewImportsPanel).not.toHaveBeenCalled();
-      } else {
-        expect(screen.getByRole("heading", { name: "Harness imports" })).toBeTruthy();
-        expect(mocks.reviewImportsPanel).toHaveBeenCalled();
-      }
-    },
-  );
+    expect(screen.getByRole("heading", { name: "Import from a machine" })).toBeTruthy();
+    expect(mocks.importSessionsPanel).toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "Harness imports" })).toBeNull();
+  });
+});
+
+describe("MCP settings", () => {
+  it("renders configured MCP accounts at their own URL", () => {
+    mocks.enabledConnections = ["mcp"];
+    renderPage("/settings/mcp");
+    expect(screen.getByText("mcp-accounts-stub")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "MCP" })).toBeInTheDocument();
+  });
+
+  it("explains a deep link when MCP is not configured", () => {
+    renderPage("/settings/mcp");
+    expect(screen.getByText("MCP services are not configured on this server.")).toBeInTheDocument();
+    expect(screen.queryByText("mcp-accounts-stub")).not.toBeInTheDocument();
+  });
 });
 
 const DEFAULT_UPDATE_CONFIG: UpdateConfig = {
@@ -454,7 +461,9 @@ describe("SettingsPage", () => {
     if (description === null) throw new Error("Missing composer shortcut description");
     expect(Array.from(description.children).map((line) => line.tagName)).toEqual(["P", "P"]);
     expect(
-      within(description).getByText("Off: Enter submits and Shift+Enter inserts a newline."),
+      within(description).getByText(
+        /Off: Enter submits and Shift\+Enter or (?:⌥|Alt)\+Enter inserts a newline\./,
+      ),
     ).toBeInTheDocument();
     expect(
       within(description).getByText(/On: Enter inserts a newline and (?:⌘|Ctrl)\+Enter submits\./),
@@ -501,6 +510,24 @@ describe("SettingsPage", () => {
     expect(screen.getByTestId("theme-system")).toHaveAttribute("aria-checked", "true");
     fireEvent.click(screen.getByTestId("theme-dark"));
     expect(mocks.setTheme).toHaveBeenCalledWith("dark");
+  });
+
+  it("opens the embedded host's theme settings in a new tab", () => {
+    mocks.isEmbedded = true;
+    const url = "https://workspace.example.com/settings/user/preferences";
+    vi.spyOn(host, "getOmnigentThemeSettingsUrl").mockReturnValue(url);
+    renderPage("/settings/appearance");
+
+    expect(screen.queryByTestId("theme-system")).not.toBeInTheDocument();
+    for (const name of [
+      "Click to open Databricks user preferences page.",
+      "Open Databricks preferences",
+    ]) {
+      const link = screen.getByRole("link", { name });
+      expect(link).toHaveAttribute("href", url);
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noreferrer");
+    }
   });
 
   it("renders the Terminal theme radiogroup with auto selected by default", () => {
@@ -589,7 +616,7 @@ describe("SettingsPage", () => {
     const group = screen.getByRole("radiogroup", { name: "Default Workspace tab" });
     const options = within(group).getAllByRole("radio");
     expect(options).toHaveLength(4);
-    ["Files", "Changes", "GitHub", "Agents"].forEach((label, index) => {
+    ["Files", "Changes", "Pull Requests", "Agents"].forEach((label, index) => {
       expect(options[index]).toHaveAccessibleName(label);
     });
     expect(screen.getByTestId("workspace-tab-default-files")).toHaveAttribute(
@@ -603,10 +630,15 @@ describe("SettingsPage", () => {
       "aria-checked",
       "true",
     );
+    expect(
+      screen.getByRole("img", {
+        name: "Sidebar preview: Agents, Files, Changes, Pull Requests pinned.",
+      }),
+    ).toBeInTheDocument();
     expect(localStorage.getItem("omnigent:default-workspace-tab")).toBe("subagents");
   });
 
-  it("seeds the default Workspace tab from storage", () => {
+  it("seeds the preferred Workspace tab and restores it when repinned", () => {
     localStorage.setItem("omnigent:default-workspace-tab", "changes");
     renderPage("/settings/appearance");
 
@@ -614,10 +646,73 @@ describe("SettingsPage", () => {
       "aria-checked",
       "true",
     );
+    expect(
+      screen.getByRole("img", {
+        name: "Sidebar preview: Changes, Files, Pull Requests, Agents pinned.",
+      }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Pin Changes" }));
     expect(screen.getByTestId("workspace-tab-default-files")).toHaveAttribute(
       "aria-checked",
+      "true",
+    );
+    expect(localStorage.getItem("omnigent:default-workspace-tab")).toBe("changes");
+    fireEvent.click(screen.getByRole("button", { name: "Pin Changes" }));
+    expect(screen.getByTestId("workspace-tab-default-changes")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
+
+  it("lets every workspace page be unpinned, remembers the choice, and selects a pinned default", () => {
+    writeSessionWorkspaceState("file", {
+      rightRailTab: "files",
+      openFiles: ["README.md"],
+      selectedFilePath: "README.md",
+    });
+    writeSessionWorkspaceState("browser", {
+      rightRailTab: "browser",
+      openBrowsers: ["one"],
+      selectedBrowserId: "one",
+    });
+    const page = renderPage("/settings/appearance");
+    for (const label of ["Files", "Changes", "Pull Requests", "Agents"]) {
+      const toggle = screen.getByRole("button", { name: `Pin ${label}` });
+      expect(toggle).toHaveAttribute("aria-pressed", "true");
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-pressed", "false");
+      expect(screen.queryByRole("radio", { name: label })).toBeNull();
+    }
+    expect(screen.queryByRole("radiogroup", { name: "Default Workspace tab" })).toBeNull();
+    expect(
+      screen.getByRole("img", { name: "Sidebar preview: all pages in the + menu." }),
+    ).toBeInTheDocument();
+    expect(localStorage.getItem("omnigent:pinned-workspace-tabs")).toBe("[]");
+
+    page.unmount();
+    renderPage("/settings/appearance");
+    expect(screen.getByRole("button", { name: "Pin Files" })).toHaveAttribute(
+      "aria-pressed",
       "false",
     );
+    fireEvent.click(screen.getByRole("button", { name: "Pin Changes" }));
+    expect(screen.getByTestId("workspace-tab-default-changes")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(
+      screen.getByRole("img", { name: "Sidebar preview: Changes pinned." }),
+    ).toBeInTheDocument();
+    expect(localStorage.getItem("omnigent:default-workspace-tab")).toBeNull();
+    expect(readSessionWorkspaceState("file")).toEqual({
+      openFiles: ["README.md"],
+      selectedFilePath: "README.md",
+    });
+    expect(readSessionWorkspaceState("browser")).toEqual({
+      rightRailTab: "browser",
+      openBrowsers: ["one"],
+      selectedBrowserId: "one",
+    });
   });
 
   it("renders the color theme dropdown, defaults to Omnigent, and applies a palette on change", () => {
@@ -819,6 +914,7 @@ describe("SettingsPage", () => {
     fireEvent.click(screen.getByTestId("transcript-view-default-terminal"));
     fireEvent.click(screen.getByTestId("workspace-panel-default-open"));
     fireEvent.click(screen.getByTestId("workspace-tab-default-subagents"));
+    fireEvent.click(screen.getByRole("button", { name: "Pin Changes" }));
     fireEvent.click(screen.getByTestId("hide-unconfigured-harnesses-toggle"));
     fireEvent.click(screen.getByTestId("ui-font-size-inc"));
     fireEvent.click(screen.getByTestId("ui-font-size-inc"));
@@ -879,6 +975,11 @@ describe("SettingsPage", () => {
       "true",
     );
     expect(localStorage.getItem("omnigent:default-workspace-tab")).toBeNull();
+    expect(localStorage.getItem("omnigent:pinned-workspace-tabs")).toBeNull();
+    expect(screen.getByRole("button", { name: "Pin Changes" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     expect(screen.getByTestId("hide-unconfigured-harnesses-toggle")).toHaveAttribute(
       "aria-checked",
       "false",
