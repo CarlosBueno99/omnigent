@@ -465,8 +465,23 @@ def test_an_editor_footer_without_a_permissions_headline_is_still_a_prompt(
         "   Enter to submit · Esc to cancel\n"
     )
     monkeypatch.setattr(bridge, "_capture_pane", lambda *_: pane)
-    assert not bridge._permissions_dialog_visible(pane)
     assert bridge.has_pending_user_prompt(native_bridge)
+
+
+def test_a_permissions_dialog_that_never_closes_is_named_and_nothing_is_typed(
+    native_bridge: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only Escapes reach a dialog that outlives the dismissal window; the refusal names it."""
+    sent: list[tuple[str, ...]] = []
+    monkeypatch.setattr(bridge, "_capture_pane", lambda *_: _PERMISSIONS_ALLOW_LIST)
+    monkeypatch.setattr(bridge, "_run_tmux", lambda *args: sent.append(args))
+    monkeypatch.setattr(bridge, "_CLAUDE_READY_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr(bridge, "_OCCUPIED_INPUT_DISMISS_RETRY_INTERVAL_S", 0.01)
+    monkeypatch.setattr(bridge, "_OCCUPIED_INPUT_DISMISS_TIMEOUT_S", 0.05)
+    with pytest.raises(bridge.ClaudeTerminalDialog, match="the /permissions dialog"):
+        bridge.inject_user_message(native_bridge, content="Never typed into the dialog")
+    assert sent
+    assert all(args[-1] == "Escape" for args in sent)
 
 
 def test_permissions_dialog_chrome_above_a_ready_composer_keeps_it_ready() -> None:

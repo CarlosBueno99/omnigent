@@ -1,13 +1,7 @@
 r"""UI journey: a web message sent while Claude Code's ``/permissions`` dialog is open.
 
-A person can open Claude Code's own settings dialogs from the embedded
-terminal and leave one up. Before the runner types a web-composer message into
-Claude it checks the pane for a pending decision prompt (a question or a tool
-permission request) and holds the message if one is up. The ``/permissions``
-dialog is not a question Claude asked, though its footer carries the same
-"Enter to select"/"Enter to submit" + "Esc to cancel" text those prompts do.
-The runner must treat it as a terminal-opened surface instead: back out of it
-with Escape (its documented dismissal) and deliver the message.
+The runner backs out of the dialog with Escape and delivers the message instead
+of holding it behind what looks like a pending question.
 
 Kept apart from the occupied-composer journey in
 ``test_native_claude_render_parity``: a slash-command dialog submits a turn of
