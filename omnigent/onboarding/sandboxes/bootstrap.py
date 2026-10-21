@@ -531,7 +531,7 @@ def login_app_oauth_in_sandbox(
         )
     from omnigent.cli import _BROWSER_LOGIN_CALLBACK_FORWARDED_ENV
 
-    # The callback port is forwarded below, so the inner login must not ask the user to.
+    # The bootstrap forwards the callback port itself.
     login = launcher.stream_exec(
         sandbox_id,
         f"{_BROWSER_LOGIN_CALLBACK_FORWARDED_ENV}=1 omnigent login {shlex.quote(server_url)}",

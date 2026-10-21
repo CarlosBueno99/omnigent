@@ -13045,7 +13045,7 @@ def _wait_for_browser_login(
 ) -> int:
     """Wait for ``databricks auth login`` and return its exit code, printing a notice (plus
     *guidance*, unless empty or already *guidance_shown*) once the wait looks stuck; after
-    ``_BROWSER_LOGIN_TIMEOUT_S`` it raises ``click.ClickException`` and leaves the CLI running."""
+    ``_BROWSER_LOGIN_TIMEOUT_S`` it raises ``click.ClickException``; the caller stops the CLI."""
     minutes = int(_BROWSER_LOGIN_TIMEOUT_S // 60)
     try:
         return proc.wait(timeout=_BROWSER_LOGIN_HINT_DELAY_S)
@@ -13122,7 +13122,7 @@ def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None
     host = split.hostname or split.netloc or split.path
     profile = host.split(".")[0]
     click.echo(f"Opening browser to log in to {login_host} (profile {profile}) ...")
-    forwarded = bool(os.environ.get(_BROWSER_LOGIN_CALLBACK_FORWARDED_ENV))
+    forwarded = env_truthy(os.environ.get(_BROWSER_LOGIN_CALLBACK_FORWARDED_ENV))
     guidance = "" if forwarded else _browser_login_callback_guidance()
     in_ssh_session = bool(guidance) and _in_ssh_session()
     if in_ssh_session:

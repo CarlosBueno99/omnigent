@@ -117,10 +117,13 @@ def token_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @dataclass
 class _FakeLoginProcess:
-    """Stand-in for the ``databricks auth login`` ``Popen`` handle: the first ``stalls``
-    ``wait`` calls time out, then it exits with ``returncode`` (or each ``wait`` raises
-    ``raise_on_wait`` until it is signalled). After ``terminate`` it exits, ignores the signal,
-    or has its wait interrupted, per ``after_terminate``. ``events`` records waits and signals."""
+    """Stand-in for the ``databricks auth login`` ``Popen`` handle.
+
+    - ``stalls``: ``wait`` calls that time out before it exits with ``returncode``.
+    - ``raise_on_wait``: raised by each ``wait`` until the process is signalled.
+    - ``after_terminate``: after SIGTERM it exits, ignores the signal, or its wait is interrupted.
+    - ``events``: waits and signals, in order.
+    """
 
     stalls: int = 0
     returncode: int = 0
@@ -684,13 +687,24 @@ def test_login_explains_callback_when_browser_login_stalls(
     assert "Logged in as alice@example.com" in result.output
 
 
+@pytest.mark.parametrize(
+    ("after_terminate", "stop_events"),
+    [
+        ("exit", ["terminate", "wait"]),
+        ("ignore", ["terminate", "wait", "kill", "wait"]),
+    ],
+)
 def test_login_gives_up_when_browser_callback_never_arrives(
-    monkeypatch: pytest.MonkeyPatch, token_dir: Path
+    monkeypatch: pytest.MonkeyPatch,
+    token_dir: Path,
+    after_terminate: Literal["exit", "ignore"],
+    stop_events: list[str],
 ) -> None:
-    """Past the overall budget the CLI is stopped and the error names the callback."""
+    """Past the overall budget the CLI is stopped (killed if it ignores SIGTERM) and reaped,
+    and the error names the callback."""
     from omnigent.cli_auth import load_databricks_workspace_host
 
-    process = _FakeLoginProcess(stalls=2)
+    process = _FakeLoginProcess(stalls=2, after_terminate=after_terminate)
     _patch_login_env(
         monkeypatch,
         fake_httpx=_FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})]),
@@ -701,7 +715,7 @@ def test_login_gives_up_when_browser_callback_never_arrives(
     result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
 
     assert result.exit_code != 0
-    assert process.events == ["wait", "wait", "terminate", "wait"]
+    assert process.events == ["wait", "wait", *stop_events]
     # The hint delay and the remaining wait add up to the overall budget.
     assert sum(process.wait_timeouts[:2]) == cli_mod._BROWSER_LOGIN_TIMEOUT_S
     assert process.wait_timeouts[2] == cli_mod._BROWSER_LOGIN_STOP_GRACE_S
@@ -753,6 +767,25 @@ def test_login_omits_forwarding_advice_when_bootstrap_forwards_the_callback(
     assert "Still waiting for the browser login" in result.output
     assert "SSH session" not in result.output
     assert "ssh -L" not in result.output
+
+
+def test_login_keeps_forwarding_advice_when_forwarded_flag_is_false(
+    monkeypatch: pytest.MonkeyPatch, token_dir: Path
+) -> None:
+    """A falsy forwarded flag such as ``0`` does not suppress the SSH forwarding advice."""
+    _patch_login_env(
+        monkeypatch,
+        fake_httpx=_apps_login_responses(),
+        cached_tokens=[None, "tok-fresh"],
+        ssh_session=True,
+    )
+    monkeypatch.setenv(cli_mod._BROWSER_LOGIN_CALLBACK_FORWARDED_ENV, "0")
+
+    result = CliRunner().invoke(cli_group, ["login", _APPS_URL])
+
+    assert result.exit_code == 0, result.output
+    assert "This terminal is an SSH session." in result.output
+    assert "ssh -L 8020:localhost:8020" in result.output
 
 
 def test_login_reports_databricks_cli_failure(
