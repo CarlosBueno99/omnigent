@@ -3088,6 +3088,9 @@ def create_runner_app(
                 and session_id not in _active_turns
             ):
                 recovery_turn = "history_resume"
+                if last_type == "message":
+                    # The replayed message's own forward can still be redelivered.
+                    _note_message_received(session_id, _last_server_item_id.get(session_id))
                 _begin_turn_slot(session_id)
                 _publish_turn_status(session_id, "running")
                 msg_body = {
@@ -3839,9 +3842,8 @@ def create_runner_app(
     _native_pane_names = _sign_in_watch.native_pane_names
     _start_sign_in_watch = _sign_in_watch.start_sign_in_watch
 
-    def _note_message_received(conv_id: str, message_body: Mapping[str, Any]) -> None:
-        """Record that *conv_id* accepted the persisted item *message_body* carries."""
-        item_id = message_body.get("persisted_item_id")
+    def _note_message_received(conv_id: str, item_id: object) -> None:
+        """Record that *conv_id* accepted the message persisted as *item_id*."""
         if isinstance(item_id, str) and item_id:
             _session_received_item_ids.setdefault(
                 conv_id, deque(maxlen=_RECEIVED_ITEM_IDS_PER_SESSION)
@@ -6561,7 +6563,7 @@ def create_runner_app(
                         conversation_id,
                         [],
                     ).append(message_body)
-                    _note_message_received(conversation_id, message_body)
+                    _note_message_received(conversation_id, message_body.get("persisted_item_id"))
                     if _can_forward and process_manager is not None:
                         try:
                             _hc = await process_manager.get_client(conversation_id, "any")
@@ -6619,7 +6621,9 @@ def create_runner_app(
                         _session_message_buffers.setdefault(conversation_id, []).append(
                             message_body
                         )
-                        _note_message_received(conversation_id, message_body)
+                        _note_message_received(
+                            conversation_id, message_body.get("persisted_item_id")
+                        )
                         _start_claude_prompt_waiter(conversation_id, pending_bridge_dir)
                         _logger.info(
                             "post_session_events: buffering message for pending Claude prompt "
@@ -6651,7 +6655,7 @@ def create_runner_app(
                     loaded.append(new_item)
                     _session_histories[conversation_id] = loaded
 
-                _note_message_received(conversation_id, message_body)
+                _note_message_received(conversation_id, message_body.get("persisted_item_id"))
                 _begin_turn_slot(conversation_id)
                 _logger.info(
                     "post_session_events: starting background turn conv=%s",

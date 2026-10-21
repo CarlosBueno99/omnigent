@@ -1,16 +1,14 @@
 """Tests for suppress_recovery_turn in the session-init protocol.
 
 Regression coverage for the race where a server-persisted message appears in
-the runner's history load during create_session, causes a recovery turn to
-start, and the subsequent message-forward is then buffered (and optionally
-double-processed).
+the runner's history load during create_session and causes a recovery turn to
+start before the server forwards that message.
 
 The race is exercised via two paths:
 1. SDK harness: the server calls session-init *after* persisting the message
    (the managed-sandbox-wake / relaunch path) and then forwards the message.
-   Without suppress_recovery_turn the runner would start a recovery turn from
-   history, see _active_turns occupied when the forward arrives, buffer it,
-   and process it a second time once the recovery turn finishes.
+   Without suppress_recovery_turn the runner would run the message as a
+   recovery turn built from history and drop the forward as a redelivery.
 2. The fix: suppress_recovery_turn=True in the session-init envelope causes
    the runner to skip the recovery-turn check, leaving _active_turns empty so
    the forward triggers the turn exactly once.
@@ -254,12 +252,10 @@ async def test_without_suppress_recovery_turn_starts_recovery_turn_from_history(
 ) -> None:
     """Without suppress_recovery_turn the runner starts a recovery turn from history.
 
-    This documents the pre-fix behaviour: when the session-init envelope does
-    NOT carry suppress_recovery_turn=True, the runner sees the persisted user
-    message in history and starts a recovery turn immediately.  A subsequent
-    forward then finds an active turn and buffers the message.  After the
-    recovery turn finishes, _check_and_start_next_turn processes the buffered
-    message as a second turn, so the harness is called twice.
+    When the session-init envelope does NOT carry suppress_recovery_turn=True,
+    the runner sees the persisted user message in history and starts a recovery
+    turn immediately. That turn accepts the message, so a later forward of the
+    same persisted item is dropped as a redelivery instead of running twice.
     """
     app, _pm, harness = _build_sdk_app(_HistoryServerClient())
     caplog.set_level(logging.INFO, logger="omnigent.runner.app")
@@ -282,10 +278,6 @@ async def test_without_suppress_recovery_turn_starts_recovery_turn_from_history(
         _assert_browser_tools_hidden(harness.posted_bodies[0])
         assert _init_rows(caplog)[0]["recovery_turn"] == "history_resume"
 
-        # Now forward the message: since the recovery turn already ran and
-        # _active_turns is now empty, the forward triggers a second turn.
-        # (In the original bug, the forward would have been buffered _during_
-        # the recovery turn and then replayed after it, resulting in two turns.)
         forward_resp = await client.post(
             f"/v1/sessions/{SESSION_ID}/events",
             params={"stream": "true"},
@@ -297,15 +289,11 @@ async def test_without_suppress_recovery_turn_starts_recovery_turn_from_history(
                 "persisted_item_id": "msg_001",
             },
         )
-        assert forward_resp.status_code == 200, (
-            f"Message forward returned {forward_resp.status_code}: {forward_resp.text}"
-        )
-        _ = forward_resp.text  # drain
-
-        # Second turn ran — harness called twice total.
-        assert len(harness.posted_bodies) == 2, (
-            "Expected two harness calls total (recovery turn + forward-triggered turn); "
-            f"got {len(harness.posted_bodies)}"
+        assert forward_resp.status_code == 202, forward_resp.text
+        assert forward_resp.json()["status"] == "duplicate"
+        assert len(harness.posted_bodies) == 1, (
+            "The recovery turn already ran the forwarded message; "
+            f"got {len(harness.posted_bodies)} harness calls"
         )
 
 

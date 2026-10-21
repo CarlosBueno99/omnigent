@@ -1556,6 +1556,22 @@ async def test_session_creation_auto_starts_turn_for_unanswered_user_message() -
         # turn runs in a fire-and-forget background task.
         await _aio.sleep(0.5)
 
+        # The replayed message's forward, redelivered after a tunnel drop.
+        session_url = "/v1/sessions/5f35011bda530550543bf0c329c309f1"
+        read = await client.get(session_url, params={"message_item_id": "item_1"})
+        redelivery = await client.post(
+            f"{session_url}/events",
+            json={
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+                "persisted_item_id": "item_1",
+            },
+        )
+        await _aio.sleep(0.1)
+
+    assert read.json().get("message_received") is True
+    assert redelivery.json()["status"] == "duplicate"
     # 1 POST = the recovery turn sent full history to the harness.
     # 0 would mean _run_turn_bg never ran (detection broken).
     assert len(hc.posted_bodies) == 1, (

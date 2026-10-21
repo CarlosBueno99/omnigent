@@ -7610,9 +7610,9 @@ async def _forward_event_to_runner(
                     attempted_override=_overridden,
                 )
     except (httpx.HTTPError, ConnectionError) as exc:
-        # Transport failure — the runner never answered. The message is already
-        # persisted (invariant I1) but no turn started for it. Keep publishing
-        # ``idle`` so the composer is released for a retry.
+        # Transport failure — the runner never answered. The message is persisted
+        # (invariant I1); a turn starts for it only if reconnect recovery replays
+        # it. Keep publishing ``idle`` so the composer is released for a retry.
         _logger.exception(
             "Forward to runner failed for session=%s",
             session_id,
