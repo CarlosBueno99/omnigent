@@ -1094,6 +1094,7 @@ _RESUMED_REFUSAL = "This session was resumed in Omnigent, so it can't be replace
         ("resumed_then_unbound", _RESUMED_REFUSAL),
         ("resumed_during_import", _RESUMED_REFUSAL),
         ("shared_editor", "Only the owner of the imported session can replace it."),
+        ("no_access", "Only the owner of the imported session can replace it."),
         ("other_harness", "Only a session imported from this harness can be replaced."),
     ],
 )
@@ -1184,6 +1185,8 @@ async def test_forced_local_import_replaces_only_an_unused_import_the_caller_own
             )
         elif case == "shared_editor":
             permission_store.grant(caller, session_id, LEVEL_EDIT)
+        elif case == "no_access":
+            assert permission_store.revoke(caller, session_id)
         elif case == "other_harness":
             store.set_labels(session_id, {IMPORT_SOURCE_LABEL_KEY: "codex"})
         original_items = store.list_items(session_id).data
