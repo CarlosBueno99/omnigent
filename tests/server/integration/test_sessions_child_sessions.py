@@ -1863,35 +1863,49 @@ async def test_claude_child_of_full_access_codex_session_inherits_bypass(
     assert child.json()["terminal_launch_args"] == ["--permission-mode", "bypassPermissions"]
 
 
-async def _create_full_access_codex_session(client: httpx.AsyncClient, name: str) -> str:
-    """Create a Codex session launched with the Full access preset and return its id."""
+_CODEX_FULL_ACCESS_ARGS = ["--sandbox", "danger-full-access", "--ask-for-approval", "never"]
+
+
+async def _create_codex_session(
+    client: httpx.AsyncClient,
+    name: str,
+    *,
+    terminal_launch_args: list[str] | None,
+) -> str:
+    """Create a Codex session with ``terminal_launch_args`` and return its id."""
     codex = await create_test_agent(
         client,
         name=name,
         executor={"type": "omnigent", "config": {"harness": "codex-native"}},
         include_llm=False,
     )
-    parent = await client.post(
-        "/v1/sessions",
-        json={
-            "agent_id": codex["id"],
-            "terminal_launch_args": [
-                "--sandbox",
-                "danger-full-access",
-                "--ask-for-approval",
-                "never",
-            ],
-        },
-    )
+    body: dict[str, Any] = {"agent_id": codex["id"]}
+    if terminal_launch_args is not None:
+        body["terminal_launch_args"] = terminal_launch_args
+    parent = await client.post("/v1/sessions", json=body)
     assert parent.status_code == 201, parent.text
     return parent.json()["id"]
 
 
-async def test_multipart_claude_child_of_full_access_codex_session_inherits_bypass(
+@pytest.mark.parametrize(
+    ("parent_launch_args", "expected_child_args"),
+    [
+        (_CODEX_FULL_ACCESS_ARGS, ["--permission-mode", "bypassPermissions"]),
+        (None, None),
+    ],
+    ids=["full-access-parent", "default-parent"],
+)
+async def test_multipart_claude_child_follows_only_a_full_access_parent(
     client: httpx.AsyncClient,
+    parent_launch_args: list[str] | None,
+    expected_child_args: list[str] | None,
 ) -> None:
-    """A bundled Claude child of a Full access Codex session launches in bypass mode."""
-    parent_id = await _create_full_access_codex_session(client, "bundle-full-access-parent")
+    """A bundled Claude child inherits a Codex parent's full access, never a default stance."""
+    parent_id = await _create_codex_session(
+        client,
+        f"bundle-{'full' if parent_launch_args else 'default'}-parent",
+        terminal_launch_args=parent_launch_args,
+    )
     child_bundle = build_agent_bundle(
         name="bundle-claude-child",
         executor={"type": "omnigent", "config": {"harness": "claude-native"}},
@@ -1907,14 +1921,16 @@ async def test_multipart_claude_child_of_full_access_codex_session_inherits_bypa
     assert resp.status_code == 201, resp.text
     child = await client.get(f"/v1/sessions/{resp.json()['session_id']}")
     assert child.status_code == 200, child.text
-    assert child.json()["terminal_launch_args"] == ["--permission-mode", "bypassPermissions"]
+    assert child.json().get("terminal_launch_args") == expected_child_args
 
 
 async def test_explicit_child_launch_args_override_inherited_full_access(
     client: httpx.AsyncClient,
 ) -> None:
     """Launch args sent with the child create, even none, replace the inherited stance."""
-    parent_id = await _create_full_access_codex_session(client, "explicit-args-parent")
+    parent_id = await _create_codex_session(
+        client, "explicit-args-parent", terminal_launch_args=_CODEX_FULL_ACCESS_ARGS
+    )
     claude = await create_test_agent(
         client,
         name="explicit-args-claude-child",

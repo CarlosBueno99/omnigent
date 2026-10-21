@@ -504,6 +504,7 @@ _CODEX_BYPASS = "omnigent.codex_native.bypass_sandbox"
         ("codex-native", _CODEX_FULL_ACCESS_PRESET, {_CODEX_MODE: "ask-for-approval"}, False),
         ("codex-native", [], {_CODEX_MODE: "full-access"}, True),
         ("codex-native", [], {_CODEX_BYPASS: "1"}, True),
+        ("codex-native", [], {_CODEX_MODE: "ask-for-approval", _CODEX_BYPASS: "1"}, False),
         ("cursor-native", ["--yolo"], {}, True),
         ("cursor-native", ["-f"], {}, True),
         ("cursor-native", ["--yolo=false"], {}, False),

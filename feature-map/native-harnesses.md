@@ -86,7 +86,8 @@ the linked session's Agents panel and check the child under its parent. Ask a
 child to delegate again to check nested ownership; completed children remain
 visible while the runner idles. A child of a full-access parent, including one
 added from the Agents panel, starts in its harness's full-access mode unless its
-spec or the request sets a permission stance.
+spec declares a permission stance or the create request passes launch args.
+Changing the parent's mode later does not change children it already started.
 
 **Approval inbox:** open Inbox in the sidebar to answer a pending permission
 without opening its session. Antigravity's Chat and Inbox cards both offer
