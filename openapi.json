@@ -7154,7 +7154,7 @@
                 "type": "null"
               }
             ],
-            "description": "Epoch-microsecond revision of the *requesting user's* latest read-state write for this session, or `None`. Increases with every write; in-memory only.",
+            "description": "Epoch-microsecond revision of the *requesting user's* latest read-state write for this session, or `None`. Increases with every write on the serving replica; in-memory only.",
             "title": "Viewer Read State Revision"
           },
           "viewer_unread": {

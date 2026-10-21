@@ -607,6 +607,28 @@ describe("cross-device read-state (server revisions)", () => {
     expect(reloaded.isExplicitlyUnread("conv-1")).toBe(false);
   });
 
+  it("skips malformed stored revisions and keeps valid ones", async () => {
+    localStorage.clear();
+    localStorage.setItem(
+      "omnigent.readState.v1",
+      JSON.stringify({
+        lastSeen: { "conv-1": 6_000, "conv-2": 6_000 },
+        unread: [],
+        revisions: { "conv-1": "x", "conv-2": 9 },
+      }),
+    );
+    const mod = await reloadKeepingStorage();
+
+    mod.seedReadState([
+      { id: "conv-1", viewer_last_seen: 4_999, viewer_unread: true, viewer_read_state_revision: 1 },
+      { id: "conv-2", viewer_last_seen: 4_999, viewer_unread: true, viewer_read_state_revision: 9 },
+    ]);
+
+    expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true);
+    expect(mod.isConversationUnseen("conv-2", 5_000, "idle")).toBe(false);
+    expect(mod.isExplicitlyUnread("conv-2")).toBe(false);
+  });
+
   it("applies another device's Mark as unread to a session this device only seeded", async () => {
     const mod = await loadFresh();
     mod.seedReadState([{ id: "conv-1", viewer_last_seen: null, updated_at: 5_000 }]);
@@ -701,6 +723,7 @@ describe("cross-device read-state (server revisions)", () => {
     ]);
 
     expect(mod.isExplicitlyUnread("conv-1")).toBe(true);
+    expect(mod.isConversationUnseen("conv-1", 4_999, "idle")).toBe(false);
     expect(mod.isConversationUnseen("conv-1", 5_000, "idle")).toBe(true);
   });
 });
