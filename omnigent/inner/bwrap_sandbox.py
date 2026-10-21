@@ -1113,7 +1113,9 @@ def _grant_reexpose_after_mask(
     ``~/.omnigent/codex-native``. Only grant paths are re-bound, so a masked
     dotdir is exposed only when it is itself granted, minus its nested
     dotfiles. Layers are depth-sorted so the deepest mount wins; operator
-    ``mask_paths`` and write-over-read precedence are preserved.
+    ``mask_paths`` are preserved, and so is write-over-read precedence
+    among re-exposed grants. A read grant under a masked dotdir is re-bound
+    read-only even when an unmasked write root such as cwd covers it.
 
     :param policy: Resolved sandbox policy carrying the grant lists.
     :param mask_args: The mask args produced by
@@ -1175,12 +1177,11 @@ def _grant_reexpose_after_mask(
         layers.append((len(dest.parts), 0, dest, tokens))
 
     if reexposed_dirs:
-        # Replay masks a re-exposed grant shadowed; deeper grants win back via the depth sort.
+        # Replay masks nested inside re-exposed grants.
         for dest, tokens in mask_layers:
             _add_mask(tokens, dest)
 
-        # Fresh dotfile scan of each re-exposed grant subtree, which the
-        # pruned cwd walk and the under-cwd root drop never reached.
+        # Scan grant subtrees the cwd walk pruned at their masked ancestor.
         safe_roots = _bwrap_safe_roots(cwd, policy, argv=argv)
         allow_hidden = policy.cwd_allow_hidden if policy.cwd_allow_hidden is not None else []
         skip_roots = policy.mask_scan_skip_roots or []

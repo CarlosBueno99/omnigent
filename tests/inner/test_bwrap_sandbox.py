@@ -1481,6 +1481,27 @@ def test_wrap_launcher_argv_remask_keeps_ungranted_siblings_hidden(
     )
 
 
+def test_wrap_launcher_argv_reexposed_grant_scan_overflow_names_grant_root(
+    tmp_path: Path,
+) -> None:
+    """An overflowing scan of a re-exposed grant fails the launch and names the grant."""
+    cwd = tmp_path.resolve(strict=False)
+    grant = cwd / ".omnigent" / "codex-native"
+    grant.mkdir(parents=True)
+    for index in range(5):
+        (grant / f"file{index}.txt").write_text("x")
+
+    backend = _make_backend()
+    policy = _make_policy(
+        tmp_path,
+        write_roots=[grant],
+        cwd_hidden_scan_max_entries=3,
+        cwd_hidden_scan_overflow="error",
+    )
+    with pytest.raises(OSError, match=re.escape(f"re-exposed grant root {grant}")):
+        backend.wrap_launcher_argv([sys.executable, "-c", "pass"], policy, tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # Nested-sandbox /proc handling (lakebox proc bind)
 # ---------------------------------------------------------------------------
