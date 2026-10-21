@@ -1120,7 +1120,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
         queryFn: () => fetchPullRequestInfo(conversationId),
       })
       .then((sessionInfo) => {
-        if (current && !sessionInfo.prs?.some((pr) => pr.url === pick)) {
+        if (current && sessionInfo.prs && !sessionInfo.prs.some((pr) => pr.url === pick)) {
           setSessionPrPick(conversationId, undefined);
         }
       })

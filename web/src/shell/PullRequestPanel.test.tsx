@@ -183,6 +183,8 @@ beforeEach(() => {
   // The diff-layout toggle seeds from persisted prefs; start each test clean.
   window.localStorage.clear();
   clearSessionPrPicks();
+  updateSessionPr.mockReset();
+  fetchPullRequestInfo.mockReset();
   // Fire the observer callback immediately on observe so lazy sections mount.
   class IO {
     private cb: IntersectionObserverCallback;
@@ -1945,6 +1947,7 @@ describe("session PR selection", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Unlink PR" }));
+    expect(updateSessionPr).toHaveBeenCalledTimes(1);
     const [body, { onSuccess }] = updateSessionPr.mock.lastCall!;
     expect(body).toEqual({ url: secondPr, action: "remove" });
     act(() => onSuccess(trackedPrInfo([firstPr]).data));
@@ -1959,10 +1962,20 @@ describe("session PR selection", () => {
     });
   });
 
+  async function flushPendingWork() {
+    await act(async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    });
+  }
+
   it("keeps a remembered pick while the runner is offline", async () => {
     await pickSecondPrAndUnmount();
     state.info = { isLoading: false, error: new RunnerOfflineError(), isFetching: false };
     renderPanel();
+    await flushPendingWork();
+    expect(fetchPullRequestInfo).not.toHaveBeenCalled();
     expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
       poll: true,
       prUrl: secondPr,
@@ -1989,17 +2002,26 @@ describe("session PR selection", () => {
     expect(fetchPullRequestInfo).toHaveBeenCalledWith("conv_1");
   });
 
-  it("keeps a remembered pick that fails to load while the session still tracks it", async () => {
+  it.each([
+    [
+      "the session still tracks it",
+      () => fetchPullRequestInfo.mockResolvedValue(trackedPrInfo([firstPr, secondPr]).data),
+    ],
+    [
+      "the session's PR list is unavailable",
+      () => fetchPullRequestInfo.mockResolvedValue({ available: false, reason: "no_os_env" }),
+    ],
+    [
+      "the PR list check fails",
+      () => fetchPullRequestInfo.mockRejectedValue(new Error("502 Bad Gateway")),
+    ],
+  ])("keeps a remembered pick that fails to load when %s", async (_case, mockSessionInfo) => {
     await pickSecondPrAndUnmount();
-    fetchPullRequestInfo.mockResolvedValue(trackedPrInfo([firstPr, secondPr]).data);
+    mockSessionInfo();
     state.info = { isLoading: false, error: new Error("502 Bad Gateway"), isFetching: false };
     renderPanel();
     await waitFor(() => expect(fetchPullRequestInfo).toHaveBeenCalledWith("conv_1"));
-    await act(async () => {
-      await new Promise((resolve) => {
-        setTimeout(resolve, 0);
-      });
-    });
+    await flushPendingWork();
     expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
       poll: true,
       prUrl: secondPr,
@@ -2041,6 +2063,7 @@ describe("session PR selection", () => {
     await user.click(screen.getByRole("button", { name: "Link a PR" }));
     await user.type(screen.getByRole("textbox", { name: "Pull request URL" }), secondPr);
     await user.click(screen.getByRole("button", { name: "Link" }));
+    expect(updateSessionPr).toHaveBeenCalledTimes(1);
     const [body, { onSuccess }] = updateSessionPr.mock.lastCall!;
     expect(body).toEqual({ url: secondPr, action: "attach" });
     act(() => onSuccess({ ...trackedPrInfo([firstPr, secondPr]).data, selected_pr_url: secondPr }));
