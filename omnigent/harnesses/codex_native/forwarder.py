@@ -88,6 +88,7 @@ _REFUSED_SUBSCRIPTION_TURN_WAIT_SECONDS = 10.0
 # JSON-RPC "method not found"; Codex also uses it for an operation its build
 # does not support, e.g. ``list_turns is not supported yet``.
 _CODEX_UNSUPPORTED_REQUEST_CODE = -32601
+_REFUSED_TURN_MAY_BE_RUNNING = "may still be running"
 _NO_ROLLOUT_FRAGMENT = "no rollout found for thread id"
 # A freshly created thread passes through a second transient state: its rollout
 # file exists but is still empty (the TUI created the thread but no turn has
@@ -2720,10 +2721,11 @@ async def _subscribe_until_ready_inner(
     successful resume and set the signal. A short poll still covers the
     brief window between "thread active" and the rollout being flushed.
 
-    Codex routes turn and item notifications only to subscribed connections,
-    so a request this Codex build does not support (``-32601``) is returned
-    for the caller to fail the running turn instead of leaving it
-    ``running`` unobserved. Other failures are only logged.
+    Codex routes turn and item notifications only to subscribed connections.
+    When Codex cannot return the thread's turns (``-32601``), the subscription
+    is retried without them. If that is refused too, the error is returned for
+    the caller to fail the running turn instead of leaving it ``running``
+    unobserved. Other failures are only logged.
 
     :param client: Codex app-server client.
     :param ap_client: Omnigent HTTP client used for replayed items.
@@ -2750,11 +2752,12 @@ async def _subscribe_until_ready_inner(
         else None
     )
     saw_not_ready = False
+    turns_refused = False
     while True:
+        params: _JsonObject = {"threadId": thread_id}
+        if turns_refused or (not saw_not_ready and replay_from_turn_id is None):
+            params["excludeTurns"] = True
         try:
-            params: _JsonObject = {"threadId": thread_id}
-            if not saw_not_ready and replay_from_turn_id is None:
-                params["excludeTurns"] = True
             response = await client.request("thread/resume", params)
         except asyncio.CancelledError:
             raise
@@ -2778,13 +2781,22 @@ async def _subscribe_until_ready_inner(
                     # poll covers that window.
                     await _sleep(_SUBSCRIBE_RETRY_DELAY_SECONDS)
                 continue
-            _logger.warning("failed to subscribe to Codex thread %s", thread_id, exc_info=True)
-            if (
-                isinstance(exc, CodexAppServerResponseError)
+            refusal = (
+                exc
+                if isinstance(exc, CodexAppServerResponseError)
                 and exc.code == _CODEX_UNSUPPORTED_REQUEST_CODE
-            ):
-                return exc
-            return None
+                else None
+            )
+            if refusal is not None and "excludeTurns" not in params:
+                _logger.warning(
+                    "Codex could not return thread %s's turns (%s); subscribing without replay",
+                    thread_id,
+                    refusal,
+                )
+                turns_refused = True
+                continue
+            _logger.warning("failed to subscribe to Codex thread %s", thread_id, exc_info=True)
+            return refusal
         if forwarder_state is not None:
             forwarder_state.note_resume_response(response)
             # Source of truth for the cost policy is config.toml's model (what
@@ -2821,7 +2833,7 @@ async def _subscribe_until_ready_inner(
             usage_coalescer=usage_coalescer,
             elicitation_tracker=elicitation_tracker,
             forwarder_state=forwarder_state,
-            replay_from_turn_id=replay_from_turn_id,
+            replay_from_turn_id=None if turns_refused else replay_from_turn_id,
         )
         return None
 
@@ -2852,7 +2864,7 @@ async def _wait_for_refused_turn_id(bridge_dir: Path, thread_id: str) -> str | N
 
 async def _interrupt_refused_turn(
     client: CodexAppServerClient, *, thread_id: str, turn_id: str
-) -> bool:
+) -> str:
     """
     Interrupt a turn the forwarder cannot follow, waiting out turn startup.
 
@@ -2862,9 +2874,9 @@ async def _interrupt_refused_turn(
     :param client: Codex app-server client used to interrupt the turn.
     :param thread_id: Codex thread id, e.g. ``"thread_123"``.
     :param turn_id: Codex turn id to interrupt, e.g. ``"turn_123"``.
-    :returns: ``True`` when Codex accepted the interrupt or still reports no
-        active turn after the wait, ``False`` when the turn may still be
-        running.
+    :returns: The turn's outcome for the failure message: ``"was stopped"``,
+        ``"had already ended"`` when Codex reports no active turn throughout
+        the wait, or :data:`_REFUSED_TURN_MAY_BE_RUNNING`.
     """
     polls = int(_REFUSED_SUBSCRIPTION_TURN_WAIT_SECONDS / _SUBSCRIBE_RETRY_DELAY_SECONDS)
     for poll in range(polls + 1):
@@ -2872,20 +2884,20 @@ async def _interrupt_refused_turn(
             await _sleep(_SUBSCRIBE_RETRY_DELAY_SECONDS)
         try:
             await client.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
-            return True
+            return "was stopped"
         except asyncio.CancelledError:
             raise
         except CodexAppServerResponseError as exc:
             if is_no_active_turn_error(exc):
                 continue
             _logger.warning("Codex turn interrupt after a refused subscription failed: %s", exc)
-            return False
+            return _REFUSED_TURN_MAY_BE_RUNNING
         except Exception:  # noqa: BLE001 - the failure is surfaced either way.
             _logger.warning(
                 "Codex turn interrupt after a refused subscription failed", exc_info=True
             )
-            return False
-    return True
+            return _REFUSED_TURN_MAY_BE_RUNNING
+    return "had already ended"
 
 
 async def _fail_turn_after_refused_subscription(
@@ -2901,8 +2913,9 @@ async def _fail_turn_after_refused_subscription(
     """
     Interrupt and fail the bridge's active turn after Codex refused the subscription.
 
-    A turn already failed, or replaced by a newer turn meanwhile, posts nothing.
-    A turn Codex would not stop keeps its recorded id for a later interrupt.
+    A turn already failed, or cleared or replaced meanwhile by an owner that
+    reports its own outcome, posts nothing. A turn Codex would not stop keeps
+    its recorded id so the user's stop can still interrupt it.
 
     :param client: Codex app-server client used to interrupt the turn.
     :param ap_client: HTTP client for Omnigent event posts.
@@ -2922,20 +2935,19 @@ async def _fail_turn_after_refused_subscription(
             thread_id,
         )
         return
-    if forwarder_state is not None:
-        if turn_id in forwarder_state.surfaced_terminal_error_turns:
-            return
-        forwarder_state.surfaced_terminal_error_turns.add(turn_id)
-    stopped = await _interrupt_refused_turn(client, thread_id=thread_id, turn_id=turn_id)
-    if stopped:
-        still_active = clear_active_turn_id_if_matches(bridge_dir, turn_id)
-    else:
+    if forwarder_state is not None and turn_id in forwarder_state.surfaced_terminal_error_turns:
+        return
+    outcome = await _interrupt_refused_turn(client, thread_id=thread_id, turn_id=turn_id)
+    if outcome == _REFUSED_TURN_MAY_BE_RUNNING:
         state = read_bridge_state(bridge_dir)
         still_active = state is None or state.active_turn_id == turn_id
+    else:
+        still_active = clear_active_turn_id_if_matches(bridge_dir, turn_id)
     if not still_active:
-        _logger.info("Codex turn %s was replaced before its refusal was surfaced", turn_id)
+        _logger.info("Codex turn %s was cleared before its refusal was surfaced", turn_id)
         return
-    outcome = "was stopped" if stopped else "may still be running"
+    if forwarder_state is not None:
+        forwarder_state.surfaced_terminal_error_turns.add(turn_id)
     reason = refusal.message or str(refusal)
     async with _conversation_item_delivery_scope(session_id):
         await _post_turn_status_edge(
