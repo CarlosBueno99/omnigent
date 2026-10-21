@@ -1002,8 +1002,9 @@ function WorkspacePanelImpl({
     // now disables the entry points; reject locally with the known reason and keep
     // the draft rather than letting its first send reach the server-side fork.
     if (sideChatUnavailable !== undefined) {
-      toast.error(sideChatUnavailable);
-      return Promise.reject(new Error(sideChatUnavailable));
+      const err = new Error(sideChatUnavailable);
+      toastSideChatStartFailed(err);
+      return Promise.reject(err);
     }
     return createSideChat(conversationId).then(
       ({ childSessionId }) => {

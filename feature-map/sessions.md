@@ -294,7 +294,8 @@ through the fork endpoint, so their side chat stays available on these hosts.
 The reconnect dialog also disables Clone and Switch host; directory selection
 cannot enable either action.
 While support is being checked, actions stay disabled. If that check fails,
-the explanation asks you to reload. A missing source-host record keeps switching
+the explanation asks you to reload. Side chat is not held for this check; a fork
+the server refuses meanwhile shows its reason in the error toast. A missing source-host record keeps switching
 disabled while ordinary shared sessions remain forkable. Direct dialogs show a loading status without
 an action button until the check finishes; supported forms then receive keyboard focus.
 If the reconnect dialog is already on Clone when an unsupported result arrives,
@@ -597,6 +598,15 @@ plain `uv run pytest`, which starts a private server for the test.
   mobile side-chat drawer. Its stale-branch scenarios simulate a stopped parent
   runner and verify parent recovery before binding; the hosted lifecycle test
   above proves live-parent reuse with actual runner processes.
+- **`side-chat-lifecycle`, fork-restricted sessions:**
+  `tests/e2e_ui/chat/test_side_chat_fork_unsupported.py` marks a session as a
+  managed sandbox: `test_side_chat_entry_points_follow_fork_restriction` checks
+  the disabled Workspace and add-tray entries and the withheld `/side`;
+  `test_restricted_session_withholds_ask_in_side_chat` checks the selection
+  popup; `test_refused_side_chat_fork_explains_refusal` refuses the fork in the
+  browser and checks the toast shows the server's reason. Composer, drawer,
+  pending-tab and Codex-exemption cases are component tests in
+  `web/src/pages/ChatPage.composer.test.tsx` and `web/src/shell/WorkspacePanel.test.tsx`.
 - **`side-chat-quotes`, desktop Ask in side chat and Reply:**
   `tests/e2e_ui/chat/test_side_chat_entrypoints.py::test_ask_in_side_chat_opens_a_quoted_side_chat_tab`
   checks pending/live tab reuse, draft preservation, and replies sent only to

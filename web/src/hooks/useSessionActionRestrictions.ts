@@ -34,7 +34,8 @@ export function useSessionActionRestrictions(
   const hostMissing = Boolean(hostId && hosts && !host);
   return {
     forkDisabledReason: restrictions.forkDisabledReason ?? lookupReason,
-    sideChatDisabledReason: restrictions.sideChatDisabledReason ?? lookupReason,
+    // Side chat isn't held for the lookup; a fork refused meanwhile reports its reason.
+    sideChatDisabledReason: restrictions.sideChatDisabledReason,
     switchHostDisabledReason:
       restrictions.switchHostDisabledReason ??
       lookupReason ??

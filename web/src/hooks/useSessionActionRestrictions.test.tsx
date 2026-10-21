@@ -84,12 +84,12 @@ afterEach(() => {
 });
 
 describe("useSessionActionRestrictions", () => {
-  it("keeps actions disabled while the snapshot is loading", () => {
+  it("keeps fork and host actions, but not side chat, disabled while the snapshot is loading", () => {
     getSessionMock.mockReturnValue(new Promise(() => {}));
     const { result } = renderRestrictions();
     expect(result.current).toEqual({
       forkDisabledReason: SESSION_ACTIONS_LOADING,
-      sideChatDisabledReason: SESSION_ACTIONS_LOADING,
+      sideChatDisabledReason: undefined,
       switchHostDisabledReason: SESSION_ACTIONS_LOADING,
     });
     expect(fetchMock).not.toHaveBeenCalled();
@@ -127,7 +127,7 @@ describe("useSessionActionRestrictions", () => {
     await waitFor(() =>
       expect(result.current).toEqual({
         forkDisabledReason: SESSION_ACTIONS_UNAVAILABLE,
-        sideChatDisabledReason: SESSION_ACTIONS_UNAVAILABLE,
+        sideChatDisabledReason: undefined,
         switchHostDisabledReason: SESSION_ACTIONS_UNAVAILABLE,
       }),
     );
@@ -139,7 +139,7 @@ describe("useSessionActionRestrictions", () => {
     await waitFor(() =>
       expect(result.current).toEqual({
         forkDisabledReason: SESSION_ACTIONS_UNAVAILABLE,
-        sideChatDisabledReason: SESSION_ACTIONS_UNAVAILABLE,
+        sideChatDisabledReason: undefined,
         switchHostDisabledReason: SESSION_ACTIONS_UNAVAILABLE,
       }),
     );

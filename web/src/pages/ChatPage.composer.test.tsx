@@ -4554,7 +4554,9 @@ describe("Composer /side on a fork-restricted session", () => {
 
   it("keeps Codex's in-process /side listed and sends it to the runner", () => {
     useChatStore.setState({ sessionHarness: "codex-native" });
-    const createSideChat = vi.spyOn(sessionsApi, "createSideChat");
+    const createSideChat = vi
+      .spyOn(sessionsApi, "createSideChat")
+      .mockResolvedValue({ childSessionId: "child" });
     const onSend = vi.fn();
     // Native wrappers get no onSendSlashCommand; their slash commands go out as plaintext.
     render(<Composer {...composerProps({ onSend })} />);

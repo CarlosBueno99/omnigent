@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import * as sessionsApi from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
 import { SANDBOX_SIDE_CHAT_UNSUPPORTED } from "@/lib/sessionCapabilities";
+import { SIDE_CHAT_START_FAILED } from "@/components/chat/sideChatStartFailedToast";
 import { ALT_KEY, MOD_KEY } from "@/components/KeyboardShortcut";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useSessionAgent } from "@/hooks/useAgents";
@@ -1379,10 +1380,27 @@ describe("WorkspacePanel mobile side chats", () => {
     fireEvent.click(screen.getByRole("button", { name: "send pending side chat" }));
 
     // A pending tab created before the restriction never reaches the server-side
-    // fork; its first send surfaces the known reason and keeps the draft.
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(SANDBOX_SIDE_CHAT_UNSUPPORTED));
+    // fork; its first send surfaces the known reason and keeps the tab open.
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(SIDE_CHAT_START_FAILED, {
+        description: SANDBOX_SIDE_CHAT_UNSUPPORTED,
+      }),
+    );
     expect(create).not.toHaveBeenCalled();
+    expect(screen.getByTestId("side-chat-pane-stub")).toHaveTextContent("pending:restored");
     create.mockRestore();
+  });
+
+  it("keeps Codex's drawer New side chat enabled on a fork-restricted session", () => {
+    isMobileMock.mockReturnValue(true);
+    useChatStore.setState({ sessionHarness: "codex-native" });
+    restrictionsMock.mockReturnValue({ sideChatDisabledReason: SANDBOX_SIDE_CHAT_UNSUPPORTED });
+    renderWorkspace({ rightRailTab: "sidechat", mobileSideChatsOpen: true });
+
+    const drawer = screen.getByTestId("side-chats-panel-drawer");
+    expect(within(drawer).getByRole("button", { name: "New side chat" })).toBeEnabled();
+    expect(within(drawer).getByText(/Tap \+ to ask a question/)).toBeVisible();
+    expect(within(drawer).queryByText(SANDBOX_SIDE_CHAT_UNSUPPORTED)).toBeNull();
   });
 });
 
