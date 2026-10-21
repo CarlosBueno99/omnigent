@@ -93,7 +93,8 @@ const hasSession = (req) =>
  * @param {{ upstreamUrl: string, scratchDir: string }} options
  * @returns {Promise<{ serverUrl: string, idpOrigin: string, credentialId: string,
  *   events: Array<{ event: string, at: number }>, preloadPath: string,
- *   launchEnv: Record<string, string>, close: () => Promise<void> }>}
+ *   launchEnv: Record<string, string>, holdSignIn: () => void, releaseSignIn: () => void,
+ *   close: () => Promise<void> }>}
  */
 async function startFakeAppsFrontDoor({ upstreamUrl, scratchDir }) {
   const hostname = "omnigent-repro.aws.databricksapps.com";
@@ -102,6 +103,8 @@ async function startFakeAppsFrontDoor({ upstreamUrl, scratchDir }) {
   const events = [];
   const tls = generateCertificate(scratchDir, hostname);
   let idpOrigin;
+  // While set, the sign-in page waits after its key answers instead of navigating.
+  let heldSignIns = null;
 
   const idp = http.createServer((req, res) => {
     const url = new URL(req.url, idpOrigin);
@@ -116,8 +119,10 @@ async function startFakeAppsFrontDoor({ upstreamUrl, scratchDir }) {
         body += chunk;
       });
       req.on("end", () => {
-        events.push({ ...JSON.parse(body || "{}"), at: Date.now() });
-        res.writeHead(204).end();
+        const report = JSON.parse(body || "{}");
+        events.push({ ...report, at: Date.now() });
+        if (heldSignIns && report.event === "get_resolved") heldSignIns.push(res);
+        else res.writeHead(204).end();
       });
       return;
     }
@@ -222,6 +227,13 @@ async function startFakeAppsFrontDoor({ upstreamUrl, scratchDir }) {
     credentialId: CREDENTIAL_ID,
     events,
     preloadPath,
+    holdSignIn: () => {
+      heldSignIns = [];
+    },
+    releaseSignIn: () => {
+      for (const res of heldSignIns ?? []) res.writeHead(204).end();
+      heldSignIns = null;
+    },
     close: async () => {
       for (const server of [frontDoor, idp]) {
         server.closeAllConnections?.();

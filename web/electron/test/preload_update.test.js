@@ -129,13 +129,19 @@ describe("WebAuthn request observer", () => {
     assert.equal(typeof script?.func, "function");
     const realm = vm.createContext({ report: report ?? script.args[0] });
     vm.runInContext(
-      `globalThis.CredentialsContainer = class CredentialsContainer {
+      `function track(options) {
+        const call = { options };
+        call.promise = new Promise((resolve, reject) => Object.assign(call, { resolve, reject }));
+        calls.push(call);
+        return call.promise;
+      }
+      globalThis.CredentialsContainer = class CredentialsContainer {
         get(options) {
           if (options?.illegal) throw new TypeError("Illegal invocation");
-          return new Promise((resolve, reject) => calls.push({ options, resolve, reject }));
+          return track(options);
         }
         create(options) {
-          return new Promise((resolve, reject) => calls.push({ options, resolve, reject }));
+          return track(options);
         }
       };
       globalThis.calls = [];
@@ -172,7 +178,8 @@ describe("WebAuthn request observer", () => {
   it("does not count a request whose promise it cannot observe", () => {
     const { realm, pending } = loadObserver();
     vm.runInContext("Promise.prototype.constructor = 1", realm);
-    vm.runInContext("credentials.get({ publicKey: {} })", realm);
+    const request = vm.runInContext("credentials.get({ publicKey: {} })", realm);
+    assert.equal(request, vm.runInContext("calls[0].promise", realm));
     assert.deepEqual(pending(), []);
   });
 

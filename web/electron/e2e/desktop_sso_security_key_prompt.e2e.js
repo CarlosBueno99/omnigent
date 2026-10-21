@@ -95,7 +95,12 @@ function promptState(electronApp) {
 
 describe(
   "desktop shell — Databricks App SSO with a security key factor",
-  { skip: missingDeps.length > 0 ? `missing deps: ${missingDeps.join(", ")}` : false },
+  {
+    skip:
+      process.platform === "win32"
+        ? "Windows keeps its native WebAuthn dialog"
+        : missingDeps.length > 0 && `missing deps: ${missingDeps.join(", ")}`,
+  },
   () => {
     let tmpDir;
     let server;
@@ -174,9 +179,10 @@ describe(
           );
           assert.ok(page, "the prompt window has no Playwright page");
           await page.getByText("Use your security key").waitFor({ state: "visible" });
-          const clipped = await page.evaluate(
-            () => document.getElementById("card").getBoundingClientRect().bottom > innerHeight,
-          );
+          const clipped = await page.evaluate(() => {
+            const card = document.getElementById("card");
+            return card.scrollHeight > card.clientHeight;
+          });
           assert.equal(clipped, false, "the prompt's text does not fit its window");
           // Hold the prompt on screen long enough to read in the recording.
           await sleep(5000);
@@ -207,7 +213,7 @@ describe(
     );
 
     it(
-      "shows the prompt for a touched key's sign-in and hides it once signed in",
+      "shows the prompt for a touched key's sign-in and hides it once the key answers",
       { timeout: 120_000 },
       async () => {
         frontDoor.events.length = 0;
@@ -217,24 +223,41 @@ describe(
           env: frontDoor.launchEnv,
         });
         try {
-          // A touched key answers at once, so record that the prompt was shown at all.
+          // A touched key answers at once, so record the prompt's show and hide events.
           await app.electronApp.evaluate(({ app: electronApp }) => {
-            globalThis.shownWindowIds = new Set();
+            globalThis.windowEvents = new Map();
             electronApp.on("browser-window-created", (_event, win) => {
-              win.on("show", () => globalThis.shownWindowIds.add(win.id));
+              const seen = [];
+              globalThis.windowEvents.set(win.id, seen);
+              for (const name of ["show", "hide"]) win.on(name, () => seen.push(name));
             });
           });
+          const promptEvents = () =>
+            app.electronApp.evaluate(({ BrowserWindow }, page) => {
+              const prompt = BrowserWindow.getAllWindows().find((win) =>
+                win.webContents.getURL().endsWith(page),
+              );
+              return prompt ? (globalThis.windowEvents.get(prompt.id) ?? []) : [];
+            }, PROMPT_PAGE);
+
+          // Keep the sign-in page from navigating, which also hides the prompt.
+          frontDoor.holdSignIn();
           await connectWithKey(app, true);
+          const answered = await waitFor(() => idpEvents().includes("get_resolved"), 30_000);
+          assert.ok(answered, `the key never answered; IdP events ${JSON.stringify(idpEvents())}`);
+          const seen = await waitFor(async () => {
+            const events = await promptEvents();
+            return events.includes("hide") ? events : null;
+          }, 5000);
+          assert.deepEqual(seen, ["show", "hide"], "the prompt did not hide once the key answered");
+          assert.match(
+            app.window.url(),
+            /\/signin\/verify\/webauthn/,
+            "the sign-in page navigated before the prompt hid",
+          );
+
+          frontDoor.releaseSignIn();
           await app.window.getByText("What should we build?").waitFor({ timeout: 30_000 });
-          assert.ok(idpEvents().includes("get_resolved"), JSON.stringify(idpEvents()));
-          const promptWasShown = await app.electronApp.evaluate(({ BrowserWindow }, page) => {
-            const prompt = BrowserWindow.getAllWindows().find((win) =>
-              win.webContents.getURL().endsWith(page),
-            );
-            return Boolean(prompt && globalThis.shownWindowIds.has(prompt.id));
-          }, PROMPT_PAGE);
-          assert.ok(promptWasShown, "the prompt never showed during the key's sign-in");
-          assert.equal((await promptState(app.electronApp))?.shown, false);
         } finally {
           try {
             await app.stopDisplayCapture();

@@ -7,8 +7,7 @@
 // untrusted, so the banner can NOT ride the page's bridge and must be a
 // shell-owned surface whose IPC is verified by sender.
 //
-// Unlike the update overlay the banner is created LAZILY (first show), so
-// windows that never leave their server never pay for the child window.
+// Lazily created per window on first show; see banner_window.js.
 
 "use strict";
 
