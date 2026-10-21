@@ -80,6 +80,7 @@ import { RunnerOfflineError, useWorkspaceAsleep } from "@/hooks/useWorkspaceChan
 import { readFileViewPreferences, writeFileViewPreferences } from "@/lib/fileViewPreferences";
 import { gitProviderCopy, type GitProviderCopy } from "@/lib/gitProviders";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
+import { setSessionPrPick, useSessionPrPick } from "@/lib/sessionPrPicks";
 import {
   fetchPullRequestFileContents,
   normalizePullRequestInfo,
@@ -1038,14 +1039,15 @@ function pullRequestLabel(pr: PullRequestAssociation, sessionProvider?: string |
 
 export function PullRequestPanel({ conversationId }: { conversationId: string }) {
   const isMobileViewport = useIsMobileViewport();
-  const [selection, setSelection] = useState<{ sessionId: string; url?: string }>();
+  const pick = useSessionPrPick(conversationId);
+  const [defaultPin, setDefaultPin] = useState<{ sessionId: string; url?: string }>();
   const [prPickerOpen, setPrPickerOpen] = useState(false);
   const [prPickerTooltipOpen, setPrPickerTooltipOpen] = useState(false);
   // Select focuses rows on both pointer hover and keyboard navigation.
   const [focusedPrUrl, setFocusedPrUrl] = useState<string>();
   const [linking, setLinking] = useState(false);
   const [url, setUrl] = useState("");
-  const selected = selection?.sessionId === conversationId ? selection.url : undefined;
+  const selected = pick ?? (defaultPin?.sessionId === conversationId ? defaultPin.url : undefined);
   const info = usePullRequestInfo(conversationId, { poll: true, prUrl: selected });
   const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
@@ -1101,10 +1103,17 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
   const update = useUpdateSessionPr(conversationId);
   useEffect(() => {
     if (!selected && info.data?.selected_pr_url) {
-      setSelection({ sessionId: conversationId, url: info.data.selected_pr_url });
+      setDefaultPin({ sessionId: conversationId, url: info.data.selected_pr_url });
     }
   }, [conversationId, selected, info.data?.selected_pr_url]);
-  const changeSelection = (next?: string) => setSelection({ sessionId: conversationId, url: next });
+  // With no associations there is no picker to replace a pick that fails to load (e.g. one
+  // unlinked elsewhere), so fall back to the session's default PR.
+  const pickUnserved =
+    !!pick && !associations && !!info.error && !(info.error instanceof RunnerOfflineError);
+  useEffect(() => {
+    if (pickUnserved) setSessionPrPick(conversationId, undefined);
+  }, [conversationId, pickUnserved]);
+  const changeSelection = (next?: string) => setSessionPrPick(conversationId, next);
   const prs = associations?.prs ?? [];
   const selectedPr = prs.find((pr) => pr.url === (selected ?? associations?.selected_pr_url));
   const linkInEmptyState = prs.length === 0 && panelState.kind === "no-pr";
@@ -1265,7 +1274,10 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
                       update.mutate(
                         { url: selected, action: "remove" },
                         {
-                          onSuccess: (data) => changeSelection(data.selected_pr_url),
+                          onSuccess: (data) => {
+                            setSessionPrPick(conversationId, undefined);
+                            setDefaultPin({ sessionId: conversationId, url: data.selected_pr_url });
+                          },
                         },
                       )
                     }

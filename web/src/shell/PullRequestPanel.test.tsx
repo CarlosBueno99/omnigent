@@ -2,7 +2,7 @@
 // hooks and the heavy MonacoDiffViewer are mocked; IntersectionObserver (absent
 // in jsdom) is stubbed to fire immediately so lazy sections mount.
 
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { parsePatchFiles } from "@pierre/diffs";
 import type * as DiffsModule from "@pierre/diffs";
 import userEvent from "@testing-library/user-event";
@@ -49,6 +49,7 @@ const state = vi.hoisted(() => ({
   diff: null as PullRequestDiffResponse | null,
   diffError: null as Error | null,
 }));
+const updateSessionPr = vi.hoisted(() => vi.fn());
 
 vi.mock("@/hooks/usePullRequests", async (importOriginal) => ({
   // The panel reads every info payload through the real normalizer.
@@ -65,7 +66,7 @@ vi.mock("@/hooks/usePullRequests", async (importOriginal) => ({
   fetchPullRequestFileContents: async () => ({ before: "old", after: "new" }),
   // The account selector (shown in the repo-unresolved empty state) calls this;
   // stub the mutation shape it reads.
-  useUpdateSessionPr: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+  useUpdateSessionPr: () => ({ mutate: updateSessionPr, isPending: false, isError: false }),
   useSetPullRequestPreference: () => ({
     mutate: () => {},
     isPending: false,
@@ -106,6 +107,7 @@ import {
   LARGE_DIFF_THRESHOLD,
 } from "./PullRequestPanel";
 import { RunnerOfflineError } from "@/hooks/useWorkspaceChangedFiles";
+import { clearSessionPrPicks } from "@/lib/sessionPrPicks";
 
 const FORGE_DISPLAY = {
   id: "example_forge",
@@ -178,6 +180,7 @@ let scrollIntoView: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   // The diff-layout toggle seeds from persisted prefs; start each test clean.
   window.localStorage.clear();
+  clearSessionPrPicks();
   // Fire the observer callback immediately on observe so lazy sections mount.
   class IO {
     private cb: IntersectionObserverCallback;
@@ -1765,6 +1768,134 @@ describe("session PR selection", () => {
     state.info = { isLoading: true, error: null, isFetching: true };
     rerender(<PullRequestPanel conversationId="conv_other" />);
     expect(screen.queryByRole("combobox", { name: "Session pull request" })).toBeNull();
+  });
+
+  it("keeps a session's picked PR after switching to another session and back", async () => {
+    const user = userEvent.setup();
+    const open = "https://github.com/example/project/pull/42";
+    const merged = "https://github.com/example/project/pull/7";
+    const openLabel = "example/project #42 — Add session switcher keyboard shortcuts";
+    const association = (url: string, number: number, title: string) => ({
+      url,
+      host: "github.com",
+      repository: "example/project",
+      number,
+      title,
+      relationship: "attached" as const,
+    });
+    const openPr = association(open, 42, "Add session switcher keyboard shortcuts");
+    const mergedPr = association(merged, 7, "Fix sidebar PR label truncation");
+    const infoFor = (selected: string, prs: PullRequestAssociation[]) => ({
+      isLoading: false,
+      error: null,
+      isFetching: false,
+      data: {
+        ...state.info!.data!,
+        tracking_available: true,
+        selected_pr_url: selected,
+        prs,
+      },
+    });
+    state.info = infoFor(merged, [mergedPr, openPr]);
+    const { rerender } = renderPanel();
+    const picker = screen.getByRole("combobox", { name: "Session pull request" });
+    await user.click(picker);
+    await user.click(screen.getByRole("option", { name: openLabel }));
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: open });
+
+    state.info = infoFor(open, [openPr]);
+    rerender(<PullRequestPanel conversationId="conv_other" />);
+    expect(screen.getByRole("combobox", { name: "Session pull request" })).toHaveTextContent(
+      openLabel,
+    );
+
+    state.info = infoFor(merged, [mergedPr, openPr]);
+    rerender(<PullRequestPanel conversationId="conv_1" />);
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: open });
+    expect(screen.getByRole("combobox", { name: "Session pull request" })).toHaveTextContent(
+      openLabel,
+    );
+  });
+
+  const firstPr = "https://github.com/example/one/pull/42";
+  const secondPr = "https://github.com/example/two/pull/42";
+  function trackedPrInfo(urls: string[]) {
+    return {
+      isLoading: false,
+      error: null,
+      isFetching: false,
+      data: {
+        ...state.info!.data!,
+        tracking_available: true,
+        selected_pr_url: urls[0],
+        prs: urls.map((url) => ({
+          url,
+          host: "github.com",
+          repository: url === firstPr ? "example/one" : "example/two",
+          number: 42,
+          relationship: "attached" as const,
+        })),
+      },
+    };
+  }
+  async function pickSecondPrAndUnmount() {
+    const user = userEvent.setup();
+    state.info = trackedPrInfo([firstPr, secondPr]);
+    const { unmount } = renderPanel();
+    await user.click(screen.getByRole("combobox", { name: "Session pull request" }));
+    await user.click(screen.getByRole("option", { name: "example/two #42" }));
+    unmount();
+    return user;
+  }
+
+  it("restores a session's picked PR when the panel remounts until it is unlinked", async () => {
+    const user = await pickSecondPrAndUnmount();
+    const remounted = renderPanel();
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
+      poll: true,
+      prUrl: secondPr,
+    });
+    expect(screen.getByRole("combobox", { name: "Session pull request" })).toHaveTextContent(
+      "example/two #42",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Unlink PR" }));
+    const [body, { onSuccess }] = updateSessionPr.mock.lastCall!;
+    expect(body).toEqual({ url: secondPr, action: "remove" });
+    act(() => onSuccess(trackedPrInfo([firstPr]).data));
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: firstPr });
+    remounted.unmount();
+
+    vi.mocked(usePullRequestInfo).mockClear();
+    renderPanel();
+    expect(usePullRequestInfo).toHaveBeenNthCalledWith(1, "conv_1", {
+      poll: true,
+      prUrl: undefined,
+    });
+  });
+
+  it("keeps a remembered pick while the runner is offline", async () => {
+    await pickSecondPrAndUnmount();
+    state.info = { isLoading: false, error: new RunnerOfflineError(), isFetching: false };
+    renderPanel();
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
+      poll: true,
+      prUrl: secondPr,
+    });
+  });
+
+  it("falls back to the session's default PR when a remembered pick fails to load", async () => {
+    await pickSecondPrAndUnmount();
+    state.info = {
+      isLoading: false,
+      error: new Error("This pull request is not associated with the session"),
+      isFetching: false,
+    };
+    renderPanel();
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
+      poll: true,
+      prUrl: undefined,
+    });
   });
 
   it.each([undefined, null, "", "   "])(
