@@ -176,14 +176,12 @@ function readStore(): Store {
   }
 }
 
-function writeStore(store: Store): boolean {
-  if (typeof window === "undefined") return false;
+function writeStore(store: Store): void {
+  if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-    return true;
   } catch {
     // Storage quota/access errors must not break panel interactions.
-    return false;
   }
 }
 
@@ -194,19 +192,10 @@ export function readSessionWorkspaceState(conversationId: string): SessionWorksp
 }
 
 /** Merge a partial update into one session's persisted workspace state. */
-/** Merge a patch into one session's persisted workspace state. */
 export function writeSessionWorkspaceState(
   conversationId: string,
   patch: SessionWorkspaceState,
 ): void {
-  saveSessionWorkspaceState(conversationId, patch);
-}
-
-/** Like `writeSessionWorkspaceState`, but returns false when storage rejected the write. */
-export function saveSessionWorkspaceState(
-  conversationId: string,
-  patch: SessionWorkspaceState,
-): boolean {
   const store = readStore();
   const existingIdx = store.findIndex((e) => e.id === conversationId);
   const prev = existingIdx >= 0 ? store[existingIdx].state : {};
@@ -241,7 +230,7 @@ export function saveSessionWorkspaceState(
   if (store.length > MAX_SESSIONS) {
     store.splice(0, store.length - MAX_SESSIONS);
   }
-  return writeStore(store);
+  writeStore(store);
 }
 
 /** Let existing chats follow a changed default while keeping their open tabs and layout. */

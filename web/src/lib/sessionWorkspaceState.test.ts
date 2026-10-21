@@ -1,9 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   type SessionWorkspaceState,
   readSessionWorkspaceState,
   resetSessionWorkspaceTabSelections,
-  saveSessionWorkspaceState,
   unpinSessionWorkspaceTabs,
   writeSessionWorkspaceState,
 } from "./sessionWorkspaceState";
@@ -187,18 +186,6 @@ describe("sessionWorkspaceState", () => {
     });
     expect(readSessionWorkspaceState("conv_list").browserNames).toBeUndefined();
     expect(readSessionWorkspaceState("conv_blank")).not.toHaveProperty("browserNames");
-  });
-
-  it("reports whether the browser could save the state", () => {
-    expect(saveSessionWorkspaceState("conv_saved", { openBrowsers: ["a"] })).toBe(true);
-    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new DOMException("quota", "QuotaExceededError");
-    });
-    try {
-      expect(saveSessionWorkspaceState("conv_saved", { openBrowsers: ["b"] })).toBe(false);
-    } finally {
-      setItem.mockRestore();
-    }
   });
 
   it("caps the persisted browser tabs at 20, keeping the most recent", () => {

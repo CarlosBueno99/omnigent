@@ -22,6 +22,8 @@ describe("browserUrlLabel", () => {
     ["file:///Users/me/report.html", "report.html"],
     ["file:///", "file:///"],
     ["about:blank#top", "New tab"],
+    ["data:text/plain,\u202Etxt.exe", "data:text/plain,%E2%80%AEtxt.exe"],
+    ["not a url \u200B\u0007", "not a url %E2%80%8B%07"],
     ["https://evil.test/%E2%80%AEmoc.elgoog", "evil.test/%E2%80%AEmoc.elgoog"],
     ["https://example.com/a%0Ab", "example.com/a%0Ab"],
     ["data:text/plain,hello", "data:text/plain,hello"],
@@ -39,6 +41,7 @@ describe("browserUrlLabel", () => {
     expect(browserUrlLabel(`https://example.com/${"a".repeat(100)}`)).toBe(
       `example.com/${"a".repeat(48)}…`,
     );
+    expect(browserUrlLabel(`file:///tmp/${"b".repeat(70)}.html`)).toBe(`${"b".repeat(60)}…`);
   });
 
   it("shortens a long URL that has no host", () => {

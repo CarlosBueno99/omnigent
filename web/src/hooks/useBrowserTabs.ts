@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { onBrowserActionRequest } from "@/lib/browserActionBus";
 import { onInAppLinkOpen } from "@/lib/openLinkInApp";
 import { normalizeBrowserTabName } from "@/lib/browserTabLabel";
-import { readSessionWorkspaceState, saveSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
+import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 
 /** Stable soft-tab id for the browser view driven by agents and opted-in links. */
 export const AGENT_BROWSER_TAB_ID = "agent-browser";
@@ -32,16 +32,12 @@ interface BrowserTabsState {
 }
 
 const agentNavigationEpochs = new Map<string, number>();
-// Tab state whose last save failed (e.g. a full localStorage), so later changes still build on it.
-const unsavedBrowserTabs = new Map<string, BrowserTabsState>();
 
 function agentNavigationEpoch(conversationId: string): number {
   return agentNavigationEpochs.get(conversationId) ?? 0;
 }
 
 function readBrowserTabsState(conversationId: string): BrowserTabsState {
-  const unsaved = unsavedBrowserTabs.get(conversationId);
-  if (unsaved) return unsaved;
   const saved = readSessionWorkspaceState(conversationId);
   const tabs = saved.openBrowsers ?? [];
   return {
@@ -52,13 +48,11 @@ function readBrowserTabsState(conversationId: string): BrowserTabsState {
 }
 
 function writeBrowserTabsState(conversationId: string, next: BrowserTabsState): void {
-  const saved = saveSessionWorkspaceState(conversationId, {
+  writeSessionWorkspaceState(conversationId, {
     openBrowsers: next.tabs,
     selectedBrowserId: next.selected,
     browserNames: next.names,
   });
-  if (saved) unsavedBrowserTabs.delete(conversationId);
-  else unsavedBrowserTabs.set(conversationId, next);
 }
 
 function withOpenTabNames(state: BrowserTabsState): BrowserTabsState {
@@ -92,8 +86,15 @@ export function useBrowserTabs(conversationId: string) {
 
   const update = useCallback(
     (mutate: (current: BrowserTabsState) => BrowserTabsState) => {
+      const current = readBrowserTabsState(conversationId);
+      const mutated = mutate(current);
+      // A no-op (e.g. a late close of a gone tab) must not recreate a cleared entry.
+      if (mutated === current) {
+        setState(current);
+        return;
+      }
       // Drop names of closed tabs so memory matches what is saved.
-      const next = withOpenTabNames(mutate(readBrowserTabsState(conversationId)));
+      const next = withOpenTabNames(mutated);
       writeBrowserTabsState(conversationId, next);
       setState(next);
     },

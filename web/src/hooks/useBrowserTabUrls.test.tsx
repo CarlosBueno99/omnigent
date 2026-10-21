@@ -68,10 +68,10 @@ describe("useBrowserTabUrls", () => {
     expect(result.current).toEqual({ "tab-two": "https://two.example/" });
   });
 
-  it("forgets a URL when a reopened tab has no view yet", async () => {
+  it("forgets the URL of a removed tab before it is reopened", async () => {
     let exists = true;
     installBridge(() =>
-      Promise.resolve(exists ? { exists, url: "https://old.example/" } : { exists: false }),
+      exists ? Promise.resolve({ exists, url: "https://old.example/" }) : new Promise(() => {}),
     );
     const { result, rerender } = renderHook(({ tabs }) => useBrowserTabUrls("session-a", tabs), {
       initialProps: { tabs: [AGENT_BROWSER_TAB_ID] },
@@ -79,11 +79,10 @@ describe("useBrowserTabUrls", () => {
     await act(async () => {});
     expect(result.current).toEqual({ [AGENT_BROWSER_TAB_ID]: "https://old.example/" });
 
-    // The view went away without a close event reaching this hook.
+    // The view went away without a close event, and the reopened tab's probe never settles.
     exists = false;
     rerender({ tabs: [] });
     rerender({ tabs: [AGENT_BROWSER_TAB_ID] });
-    await act(async () => {});
     expect(result.current).toEqual({});
   });
 

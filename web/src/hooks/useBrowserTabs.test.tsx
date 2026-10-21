@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { emitBrowserActionRequest } from "@/lib/browserActionBus";
-import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
+import { readSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import {
   AGENT_BROWSER_TAB_ID,
   browserViewId,
@@ -116,34 +116,10 @@ describe("browser soft tabs", () => {
     expect(readSessionWorkspaceState("session-a").browserNames).toBeUndefined();
   });
 
-  it("keeps every change while storage rejects writes, and saves them once it recovers", () => {
-    writeSessionWorkspaceState("session-a", {
-      openBrowsers: ["saved"],
-      selectedBrowserId: "saved",
-    });
-    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new DOMException("quota", "QuotaExceededError");
-    });
+  it("does not save anything when renaming a tab that is not open", () => {
     const { result } = renderHook(() => useBrowserTabs("session-a"));
-    let added: string[] = [];
-    try {
-      act(() => result.current.rename("saved", "Docs"));
-      act(() => result.current.add());
-      added = [result.current.selected!];
-      act(() => result.current.add());
-      added = [...added, result.current.selected!];
-      expect(result.current.names).toEqual({ saved: "Docs" });
-      expect(result.current.tabs).toEqual(["saved", ...added]);
-    } finally {
-      setItem.mockRestore();
-    }
-
-    act(() => result.current.select("saved"));
-    expect(readSessionWorkspaceState("session-a")).toMatchObject({
-      openBrowsers: ["saved", ...added],
-      selectedBrowserId: "saved",
-      browserNames: { saved: "Docs" },
-    });
+    act(() => result.current.rename("closed-tab", "Docs"));
+    expect(localStorage.length).toBe(0);
   });
 
   it("creates independent views and restores the selection on remount", () => {

@@ -28,17 +28,9 @@ from playwright.sync_api import Locator, Page, expect
 
 from tests.e2e_ui.conftest import open_right_rail
 
-# Minimal stand-in for the Electron preload bridge. Runs before any app script
-# on every navigation (add_init_script), so the SPA's feature detection
-# (``supportsBrowser()`` in nativeBridge.ts) sees a browser-capable shell. Most
-# methods are guarded no-ops (``onBrowserUrlChanged`` records listeners so tests
-# can emit navigation events): ``kind`` marks the native
-# shell, ``browserOpenOrNavigate`` is the capability marker that gates the
-# Browser tab (a shell too old to ship the embedded browser lacks it, so the
-# tab hides), and the rest keep unrelated native calls (badge, notify, the
-# title-bar server picker, and the browser-pane bridge probes) from throwing
-# under the stub. ``browserHasView`` resolves "no view yet" so the pane shows
-# its empty state instead of trying to attach a native WebContentsView.
+# Electron preload stub, run before app scripts so ``supportsBrowser()`` passes.
+# Methods are guarded no-ops (``browserHasView`` reports no view) except
+# ``onBrowserUrlChanged``, which records listeners for ``_emit_browser_url``.
 _ELECTRON_SHELL_INIT_SCRIPT = """
 window.omnigentDesktop = {
   kind: "electron",

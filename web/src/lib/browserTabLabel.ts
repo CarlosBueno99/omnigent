@@ -7,8 +7,14 @@ export const BROWSER_TAB_NAME_MAX_CHARS = 80;
 /** Longest URL label; the full URL stays in the tab tooltip. */
 const URL_LABEL_MAX_CHARS = 60;
 
-// Bidi, zero-width and control characters could disguise a decoded path segment.
+// Bidi, zero-width and control characters could make a label read as something else.
 const SPOOFABLE_CHARS = /[\p{Cc}\p{Cf}]/u;
+const SPOOFABLE_CHARS_GLOBAL = /[\p{Cc}\p{Cf}]/gu;
+
+/** Show disguising characters percent-encoded, as in the address bar. */
+function escapeSpoofableChars(text: string): string {
+  return text.replace(SPOOFABLE_CHARS_GLOBAL, (char) => encodeURIComponent(char));
+}
 
 /** First `max` code points of `text`, so an emoji is never split. */
 export function truncateCodePoints(text: string, max: number): string {
@@ -49,7 +55,7 @@ export function browserUrlLabel(url: string | null | undefined): string {
   try {
     parsed = new URL(trimmed);
   } catch {
-    return clampUrlLabel(trimmed);
+    return clampUrlLabel(escapeSpoofableChars(trimmed));
   }
   if (parsed.protocol === "about:" && parsed.pathname === "blank") return NEW_BROWSER_TAB_LABEL;
   const segments = parsed.pathname.split("/").filter(Boolean).map(decodeSegment);
@@ -59,8 +65,9 @@ export function browserUrlLabel(url: string | null | undefined): string {
     const tail = segments.slice(-2).join("/");
     return clampUrlLabel(segments.length > 2 ? `${host}/…/${tail}` : `${host}/${tail}`);
   }
-  if (parsed.protocol === "file:") return segments.at(-1) ?? trimmed;
-  return clampUrlLabel(trimmed);
+  const raw = escapeSpoofableChars(trimmed);
+  if (parsed.protocol === "file:") return clampUrlLabel(segments.at(-1) ?? raw);
+  return clampUrlLabel(raw);
 }
 
 /** Starting value of the rename field: the label cut to the name limit. */
