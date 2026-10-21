@@ -1,13 +1,6 @@
-// Shell-owned "return to your server?" banner window.
-//
-// Shown when a shell window has been sitting on a foreign page (typically an
-// SSO/IdP login) instead of the server it is pinned to — see away_banner.js.
-// Like the update overlay, it is a transparent, frameless child window with a
-// bundled page and a narrow preload: the page the user is on is foreign and
-// untrusted, so the banner can NOT ride the page's bridge and must be a
-// shell-owned surface whose IPC is verified by sender.
-//
-// Lazily created per window on first show; see banner_window.js.
+// Shell-owned "return to your server?" banner, shown while a shell window sits on a
+// foreign (typically SSO) page; see away_banner.js. That page is untrusted, so the banner
+// is a separate child window (banner_window.js) whose IPC is verified by sender.
 
 "use strict";
 

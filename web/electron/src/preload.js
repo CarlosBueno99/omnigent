@@ -54,7 +54,7 @@ function observeWebAuthnRequests(report) {
   for (const name of ["get", "create"]) {
     const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
     if (typeof descriptor?.value !== "function") continue;
-    // A Proxy keeps the method's name and length and a native toString.
+    // A Proxy keeps name and length; toString stays native but drops the name.
     descriptor.value = new Proxy(descriptor.value, {
       apply(target, thisArg, args) {
         let prompted = false;

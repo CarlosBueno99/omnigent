@@ -176,6 +176,8 @@ describe("security-key prompt", () => {
     assert.equal(prompt.visible, true);
     h.send("omnigent:security-key-prompt-dismiss", { sender: prompt.webContents });
     assert.equal(prompt.visible, false);
+    h.report(true);
+    assert.equal(prompt.visible, true, "a later request re-shows a dismissed prompt");
   });
 
   it("hides when the page navigates or its renderer dies", () => {

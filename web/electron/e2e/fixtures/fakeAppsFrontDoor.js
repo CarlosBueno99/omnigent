@@ -38,7 +38,7 @@ const b64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/"))
   try {
     await navigator.credentials.get({ publicKey: {
       challenge: crypto.getRandomValues(new Uint8Array(32)),
-      rpId: "localhost",
+      rpId: location.hostname,
       allowCredentials: [{ type: "public-key", id: b64(${JSON.stringify(CREDENTIAL_ID)}),
         transports: ["usb", "nfc", "internal", "hybrid"] }],
       userVerification: "preferred",
