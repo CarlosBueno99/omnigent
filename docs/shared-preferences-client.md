@@ -59,6 +59,32 @@ separate process lock permits only one synchronizer per cache, while local
 enqueue remains available during HTTP waits. No SQLite transaction spans a
 network request. SQLite's normal durable commit settings are retained.
 
+The device cache deliberately uses local SQLite, rather than opening the server's
+application database: offline hosts cannot reach that database or carry its
+credentials. Server stores and their Alembic lifecycle require application
+bootstrap; using those tables for an outbox would also mix local, unsaved intent
+with authoritative server state. A device-local transactional queue is needed to
+commit edits before network access and survive process death. This separate
+persistence path is proposed for maintainer design review in this PR; approval
+has not been assumed.
+
+Schema version 1 uses `PRAGMA user_version`. Unknown versions and earlier
+unversioned prototype files fail visibly; preserve those files for recovery,
+rather than deleting pending edits. Future migrations must preserve operation
+IDs, bodies, ordering and binding atomically, with reopen/rollback tests.
+Records are bounded binary JSON (at most 16,000 bytes each), UUID references are
+16 bytes, and sequence numbers are supplied explicitly. Entries and conflicts
+are individual records, not one duplicated snapshot blob. A newer receipt is
+held separately on its entry until a complete refresh replaces it; this keeps
+the last complete offline snapshot distinct from acknowledged versions.
+
+New cache directories are private (0700), cache files are 0600, and read-only
+transactions do not request a write lock. Caller-owned existing directories are
+not chmodded. Synchronization holds its process lock until any disk worker has
+finished, including cancellation. A busy sync/discard raises `filelock.Timeout`
+immediately; SQLite contention raises `sqlite3.OperationalError` after five
+seconds. Callers should retry without dropping pending edits.
+
 Consecutive offline edits to one key form a chain. After an applied/unchanged
 receipt, only its unattempted successor inherits that acknowledged version.
 If the predecessor conflicts, its successor keeps the stale base and also
@@ -92,6 +118,6 @@ entry point and real-process recipe. To reproduce offline/restart recovery:
 uv run --no-sync pytest tests/e2e/omnigent/test_shared_preferences_e2e.py --reruns 0 -q -rs
 ```
 
-The scenario uses isolated client processes and two local servers; a lost reply
+The scenario uses isolated client processes and two initial server replicas plus a replacement server; a lost reply
 is injected after a real committed HTTP request. It proves the client/API/SQL
 path, not UI, native plugin application, live vendor models, or managed startup.

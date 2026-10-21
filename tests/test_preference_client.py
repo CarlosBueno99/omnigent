@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
@@ -132,12 +134,12 @@ async def test_delivery_failure_preserves_outbox(peers, failure):
     def handle(request):
         if failure == "offline":
             raise httpx.ConnectError("offline", request=request)
-        if failure == "forbidden":
-            return httpx.Response(401)
         if request.method == "GET":
             snapshot = store.read(user_id="bob" if failure == "wrong-user" else "alice")
             return httpx.Response(200, json=snapshot.model_dump(mode="json"))
         posts.append(request)
+        if failure == "forbidden":
+            return httpx.Response(403)
         if failure == "cancelled":
             raise asyncio.CancelledError
         return httpx.Response(200, json={"operation_id": "invalid"})
@@ -148,8 +150,7 @@ async def test_delivery_failure_preserves_outbox(peers, failure):
         with pytest.raises((httpx.HTTPError, ValueError, asyncio.CancelledError)):
             await local.sync(http)
     assert local.pending() == queued
-    if failure == "wrong-user":
-        assert posts == []
+    assert len(posts) == (0 if failure in ("offline", "wrong-user") else 1)
 
 
 @pytest.mark.asyncio
@@ -167,7 +168,7 @@ async def test_cache_identity_corruption_and_stale_snapshot_are_not_silent_reset
         local._accept_snapshot(latest.model_copy(update={"entries": []}))
     assert local.cached() == latest
     with local._transaction() as connection:
-        connection.execute("UPDATE state SET snapshot = 'corrupt'")
+        connection.execute("UPDATE entries SET payload = ?", (b"corrupt",))
     with pytest.raises(ValueError):
         local.cached()
 
@@ -242,7 +243,7 @@ async def test_outbox_limit_and_invalid_edit_leave_existing_work(peers, monkeypa
         await local.sync(http)
     with pytest.raises(ValueError):
         local.enqueue(MODEL, False)
-    monkeypatch.setattr(module, "MAX_KEYS", 1)
+    monkeypatch.setattr(module, "MAX_PENDING_OPERATIONS", 1)
     operation_id = local.enqueue(MODEL, "a")
     with pytest.raises(ValueError, match="outbox is full"):
         local.enqueue(MODEL, "b")
@@ -371,3 +372,84 @@ async def test_bad_later_page_never_replaces_cache_or_sends_edits(peers, fault):
         with pytest.raises((ValueError, httpx.ReadError)):
             await local.sync(http, page_size=1)
     assert count == 2 and local.cached() == cached and local.pending() == pending
+
+
+@pytest.mark.asyncio
+async def test_enqueue_during_network_wait_and_cancelled_disk_worker(peers, monkeypatch):
+    store, (local, _) = peers
+    async with httpx.AsyncClient(base_url="http://test", transport=transport(store)) as http:
+        await local.sync(http)
+    local.enqueue(MODEL, "first")
+    posted, release_post = asyncio.Event(), asyncio.Event()
+    base = transport(store)
+
+    async def delayed(request):
+        if request.method == "POST":
+            posted.set()
+            await release_post.wait()
+        return base.handle_request(request)
+
+    async with httpx.AsyncClient(
+        base_url="http://test", transport=httpx.MockTransport(delayed)
+    ) as http:
+        task = asyncio.create_task(local.sync(http))
+        try:
+            await asyncio.wait_for(posted.wait(), 5)
+            successor = await asyncio.wait_for(
+                asyncio.to_thread(local.enqueue, MODEL, "second"), 2
+            )
+            assert local.pending()[-1].operation_id == successor
+        finally:
+            release_post.set()
+            await task
+    assert local.cached().entries[0].value == "second"
+    started, release_worker = threading.Event(), threading.Event()
+    accept = local._accept_snapshot
+
+    def blocked(snapshot):
+        started.set()
+        assert release_worker.wait(5)
+        accept(snapshot)
+
+    monkeypatch.setattr(local, "_accept_snapshot", blocked)
+    async with httpx.AsyncClient(base_url="http://test", transport=transport(store)) as http:
+        task = asyncio.create_task(local.sync(http))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()  # repeated cancellation must not release the lock either
+            await asyncio.sleep(0)
+            with pytest.raises(Timeout):
+                await local.sync(http)
+        finally:
+            release_worker.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert await local.sync(http) == local.cached()
+
+
+@pytest.mark.asyncio
+async def test_cache_schema_permissions_bounds_and_incomplete_refresh(peers):
+    store, (local, _) = peers
+    assert local.path.stat().st_mode & 0o777 == 0o600
+    assert local.path.parent.stat().st_mode & 0o777 == 0o700
+    async with httpx.AsyncClient(base_url="http://test", transport=transport(store)) as http:
+        before = await local.sync(http)
+    local.enqueue(MODEL, "a")
+    sequence, operation = local._next()
+    receipt = store.apply(operation, user_id="alice")
+    local._acknowledge(sequence, operation, receipt)
+    # An ack isn't a complete snapshot; offline startup retains the last complete read.
+    assert local.cached() == before
+    with local._transaction() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE entries SET payload = ?", (b"x" * 16001,))
+        connection.execute("PRAGMA user_version = 999")
+    with pytest.raises(ValueError, match="Unsupported preference cache version"):
+        PreferenceClient(local.path, identity=store.identity("alice"), installation_id="laptop")
+    with local._transaction() as connection:
+        connection.execute("PRAGMA user_version = 0")
+    with pytest.raises(ValueError, match="Unversioned preference cache"):
+        PreferenceClient(local.path, identity=store.identity("alice"), installation_id="laptop")

@@ -278,6 +278,9 @@ backend.
 
 ## Shared preferences
 
+Default runs omit preference journeys and leave the API off. Name a preference
+journey explicitly or pass `--shared-preferences` to include them.
+
 The `shared_preferences_*` journeys enable the API on the benchmark-owned
 server. They use real HTTP/SQL and local header authentication, with no model.
 The sync journeys also use the production client's private SQLite cache/outbox.

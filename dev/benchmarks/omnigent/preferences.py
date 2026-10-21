@@ -77,7 +77,7 @@ async def _setup(
 ) -> _Context:
     ctx = _Context()
     run_id = uuid4().hex
-    if clients > 1 and env.preference_keys <= clients:
+    if env.preference_keys <= clients:
         raise ValueError("Concurrent sync needs at least preference_clients + 1 keys")
     try:
         for index in range(clients):
@@ -163,7 +163,12 @@ async def _write(_env: BenchEnvironment, context: object) -> None:
         }
     )
     result = await _post(worker.http, operation)
-    if result.status != "applied" or result.entry.value != operation.value:
+    if (
+        result.status != "applied"
+        or result.entry.value != operation.value
+        or result.operation_id != operation.operation_id
+        or result.entry.key != operation.key
+    ):
         raise RuntimeError("Preference edit was not applied")
     worker.receipt = result
 
@@ -177,7 +182,10 @@ async def _verify_write(_env: BenchEnvironment, context: object) -> None:
 
 async def _refresh(_env: BenchEnvironment, context: object) -> None:
     worker = cast(_Context, context).workers[0]
-    if await worker.local.sync(worker.http, max_operations=0) != worker.snapshot:
+    if (
+        await worker.local.sync(worker.http, max_operations=0) != worker.snapshot
+        or worker.local.cached() != worker.snapshot
+    ):
         raise RuntimeError("Client refresh lost saved preferences")
 
 

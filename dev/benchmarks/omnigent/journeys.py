@@ -1287,16 +1287,24 @@ ALL_JOURNEYS: dict[str, Journey] = {
 }
 
 # Registry alias — kept for callers that enumerate opt-in journeys explicitly.
-OPT_IN_JOURNEYS: dict[str, Journey] = {}
+OPT_IN_JOURNEYS: dict[str, Journey] = {
+    name: journey for name, journey in ALL_JOURNEYS.items() if journey.needs_shared_preferences
+}
 
 
-def resolve_journeys(names: list[str] | None) -> list[Journey]:
-    """Resolve requested journey *names* (or all when ``None``/empty).
+def resolve_journeys(
+    names: list[str] | None, *, shared_preferences: bool = False
+) -> list[Journey]:
+    """Resolve named journeys; defaults exclude preferences unless explicitly enabled.
 
     :raises KeyError: If a requested name isn't registered.
     """
     if not names:
-        return list(ALL_JOURNEYS.values())
+        return [
+            journey
+            for journey in ALL_JOURNEYS.values()
+            if shared_preferences or not journey.needs_shared_preferences
+        ]
     resolved = []
     for name in names:
         if name not in ALL_JOURNEYS:

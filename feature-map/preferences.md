@@ -26,7 +26,8 @@ An explicit Python client can persist offline edits and synchronize them on reco
 - `shared-operations`: opt-in server API; read/save all four groups, retry an
   edit, remove a preference, inspect competing edits, and resolve them explicitly.
 - `shared-client`: explicit Python client; preserve offline edits across process
-  restarts, retry uncertain deliveries, refresh the cache, and surface conflicts.
+  restarts, retry uncertain deliveries, refresh the cache, and surface conflicts. Cache records are versioned and bounded; lock contention
+  and unsupported cache versions remain visible.
 
 ## How to get to it (user POV)
 

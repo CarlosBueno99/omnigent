@@ -306,6 +306,11 @@ def _stop_process_group(proc: subprocess.Popen[bytes]) -> None:
         psutil.wait_procs(current, timeout=0.2)
 
 
+DEFAULT_PREFERENCE_HISTORY = 0
+DEFAULT_PREFERENCE_KEYS = 32
+DEFAULT_PREFERENCE_CLIENTS = 16
+
+
 class BenchEnvironment:
     """Async context manager owning the benchmark's server (± runner + mock).
 
@@ -348,9 +353,9 @@ class BenchEnvironment:
         model: str = _DEFAULT_MODEL,
         network_delay_ms: float = 0.0,
         shared_preferences: bool = False,
-        preference_history: int = 0,
-        preference_keys: int = 32,
-        preference_clients: int = 16,
+        preference_history: int = DEFAULT_PREFERENCE_HISTORY,
+        preference_keys: int = DEFAULT_PREFERENCE_KEYS,
+        preference_clients: int = DEFAULT_PREFERENCE_CLIENTS,
         teardown_started: asyncio.Event | None = None,
     ) -> None:
         # with_host is additive over with_runner: the boot runner still serves

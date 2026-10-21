@@ -33,7 +33,12 @@ from pathlib import Path
 # Allow ``uv run <path>`` (no package context) to import the sibling modules.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from dev.benchmarks.omnigent.environment import BenchEnvironment
+from dev.benchmarks.omnigent.environment import (
+    DEFAULT_PREFERENCE_CLIENTS,
+    DEFAULT_PREFERENCE_HISTORY,
+    DEFAULT_PREFERENCE_KEYS,
+    BenchEnvironment,
+)
 from dev.benchmarks.omnigent.journeys import (
     ALL_JOURNEYS,
     Journey,
@@ -149,7 +154,9 @@ async def run_benchmark(
     :returns: ``(report, passed)`` where *passed* is ``False`` if any journey
         breached a supplied threshold.
     """
-    journeys = resolve_journeys(args.journeys)
+    journeys = resolve_journeys(
+        args.journeys, shared_preferences=getattr(args, "shared_preferences", False)
+    )
     journey_results: dict[str, dict[str, object]] = {}
     passed = True
     backend = _backend_of(args.database_uri)
@@ -173,9 +180,9 @@ async def run_benchmark(
         database_uri=args.database_uri,
         network_delay_ms=args.network_delay_ms,
         shared_preferences=shared_preferences,
-        preference_history=getattr(args, "preference_history", 0),
-        preference_keys=getattr(args, "preference_keys", 32),
-        preference_clients=getattr(args, "preference_clients", 16),
+        preference_history=getattr(args, "preference_history", DEFAULT_PREFERENCE_HISTORY),
+        preference_keys=getattr(args, "preference_keys", DEFAULT_PREFERENCE_KEYS),
+        preference_clients=getattr(args, "preference_clients", DEFAULT_PREFERENCE_CLIENTS),
         teardown_started=teardown_started,
     ) as env:
         for journey in journeys:
@@ -227,9 +234,9 @@ async def run_benchmark(
         "backend": backend,
         "network_delay_ms": args.network_delay_ms,
         "shared_preferences": shared_preferences,
-        "preference_history": getattr(args, "preference_history", 0),
-        "preference_keys": getattr(args, "preference_keys", 32),
-        "preference_clients": getattr(args, "preference_clients", 16),
+        "preference_history": getattr(args, "preference_history", DEFAULT_PREFERENCE_HISTORY),
+        "preference_keys": getattr(args, "preference_keys", DEFAULT_PREFERENCE_KEYS),
+        "preference_clients": getattr(args, "preference_clients", DEFAULT_PREFERENCE_CLIENTS),
     }
     generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     report = build_report(
@@ -346,19 +353,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--preference-history",
         type=int,
-        default=0,
+        default=DEFAULT_PREFERENCE_HISTORY,
         help="Extra receipt rows seeded per preference namespace, outside timing (0..9000).",
     )
     parser.add_argument(
         "--preference-keys",
         type=int,
-        default=32,
+        default=DEFAULT_PREFERENCE_KEYS,
         help="Current preference keys per namespace (1..512).",
     )
     parser.add_argument(
         "--preference-clients",
         type=int,
-        default=16,
+        default=DEFAULT_PREFERENCE_CLIENTS,
         help="Independent disk caches for concurrent sync journeys.",
     )
     args = parser.parse_args(argv)
@@ -366,8 +373,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("preference history must be 0..9000 and keys must be 1..512")
     if not 1 <= args.preference_clients <= 64:
         parser.error("preference clients must be 1..64")
-    selected = set(args.journeys or ALL_JOURNEYS)
+    selected = {
+        journey.name
+        for journey in resolve_journeys(args.journeys, shared_preferences=args.shared_preferences)
+    }
     sync = selected & {"shared_preferences_sync_same_user", "shared_preferences_sync_many_users"}
+    if (
+        any(name.startswith("shared_preferences_") for name in selected)
+        and args.preference_keys < 2
+    ):
+        parser.error("preference journeys need at least two seeded keys")
     writes = 0
     if sync:
         if args.concurrency > args.preference_clients:
