@@ -71,6 +71,10 @@ def _onboarding_shell(tmp_path: Path, workspace: HostLoginWorkspace) -> _Onboard
             "OPENAI_API_KEY": None,
             "XDG_CONFIG_HOME": str(home / ".config"),
             "XDG_CACHE_HOME": str(home / ".cache"),
+            "SSH_CONNECTION": None,
+            "SSH_CLIENT": None,
+            "SSH_TTY": None,
+            "OMNIGENT_LOGIN_CALLBACK_FORWARDED": None,
         },
         None,
     )

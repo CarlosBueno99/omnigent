@@ -13066,11 +13066,17 @@ def _wait_for_browser_login(
 def _stop_browser_login(proc: subprocess.Popen[bytes]) -> None:
     """Terminate ``databricks auth login``, kill it if it outlives the grace period, reap it."""
     proc.terminate()
+    stopped = False
     try:
         proc.wait(timeout=_BROWSER_LOGIN_STOP_GRACE_S)
+        stopped = True
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+        pass
+    finally:
+        # Also runs when a second Ctrl+C interrupts the grace wait.
+        if not stopped:
+            proc.kill()
+            proc.wait()
 
 
 def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None) -> None:

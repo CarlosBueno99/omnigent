@@ -20,6 +20,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import click
 import httpx
@@ -118,12 +119,13 @@ def token_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 class _FakeLoginProcess:
     """Stand-in for the ``databricks auth login`` ``Popen`` handle: the first ``stalls``
     ``wait`` calls time out, then it exits with ``returncode`` (or each ``wait`` raises
-    ``raise_on_wait`` until it is signalled). ``events`` records waits and signals in order."""
+    ``raise_on_wait`` until it is signalled). After ``terminate`` it exits, ignores the signal,
+    or has its wait interrupted, per ``after_terminate``. ``events`` records waits and signals."""
 
     stalls: int = 0
     returncode: int = 0
     raise_on_wait: type[BaseException] | None = None
-    ignores_terminate: bool = False
+    after_terminate: Literal["exit", "ignore", "interrupt"] = "exit"
     wait_timeouts: list[float | None] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
     terminated: bool = False
@@ -139,19 +141,15 @@ class _FakeLoginProcess:
     def wait(self, timeout: float | None = None) -> int:
         self.wait_timeouts.append(timeout)
         self.events.append("wait")
-        if self.killed or (self.terminated and not self.ignores_terminate):
+        if self.killed or (self.terminated and self.after_terminate == "exit"):
             return self.returncode
-        if self.raise_on_wait is not None and not self.terminated:
+        if self.terminated and self.after_terminate == "interrupt":
+            raise KeyboardInterrupt
+        if not self.terminated and self.raise_on_wait is not None:
             raise self.raise_on_wait()
         if not self.terminated and len(self.wait_timeouts) > self.stalls:
             return self.returncode
         raise subprocess.TimeoutExpired("databricks auth login", timeout or 0)
-
-    def communicate(self, input: object = None, timeout: float | None = None) -> tuple[None, None]:
-        return None, None
-
-    def poll(self) -> int:
-        return self.returncode
 
     def terminate(self) -> None:
         self.terminated = True
@@ -777,11 +775,15 @@ def test_login_reports_databricks_cli_failure(
     assert not process.terminated and not process.killed
 
 
+@pytest.mark.parametrize("after_terminate", ["ignore", "interrupt"])
 def test_login_kills_databricks_cli_on_keyboard_interrupt(
-    monkeypatch: pytest.MonkeyPatch, token_dir: Path
+    monkeypatch: pytest.MonkeyPatch,
+    token_dir: Path,
+    after_terminate: Literal["ignore", "interrupt"],
 ) -> None:
-    """Ctrl+C during the wait aborts the command; a CLI ignoring SIGTERM is killed and reaped."""
-    process = _FakeLoginProcess(raise_on_wait=KeyboardInterrupt, ignores_terminate=True)
+    """Ctrl+C aborts the login; a CLI that ignores SIGTERM, or a second Ctrl+C during the
+    grace wait, still gets the CLI killed and reaped."""
+    process = _FakeLoginProcess(raise_on_wait=KeyboardInterrupt, after_terminate=after_terminate)
     _patch_login_env(
         monkeypatch,
         fake_httpx=_FakeHttpx(responses=[_response(302, headers={"location": _APPS_REDIRECT})]),
