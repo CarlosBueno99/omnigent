@@ -50,6 +50,7 @@ const state = vi.hoisted(() => ({
   diffError: null as Error | null,
 }));
 const updateSessionPr = vi.hoisted(() => vi.fn());
+const fetchPullRequestInfo = vi.hoisted(() => vi.fn());
 
 vi.mock("@/hooks/usePullRequests", async (importOriginal) => ({
   // The panel reads every info payload through the real normalizer.
@@ -64,6 +65,7 @@ vi.mock("@/hooks/usePullRequests", async (importOriginal) => ({
     isFetching: false,
   }),
   fetchPullRequestFileContents: async () => ({ before: "old", after: "new" }),
+  fetchPullRequestInfo,
   // The account selector (shown in the repo-unresolved empty state) calls this;
   // stub the mutation shape it reads.
   useUpdateSessionPr: () => ({ mutate: updateSessionPr, isPending: false, isError: false }),
@@ -1967,17 +1969,89 @@ describe("session PR selection", () => {
     });
   });
 
-  it("falls back to the session's default PR when a remembered pick fails to load", async () => {
+  it("forgets a remembered pick that fails to load once the session no longer tracks it", async () => {
     await pickSecondPrAndUnmount();
-    state.info = {
-      isLoading: false,
-      error: new Error("This pull request is not associated with the session"),
-      isFetching: false,
-    };
+    vi.mocked(usePullRequestInfo).mockClear();
+    fetchPullRequestInfo.mockResolvedValue(trackedPrInfo([firstPr]).data);
+    // The server proxy reports an untracked PR as a generic runner failure.
+    state.info = { isLoading: false, error: new Error("502 Bad Gateway"), isFetching: false };
     renderPanel();
+    expect(usePullRequestInfo).toHaveBeenNthCalledWith(1, "conv_1", {
+      poll: true,
+      prUrl: secondPr,
+    });
+    await waitFor(() =>
+      expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
+        poll: true,
+        prUrl: undefined,
+      }),
+    );
+    expect(fetchPullRequestInfo).toHaveBeenCalledWith("conv_1");
+  });
+
+  it("keeps a remembered pick that fails to load while the session still tracks it", async () => {
+    await pickSecondPrAndUnmount();
+    fetchPullRequestInfo.mockResolvedValue(trackedPrInfo([firstPr, secondPr]).data);
+    state.info = { isLoading: false, error: new Error("502 Bad Gateway"), isFetching: false };
+    renderPanel();
+    await waitFor(() => expect(fetchPullRequestInfo).toHaveBeenCalledWith("conv_1"));
+    await act(async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    });
     expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
       poll: true,
+      prUrl: secondPr,
+    });
+  });
+
+  it("remembers each session's own pick across session switches", async () => {
+    const user = userEvent.setup();
+    state.info = trackedPrInfo([firstPr, secondPr]);
+    const { rerender } = renderPanel();
+    await user.click(screen.getByRole("combobox", { name: "Session pull request" }));
+    await user.click(screen.getByRole("option", { name: "example/two #42" }));
+
+    vi.mocked(usePullRequestInfo).mockClear();
+    state.info = trackedPrInfo([secondPr, firstPr]);
+    rerender(<PullRequestPanel conversationId="conv_other" />);
+    expect(usePullRequestInfo).toHaveBeenNthCalledWith(1, "conv_other", {
+      poll: true,
       prUrl: undefined,
+    });
+    await user.click(screen.getByRole("combobox", { name: "Session pull request" }));
+    await user.click(screen.getByRole("option", { name: "example/one #42" }));
+
+    state.info = trackedPrInfo([firstPr, secondPr]);
+    rerender(<PullRequestPanel conversationId="conv_1" />);
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: secondPr });
+    state.info = trackedPrInfo([secondPr, firstPr]);
+    rerender(<PullRequestPanel conversationId="conv_other" />);
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_other", {
+      poll: true,
+      prUrl: firstPr,
+    });
+  });
+
+  it("remembers a newly linked PR after the panel remounts", async () => {
+    const user = userEvent.setup();
+    state.info = trackedPrInfo([firstPr]);
+    const { unmount } = renderPanel();
+    await user.click(screen.getByRole("button", { name: "Link a PR" }));
+    await user.type(screen.getByRole("textbox", { name: "Pull request URL" }), secondPr);
+    await user.click(screen.getByRole("button", { name: "Link" }));
+    const [body, { onSuccess }] = updateSessionPr.mock.lastCall!;
+    expect(body).toEqual({ url: secondPr, action: "attach" });
+    act(() => onSuccess({ ...trackedPrInfo([firstPr, secondPr]).data, selected_pr_url: secondPr }));
+    unmount();
+
+    vi.mocked(usePullRequestInfo).mockClear();
+    state.info = trackedPrInfo([firstPr, secondPr]);
+    renderPanel();
+    expect(usePullRequestInfo).toHaveBeenNthCalledWith(1, "conv_1", {
+      poll: true,
+      prUrl: secondPr,
     });
   });
 });

@@ -83,6 +83,7 @@ import { absoluteTime, relativeTime } from "@/lib/relativeTime";
 import { setSessionPrPick, useSessionPrPick } from "@/lib/sessionPrPicks";
 import {
   fetchPullRequestFileContents,
+  fetchPullRequestInfo,
   normalizePullRequestInfo,
   usePullRequestChangedFiles,
   usePullRequestDiff,
@@ -1106,13 +1107,28 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
       setDefaultPin({ sessionId: conversationId, url: info.data.selected_pr_url });
     }
   }, [conversationId, selected, info.data?.selected_pr_url]);
-  // With no associations there is no picker to replace a pick that fails to load (e.g. one
-  // unlinked elsewhere), so fall back to the session's default PR.
-  const pickUnserved =
+  // With no associations there is no picker to replace a pick that fails to load. The error
+  // doesn't say whether the PR was unlinked, so forget it only once the session's list confirms.
+  const pickFailed =
     !!pick && !associations && !!info.error && !(info.error instanceof RunnerOfflineError);
   useEffect(() => {
-    if (pickUnserved) setSessionPrPick(conversationId, undefined);
-  }, [conversationId, pickUnserved]);
+    if (!pick || !pickFailed) return;
+    let current = true;
+    queryClient
+      .fetchQuery({
+        queryKey: ["github-info", conversationId],
+        queryFn: () => fetchPullRequestInfo(conversationId),
+      })
+      .then((sessionInfo) => {
+        if (current && !sessionInfo.prs?.some((pr) => pr.url === pick)) {
+          setSessionPrPick(conversationId, undefined);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [conversationId, pick, pickFailed, info.errorUpdatedAt, queryClient]);
   const changeSelection = (next?: string) => setSessionPrPick(conversationId, next);
   const prs = associations?.prs ?? [];
   const selectedPr = prs.find((pr) => pr.url === (selected ?? associations?.selected_pr_url));
