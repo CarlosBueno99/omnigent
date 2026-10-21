@@ -20,7 +20,6 @@ import json
 import socket
 import subprocess
 import sys
-import textwrap
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -545,40 +544,21 @@ if sys.argv[1:3] == ["auth", "login"]:
 
 
 def _versioned_legacy_databricks_cli(tmp_path: Path) -> Path:
-    """Write a stand-in for a Databricks CLI older than v0.265.0 that reports its version.
-
-    Those releases bind the OAuth callback listener to a fixed localhost:8020
-    and abort the login when another process already holds it.
-
-    :param tmp_path: Directory to write the executable into.
-    :returns: Path to the executable.
-    """
+    """Write a pre-v0.265.0 CLI stub that reports its version and marks any ``auth login``."""
     script = tmp_path / "databricks"
     script.write_text(
-        textwrap.dedent(
-            """\
-            #!/usr/bin/env python3
-            import json, socket, sys
+        f"""#!{sys.executable}
+import pathlib
+import sys
 
-            args = sys.argv[1:]
-            if args[:1] in (["--version"], ["version"]):
-                if "json" in args:
-                    print(json.dumps({"Version": "0.244.0", "Major": 0, "Minor": 244, "Patch": 0}))
-                else:
-                    print("Databricks CLI v0.244.0")
-                sys.exit(0)
-            if args[:2] == ["auth", "login"]:
-                try:
-                    socket.create_server(("127.0.0.1", 8020)).close()
-                except OSError:
-                    sys.stderr.write(
-                        "Error: listen tcp 127.0.0.1:8020: bind: address already in use\\n"
-                    )
-                    sys.exit(1)
-                sys.exit(0)
-            sys.exit(1)
-            """
-        )
+if sys.argv[1:] == ["--version"]:
+    print("Databricks CLI v0.244.0")
+elif sys.argv[1:3] == ["auth", "login"]:
+    pathlib.Path({str(tmp_path / "auth-login-ran")!r}).touch()
+    sys.exit("Error: listen tcp 127.0.0.1:8020: bind: address already in use")
+else:
+    sys.exit(1)
+"""
     )
     script.chmod(0o755)
     return script
@@ -647,7 +627,9 @@ def test_login_with_busy_callback_port_and_old_cli_names_the_port(
 
     assert result.exit_code != 0
     assert "8020" in result.output, result.output
+    assert "v0.244.0" in result.output, result.output
     assert "VPN / IP access lists" not in result.output, result.output
+    assert not (tmp_path / "auth-login-ran").exists()
 
 
 def test_login_fails_loud_when_app_rejects_workspace_token(
@@ -855,6 +837,8 @@ def test_run_databricks_browser_login_no_conflict_keeps_failure_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without a conflict the login runs and a failure keeps the VPN/IP-list message."""
+    from omnigent.cli_diagnostics import suppresses_recovery_hint
+
     calls = _patch_browser_login(monkeypatch, conflict=None, exit_code=1)
 
     with pytest.raises(click.ClickException) as exc_info:
@@ -863,7 +847,9 @@ def test_run_databricks_browser_login_no_conflict_keeps_failure_message(
     assert len(calls) == 1
     msg = exc_info.value.format_message()
     assert "failed (exit 1)" in msg
+    assert "VPN / IP access lists" in msg
     assert "8020" not in msg
+    assert not suppresses_recovery_hint(exc_info.value)
 
 
 # ── ?o= workspace selector ──────────────────────────────────────────

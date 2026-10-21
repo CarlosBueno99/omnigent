@@ -8,6 +8,7 @@ import importlib.util
 import logging
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -170,27 +171,18 @@ class _OAuthPortHolder:
 
 
 def _oauth_callback_port_busy() -> bool:
-    """Return whether the OAuth callback port is already bound on loopback.
-
-    On POSIX, binds with ``SO_REUSEADDR`` (mirrors Go's ``net.Listen``) so
-    TIME_WAIT sockets are not false positives. ``SO_REUSEADDR`` on Windows
-    lets a bind succeed even while another socket is actively LISTENing, so
-    ``SO_EXCLUSIVEADDRUSE`` is used there to detect the live listener. Only
-    ``EADDRINUSE`` counts as busy.
-    """
+    """Bind-probe the callback port like Go's ``net.Listen``; only EADDRINUSE counts as busy."""
     import errno
     import socket as _socket
-    import sys
 
-    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
-        if sys.platform == "win32":
-            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_EXCLUSIVEADDRUSE, 1)
-        else:
-            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-        try:
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
+            # Go sets SO_REUSEADDR on POSIX and no listener options on Windows.
+            if sys.platform != "win32":
+                sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
             sock.bind(("127.0.0.1", _DATABRICKS_OAUTH_CALLBACK_PORT))
-        except OSError as exc:
-            return exc.errno == errno.EADDRINUSE
+    except OSError as exc:
+        return exc.errno == errno.EADDRINUSE
     return False
 
 
@@ -207,7 +199,9 @@ def _oauth_callback_port_holder() -> _OAuthPortHolder:
                 proc_name: str | None = None
                 if pid is not None:
                     with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
-                        proc_name = psutil.Process(pid).name()
+                        proc_name = "".join(
+                            ch for ch in psutil.Process(pid).name() if ch.isprintable()
+                        )
                 return _OAuthPortHolder(pid=pid, name=proc_name)
     except (psutil.Error, OSError, AttributeError) as exc:
         _logger.debug("OAuth port holder lookup failed: %s", exc)
@@ -269,10 +263,14 @@ def databricks_login_port_conflict(
     who = ""
     if holder.pid is not None:
         who = f" by pid {holder.pid} ({holder.name})" if holder.name else f" by pid {holder.pid}"
+    find_holder = (
+        f"netstat -ano | findstr :{port}"
+        if sys.platform == "win32"
+        else f"lsof -nP -iTCP:{port} -sTCP:LISTEN"
+    )
     return (
         f"Port {port}, which {cli_needs} for the sign-in callback, is already in use{who}. "
         "Upgrade the Databricks CLI to v0.265.0 or newer, which falls back to a free port "
         "automatically (https://docs.databricks.com/dev-tools/cli/install.html), "
-        f"or free port {port} if nothing else needs it "
-        f"(`lsof -nP -iTCP:{port} -sTCP:LISTEN`)."
+        f"or free port {port} if nothing else needs it (`{find_holder}`)."
     )
