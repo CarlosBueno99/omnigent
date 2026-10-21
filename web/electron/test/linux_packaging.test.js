@@ -28,25 +28,22 @@ const HOST_TOOLS = [
   "apparmor_parser",
 ];
 
-/** The deb after-install template electron-builder ships: the configured
- * `deb.afterInstall`, else app-builder-lib's default. */
-function debAfterInstallTemplate() {
-  const configured = packageConfig.build.deb && packageConfig.build.deb.afterInstall;
-  if (configured) return path.resolve(APP_DIR, configured);
-  // The default template lives in electron-builder, which CI does not install here.
-  let electronBuilderDir;
+const DEB_AFTER_INSTALL = path.resolve(APP_DIR, packageConfig.build.deb.afterInstall);
+
+/** electron-builder's default deb after-install template, or null when it is not installed. */
+function upstreamAfterInstallTemplate() {
   try {
-    electronBuilderDir = path.dirname(require.resolve("electron-builder/package.json"));
+    const electronBuilderDir = path.dirname(require.resolve("electron-builder/package.json"));
+    const appBuilderLib = path.dirname(
+      require.resolve("app-builder-lib/package.json", { paths: [electronBuilderDir] }),
+    );
+    return path.join(appBuilderLib, "templates", "linux", "after-install.tpl");
   } catch {
-    assert.fail("deb.afterInstall is not configured and electron-builder is not installed");
+    return null;
   }
-  const appBuilderLib = path.dirname(
-    require.resolve("app-builder-lib/package.json", { paths: [electronBuilderDir] }),
-  );
-  return path.join(appBuilderLib, "templates", "linux", "after-install.tpl");
 }
 
-/** Mirror FpmTarget's macro substitution with the values LinuxPackager derives. */
+/** Expand the template's macros as FpmTarget does, using the release build's names. */
 function renderDebScript(templatePath) {
   const options = {
     executable: EXECUTABLE,
@@ -64,9 +61,7 @@ function writeStub(dir, name, body) {
   fs.writeFileSync(path.join(dir, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
 }
 
-/** Run the rendered post-install script as dpkg would, with every host-mutating
- * tool stubbed to record its arguments; returns the recorded calls
- * ("<tool> <args>") in order. */
+/** Run the rendered script with host tools stubbed; return the recorded calls in order. */
 function runPostInstall({ rootCanUnshare, apparmorEnabled = false }) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "omnigent-deb-postinst-"));
   try {
@@ -79,7 +74,7 @@ function runPostInstall({ rootCanUnshare, apparmorEnabled = false }) {
     for (const tool of HOST_TOOLS) recordCalls(tool);
     recordCalls("apparmor_status", apparmorEnabled ? 0 : 1);
     const script = path.join(tmp, "after-install.sh");
-    fs.writeFileSync(script, renderDebScript(debAfterInstallTemplate()));
+    fs.writeFileSync(script, renderDebScript(DEB_AFTER_INSTALL));
     const result = spawnSync("bash", [script], {
       encoding: "utf8",
       env: { PATH: `${bin}:/usr/bin:/bin`, LANG: "C" },
@@ -95,6 +90,19 @@ function chromeSandboxModes(calls) {
   return calls
     .filter((call) => call.startsWith("chmod ") && call.endsWith(` ${CHROME_SANDBOX}`))
     .map((call) => call.split(" ")[1]);
+}
+
+/** Script paragraphs other than the chrome-sandbox setup, without comment lines. */
+function stepsBesidesSandboxSetup(script) {
+  return script
+    .split(/\n\s*\n/)
+    .filter((paragraph) => !paragraph.includes("chrome-sandbox"))
+    .map((paragraph) =>
+      paragraph
+        .split("\n")
+        .filter((line) => !/^\s*#(?!!)/.test(line))
+        .join("\n"),
+    );
 }
 
 describe("Linux .deb packaging", { skip: process.platform !== "linux" }, () => {
@@ -122,4 +130,17 @@ describe("Linux .deb packaging", { skip: process.platform !== "linux" }, () => {
       assert.ok(calls.includes(expected), `missing ${expected} in ${JSON.stringify(calls)}`);
     }
   });
+
+  const upstreamTemplate = upstreamAfterInstallTemplate();
+  it(
+    "matches electron-builder's template apart from the chrome-sandbox setup",
+    { skip: !upstreamTemplate && "electron-builder is not installed" },
+    () => {
+      assert.deepEqual(
+        stepsBesidesSandboxSetup(fs.readFileSync(DEB_AFTER_INSTALL, "utf8")),
+        stepsBesidesSandboxSetup(fs.readFileSync(upstreamTemplate, "utf8")),
+        `re-sync ${packageConfig.build.deb.afterInstall} with ${upstreamTemplate}`,
+      );
+    },
+  );
 });
