@@ -1147,6 +1147,7 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
       .then((sessionInfo) => {
         if (current && sessionInfo.prs && !sessionInfo.prs.some((pr) => pr.url === pick)) {
           setSessionPrPick(conversationId, undefined);
+          setDefaultPin({ sessionId: conversationId, url: sessionInfo.selected_pr_url });
         }
       })
       .catch(() => {});

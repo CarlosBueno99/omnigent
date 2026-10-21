@@ -2133,10 +2133,29 @@ describe("session PR selection", () => {
     await waitFor(() =>
       expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
         poll: true,
-        prUrl: undefined,
+        prUrl: firstPr,
       }),
     );
     expect(fetchPullRequestInfo).toHaveBeenCalledWith("conv_1");
+  });
+
+  it("falls back to the session's current default, not an earlier one, after forgetting a pick", async () => {
+    const user = userEvent.setup();
+    state.info = trackedPrInfo([firstPr, secondPr]);
+    const { rerender } = renderPanel();
+    await user.click(screen.getByRole("combobox", { name: "Session pull request" }));
+    await user.click(screen.getByRole("option", { name: "example/two #42" }));
+    fetchPullRequestInfo.mockResolvedValue(trackedPrInfo([]).data);
+    state.info = { isLoading: false, error: new Error("502 Bad Gateway"), isFetching: false };
+    rerender(<PullRequestPanel conversationId="conv_1" />);
+    await waitFor(() =>
+      expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", {
+        poll: true,
+        prUrl: undefined,
+      }),
+    );
+    await flushPendingWork();
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: undefined });
   });
 
   it("forgets an unlinked pick while its cached PR list still shows it", async () => {
