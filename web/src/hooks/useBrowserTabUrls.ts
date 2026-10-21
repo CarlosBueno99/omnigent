@@ -11,10 +11,6 @@ export function useBrowserTabUrls(
   const tabKey = tabIds.join("\n");
 
   useEffect(() => {
-    setUrlsByViewId({});
-  }, [conversationId]);
-
-  useEffect(() => {
     const bridge = getBrowserPaneBridge();
     if (!bridge) return;
     const viewIds = new Set(

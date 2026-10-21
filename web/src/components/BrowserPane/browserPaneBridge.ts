@@ -18,9 +18,8 @@ export interface NavResult {
   error?: string;
 }
 
-/** Subset of `window.omnigentDesktop` the pane calls. Typed locally so the
- *  component doesn't depend on the full nativeBridge type; every method is
- *  optional (an older shell may predate the browser feature). */
+/** Subset of `window.omnigentDesktop` used by the browser pane and tab labels.
+ *  Every method is optional; an older shell may predate the browser feature. */
 export interface BrowserPaneBridge {
   browserSetActive?: (conversationId: string | null) => Promise<{ ok: boolean; error?: string }>;
   browserResize?: (

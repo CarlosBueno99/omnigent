@@ -11,10 +11,9 @@ const URL_LABEL_MAX_CHARS = 60;
 const SPOOFABLE_CHARS = /[\p{Cc}\p{Cf}]/u;
 const SPOOFABLE_CHARS_GLOBAL = /[\p{Cc}\p{Cf}]/gu;
 
-/** Show disguising characters percent-encoded, as in the address bar. */
-function escapeSpoofableChars(text: string): string {
-  return text.replace(SPOOFABLE_CHARS_GLOBAL, (char) => encodeURIComponent(char));
-}
+// Schemes whose labels come from the parsed URL; others show as raw text.
+const PARSED_SCHEMES = new Set(["http", "https", "file", "about"]);
+const URL_SCHEME = /^([a-z][a-z\d+.-]*):/i;
 
 /** First `max` code points of `text`, so an emoji is never split. */
 export function truncateCodePoints(text: string, max: number): string {
@@ -29,6 +28,12 @@ function clampUrlLabel(text: string): string {
   return cut === text ? text : `${cut}…`;
 }
 
+/** Raw text as a label: bounded first, with disguising characters percent-encoded. */
+function rawUrlLabel(text: string): string {
+  const bounded = truncateCodePoints(text, URL_LABEL_MAX_CHARS + 1);
+  return clampUrlLabel(bounded.replace(SPOOFABLE_CHARS_GLOBAL, (char) => encodeURIComponent(char)));
+}
+
 /** A manual name as stored: trimmed and capped; blank means no name. */
 export function normalizeBrowserTabName(name: string): string {
   return truncateCodePoints(name.trim(), BROWSER_TAB_NAME_MAX_CHARS).trim();
@@ -37,7 +42,8 @@ export function normalizeBrowserTabName(name: string): string {
 function decodeSegment(segment: string): string {
   try {
     const decoded = decodeURIComponent(segment);
-    return SPOOFABLE_CHARS.test(decoded) ? segment : decoded;
+    // An encoded slash stays encoded so one segment cannot pose as several.
+    return SPOOFABLE_CHARS.test(decoded) || decoded.includes("/") ? segment : decoded;
   } catch {
     return segment;
   }
@@ -51,11 +57,14 @@ function decodeSegment(segment: string): string {
 export function browserUrlLabel(url: string | null | undefined): string {
   const trimmed = url?.trim() ?? "";
   if (trimmed === "" || trimmed === "about:blank") return NEW_BROWSER_TAB_LABEL;
+  // Skip parsing raw-text schemes, which can be huge (data: URLs).
+  const scheme = URL_SCHEME.exec(trimmed.slice(0, 32))?.[1]?.toLowerCase();
+  if (scheme && !PARSED_SCHEMES.has(scheme)) return rawUrlLabel(trimmed);
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
   } catch {
-    return clampUrlLabel(escapeSpoofableChars(trimmed));
+    return rawUrlLabel(trimmed);
   }
   if (parsed.protocol === "about:" && parsed.pathname === "blank") return NEW_BROWSER_TAB_LABEL;
   const segments = parsed.pathname.split("/").filter(Boolean).map(decodeSegment);
@@ -65,9 +74,9 @@ export function browserUrlLabel(url: string | null | undefined): string {
     const tail = segments.slice(-2).join("/");
     return clampUrlLabel(segments.length > 2 ? `${host}/…/${tail}` : `${host}/${tail}`);
   }
-  const raw = escapeSpoofableChars(trimmed);
-  if (parsed.protocol === "file:") return clampUrlLabel(segments.at(-1) ?? raw);
-  return clampUrlLabel(raw);
+  const last = segments.at(-1);
+  if (parsed.protocol === "file:" && last) return clampUrlLabel(last);
+  return rawUrlLabel(trimmed);
 }
 
 /** Starting value of the rename field: the label cut to the name limit. */

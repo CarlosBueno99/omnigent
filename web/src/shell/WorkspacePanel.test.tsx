@@ -1181,7 +1181,11 @@ describe("WorkspacePanel browser tab", () => {
     expect(screen.getByTestId("browser-pane-stub")).toHaveTextContent(firstView!);
     fireEvent.click(screen.getAllByRole("button", { name: "Close New tab" })[0]);
     await waitFor(() => expect(screen.getAllByRole("tab", { name: "New tab" })).toHaveLength(1));
-    fireEvent.click(screen.getByRole("button", { name: "Close New tab" }));
+    // A middle-click closes the tab too.
+    fireEvent(
+      screen.getByRole("tab", { name: "New tab" }),
+      new MouseEvent("auxclick", { bubbles: true, button: 1 }),
+    );
     await waitFor(() => expect(screen.queryByTestId("browser-pane-stub")).not.toBeInTheDocument());
     expect(screen.getByTestId("files-panel-stub")).toBeInTheDocument();
   });
