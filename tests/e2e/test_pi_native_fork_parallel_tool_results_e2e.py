@@ -105,6 +105,8 @@ def pi_fork_rig(
             "if mode == 'failed_exit':\n"
             " print('PRIVATE-HELPER-ERROR',file=sys.stderr); sys.exit(7)\n"
             "if mode == 'empty': sys.exit(0)\n"
+            "if mode == 'fail_once' and not (root / 'failed-once').exists():\n"
+            " (root / 'failed-once').write_text('1'); sys.exit(7)\n"
             "print((root / 'token').read_text())\n"
         )
         # Keep a shell after the helper so cleanup must reach its process group.
@@ -112,7 +114,8 @@ def pi_fork_rig(
             "auth_command": shlex.join([sys.executable, str(helper)]) + "; code=$?; exit $code"
         }
         replies[2:] = [
-            anthropic_sse_text_response(f"AUTH-RECOVERED-{i}", model=_MODEL) for i in range(3)
+            anthropic_sse_text_response("AUTH-TRANSIENT-OK", model=_MODEL),
+            *(anthropic_sse_text_response(f"AUTH-RECOVERED-{i}", model=_MODEL) for i in range(3)),
         ]
 
     class Handler(BaseHTTPRequestHandler):
@@ -297,7 +300,7 @@ def test_pi_native_fork_rebuild_keeps_parallel_tool_results_adjacent(
 def test_pi_native_token_failure_recovers_without_replaying_tools(
     pi_fork_rig: tuple[httpx.Client, str, list[dict[str, Any]]], tmp_path: Path
 ) -> None:
-    """Real server/runner/Pi: refresh, classified failures, cleanup and same-PID recovery."""
+    """Real server/runner/Pi: refresh, transient tolerance, classified failures and recovery."""
     client, runner_id, requests = pi_fork_rig
     workspace = tmp_path / "workspace"
     spec = _materialize_pi_agent_spec(tmp_path)
@@ -342,6 +345,21 @@ def test_pi_native_token_failure_recovers_without_replaying_tools(
         assert len(requests) == 2
         pids = native_pids()
         assert len(pids) == 1
+
+        (workspace / "auth-mode").write_text("fail_once")
+        before = len(requests)
+        send("Continue after one failed token refresh.")
+
+        def transient_outcome() -> str | None:
+            current = items()
+            if any(item["type"] == "error" for item in current):
+                return "error"
+            return "reply" if "AUTH-TRANSIENT-OK" in json.dumps(current) else None
+
+        assert _wait(transient_outcome) == "reply", [
+            item for item in items() if item["type"] == "error"
+        ]
+        assert len(requests) == before + 1
         for i, (mode, kind) in enumerate(
             [
                 ("failed_exit", "failed_exit"),

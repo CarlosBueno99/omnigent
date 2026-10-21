@@ -1026,24 +1026,37 @@ def test_write_models_config_is_owner_only(tmp_path: Path) -> None:
     assert written["providers"]["omnigent"]["apiKey"] == "sk-secret"
 
 
+def _first_attempt_exits(code: int) -> str:
+    return f"[ -e failed-once ] || {{ : > failed-once; exit {code}; }}; "
+
+
 @pytest.mark.parametrize(
-    ("command", "kind", "token"),
+    ("command", "kind", "token", "attempts"),
     [
-        ("printf 'private-token' | tr a-z A-Z", "ok", "PRIVATE-TOKEN"),
-        ("printf private-token; echo private-error >&2; exit 7", "failed_exit", ""),
-        ("printf '  '", "empty", ""),
-        ("printf '\\377'", "invalid_output", ""),
-        ("sleep 20", "timeout", ""),
-        ("", "invalid_command", ""),
+        ("printf 'private-token' | tr a-z A-Z", "ok", "PRIVATE-TOKEN", 1),
+        ("printf private-token; echo private-error >&2; exit 7", "failed_exit", "", 3),
+        ("printf '  '", "empty", "", 3),
+        ("printf '\\377'", "invalid_output", "", 1),
+        ("sleep 20", "timeout", "", 1),
+        ("", "invalid_command", "", 0),
+        (_first_attempt_exits(7) + "printf private-token", "ok", "private-token", 2),
+        (_first_attempt_exits(0) + "printf private-token", "ok", "private-token", 2),
+        (_first_attempt_exits(7) + "sleep 20", "failed_exit", "", 2),
     ],
 )
 def test_generated_token_command_reports_only_safe_results(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, kind: str, token: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    kind: str,
+    token: str,
+    attempts: int,
 ) -> None:
     if os.name != "posix" or shutil.which("node") is None:
         pytest.skip("the native Pi token wrapper requires POSIX and Node")
-    if kind == "timeout":
-        monkeypatch.setattr(auth_command, "AUTH_TIMEOUT_MS", 500)
+    if "sleep" in command:
+        monkeypatch.setattr(auth_command, "AUTH_TIMEOUT_MS", 1_500)
+    command = command and "printf x >> attempts; " + command
     provider = creds.PiProviderConfig(
         provider_id="omnigent",
         base_url="http://localhost/v1",
@@ -1064,11 +1077,14 @@ def test_generated_token_command_reports_only_safe_results(
         capture_output=True,
         text=True,
         timeout=12,
+        cwd=tmp_path,
         env={**os.environ, "OMNIGENT_PI_NATIVE_PID": "123"},
     )
     assert result.returncode == (0 if kind == "ok" else 1)
     assert result.stdout == token
     assert result.stderr == ""
+    attempt_log = tmp_path / "attempts"
+    assert (attempt_log.read_text() if attempt_log.exists() else "") == "x" * attempts
     auth_dir = agent / auth_command.AUTH_DIR_NAME
     status = next(auth_dir.glob("*.result.json"))
     payload = json.loads(status.read_text())
