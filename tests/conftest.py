@@ -367,9 +367,8 @@ def _isolate_claude_native_state(
     monkeypatch.setenv("OMNIGENT_CLAUDE_NATIVE_STATE_DIR", str(state_dir))
 
 
-# Suites that drive real processes build each child's environment explicitly, and the
-# prepared repro environment relies on the exported selector reaching respawned runners.
-_PROCESS_SUITES = ("tests/e2e/", "tests/e2e_ui/", "tests/integration/", "tests/browser_ui/")
+# Process suites build child environments explicitly and keep the exported selector.
+_PROCESS_SUITES = ("tests/e2e", "tests/e2e_ui", "tests/integration", "tests/browser_ui")
 
 
 @pytest.fixture(autouse=True)
@@ -386,8 +385,8 @@ def _isolate_claude_config_dir(
     :param monkeypatch: Pytest monkeypatch fixture; restores the env at teardown.
     :returns: None.
     """
-    relative = request.node.path.relative_to(request.config.rootpath).as_posix()
-    if relative.startswith(_PROCESS_SUITES):
+    root = request.config.rootpath
+    if any(request.node.path.is_relative_to(root / suite) for suite in _PROCESS_SUITES):
         return
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 

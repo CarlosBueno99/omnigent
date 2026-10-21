@@ -40,7 +40,7 @@ def test_claude_config_dir_follows_claude_config_dir(
 
 
 def test_claude_config_dir_expands_tilde(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``~``-relative ``CLAUDE_CONFIG_DIR`` is expanded as a shell would (Omnigent's rule)."""
+    """A ``~``-relative ``CLAUDE_CONFIG_DIR`` is expanded against the user's home."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~/profiles/work")
 
     assert claude_config_dir() == home / "profiles" / "work"
@@ -49,7 +49,7 @@ def test_claude_config_dir_expands_tilde(home: Path, monkeypatch: pytest.MonkeyP
 def test_claude_config_dir_treats_empty_value_as_unset(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An empty ``CLAUDE_CONFIG_DIR`` keeps Omnigent on ``~/.claude``, as before this helper."""
+    """An empty ``CLAUDE_CONFIG_DIR`` resolves to ``~/.claude``."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "")
 
     assert claude_config_dir() == home / ".claude"
