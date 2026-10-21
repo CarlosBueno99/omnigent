@@ -41,6 +41,8 @@ with their own terminal retain the switcher.
   off while a rail-opened shell owns the main view.
 - On a phone, use the view mode choice in the header menu.
 - Choose Resume when the terminal shows as stopped.
+- A sub-agent's pending approval docks below the agent terminal in Terminal
+  view; answer it there without switching to Chat.
 
 **User shells:**
 
@@ -74,6 +76,8 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
 - **`agent-terminal-view`:**
   `tests/e2e_ui/shells/test_new_shell.py::test_starting_terminal_view_shows_loading_without_resume`,
   `tests/e2e_ui/shells/test_new_shell.py::test_stopped_terminal_view_keeps_resume`.
+  A sub-agent approval answered from the dock below the terminal:
+  `tests/e2e_ui/approvals/test_subagent_approval_terminal_view.py::test_subagent_approval_is_answerable_from_parent_terminal_view`.
   The stopped state with a selectable empty terminal (own environment):
   `tests/e2e_ui/shells/test_new_shell.py::test_empty_terminal_view_remains_selectable_and_resumable`
   kills the session's runner, so it fails under `verify-env run`; run it with

@@ -78,7 +78,6 @@ from omnigent.harness_plugins import (
     DEVIN_NATIVE_CODING_AGENT,
     NativeCodingAgent,
 )
-from omnigent.harnesses.codex_native.launch_args import canonical_codex_launch_args
 from omnigent.host.frames import RUNNER_LOG_TAIL_HEADING
 from omnigent.mcp_selection import mcp_selection_revision
 from omnigent.models.model_metadata import concrete_reported_model
@@ -10306,58 +10305,19 @@ _FULL_ACCESS_LAUNCH_ARGS: Final[dict[str, tuple[str, ...]]] = {
 _SPEC_PERMISSION_STANCE_KEYS: Final = ("permission_mode", "exec_mode", "yolo")
 
 
-def _claude_launch_args_bypass_permissions(args: Sequence[str]) -> bool:
-    """Return whether Claude launch args select ``bypassPermissions``."""
-    bypass = False
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg == "--":
-            break
-        if arg == "--dangerously-skip-permissions":
-            return True
-        if arg == "--permission-mode":
-            index += 1
-            bypass = index < len(args) and args[index] == "bypassPermissions"
-        elif arg.startswith("--permission-mode="):
-            bypass = arg.partition("=")[2] == "bypassPermissions"
-        index += 1
-    return bypass
-
-
 def _codex_launch_args_full_access(args: Sequence[str]) -> bool:
     """Return whether Codex launch args run with no sandbox and no approval prompts."""
-    sandbox_options = {"--sandbox", "-s"}
-    approval_options = {"--ask-for-approval", "-a"}
-    config_options = {"--config", "-c"}
-    settings: dict[str, str] = {}
-    canonical = canonical_codex_launch_args(args)
-    index = 0
-    while index < len(canonical):
-        arg = canonical[index]
-        if arg == "--":
-            break
-        if arg == "--dangerously-bypass-approvals-and-sandbox":
-            return True
-        option, joined, value = arg.partition("=")
-        if option in sandbox_options | approval_options | config_options:
-            if not joined:
-                index += 1
-                value = canonical[index] if index < len(canonical) else ""
-            if option in sandbox_options:
-                settings["sandbox_mode"] = value
-            elif option in approval_options:
-                settings["approval_policy"] = value
-            else:
-                key, _, raw_value = value.partition("=")
-                settings[key.strip()] = raw_value.strip().strip("\"'")
-        index += 1
-    full_access_profile = settings.get("default_permissions") == ":danger-full-access"
-    if settings.get("sandbox_mode") != "danger-full-access" and not full_access_profile:
+    from omnigent.harnesses.codex_native.app_server import _codex_resume_permission_params
+
+    try:
+        params = _codex_resume_permission_params(args)
+    except ValueError:
         return False
-    approval_policy = settings.get("approval_policy")
-    # Codex completes a full-access profile without a policy to ``never``.
-    return approval_policy == "never" or (approval_policy is None and full_access_profile)
+    full_access = (
+        params.get("sandbox") == "danger-full-access"
+        or params.get("permissions") == ":danger-full-access"
+    )
+    return full_access and params.get("approvalPolicy") == "never"
 
 
 def _session_runs_with_full_access(conv: Conversation, harness: str | None) -> bool:
@@ -10366,6 +10326,7 @@ def _session_runs_with_full_access(conv: Conversation, harness: str | None) -> b
 
     Live permission labels (set by a running-session switch or a mode change
     observed in the TUI) win over the launch args the session started with.
+    Cursor and Antigravity record no live mode, so their launch args decide.
 
     :param conv: The session row, e.g. a Codex parent spawning a sub-agent.
     :param harness: The session's resolved harness, e.g. ``"codex-native"``.
@@ -10377,7 +10338,9 @@ def _session_runs_with_full_access(conv: Conversation, harness: str | None) -> b
         live_mode = labels.get(_CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY)
         if live_mode:
             return live_mode == "bypassPermissions"
-        return _claude_launch_args_bypass_permissions(args)
+        from omnigent.harnesses.claude_native.bridge import _args_request_bypass_permissions
+
+        return _args_request_bypass_permissions(tuple(args))
     if harness == _CODEX_NATIVE_HARNESS:
         live_mode = labels.get(_CODEX_NATIVE_APPROVAL_MODE_LABEL_KEY)
         if live_mode:
@@ -10419,7 +10382,8 @@ def _inherited_full_access_launch_args(
     if parent is None or child_spec is None or child_harness is None:
         return None
     if any(
-        child_spec.executor.config.get(key) is not None for key in _SPEC_PERMISSION_STANCE_KEYS
+        child_spec.executor.config.get(key) not in (None, "")
+        for key in _SPEC_PERMISSION_STANCE_KEYS
     ):
         return None
     full_access_args = _FULL_ACCESS_LAUNCH_ARGS.get(child_harness)

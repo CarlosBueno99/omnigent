@@ -1197,7 +1197,9 @@ async def test_child_sessions_per_child_fields_isolated_across_fanout(
 # ── Native-harness sub-agent terminal-UI label stamping ──────────────
 
 
-def _bundle_with_harnessed_subagents(name: str, sub_agents: list[dict[str, Any]]) -> bytes:
+def _bundle_with_harnessed_subagents(
+    name: str, sub_agents: list[dict[str, Any]], parent_harness: str = "claude-sdk"
+) -> bytes:
     """
     Build a bundle whose sub-agents carry an explicit executor harness.
 
@@ -1214,13 +1216,14 @@ def _bundle_with_harnessed_subagents(name: str, sub_agents: list[dict[str, Any]]
         ``{"name": "impl", "harness": "claude-native",
         "config": {"permission_mode": "bypassPermissions"}}`` to declare
         YOLO bypass).
+    :param parent_harness: The parent agent's harness, e.g. ``"codex-native"``.
     :returns: A gzipped tar bundle.
     """
     config: dict[str, Any] = {
         "spec_version": 1,
         "name": name,
         "llm": {"model": name, "connection": {"api_key": "test-key"}},
-        "executor": {"config": {"harness": "claude-sdk"}},
+        "executor": {"config": {"harness": parent_harness}},
         "tools": {"agents": [sa["name"] for sa in sub_agents]},
     }
     buf = io.BytesIO()
@@ -1249,6 +1252,9 @@ async def _create_parent_with_subagents(
     client: httpx.AsyncClient,
     name: str,
     sub_agents: list[dict[str, Any]],
+    *,
+    parent_harness: str = "claude-sdk",
+    terminal_launch_args: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Register a bundle with harnessed sub-agents and create a parent session.
@@ -1258,13 +1264,18 @@ async def _create_parent_with_subagents(
     :param sub_agents: Sub-agent dicts with ``name`` + ``harness`` and an
         optional ``config`` mapping (see
         :func:`_bundle_with_harnessed_subagents`).
+    :param parent_harness: The parent agent's harness, e.g. ``"codex-native"``.
+    :param terminal_launch_args: The parent session's launch args, if any.
     :returns: A dict with ``session_id`` (the parent session) and
         ``agent_id`` (the durable agent id resolved from the session).
     """
-    bundle = _bundle_with_harnessed_subagents(name, sub_agents)
+    bundle = _bundle_with_harnessed_subagents(name, sub_agents, parent_harness)
+    metadata = (
+        {} if terminal_launch_args is None else {"terminal_launch_args": terminal_launch_args}
+    )
     resp = await client.post(
         "/v1/sessions",
-        data={"metadata": json.dumps({})},
+        data={"metadata": json.dumps(metadata)},
         files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
     )
     assert resp.status_code == 201, f"parent create failed: {resp.text}"
@@ -1373,6 +1384,43 @@ async def test_native_subagent_yolo_args_derived_from_trusted_spec(
     # The persisted child session carries exactly the YOLO bypass flags;
     # an empty / None value would mean the worker launches prompting.
     assert resp.json()["terminal_launch_args"] == expected_args
+
+
+@pytest.mark.parametrize(
+    ("parent_launch_args", "expected_child_args"),
+    [
+        (
+            ["--sandbox", "danger-full-access", "--ask-for-approval", "never"],
+            ["--permission-mode", "bypassPermissions"],
+        ),
+        (None, None),
+    ],
+    ids=["full-access-parent", "default-parent"],
+)
+async def test_named_claude_subagent_follows_only_a_full_access_parent(
+    client: httpx.AsyncClient,
+    parent_launch_args: list[str] | None,
+    expected_child_args: list[str] | None,
+) -> None:
+    """A named sub-agent with no spec stance inherits full access, never a default stance."""
+    parent = await _create_parent_with_subagents(
+        client,
+        name=f"codex-orch-{'full' if parent_launch_args else 'default'}",
+        sub_agents=[{"name": "impl", "harness": "claude-native"}],
+        parent_harness="codex-native",
+        terminal_launch_args=parent_launch_args,
+    )
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": parent["agent_id"],
+            "parent_session_id": parent["session_id"],
+            "title": "impl:review",
+            "sub_agent_name": "impl",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json().get("terminal_launch_args") == expected_child_args
 
 
 async def test_native_subagent_yolo_args_reject_overlong_spec_value(

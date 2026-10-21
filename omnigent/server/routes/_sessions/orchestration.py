@@ -11570,7 +11570,8 @@ async def _create_session_from_existing_agent(
     # flat-list shape plus this bounds check is the security boundary;
     # mirrors the multipart create + PATCH paths. When the body carries no
     # args, the agent's own trusted spec seeds them below — explicit
-    # opt-ins only, never the headless worker default bypass.
+    # opt-ins only, never the headless worker default bypass. A child whose
+    # spec declares no stance still inherits a full-access parent's stance.
     sub_spec: AgentSpec | None = None
     if body.sub_agent_name:
         sub_spec = _resolve_subagent_spec(

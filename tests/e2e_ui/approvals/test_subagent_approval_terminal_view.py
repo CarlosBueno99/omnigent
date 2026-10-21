@@ -13,7 +13,6 @@ from tests._helpers.native_session import create_native_session
 from tests._helpers.polling import poll_until
 
 _PENDING_CARD = '[data-testid="approval-card"][data-state="pending"]'
-_FULL_ACCESS_ARGS = ["--sandbox", "danger-full-access", "--ask-for-approval", "never"]
 
 
 def _pending_ids(base_url: str, session_id: str) -> set[str]:
@@ -48,7 +47,7 @@ def test_subagent_approval_is_answerable_from_parent_terminal_view(
         httpx,
         live_server,
         harness="codex",
-        metadata={"title": "Codex commit review", "terminal_launch_args": _FULL_ACCESS_ARGS},
+        metadata={"title": "Codex commit review"},
     )["session_id"]
     child_id = create_native_session(
         httpx,
@@ -77,14 +76,20 @@ def test_subagent_approval_is_answerable_from_parent_terminal_view(
         expect(page.get_by_test_id("main-terminal-view")).to_have_attribute(
             "data-visible", "true", timeout=15_000
         )
-        card = page.locator(f"{_PENDING_CARD}:visible").first
+        card = page.get_by_test_id("terminal-subagent-approvals").locator(_PENDING_CARD).first
         expect(card).to_be_visible(timeout=10_000)
         expect(card).to_contain_text("Bash")
         card.get_by_role("button", name="Approve", exact=True).click()
 
         worker.join(timeout=30)
+        assert not worker.is_alive(), "the Approve click did not resolve the permission hook"
         assert "error" not in sink, sink.get("error")
-        behavior = sink["resp"].json()["hookSpecificOutput"]["decision"]["behavior"]
+        response = sink["resp"]
+        assert response.status_code == 200 and response.content, (
+            response.status_code,
+            response.text,
+        )
+        behavior = response.json()["hookSpecificOutput"]["decision"]["behavior"]
         assert behavior == "allow"
     finally:
         if worker.is_alive():

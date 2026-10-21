@@ -260,6 +260,7 @@ import {
   CODEX_NATIVE_RUNTIME_APPROVAL_PRESETS,
   codexApprovalModeLabel,
 } from "@/lib/codexApprovalMode";
+import { isOwnElicitation } from "@/lib/blocks";
 import { isCodexNativeSession } from "@/lib/codexPlanMode";
 import { getCliServerUrl } from "@/lib/host";
 import { useOmnigentAnalytics } from "@/lib/analyticsEmit";
@@ -2386,9 +2387,7 @@ function ComposerImpl(
   const hasPendingElicitation = useChatStore((s) =>
     s.blocks.some(
       (b) =>
-        b.type === "elicitation" &&
-        b.status === "pending" &&
-        (b.targetSessionId == null || b.targetSessionId === s.conversationId),
+        b.type === "elicitation" && b.status === "pending" && isOwnElicitation(b, s.conversationId),
     ),
   );
 

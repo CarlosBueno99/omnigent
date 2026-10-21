@@ -768,3 +768,11 @@ export const ELICITATION_RESPONSE_PREFIX = "elicit_";
 export function answeredElicitationItemId(callItemId: string): string {
   return `${callItemId}:answer`;
 }
+
+/** Whether a prompt is this session's own, not one mirrored from a sub-agent. */
+export function isOwnElicitation(
+  block: Pick<ElicitationBlock, "targetSessionId">,
+  conversationId: string | null,
+): boolean {
+  return block.targetSessionId == null || block.targetSessionId === conversationId;
+}

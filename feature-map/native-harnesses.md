@@ -18,7 +18,8 @@ implements them separately, so a fix for one harness does not reach the others.
 - `model-and-effort`: the harness's own model catalog, and reasoning effort where
   the harness declares it. The web picker should offer what the CLI offers.
 - `approvals`: tool calls the harness gates show an approval card in chat, and
-  the answer reaches the harness.
+  the answer reaches the harness. A sub-agent's card also docks below its
+  parent's terminal in Terminal view.
 - `resume`: resume a previous conversation from the CLI (`--resume`, or a bare
   `--resume` picker that lists only this host's sessions) or by reopening it.
 - `steer`: sending while the harness is mid-turn steers the active turn.
@@ -83,7 +84,9 @@ without a session ID to resume.
 `omnigent claude` session, ask Claude to delegate through its Agent tool. Open
 the linked session's Agents panel and check the child under its parent. Ask a
 child to delegate again to check nested ownership; completed children remain
-visible while the runner idles.
+visible while the runner idles. A child of a full-access parent, including one
+added from the Agents panel, starts in its harness's full-access mode unless its
+spec or the request sets a permission stance.
 
 **Approval inbox:** open Inbox in the sidebar to answer a pending permission
 without opening its session. Antigravity's Chat and Inbox cards both offer

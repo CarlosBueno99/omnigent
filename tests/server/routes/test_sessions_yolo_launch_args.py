@@ -455,7 +455,6 @@ _CODEX_BYPASS = "omnigent.codex_native.bypass_sandbox"
             {},
             False,
         ),
-        ("claude-native", ["--", "--dangerously-skip-permissions"], {}, False),
         ("claude-native", [], {}, False),
         (
             "claude-native",
@@ -477,6 +476,24 @@ _CODEX_BYPASS = "omnigent.codex_native.bypass_sandbox"
         (
             "codex-native",
             ["-c", 'default_permissions=":danger-full-access"', "-a", "on-request"],
+            {},
+            False,
+        ),
+        (
+            "codex-native",
+            ["--sandbox", "read-only", "-a", "never", "-c", 'sandbox_mode="danger-full-access"'],
+            {},
+            False,
+        ),
+        (
+            "codex-native",
+            [*_CODEX_FULL_ACCESS_PRESET, "-c", 'approval_policy="on-request"'],
+            {},
+            True,
+        ),
+        (
+            "codex-native",
+            ["--approve-for-me", *_CODEX_FULL_ACCESS_PRESET],
             {},
             False,
         ),
@@ -516,6 +533,16 @@ def test_child_spec_stance_wins_over_inherited_full_access(stance: dict[str, str
     parent = _parent(list(_CODEX_FULL_ACCESS_PRESET))
     config: dict[str, object] = {"harness": "claude-native", **stance}
     assert _inherited(parent, "codex-native", child_config=config) is None
+
+
+def test_empty_child_spec_stance_is_undeclared() -> None:
+    """An empty spec value declares no stance, as in launch-arg derivation."""
+    parent = _parent(list(_CODEX_FULL_ACCESS_PRESET))
+    config: dict[str, object] = {"harness": "claude-native", "permission_mode": ""}
+    assert _inherited(parent, "codex-native", child_config=config) == [
+        "--permission-mode",
+        "bypassPermissions",
+    ]
 
 
 def test_inheritance_needs_parent_spec_and_child_harness() -> None:

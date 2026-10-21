@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { ElicitationCard } from "@/components/blocks/ApprovalCard";
-import type { AnyBlock, ElicitationBlock } from "@/lib/blocks";
+import { isOwnElicitation, type AnyBlock, type ElicitationBlock } from "@/lib/blocks";
 import { elicitationRenderItem } from "@/lib/renderItems";
 import { cn } from "@/lib/utils";
 import { CHAT_COLUMN_WIDTH } from "@/pages/chatLayout";
@@ -16,15 +16,11 @@ export function pendingSubagentElicitations(
     (block): block is ElicitationBlock =>
       block.type === "elicitation" &&
       block.status === "pending" &&
-      !!block.targetSessionId &&
-      block.targetSessionId !== conversationId,
+      !isOwnElicitation(block, conversationId),
   );
 }
 
-/**
- * Sub-agent approval cards for the terminal view, which hides the transcript.
- * The session's own prompts already appear in its terminal UI.
- */
+/** Sub-agent approval cards for the terminal view, which hides the transcript. */
 export function TerminalSubagentApprovals() {
   const pendingBlocks = useChatStore(
     useShallow((s) => pendingSubagentElicitations(s.blocks, s.conversationId)),
