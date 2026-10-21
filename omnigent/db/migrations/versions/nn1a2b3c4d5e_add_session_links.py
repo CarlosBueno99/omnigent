@@ -1,7 +1,7 @@
 """Persist directed session links, verified inputs, requests and replies.
 
 Revision ID: nn1a2b3c4d5e
-Revises: mm1a2b3c4d5e
+Revises: nf12ab34cd56
 
 Additive metadata-database migration. Deploy before the disabled-by-default
 session-links application feature. Older binaries ignore these tables. Disable
@@ -16,7 +16,7 @@ from alembic import op
 from sqlalchemy.dialects.mysql import BINARY
 
 revision = "nn1a2b3c4d5e"
-down_revision = "mm1a2b3c4d5e"
+down_revision = "nf12ab34cd56"
 branch_labels = None
 depends_on = None
 
