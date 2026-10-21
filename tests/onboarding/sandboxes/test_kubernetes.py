@@ -2242,6 +2242,62 @@ def test_wait_resets_to_pod_ready_budget_when_cloning_pod_is_replaced(
     assert clock["now"] < 1800
 
 
+@pytest.mark.parametrize("replacement_clone_s", [None, 1500.0])
+def test_cloning_pod_that_disappears_restarts_from_pod_ready_budget(
+    fake_clients: tuple[_FakeCore, _FakeBatch],
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_clone_s: float | None,
+) -> None:
+    """A Pod deleted mid-clone gets the tight budget to be replaced; a replacement
+    that starts cloning earns a fresh preparation budget of its own."""
+    core, _batch = fake_clients
+    clock = _fake_clock(monkeypatch)
+    deleted_at = 1000.0
+    core.pod_list_items = [_cloning_pod()]
+    state = {"replaced": False}
+
+    def read_pod(name, namespace, _request_timeout=None):
+        if clock["now"] < deleted_at:
+            return _cloning_pod()
+        if not state["replaced"]:
+            state["replaced"] = True
+            if replacement_clone_s is None:
+                core.pod_list_items = []
+            raise _FakeApiException(status=404, reason="Not Found")
+        if clock["now"] < deleted_at + replacement_clone_s:
+            return _cloning_pod()
+        return _prepared_pod()
+
+    monkeypatch.setattr(core, "read_namespaced_pod", read_pod)
+    launcher = KubernetesSandboxLauncher(
+        in_cluster=True,
+        namespace="omnigent-sandboxes",
+        secret_name="omnigent-creds",
+        env=(),
+        pod_ready_timeout_s=90,
+        workspace_prep_timeout_s=1800,
+    )
+
+    def start() -> str:
+        return launcher.start_host(
+            "omnigent-job-deleted",
+            token=_TOKEN,
+            host_id="host_deleted",
+            host_name="managed-deleted",
+            server_url="http://srv.example.com",
+            repos=[RepoWorkspace(url="https://x/monorepo.git", branch=None, repo_name="monorepo")],
+        )
+
+    if replacement_clone_s is None:
+        with pytest.raises(click.ClickException) as exc:
+            start()
+        assert "did not create a child pod within 90s" in exc.value.message
+        assert clock["now"] <= deleted_at + 90 + 2 * k8s._POD_READY_POLL_S
+    else:
+        assert start() == "/home/omnigent/workspace/monorepo"
+        assert clock["now"] >= deleted_at + replacement_clone_s > 1800
+
+
 def test_wait_resets_to_pod_ready_budget_when_clone_finishes_but_host_stalls(
     fake_clients: tuple[_FakeCore, _FakeBatch], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1815,6 +1815,10 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
                     # preemption, node drain) — re-discover instead of failing.
                     replaced_pod_name = pod_name
                     pod_name = None
+                    if preparing:
+                        preparing = False
+                        budget_s = pod_ready_timeout_s
+                        deadline = time.monotonic() + pod_ready_timeout_s
                     if time.monotonic() >= deadline:
                         raise click.ClickException(
                             self._pod_failure_message(
