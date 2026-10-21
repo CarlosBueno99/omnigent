@@ -3,67 +3,25 @@
 With the workspace at ``$HOME``, the dotfile mask of ``~/.omnigent`` (or
 the ``/dev/null`` overlay of ``~/.claude.json``) is emitted after the
 grant binds and must not void codex-native's ``write_paths`` bridge
-directory or the claude CLI wrap's auth grants.
-
-- The ``*_in_argv`` tests replay bwrap's last-mount-wins semantics over
-  the generated argv, so they need no user namespaces.
-- The runtime tests drive the real sandboxed helper and skip where bwrap
-  cannot create a namespace; the project-cwd test is their control.
+directory or the claude CLI wrap's auth grants. These tests drive the
+real sandboxed helper and skip where bwrap cannot create a namespace;
+``tests/inner/test_bwrap_sandbox.py`` covers the generated argv.
 """
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from omnigent.inner.bwrap_sandbox import BwrapSandboxBackend
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import create_os_environment
-from tests.inner.sandbox.conftest import _repo_root_for_pythonpath, run_async
-from tests.inner.test_bwrap_sandbox import _last_covering_mount
-
-_BWRAP = shutil.which("bwrap")
-
-linux_bwrap_only = pytest.mark.skipif(
-    not sys.platform.startswith("linux") or _BWRAP is None,
-    reason="linux_bwrap requires Linux + bwrap on PATH",
-)
-
-
-def _bwrap_functional() -> bool:
-    """Whether bwrap can actually create a namespace on this host.
-
-    A seccomp-confined CI runner can have ``bwrap`` on PATH while the
-    kernel denies unprivileged user namespaces; the runtime tests skip
-    there instead of failing for a reason unrelated to the bug.
-    """
-    if _BWRAP is None or not sys.platform.startswith("linux"):
-        return False
-    try:
-        proc = subprocess.run(
-            [_BWRAP, "--ro-bind", "/", "/", "/bin/true"],
-            capture_output=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return proc.returncode == 0
-
+from tests.inner.sandbox.conftest import _bwrap_functional, _repo_root_for_pythonpath, run_async
 
 requires_bwrap_namespace = pytest.mark.skipif(
     not _bwrap_functional(),
     reason="bwrap cannot create namespaces on this host",
 )
-
-
-def _exposed(argv: list[str], path: Path) -> bool:
-    """Whether the last mount covering *path* binds real host content."""
-    mount = _last_covering_mount(argv, path)
-    return mount is not None and mount[0] != "--tmpfs" and mount[1] != "/dev/null"
 
 
 def _home_with_codex_bridge(base: Path) -> tuple[Path, Path]:
@@ -97,82 +55,6 @@ def _codex_bridge_spec(home: Path, cwd: Path) -> OSEnvSpec:
     )
 
 
-@linux_bwrap_only
-def test_codex_bridge_grant_survives_dotdir_mask_in_argv(tmp_path: Path) -> None:
-    """The granted codex-native bridge must stay visible with cwd=$HOME.
-
-    A launcher that emits ``--tmpfs <home>/.omnigent`` after the grant's
-    ``--bind-try <home>/.omnigent/codex-native`` without re-emitting the
-    grant voids it (last-mount-wins) and CODEX_HOME vanishes.
-    """
-    home, codex_home = _home_with_codex_bridge(tmp_path)
-    backend = BwrapSandboxBackend()
-    spec = _codex_bridge_spec(home, home)
-    policy = backend.resolve(spec, home)
-    argv = backend.wrap_launcher_argv(["/bin/true"], policy, home)
-
-    grant = str(home / ".omnigent" / "codex-native")
-    assert any(
-        argv[i] in ("--bind", "--bind-try") and argv[i + 1] == grant for i in range(len(argv) - 2)
-    ), f"precondition: the write grant must be emitted at all. argv: {argv}"
-
-    assert _exposed(argv, codex_home / "config.toml"), (
-        "the --tmpfs mask of ~/.omnigent is emitted after the --bind-try of "
-        "the granted ~/.omnigent/codex-native subtree and wins "
-        f"(last-mount-wins), voiding the explicit write grant. argv: {argv}"
-    )
-
-    # Deny-wins must survive any fix: sibling content stays hidden.
-    assert not _exposed(argv, home / ".omnigent" / "chat.db"), (
-        f"~/.omnigent content outside the grant must stay masked. argv: {argv}"
-    )
-
-
-@linux_bwrap_only
-def test_claude_auth_grants_survive_dotfile_masks_in_argv(tmp_path: Path) -> None:
-    """Grant shapes of the claude CLI wrap must stay visible with cwd=$HOME.
-
-    Mirrors the grants ``prepare_claude_cli_path`` adds
-    (``_claude_internal_write_roots`` / ``_claude_internal_write_files``):
-    with the workspace at ``$HOME``, the ``.claude.json`` write-file grant
-    must survive its ``/dev/null`` dotfile mask and the ``.claude``
-    subtree grants their ``--tmpfs`` mask; a mask that wins leaves the
-    CLI without auth and drops it into first-run onboarding.
-    """
-    home = tmp_path / "home"
-    (home / ".claude" / "sessions").mkdir(parents=True)
-    (home / ".claude" / ".credentials.json").write_text("{}\n")
-    (home / ".claude.json").write_text("{}\n")
-
-    spec = OSEnvSpec(
-        type="caller_process",
-        cwd=str(home),
-        sandbox=OSEnvSandboxSpec(
-            type="linux_bwrap",
-            read_paths=[_repo_root_for_pythonpath()],
-            write_paths=[str(home / ".claude" / "sessions")],
-            write_files=[
-                str(home / ".claude.json"),
-                str(home / ".claude" / ".credentials.json"),
-            ],
-            allow_network=False,
-        ),
-    )
-    backend = BwrapSandboxBackend()
-    policy = backend.resolve(spec, home)
-    argv = backend.wrap_launcher_argv(["/bin/true"], policy, home)
-
-    for granted in (
-        home / ".claude.json",
-        home / ".claude" / ".credentials.json",
-        home / ".claude" / "sessions",
-    ):
-        assert _exposed(argv, granted), (
-            f"explicitly granted {granted} is hidden by a later dotfile mask "
-            f"(last-mount-wins). argv: {argv}"
-        )
-
-
 @requires_bwrap_namespace
 def test_read_through_granted_path_under_home_cwd(
     tmp_path: Path,
@@ -198,32 +80,6 @@ def test_read_through_granted_path_under_home_cwd(
     assert "error" in sibling or "secret" not in str(sibling.get("content", "")), (
         f"~/.omnigent content outside the grant must stay masked in the namespace: {sibling}"
     )
-
-
-@requires_bwrap_namespace
-def test_read_through_granted_path_with_project_cwd(
-    tmp_path: Path,
-    sandbox_pythonpath_env: None,
-) -> None:
-    """Control: the identical grant with a project workspace works today.
-
-    If this control ever fails, a failure of the home-cwd test above is
-    environmental, not the mask-after-grant ordering bug.
-    """
-    home, codex_home = _home_with_codex_bridge(tmp_path)
-    project = home / "project"
-    project.mkdir()
-
-    os_env = create_os_environment(_codex_bridge_spec(home, project))
-    try:
-        result = run_async(os_env.read(str(codex_home / "config.toml")))
-    finally:
-        os_env.close()
-
-    assert "error" not in result, (
-        f"control read of granted CODEX_HOME with a project cwd failed: {result}"
-    )
-    assert "gpt-5-codex" in str(result.get("content", ""))
 
 
 @requires_bwrap_namespace
