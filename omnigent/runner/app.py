@@ -764,11 +764,11 @@ def _is_context_overflow_error(
     """
     if event.get("type") != "response.failed":
         return None
-    # Harness failures carry the error under ``response``; ``error`` is the legacy mirror.
-    error = event.get("error")
+    # Match server persistence: ``response.error`` first, then the legacy mirror.
     response = event.get("response")
-    if not error and isinstance(response, dict):
-        error = response.get("error")
+    error = response.get("error") if isinstance(response, dict) else None
+    if not error:
+        error = event.get("error")
     if not isinstance(error, dict):
         return None
     raw = str(error.get("message", ""))

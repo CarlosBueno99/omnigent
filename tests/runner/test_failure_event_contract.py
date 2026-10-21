@@ -205,6 +205,7 @@ async def test_harness_prompt_too_long_failure_is_normalized_to_context_overflow
     )
     error = await _assert_failure_on_both_streams(app, source="llm")
     assert error["code"] == "context_length_exceeded"
+    assert error["message"] == message
 
 
 @pytest.mark.asyncio
@@ -299,26 +300,28 @@ def test_harness_shaped_overflow_classifies_with_its_detail(
     )
 
 
+_GENERIC_ERROR = {"code": "RuntimeError", "message": "boom"}
+_OVERFLOW_ERROR = {"code": "RuntimeError", "message": _APPROXIMATE_OVERFLOW}
+
+
 @pytest.mark.parametrize(
-    ("top_level_error", "expected"),
+    ("top_level_error", "response_error"),
     [
-        pytest.param({}, (1000000, 1006037, _APPROXIMATE_OVERFLOW), id="empty-legacy-error"),
-        pytest.param({"code": "RuntimeError", "message": "boom"}, None, id="legacy-error-wins"),
+        pytest.param({}, _OVERFLOW_ERROR, id="empty-legacy-error"),
+        pytest.param(_GENERIC_ERROR, _OVERFLOW_ERROR, id="response-error-wins"),
+        pytest.param(_OVERFLOW_ERROR, None, id="legacy-error-only"),
     ],
 )
-def test_overflow_reads_response_error_only_without_a_legacy_error(
-    top_level_error: dict[str, str], expected: tuple[int, int, str] | None
+def test_overflow_prefers_response_error_over_the_legacy_mirror(
+    top_level_error: dict[str, str], response_error: dict[str, str] | None
 ) -> None:
-    """The top-level ``error`` mirror takes precedence whenever it is populated."""
+    """Like server persistence, read ``response.error`` and fall back to ``error``."""
     event: dict[str, object] = {
         "type": "response.failed",
         "error": top_level_error,
-        "response": {
-            "status": "failed",
-            "error": {"code": "RuntimeError", "message": _APPROXIMATE_OVERFLOW},
-        },
+        "response": {"status": "failed", "error": response_error},
     }
-    assert _is_context_overflow_error(event) == expected
+    assert _is_context_overflow_error(event) == (1000000, 1006037, _APPROXIMATE_OVERFLOW)
 
 
 def test_content_length_phrase_without_sizes_is_not_overflow() -> None:

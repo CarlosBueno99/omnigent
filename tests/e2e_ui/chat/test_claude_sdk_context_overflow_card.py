@@ -20,6 +20,7 @@ from playwright.sync_api import Page, expect
 
 from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
 from tests.e2e_ui.chat.test_model_unavailable_recovery_hint import (
+    _delete_session,
     _persisted_errors,
     _stop_respawned_runner,
     _type_and_submit,
@@ -79,11 +80,11 @@ def _post_heartbeat(base_url: str, session_id: str) -> None:
 
 
 def _wait_for_failure_card(
-    page: Page, base_url: str, session_id: str, cards_before: int, mark: Callable[[str], None]
+    page: Page, base_url: str, session_id: str, pills_before: int, mark: Callable[[str], None]
 ) -> dict:
     pills = page.get_by_test_id("error-pill")
     deadline = time.monotonic() + _TURN_TIMEOUT_S
-    while pills.count() <= cards_before:
+    while pills.count() <= pills_before:
         if time.monotonic() > deadline:
             raise AssertionError(f"no new error card; session {_snapshot(base_url, session_id)}")
         page.wait_for_timeout(1_000)
@@ -117,6 +118,7 @@ def test_claude_sdk_prompt_too_long_cards_read_as_context_overflow(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     respawned = _ensure_runner_online(live_server, tmp_path_factory)
+    session_id = ""
     try:
         session_id = _create_claude_sdk_session(
             live_server, str(_server_state["runner_id"]), mock_llm_server_url
@@ -156,11 +158,12 @@ def test_claude_sdk_prompt_too_long_cards_read_as_context_overflow(
         requests_per_wake = []
         for label, text, wake in wakes:
             baseline = _request_count(mock_llm_server_url)
+            pills_before = page.get_by_test_id("error-pill").count()
             mark(f"{label} sent")
             wake()
             expect(page.locator(_USER, has_text=text).last).to_be_visible(timeout=30_000)
             mark(f"{label} shown in chat")
-            card = _wait_for_failure_card(page, live_server, session_id, len(cards), mark)
+            card = _wait_for_failure_card(page, live_server, session_id, pills_before, mark)
             requests_per_wake.append(_request_count(mock_llm_server_url) - baseline)
             mark(f"{label} card: {card}")
             cards.append(card)
@@ -175,10 +178,13 @@ def test_claude_sdk_prompt_too_long_cards_read_as_context_overflow(
         print(f"persisted errors: {_persisted_errors(live_server, session_id)}", flush=True)
         print(f"session count: {len(sessions.get('data', []))}", flush=True)
         mark("journey complete")
-        page.context.close()
 
         assert [card["headline"] for card in cards] == [_OVERFLOW_HEADLINE] * len(cards), cards
+        # The CLI rewrites the mock's explicit pair, so the card keeps its original text.
+        assert all("Prompt is too long" in card["detail"] for card in cards), cards
         last_error = snapshot.get("last_task_error") or {}
         assert last_error.get("code") == "context_length_exceeded", last_error
     finally:
+        if session_id:
+            _delete_session(live_server, session_id)
         _stop_respawned_runner(respawned)
