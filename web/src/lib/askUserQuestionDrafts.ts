@@ -19,7 +19,7 @@ export function getAskUserQuestionDraft(
   questions: ClaudeQuestion[],
 ): AskUserQuestionDraft | undefined {
   const entry = drafts.get(elicitationId);
-  return entry?.questions === JSON.stringify(questions) ? entry.draft : undefined;
+  return entry?.questions === JSON.stringify(questions) ? structuredClone(entry.draft) : undefined;
 }
 
 /** Remember a card's unsent answers; only the most recent drafts are kept. */
@@ -33,7 +33,7 @@ export function saveAskUserQuestionDraft(
   if (drafts.size > MAX_DRAFTS) drafts.delete(drafts.keys().next().value as string);
 }
 
-/** Forget a card's draft once its prompt has been answered or has ended. */
+/** Forget a card's draft once its prompt has been answered. */
 export function clearAskUserQuestionDraft(elicitationId: string): void {
   drafts.delete(elicitationId);
 }

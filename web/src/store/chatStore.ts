@@ -4384,7 +4384,6 @@ async function reconcilePendingElicitations(id: string): Promise<void> {
         !stillPending.has(b.elicitationId)
       ) {
         changed = true;
-        clearAskUserQuestionDraft(b.elicitationId);
         const updated: ElicitationBlock = {
           ...b,
           status: "responded",
@@ -5341,7 +5340,6 @@ function reconcileElicitationBlocks(
       !pendingNow.has(b.elicitationId)
     ) {
       changed = true;
-      clearAskUserQuestionDraft(b.elicitationId);
       const updated: ElicitationBlock = {
         ...b,
         status: "responded",
@@ -8505,7 +8503,8 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       // elsewhere".
       return;
     case "elicitation_resolved":
-      clearAskUserQuestionDraft(event.elicitationId);
+      // Without a verdict the card can reopen if the prompt re-parks, so keep its draft.
+      if (event.action) clearAskUserQuestionDraft(event.elicitationId);
       // Match by id, not first-pending — the `pending` guard keeps
       // a user-delivered verdict from being overwritten by a later
       // duplicate-resolve.

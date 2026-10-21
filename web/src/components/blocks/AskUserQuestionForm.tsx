@@ -98,6 +98,8 @@ export function AskUserQuestionForm({
   onReject,
 }: AskUserQuestionFormProps) {
   const [draft] = useState(() => getAskUserQuestionDraft(elicitationId, questions));
+  // Form state belongs to the first questions; ApprovalCard remounts the form for new ones.
+  const [draftQuestions] = useState(questions);
 
   // Currently-visible question (carousel index).
   const [currentIndex, setCurrentIndex] = useState(draft?.currentIndex ?? 0);
@@ -131,35 +133,35 @@ export function AskUserQuestionForm({
   });
 
   useEffect(() => {
-    // Untouched cards keep no draft, so they cannot evict real ones.
-    const untouched =
-      currentIndex === 0 &&
-      Object.values(selections).every((selection) => selection.length === 0) &&
-      !Object.values(customSelected).some(Boolean) &&
-      Object.values(customInputs).every((text) => text === "");
-    if (untouched) {
-      if (getAskUserQuestionDraft(elicitationId, questions)) {
-        clearAskUserQuestionDraft(elicitationId);
-      }
-      return;
-    }
     const draftSelections = { ...selections };
     const draftSelected = { ...customSelected };
     const draftInputs = { ...customInputs };
     // Answers to a secret question are never kept past this mount.
-    for (const q of questions) {
+    for (const q of draftQuestions) {
       if (!q.isSecret) continue;
       draftSelections[questionKey(q)] = q.multiSelect ? [] : "";
       draftSelected[questionKey(q)] = false;
       draftInputs[questionKey(q)] = "";
     }
-    saveAskUserQuestionDraft(elicitationId, questions, {
+    // Untouched cards keep no draft, so they cannot evict real ones.
+    const untouched =
+      currentIndex === 0 &&
+      Object.values(draftSelections).every((selection) => selection.length === 0) &&
+      !Object.values(draftSelected).some(Boolean) &&
+      Object.values(draftInputs).every((text) => text === "");
+    if (untouched) {
+      if (getAskUserQuestionDraft(elicitationId, draftQuestions)) {
+        clearAskUserQuestionDraft(elicitationId);
+      }
+      return;
+    }
+    saveAskUserQuestionDraft(elicitationId, draftQuestions, {
       currentIndex,
       selections: draftSelections,
       customSelected: draftSelected,
       customInputs: draftInputs,
     });
-  }, [elicitationId, questions, currentIndex, selections, customSelected, customInputs]);
+  }, [elicitationId, draftQuestions, currentIndex, selections, customSelected, customInputs]);
 
   const handleSingleSelect = (key: string, label: string) => {
     // Single-select mutex: clicking a real option clears the

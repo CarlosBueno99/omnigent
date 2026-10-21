@@ -26,6 +26,10 @@ describe("askUserQuestionDrafts", () => {
     saveAskUserQuestionDraft("elic_0", questions, draft);
 
     expect(getAskUserQuestionDraft("elic_0", structuredClone(questions))).toEqual(draft);
+    getAskUserQuestionDraft("elic_0", questions)!.customInputs["Pick a region"] = "changed";
+    expect(getAskUserQuestionDraft("elic_0", questions)?.customInputs).toEqual({
+      "Pick a region": "eu-west",
+    });
     expect(
       getAskUserQuestionDraft("elic_0", [{ ...questions[0]!, question: "Pick a zone" }]),
     ).toBeUndefined();

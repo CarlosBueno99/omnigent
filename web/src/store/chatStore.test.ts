@@ -37,7 +37,11 @@ import { getSessionSlim, INITIAL_WINDOW_ITEMS, SESSION_HISTORY_PAGE_SIZE } from 
 import { SSE_STALL_TIMEOUT_MS } from "@/lib/sse";
 import { serializeReplyDraft, type StoredReplyDraft } from "@/lib/replyDraft";
 import { clearUnsentSends, peekUnsentSend, rememberUnsentSend } from "@/lib/unsentSends";
-import { getAskUserQuestionDraft, saveAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
+import {
+  clearAskUserQuestionDraft,
+  getAskUserQuestionDraft,
+  saveAskUserQuestionDraft,
+} from "@/lib/askUserQuestionDrafts";
 import {
   clearSessionDrafts,
   getSessionDraft,
@@ -1441,7 +1445,7 @@ describe("chatStore — switchTo", () => {
     expect(reconciled).toHaveLength(1);
     expect(reconciled[0]!.status).toBe("responded");
     expect(reconciled[0]!.response).toEqual({ action: "auto_resolved" });
-    expect(getAskUserQuestionDraft("elic_vis", regionQuestions)).toBeUndefined();
+    expect(getAskUserQuestionDraft("elic_vis", regionQuestions)).toBeDefined();
   });
 
   it("does not abort a conversation's stream when switching away", async () => {
@@ -10241,8 +10245,15 @@ describe("chatStore — handleSessionEvent (resource events)", () => {
 });
 
 const regionQuestions = [{ question: "Pick a region", options: [], multiSelect: false }];
+const savedRegionDrafts = new Set<string>();
+
+afterEach(() => {
+  for (const elicitationId of savedRegionDrafts) clearAskUserQuestionDraft(elicitationId);
+  savedRegionDrafts.clear();
+});
 
 function saveRegionDraft(elicitationId: string): void {
+  savedRegionDrafts.add(elicitationId);
   saveAskUserQuestionDraft(elicitationId, regionQuestions, {
     currentIndex: 0,
     selections: { "Pick a region": "" },
@@ -10723,8 +10734,6 @@ describe("chatStore — elicitation_resolved", () => {
     useChatStore.setState({
       blocks: [elicitationBlock("elic_older"), elicitationBlock("elic_target")],
     });
-    saveRegionDraft("elic_older");
-    saveRegionDraft("elic_target");
 
     handleSessionEvent(elicitationResolvedEvent("elic_target"));
 
@@ -10741,8 +10750,6 @@ describe("chatStore — elicitation_resolved", () => {
     expect(older.response).toBeNull();
     expect(target.status).toBe("responded");
     expect(target.response).toEqual({ action: "auto_resolved" });
-    expect(getAskUserQuestionDraft("elic_older", regionQuestions)).toBeDefined();
-    expect(getAskUserQuestionDraft("elic_target", regionQuestions)).toBeUndefined();
   });
 
   it("carries a delivered verdict to the card instead of the neutral pill", () => {
@@ -10753,6 +10760,7 @@ describe("chatStore — elicitation_resolved", () => {
     // ambiguous "Resolved elsewhere" pill, so the user could not tell
     // whether the tool was approved and the session looked stuck.
     useChatStore.setState({ blocks: [elicitationBlock("elic_verdict")] });
+    saveRegionDraft("elic_verdict");
 
     handleSessionEvent(elicitationResolvedEvent("elic_verdict", "accept"));
 
@@ -10762,6 +10770,7 @@ describe("chatStore — elicitation_resolved", () => {
     }
     expect(block.status).toBe("responded");
     expect(block.response).toEqual({ action: "accept" });
+    expect(getAskUserQuestionDraft("elic_verdict", regionQuestions)).toBeUndefined();
   });
 
   it("carries the unanswered reason so the card can say the prompt expired", () => {
@@ -17131,7 +17140,6 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     sinks[0]!.push(elicitationReqFrame("elic_res", "Approve soon-resolved?"));
     await drainAsync();
     expect(elicitationCards()[0]!.status).toBe("pending");
-    saveRegionDraft("elic_res");
 
     // Answered elsewhere during the gap: the resolved event fired into
     // the dead socket and the snapshot no longer lists the prompt.
@@ -17148,7 +17156,30 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     // would 404 against the already-cleared parked future.
     expect(cards[0]!.status).toBe("responded");
     expect(cards[0]!.response).toEqual({ action: "auto_resolved" });
-    expect(getAskUserQuestionDraft("elic_res", regionQuestions)).toBeUndefined();
+
+    await closeLoop(sinks, loop);
+  });
+
+  it("keeps a question draft when a later snapshot reopens the card", async () => {
+    const reopened = pendingElicitationRaw("elic_reopen", "Pick a region?");
+    seedSession("conv_gapreopen", []);
+    seedPendingElicitations("conv_gapreopen", [reopened]);
+    const { sinks, loop } = await openLoop("conv_gapreopen");
+    sinks[0]!.push(elicitationReqFrame("elic_reopen", "Pick a region?"));
+    await drainAsync();
+    saveRegionDraft("elic_reopen");
+
+    seedPendingElicitations("conv_gapreopen", []);
+    sinks[0]!.error();
+    await drainAsync();
+    expect(elicitationCards()[0]!.response).toEqual({ action: "auto_resolved" });
+
+    seedPendingElicitations("conv_gapreopen", [reopened]);
+    sinks[1]!.error();
+    await drainAsync();
+    expect(sinks).toHaveLength(3);
+    expect(elicitationCards()[0]!.status).toBe("pending");
+    expect(getAskUserQuestionDraft("elic_reopen", regionQuestions)).toBeDefined();
 
     await closeLoop(sinks, loop);
   });
@@ -17180,6 +17211,7 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
 
     sinks[0]!.push(elicitationReqFrame("elic_rev", "Approve revived?"));
     await drainAsync();
+    saveRegionDraft("elic_rev");
     // The deferred clear fired before the harness retry re-parked: the
     // card flips to "Resolved elsewhere" without a user verdict.
     sinks[0]!.push(sse("response.elicitation_resolved", { elicitation_id: "elic_rev" }));
@@ -17197,6 +17229,7 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
     expect(cards).toHaveLength(1);
     expect(cards[0]!.status).toBe("pending");
     expect(cards[0]!.response).toBeNull();
+    expect(getAskUserQuestionDraft("elic_rev", regionQuestions)).toBeDefined();
 
     await abortLoop(sinks, controller, loop);
   });

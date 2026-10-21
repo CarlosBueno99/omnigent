@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { childSessionsQueryKey, type ChildSessionInfo } from "@/hooks/useChildSessions";
 import type { ClaudeQuestion } from "@/lib/askUserQuestion";
-import { getAskUserQuestionDraft, saveAskUserQuestionDraft } from "@/lib/askUserQuestionDrafts";
+import {
+  clearAskUserQuestionDraft,
+  getAskUserQuestionDraft,
+  saveAskUserQuestionDraft,
+} from "@/lib/askUserQuestionDrafts";
 import { BlockStream } from "@/lib/blockStream";
 import type { ElicitationBlock } from "@/lib/blocks";
 import { buildBubbles, type RenderItem } from "@/lib/renderItems";
@@ -1469,6 +1473,16 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
       expect(getAskUserQuestionDraft("elic_draft_untouched", draftQuestions)).toBeUndefined();
     });
 
+    it("does not save a cleared draft again when the card rerenders with equal questions", () => {
+      const card = renderPendingQuestions("elic_draft_rerender", draftQuestions);
+      answerFirstAndTypeSecond();
+      clearAskUserQuestionDraft("elic_draft_rerender");
+
+      card.rerender(pendingQuestionsCard("elic_draft_rerender", structuredClone(draftQuestions)));
+
+      expect(getAskUserQuestionDraft("elic_draft_rerender", draftQuestions)).toBeUndefined();
+    });
+
     it("drops the draft once a restored card's answers are undone", () => {
       const regionQuestions: ClaudeQuestion[] = [
         {
@@ -1577,6 +1591,7 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
       const elicitationId = `elic_draft_secret_${how}`;
       const first = renderPendingQuestions(elicitationId, secretQuestions);
       answerSecret();
+      expect(getAskUserQuestionDraft(elicitationId, secretQuestions)).toBeUndefined();
       fireEvent.click(screen.getByTestId("ask-user-question-next"));
       fireEvent.change(screen.getByTestId("ask-user-question-custom-input"), {
         target: { value: "eu-west" },
