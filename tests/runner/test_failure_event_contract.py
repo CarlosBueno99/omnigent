@@ -273,17 +273,37 @@ _APPROXIMATE_OVERFLOW = (
 )
 
 
+_OVERFLOW_COUNTS = (1000000, 1006037, _APPROXIMATE_OVERFLOW)
+_OPENAI_STYLE_OVERFLOW = (
+    "This model's maximum context length is 128000 tokens. "
+    "However, your messages resulted in 130000 tokens."
+)
+
+
 @pytest.mark.parametrize(
-    ("message", "expected_detail"),
+    ("message", "expected"),
     [
-        pytest.param(_APPROXIMATE_OVERFLOW, _APPROXIMATE_OVERFLOW, id="approximate-counts"),
+        pytest.param(_APPROXIMATE_OVERFLOW, _OVERFLOW_COUNTS, id="approximate-counts"),
         pytest.param(
-            "prompt is too long: 1006037 tokens > 1000000 maximum", None, id="explicit-pair"
+            "prompt is too long: 1006037 tokens > 1000000 maximum",
+            (1000000, 1006037, None),
+            id="explicit-pair",
         ),
+        pytest.param(
+            _OPENAI_STYLE_OVERFLOW,
+            (128000, 130000, _OPENAI_STYLE_OVERFLOW),
+            id="two-numbers",
+        ),
+        pytest.param(
+            "prompt is too long: 1006037 tokens",
+            (1006037, 1006038, "prompt is too long: 1006037 tokens"),
+            id="one-number",
+        ),
+        pytest.param("Prompt is too long", (128000, 128001, "Prompt is too long"), id="no-number"),
     ],
 )
 def test_harness_shaped_overflow_classifies_with_its_detail(
-    message: str, expected_detail: str | None
+    message: str, expected: tuple[int, int, str | None]
 ) -> None:
     """A harness failure, which has no top-level ``error``, is still an overflow."""
     event = FailedEvent(
@@ -293,11 +313,7 @@ def test_harness_shaped_overflow_classifies_with_its_detail(
             status="failed", error={"code": "RuntimeError", "message": message}
         ),
     )
-    assert _is_context_overflow_error(event.model_dump(mode="json")) == (
-        1000000,
-        1006037,
-        expected_detail,
-    )
+    assert _is_context_overflow_error(event.model_dump(mode="json")) == expected
 
 
 _GENERIC_ERROR = {"code": "RuntimeError", "message": "boom"}
@@ -305,23 +321,28 @@ _OVERFLOW_ERROR = {"code": "RuntimeError", "message": _APPROXIMATE_OVERFLOW}
 
 
 @pytest.mark.parametrize(
-    ("top_level_error", "response_error"),
+    ("top_level_error", "response_error", "expected"),
     [
-        pytest.param({}, _OVERFLOW_ERROR, id="empty-legacy-error"),
-        pytest.param(_GENERIC_ERROR, _OVERFLOW_ERROR, id="response-error-wins"),
-        pytest.param(_OVERFLOW_ERROR, None, id="legacy-error-only"),
+        pytest.param(_GENERIC_ERROR, _OVERFLOW_ERROR, _OVERFLOW_COUNTS, id="response-error-wins"),
+        pytest.param(_OVERFLOW_ERROR, _GENERIC_ERROR, None, id="generic-response-error-wins"),
+        pytest.param(_OVERFLOW_ERROR, None, _OVERFLOW_COUNTS, id="legacy-error-only"),
+        pytest.param(
+            _OVERFLOW_ERROR, "malformed", _OVERFLOW_COUNTS, id="malformed-response-error"
+        ),
     ],
 )
 def test_overflow_prefers_response_error_over_the_legacy_mirror(
-    top_level_error: dict[str, str], response_error: dict[str, str] | None
+    top_level_error: dict[str, str],
+    response_error: object,
+    expected: tuple[int, int, str | None] | None,
 ) -> None:
-    """Like server persistence, read ``response.error`` and fall back to ``error``."""
+    """Read ``response.error`` first and fall back to ``error`` when it is unusable."""
     event: dict[str, object] = {
         "type": "response.failed",
         "error": top_level_error,
         "response": {"status": "failed", "error": response_error},
     }
-    assert _is_context_overflow_error(event) == (1000000, 1006037, _APPROXIMATE_OVERFLOW)
+    assert _is_context_overflow_error(event) == expected
 
 
 def test_content_length_phrase_without_sizes_is_not_overflow() -> None:

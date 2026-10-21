@@ -9,6 +9,7 @@ the same way. Every failure card must read as a context-window overflow.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import Callable
@@ -21,7 +22,6 @@ from playwright.sync_api import Page, expect
 from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
 from tests.e2e_ui.chat.test_model_unavailable_recovery_hint import (
     _delete_session,
-    _persisted_errors,
     _stop_respawned_runner,
     _type_and_submit,
 )
@@ -38,7 +38,8 @@ _OVERFLOW = "prompt is too long: 1006037 tokens > 1000000 maximum"
 _HEARTBEAT = "You are idle with asks still open - continue the open work."
 _OVERFLOW_HEADLINE = "The conversation grew past the model's context window."
 _TURN_TIMEOUT_S = 150.0
-_HOLD_MS = 4_000
+# Readable pauses for filmed runs only.
+_HOLD_MS = 4_000 if os.environ.get("OMNIGENT_E2E_RECORD_DIR") else 0
 
 
 def _create_claude_sdk_session(base_url: str, runner_id: str, mock_url: str) -> str:
@@ -62,10 +63,6 @@ def _create_claude_sdk_session(base_url: str, runner_id: str, mock_url: str) -> 
 
 def _snapshot(base_url: str, session_id: str) -> dict[str, object]:
     return httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0).json()
-
-
-def _request_count(mock_url: str) -> int:
-    return int(httpx.get(f"{mock_url}/stats", timeout=10.0).json()["request_count"])
 
 
 def _post_heartbeat(base_url: str, session_id: str) -> None:
@@ -155,28 +152,17 @@ def test_claude_sdk_prompt_too_long_cards_read_as_context_overflow(
             ("go", "go", lambda: _type_and_submit(page, "go")),
         ]
         cards = []
-        requests_per_wake = []
         for label, text, wake in wakes:
-            baseline = _request_count(mock_llm_server_url)
             pills_before = page.get_by_test_id("error-pill").count()
             mark(f"{label} sent")
             wake()
             expect(page.locator(_USER, has_text=text).last).to_be_visible(timeout=30_000)
             mark(f"{label} shown in chat")
             card = _wait_for_failure_card(page, live_server, session_id, pills_before, mark)
-            requests_per_wake.append(_request_count(mock_llm_server_url) - baseline)
             mark(f"{label} card: {card}")
             cards.append(card)
 
         snapshot = _snapshot(live_server, session_id)
-        sessions = httpx.get(
-            f"{live_server}/v1/sessions", params={"visibility": "all"}, timeout=15.0
-        ).json()
-        print(f"last_task_error: {snapshot.get('last_task_error')}", flush=True)
-        print(f"status: {snapshot.get('status')}", flush=True)
-        print(f"model requests per wake: {requests_per_wake}", flush=True)
-        print(f"persisted errors: {_persisted_errors(live_server, session_id)}", flush=True)
-        print(f"session count: {len(sessions.get('data', []))}", flush=True)
         mark("journey complete")
 
         assert [card["headline"] for card in cards] == [_OVERFLOW_HEADLINE] * len(cards), cards
