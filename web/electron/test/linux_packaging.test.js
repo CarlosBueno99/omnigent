@@ -62,7 +62,7 @@ function writeStub(dir, name, body) {
 }
 
 /** Run the rendered script with host tools stubbed; return the recorded calls in order. */
-function runPostInstall({ rootCanUnshare, apparmorEnabled = false }) {
+function runPostInstall({ apparmorEnabled = false } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "omnigent-deb-postinst-"));
   try {
     const bin = path.join(tmp, "bin");
@@ -70,7 +70,7 @@ function runPostInstall({ rootCanUnshare, apparmorEnabled = false }) {
     const callLog = path.join(tmp, "calls.log");
     const recordCalls = (name, exitCode = 0) =>
       writeStub(bin, name, `printf '%s\\n' "${name} $*" >> '${callLog}'\nexit ${exitCode}`);
-    writeStub(bin, "unshare", rootCanUnshare ? "exit 0" : "exit 1");
+    recordCalls("unshare");
     for (const tool of HOST_TOOLS) recordCalls(tool);
     recordCalls("apparmor_status", apparmorEnabled ? 0 : 1);
     const script = path.join(tmp, "after-install.sh");
@@ -106,20 +106,16 @@ function stepsBesidesSandboxSetup(script) {
 }
 
 describe("Linux .deb packaging", { skip: process.platform !== "linux" }, () => {
-  it("installs chrome-sandbox setuid root even where the root installer can create user namespaces", () => {
+  it("installs chrome-sandbox setuid root without probing user namespaces as root", () => {
     // Ubuntu with apparmor_restrict_unprivileged_userns=1: root's probe succeeds while the
     // desktop user's Chromium still cannot use the namespace sandbox.
-    const calls = runPostInstall({ rootCanUnshare: true });
+    const calls = runPostInstall();
     assert.equal(chromeSandboxModes(calls).at(-1), "4755", `calls: ${JSON.stringify(calls)}`);
-  });
-
-  it("installs chrome-sandbox setuid root where user namespaces are unavailable", () => {
-    const calls = runPostInstall({ rootCanUnshare: false });
-    assert.equal(chromeSandboxModes(calls).at(-1), "4755", `calls: ${JSON.stringify(calls)}`);
+    assert.ok(!calls.some((call) => call.startsWith("unshare")), `calls: ${JSON.stringify(calls)}`);
   });
 
   it("keeps electron-builder's other post-install steps", () => {
-    const calls = runPostInstall({ rootCanUnshare: true, apparmorEnabled: true });
+    const calls = runPostInstall({ apparmorEnabled: true });
     for (const expected of [
       `update-alternatives --install /usr/bin/${EXECUTABLE} ${EXECUTABLE} ${INSTALL_DIR}/${EXECUTABLE} 100`,
       "update-mime-database /usr/share/mime",
@@ -136,6 +132,10 @@ describe("Linux .deb packaging", { skip: process.platform !== "linux" }, () => {
     "matches electron-builder's template apart from the chrome-sandbox setup",
     { skip: !upstreamTemplate && "electron-builder is not installed" },
     () => {
+      assert.ok(
+        fs.existsSync(upstreamTemplate),
+        `re-sync with electron-builder: ${upstreamTemplate} is gone`,
+      );
       assert.deepEqual(
         stepsBesidesSandboxSetup(fs.readFileSync(DEB_AFTER_INSTALL, "utf8")),
         stepsBesidesSandboxSetup(fs.readFileSync(upstreamTemplate, "utf8")),
