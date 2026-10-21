@@ -1159,7 +1159,7 @@ def test_stalled_start_reports_the_budget_it_exhausted(
 ) -> None:
     """Activation stays under the pod-ready budget; preparation gets its own, longer one."""
     monkeypatch.delenv(k8s._POD_READY_TIMEOUT_ENV_VAR, raising=False)
-    harness.launcher._workspace_prep_timeout_s = 120
+    monkeypatch.setenv(k8s._WORKSPACE_PREP_TIMEOUT_ENV_VAR, "120")
     clock = {"now": 0.0}
     monkeypatch.setattr(warm.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(warm.time, "sleep", lambda s: clock.__setitem__("now", clock["now"] + s))

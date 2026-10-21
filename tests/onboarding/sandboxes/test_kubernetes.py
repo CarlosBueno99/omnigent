@@ -2120,6 +2120,24 @@ def _prepared_pod():
     )
 
 
+def _crash_looping_clone_pod(restart_count: int):
+    """A Pending Pod whose failed workspace-prep init container is in kubelet back-off."""
+    return _pod(
+        phase="Pending",
+        init_statuses=[
+            SimpleNamespace(
+                name="workspace-prep",
+                restart_count=restart_count,
+                state=SimpleNamespace(
+                    running=None,
+                    waiting=SimpleNamespace(reason="CrashLoopBackOff", message="back-off 10s"),
+                    terminated=None,
+                ),
+            )
+        ],
+    )
+
+
 def test_launch_host_waits_for_in_progress_workspace_clone(
     fake_clients: tuple[_FakeCore, _FakeBatch], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2152,7 +2170,7 @@ def test_launch_host_waits_for_in_progress_workspace_clone(
 
     assert workspace == "/home/omnigent/workspace/monorepo"
     assert clock["now"] >= clone_seconds > k8s._POD_READY_TIMEOUT_S
-    assert stages == ["starting", "cloning"]
+    assert stages == ["starting", "cloning", "starting"]
     assert "delete_job" not in batch.calls
 
 
@@ -2187,7 +2205,7 @@ def test_stalled_clone_fails_after_workspace_prep_budget_with_init_log_tail(
     cloning = _cloning_pod()
     core.pod_list_items = [cloning]
     core.read_default = cloning
-    core.logs["workspace-prep"] = "Receiving objects:  41% (812345/1980000), 2.1 GiB | 3 MiB/s"
+    core.logs["workspace-prep"] = "Cloning into '/home/omnigent/workspace/monorepo'..."
     launcher = _launcher(pod_ready_timeout_s=30, workspace_prep_timeout_s=600)
 
     with pytest.raises(click.ClickException) as exc:
@@ -2201,7 +2219,7 @@ def test_stalled_clone_fails_after_workspace_prep_budget_with_init_log_tail(
         )
 
     assert "was still preparing its workspace after 600s" in exc.value.message
-    assert "Receiving objects:  41%" in exc.value.message
+    assert "Cloning into '/home/omnigent/workspace/monorepo'..." in exc.value.message
     assert clock["now"] >= 600
     assert "delete_job" in batch.calls
 
@@ -2243,7 +2261,7 @@ def test_wait_resets_to_pod_ready_budget_when_cloning_pod_is_replaced(
 
     assert "did not start within 90s" in exc.value.message
     assert "was still preparing" not in exc.value.message
-    assert clock["now"] < 1800
+    assert clock["now"] <= 90 + 2 * k8s._POD_READY_POLL_S
 
 
 @pytest.mark.parametrize("replacement_clone_s", [None, 1500.0])
@@ -2334,23 +2352,25 @@ def test_wait_resets_to_pod_ready_budget_when_clone_finishes_but_host_stalls(
     assert "did not start within 90s" in exc.value.message
     assert "ContainerCreating" in exc.value.message
     assert "was still preparing" not in exc.value.message
-    assert clock["now"] < 1800
+    assert clock["now"] <= 90 + 2 * k8s._POD_READY_POLL_S
 
 
 def test_restarting_clone_keeps_the_budget_from_its_first_run(
     fake_clients: tuple[_FakeCore, _FakeBatch], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A clone the kubelet keeps restarting in the same Pod stays bounded by one
-    preparation budget and reports the clone's own log."""
+    """A clone the kubelet keeps restarting in the same Pod, backing off below the
+    crash-loop threshold, stays bounded by one preparation budget."""
     core, _batch = fake_clients
     clock = _fake_clock(monkeypatch)
-    failed_attempt = _pod(phase="Pending", init_statuses=[_terminated(128, name="workspace-prep")])
     core.pod_list_items = [_cloning_pod()]
     core.logs["workspace-prep"] = "fatal: early EOF"
 
     def read_pod(name, namespace, _request_timeout=None):
         assert clock["now"] < 3 * 1800, "the wait outlived one preparation budget"
-        return failed_attempt if clock["now"] % 500 < k8s._POD_READY_POLL_S else _cloning_pod()
+        failures = int(clock["now"] // 500)
+        if failures and clock["now"] % 500 < 10:
+            return _crash_looping_clone_pod(restart_count=failures - 1)
+        return _cloning_pod()
 
     monkeypatch.setattr(core, "read_namespaced_pod", read_pod)
     stages: list[str] = []
@@ -2372,30 +2392,48 @@ def test_restarting_clone_keeps_the_budget_from_its_first_run(
     assert stages == ["starting", "cloning"]
 
 
+def test_clone_that_recovers_from_back_off_completes_the_launch(
+    fake_clients: tuple[_FakeCore, _FakeBatch], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient clone failure the kubelet retries below the threshold still launches."""
+    core, batch = fake_clients
+    _fake_clock(monkeypatch)
+    core.pod_list_items = [_cloning_pod()]
+    core.read_queue = [
+        _cloning_pod(),
+        _crash_looping_clone_pod(restart_count=k8s._WORKSPACE_PREP_CRASHLOOP_RESTARTS - 1),
+        _cloning_pod(),
+    ]
+    core.read_default = _prepared_pod()
+    stages: list[str] = []
+
+    workspace = _launcher().start_host(
+        "omnigent-job-flaky-clone",
+        token=_TOKEN,
+        host_id="host_flaky",
+        host_name="managed-flaky",
+        server_url="http://srv.example.com",
+        repos=[RepoWorkspace(url="https://x/monorepo.git", branch=None, repo_name="monorepo")],
+        on_stage=stages.append,
+    )
+
+    assert workspace == "/home/omnigent/workspace/monorepo"
+    assert stages == ["starting", "cloning", "starting"]
+    assert "delete_job" not in batch.calls
+
+
 def test_crash_looping_clone_fails_fast_with_its_log_tail(
     fake_clients: tuple[_FakeCore, _FakeBatch], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A clone that keeps failing (e.g. bad credentials) fails at once with the git
-    error instead of waiting out a budget."""
+    """A clone still failing at the restart threshold (e.g. bad credentials) fails
+    with the git error instead of waiting out the preparation budget."""
     core, batch = fake_clients
     clock = _fake_clock(monkeypatch)
-    crash_looping = _pod(
-        phase="Pending",
-        init_statuses=[
-            SimpleNamespace(
-                name="workspace-prep",
-                restart_count=1,
-                state=SimpleNamespace(
-                    running=None,
-                    waiting=SimpleNamespace(reason="CrashLoopBackOff", message="back-off 10s"),
-                    terminated=None,
-                ),
-            )
-        ],
-    )
     core.pod_list_items = [_cloning_pod()]
     core.read_queue = [_cloning_pod()]
-    core.read_default = crash_looping
+    core.read_default = _crash_looping_clone_pod(
+        restart_count=k8s._WORKSPACE_PREP_CRASHLOOP_RESTARTS
+    )
     core.logs["workspace-prep"] = "remote: Invalid username or password."
 
     with pytest.raises(click.ClickException) as exc:
@@ -2408,7 +2446,10 @@ def test_crash_looping_clone_fails_fast_with_its_log_tail(
             repos=[RepoWorkspace(url="https://x/monorepo.git", branch=None, repo_name="monorepo")],
         )
 
-    assert "workspace prep is crash-looping (restarts: 1, CrashLoopBackOff)" in exc.value.message
+    restarts = k8s._WORKSPACE_PREP_CRASHLOOP_RESTARTS
+    assert f"workspace prep is crash-looping (restarts: {restarts}, CrashLoopBackOff)" in (
+        exc.value.message
+    )
     assert "remote: Invalid username or password." in exc.value.message
     assert clock["now"] < 10
     assert "delete_job" in batch.calls

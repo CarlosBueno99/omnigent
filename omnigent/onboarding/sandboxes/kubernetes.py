@@ -184,7 +184,8 @@ _INIT_CONTAINER_NAME: str = "workspace-prep"
 
 # Tight pod-start budget consumed before the shared online poll, so scheduling
 # or image-pull failures fail fast. Raise via ``sandbox.kubernetes.pod_ready_timeout_s``
-# or :data:`_POD_READY_TIMEOUT_ENV_VAR`; once the clone runs _WORKSPACE_PREP_TIMEOUT_S takes over.
+# or :data:`_POD_READY_TIMEOUT_ENV_VAR`. Clone time is bounded separately by
+# _WORKSPACE_PREP_TIMEOUT_S.
 _POD_READY_TIMEOUT_S: int = 90
 _POD_READY_POLL_S: float = 2.0
 
@@ -200,6 +201,10 @@ _POD_READY_TIMEOUT_ENV_VAR: str = "OMNIGENT_K8S_POD_READY_TIMEOUT_S"
 # from the tight pod-start budget. Override via workspace_prep_timeout_s or its env var.
 _WORKSPACE_PREP_TIMEOUT_S: int = 30 * 60
 _WORKSPACE_PREP_TIMEOUT_ENV_VAR: str = "OMNIGENT_K8S_WORKSPACE_PREP_TIMEOUT_S"
+
+# A crash-looping clone fails the launch only after this many kubelet restarts
+# (backoff ~10s, 20s, ...), so a transient clone failure can still recover.
+_WORKSPACE_PREP_CRASHLOOP_RESTARTS: int = 3
 
 # Per-request client timeout for the blocking calls. Without it a stalled
 # apiserver socket blocks indefinitely and the wait deadline never fires.
@@ -341,12 +346,13 @@ def _resolve_timeout_s(configured: int | None, env_var: str, default: int) -> in
     raw = os.environ.get(env_var)
     if raw is None:
         return default
+    message = f"{env_var} must be a positive number of seconds"
     try:
         value = int(float(raw))
-    except (ValueError, OverflowError):
-        value = 0
+    except (ValueError, OverflowError) as exc:
+        raise click.ClickException(message) from exc
     if value <= 0:
-        raise click.ClickException(f"{env_var} must be a positive number of seconds")
+        raise click.ClickException(message)
     return value
 
 
@@ -370,12 +376,8 @@ def _resolve_pod_ready_timeout_s(configured: int | None) -> int:
 
 def _resolve_workspace_prep_timeout_s(configured: int | None) -> int:
     """
-    Resolve the workspace-preparation budget for :meth:`_wait_for_pod_running`.
-
-    Same precedence as :func:`_resolve_pod_ready_timeout_s`:
-    ``sandbox.kubernetes.workspace_prep_timeout_s``, then
-    :data:`_WORKSPACE_PREP_TIMEOUT_ENV_VAR`, then
-    :data:`_WORKSPACE_PREP_TIMEOUT_S`.
+    Resolve the workspace-preparation budget for :meth:`_wait_for_pod_running`,
+    with :func:`_resolve_timeout_s` precedence.
 
     :param configured: The launcher's ``workspace_prep_timeout_s`` constructor
         argument, or ``None`` when the bundle didn't set it.
@@ -1168,9 +1170,10 @@ def _terminal_failure(pod: object) -> tuple[str, str] | None:
 
     - The **Pod phase** is ``Failed`` (the Job controller gave up after
       exhausting ``backoffLimit``), OR
-    - The host or workspace-prep container is in ``CrashLoopBackOff`` (the
-      kubelet is still retrying, but the container is crash-looping and
-      unlikely to self-heal during the launch window).
+    - The host container is in ``CrashLoopBackOff``, or the workspace-prep
+      container is in it after :data:`_WORKSPACE_PREP_CRASHLOOP_RESTARTS`
+      restarts (the kubelet is still retrying, but the container is unlikely
+      to self-heal during the launch window).
 
     :param pod: A ``V1Pod`` read from the API.
     :returns: The failed container name + summary, or ``None``.
@@ -1217,10 +1220,10 @@ def _terminal_failure(pod: object) -> tuple[str, str] | None:
         if (
             getattr(cs, "name", None) == _INIT_CONTAINER_NAME
             and getattr(waiting, "reason", None) == "CrashLoopBackOff"
+            and (getattr(cs, "restart_count", 0) or 0) >= _WORKSPACE_PREP_CRASHLOOP_RESTARTS
         ):
-            restart_count = getattr(cs, "restart_count", "?")
             return _INIT_CONTAINER_NAME, (
-                f"workspace prep is crash-looping (restarts: {restart_count}, CrashLoopBackOff)"
+                f"workspace prep is crash-looping (restarts: {cs.restart_count}, CrashLoopBackOff)"
             )
 
     return None
@@ -1627,7 +1630,8 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
             stamped as the Job's ``omnigent.ai/agent`` classifier, or ``None`` to
             leave the runner unclassified.
         :param on_stage: Progress observer; invoked with ``"starting"``, then
-            ``"cloning"`` once the init container is cloning *repos*.
+            ``"cloning"`` once the init container is cloning *repos* and
+            ``"starting"`` again once the host container runs.
         :returns: The absolute in-sandbox workspace path.
         :raises click.ClickException: When creation fails or the host does not
             start in time.
@@ -1702,6 +1706,8 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
                 raise
         finally:
             self._close_clients()
+        if repos and on_stage is not None:
+            on_stage("starting")
         click.echo(f"  → {self.workload_kind} '{sandbox_id}' is starting the host")
         # One repo → drop the agent straight into it; several (or none) → the
         # workspace root that parents every clone.
