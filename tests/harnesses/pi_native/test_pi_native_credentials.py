@@ -1037,11 +1037,12 @@ def _first_attempt_exits(code: int) -> str:
         ("printf private-token; echo private-error >&2; exit 7", "failed_exit", "", 3),
         ("printf '  '", "empty", "", 3),
         ("printf '\\377'", "invalid_output", "", 1),
+        ("head -c 1048577 /dev/zero | tr '\\0' x", "output_limit", "", 1),
         ("sleep 20", "timeout", "", 1),
         ("", "invalid_command", "", 0),
         (_first_attempt_exits(7) + "printf private-token", "ok", "private-token", 2),
         (_first_attempt_exits(0) + "printf private-token", "ok", "private-token", 2),
-        (_first_attempt_exits(7) + "sleep 20", "failed_exit", "", 2),
+        (_first_attempt_exits(7) + "sleep 20", "timeout", "", 2),
     ],
 )
 def test_generated_token_command_reports_only_safe_results(
@@ -1054,7 +1055,7 @@ def test_generated_token_command_reports_only_safe_results(
 ) -> None:
     if os.name != "posix" or shutil.which("node") is None:
         pytest.skip("the native Pi token wrapper requires POSIX and Node")
-    if "sleep" in command:
+    if kind == "timeout":
         monkeypatch.setattr(auth_command, "AUTH_TIMEOUT_MS", 1_500)
     command = command and "printf x >> attempts; " + command
     provider = creds.PiProviderConfig(
@@ -1089,6 +1090,8 @@ def test_generated_token_command_reports_only_safe_results(
     status = next(auth_dir.glob("*.result.json"))
     payload = json.loads(status.read_text())
     assert payload["kind"] == kind
+    if attempts > 1:
+        assert payload["elapsedMs"] >= sum(auth_command.AUTH_RETRY_DELAYS_MS[: attempts - 1])
     assert payload["piPid"] == 123
     assert "private-" not in status.read_text()
     for file in auth_dir.iterdir():

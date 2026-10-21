@@ -331,12 +331,11 @@ def test_pi_native_token_failure_recovers_without_replaying_tools(
         response.raise_for_status()
         assert response.json()["queued"]
 
+    def helper_runs() -> list[str]:
+        return (workspace / "auth-pids.jsonl").read_text().splitlines()
+
     def native_pids() -> set[str]:
-        return {
-            row["pi"]
-            for line in (workspace / "auth-pids.jsonl").read_text().splitlines()
-            if (row := json.loads(line))["pi"]
-        }
+        return {row["pi"] for line in helper_runs() if (row := json.loads(line))["pi"]}
 
     try:
         bind_session_runner(client.patch, "", session_id, runner_id)
@@ -348,6 +347,7 @@ def test_pi_native_token_failure_recovers_without_replaying_tools(
 
         (workspace / "auth-mode").write_text("fail_once")
         before = len(requests)
+        runs_before = len(helper_runs())
         send("Continue after one failed token refresh.")
 
         def transient_outcome() -> str | None:
@@ -360,6 +360,8 @@ def test_pi_native_token_failure_recovers_without_replaying_tools(
             item for item in items() if item["type"] == "error"
         ]
         assert len(requests) == before + 1
+        assert (workspace / "failed-once").exists()
+        assert len(helper_runs()) >= runs_before + 2
         for i, (mode, kind) in enumerate(
             [
                 ("failed_exit", "failed_exit"),

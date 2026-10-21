@@ -13,7 +13,6 @@ let deadline = Infinity;
 let child;
 let timer;
 let retryTimer;
-let lastFailure;
 let finished = false;
 let chunks = [];
 let bytes = 0;
@@ -69,7 +68,6 @@ function retryOrFinish(kind, command, retryDelays) {
   }
   killHelper();
   child = undefined;
-  lastFailure = kind;
   retryTimer = setTimeout(() => {
     try {
       runAttempt(command, rest);
@@ -119,11 +117,7 @@ try {
     return finish("invalid_command");
   }
   deadline = started + config.timeoutMs;
-  // A retry still running at the deadline reports the failure it was retrying.
-  timer = setTimeout(
-    () => finish(lastFailure || "timeout"),
-    Math.max(0, deadline - performance.now()),
-  );
+  timer = setTimeout(() => finish("timeout"), Math.max(0, deadline - performance.now()));
   runAttempt(config.command, config.retryDelaysMs || []);
 } catch (_) {
   finish("start_failed");
