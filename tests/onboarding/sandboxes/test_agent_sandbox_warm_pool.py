@@ -1163,16 +1163,21 @@ def test_start_waits_for_in_progress_workspace_preparation(
 
 
 @pytest.mark.parametrize(
-    ("stalled_stage", "expected"),
+    ("stalled_stage", "with_repos", "expected"),
     [
-        ("waiting", "Timed out waiting for warm Sandbox activation"),
-        ("preparing", "workspace preparation did not finish within 120s"),
+        ("waiting", True, "Timed out waiting for warm Sandbox activation"),
+        ("preparing", True, "workspace preparation did not finish within 120s"),
+        ("preparing", False, "Timed out waiting for warm Sandbox activation"),
     ],
 )
 def test_stalled_start_reports_the_budget_it_exhausted(
-    harness: _Harness, monkeypatch: pytest.MonkeyPatch, stalled_stage: str, expected: str
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    stalled_stage: str,
+    with_repos: bool,
+    expected: str,
 ) -> None:
-    """Activation stays under the pod-ready budget; preparation gets its own, longer one."""
+    """Activation stays under the pod-ready budget; a repository clone gets its own, longer one."""
     monkeypatch.delenv(k8s._POD_READY_TIMEOUT_ENV_VAR, raising=False)
     monkeypatch.setenv(k8s._WORKSPACE_PREP_TIMEOUT_ENV_VAR, "120")
     clock = {"now": 0.0}
@@ -1195,7 +1200,9 @@ def test_stalled_start_reports_the_budget_it_exhausted(
     repo = RepoWorkspace("https://github.com/example/monorepo.git", None, "monorepo")
 
     with pytest.raises(click.ClickException, match=expected):
-        harness.launcher.start_host(_HANDLE.encode(), **_START_ARGS, repos=[repo])
+        harness.launcher.start_host(
+            _HANDLE.encode(), **_START_ARGS, repos=[repo] if with_repos else []
+        )
 
-    exhausted = k8s._POD_READY_TIMEOUT_S if stalled_stage == "waiting" else 120
+    exhausted = 120 if stalled_stage == "preparing" and with_repos else k8s._POD_READY_TIMEOUT_S
     assert exhausted <= clock["now"] < exhausted + 2

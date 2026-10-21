@@ -3614,10 +3614,11 @@ async def launch_managed_host(
         or ``None`` to leave it unstamped.
     :param on_stage: Progress observer invoked as the launch pipeline
         advances, with the stage just entered: ``"cloning"`` (when
-        *repo* is set) then ``"starting"``. May be called from a
-        worker thread (the sandbox exec steps run via
-        ``asyncio.to_thread``), so it must be thread-safe. ``None``
-        disables progress reporting.
+        *repos* is set) then ``"starting"``. Providers that clone inside
+        the Pod report ``"starting"``, ``"cloning"``, then ``"starting"``
+        again once the clone finishes. May be called from a worker thread
+        (the sandbox exec steps run via ``asyncio.to_thread``), so it must
+        be thread-safe. ``None`` disables progress reporting.
     :param host_id: Id to register the host under — a create's
         ``host_id`` — or ``None`` to mint one. A requested id also makes the
         host route by it (see :func:`host_slice_key_enabled`).

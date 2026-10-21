@@ -421,12 +421,15 @@ def test_keep_alive_pushes_shutdown_time_forward(
     assert 1740 <= ahead <= 1800
 
 
+@pytest.mark.parametrize("patch_fails", [False, True])
 def test_clone_start_pushes_the_boot_deadline_past_the_clone_budget(
-    fake_clients: tuple[_FakeCore, _FakeCustom], monkeypatch: pytest.MonkeyPatch
+    fake_clients: tuple[_FakeCore, _FakeCustom], monkeypatch: pytest.MonkeyPatch, patch_fails: bool
 ) -> None:
     """Nothing refreshes shutdownTime before the runner connects, so the boot
     deadline must outlast the clone budget once the clone starts."""
     core, custom = fake_clients
+    if patch_fails:
+        custom.patch_error = _FakeApiException(status=503, reason="ServiceUnavailable")
     monkeypatch.delenv(k8s._WORKSPACE_PREP_TIMEOUT_ENV_VAR, raising=False)
 
     def pod(phase, prep_state):
@@ -445,6 +448,9 @@ def test_clone_start_pushes_the_boot_deadline_past_the_clone_budget(
 
     _launcher()._wait_for_pod_running("omnigent-sandboxes", _SANDBOX_ID, cloning=True)
 
+    assert custom.calls == ["patch"]
+    if patch_fails:
+        return
     name, body = custom.patches[0]
     assert name == _SANDBOX_ID
     assert list(body["spec"]) == ["shutdownTime"]
