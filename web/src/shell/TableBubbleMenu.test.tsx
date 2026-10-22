@@ -9,7 +9,8 @@
 //   - clicking each menu item runs the matching TipTap command against the
 //     cell the grip belongs to (Insert row above/below, Delete row; Insert
 //     column before/after, Delete column),
-//   - right-clicking a cell opens the "Delete table" context menu.
+//   - right-clicking a cell opens the "Delete table" context menu,
+//   - scrolling a wide table inside the editor hides the grips.
 //
 // A real headless TipTap Editor (with a table) backs the component so the
 // assertions are end-to-end on the resulting table structure — each test
@@ -18,7 +19,7 @@
 
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createRef } from "react";
-import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -34,7 +35,42 @@ const TABLE_3X3 = `
   </table>
 `;
 
+const CELL_WIDTH = 100;
+const ROW_HEIGHT = 30;
+const TABLE_ORIGIN = 40;
+
 let editor: Editor;
+
+/** jsdom has no layout; lay tables out as a grid so the grips have a visible table to sit beside. */
+function stubTableLayout() {
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+    const isWrapper = this.classList.contains("tableWrapper");
+    const table = isWrapper ? this.querySelector("table") : this.closest("table");
+    if (!table) return new DOMRect(0, 0, 0, 0);
+    const width = (table.rows[0]?.cells.length ?? 0) * CELL_WIDTH;
+    if (this instanceof HTMLTableCellElement) {
+      const row = this.parentElement as HTMLTableRowElement;
+      return new DOMRect(
+        TABLE_ORIGIN + this.cellIndex * CELL_WIDTH,
+        TABLE_ORIGIN + row.rowIndex * ROW_HEIGHT,
+        CELL_WIDTH,
+        ROW_HEIGHT,
+      );
+    }
+    if (this instanceof HTMLTableRowElement) {
+      return new DOMRect(
+        TABLE_ORIGIN,
+        TABLE_ORIGIN + this.rowIndex * ROW_HEIGHT,
+        width,
+        ROW_HEIGHT,
+      );
+    }
+    if (this === table || isWrapper) {
+      return new DOMRect(TABLE_ORIGIN, TABLE_ORIGIN, width, table.rows.length * ROW_HEIGHT);
+    }
+    return new DOMRect(0, 0, 0, 0);
+  });
+}
 
 function makeEditor(content = TABLE_3X3): Editor {
   const el = document.createElement("div");
@@ -93,6 +129,7 @@ function openColMenu(rowIndex: number, colIndex: number): HTMLElement {
 }
 
 beforeEach(() => {
+  stubTableLayout();
   editor = makeEditor();
 });
 
@@ -100,6 +137,7 @@ afterEach(() => {
   cleanup();
   editor.destroy();
   setEmbedRoot(null);
+  vi.restoreAllMocks();
 });
 
 describe("TableHandles — grip visibility", () => {
@@ -126,6 +164,23 @@ describe("TableHandles — grip visibility", () => {
     expect(within(colMenu).getByText("Insert column before")).toBeInTheDocument();
     expect(within(colMenu).getByText("Insert column after")).toBeInTheDocument();
     expect(within(colMenu).getByText("Delete column")).toBeInTheDocument();
+  });
+
+  it("hides the grips when a wide table scrolls inside the editor", () => {
+    // WHY: a wide table scrolls its own wrapper, and that scroll event doesn't
+    // bubble; grips left behind point at cells that have moved.
+    const scrollContainer = document.createElement("div");
+    document.body.appendChild(scrollContainer);
+    onTestFinished(() => scrollContainer.remove());
+    scrollContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 600);
+    scrollContainer.appendChild(editor.view.dom);
+    render(<TableHandles editor={editor} scrollContainerRef={{ current: scrollContainer }} />);
+
+    hoverCell(1, 1);
+    expect(screen.getByRole("button", { name: "Row options" })).toBeInTheDocument();
+    fireEvent.scroll(editor.view.dom.querySelector(".tableWrapper")!);
+    expect(screen.queryByRole("button", { name: "Row options" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Column options" })).toBeNull();
   });
 });
 
