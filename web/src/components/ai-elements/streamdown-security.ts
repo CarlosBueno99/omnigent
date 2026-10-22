@@ -73,11 +73,7 @@ export function splitWorkspaceFileCitation(text: string): WorkspaceFileCitation 
   };
 }
 
-/**
- * The short label a file link shows: the cited file's name plus the position
- * suffix as written (`src/app/Main.scala:68-72` → `Main.scala:68-72`). Null
- * when the text has no directory part to drop.
- */
+/** File name plus position as written (`src/Main.scala:68-72` → `Main.scala:68-72`); null without a directory. */
 export function shortFileCitationLabel(text: string): string | null {
   const { path } = splitWorkspaceFileCitation(text);
   const slash = path.lastIndexOf("/");
