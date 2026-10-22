@@ -580,8 +580,8 @@ async def test_call_tool_recovers_retained_result_without_replay(
         ("completed", 500, False, 1),
         ("completed", 502, False, 2),
         ("completed", "timeout", False, 2),
-        ("completed", 502, True, 2),
-        ("completed", "timeout", True, 2),
+        pytest.param("completed", 502, True, 2, id="approval-reply-502-not-recovered"),
+        pytest.param("completed", "timeout", True, 2, id="approval-reply-timeout-not-recovered"),
         ("input_required", 504, False, 1),
         ("input_required", "timeout", False, 1),
     ],
@@ -638,7 +638,8 @@ async def test_response_recovery_requires_execution_and_is_bounded(
         transport=httpx.MockTransport(handle), base_url="http://ap"
     ) as client:
         manager = ProxyMcpManager("conv_test", client, execution_registry=registry)
-        with pytest.raises(RuntimeError):
+        message = "no replacement connected" if failure == "timeout" else "MCP proxy call failed"
+        with pytest.raises(RuntimeError, match=message):
             await manager.call_tool(None, "sys_os_shell", {})
     assert calls == expected_calls
     assert executions == int(retained != "reserved")
