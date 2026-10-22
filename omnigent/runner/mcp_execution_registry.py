@@ -95,10 +95,22 @@ class McpExecutionRegistry:
             for stored_session, stored_operation, _step in self._entries
         )
 
-    def has_execution(self, session_id: str, operation_id: str) -> bool:
-        """Confirm work is retained, rather than only reserved by a caller."""
+    def has_recoverable_result(self, session_id: str, operation_id: str) -> bool:
+        """Recover only completed initial results that cannot re-open elicitation."""
         self._prune()
-        return any(key[:2] == (session_id, operation_id) for key in self._entries)
+        entry = self._entries.get((session_id, operation_id, "initial"))
+        if entry is None or not entry.task.done() or entry.task.cancelled():
+            return False
+        if entry.task.exception() is not None:
+            return False
+        response = entry.task.result()
+        result = response.content.get("result")
+        return (
+            response.status_code == 200
+            and isinstance(result, dict)
+            and "input_required" not in result
+            and isinstance(result.get("output"), str)
+        )
 
     async def execute(
         self,

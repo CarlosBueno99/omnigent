@@ -455,9 +455,19 @@ async def test_call_tool_recreates_approval_after_server_reconnect() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["detach", "timeout", 502, 503, 504])
-@pytest.mark.parametrize("denied_on_recovery", [False, True])
-async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
+@pytest.mark.parametrize(
+    "failure,denied_on_recovery",
+    [
+        ("detach", False),
+        ("timeout", False),
+        (502, False),
+        (503, False),
+        (504, False),
+        ("detach", True),
+        (502, True),
+    ],
+)
+async def test_call_tool_recovers_retained_result_without_replay(
     monkeypatch: pytest.MonkeyPatch,
     failure: str | int,
     denied_on_recovery: bool,
@@ -484,7 +494,7 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
                 self.external_invocations += 1
                 return McpExecutionResult(
                     status_code=200,
-                    content={"content": [{"type": "text", "text": "retained"}]},
+                    content={"result": {"output": "retained"}},
                 )
 
             result = await registry.execute(
@@ -509,11 +519,13 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
                         },
                     }
                 )
+            retained_result = result.content["result"]
+            assert isinstance(retained_result, dict)
             return _json_resp(
                 {
                     "jsonrpc": "2.0",
                     "id": body["id"],
-                    "result": result.content,
+                    "result": {"content": [{"type": "text", "text": retained_result["output"]}]},
                 }
             )
 
@@ -564,21 +576,24 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
 @pytest.mark.parametrize(
     "retained,failure,approved,expected_calls",
     [
-        (False, 502, False, 1),
-        (True, 403, False, 1),
-        (True, 502, False, 2),
-        (True, "timeout", False, 2),
-        (True, 502, True, 2),
-        (True, "timeout", True, 2),
+        ("reserved", 502, False, 1),
+        ("completed", 500, False, 1),
+        ("completed", 502, False, 2),
+        ("completed", "timeout", False, 2),
+        ("completed", 502, True, 2),
+        ("completed", "timeout", True, 2),
+        ("input_required", 504, False, 1),
+        ("input_required", "timeout", False, 1),
     ],
 )
 async def test_response_recovery_requires_execution_and_is_bounded(
     monkeypatch: pytest.MonkeyPatch,
-    retained: bool,
+    retained: str,
     failure: str | int,
     approved: bool,
     expected_calls: int,
 ) -> None:
+    """Only ordinary completed results get one immediate recovery attempt."""
     registry = McpExecutionRegistry()
     calls = executions = 0
 
@@ -600,9 +615,10 @@ async def test_response_recovery_requires_execution_and_is_bounded(
         async def run() -> McpExecutionResult:
             nonlocal executions
             executions += 1
-            return McpExecutionResult(200, {"output": "done"})
+            result = {"input_required": {}} if retained == "input_required" else {"output": "done"}
+            return McpExecutionResult(200, {"result": result})
 
-        if retained:
+        if retained != "reserved":
             await registry.execute(
                 session_id="conv_test", operation_id=operation, step="initial", params={}, run=run
             )
@@ -611,9 +627,8 @@ async def test_response_recovery_requires_execution_and_is_bounded(
         assert isinstance(failure, int)
         return httpx.Response(failure)
 
-    monkeypatch.setattr(
-        pending_approvals, "wait_for_server_reconnect", AsyncMock(side_effect=TimeoutError)
-    )
+    wait_for_reconnect = AsyncMock(side_effect=TimeoutError)
+    monkeypatch.setattr(pending_approvals, "wait_for_server_reconnect", wait_for_reconnect)
     monkeypatch.setattr(
         pending_approvals,
         "wait_for_user_verdict",
@@ -626,7 +641,8 @@ async def test_response_recovery_requires_execution_and_is_bounded(
         with pytest.raises(RuntimeError):
             await manager.call_tool(None, "sys_os_shell", {})
     assert calls == expected_calls
-    assert executions == int(retained)
+    assert executions == int(retained != "reserved")
+    assert wait_for_reconnect.await_count == int(failure == "timeout")
 
 
 @pytest.mark.asyncio

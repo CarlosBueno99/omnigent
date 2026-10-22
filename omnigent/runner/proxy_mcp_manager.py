@@ -434,10 +434,10 @@ class ProxyMcpManager:
                     # Approval responses may already have been consumed.
                     and approval_retries == 0
                     and registry is not None
-                    and registry.has_execution(self._session_id, operation_id)
+                    and registry.has_recoverable_result(self._session_id, operation_id)
                 ):
                     # An HTTP response can be lost while the tunnel stays up.
-                    # Re-enter server policy checks and attach to retained work.
+                    # Recheck policy for a completed, non-interactive result.
                     response_recovery_attempted = True
                 elif isinstance(exc, httpx.TransportError):
                     await _wait_to_reattach(request_generation, exc)
@@ -446,7 +446,7 @@ class ProxyMcpManager:
                         f"MCP proxy call failed for tool {tool_name!r} in session "
                         f"{self._session_id!r}: {exc}"
                     ) from exc
-                # Only the JSON-RPC id changes; execution keeps its operation id.
+                # A new JSON-RPC id per attempt; the shared operation id prevents replay.
                 request_id += 1
                 payload = cast("_JsonObject", {**payload, "id": request_id})
                 continue

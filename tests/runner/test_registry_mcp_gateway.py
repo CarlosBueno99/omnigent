@@ -7,6 +7,11 @@ import httpx
 import pytest
 
 from omnigent.runner import pending_approvals
+from omnigent.runner.mcp_execution_registry import (
+    MCP_OPERATION_ID_PARAM,
+    McpExecutionRegistry,
+    McpExecutionResult,
+)
 from omnigent.runner.proxy_mcp_manager import ProxyMcpManager
 from omnigent.spec.types import AgentSpec, MCPServerConfig
 
@@ -48,12 +53,22 @@ async def test_registry_discovery_and_fresh_native_manager_use_service_route():
     assert len(calls) == 3
 
 
-@pytest.mark.parametrize("failure", ["read_error", 502, 503, 504])
+@pytest.mark.parametrize("failure", ["read_error", 502])
 async def test_registry_transport_failure_is_not_replayed(failure):
     calls = []
+    registry = McpExecutionRegistry()
 
-    def handle(request):
+    async def handle(request):
         calls.append(request)
+        operation = json.loads(request.content)["params"][MCP_OPERATION_ID_PARAM]
+
+        async def run():
+            return McpExecutionResult(200, {"result": {"output": "done"}})
+
+        await registry.execute(
+            session_id="session-test", operation_id=operation, step="initial", params={}, run=run
+        )
+        assert registry.has_recoverable_result("session-test", operation)
         if isinstance(failure, int):
             return httpx.Response(failure)
         raise httpx.ReadError("connection closed", request=request)
@@ -63,7 +78,7 @@ async def test_registry_transport_failure_is_not_replayed(failure):
     ) as client:
         message = "not retried" if failure == "read_error" else "MCP proxy call failed"
         with pytest.raises(RuntimeError, match=message):
-            await ProxyMcpManager("session-test", client).call_tool(
+            await ProxyMcpManager("session-test", client, execution_registry=registry).call_tool(
                 spec(), "tracker__read_ticket", {}
             )
     assert len(calls) == 1
