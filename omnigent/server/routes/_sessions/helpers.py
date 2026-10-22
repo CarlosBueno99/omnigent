@@ -5380,6 +5380,8 @@ def _publish_sandbox_status_impl(
             "sandbox_launch_failed" if stage == "failed" else "sandbox_launch_stage",
             session_id=session_id,
             stage=(previous.stage if previous else "unknown") if stage == "failed" else stage,
+            # Every stage row names the sandbox, even when the launch's host never connects.
+            provider=status.provider,
         ),
     )
     if status.stage == "ready":

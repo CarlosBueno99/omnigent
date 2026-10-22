@@ -1337,8 +1337,8 @@ async def test_resumable_managed_wake_ignores_stale_db_liveness(
     calls: list[str] = []
 
     def _finish_wake(**kwargs: object) -> None:
-        del kwargs
-        calls.append("wake")
+        # The wake gets the host's provider, which its seeded launch status names.
+        calls.append(f"wake {kwargs['provider']}")
         tracker.begin(conv.id)
         tracker.finish(conv.id)
 
@@ -1359,7 +1359,7 @@ async def test_resumable_managed_wake_ignores_stale_db_liveness(
             conversation_store=conv_store,
         )
     assert exc.value.code == ErrorCode.WRONG_REPLICA
-    assert calls == ["wake"]
+    assert calls == ["wake islo"]
 
 
 async def test_resumable_managed_wake_drops_fresh_local_tunnels_when_provider_paused(
