@@ -12,6 +12,16 @@
 //   fetchPullRequestFileContents — GET /resources/github/diff/{path}?base=<ref>
 //                                  before/after full content for one file, fetched on
 //                                  demand to expand unchanged context (not a hook).
+//   usePullRequestRepoLabels     — GET /resources/github/labels
+//                                  the labels the selected PR's repository offers.
+//   useUpdatePullRequestLabels   — POST /resources/github/labels
+//                                  add / remove labels on the selected PR.
+//   usePullRequestMergeOptions   — GET /resources/github/merge-options
+//                                  the merge methods the selected PR's repository allows.
+//   useMergePullRequest          — POST /resources/github/merge
+//                                  merge the selected PR at the head the panel showed.
+//   useDisablePullRequestAutoMerge — POST /resources/github/disable-auto-merge
+//                                  turn off the selected PR's auto-merge.
 //
 // Runner-offline (503 runner_unavailable) and no-os_env (404) are handled the
 // same way as the workspace filesystem hooks — reusing their helpers.
@@ -24,7 +34,7 @@ import {
   isRunnerUnavailable503,
   RunnerOfflineError,
   runnerOfflineRetryDelay,
-  shouldRetryRunnerOffline,
+  useRunnerOfflineRetry,
   useSessionActive,
   useTrailingInvalidate,
   useWorkspaceServeable,
@@ -35,7 +45,7 @@ import {
 export interface PullRequestCheckRun {
   name: string;
   bucket: "passing" | "failing" | "pending";
-  /** Link to the run on GitHub, or null when unknown. */
+  /** Link to the run on the provider or external CI, or null when unknown. */
   url: string | null;
 }
 
@@ -75,6 +85,24 @@ export interface PullRequestReviewer {
   state: PullRequestReviewerState;
 }
 
+/** A label on a PR or in its repository. */
+export interface PullRequestLabel {
+  name: string;
+  /** Six lowercase hex digits without `#`, or null when the provider sent none. */
+  color: string | null;
+  description: string | null;
+}
+
+/** A `gh pr merge` method. */
+export type PullRequestMergeMethod = "merge" | "squash" | "rebase";
+
+/** Auto-merge enabled on a PR; the method is GitHub's upper-case name, e.g. "SQUASH". */
+export interface PullRequestAutoMerge {
+  merge_method: string | null;
+  enabled_by: string | null;
+  enabled_at: string | null;
+}
+
 export interface PullRequest {
   number: number;
   title: string;
@@ -102,6 +130,13 @@ export interface PullRequest {
   comments_partial?: boolean;
   /** Assigned reviewers and their current review state; absent from older hosts. */
   reviewers?: PullRequestReviewer[];
+  /** The PR's labels; absent from older hosts and providers that don't report them. */
+  labels?: PullRequestLabel[];
+  /** GitHub's `mergeStateStatus`, e.g. "CLEAN" or "BLOCKED"; null when unreported.
+   *  Absent from older hosts and providers that don't report it. */
+  merge_state_status?: string | null;
+  /** Null when auto-merge is off; absent when the host can't report it. */
+  auto_merge?: PullRequestAutoMerge | null;
 }
 
 export interface PullRequestRepo {
@@ -137,6 +172,10 @@ export interface PullRequestCapabilities {
   base_remote_selection: boolean;
   line_counts: boolean;
   linked_pr_diff: boolean;
+  /** The PR's labels can be added and removed; absent from older hosts. */
+  label_editing?: boolean;
+  /** The PR can be merged from the panel; absent from older hosts. */
+  merging?: boolean;
 }
 
 /** Why the panel can't show pull request content.
@@ -281,8 +320,9 @@ export interface PullRequestFileDiffResponse {
 async function errorFromResponse(res: Response): Promise<Error> {
   let message = `${res.status} ${res.statusText}`;
   try {
-    const body = (await res.json()) as { error?: { message?: string } };
+    const body = (await res.json()) as { error?: { message?: string }; detail?: unknown };
     if (body?.error?.message) message = body.error.message;
+    else if (typeof body?.detail === "string" && body.detail) message = body.detail;
   } catch {
     // Non-JSON body (gateway/front-door error) — keep the status line.
   }
@@ -414,6 +454,9 @@ export function usePullRequestInfo(
   // A `temp:*` id (navigate-first new-chat window) has no server session.
   const conversationId = isTempConvId(rawConversationId) ? undefined : rawConversationId;
   const serveable = useWorkspaceServeable(conversationId);
+  // Gate on the health poll rather than the session snapshot: the sidebar
+  // tooltip reuses this hook, and must not load every hovered session.
+  const retry = useRunnerOfflineRetry(serveable !== false);
   // Turn-end backstop: refetch when the focused session goes active→idle, so a
   // just-opened PR appears without opening the tab. Keys off the turn lifecycle,
   // so it works for every harness (no per-harness tool detection).
@@ -422,7 +465,7 @@ export function usePullRequestInfo(
     queryKey: ["github-info", conversationId, ...(options?.prUrl ? [options.prUrl] : [])],
     queryFn: () => fetchPullRequestInfo(conversationId!, options?.prUrl),
     enabled: !!conversationId && serveable !== false,
-    retry: shouldRetryRunnerOffline,
+    retry,
     retryDelay: runnerOfflineRetryDelay,
     staleTime: 30_000,
     refetchInterval: options?.poll
@@ -509,13 +552,14 @@ export function usePullRequestChangedFiles(
   revision?: string,
 ) {
   const serveable = useWorkspaceServeable(conversationId);
+  const retry = useRunnerOfflineRetry(serveable !== false);
   return useQuery({
     queryKey: ["github-changed-files", conversationId, ...(prUrl ? [prUrl, revision] : [])],
     queryFn: () => fetchPullRequestChangedFiles(conversationId!, prUrl),
     // Only a PR has files to show — skip the call in every no-PR / unavailable
     // / unauthenticated state (the panel shows an empty state instead).
     enabled: !!conversationId && hasPr && serveable !== false,
-    retry: shouldRetryRunnerOffline,
+    retry,
     retryDelay: runnerOfflineRetryDelay,
     staleTime: 30_000,
   });
@@ -588,11 +632,12 @@ export function usePullRequestDiff(
   revision?: string,
 ) {
   const serveable = useWorkspaceServeable(conversationId);
+  const retry = useRunnerOfflineRetry(serveable !== false);
   return useQuery({
     queryKey: ["github-pr-diff", conversationId, ...(prUrl ? [prUrl, revision] : [])],
     queryFn: () => fetchPullRequestDiff(conversationId!, prUrl),
     enabled: !!conversationId && hasPr && serveable !== false,
-    retry: shouldRetryRunnerOffline,
+    retry,
     retryDelay: runnerOfflineRetryDelay,
     staleTime: 30_000,
   });
@@ -628,5 +673,197 @@ export function useUpdateSessionPr(conversationId: string) {
         predicate: (query) => body.action !== "remove" || query.queryKey[2] !== body.url,
       });
     },
+  });
+}
+
+export interface PullRequestRepoLabels {
+  object: "list";
+  /** Sorted by name. */
+  data: PullRequestLabel[];
+  /** The repository has more labels than the host lists. */
+  has_more: boolean;
+}
+
+/** The labels the selected PR's repository offers, for the label picker. */
+export function usePullRequestRepoLabels(conversationId: string, prUrl: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["github-labels", conversationId, prUrl],
+    queryFn: async (): Promise<PullRequestRepoLabels> => {
+      const response = await authenticatedFetch(
+        `/v1/sessions/${encodeURIComponent(conversationId)}/resources/github/labels${prQuery(prUrl)}`,
+      );
+      if (response.status === 503 && (await isRunnerUnavailable503(response))) {
+        throw new RunnerOfflineError();
+      }
+      if (!response.ok) throw await errorFromResponse(response);
+      return (await response.json()) as PullRequestRepoLabels;
+    },
+    enabled,
+    retry: false,
+    // A repository's label set rarely changes while the picker is in use.
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** One label edit; the full labels let the panel show the change before it lands. */
+export interface PullRequestLabelChange {
+  prUrl: string;
+  add: PullRequestLabel[];
+  remove: PullRequestLabel[];
+}
+
+/** Mutation key of {@link useUpdatePullRequestLabels}, for reading pending edits. */
+export function pullRequestLabelsMutationKey(conversationId: string) {
+  return ["github-labels-update", conversationId] as const;
+}
+
+/** Apply a label edit to a PR's labels. GitHub label names are case-insensitive. */
+export function applyPullRequestLabelChange(
+  labels: readonly PullRequestLabel[],
+  change: Pick<PullRequestLabelChange, "add" | "remove">,
+): PullRequestLabel[] {
+  const key = (label: PullRequestLabel) => label.name.toLowerCase();
+  const dropped = new Set([...change.add, ...change.remove].map(key));
+  return [...labels.filter((label) => !dropped.has(key(label))), ...change.add];
+}
+
+/**
+ * Add and remove labels on the selected PR through the runner or host fallback.
+ * Edits run one at a time; pending and queued ones are read with
+ * {@link pullRequestLabelsMutationKey}. A success writes the PR's resulting
+ * labels into the info cache, and a failure refetches it.
+ */
+export function useUpdatePullRequestLabels(conversationId: string) {
+  const queryClient = useQueryClient();
+  const infoKey = ["github-info", conversationId];
+  return useMutation({
+    mutationKey: pullRequestLabelsMutationKey(conversationId),
+    // One edit at a time, in click order, so GitHub and the cache end in the last state shown.
+    scope: { id: `github-labels-${conversationId}` },
+    mutationFn: async (change: PullRequestLabelChange) => {
+      const response = await authenticatedFetch(
+        `/v1/sessions/${encodeURIComponent(conversationId)}/resources/github/labels`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            pr_url: change.prUrl,
+            add: change.add.map((label) => label.name),
+            remove: change.remove.map((label) => label.name),
+          }),
+        },
+      );
+      if (response.status === 503 && (await isRunnerUnavailable503(response))) {
+        throw new RunnerOfflineError();
+      }
+      if (!response.ok) throw await errorFromResponse(response);
+      return (await response.json()) as { labels: PullRequestLabel[] };
+    },
+    onSuccess: async ({ labels }, change) => {
+      // A poll that started before the edit landed would bring the old labels back.
+      await queryClient.cancelQueries({ queryKey: infoKey });
+      queryClient.setQueriesData<NormalizedPullRequestInfo>({ queryKey: infoKey }, (info) =>
+        info?.pr && info.selected_pr_url === change.prUrl
+          ? { ...info, pr: { ...info.pr, labels } }
+          : info,
+      );
+    },
+    onError: () => queryClient.invalidateQueries({ queryKey: infoKey }),
+  });
+}
+
+export interface PullRequestMergeOptions {
+  object: "session.github.merge_options";
+  /** The methods the repository allows, in display order. */
+  methods: PullRequestMergeMethod[];
+  /** The method to preselect; null when the repository allows none. */
+  default: PullRequestMergeMethod | null;
+}
+
+/** The merge methods the selected PR's repository allows, for the Merge button and dialog. */
+export function usePullRequestMergeOptions(
+  conversationId: string,
+  prUrl: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["github-merge-options", conversationId, prUrl],
+    queryFn: async (): Promise<PullRequestMergeOptions> => {
+      const response = await authenticatedFetch(
+        `/v1/sessions/${encodeURIComponent(conversationId)}/resources/github/merge-options${prQuery(prUrl)}`,
+      );
+      if (response.status === 503 && (await isRunnerUnavailable503(response))) {
+        throw new RunnerOfflineError();
+      }
+      if (!response.ok) throw await errorFromResponse(response);
+      return (await response.json()) as PullRequestMergeOptions;
+    },
+    enabled,
+    retry: false,
+    // A repository's merge settings rarely change while the panel is open.
+    staleTime: 5 * 60_000,
+  });
+}
+
+export interface PullRequestMergeRequest {
+  prUrl: string;
+  mergeMethod: PullRequestMergeMethod;
+  /** The head commit the panel showed; GitHub refuses the merge if the branch moved. */
+  expectedHead: string;
+}
+
+/**
+ * Merge the selected PR through the runner or host fallback. A merge can't be
+ * undone, so nothing shows it as merged until the refetched info says so.
+ */
+export function useMergePullRequest(conversationId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: ["github-merge", conversationId],
+    scope: { id: `github-merge-${conversationId}` },
+    mutationFn: async (request: PullRequestMergeRequest) => {
+      const response = await authenticatedFetch(
+        `/v1/sessions/${encodeURIComponent(conversationId)}/resources/github/merge`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            pr_url: request.prUrl,
+            merge_method: request.mergeMethod,
+            expected_head: request.expectedHead,
+          }),
+        },
+      );
+      if (response.status === 503 && (await isRunnerUnavailable503(response))) {
+        throw new RunnerOfflineError();
+      }
+      if (!response.ok) throw await errorFromResponse(response);
+      return (await response.json()) as { object: "session.github.pr_merge"; pr_url: string };
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["github-info", conversationId] }),
+  });
+}
+
+/** Turn off the selected PR's auto-merge; the refetched info shows the result. */
+export function useDisablePullRequestAutoMerge(conversationId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: ["github-disable-auto-merge", conversationId],
+    mutationFn: async (prUrl: string) => {
+      const response = await authenticatedFetch(
+        `/v1/sessions/${encodeURIComponent(conversationId)}/resources/github/disable-auto-merge`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pr_url: prUrl }),
+        },
+      );
+      if (response.status === 503 && (await isRunnerUnavailable503(response))) {
+        throw new RunnerOfflineError();
+      }
+      if (!response.ok) throw await errorFromResponse(response);
+      return (await response.json()) as { object: "session.github.pr_merge"; pr_url: string };
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["github-info", conversationId] }),
   });
 }
