@@ -659,7 +659,7 @@ function loadNavigationHarness({
   const mainRequire = createRequire(mainPath);
   const source =
     fs.readFileSync(mainPath, "utf8") +
-    "\nmodule.exports.testApi = { buildMenu, openFindBar, signOutOfServer, createWindow, createBrowserRegistryForWindow, loadServerUrl, loadSetupPage, pinWindow, setWindowServerUrl, startArcaHostConnect, pickWorkspaceForBridge, registerIpc, registerPermissions, registerSessionExpiryAccess, registerNavigationFallbacks, windows, SETUP_PAGE, SERVER_SELECTOR_V2_PAGE, disposeAuth: () => { databricksAuth?.dispose(); oidcAuth?.dispose(); for (const watch of awayWatches.values()) watch.dispose(); }, setAwayBannerDelayMs: (ms) => { awayBannerDelayMs = ms; }, setReconnectDelaysMs: (delays) => { reconnectDelaysMs = delays; }, reconnectDelaysMs: () => reconnectDelaysMs, setReconnectSlowDelayMs: (ms) => { reconnectSlowDelayMs = ms; }, reconnectSlowDelayMs: () => reconnectSlowDelayMs, cancelReconnect };";
+    "\nmodule.exports.testApi = { buildMenu, openFindBar, signOutOfServer, createWindow, createBrowserRegistryForWindow, loadServerUrl, loadSetupPage, pinWindow, setWindowServerUrl, startArcaHostConnect, pickWorkspaceForBridge, registerIpc, registerPermissions, registerSessionExpiryAccess, registerNavigationFallbacks, windows, SETUP_PAGE, SERVER_SELECTOR_V2_PAGE, disposeAuth: () => { databricksAuth?.dispose(); oidcAuth?.dispose(); for (const watch of awayWatches.values()) watch.dispose(); }, setAwayBannerDelayMs: (ms) => { awayBannerDelayMs = ms; }, setReconnectDelaysMs: (delays) => { reconnectDelaysMs = delays; }, reconnectDelaysMs: () => reconnectDelaysMs, setReconnectSlowDelayMs: (ms) => { reconnectSlowDelayMs = ms; }, reconnectSlowDelayMs: () => reconnectSlowDelayMs, cancelReconnect, retainedNotifications: () => retainedNotifications, maxRetainedNotifications: () => MAX_RETAINED_NOTIFICATIONS };";
   const module = { exports: {} };
   const sandbox = {
     __dirname: path.dirname(mainPath),
@@ -5281,25 +5281,21 @@ describe("desktop notifications", () => {
     });
   });
 
-  it("releases clicked or failed notifications and keeps only the newest others", async (t) => {
+  it("releases clicked or failed notifications and keeps only the newest others", (t) => {
     const h = loadNavigationHarness({ serverUrl: server, notificationsSupported: true });
     t.after(h.cleanup);
     h.api.registerIpc();
     h.webContents.isDestroyed = () => false;
-    const retainedLimit = 100;
-    for (let i = 0; i <= retainedLimit; i++) {
+    for (let i = 0; i <= h.api.maxRetainedNotifications(); i++) {
       h.ipc.get("omnigent:notify")(pageEvent(h), { title: "Done", navigatePath: `/c/${i}` });
     }
-    // Emitted in a helper so no stack temporary keeps the released notification alive.
-    const emit = (ref, eventName) => ref.deref().emit(eventName);
-    emit(h.calls.notificationRefs.at(-1), "click");
-    emit(h.calls.notificationRefs.at(-3), "failed");
-    await wait();
-    collectGarbage();
+    const shown = h.calls.notificationRefs.map((ref) => ref.deref());
+    shown.at(-1).emit("click");
+    shown.at(-3).emit("failed");
 
-    const alive = h.calls.notificationRefs.map((ref) => ref.deref() !== undefined);
+    const retained = shown.map((notification) => h.api.retainedNotifications().has(notification));
     assert.deepEqual(
-      [alive[0], alive[1], alive.at(-3), alive.at(-2), alive.at(-1)],
+      [retained[0], retained[1], retained.at(-3), retained.at(-2), retained.at(-1)],
       [false, true, false, true, false],
     );
   });
