@@ -3354,8 +3354,8 @@ function shouldPlayNotificationSound(key) {
 }
 
 // Electron never emits `click` for a garbage-collected Notification, so the
-// notify handler keeps shown ones alive until clicked. The cap bounds the ones
-// dismissed without a click, whose `close` event isn't reliable.
+// notify handler keeps each one alive until it is clicked or fails to show. The
+// cap bounds the ones dismissed without a click, whose `close` isn't reliable.
 const MAX_RETAINED_NOTIFICATIONS = 100;
 /** @type {Set<Electron.Notification>} */
 const retainedNotifications = new Set();
@@ -4536,11 +4536,12 @@ function registerIpc() {
         }
       }
     });
-    notification.show();
+    notification.on("failed", () => retainedNotifications.delete(notification));
     retainedNotifications.add(notification);
     if (retainedNotifications.size > MAX_RETAINED_NOTIFICATIONS) {
       retainedNotifications.delete(retainedNotifications.values().next().value);
     }
+    notification.show();
     signalForeground();
     // Foreground + background audible cue on macOS: play the user's chosen
     // system sound. macOS muted the toast's own sound above, so this is the one

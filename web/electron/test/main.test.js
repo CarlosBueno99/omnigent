@@ -5281,7 +5281,7 @@ describe("desktop notifications", () => {
     });
   });
 
-  it("releases clicked notifications and keeps only the newest unclicked ones", async (t) => {
+  it("releases clicked or failed notifications and keeps only the newest others", async (t) => {
     const h = loadNavigationHarness({ serverUrl: server, notificationsSupported: true });
     t.after(h.cleanup);
     h.api.registerIpc();
@@ -5290,13 +5290,17 @@ describe("desktop notifications", () => {
     for (let i = 0; i <= retainedLimit; i++) {
       h.ipc.get("omnigent:notify")(pageEvent(h), { title: "Done", navigatePath: `/c/${i}` });
     }
-    // Clicked in a helper so no stack temporary keeps the clicked notification alive.
-    const click = (ref) => ref.deref().emit("click");
-    click(h.calls.notificationRefs.at(-1));
+    // Emitted in a helper so no stack temporary keeps the released notification alive.
+    const emit = (ref, eventName) => ref.deref().emit(eventName);
+    emit(h.calls.notificationRefs.at(-1), "click");
+    emit(h.calls.notificationRefs.at(-3), "failed");
     await wait();
     collectGarbage();
 
     const alive = h.calls.notificationRefs.map((ref) => ref.deref() !== undefined);
-    assert.deepEqual([alive[0], alive[1], alive.at(-2), alive.at(-1)], [false, true, true, false]);
+    assert.deepEqual(
+      [alive[0], alive[1], alive.at(-3), alive.at(-2), alive.at(-1)],
+      [false, true, false, true, false],
+    );
   });
 });
