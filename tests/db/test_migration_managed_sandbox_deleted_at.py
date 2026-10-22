@@ -135,3 +135,45 @@ def test_upgrade_tolerates_current_schema_stamped_at_crdb_baseline(tmp_path: Pat
 
     engine.dispose()
     clear_engine_cache()
+
+
+def test_workspace_guard_migration_defaults_existing_hosts_and_old_writers(tmp_path: Path) -> None:
+    uri = f"sqlite:///{tmp_path / 'managed-workspace-guard.db'}"
+    engine = sa.create_engine(uri)
+    _migrate(uri, engine, "c8e4f2a6b901")
+    insert = sa.text(
+        "INSERT INTO hosts (workspace_id, host_id, user_id, name, status, created_at, updated_at) "
+        "VALUES (0, :host_id, 'alice@example.com', :name, 2, 1, 1)"
+    )
+    with engine.begin() as connection:
+        connection.execute(insert, {"host_id": bytes.fromhex("01" * 16), "name": "existing"})
+
+    _migrate(uri, engine, "2d8a4e6b9c71")
+    columns = {column["name"]: column for column in sa.inspect(engine).get_columns("hosts")}
+    assert columns["preserve_workspace"]["nullable"] is False
+    assert isinstance(columns["preserve_workspace"]["type"], sa.Boolean)
+    with engine.begin() as connection:
+        connection.execute(insert, {"host_id": bytes.fromhex("02" * 16), "name": "old-writer"})
+        assert connection.execute(
+            sa.text("SELECT preserve_workspace FROM hosts")
+        ).scalars().all() == [
+            False,
+            False,
+        ]
+        connection.execute(sa.text("UPDATE hosts SET preserve_workspace = true"))
+    with engine.connect() as connection:
+        assert connection.execute(
+            sa.text("SELECT preserve_workspace FROM hosts")
+        ).scalars().all() == [
+            True,
+            True,
+        ]
+
+    _downgrade(uri, engine, "c8e4f2a6b901")
+    assert "preserve_workspace" not in {
+        column["name"] for column in sa.inspect(engine).get_columns("hosts")
+    }
+    with engine.connect() as connection:
+        assert connection.scalar(sa.text("SELECT count(*) FROM hosts")) == 2
+    engine.dispose()
+    clear_engine_cache()

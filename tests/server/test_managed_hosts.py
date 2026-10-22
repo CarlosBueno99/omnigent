@@ -2549,6 +2549,7 @@ async def test_launch_success_registers_host_and_returns_workspace(
     assert host.status == "online"
     assert host.sandbox_provider == "modal"
     assert host.sandbox_id == "sb-fake-1"
+    assert host.preserve_workspace is False
     # The token injected into the sandbox is the one whose digest was
     # stored: resolving it (the tunnel's auth path) yields this host,
     # which also proves it is unexpired.
@@ -2606,12 +2607,11 @@ async def test_launch_forks_with_target_identity_and_preserves_workspace(db_uri:
     assert result.workspace == "/copied/workspace/subdirectory"
     target = host_store.get_host(result.host_id)
     assert target is not None and target.sandbox_id == "sb-forked"
+    assert target.preserve_workspace is True
     assert host_store.resolve_launch_token(source.host_id, "source-token") is not None
 
     with pytest.raises(HTTPException, match="forked sandbox workspace") as error:
-        await relaunch_managed_host(
-            config=config, host=target, host_store=host_store, preserve_workspace=True
-        )
+        await relaunch_managed_host(config=config, host=target, host_store=host_store)
     assert error.value.status_code == 409
     assert fake.provisioned_names == []
     assert fake.terminated == []
@@ -5225,9 +5225,9 @@ async def test_run_managed_launch_leaves_the_runner_unclassified(
     assert captured["agent_name"] is expected
 
 
-@pytest.mark.parametrize("from_sibling", [False, True])
+@pytest.mark.parametrize("recovery_source", ["original", "sibling", "deleted-original"])
 async def test_run_managed_launch_preserves_a_forked_workspace_on_recovery(
-    db_uri: str, from_sibling: bool
+    db_uri: str, recovery_source: str
 ) -> None:
     from omnigent.server.routes._sessions import orchestration
     from omnigent.server.sandbox_forks import SANDBOX_FORK_STATE_LABEL
@@ -5241,33 +5241,38 @@ async def test_run_managed_launch_preserves_a_forked_workspace_on_recovery(
         provider="modal",
         sandbox_id="sb-copied",
         token_expires_at=now_epoch() + 3600,
+        preserve_workspace=True,
     )
-    copied = SimpleNamespace(labels={SANDBOX_FORK_STATE_LABEL: "ready"}, inference_snapshot=None)
-    conversation = SimpleNamespace(labels={}, inference_snapshot=None) if from_sibling else copied
-
-    def list_host_sessions(host_id: str, **kwargs: object) -> list[str]:
-        assert host_id == host.host_id
-        return ["copied-session"]
+    conversations = SqlAlchemyConversationStore(db_uri)
+    copied = conversations.create_conversation(
+        host_id=host.host_id,
+        workspace="/copied/workspace",
+        labels={SANDBOX_FORK_STATE_LABEL: "ready"},
+    )
+    conversation = (
+        copied
+        if recovery_source == "original"
+        else conversations.create_conversation(host_id=host.host_id, workspace="/copied/workspace")
+    )
+    if recovery_source == "deleted-original":
+        assert await conversations.delete_conversation(copied.id)
 
     fake = FakeSandboxLauncher()
     tracker = ManagedLaunchTracker()
-    tracker.begin("current-session")
+    tracker.begin(conversation.id)
     await orchestration._run_managed_launch(
-        session_id="current-session",
+        session_id=conversation.id,
         owner=_OWNER,
         sandbox_config=_injected_config(fake),
         repos=[],
         tracker=tracker,
-        conversation_store=SimpleNamespace(
-            get_conversation=lambda sid: copied if sid == "copied-session" else conversation,
-            list_host_conversation_ids=list_host_sessions,
-        ),
+        conversation_store=conversations,
         host_store=host_store,
         host_registry=None,
         tunnel_registry=None,
         relaunch_host=host,
     )
-    launch = tracker.get("current-session")
+    launch = tracker.get(conversation.id)
     assert launch is not None and launch.settled.is_set()
     assert "forked sandbox workspace" in (launch.error or "")
     assert fake.provisioned_names == []

@@ -3727,9 +3727,15 @@ def register_core_routes(
             from omnigent.server.routes.sandbox_inference import prepare_create_inference
 
             cache = agent_cache or get_agent_cache()
-            target_spec = (
-                await asyncio.to_thread(cache.load, base_agent.id, base_agent.bundle_location)
-            ).spec
+            try:
+                target_spec = (
+                    await asyncio.to_thread(cache.load, base_agent.id, base_agent.bundle_location)
+                ).spec
+            except (KeyError, AttributeError, ValueError, ImportError, OSError) as exc:
+                raise OmnigentError(
+                    "Cannot load the target agent to prepare its inference configuration",
+                    code=ErrorCode.INVALID_INPUT,
+                ) from exc
             selected_model = (
                 (None if clear_override_model else override_model)
                 if model_override_set

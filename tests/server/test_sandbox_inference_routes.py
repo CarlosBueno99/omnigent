@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -1020,7 +1020,9 @@ async def test_configured_fork_rejects_foreign_provider_owner(env: _Env, unbound
     assert env.persisted() == before
 
 
-@pytest.mark.parametrize("target_config", ["configured", "unconfigured", "unavailable_model"])
+@pytest.mark.parametrize(
+    "target_config", ["configured", "unconfigured", "unavailable_model", "missing_bundle"]
+)
 async def test_sandbox_copy_uses_target_users_inference(
     env: _Env, monkeypatch: pytest.MonkeyPatch, target_config: str
 ) -> None:
@@ -1063,6 +1065,8 @@ async def test_sandbox_copy_uses_target_users_inference(
                 }
             ),
         )
+    elif target_config == "missing_bundle":
+        monkeypatch.setattr(AgentCache, "load", Mock(side_effect=FileNotFoundError("bundle")))
     before = env.persisted()
     env.launch.reset_mock()
 
@@ -1071,9 +1075,13 @@ async def test_sandbox_copy_uses_target_users_inference(
         json={"host_type": "managed", "fork_sandbox": True},
     )
 
-    if target_config == "unavailable_model":
+    if target_config in {"unavailable_model", "missing_bundle"}:
         assert response.status_code == 400, response.text
-        assert "configured model list" in response.text
+        assert (
+            "configured model list"
+            if target_config == "unavailable_model"
+            else "Cannot load the target agent"
+        ) in response.text
         assert env.persisted() == before
         env.launch.assert_not_called()
     else:

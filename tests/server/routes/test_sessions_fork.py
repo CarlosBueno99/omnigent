@@ -7,6 +7,8 @@ shape using minimal real-type stubs — no MagicMock.
 
 from __future__ import annotations
 
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -25,6 +27,7 @@ from omnigent.entities import (
     StoredFile,
 )
 from omnigent.errors import SESSION_AGENT_BUNDLE_MISSING_MESSAGE, OmnigentError
+from omnigent.onboarding.sandboxes.types import SandboxCapabilities
 from omnigent.server.auth import AuthProvider, UnifiedAuthProvider
 from omnigent.server.managed_hosts import (
     MANAGED_REPO_LABEL_KEY,
@@ -2000,10 +2003,20 @@ async def test_fork_sandbox_authorizes_files_and_pins_source_generation(
         sandbox_id="source-generation-17",
     )
     app.state.host_store = _ForkSourceHostStore(source_host)
-    monkeypatch.setattr(
-        type(app.state.sandbox_config),
-        "provider_ui_capabilities",
-        lambda _self: {"modal": {"fork_sandbox": capable, "multi_repo": False}},
+    provider_config = app.state.sandbox_config.default
+
+    def unrelated_launcher() -> None:
+        raise AssertionError("Fork eligibility must not construct unrelated providers")
+
+    app.state.sandbox_config.configs = (
+        replace(
+            provider_config,
+            launcher_factory=lambda: SimpleNamespace(
+                provider="modal",
+                capabilities=SandboxCapabilities(managed_launch=True, fork_sandbox=capable),
+            ),
+        ),
+        replace(provider_config, provider="unrelated", launcher_factory=unrelated_launcher),
     )
 
     async def access(*_args: Any, **_kwargs: Any) -> SessionAccess:
@@ -2039,7 +2052,7 @@ async def test_fork_sandbox_authorizes_files_and_pins_source_generation(
     assert SANDBOX_FORK_STATE_LABEL not in response.json()["labels"]
     assert store.fork_calls[0]["resume_source_native_session"] is False
     # A restarted process has no launch tracker; an incomplete copy cannot run fresh.
-    with pytest.raises(OmnigentError, match="Fork the source session again"):
+    with pytest.raises(OmnigentError, match="sandbox copy is not ready yet"):
         require_bound_sandbox_fork(fork)
 
 
@@ -2115,10 +2128,14 @@ async def test_sandbox_fork_checks_inherited_workspace_permission(
             sandbox_id="source-generation",
         )
     )
-    monkeypatch.setattr(
-        type(app.state.sandbox_config),
-        "provider_ui_capabilities",
-        lambda _self: {"modal": {"fork_sandbox": True}},
+    app.state.sandbox_config.configs = (
+        replace(
+            app.state.sandbox_config.default,
+            launcher_factory=lambda: SimpleNamespace(
+                provider="modal",
+                capabilities=SandboxCapabilities(managed_launch=True, fork_sandbox=True),
+            ),
+        ),
     )
     client = TestClient(app)
     headers = {"X-Forwarded-Email": "bob@example.com"}

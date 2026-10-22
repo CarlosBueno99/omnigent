@@ -88,6 +88,8 @@ class Host:
         generation may coexist in ``sandbox_id`` while this cleanup retries.
     :param deleted_at: Logical deletion timestamp. A managed host with pending
         provider cleanup keeps an internal tombstone row until cleanup succeeds.
+    :param preserve_workspace: Refuse cold sandbox replacement because the host
+        holds a copied workspace that must be recovered by its provider.
     :param configured_harnesses: Per-harness readiness reported in the
         host's last ``host.hello`` frame, e.g.
         ``{"claude-sdk": True, "codex": False}``. ``None`` when the
@@ -107,6 +109,7 @@ class Host:
     terminating_sandbox_id: str | None = None
     deleted_at: int | None = None
     account_generation: str | None = None
+    preserve_workspace: bool = False
 
 
 ManagedSandboxScanCursor = tuple[str, int, str]
@@ -181,6 +184,7 @@ def _row_to_host(row: SqlHost) -> Host:
         terminating_sandbox_id=row.terminating_sandbox_id,
         deleted_at=row.deleted_at,
         account_generation=row.account_generation,
+        preserve_workspace=row.preserve_workspace,
         configured_harnesses=_parse_configured_harnesses(row.configured_harnesses),
     )
 
@@ -427,6 +431,7 @@ class HostStore:
                 created_at=now,
                 updated_at=now,
                 configured_harnesses=harnesses_json,
+                preserve_workspace=False,
             )
             session.add(row)
             return _row_to_host(row)
@@ -479,6 +484,7 @@ class HostStore:
         token_expires_at = row.token_expires_at
         sandbox_provider = row.sandbox_provider
         sandbox_id = row.sandbox_id
+        preserve_workspace = row.preserve_workspace
         terminating_sandbox_id = row.terminating_sandbox_id
 
         bound_ids = list(
@@ -522,6 +528,7 @@ class HostStore:
             token_expires_at=token_expires_at,
             sandbox_provider=sandbox_provider,
             sandbox_id=sandbox_id,
+            preserve_workspace=preserve_workspace,
             terminating_sandbox_id=terminating_sandbox_id,
             configured_harnesses=harnesses_json,
         )
@@ -614,6 +621,7 @@ class HostStore:
             account_generation=generation,
             sandbox_provider=existing.sandbox_provider,
             sandbox_id=existing.sandbox_id,
+            preserve_workspace=existing.preserve_workspace,
             configured_harnesses=_parse_configured_harnesses(configured_harnesses_json),
         )
 
@@ -956,6 +964,7 @@ class HostStore:
                     created_at=now,
                     updated_at=now,
                     sandbox_provider=provider,
+                    preserve_workspace=False,
                 )
                 session.add(row)
             else:
@@ -1037,6 +1046,7 @@ class HostStore:
         provider: str,
         sandbox_id: str,
         token_expires_at: int,
+        preserve_workspace: bool = False,
     ) -> Host:
         """
         Create a server-managed sandbox host with its credential.
@@ -1062,6 +1072,7 @@ class HostStore:
             ``"sb-a1b2c3"``.
         :param token_expires_at: Unix epoch seconds after which the
             token no longer authenticates.
+        :param preserve_workspace: Protect a copied workspace from cold replacement.
         :returns: The registered :class:`Host`.
         """
         now = now_epoch()
@@ -1081,6 +1092,7 @@ class HostStore:
                 token_expires_at=token_expires_at,
                 sandbox_provider=provider,
                 sandbox_id=sandbox_id,
+                preserve_workspace=preserve_workspace,
             )
             session.add(row)
             return _row_to_host(row)

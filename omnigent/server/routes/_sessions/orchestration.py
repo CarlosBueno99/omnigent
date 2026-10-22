@@ -368,7 +368,6 @@ from omnigent.server.runner_session_init import RunnerSessionInitializer
 from omnigent.server.sandbox_forks import (
     SANDBOX_FORK_LABEL_PREFIX,
     SANDBOX_FORK_STATE_LABEL,
-    host_has_forked_workspace,
     require_bound_sandbox_fork,
     sandbox_fork_provider,
 )
@@ -4416,10 +4415,6 @@ async def _run_managed_launch(
     preserve_workspace = (
         saved_conversation is not None and SANDBOX_FORK_STATE_LABEL in saved_conversation.labels
     )
-    if relaunch_host is not None and not preserve_workspace:
-        preserve_workspace = await asyncio.to_thread(
-            host_has_forked_workspace, conversation_store, relaunch_host.host_id
-        )
     if saved_conversation is not None:
         sandbox_config = deployment_with_inference_snapshot(
             sandbox_config,
@@ -4857,6 +4852,7 @@ async def ensure_runner_connected(
     dead-ending on a 502. Only the wakeable states recover here:
 
     * runner already connected → returned as-is (the common fast path);
+    * managed sandbox still provisioning → wait for its launch to settle;
     * host online, pinned runner still booting → wait the connect grace
       (``_HOST_BOUND_RUNNER_CONNECT_GRACE_S``, racing a ``host.runner_status``
       query) before treating it as dead, so a booting runner isn't orphaned
@@ -4888,11 +4884,19 @@ async def ensure_runner_connected(
 
     from omnigent.server.routes import sessions as _facade
 
-    require_bound_sandbox_fork(conv)
-
     async def _reread() -> Conversation:
         refreshed = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         return refreshed if refreshed is not None else conv
+
+    if conv.host_id is None:
+        managed_tracker = getattr(app_state, "managed_launches", None)
+        managed_launch = managed_tracker.get(session_id) if managed_tracker is not None else None
+        if managed_launch is not None:
+            await _await_settled_managed_launch(managed_launch)
+        if managed_launch is not None or SANDBOX_FORK_STATE_LABEL in conv.labels:
+            # The copy may have finished on this replica or another one.
+            conv = await _reread()
+    require_bound_sandbox_fork(conv)
 
     # Fast path: a live runner tunnel is already reachable.
     runner_client = await _get_runner_client(

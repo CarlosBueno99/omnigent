@@ -9,6 +9,7 @@ relaunch, non-wakeable → ``None``) can't silently regress.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,7 +18,9 @@ import pytest
 from omnigent.entities.conversation import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import WORKSPACE_MISSING_ERROR_CODE as _WORKSPACE_MISSING_ERROR_CODE
+from omnigent.server.managed_hosts import ManagedLaunch, ManagedLaunchTracker
 from omnigent.server.routes._sessions import orchestration
+from omnigent.server.sandbox_forks import SANDBOX_FORK_STATE_LABEL
 
 
 def _conv(**kwargs: Any) -> Conversation:
@@ -70,6 +73,115 @@ async def test_returns_existing_client_without_waking(monkeypatch: pytest.Monkey
 
     assert client is sentinel
     assert out_conv is conv
+
+
+@pytest.mark.parametrize("launch_error", [None, "sandbox copy failed"])
+@pytest.mark.asyncio
+async def test_pending_sandbox_fork_waits_for_existing_launch(
+    monkeypatch: pytest.MonkeyPatch, launch_error: str | None
+) -> None:
+    conv = _conv(labels={SANDBOX_FORK_STATE_LABEL: "pending"})
+    store = _Store(conv)
+    tracker = ManagedLaunchTracker()
+    tracker.begin(conv.id)
+    connected = object()
+    waiting = asyncio.Event()
+    await_launch = orchestration._await_settled_managed_launch
+
+    async def _wait(launch: ManagedLaunch) -> None:
+        waiting.set()
+        await await_launch(launch)
+
+    async def _client(*_a: Any, conversation: Conversation, **_k: Any) -> Any:
+        assert conversation.host_id == "copied_host"
+        assert conversation.workspace == "/copied/workspace"
+        return connected
+
+    monkeypatch.setattr(orchestration, "_await_settled_managed_launch", _wait)
+    monkeypatch.setattr(orchestration, "_get_runner_client", _client)
+    task = asyncio.create_task(
+        orchestration.ensure_runner_connected(
+            session_id=conv.id,
+            conv=conv,
+            app_state=SimpleNamespace(managed_launches=tracker),
+            conversation_store=store,
+            runner_router=None,
+        )
+    )
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        assert not task.done()
+        if launch_error is not None:
+            tracker.fail(conv.id, launch_error)
+            with pytest.raises(OmnigentError, match=launch_error) as excinfo:
+                await task
+            assert excinfo.value.code == ErrorCode.RUNNER_UNAVAILABLE
+        else:
+            store._conv = _conv(
+                host_id="copied_host",
+                workspace="/copied/workspace",
+                runner_id="copied_runner",
+                labels={SANDBOX_FORK_STATE_LABEL: "ready"},
+            )
+            tracker.finish(conv.id)
+            client, refreshed = await task
+            assert client is connected
+            assert refreshed is store._conv
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        ("pending", "sandbox copy is not ready yet"),
+        ("failed", "Fork the source session again"),
+        ("ready", "Fork the source session again"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unbound_sandbox_fork_without_local_launch_never_recovers_empty(
+    monkeypatch: pytest.MonkeyPatch, state: str, message: str
+) -> None:
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("an unbound copy must not reach runner recovery")
+
+    monkeypatch.setattr(orchestration, "_get_runner_client", _boom)
+    conv = _conv(labels={SANDBOX_FORK_STATE_LABEL: state})
+    with pytest.raises(OmnigentError, match=message) as excinfo:
+        await orchestration.ensure_runner_connected(
+            session_id=conv.id,
+            conv=conv,
+            app_state=SimpleNamespace(managed_launches=ManagedLaunchTracker()),
+            conversation_store=_Store(conv),
+            runner_router=None,
+        )
+    assert excinfo.value.code == ErrorCode.RUNNER_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_sandbox_fork_reloads_binding_when_local_launch_is_already_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = _conv(labels={SANDBOX_FORK_STATE_LABEL: "pending"})
+    bound = _conv(host_id="copied_host", labels={SANDBOX_FORK_STATE_LABEL: "ready"})
+    connected = object()
+
+    async def _client(*_a: Any, conversation: Conversation, **_k: Any) -> Any:
+        assert conversation is bound
+        return connected
+
+    monkeypatch.setattr(orchestration, "_get_runner_client", _client)
+    client, refreshed = await orchestration.ensure_runner_connected(
+        session_id=stale.id,
+        conv=stale,
+        app_state=SimpleNamespace(managed_launches=ManagedLaunchTracker()),
+        conversation_store=_Store(bound),
+        runner_router=None,
+    )
+    assert client is connected
+    assert refreshed is bound
 
 
 @pytest.mark.asyncio

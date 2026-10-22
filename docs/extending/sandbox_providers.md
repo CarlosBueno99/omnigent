@@ -319,6 +319,10 @@ stable id. Clients request the copy with `fork_sandbox: true` on the existing
 session fork API; omitting it preserves existing behavior. Eligible sessions
 show **Fork sandbox as well**, checked by default, in the fork dialog.
 
+Workspace access requires edit permission (including inherited edit access) or
+file sharing enabled on the source session itself. A parent's file-sharing
+setting does not enable file sharing on its child sessions.
+
 The launch sequence is `prepare()` → `fork()` → register a fresh host and token
 → `start_host()` → wait for the new host to connect. No built-in provider enables
 the capability yet; custom providers can implement it while their controller's
@@ -351,6 +355,8 @@ Providers opting in must satisfy these requirements:
 - Resume the destination's own retained storage when it sleeps. Omnigent refuses
   cold replacement of a forked sandbox if its workspace cannot be recovered;
   it does not copy a newer version of the source automatically.
+  This protection is stored on the host and survives deletion of the original
+  forked session while other sessions still use that host.
   Store copy provenance with the controller's sandbox record: resume uses a new
   launcher instance and calls `resume(target_id)` followed by `start_host`, with
   no new `fork` call or source cwd. If retained storage is gone, fail instead of
