@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import subprocess
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -557,6 +558,35 @@ class GitLabPullRequests:
         del root, reference
         if account is not None or remote is not None:
             raise ValueError("Use glab on the host to select a GitLab account or remote.")
+
+    def repo_labels(self, root: str, reference: PullRequestRef) -> dict[str, Any]:
+        del root, reference
+        raise ValueError("Editing GitLab merge request labels is not supported yet.")
+
+    def edit_labels(
+        self,
+        root: str,
+        reference: PullRequestRef,
+        *,
+        add: Sequence[str],
+        remove: Sequence[str],
+    ) -> dict[str, Any]:
+        del root, reference, add, remove
+        raise ValueError("Editing GitLab merge request labels is not supported yet.")
+
+    def merge_options(self, root: str, reference: PullRequestRef) -> dict[str, Any]:
+        del root, reference
+        raise ValueError("Merging GitLab merge requests from Omnigent is not supported yet.")
+
+    def merge(
+        self, root: str, reference: PullRequestRef, *, merge_method: str, expected_head: str
+    ) -> dict[str, Any]:
+        del root, reference, merge_method, expected_head
+        raise ValueError("Merging GitLab merge requests from Omnigent is not supported yet.")
+
+    def disable_auto_merge(self, root: str, reference: PullRequestRef) -> dict[str, Any]:
+        del root, reference
+        raise ValueError("Merging GitLab merge requests from Omnigent is not supported yet.")
 
 
 PULL_REQUESTS: PullRequestFacet = GitLabPullRequests()
