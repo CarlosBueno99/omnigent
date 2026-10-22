@@ -93,6 +93,9 @@ describe("AlignedOrderedList tokenizer", () => {
     "1. item\n   > quote\n\n       indented code\n2. two",
     "1. item\r\n   continuation\r\n\r\n2. two",
     "1.\n   empty first line\n2. two",
+    "1.   \n   para\n\n       indented\n2. two",
+    "1.      wide\n\n   para\n\n       indented\n2. two",
+    "1.  wide\n\n    ```\n    1. step\n    next\n    ```",
     reported,
     listOfLines(63),
     listOfLines(64),
@@ -139,4 +142,12 @@ describe("AlignedOrderedList tokenizer", () => {
   ])("aligns continuation paragraphs in %j", (source, text) => {
     expect(paragraphTexts(itemTokens(source).flat())).toContain(text);
   });
+
+  it.each(["1.   \n   para\n\n       indented", "1.      wide\n\n   para\n\n       indented"])(
+    "keeps indented code past a one-column marker gap in %j",
+    (source) => {
+      const code = itemTokens(source)[0].filter((token) => token.type === "code");
+      expect(code.map((token) => token.text)).toEqual(["indented"]);
+    },
+  );
 });

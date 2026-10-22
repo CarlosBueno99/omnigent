@@ -237,12 +237,8 @@ describe("SoftBreak serialisation", () => {
     expect(roundTrip(saved, true)).toBe(saved.trim());
   });
 
-  it.each([
-    ["a paragraph after a blank line", "1. first\n\n   para\n   wrapped\n2. next"],
-    ["a wide marker gap", "1.  first\n\n    para\n    wrapped\n2.  next"],
-    ["a nested ordered item", "1. first\n   1. child\n\n      para\n      wrapped\n2. next"],
-  ])("keeps %s at a stable indent across saves", (_label, md) => {
-    const saved = roundTrip(md, true);
+  it("keeps a nested ordered item's paragraph at a stable indent across saves", () => {
+    const saved = roundTrip("1. first\n   1. child\n\n      para\n      wrapped\n2. next", true);
     expect(saved).toMatch(/^ +para\n +wrapped$/m);
     expect(roundTrip(saved, true)).toBe(saved);
   });

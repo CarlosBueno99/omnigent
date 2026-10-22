@@ -16,7 +16,9 @@ function alignContinuationLines(source: string): string {
       if (item) {
         const [, indent, marker, , content] = item;
         upstreamColumn = indent.length + marker.length + 1;
-        markerGap = line.length - content.length - upstreamColumn;
+        // CommonMark: after a blank or 5+ space gap, content starts one column past the marker.
+        const gap = line.length - content.length - upstreamColumn;
+        markerGap = content && gap <= 4 ? gap : 1;
         return line;
       }
       const leading = line.length - line.trimStart().length;
