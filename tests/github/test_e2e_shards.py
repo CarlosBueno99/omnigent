@@ -49,11 +49,16 @@ def test_profile_refresh_uses_complete_worker_elapsed_times(
         directory.mkdir()
         outcome = "<failure/>" if fault == "failed" else ""
         (directory / "junit.xml").write_text(
-            f"<testsuites><testsuite><testcase>{outcome}</testcase></testsuite></testsuites>"
+            f"<testsuites><testsuite><testcase>{outcome}</testcase>"
+            '<testcase classname="" name="skipped.module">'
+            '<skipped message="collection skipped">Missing optional CLI</skipped>'
+            "</testcase></testsuite></testsuites>"
         )
         if fault != "missing_worker":
             end = 99 if fault == "backwards" else 100 + elapsed
             records = "100\tSTART\ttests/e2e/test_example.py::test_case\n"
+            records += "101\tSTART\tleak_probe_test.py::test_child\n"
+            records += "102\tEND\tleak_probe_test.py::test_child\t12345\n"
             if fault != "missing_end":
                 records += f"{end}\tEND\ttests/e2e/test_example.py::test_case\t12345\n"
             (directory / "progress-gw0.log").write_text(records)

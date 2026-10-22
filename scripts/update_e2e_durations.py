@@ -18,6 +18,12 @@ def measured_durations(root: Path) -> dict[str, float]:
     samples: dict[str, list[float]] = defaultdict(list)
     for report in reports:
         cases = ET.parse(report).findall(".//testcase")
+        cases = [
+            case
+            for case in cases
+            if (skipped := case.find("skipped")) is None
+            or skipped.get("message") != "collection skipped"
+        ]
         if not cases or any(
             case.find("failure") is not None or case.find("error") is not None for case in cases
         ):
@@ -27,6 +33,9 @@ def measured_durations(root: Path) -> dict[str, float]:
             starts: dict[str, float] = {}
             for line in progress.read_text().splitlines():
                 timestamp, event, nodeid, *_ = line.split("\t")
+                # Nested pytest probes inherit the progress-log environment.
+                if not nodeid.startswith("tests/e2e/"):
+                    continue
                 if event == "START":
                     starts[nodeid] = float(timestamp)
                 elif event == "END":
