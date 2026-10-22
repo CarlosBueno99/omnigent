@@ -299,23 +299,40 @@ async def test_session_error_generic_posts_failed_without_reauth() -> None:
 _ABORTED = {"name": "MessageAbortedError", "data": {"message": "Aborted"}}
 
 
+_ABORTED_MESSAGE = _event(
+    "message.updated", info={"id": "msg_1", "role": "assistant", "error": _ABORTED}
+)
+
+
 @pytest.mark.parametrize(
-    "abort_events",
+    ("abort_events", "abort_edges"),
     [
         pytest.param(
-            [
-                _event(
-                    "message.updated", info={"id": "msg_1", "role": "assistant", "error": _ABORTED}
-                ),
-                _event("session.idle"),
-            ],
+            [_ABORTED_MESSAGE, _event("session.idle")],
+            [("idle", "cancelled")],
             id="aborted-message-then-idle",
         ),
-        pytest.param([_event("session.error", error=_ABORTED)], id="session-error"),
+        pytest.param(
+            [_event("session.error", error=_ABORTED)],
+            [("idle", "cancelled")],
+            id="session-error",
+        ),
+        pytest.param(
+            [
+                _event("session.error", error=_ABORTED),
+                _event("session.idle"),
+                _ABORTED_MESSAGE,
+                _event("session.idle"),
+            ],
+            [("idle", "cancelled"), ("idle", None), ("idle", None)],
+            id="session-error-then-late-aborted-message",
+        ),
     ],
 )
-async def test_aborted_turn_posts_cancelled_idle(abort_events: list[OpenCodeEvent]) -> None:
-    """Both orders OpenCode reports an abort in end the turn as cancelled, not completed."""
+async def test_aborted_turn_posts_cancelled_idle(
+    abort_events: list[OpenCodeEvent], abort_edges: list[tuple[str, str | None]]
+) -> None:
+    """Each order OpenCode reports an abort in ends the turn cancelled and never reopens it."""
     server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
     fwd = _forwarder(server, opencode)
     await fwd.handle_event(_event("message.updated", info={"id": "msg_1", "role": "assistant"}))
@@ -325,7 +342,7 @@ async def test_aborted_turn_posts_cancelled_idle(abort_events: list[OpenCodeEven
     await fwd.handle_event(_event("session.idle"))
 
     edges = [(edge["status"], edge.get("turn_outcome")) for edge in _status_edges(server.posts)]
-    assert edges == [("running", None), ("idle", "cancelled"), ("running", None), ("idle", None)]
+    assert edges == [("running", None), *abort_edges, ("running", None), ("idle", None)]
 
 
 def _status_edges(posts: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:

@@ -218,7 +218,7 @@ class OpenCodeNativeForwarder:
         # turn; both reset in :meth:`_end_turn`.
         self._active_message_id: str | None = None
         self._running_response_id: str | None = None
-        # OpenCode reports an interrupt on the assistant message, then a bare idle.
+        # OpenCode usually reports an interrupt on the assistant message, then a bare idle.
         self._turn_aborted = False
         self._question_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -613,16 +613,18 @@ class OpenCodeNativeForwarder:
             return
         self._msg_role[message_id] = role
         if role == "assistant":
-            # This turn's per-turn ``response_id`` — the running/idle edges carry
-            # it so the web chat can correlate them with the tool-call items that
-            # already stamp the same id (renders in-flight tool calls live).
-            self._active_message_id = message_id
-            if self._bridge_dir is not None:
-                update_active_message_id(self._bridge_dir, message_id, status="busy")
-            await self._begin_turn_if_needed()
             error = info.get("error")
             if isinstance(error, Mapping) and error.get("name") == _MESSAGE_ABORTED_ERROR:
-                self._turn_aborted = True
+                # An aborted message only marks the live turn; a late update must not reopen it.
+                self._turn_aborted = self._turn_aborted or self.state.turn_active
+            else:
+                # This turn's per-turn ``response_id`` — the running/idle edges carry
+                # it so the web chat can correlate them with the tool-call items that
+                # already stamp the same id (renders in-flight tool calls live).
+                self._active_message_id = message_id
+                if self._bridge_dir is not None:
+                    update_active_message_id(self._bridge_dir, message_id, status="busy")
+                await self._begin_turn_if_needed()
             self._record_assistant_usage(message_id, info)
             await self._post_session_usage()
 

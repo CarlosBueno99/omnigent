@@ -189,14 +189,15 @@ def _patch_opencode_bridge(
 
 @pytest.mark.asyncio
 async def test_opencode_interrupt_aborts_native_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Interrupt aborts the turn on OpenCode's own server and short-circuits the in-process cancel.
+    """Interrupt aborts the turn on OpenCode's own server and records it for the dispatch.
 
-    The forwarder's cancelled turn outcome settles the dispatch, so the handler
-    registers no wake or pending interrupt itself.
+    The pending record lets a bare idle or the grace timer settle the dispatch as
+    cancelled; the handler itself wakes nothing.
     """
     client = _FakeOpenCodeClient(True)
     routed = _patch_opencode_bridge(monkeypatch, state=_OPENCODE_STATE, client=client)
     runner, captured = _make_runner()
+    captured["current_work_id"] = "work_oc"
 
     resp = await runner.interrupt("opencode-native", "conv_oc")
 
@@ -208,7 +209,7 @@ async def test_opencode_interrupt_aborts_native_turn(monkeypatch: pytest.MonkeyP
         "directory": "/ws",
     }
     assert captured["wakes"] == []
-    assert runner.take_pending_interrupt("conv_oc")[0] is False
+    assert runner.take_pending_interrupt("conv_oc") == (True, "work_oc")
     assert await runner.stop("opencode-native", "conv_oc") is None
 
 
