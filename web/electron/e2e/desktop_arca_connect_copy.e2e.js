@@ -279,10 +279,15 @@ it(
       );
 
       // Close the console and paste the copied output into the composer.
-      await Promise.all([
-        arcaConsole.waitForEvent("close"),
-        arcaConsole.locator("#cancel").click(),
-      ]);
+      const consoleClosed = arcaConsole.waitForEvent("close");
+      // Close can destroy the window before Playwright finishes the click.
+      await arcaConsole
+        .locator("#cancel")
+        .click()
+        .catch((error) => {
+          if (!arcaConsole.isClosed()) throw error;
+        });
+      await consoleClosed;
       await pointAt(window, composer);
       await composer.click();
       await window.keyboard.press("ControlOrMeta+V");
@@ -296,8 +301,10 @@ it(
         await desktop.electronApp.close().catch(() => {});
         const saved = saveRecording(recordDir, "arca-connect-copy");
         t.diagnostic(`recordings ${JSON.stringify(saved)}`);
+        fs.rmSync(desktop.userDataDir, { recursive: true, force: true });
       }
       await server.close();
+      fs.rmSync(root, { recursive: true, force: true });
     }
 
     assert.deepEqual(observed.arcaCommands, ["isaac omni host", "isaac omni login"]);
