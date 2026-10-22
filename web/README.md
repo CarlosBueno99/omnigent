@@ -38,6 +38,18 @@ mount and authenticates with your `databricks auth login` token automatically:
 OMNIGENT_URL=https://my-workspace.databricks.com pnpm run dev
 ```
 
+The dev server loads hundreds of modules on first page load, which is slow over
+plain HTTP when the browser reaches it through a port forward or tunnel. Point
+`VITE_DEV_HTTPS_CERT` and `VITE_DEV_HTTPS_KEY` at a certificate and key to serve
+over HTTPS, which uses HTTP/2. Use a certificate the browser trusts (for example
+from [mkcert](https://github.com/FiloSottile/mkcert)); Chrome does not cache
+responses from sites with certificate errors.
+
+```bash
+mkcert localhost  # writes localhost.pem and localhost-key.pem
+VITE_DEV_HTTPS_CERT=localhost.pem VITE_DEV_HTTPS_KEY=localhost-key.pem pnpm run dev
+```
+
 Additional `omnigent server` options:
 
 | Flag                  | Default                | Description                          |
