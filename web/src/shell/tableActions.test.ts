@@ -735,6 +735,19 @@ describe("placeTableHandles", () => {
     expect(placement?.colGrip).toEqual({ top: 26, left: 134, width: 96, height: 18 });
   });
 
+  it("keeps the row grip inside the editor when the table starts at its edge", () => {
+    // WHY: without room left of the table, the grip overlaps the first column
+    // rather than disappearing.
+    const placement = placeTableHandles({
+      row: { ...fittingRow, left: 0 },
+      cell,
+      table: { ...fittingTable, left: 0 },
+      wrapper: { ...wrapper, left: 0 },
+      viewport,
+    });
+    expect(placement?.rowGrip).toEqual({ top: 82, left: 0, width: 20, height: 26 });
+  });
+
   it("clips the column grip to the part of a cell still in view", () => {
     const placement = placeTableHandles({
       row: scrolledRow,

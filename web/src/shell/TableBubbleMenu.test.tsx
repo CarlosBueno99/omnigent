@@ -10,7 +10,8 @@
 //     cell the grip belongs to (Insert row above/below, Delete row; Insert
 //     column before/after, Delete column),
 //   - right-clicking a cell opens the "Delete table" context menu,
-//   - scrolling a wide table inside the editor hides the grips.
+//   - scrolling a wide table inside the editor hides the grips,
+//   - selection and drag overlays stay within the visible part of a wide table.
 //
 // A real headless TipTap Editor (with a table) backs the component so the
 // assertions are end-to-end on the resulting table structure — each test
@@ -105,6 +106,17 @@ function renderHandles() {
   return render(<TableHandles editor={editor} scrollContainerRef={ref} />);
 }
 
+/** Renders the handles with the editor inside a scroll container laid out at `viewport`. */
+function renderInScrollContainer(viewport: DOMRect): HTMLDivElement {
+  const scrollContainer = document.createElement("div");
+  document.body.appendChild(scrollContainer);
+  onTestFinished(() => scrollContainer.remove());
+  scrollContainer.getBoundingClientRect = () => viewport;
+  scrollContainer.appendChild(editor.view.dom);
+  render(<TableHandles editor={editor} scrollContainerRef={{ current: scrollContainer }} />);
+  return scrollContainer;
+}
+
 /** Hovers the cell at (rowIndex, colIndex), revealing the grips. */
 function hoverCell(rowIndex: number, colIndex: number): HTMLTableCellElement {
   const cell = rows()[rowIndex].cells[colIndex];
@@ -169,18 +181,65 @@ describe("TableHandles — grip visibility", () => {
   it("hides the grips when a wide table scrolls inside the editor", () => {
     // WHY: a wide table scrolls its own wrapper, and that scroll event doesn't
     // bubble; grips left behind point at cells that have moved.
-    const scrollContainer = document.createElement("div");
-    document.body.appendChild(scrollContainer);
-    onTestFinished(() => scrollContainer.remove());
-    scrollContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 600);
-    scrollContainer.appendChild(editor.view.dom);
-    render(<TableHandles editor={editor} scrollContainerRef={{ current: scrollContainer }} />);
-
+    renderInScrollContainer(new DOMRect(0, 0, 800, 600));
     hoverCell(1, 1);
     expect(screen.getByRole("button", { name: "Row options" })).toBeInTheDocument();
     fireEvent.scroll(editor.view.dom.querySelector(".tableWrapper")!);
     expect(screen.queryByRole("button", { name: "Row options" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Column options" })).toBeNull();
+  });
+
+  it("keeps the grips and menu when another element inside the editor scrolls", () => {
+    // WHY: scrolling a wide code block doesn't move the table, so it must not
+    // close an open grip menu.
+    const scrollContainer = renderInScrollContainer(new DOMRect(0, 0, 800, 600));
+    const codeBlock = document.createElement("pre");
+    scrollContainer.appendChild(codeBlock);
+    openRowMenu(1);
+    fireEvent.scroll(codeBlock);
+    expect(screen.getByRole("button", { name: "Row options" })).toBeInTheDocument();
+    expect(screen.getByText("Delete row")).toBeInTheDocument();
+  });
+});
+
+describe("TableHandles — overlays", () => {
+  it("clips the selection and drag overlays to the visible part of a wide table", () => {
+    // WHY: the overlays are fixed portals, so only clipping keeps them from
+    // being drawn past the editor's edge, over the rest of the page.
+    const viewportRight = 200;
+    renderInScrollContainer(new DOMRect(0, 0, viewportRight, 600));
+    hoverCell(1, 1);
+    const rowGrip = screen.getByRole("button", { name: "Row options" });
+    fireEvent.mouseEnter(rowGrip);
+    fireEvent.mouseDown(rowGrip, { clientX: 20, clientY: 85 });
+    fireEvent.mouseMove(document, { clientX: 20, clientY: 115 });
+
+    const overlays = Array.from(
+      document.querySelectorAll<HTMLElement>("div.pointer-events-none.fixed"),
+    );
+    // Row selection, drag ghost, drop target and drop indicator.
+    expect(overlays).toHaveLength(4);
+    for (const overlay of overlays) {
+      const left = parseFloat(overlay.style.left);
+      expect(left).toBeGreaterThanOrEqual(TABLE_ORIGIN);
+      expect(left + parseFloat(overlay.style.width)).toBeLessThanOrEqual(viewportRight);
+    }
+    fireEvent.mouseUp(document, { clientX: 20, clientY: 115 });
+  });
+
+  it("updates the row selection when the hovered row grows under a still grip", () => {
+    // WHY: typing or a column resize can widen the row without moving its
+    // grip; the selection must follow the row, not its earlier size.
+    renderInScrollContainer(new DOMRect(0, 0, 800, 600));
+    const wrapper = editor.view.dom.querySelector<HTMLElement>(".tableWrapper")!;
+    wrapper.getBoundingClientRect = () => new DOMRect(TABLE_ORIGIN, TABLE_ORIGIN, 700, 90);
+    hoverCell(1, 1);
+    rows()[1].getBoundingClientRect = () =>
+      new DOMRect(TABLE_ORIGIN, TABLE_ORIGIN + ROW_HEIGHT, 500, ROW_HEIGHT);
+    hoverCell(1, 1);
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "Row options" }));
+    const selection = document.querySelector<HTMLElement>("div.pointer-events-none.fixed");
+    expect(selection?.style.width).toBe("500px");
   });
 });
 

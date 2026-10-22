@@ -284,12 +284,7 @@ export function clipRect(rect: Rect, bounds: Rect): Rect | null {
   return { top, left, width: right - left, height: bottom - top };
 }
 
-/**
- * Places the grips for a hovered cell. A wide table scrolls inside its wrapper,
- * so `visible` is the wrapper's span within the editor viewport: the row grip
- * sits left of that span and the column grip is clipped to it. Returns null
- * when none of the table is visible.
- */
+/** Places a cell's grips beside the visible part of its table; null when none of it is visible. */
 export function placeTableHandles({
   row,
   cell,
@@ -308,7 +303,7 @@ export function placeTableHandles({
     viewport,
   );
   if (!visible) return null;
-  const rowGripLeft = Math.max(row.left, visible.left) - 22;
+  const rowGripLeft = Math.max(row.left - 22, visible.left - 22, viewport.left);
   return {
     visible,
     rowGrip: clipRect(
@@ -337,14 +332,17 @@ interface HandlePos {
   visible: Rect;
 }
 
+function sameRect(a: Rect, b: Rect): boolean {
+  return a.top === b.top && a.left === b.left && a.width === b.width && a.height === b.height;
+}
+
 function sameHandle(prev: HandlePos, next: HandlePos): boolean {
   return (
     prev.rowIndex === next.rowIndex &&
     prev.colIndex === next.colIndex &&
-    prev.grip.top === next.grip.top &&
-    prev.grip.left === next.grip.left &&
-    prev.grip.width === next.grip.width &&
-    prev.grip.height === next.grip.height
+    sameRect(prev.grip, next.grip) &&
+    sameRect(prev.target, next.target) &&
+    sameRect(prev.visible, next.visible)
   );
 }
 
@@ -475,9 +473,9 @@ export function TableHandles({
         height: tableRect.height,
       });
 
-      // Skip the state update (and consequent re-render) when the cursor is
-      // still in the same cell at the same position — mousemove fires very
-      // frequently and each setState triggers a portal re-paint.
+      // Skip the state update (and consequent re-render) when the cell and its
+      // geometry are unchanged — mousemove fires very frequently and each
+      // setState triggers a portal re-paint.
       setRowHandle((prev) => (prev && nextRow && sameHandle(prev, nextRow) ? prev : nextRow));
       setColHandle((prev) => (prev && nextCol && sameHandle(prev, nextCol) ? prev : nextCol));
       // Selection overlays are set only when the handle pill is hovered (see onMouseEnter below).
@@ -499,7 +497,13 @@ export function TableHandles({
     };
 
     const onMouseLeave = () => scheduleHide();
-    const onScroll = () => {
+    const scrollEl = scrollContainerRef.current;
+    const onScroll = (e: Event) => {
+      // Other nested scrollers, such as a wide code block, don't move the table.
+      const movesTable =
+        e.target === scrollEl ||
+        (e.target instanceof Element && e.target.classList.contains("tableWrapper"));
+      if (!movesTable) return;
       setRowHandle(null);
       setColHandle(null);
       setRowMenu(null);
@@ -515,7 +519,6 @@ export function TableHandles({
     dom.addEventListener("mousemove", onMouseMove);
     dom.addEventListener("mouseleave", onMouseLeave);
     dom.addEventListener("contextmenu", onContextMenu);
-    const scrollEl = scrollContainerRef.current;
     // Capture also sees a wide table scrolling its wrapper; that scroll doesn't bubble.
     scrollEl?.addEventListener("scroll", onScroll, { capture: true });
 
