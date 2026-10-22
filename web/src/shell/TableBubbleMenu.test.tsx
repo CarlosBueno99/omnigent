@@ -178,15 +178,16 @@ describe("TableHandles — grip visibility", () => {
     expect(within(colMenu).getByText("Delete column")).toBeInTheDocument();
   });
 
-  it("hides the grips when a wide table scrolls inside the editor", () => {
+  it("hides the grips and menu when a wide table scrolls inside the editor", () => {
     // WHY: a wide table scrolls its own wrapper, and that scroll event doesn't
-    // bubble; grips left behind point at cells that have moved.
+    // bubble; grips and menus left behind point at cells that have moved.
     renderInScrollContainer(new DOMRect(0, 0, 800, 600));
-    hoverCell(1, 1);
-    expect(screen.getByRole("button", { name: "Row options" })).toBeInTheDocument();
+    openRowMenu(1, 1);
+    expect(screen.getByRole("button", { name: "Column options" })).toBeInTheDocument();
     fireEvent.scroll(editor.view.dom.querySelector(".tableWrapper")!);
     expect(screen.queryByRole("button", { name: "Row options" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Column options" })).toBeNull();
+    expect(screen.queryByText("Delete row")).toBeNull();
   });
 
   it("keeps the grips and menu when another element inside the editor scrolls", () => {

@@ -284,7 +284,7 @@ export function clipRect(rect: Rect, bounds: Rect): Rect | null {
   return { top, left, width: right - left, height: bottom - top };
 }
 
-/** Places a cell's grips beside the visible part of its table; null when none of it is visible. */
+/** Places a cell's grips beside the table's visible columns; null when none is in view. */
 export function placeTableHandles({
   row,
   cell,
@@ -328,7 +328,7 @@ interface HandlePos {
   grip: Rect;
   /** The whole row or column the grip selects and drags. */
   target: Rect;
-  /** Visible part of the table; selection and drag overlays are clipped to it. */
+  /** Wrapper's visible columns within the editor viewport; overlays are clipped to it. */
   visible: Rect;
 }
 
