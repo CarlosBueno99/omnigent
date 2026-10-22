@@ -407,7 +407,9 @@ function loadNavigationHarness({
     Notification: Object.assign(
       function Notification(options) {
         calls.notifications = [...(calls.notifications ?? []), options];
-        return { on: () => {}, show: () => {} };
+        const notification = Object.assign(new EventEmitter(), { show: () => {} });
+        calls.notificationRefs = [...(calls.notificationRefs ?? []), new WeakRef(notification)];
+        return notification;
       },
       { isSupported: () => notificationsSupported },
     ),
@@ -5245,5 +5247,56 @@ describe("server names from the manifest", () => {
     h.api.windows.get(h.win).ephemeral = true;
     await h.api.loadServerUrl(h.win, server);
     assert.equal(fs.existsSync(h.settingsPath) ? saved(h).server_names : undefined, undefined);
+  });
+});
+
+describe("desktop notifications", () => {
+  const server = "https://omni.example";
+  const pageEvent = (h) => ({ sender: h.webContents, senderFrame: { url: server } });
+  const collectGarbage = () => {
+    require("node:v8").setFlagsFromString("--expose-gc");
+    vm.runInNewContext("gc")();
+  };
+
+  it("opens the notification's session when it is clicked after garbage collection", async (t) => {
+    const h = loadNavigationHarness({ serverUrl: server, notificationsSupported: true });
+    t.after(h.cleanup);
+    h.api.registerIpc();
+    h.webContents.isDestroyed = () => false;
+    await h.ipc.get("omnigent:notify")(pageEvent(h), {
+      title: "Done",
+      navigatePath: "/c/conv_abc",
+    });
+    await wait();
+    collectGarbage();
+    await wait();
+    collectGarbage();
+
+    const notification = h.calls.notificationRefs.at(-1).deref();
+    assert.ok(notification, "the shown notification was garbage-collected before its click");
+    notification.emit("click");
+    assert.deepEqual(h.calls.progress.at(-1), {
+      channel: "omnigent:notification-activated",
+      data: "/c/conv_abc",
+    });
+  });
+
+  it("releases clicked notifications and keeps only the newest unclicked ones", async (t) => {
+    const h = loadNavigationHarness({ serverUrl: server, notificationsSupported: true });
+    t.after(h.cleanup);
+    h.api.registerIpc();
+    h.webContents.isDestroyed = () => false;
+    const retainedLimit = 100;
+    for (let i = 0; i <= retainedLimit; i++) {
+      h.ipc.get("omnigent:notify")(pageEvent(h), { title: "Done", navigatePath: `/c/${i}` });
+    }
+    // Clicked in a helper so no stack temporary keeps the clicked notification alive.
+    const click = (ref) => ref.deref().emit("click");
+    click(h.calls.notificationRefs.at(-1));
+    await wait();
+    collectGarbage();
+
+    const alive = h.calls.notificationRefs.map((ref) => ref.deref() !== undefined);
+    assert.deepEqual([alive[0], alive[1], alive.at(-2), alive.at(-1)], [false, true, true, false]);
   });
 });
