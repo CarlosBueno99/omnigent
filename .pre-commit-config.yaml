@@ -7,16 +7,16 @@ exclude: ^omnigent/server/static/web-ui/
 repos:
   - repo: local
     hooks:
-      - id: ruff-format
-        name: ruff format
-        language: system
-        entry: .venv/bin/python -m ruff format --force-exclude
-        types: [python]
-
       - id: ruff-check
         name: ruff check
         language: system
         entry: .venv/bin/python -m ruff check --fix --force-exclude
+        types: [python]
+
+      - id: ruff-format
+        name: ruff format
+        language: system
+        entry: .venv/bin/python -m ruff format --force-exclude
         types: [python]
 
       - id: pyrefly
@@ -191,7 +191,7 @@ repos:
 
   # ── File hygiene ────────────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
         name: trim trailing whitespace
@@ -203,6 +203,7 @@ repos:
         exclude: (\.(md|svg)$|/AppIcon\.icon/)
       - id: check-yaml
         name: check yaml syntax
+        args: ['--allow-multiple-documents']
         # docker-compose override files use non-standard tags
         # (`!reset`, `!override`) that PyYAML can't parse.
         exclude: ^deploy/docker/docker-compose\.[a-z]+\.yaml$

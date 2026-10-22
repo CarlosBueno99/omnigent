@@ -77,6 +77,7 @@ function renderHeader(props: {
   wrapperLabel?: string | null;
   canShare?: boolean;
   canFork?: boolean;
+  forkDisabledReason?: string;
   shareDisabled?: boolean;
   shareDisabledReason?: string;
   hasHeaderMenu?: boolean;
@@ -113,6 +114,7 @@ function renderHeader(props: {
             wrapperLabel={props.wrapperLabel ?? null}
             canShare={props.canShare ?? false}
             canFork={props.canFork ?? false}
+            forkDisabledReason={props.forkDisabledReason}
             shareDisabled={props.shareDisabled}
             shareDisabledReason={props.shareDisabledReason}
             onShare={() => {}}
@@ -736,6 +738,24 @@ describe("ChatHeader — title-adjacent conversation actions", () => {
     permission_level: 3,
   };
 
+  it.each([
+    { name: "landing", actionConversation: null },
+    { name: "shared session", actionConversation: null, conversationId: "conv-1" },
+    { name: "sub-agent", actionConversation: conversation, isChildSession: true },
+    { name: "pending session", actionConversation: conversation, pending: true },
+  ])("leaves the rename shortcut untouched on $name", (props) => {
+    renderHeader({ sidebarOpen: true, conversationTitle: conversation.title, ...props });
+    const pressed = new KeyboardEvent("keydown", {
+      code: "KeyR",
+      ctrlKey: true,
+      altKey: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(pressed);
+    expect(pressed.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("textbox", { name: "Session name" })).toBeNull();
+  });
+
   it("keeps the overflow trigger immediately after a truncating title", () => {
     renderHeader({
       sidebarOpen: true,
@@ -861,6 +881,28 @@ describe("ChatHeader — title-adjacent conversation actions", () => {
     expect(onFork).toHaveBeenCalledOnce();
   });
 
+  it.each([false, true])("disables the fallback Fork menu (mobile=%s)", (mobile) => {
+    isMobileMock.mockReturnValue(mobile);
+    const onFork = vi.fn();
+    renderHeader({
+      sidebarOpen: true,
+      conversationId: conversation.id,
+      actionConversation: null,
+      canFork: true,
+      forkDisabledReason: "Forking this sandbox session is not supported yet.",
+      onFork,
+    });
+    fireEvent.pointerDown(
+      screen.getByTestId(mobile ? "session-actions-menu" : "desktop-fork-actions-menu"),
+      { button: 0 },
+    );
+    const fork = screen.getByRole("menuitem", { name: "Fork" });
+    expect(fork).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(fork);
+    fireEvent.keyDown(fork, { key: "Enter" });
+    expect(onFork).not.toHaveBeenCalled();
+  });
+
   it("folds the workspace-rail entries into the one mobile kebab", () => {
     // Previously a second `PanelRight` trigger sat beside the kebab; the rail
     // entries now ride in the same menu, so a phone has a single trigger.
@@ -879,15 +921,7 @@ describe("ChatHeader — title-adjacent conversation actions", () => {
       button: 0,
     });
 
-    // Strip SVG <title> text (e.g. "Github" from GithubMono) before comparing —
-    // textContent includes it but it's invisible; the labels are what matters.
-    const svgTitleText = (el: Element) =>
-      [...el.querySelectorAll("title")].map((t) => t.textContent ?? "").join("");
-    expect(
-      screen
-        .getAllByRole("menuitem")
-        .map((item) => (item.textContent ?? "").replace(svgTitleText(item), "").trim()),
-    ).toEqual([
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
       "Pin",
       "Export",
       "Rename",
@@ -895,7 +929,7 @@ describe("ChatHeader — title-adjacent conversation actions", () => {
       "Add to project",
       "Files",
       "Changes",
-      "GitHub",
+      "Pull Requests",
       "Agents1",
       "Archive",
       "Delete",
