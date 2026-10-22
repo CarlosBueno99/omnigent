@@ -397,9 +397,6 @@ jobs:
             --ui-timing-output=artifacts/ui-timings.jsonl \
             --splits="$NUM_SHARDS" \
             --group="$((SHARD_ID + 1))" \
-            --tracing=retain-on-failure \
-            --screenshot=only-on-failure \
-            --video=retain-on-failure \
             -m "$MARKER" \
             || { rc=$?; [ "$rc" -eq 5 ] && [ "$UI_SCOPE" == "full" ] && echo "::notice::No tests collected in this shard; treating as a pass." || exit "$rc"; }
 
