@@ -9,6 +9,10 @@ packages:
 
 # 7-day dependency cooldown, mirroring the Python-side exclude-newer = "P7D" in uv.toml.
 minimumReleaseAge: 10080
+# electron 42.11.16 distrusts the compromised eMudhra intermediate CAs.
+# Drop once aged past the cooldown (2026-10-27).
+minimumReleaseAgeExclude:
+  - electron@42.11.16
 
 settings:
   autoInstallPeers: false
@@ -28,19 +32,19 @@ catalog:
   react: ^18.2.0
   react-dom: ^18.2.0
   shiki: 4.2.0
+  vite: 8.1.6
 
 overrides:
-  # Build-tool pins that match the legacy npm lockfile. Removing them allowed pnpm
-  # to resolve newer Vite/Tailwind patches whose new bundler/chunking produced a
-  # broken split of the Shiki bundle and lost the PDF worker asset.
-  vite: 8.1.0
+  # Keep build-tool upgrades explicit and validate their bundles: incompatible
+  # Vite/Tailwind chunking can split Shiki incorrectly or lose the PDF worker.
+  vite: "catalog:"
   tailwindcss: 4.3.1
   '@tailwindcss/vite': 4.3.1
   '@tailwindcss/node': 4.3.1
   '@tailwindcss/postcss': 4.3.1
   jiti: 2.7.0
   lightningcss: 1.32.0
-  postcss: 8.5.23
+  postcss: 8.5.29
   browserslist: 4.28.8
   fast-uri: 3.1.6
   '@xmldom/xmldom': 0.8.15

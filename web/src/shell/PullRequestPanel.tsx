@@ -1,9 +1,8 @@
 // Serves every git provider. Runtime names (query keys, routes, test ids) keep
 // the `github` prefix because they are stable wire ids.
 //
-// PullRequestPanel — the right-rail "Pull Requests" tab. Read-only view of the
-// session branch's relationship to its git provider: the associated PR (number,
-// title, state, CI summary, link out) and the branch-vs-base diff.
+// PullRequestPanel — the right-rail "Pull Requests" tab: the session branch's PR
+// (number, title, state, CI summary, labels, link out) and the branch-vs-base diff.
 // Provider-visible text comes from lib/gitProviders.ts.
 //
 // Layout is GitHub's "Files changed": every file's diff stacked in one scroll
@@ -73,12 +72,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
 import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
+import { useCanEdit } from "@/hooks/usePermissions";
 import { useResizableColumn } from "@/hooks/useResizableColumn";
 import { RunnerOfflineError, useWorkspaceAsleep } from "@/hooks/useWorkspaceChangedFiles";
 import { readFileViewPreferences, writeFileViewPreferences } from "@/lib/fileViewPreferences";
 import { gitProviderCopy, type GitProviderCopy } from "@/lib/gitProviders";
+import { parseHttpUrl } from "@/lib/openLinkInApp";
 import { absoluteTime, relativeTime } from "@/lib/relativeTime";
 import {
   fetchPullRequestFileContents,
@@ -97,6 +99,8 @@ import {
   type PullRequestInfo,
   type PullRequestReviewer,
 } from "@/hooks/usePullRequests";
+import { PullRequestLabels } from "./PullRequestLabels";
+import { PullRequestMerge } from "./PullRequestMerge";
 
 // Shiki bundled themes matching the app's editor look; the concrete side is
 // chosen by `themeType` from the app's resolved light/dark mode.
@@ -524,11 +528,13 @@ function listKeys<T>(items: readonly T[], identity: (item: T) => readonly unknow
   });
 }
 
+const CHECK_ROW_CLASS = "flex items-center gap-2 px-1.5 py-1.5";
+
 /**
  * A CI-status pill (e.g. "✓ 66 passed"); hovering it reveals the individual job
  * names in that bucket, each with the status icon and a divider between rows.
- * Renders nothing when the bucket is empty. The full list shows — the card is
- * height-capped and scrolls.
+ * A job with an http(s) run URL links to it. Renders nothing when the bucket
+ * is empty. The full list shows — the card is height-capped and scrolls.
  */
 function CheckPill({
   label,
@@ -571,14 +577,33 @@ function CheckPill({
           <p className="px-1.5 py-1 text-muted-foreground">No job details.</p>
         ) : (
           <ul className="divide-y divide-border">
-            {names.map((r, i) => (
-              <li key={keys[i]} className="flex items-center gap-2 px-1.5 py-1.5">
-                <span className="shrink-0">{icon}</span>
-                <span className="truncate" title={r.name}>
-                  {r.name}
-                </span>
-              </li>
-            ))}
+            {names.map((r, i) => {
+              const href = r.url ? parseHttpUrl(r.url)?.href : undefined;
+              const row = (
+                <>
+                  <span className="shrink-0">{icon}</span>
+                  <span className="truncate" title={r.name}>
+                    {r.name}
+                  </span>
+                </>
+              );
+              return (
+                <li key={keys[i]}>
+                  {href ? (
+                    <a
+                      href={href}
+                      target="_blank"
+                      rel="noreferrer"
+                      className={cn(CHECK_ROW_CLASS, "cursor-pointer hover:underline")}
+                    >
+                      {row}
+                    </a>
+                  ) : (
+                    <div className={CHECK_ROW_CLASS}>{row}</div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </HoverCardContent>
@@ -751,70 +776,95 @@ function PullRequestCommentCard({
   );
 }
 
-/** The Summary tab body: reviewers, CI checks, then the PR description. When the token
- *  can't read check runs, the Checks area says so instead of counts. */
+/** The Summary tab body: reviewers beside labels, then CI checks with the Merge button, then
+ *  the PR description, with dividers between. When the token can't read check runs, the
+ *  Checks area says so instead of counts. */
 function PullRequestSummaryTab({
   reviewers,
+  labels,
+  merge,
   checks,
   checksSupported,
   checksUnavailableHint,
   body,
 }: {
   reviewers: PullRequestReviewer[] | undefined;
+  labels: React.ReactNode;
+  merge: React.ReactNode;
   checks: PullRequestChecks;
   checksSupported: boolean;
   checksUnavailableHint?: string;
   body: string | null | undefined;
 }) {
+  const showChecks = checks.total > 0 || checks.partial || !checksSupported;
+  const showReviewers = reviewers !== undefined;
+  const showPeople = showReviewers || !!labels;
+  const showStatus = showChecks || !!merge;
   return (
-    // Extra bottom padding so the end of a long description can scroll clear
-    // of the very bottom edge, where it's awkward to read.
-    <div className="space-y-4 p-3 pb-16">
-      {reviewers !== undefined && <PullRequestReviewers reviewers={reviewers} />}
-      {/* CI status checks (from the PR's statusCheckRollup) as pills; hover a
-          pill to see the job names in that bucket. */}
-      {(checks.total > 0 || checks.partial || !checksSupported) && (
-        <section className="space-y-1.5">
-          <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            Checks
-          </h3>
-          {!checksSupported ? (
-            <p role="status" className="text-ui text-muted-foreground">
-              {checksUnavailableHint ?? "Checks can’t be read with the signed-in account."}
-            </p>
-          ) : (
-            checks.partial && (
-              <p role="status" className="text-ui text-muted-foreground">
-                Some checks are unavailable. Counts include only the checks loaded.
-              </p>
-            )
+    // Blocks carry their own padding so the dividers between them span the full width.
+    <div>
+      {showPeople && (
+        <div className="flex">
+          {showReviewers && (
+            <div className="min-w-0 flex-1 p-3">
+              <PullRequestReviewers reviewers={reviewers} />
+            </div>
           )}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <CheckPill
-              label="passed"
-              count={checks.passing}
-              runs={checks.runs.filter((r) => r.bucket === "passing")}
-              icon={<CircleCheckIcon className="size-2.5 text-green-600 dark:text-green-400" />}
-              className="border-green-500/25 bg-green-500/10 text-green-700 dark:text-green-400"
-            />
-            <CheckPill
-              label="pending"
-              count={checks.pending}
-              runs={checks.runs.filter((r) => r.bucket === "pending")}
-              icon={<CircleDotIcon className="size-2.5 text-amber-600 dark:text-amber-400" />}
-              className="border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-            />
-            <CheckPill
-              label="failed"
-              count={checks.failing}
-              runs={checks.runs.filter((r) => r.bucket === "failing")}
-              icon={<CircleXIcon className="size-2.5 text-red-600 dark:text-red-400" />}
-              className="border-red-500/25 bg-red-500/10 text-red-700 dark:text-red-400"
-            />
-          </div>
-        </section>
+          {showReviewers && labels && <Separator orientation="vertical" />}
+          {labels && <div className="min-w-0 flex-1 p-3">{labels}</div>}
+        </div>
       )}
-      <section className="space-y-1.5">
+      {showPeople && showStatus && <Separator />}
+      {showStatus && (
+        <div className="space-y-3 p-3">
+          {showChecks && (
+            <section className="space-y-1.5">
+              <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                Checks
+              </h3>
+              {!checksSupported ? (
+                <p role="status" className="text-ui text-muted-foreground">
+                  {checksUnavailableHint ?? "Checks can’t be read with the signed-in account."}
+                </p>
+              ) : (
+                checks.partial && (
+                  <p role="status" className="text-ui text-muted-foreground">
+                    Some checks are unavailable. Counts include only the checks loaded.
+                  </p>
+                )
+              )}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <CheckPill
+                  label="passed"
+                  count={checks.passing}
+                  runs={checks.runs.filter((r) => r.bucket === "passing")}
+                  icon={<CircleCheckIcon className="size-2.5 text-green-600 dark:text-green-400" />}
+                  className="border-green-500/25 bg-green-500/10 text-green-700 dark:text-green-400"
+                />
+                <CheckPill
+                  label="pending"
+                  count={checks.pending}
+                  runs={checks.runs.filter((r) => r.bucket === "pending")}
+                  icon={<CircleDotIcon className="size-2.5 text-amber-600 dark:text-amber-400" />}
+                  className="border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                />
+                <CheckPill
+                  label="failed"
+                  count={checks.failing}
+                  runs={checks.runs.filter((r) => r.bucket === "failing")}
+                  icon={<CircleXIcon className="size-2.5 text-red-600 dark:text-red-400" />}
+                  className="border-red-500/25 bg-red-500/10 text-red-700 dark:text-red-400"
+                />
+              </div>
+            </section>
+          )}
+          {merge}
+        </div>
+      )}
+      {(showPeople || showStatus) && <Separator />}
+      {/* Extra bottom padding so the end of a long description can scroll clear
+          of the very bottom edge, where it's awkward to read. */}
+      <section className="space-y-1.5 p-3 pb-16">
         <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Description
         </h3>
@@ -1049,25 +1099,24 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
   const info = usePullRequestInfo(conversationId, { poll: true, prUrl: selected });
   const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all(
+        ["github-info", "github-changed-files", "github-pr-diff"].map((key) =>
+          queryClient.invalidateQueries({ queryKey: [key, conversationId] }),
+        ),
+      );
+    } finally {
+      setRefreshing(false);
+    }
+  };
+  const refreshIcon = (
+    <RefreshCwIcon className={cn("size-3.5", refreshing && "animate-spin")} aria-hidden="true" />
+  );
   const refreshButton = (
-    <Button
-      size="sm"
-      variant="ghost"
-      disabled={refreshing}
-      onClick={async () => {
-        setRefreshing(true);
-        try {
-          await Promise.all(
-            ["github-info", "github-changed-files", "github-pr-diff"].map((key) =>
-              queryClient.invalidateQueries({ queryKey: [key, conversationId] }),
-            ),
-          );
-        } finally {
-          setRefreshing(false);
-        }
-      }}
-    >
-      <RefreshCwIcon className={cn("size-3.5", refreshing && "animate-spin")} />
+    <Button size="sm" variant="ghost" disabled={refreshing} onClick={refresh}>
+      {refreshIcon}
       Refresh
     </Button>
   );
@@ -1252,8 +1301,10 @@ export function PullRequestPanel({ conversationId }: { conversationId: string })
               </TooltipProvider>
             )}
             <div className="ml-auto flex shrink-0 items-center gap-1">
-              {refreshButton}
               <TooltipProvider delayDuration={0}>
+                <IconButton label="Refresh" disabled={refreshing} onClick={refresh}>
+                  {refreshIcon}
+                </IconButton>
                 <IconButton label="Link a PR" onClick={() => setLinking(!linking)}>
                   <PlusIcon className="size-3.5" aria-hidden="true" />
                 </IconButton>
@@ -1339,6 +1390,7 @@ function PullRequestPanelDetails({
   const changes = usePullRequestChangedFiles(conversationId, hasPr, prUrl, revision);
   const prDiff = usePullRequestDiff(conversationId, hasPr, prUrl, revision);
   const sandboxAsleep = useWorkspaceAsleep(conversationId);
+  const canEdit = useCanEdit(conversationId);
 
   // Summary (checks + PR body), Comments, and Changes (the stacked diff).
   // Summary is the landing tab — like GitHub's PR page opening on the
@@ -1730,6 +1782,32 @@ function PullRequestPanelDetails({
         <TabsContent value="summary" className="min-h-0 flex-1 overflow-y-auto">
           <PullRequestSummaryTab
             reviewers={pr.reviewers}
+            labels={
+              pr.labels !== undefined &&
+              data.selected_pr_url && (
+                <PullRequestLabels
+                  conversationId={conversationId}
+                  prUrl={data.selected_pr_url}
+                  labels={pr.labels}
+                  editable={canEdit && !!data.capabilities.label_editing}
+                />
+              )
+            }
+            merge={
+              canEdit &&
+              data.capabilities.merging &&
+              pr.state === "OPEN" &&
+              pr.merge_state_status !== undefined &&
+              data.selected_pr_url && (
+                <PullRequestMerge
+                  // A different PR starts fresh, so an open dialog can't outlive its PR.
+                  key={data.selected_pr_url}
+                  conversationId={conversationId}
+                  prUrl={data.selected_pr_url}
+                  pr={pr}
+                />
+              )
+            }
             checks={checks}
             checksSupported={pr.checks_supported !== false}
             checksUnavailableHint={copy.checksUnavailableHint}
