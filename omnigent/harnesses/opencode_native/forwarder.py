@@ -72,6 +72,7 @@ _EXTERNAL_OUTPUT_REASONING_DELTA = "external_output_reasoning_delta"
 _STATUS_RUNNING = "running"
 _STATUS_IDLE = "idle"
 _STATUS_FAILED = "failed"
+_MESSAGE_ABORTED_ERROR = "MessageAbortedError"
 
 # Appended to a failed edge's output when opencode reports a provider-auth
 # error so the web surface can prompt a re-auth (matches the codex-native
@@ -217,6 +218,8 @@ class OpenCodeNativeForwarder:
         # turn; both reset in :meth:`_end_turn`.
         self._active_message_id: str | None = None
         self._running_response_id: str | None = None
+        # OpenCode reports an interrupt on the assistant message, then a bare idle.
+        self._turn_aborted = False
         self._question_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def seed_dedupe_from_history(self) -> None:
@@ -571,6 +574,7 @@ class OpenCodeNativeForwarder:
         ``reauth_required`` on a ``failed`` edge), which are merged on top.
         """
         self.state.turn_active = False
+        self._turn_aborted = False
         # Reasoning deltas are per-turn; drop the per-part offsets so the map
         # can't grow across a long-lived session (the next turn's reasoning
         # parts carry fresh ids anyway).
@@ -616,6 +620,9 @@ class OpenCodeNativeForwarder:
             if self._bridge_dir is not None:
                 update_active_message_id(self._bridge_dir, message_id, status="busy")
             await self._begin_turn_if_needed()
+            error = info.get("error")
+            if isinstance(error, Mapping) and error.get("name") == _MESSAGE_ABORTED_ERROR:
+                self._turn_aborted = True
             self._record_assistant_usage(message_id, info)
             await self._post_session_usage()
 
@@ -828,7 +835,7 @@ class OpenCodeNativeForwarder:
         del event
         await self._flush_pending_text()
         await self._post_session_usage()
-        await self._end_turn()
+        await self._end_turn(extra={"turn_outcome": "cancelled"} if self._turn_aborted else None)
 
     def _record_assistant_usage(self, message_id: str, info: _JsonMapping) -> None:
         """Cache the latest cost/tokens/model for an assistant message.
@@ -928,7 +935,7 @@ class OpenCodeNativeForwarder:
         await self._flush_pending_text()
         name = error.get("name") if isinstance(error, Mapping) else None
         data = error.get("data") if isinstance(error, Mapping) else None
-        if name == "MessageAbortedError":
+        if name == _MESSAGE_ABORTED_ERROR:
             # Stamp the terminal edge so the server settles an interrupted
             # sub-agent dispatch as cancelled instead of a normal completion.
             await self._end_turn(extra={"turn_outcome": "cancelled"})

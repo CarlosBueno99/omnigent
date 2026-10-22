@@ -7,6 +7,7 @@ import contextlib
 from typing import Any
 
 import httpx
+import pytest
 
 import omnigent.harnesses.opencode_native.forwarder as fwd_mod
 from omnigent.harnesses.opencode_native.client import OpenCodeEvent
@@ -295,23 +296,36 @@ async def test_session_error_generic_posts_failed_without_reauth() -> None:
     assert "reauth_required" not in status
 
 
-async def test_session_error_message_aborted_posts_cancelled_idle() -> None:
-    """A MessageAbortedError is a user interrupt → an idle edge stamped cancelled.
+_ABORTED = {"name": "MessageAbortedError", "data": {"message": "Aborted"}}
 
-    The server reads ``turn_outcome: cancelled`` on this edge to settle an
-    interrupted sub-agent dispatch as cancelled, instead of reading a bare idle
-    as a normal completion.
-    """
+
+@pytest.mark.parametrize(
+    "abort_events",
+    [
+        pytest.param(
+            [
+                _event(
+                    "message.updated", info={"id": "msg_1", "role": "assistant", "error": _ABORTED}
+                ),
+                _event("session.idle"),
+            ],
+            id="aborted-message-then-idle",
+        ),
+        pytest.param([_event("session.error", error=_ABORTED)], id="session-error"),
+    ],
+)
+async def test_aborted_turn_posts_cancelled_idle(abort_events: list[OpenCodeEvent]) -> None:
+    """Both orders OpenCode reports an abort in end the turn as cancelled, not completed."""
     server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
     fwd = _forwarder(server, opencode)
-    await fwd.handle_event(
-        _event("session.error", error={"name": "MessageAbortedError", "data": {}})
-    )
-    status = next(b["data"] for _u, b in server.posts if b["type"] == "external_session_status")
-    assert status["status"] == "idle"
-    assert status["turn_outcome"] == "cancelled"
-    assert "reauth_required" not in status
-    assert "output" not in status
+    await fwd.handle_event(_event("message.updated", info={"id": "msg_1", "role": "assistant"}))
+    for event in abort_events:
+        await fwd.handle_event(event)
+    await fwd.handle_event(_event("message.updated", info={"id": "msg_2", "role": "assistant"}))
+    await fwd.handle_event(_event("session.idle"))
+
+    edges = [(edge["status"], edge.get("turn_outcome")) for edge in _status_edges(server.posts)]
+    assert edges == [("running", None), ("idle", "cancelled"), ("running", None), ("idle", None)]
 
 
 def _status_edges(posts: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
