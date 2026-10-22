@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import tomllib
 
 from omnigent.onboarding import extra_install
 from omnigent.onboarding.antigravity_auth import ANTIGRAVITY_EXTRA
@@ -162,6 +162,7 @@ def test_extra_install_command_pip_fallback(monkeypatch: pytest.MonkeyPatch) -> 
     cmd = extra_install_command("copilot")
     assert cmd == [
         extra_install.sys.executable,
+        "-P",
         "-m",
         "pip",
         "install",
