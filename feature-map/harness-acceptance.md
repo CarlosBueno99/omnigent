@@ -79,7 +79,7 @@ no harness-specific tests exist. No passing per-harness results are implied.
 
 | Checklist ID | Bench dimensions | Existing automation / remaining gap |
 | --- | --- | --- |
-| `launch-reply` | `basic_turn`, `streaming`, `cost_tracking` | Server/runner observations; browser launch/rendering and exact-once presentation need the owning UI tests. |
+| `launch-reply` | `basic_turn`, `streaming`, `cost_tracking` | Also check authored instructions for custom agents via the [native instruction recipe](./native-harnesses.md#driving-it-with-the-repro-environment); bench replies alone do not prove delivery. Server/runner observations; browser launch/rendering and exact-once presentation need the owning UI tests. |
 | `working-status` | — | No shared status-continuity probe. Use the [native working-status recipe](./native-harnesses.md#driving-it-with-the-repro-environment) for Claude OSC/file fallback and UI status routing; SDK lifecycle and other natives need their own evidence. A completed basic turn does not prove quiet-work or blocked-state accuracy. |
 | `tool-history` | `tool_calling` | Tool round trip only. Later-turn recall is not a shared probe; reuse the Pi scenarios below and identify other harness coverage explicitly. |
 | `model-effort` | `model_override`, `reasoning` | Native-TUI model override is currently skipped; SDK routing/reasoning observations are narrower than selection persistence. Reasoning output does not prove outgoing effort, tool continuity, High→Low or UI state. |
@@ -106,6 +106,29 @@ in the existing drivers/[primitives](../tests/_helpers/README.md). Keep input
 matrices at the lowest reliable layer; retain browser/process cases for distinct
 boundaries. Do not move or replace working regression coverage just to fit the
 checklist.
+
+### Pi SDK bundled resources (own environment)
+
+For `launch-reply`, launch an uploaded Pi agent bundle through the server/runner,
+then run `omnigent run <bundle>` from a sibling workspace under Linux Bubblewrap.
+Include an extension,
+a skill and bundle-root instructions; verify all reach the provider request and
+that tools still use the session workspace. Existing scenarios:
+`tests/e2e/omnigent/test_pi_bundle_extensions_cwd_e2e.py`,
+`tests/e2e/omnigent/test_pi_bundle_project_resources_e2e.py`, and
+`tests/e2e/omnigent/test_pi_managed_extensions_e2e.py`.
+The managed-extensions filename refers to extension provisioning, not Managed
+Omnigent. The uploaded-bundle and existing global-extension CLI scenarios cover
+unsandboxed startup;
+the separate CLI bundle case covers real Bubblewrap isolation; a macOS skip does not
+validate that boundary. Native Pi resource discovery is a separate path.
+
+Run the scoped `launch-reply` checks (own environments; real Pi, scripted provider):
+
+```sh
+uv run --no-sync pytest tests/e2e/omnigent/test_pi_bundle_extensions_cwd_e2e.py tests/e2e/omnigent/test_pi_bundle_project_resources_e2e.py tests/e2e/omnigent/test_pi_managed_extensions_e2e.py --reruns 0 -q
+```
+
 
 ### Deterministic checks versus live canaries
 
