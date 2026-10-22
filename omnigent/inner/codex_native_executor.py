@@ -75,9 +75,9 @@ from omnigent.inner.native_attachments import (
     materialize_attachment,
     materialize_text,
     parse_data_uri,
-    requires_filesystem,
     restore_spilled_text,
     unresolved_attachment_marker,
+    uses_filesystem_delivery,
 )
 from omnigent.native.input_diagnostics import (
     log_input_event,
@@ -757,7 +757,7 @@ class CodexNativeExecutor(Executor):
                         "turn/interrupt",
                         {"threadId": state.thread_id, "turnId": ""},
                     )
-                except Exception:  # noqa: BLE001 - the local cancel above already took effect.
+                except Exception:  # the local cancel above already took effect.
                     _logger.warning("Codex native MCP startup interrupt failed", exc_info=True)
                 _logger.info("Codex native MCP startup cancelled: %s", ", ".join(pending))
             if state.active_turn_id is not None:
@@ -1352,9 +1352,9 @@ def _spill_oversized_text(
 
 
 def _requires_filesystem(block: Mapping[str, object]) -> bool:
-    """Whether *block* names a file that requires filesystem tools."""
+    """Whether *block* is a file that must be opened with filesystem tools."""
     filename = block.get("filename")
-    return requires_filesystem(filename if isinstance(filename, str) else None)
+    return uses_filesystem_delivery(filename if isinstance(filename, str) else None, block)
 
 
 def _apply_resize_notice_to_latest_image(
