@@ -44,6 +44,8 @@ NO_CAPABILITIES = {
     "base_remote_selection": False,
     "line_counts": False,
     "linked_pr_diff": False,
+    "label_editing": False,
+    "merging": False,
 }
 LEGACY_FIELDS = {"gh_available", "authenticated", "accounts", "selected_account"}
 CHANGES = [
