@@ -1,3 +1,4 @@
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Bubble } from "@/lib/renderItems";
@@ -87,7 +88,7 @@ it("remeasures scrollMargin when task padding changes without changing bubbles",
 
   view.rerender(list(true, scrollEl));
 
-  await waitFor(() => expect(row.style.transform).toBe("translateY(-64px)"));
+  await waitFor(() => expect(vi.mocked(useVirtualizer).mock.lastCall?.[0].scrollMargin).toBe(64));
 });
 
 it("publishes navigation that distinguishes loaded and missing turns", async () => {

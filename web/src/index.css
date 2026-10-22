@@ -1346,9 +1346,8 @@ html[data-electron-mac] .breadcrumb-folder {
 }
 
 /* The virtualized transcript holds its own read position across history
- * prepends and in-flow changes above the list (Transcript.tsx). Its rows are
- * absolutely positioned, so native anchoring can't see them and would only
- * double-count the in-flow part. */
+ * prepends, row re-measures and changes above the list (Transcript.tsx), so
+ * native anchoring would double-count each of them. */
 [data-virtualized-transcript] {
   overflow-anchor: none;
 }
