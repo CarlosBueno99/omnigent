@@ -75,6 +75,8 @@ from omnigent.runner.resource_registry import (
 from omnigent.runner.session_init_protocol import RunnerSessionInitEnvelope
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.terminals import TerminalRegistry
+from tests._helpers.pi_native import seed_pi_own_login_catalog
+from tests._helpers.providers import isolate_provider_resolution
 from tests.runner.conftest import (
     _FakeProcessManager,
     _runner_client,
@@ -742,6 +744,123 @@ async def test_auto_create_pi_terminal_cli_version_at_floor_or_unknown_proceeds(
     )
 
     assert captured["spec"].command == "pi"
+
+
+async def _launch_pi_terminal_args(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model_override: str | None,
+    agent_spec: AgentSpec | None = None,
+) -> list[str]:
+    import omnigent.harnesses.pi_native.bridge as pi_native_bridge
+    import omnigent.harnesses.pi_native.credentials as pi_native_credentials
+    import omnigent.harnesses.pi_native.main as pi_native
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+    monkeypatch.setattr(pi_native_bridge, "_BRIDGE_ROOT", tmp_path / "pi-bridge")
+    monkeypatch.setattr(pi_native, "resolve_pi_executable", lambda: "pi")
+    own_login_dir = tmp_path / "pi-own-login"
+    own_login_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(own_login_dir))
+
+    config = {
+        "providers": {
+            "openrouter": {
+                "kind": "gateway",
+                "default": "pi",
+                "openai": {
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "api_key": "sk-or-testkey",
+                    "wire_api": "chat",
+                },
+            }
+        }
+    }
+    real_resolve = pi_native_credentials.resolve_pi_native_provider
+    monkeypatch.setattr(
+        pi_native_credentials,
+        "resolve_pi_native_provider",
+        lambda **kwargs: real_resolve(config_loader=lambda: config, **kwargs),
+    )
+
+    async def _fake_launch_config(**_kwargs: Any) -> _PiNativeLaunchConfig:
+        return _PiNativeLaunchConfig(
+            workspace=tmp_path,
+            server_url="http://127.0.0.1:8000",
+            terminal_launch_args=None,
+            external_session_id=None,
+            model_override=model_override,
+        )
+
+    monkeypatch.setattr("omnigent.runner.app._pi_native_launch_config", _fake_launch_config)
+
+    captured: dict[str, Any] = {}
+
+    class _FakeResourceRegistry:
+        terminal_registry = None
+
+        async def launch_required_terminal(
+            self, *, session_id: str, spec: Any, **_kwargs: Any
+        ) -> SessionResourceView:
+            captured["spec"] = spec
+            return SessionResourceView(
+                id="terminal_pi_main",
+                type="terminal",
+                session_id=session_id,
+                name="pi:main",
+                metadata={"terminal_name": "pi", "session_key": "main", "running": True},
+            )
+
+    await _auto_create_pi_terminal(
+        "47f049b9d13df4db397c7f46859b825f",
+        _FakeResourceRegistry(),  # type: ignore[arg-type]
+        lambda _sid, _evt: None,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        agent_spec=agent_spec,
+    )
+    args = captured["spec"].args
+    assert isinstance(args, list)
+    return args
+
+
+@pytest.mark.asyncio
+async def test_auto_create_pi_terminal_spec_pinned_own_login_reference_passes_through(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_pi_own_login_catalog(tmp_path / "pi-own-login", "openai-codex", ["gpt-5.6-sol"])
+
+    args = await _launch_pi_terminal_args(
+        tmp_path,
+        monkeypatch,
+        model_override=None,
+        agent_spec=AgentSpec(
+            spec_version=1,
+            name="pi",
+            executor=ExecutorSpec(model="openai-codex/gpt-5.6-sol"),
+        ),
+    )
+
+    assert "omnigent/openai-codex/gpt-5.6-sol" not in args
+    assert "--provider" not in args
+    assert "--model" in args
+    assert args[args.index("--model") + 1] == "openai-codex/gpt-5.6-sol"
+
+
+@pytest.mark.asyncio
+async def test_auto_create_pi_terminal_keeps_gateway_routing_for_slash_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = await _launch_pi_terminal_args(
+        tmp_path, monkeypatch, model_override="openai/gpt-4o-mini"
+    )
+
+    assert "--provider" in args
+    assert "--model" in args
+    assert args[args.index("--provider") + 1] == "omnigent"
+    assert args[args.index("--model") + 1] == "omnigent/openai/gpt-4o-mini"
 
 
 @pytest.mark.asyncio
@@ -4925,10 +5044,16 @@ async def test_auto_create_claude_terminal_registers_permission_hook(
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
 
+    isolate_provider_resolution(monkeypatch, tmp_path / "config")
     token_calls: list[int] = []
+    loop = asyncio.get_running_loop()
+    loop_progressed: list[bool] = []
 
     def _shared_auth_factory() -> str:
         token_calls.append(1)
+        released = threading.Event()
+        loop.call_soon_threadsafe(released.set)
+        loop_progressed.append(released.wait(timeout=1.0))
         return "shared-runner-token"
 
     def _unexpected_auth_resolution(*args: Any, **kwargs: Any) -> None:
@@ -5015,6 +5140,7 @@ async def test_auto_create_claude_terminal_registers_permission_hook(
     assert config["ap_server_url"] == "http://127.0.0.1:8000"
     assert config["ap_auth_headers"]["Authorization"] == "Bearer shared-runner-token"
     assert token_calls == [1]
+    assert loop_progressed == [True], "Claude hook token refresh blocked the runner event loop"
 
     # The forwarder must get a refresh-capable httpx.Auth (not just a
     # one-shot Authorization header) so a long-running host-spawned

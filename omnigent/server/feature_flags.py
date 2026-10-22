@@ -28,6 +28,9 @@ class Feature(StrEnum):
     CUSTOM_AGENTS_SETTINGS_UI = "custom_agents_settings_ui"
     SIDEBAR_GROUPING_UI = "sidebar_grouping_ui"
     CLAUDE_OSC_STATUS = "claude_osc_status"
+    WORKSPACE_CONTENT_SEARCH = "workspace_content_search"
+    GRID_SESSIONS_DISPLAY_UI = "grid_sessions_display_ui"
+    AUTOMATIONS_V2 = "automations_v2"
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,20 @@ class FeatureDefinition:
 
 
 FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
+    FeatureDefinition(
+        feature=Feature.AUTOMATIONS_V2,
+        description=(
+            "Automation improvements across scheduling, run management, execution targets and UI"
+        ),
+        owner="server",
+        review_by_release="0.20.0",
+    ),
+    FeatureDefinition(
+        feature=Feature.GRID_SESSIONS_DISPLAY_UI,
+        description="Local session grids with up to four live conversations",
+        owner="web",
+        review_by_release="0.20.0",
+    ),
     FeatureDefinition(
         feature=Feature.USAGE_PAGE,
         description="Web Usage page with cost timeline and breakdowns",
@@ -93,6 +110,12 @@ FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
         review_by_release="0.20.0",
         frontend_visible=False,
         default_enabled=True,
+    ),
+    FeatureDefinition(
+        feature=Feature.WORKSPACE_CONTENT_SEARCH,
+        description="Search workspace file contents through the session runner",
+        owner="web",
+        review_by_release="0.20.0",
     ),
 )
 

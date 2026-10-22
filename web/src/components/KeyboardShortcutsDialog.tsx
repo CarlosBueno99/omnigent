@@ -34,6 +34,8 @@ import {
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
+import { isFeatureEnabled } from "@/lib/capabilities";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { hasCommandModifier } from "@/lib/hotkeys";
 import { isElectronShell, isNativeShell, supportsBrowser } from "@/lib/nativeBridge";
 
@@ -78,6 +80,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     items: [
       { label: "Open command palette", keys: [MOD_KEY, "K"] },
       { label: "Find a session by name", keys: [MOD_KEY, ALT_KEY, "S"] },
+      { label: "Rename current session", keys: [MOD_KEY, ALT_KEY, "R"] },
       { label: "Open Settings", keys: [MOD_KEY, ALT_KEY, ","] },
       { label: "Show keyboard shortcuts", keys: [MOD_KEY, "/"] },
     ],
@@ -107,6 +110,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { label: "Toggle Chat / Terminal view", keys: [...VIEW_MODE_TOGGLE_KEYS] },
       { label: "Toggle conversations sidebar", keys: [MOD_KEY, ALT_KEY, "["] },
       { label: "Focus or close workspace sidebar", keys: [MOD_KEY, ALT_KEY, "]"] },
+      { label: "Search workspace contents", keys: [MOD_KEY, SHIFT_KEY, "F"] },
       {
         label: "Select a workspace tab",
         keys: [MOD_KEY, ALT_KEY, "]", "1…4"],
@@ -145,6 +149,7 @@ function shortcutGroupsFor(
   browser: boolean,
   submitWithModEnter: boolean,
   preventsKeyboardSubmit: boolean,
+  contentSearch: boolean,
 ): ShortcutGroup[] {
   return SHORTCUT_GROUPS.map((group) => {
     if (group.title === "General") {
@@ -185,10 +190,20 @@ function shortcutGroupsFor(
         ],
       };
     }
-    if (group.title === "View" && !browser) {
+    if (group.title === "View") {
       return {
         ...group,
-        items: group.items.filter((item) => item.label !== "Open a new browser tab"),
+        items: group.items
+          .filter(
+            (item) =>
+              (browser || item.label !== "Open a new browser tab") &&
+              (contentSearch || item.label !== "Search workspace contents"),
+          )
+          .map((item) =>
+            contentSearch && item.label === "Select a workspace tab"
+              ? { ...item, keys: [MOD_KEY, ALT_KEY, "]", "1…5"] }
+              : item,
+          ),
       };
     }
     return group;
@@ -209,12 +224,14 @@ export function KeyboardShortcutsList({
   const isMobileViewport = useIsMobileViewport();
   const isCoarsePointer = useIsCoarsePointer();
   const preventsKeyboardSubmit = isMobileViewport || isCoarsePointer;
+  const serverInfo = useServerInfo();
   const groups = shortcutGroupsFor(
     isNativeShell(),
     isElectronShell(),
     supportsBrowser(),
     readSubmitWithModEnter(),
     preventsKeyboardSubmit,
+    !isMobileViewport && isFeatureEnabled(serverInfo, "workspace_content_search"),
   );
   const settings = variant === "settings";
   return (
