@@ -153,6 +153,41 @@ def test_each_ecosystem_selects_focused_coverage_from_a_real_merge(
         expected_groups if ecosystem in {"uv", "github-actions"} else []
     )
 
+    snapshot_workflow = yaml.safe_load((ROOT / ".github/workflows/ui-snapshot.yml").read_text())
+    detection = next(
+        step["run"]
+        for step in snapshot_workflow["jobs"]["detect"]["steps"]
+        if step.get("id") == "changes"
+    )
+    snapshot_output = tmp_path / "snapshot-output"
+    result = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-eo",
+            "pipefail",
+            "-c",
+            'gh() { printf "%s\\n" "$SNAPSHOT_CHANGED_FILES"; }\n' + detection,
+        ],
+        env={
+            **os.environ,
+            "DEPENDENCY": selection["dependency"],
+            "UI_SCOPE": selection["ui"],
+            "PR": "17",
+            "REPO": "fixture/repo",
+            "SNAPSHOT_CHANGED_FILES": "\n".join(changes),
+            "GITHUB_OUTPUT": str(snapshot_output),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert snapshot_output.read_text().strip() == (
+        "ui=true" if ecosystem in {"uv", "npm"} else "ui=false"
+    )
+
 
 @pytest.mark.parametrize(
     "path,before,after",
