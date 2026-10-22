@@ -39,16 +39,19 @@ OMNIGENT_URL=https://my-workspace.databricks.com pnpm run dev
 ```
 
 The dev server loads hundreds of modules on first page load, which is slow over
-plain HTTP when the browser reaches it through a port forward or tunnel. Point
-`VITE_DEV_HTTPS_CERT` and `VITE_DEV_HTTPS_KEY` at a certificate and key to serve
-over HTTPS, which uses HTTP/2. Use a certificate the browser trusts (for example
-from [mkcert](https://github.com/FiloSottile/mkcert)); Chrome does not cache
-responses from sites with certificate errors.
+plain HTTP when the browser reaches it through a port forward or tunnel. Serve
+it over HTTPS instead, which uses HTTP/2:
 
 ```bash
-mkcert localhost  # writes localhost.pem and localhost-key.pem
-VITE_DEV_HTTPS_CERT=localhost.pem VITE_DEV_HTTPS_KEY=localhost-key.pem pnpm run dev
+pnpm run dev:https
 ```
+
+On first run this creates a localhost certificate in `web/.dev-certs/`, using
+[mkcert](https://github.com/FiloSottile/mkcert) when installed and a self-signed
+certificate otherwise. Prefer mkcert: Chrome does not cache responses from sites
+with certificate errors. If the browser runs on another machine, make it trust
+the dev machine's mkcert root (`mkcert -CAROOT` shows where it lives). Set
+`VITE_DEV_HTTPS_CERT` and `VITE_DEV_HTTPS_KEY` to use your own certificate.
 
 Additional `omnigent server` options:
 
