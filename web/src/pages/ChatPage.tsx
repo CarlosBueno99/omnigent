@@ -23,6 +23,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { BotIcon, WandSparklesIcon, FileTextIcon, Loader2Icon, XIcon } from "lucide-react";
 import { Tooltip, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -88,7 +89,7 @@ import { PROJECT_LABEL_KEY } from "@/lib/sessionListCache";
 import { codexEffortLevelsForModel, findNativeModelOption } from "@/lib/codexNativeModels";
 import { modelConfigurationSourceRows } from "@/lib/modelConfigurationSource";
 import {
-  committedItemProvesDelivery,
+  takeFailedSendDraft,
   composerAttachmentKey,
   consumePendingInitialPrompt,
   holdsInitialDraft,
@@ -199,6 +200,12 @@ import { useMarkConversationSeen } from "@/hooks/useUnseenConversations";
 import { useFileDropTarget } from "@/hooks/useFileDropTarget";
 import { useComposerAttachments } from "@/hooks/useComposerAttachments";
 import { useSlashCompletion } from "@/hooks/useSlashCompletion";
+import { isBrandHarness, useHostMcpServers } from "@/hooks/useHarnessInventory";
+import {
+  getSessionHost,
+  sessionRoutingHostId,
+  subscribeSessionHostChanges,
+} from "@/lib/sessionHost";
 import { HostBadge } from "@/components/HostBadge";
 import {
   BUILTIN_SLASH_COMMANDS,
@@ -1714,6 +1721,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
           sandboxOffline={isActive && liveness.kind === "host_asleep"}
           onSurfaceElement={isActive ? setTerminalSurfaceEl : undefined}
           readOnly={entry.readOnly}
+          splittable
         />
         {isShown && (
           <ConnectionIndicator liveness={liveness} onShowReconnectHelp={onShowReconnectHelp} />
@@ -2007,12 +2015,14 @@ export function buildSlashCommandMap(
   showSide = false,
   skillPrefix: "/" | "$" = "/",
   supportsModelReset = false,
+  showMcp = false,
 ): Record<string, string> {
   const m: Record<string, string> = {};
   for (const [name, description] of Object.entries(BUILTIN_SLASH_COMMANDS)) {
     if (name === "/effort" && !showEffort) continue;
     if (name === "/model" && !showModel) continue;
     if (name === "/compact" && !showCompact) continue;
+    if (name === "/mcp" && !showMcp) continue;
     // /btw is a Claude Code CLI built-in — only offer it on claude-native.
     if (name === "/btw" && !showBtw) continue;
     // /side is a Codex CLI built-in (ephemeral fork) — only offer it on codex-native.
@@ -2418,7 +2428,7 @@ function ComposerImpl(
   const conversationId = useChatStore((s) => s.conversationId);
   const queuedMessages = useChatStore((s) => s.queuedMessages);
   const sessionStatus = useChatStore((s) => s.sessionStatus);
-  const flushBoundAgentId = useChatStore((s) => s.boundAgentId);
+  const boundAgentId = useChatStore((s) => s.boundAgentId);
   const maybeFlushQueuedHead = useChatStore((s) => s.maybeFlushQueuedHead);
   const dequeueMessage = useChatStore((s) => s.dequeueMessage);
   const steerMessage = useChatStore((s) => s.steerMessage);
@@ -2441,7 +2451,7 @@ function ComposerImpl(
     sessionStatus,
     queuedMessages,
     conversationId,
-    flushBoundAgentId,
+    boundAgentId,
     unreachable,
     maybeFlushQueuedHead,
   ]);
@@ -2451,6 +2461,32 @@ function ComposerImpl(
   // A send held while the host was offline goes out once the host is back.
   useReleaseHostHeldSends(composerSessionId);
   const { session: composerSession } = useSession(composerSessionId);
+  const mcpPanelRequested = composerSessionId !== null && value.trim() === "/mcp";
+  const nativeMcpHarness = nativeCodingAgentForHarness(sessionHarness)?.key;
+  const hostMcpHarness =
+    nativeMcpHarness !== undefined && isBrandHarness(nativeMcpHarness) ? nativeMcpHarness : null;
+  const inheritedHostId = useSyncExternalStore(subscribeSessionHostChanges, () =>
+    composerSessionId === null ? null : getSessionHost(composerSessionId),
+  );
+  const hostMcpRoutingId =
+    sessionRoutingHostId(composerSession?.hostId, composerSession?.labels) ?? inheritedHostId;
+  const hostMcpQuery = useHostMcpServers(
+    hostMcpRoutingId,
+    mcpPanelRequested && hostMcpHarness !== null,
+  );
+  const mcpServersStatus =
+    hostMcpHarness === null
+      ? undefined
+      : hostMcpRoutingId === null
+        ? "Host MCP servers unavailable: this session has no known host."
+        : hostMcpQuery.isLoading
+          ? "Loading MCP servers…"
+          : hostMcpQuery.isError
+            ? "Couldn’t load MCP servers from this session’s host."
+            : undefined;
+  const mcpSettingsHref =
+    `/settings/harnesses${nativeMcpHarness ? `/${sessionHarness}` : ""}` +
+    (hostMcpRoutingId ? `?host=${encodeURIComponent(hostMcpRoutingId)}` : "");
   const composerBranch = useChatStore((s) => s.gitBranch);
   const claudePermissionMode = useChatStore((s) => s.claudePermissionMode);
   const codexApprovalMode = useChatStore((s) => s.codexApprovalMode);
@@ -2579,6 +2615,7 @@ function ComposerImpl(
     onPaste,
     clearError,
     clear: clearAttachments,
+    accept: fileAccept,
   } = useComposerAttachments({
     onAccepted: () => {
       dirtyRef.current = true;
@@ -2697,6 +2734,7 @@ function ComposerImpl(
         showSide,
         skillPrefix,
         supportsModelReset,
+        composerSessionId !== null,
       ),
     [
       skills,
@@ -2707,6 +2745,7 @@ function ComposerImpl(
       showSide,
       skillPrefix,
       supportsModelReset,
+      composerSessionId,
     ],
   );
   const slashCommandNames = useMemo(() => Object.keys(slashCommands), [slashCommands]);
@@ -2855,49 +2894,19 @@ function ComposerImpl(
     // conversation's draft and wrongly conclude the user is mid-sentence,
     // dropping the failed message on the way back to the session it failed in.
     if (settledConversationId !== conversationId) return;
-    // The send may have proven delivered since the render that scheduled this
-    // effect: its committed item landed under the send's stable id (see
-    // `retractDeliveredSendDraft`), so restoring now would prime a duplicate.
-    // Not so for a send the server refused: its item is persisted too, but the
-    // runner never took it, so the text must come back for a resend.
-    if (committedItemProvesDelivery(useChatStore.getState().blocks, failedSendDraft)) {
-      useChatStore.setState({ failedSendDraft: null });
-      return;
-    }
-    useChatStore.setState({
-      failedSendDraft: null,
-      pendingRetryStableId: failedSendDraft.stableId ?? null,
-    });
-    // The user started something new while the send was in flight — their
-    // in-progress text wins over a clobbering restore.
-    if (valueRef.current.trim() !== "" || filesRef.current.length > 0) {
-      useChatStore.setState({ pendingRetryStableId: null });
-      return;
-    }
-    pendingFailedSendRestore.current = failedSendDraft.stableId
-      ? { stableId: failedSendDraft.stableId, draft }
+    // Re-check live delivery and preserve any newer input before consuming the failure.
+    const failed = takeFailedSendDraft(
+      failedSendDraft.conversationId,
+      valueRef.current.trim() !== "" || filesRef.current.length > 0,
+    );
+    if (!failed) return;
+    pendingFailedSendRestore.current = failed.stableId
+      ? { stableId: failed.stableId, draft }
       : null;
-    replaceText(failedSendDraft.text, failedSendDraft.replyDraft);
+    replaceText(failed.text, failed.replyDraft);
     textareaRef.current = tailTextareaRef.current;
     dirtyRef.current = true;
-    if (failedSendDraft.files.length > 0)
-      attachmentsRef.current.replaceFiles(failedSendDraft.files);
-    // Remember what was restored: if the "failed" send proves delivered (its
-    // stable id shows up as a committed item), the retraction effect below
-    // empties the composer instead of priming a duplicate send.
-    if (failedSendDraft.stableId) {
-      useChatStore.setState({
-        restoredSendDraft: {
-          conversationId: failedSendDraft.conversationId,
-          stableId: failedSendDraft.stableId,
-          text: failedSendDraft.text,
-          files: failedSendDraft.files,
-          replyDraft: failedSendDraft.replyDraft,
-          serverRefused: failedSendDraft.serverRefused,
-          delivered: false,
-        },
-      });
-    }
+    if (failed.files.length > 0) attachmentsRef.current.replaceFiles(failed.files);
     if (!isMobileRef.current) textareaRef.current?.focus();
   }, [failedSendDraft, conversationId, settledConversationId, replaceText, draft]);
 
@@ -3089,6 +3098,9 @@ function ComposerImpl(
         setCommandError(lines.join("\n"));
         return true;
       }
+      case "/mcp":
+        if (arg) setCommandError("Usage: /mcp");
+        return true;
       case "/help": {
         const lines = Object.entries(slashCommands).map(([name, desc]) => `${name} — ${desc}`);
         setCommandError(lines.join("\n"));
@@ -3110,6 +3122,11 @@ function ComposerImpl(
 
   // Skills insert at the caret; Enter/click executes standalone no-argument built-ins.
   const applyMenuSelection = (cmd: string) => {
+    if (cmd === "/mcp" && !slashCompletion.inline) {
+      setValue("/mcp");
+      dirtyRef.current = true;
+      return;
+    }
     if (slashCompletion.inline || slashCommandsWithArgs.has(cmd)) {
       completeMenuSelection(cmd);
     } else {
@@ -3129,11 +3146,36 @@ function ComposerImpl(
     [skills, skillPrefix],
   );
   const skillLabels = useMemo(() => skillDisplayNames(skills, skillPrefix), [skills, skillPrefix]);
+  const selectedAgent = agents?.find((agent) => agent.id === boundAgentId);
+  const mcpServers = useMemo(() => {
+    const byName = new Map(
+      (hostMcpQuery.data ?? [])
+        .filter((server) => server.harness === hostMcpHarness)
+        .map((server) => [
+          server.name,
+          {
+            name: server.name,
+            description:
+              [server.plugin && `${server.plugin} plugin`, server.url_host]
+                .filter(Boolean)
+                .join(" · ") || undefined,
+          },
+        ]),
+    );
+    for (const server of selectedAgent?.mcp_servers ?? []) {
+      byName.set(server.name, { name: server.name, description: server.description ?? undefined });
+    }
+    return [...byName.values()];
+  }, [hostMcpHarness, hostMcpQuery.data, selectedAgent?.mcp_servers]);
+
+  const slashCompletionCommands = mcpPanelRequested
+    ? { "/mcp": BUILTIN_SLASH_COMMANDS["/mcp"]! }
+    : slashCommands;
 
   // Complete the token at the caret; inline suggestions only insert skills.
   const slashCompletion = useSlashCompletion({
     text: value,
-    commands: slashCommands,
+    commands: slashCompletionCommands,
     skills: skillCommands,
     labels: skillLabels,
     textareaRef,
@@ -3147,6 +3189,7 @@ function ComposerImpl(
     onTabComplete: completeMenuSelection,
     clearText: () => setValue(""),
   });
+  const showMcpServers = mcpPanelRequested && !slashCompletion.inline;
 
   // Auto-grow the textarea from 1 row up to 10 rows, then let it scroll.
   // Growth stays in the flex column so the transcript viewport ends where the
@@ -3553,7 +3596,7 @@ function ComposerImpl(
         ref={fileInputRef}
         type="file"
         multiple
-        accept="image/*,application/pdf,text/*,application/json,.zip,.docx,.xlsx,.pptx,.db,.sqlite,.sqlite3"
+        accept={fileAccept}
         className="hidden"
         onChange={(e) => {
           if (e.target.files) {
@@ -3740,6 +3783,10 @@ function ComposerImpl(
                   labels={slashCompletion.labels}
                   skillsStatus={skillsStatus}
                   onRetrySkills={() => void refreshSkills()}
+                  showMcpServers={showMcpServers}
+                  mcpServers={mcpServers}
+                  mcpServersStatus={mcpServersStatus}
+                  mcpSettingsHref={mcpSettingsHref}
                 />
               )}
               {/* "@"-file-mention browser — native coding-agent sessions only.
