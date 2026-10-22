@@ -126,19 +126,28 @@ async def test_quiescence_idle_for_outcome_confirming_harness_delivers_nothing()
 
 
 @pytest.mark.asyncio
-async def test_turn_completed_idle_delivers_completed_result() -> None:
-    """The forwarder's confirmed turn-end edge still completes the dispatch."""
-    rig = _Rig("claude-native")
+@pytest.mark.parametrize(
+    ("harness", "edge", "expected"),
+    [
+        ("claude-native", {"turn_completed": True}, "completed"),
+        ("opencode-native", {"turn_outcome": "cancelled"}, "cancelled"),
+    ],
+)
+async def test_confirmed_idle_edge_delivers_its_outcome(
+    harness: str, edge: dict[str, object], expected: str
+) -> None:
+    """The forwarder's confirmed turn-end edge settles the dispatch with its outcome."""
+    rig = _Rig(harness)
     try:
         async with _runner_client(rig.app) as client:
             await rig.create_child_session(client)
             resp = await rig.post_status(
-                client, {"status": "idle", "turn_completed": True, "output": "the verdict"}
+                client, {"status": "idle", **edge, "output": "the verdict"}
             )
             assert resp.status_code == 204, resp.text
         delivered = rig.drained()
         assert [(item["status"], item["output"]) for item in delivered] == [
-            ("completed", "the verdict")
+            (expected, "the verdict")
         ]
     finally:
         rig.close()
@@ -159,32 +168,6 @@ async def test_quiescence_idle_for_legacy_native_harness_still_completes() -> No
             assert resp.status_code == 204, resp.text
         delivered = rig.drained()
         assert [(item["status"], item["output"]) for item in delivered] == [("completed", "done")]
-    finally:
-        rig.close()
-
-
-@pytest.mark.asyncio
-async def test_turn_outcome_cancelled_idle_delivers_cancelled_result() -> None:
-    """A forwarder's cancelled turn-outcome edge settles the dispatch cancelled.
-
-    OpenCode stamps ``turn_outcome: cancelled`` on the idle edge of a turn its
-    native server aborted, so an interrupt that reached that server settles the
-    parent dispatch as cancelled with the output the edge carried, rather than a
-    bare idle the runner would read as a completion.
-    """
-    rig = _Rig("opencode-native")
-    try:
-        async with _runner_client(rig.app) as client:
-            await rig.create_child_session(client)
-            resp = await rig.post_status(
-                client,
-                {"status": "idle", "turn_outcome": "cancelled", "output": "partial work"},
-            )
-            assert resp.status_code == 204, resp.text
-        delivered = rig.drained()
-        assert [(item["status"], item["output"]) for item in delivered] == [
-            ("cancelled", "partial work")
-        ]
     finally:
         rig.close()
 

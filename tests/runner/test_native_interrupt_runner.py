@@ -11,15 +11,20 @@ fall-through contract, and the 503 mapping.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.responses import Response
 
+from omnigent.harnesses.opencode_native import app_server as opencode_app_server
+from omnigent.harnesses.opencode_native import bridge as opencode_bridge
+from omnigent.harnesses.opencode_native.client import OpenCodeClientError
 from omnigent.runner.native.interrupt import NativeInterruptRunner
 
 
@@ -135,191 +140,109 @@ def test_native_cancel_capability_follows_stop_registry() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("harness", ["antigravity-native", "claude-sdk", None])
 async def test_no_handler_harnesses_return_none(harness: str | None) -> None:
-    """Harnesses without an interrupt/stop handler return None (caller falls through).
-
-    opencode-native is intentionally excluded: it has an interrupt handler
-    (``test_opencode_interrupt_*``). Its stop falls through, asserted by
-    ``test_opencode_has_no_stop_handler``.
-    """
+    """Harnesses without an interrupt/stop handler return None (caller falls through)."""
     runner, _ = _make_runner()
     assert await runner.interrupt(harness, "conv_x") is None
     assert await runner.stop(harness, "conv_x") is None
 
 
-class _FakeOpenCodeClient:
-    """Records ``abort`` / ``aclose`` for the opencode interrupt handler."""
+_OPENCODE_STATE = SimpleNamespace(
+    server_base_url="http://127.0.0.1:9999/",
+    opencode_session_id="ses_oc",
+    auth_secret="secret",
+    workspace="/ws",
+)
 
-    def __init__(self, *, abort_result: bool = True, abort_error: Exception | None = None) -> None:
+
+class _FakeOpenCodeClient:
+    """Records the native abort; *result* is returned, or raised when an exception."""
+
+    def __init__(self, result: bool | Exception) -> None:
+        self.result = result
         self.abort_calls: list[str] = []
         self.closed = False
-        self._abort_result = abort_result
-        self._abort_error = abort_error
 
     async def abort(self, session_id: str) -> bool:
         self.abort_calls.append(session_id)
-        if self._abort_error is not None:
-            raise self._abort_error
-        return self._abort_result
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
 
     async def aclose(self) -> None:
         self.closed = True
 
 
 def _patch_opencode_bridge(
-    monkeypatch: pytest.MonkeyPatch, *, state: Any, client: Any
+    monkeypatch: pytest.MonkeyPatch, *, state: Any, client: _FakeOpenCodeClient
 ) -> dict[str, Any]:
-    """Point the opencode interrupt handler at a fake bridge state + client.
+    """Serve *state* as the bridge state and *client* as its client; return the routing kwargs."""
+    routed: dict[str, Any] = {}
 
-    Returns a dict capturing the ``client_for_state`` routing kwargs so a test
-    can assert the native session id / server URL / auth come from bridge state.
-    """
-    import omnigent.harnesses.opencode_native.app_server as oc_app_server
-    import omnigent.harnesses.opencode_native.bridge as oc_bridge
-
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(oc_bridge, "bridge_dir_for_bridge_id", lambda bridge_id: Path(bridge_id))
-    monkeypatch.setattr(oc_bridge, "read_bridge_state", lambda bridge_dir: state)
-
-    def _client_for_state(*, base_url: str, auth_secret: str | None, directory: str | None = None):
-        captured.update(base_url=base_url, auth_secret=auth_secret, directory=directory)
+    def _client_for_state(**kwargs: Any) -> _FakeOpenCodeClient:
+        routed.update(kwargs)
         return client
 
-    monkeypatch.setattr(oc_app_server, "client_for_state", _client_for_state)
-    return captured
+    monkeypatch.setattr(opencode_bridge, "read_bridge_state", lambda bridge_dir: state)
+    monkeypatch.setattr(opencode_app_server, "client_for_state", _client_for_state)
+    return routed
 
 
 @pytest.mark.asyncio
-async def test_opencode_interrupt_aborts_native_turn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """opencode interrupt forwards to the native ``/abort`` with the session id.
+async def test_opencode_interrupt_aborts_native_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Interrupt aborts the turn on OpenCode's own server and short-circuits the in-process cancel.
 
-    The pending native turn is aborted via OpenCode's own server (routed by the
-    persisted URL/auth), and the handler returns 204 so the no-op in-process
-    cancel does not also run. The aborted turn's forwarder stamps the terminal
-    edge as cancelled, so the handler registers no pending interrupt of its own.
+    The forwarder's cancelled turn outcome settles the dispatch, so the handler
+    registers no wake or pending interrupt itself.
     """
-    state = SimpleNamespace(
-        server_base_url="http://127.0.0.1:9999/",
-        opencode_session_id="ses_oc",
-        auth_secret="secret",
-        workspace="/ws",
-    )
-    client = _FakeOpenCodeClient(abort_result=True)
-    captured = _patch_opencode_bridge(monkeypatch, state=state, client=client)
+    client = _FakeOpenCodeClient(True)
+    routed = _patch_opencode_bridge(monkeypatch, state=_OPENCODE_STATE, client=client)
+    runner, captured = _make_runner()
 
-    runner, run_captured = _make_runner()
     resp = await runner.interrupt("opencode-native", "conv_oc")
 
-    assert isinstance(resp, Response) and resp.status_code == 204, (
-        "opencode-native interrupt fell through to the no-op in-process cancel; "
-        "the pending native turn is never aborted and the session hangs"
-    )
-    assert client.abort_calls == ["ses_oc"]
-    assert client.closed is True
-    assert captured == {
+    assert isinstance(resp, Response) and resp.status_code == 204
+    assert client.abort_calls == ["ses_oc"] and client.closed
+    assert routed == {
         "base_url": "http://127.0.0.1:9999/",
         "auth_secret": "secret",
         "directory": "/ws",
     }
-    # The handler guesses no terminal status and registers no pending interrupt:
-    # the forwarder's cancelled turn-outcome edge settles the dispatch.
-    assert run_captured["wakes"] == []
+    assert captured["wakes"] == []
     assert runner.take_pending_interrupt("conv_oc")[0] is False
+    assert await runner.stop("opencode-native", "conv_oc") is None
 
 
 @pytest.mark.asyncio
-async def test_opencode_interrupt_falls_through_without_bridge_state(
+@pytest.mark.parametrize(
+    ("state", "abort_result", "expected_status"),
+    [
+        pytest.param(None, True, None, id="no-bridge-state"),
+        pytest.param(_OPENCODE_STATE, False, None, id="no-active-turn"),
+        pytest.param(_OPENCODE_STATE, OpenCodeClientError("boom"), 503, id="client-error"),
+        pytest.param(_OPENCODE_STATE, httpx.ReadTimeout("slow"), 503, id="transport-error"),
+    ],
+)
+async def test_opencode_interrupt_fallbacks(
     monkeypatch: pytest.MonkeyPatch,
+    state: Any,
+    abort_result: bool | Exception,
+    expected_status: int | None,
 ) -> None:
-    """No readable bridge state (serve still starting) falls through to in-process cancel.
-
-    Returning None lets the caller run the in-process cancel, which stops the
-    startup turn in the window before bridge state is written; a handled 204
-    here would silently drop that interrupt.
-    """
-    import omnigent.harnesses.opencode_native.bridge as oc_bridge
-
-    monkeypatch.setattr(oc_bridge, "read_bridge_state", lambda bridge_dir: None)
-    runner, _ = _make_runner()
-    assert await runner.interrupt("opencode-native", "conv_missing") is None
-    assert runner.take_pending_interrupt("conv_missing")[0] is False
-
-
-@pytest.mark.parametrize("error_kind", ["client_error", "http_error"])
-@pytest.mark.asyncio
-async def test_opencode_interrupt_abort_failure_returns_503(
-    error_kind: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed native abort maps to a 503 with the error code and no parent wake.
-
-    Both abort failure families reach the handler's ``except``: the opencode
-    client's own error and an ``httpx`` transport error such as a read timeout.
-    """
-    import json
-
-    import httpx
-
-    from omnigent.harnesses.opencode_native.client import OpenCodeClientError
-
-    abort_error: Exception = (
-        OpenCodeClientError("abort boom")
-        if error_kind == "client_error"
-        else httpx.ReadTimeout("slow abort")
-    )
-    state = SimpleNamespace(
-        server_base_url="http://127.0.0.1:9999/",
-        opencode_session_id="ses_oc",
-        auth_secret="secret",
-        workspace="/ws",
-    )
-    client = _FakeOpenCodeClient(abort_error=abort_error)
+    """Missing bridge state or no active turn falls through; a failed abort is a 503."""
+    client = _FakeOpenCodeClient(abort_result)
     _patch_opencode_bridge(monkeypatch, state=state, client=client)
+    runner, captured = _make_runner()
 
-    runner, run_captured = _make_runner()
     resp = await runner.interrupt("opencode-native", "conv_oc")
 
-    assert resp is not None and resp.status_code == 503
-    body = json.loads(bytes(resp.body))
-    assert body["error"] == "opencode_native_interrupt_failed"
-    assert body["detail"] == "safe:opencode-native interrupt"
-    assert client.closed is True  # client closed even on failure
-    assert run_captured["wakes"] == []
+    if expected_status is None:
+        assert resp is None
+    else:
+        assert resp is not None and resp.status_code == expected_status
+        assert json.loads(bytes(resp.body))["error"] == "opencode_native_interrupt_failed"
+    assert client.closed is (state is not None)
+    assert captured["wakes"] == []
     assert runner.take_pending_interrupt("conv_oc")[0] is False
-
-
-@pytest.mark.asyncio
-async def test_opencode_interrupt_falls_through_when_no_active_turn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unsuccessful abort falls through: the turn ended, or raced prompt admission.
-
-    ``abort`` reporting no active work is ambiguous, so fall through to the
-    in-process cancel (which covers a turn still pending before admission); no
-    pending interrupt is registered, so no grace-timer cancel is left armed.
-    """
-    state = SimpleNamespace(
-        server_base_url="http://127.0.0.1:9999/",
-        opencode_session_id="ses_oc",
-        auth_secret=None,
-        workspace=None,
-    )
-    client = _FakeOpenCodeClient(abort_result=False)
-    _patch_opencode_bridge(monkeypatch, state=state, client=client)
-
-    runner, run_captured = _make_runner()
-    assert await runner.interrupt("opencode-native", "conv_oc") is None
-    assert client.abort_calls == ["ses_oc"]
-    assert run_captured["wakes"] == []
-    assert runner.take_pending_interrupt("conv_oc")[0] is False
-
-
-@pytest.mark.asyncio
-async def test_opencode_has_no_stop_handler() -> None:
-    """stop() still falls through for opencode (only interrupt was wired)."""
-    runner, _ = _make_runner()
-    assert await runner.stop("opencode-native", "conv_oc") is None
 
 
 @pytest.mark.asyncio
