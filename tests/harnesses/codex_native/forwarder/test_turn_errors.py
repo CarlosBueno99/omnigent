@@ -14,6 +14,7 @@ import pytest
 
 from omnigent.harnesses.codex_egress import detect_certificate_failure
 from omnigent.harnesses.codex_native import forwarder as fwd
+from omnigent.harnesses.codex_native.app_server import CodexAppServerResponseError
 from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
     read_bridge_state,
@@ -1464,17 +1465,67 @@ async def test_other_turn_failures_stay_in_codex_history(tmp_path: Path) -> None
     assert [post["status"] for post in _status_posts(client)] == ["failed"]
 
 
-class _FailingRevertCodexClient:
+class _RejectingCodexClient(_InterruptRecordingCodexClient):
+    """Records RPCs and answers the given methods with a Codex JSON-RPC error."""
+
+    def __init__(self, rejections: dict[str, dict]) -> None:
+        super().__init__()
+        self.rejections = rejections
+
     async def request(self, method: str, params: dict) -> dict:
-        raise RuntimeError(f"{method} is not supported")
+        self.requests.append((method, params))
+        if method in self.rejections:
+            raise CodexAppServerResponseError(self.rejections[method])
+        return {"result": {}}
+
+
+_REVERT_UNKNOWN = {
+    "code": -32600,
+    "message": "Invalid request: unknown variant `thread/revert`, expected one of "
+    "`initialize`, `thread/rollback`, `thread/list`",
+}
+_THREAD_NOT_FOUND = {"code": -32600, "message": "thread not found: thread_123"}
 
 
 @pytest.mark.asyncio
+async def test_codex_without_thread_revert_rolls_back_the_safety_blocked_turn(
+    tmp_path: Path,
+) -> None:
+    """Codex releases that predate thread/revert drop the refused turn by rollback."""
+    _seed_active_turn(tmp_path, "turn_123")
+    codex_client = _RejectingCodexClient({"thread/revert": _REVERT_UNKNOWN})
+
+    await _forward_turn_events(
+        tmp_path, [_failed_turn_completed_event(_SAFETY_BLOCK_MESSAGE)], codex_client=codex_client
+    )
+
+    assert codex_client.requests == [
+        ("thread/revert", {"threadId": "thread_123", "beforeTurnId": "turn_123"}),
+        ("thread/rollback", {"threadId": "thread_123", "numTurns": 1}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rejections", "attempted"),
+    [
+        ({"thread/revert": _THREAD_NOT_FOUND}, ["thread/revert"]),
+        (
+            {"thread/revert": _REVERT_UNKNOWN, "thread/rollback": _THREAD_NOT_FOUND},
+            ["thread/revert", "thread/rollback"],
+        ),
+    ],
+    ids=["revert-refused", "rollback-refused"],
+)
 async def test_failed_revert_still_ends_the_safety_blocked_turn(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    rejections: dict[str, dict],
+    attempted: list[str],
 ) -> None:
     """A Codex build that rejects the revert still sees the refusal and an idle bridge."""
     _seed_active_turn(tmp_path, "turn_123")
+    codex_client = _RejectingCodexClient(rejections)
 
     with caplog.at_level("WARNING", logger=fwd.__name__):
         client = await _forward_turn_events(
@@ -1483,9 +1534,10 @@ async def test_failed_revert_still_ends_the_safety_blocked_turn(
                 _terminal_error_event(_SAFETY_BLOCK_MESSAGE),
                 _failed_turn_completed_event(_SAFETY_BLOCK_MESSAGE),
             ],
-            codex_client=_FailingRevertCodexClient(),
+            codex_client=codex_client,
         )
 
+    assert [method for method, _params in codex_client.requests] == attempted
     assert [post["output"] for post in _status_posts(client)] == [_SAFETY_BLOCK_MESSAGE]
     assert any("could not revert safety-blocked turn" in r.getMessage() for r in caplog.records)
     state = read_bridge_state(tmp_path)

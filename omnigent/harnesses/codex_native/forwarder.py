@@ -32,6 +32,7 @@ from omnigent.harnesses.codex_native.app_server import (
     CodexAppServerResponseError,
     CodexMessage,
     client_for_transport,
+    codex_rejects_method,
 )
 from omnigent.harnesses.codex_native.bridge import (
     CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
@@ -4233,9 +4234,15 @@ async def _maybe_revert_safety_blocked_turn(
     if not blocked:
         return
     try:
-        await codex_client.request(
-            "thread/revert", {"threadId": thread_id, "beforeTurnId": turn_id}
-        )
+        try:
+            await codex_client.request(
+                "thread/revert", {"threadId": thread_id, "beforeTurnId": turn_id}
+            )
+        except CodexAppServerResponseError as exc:
+            if not codex_rejects_method(exc, "thread/revert"):
+                raise
+            # Codex releases before thread/revert can only drop the latest turns.
+            await codex_client.request("thread/rollback", {"threadId": thread_id, "numTurns": 1})
     except Exception:  # the refusal is already surfaced as a failed turn.
         _logger.warning(
             "Codex forwarder could not revert safety-blocked turn: turn_id=%s",
