@@ -598,8 +598,6 @@ class SandboxLifecycle(ABC):
         preserves copied files instead of recloning, and returns the destination
         cwd corresponding to ``source_workspace``. Providers may reserve the
         destination id here and finish copying during ``start_host``.
-        Copy provenance must survive new launcher instances: resume reuses the
-        destination's storage and never recopies the source.
 
         :param source_sandbox_id: Server-resolved source generation to copy.
         :param name: Human-readable name for the new sandbox.

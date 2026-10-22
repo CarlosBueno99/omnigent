@@ -39,11 +39,7 @@ from omnigent.server.managed_hosts import (
 from omnigent.server.routes import _session_create_validation as create_validation
 from omnigent.server.routes._auth_helpers import SessionAccess
 from omnigent.server.routes.sessions import create_sessions_router, routes_core
-from omnigent.server.sandbox_forks import (
-    SANDBOX_FORK_STATE_LABEL,
-    require_bound_sandbox_fork,
-    sandbox_fork_provider,
-)
+from omnigent.server.sandbox_forks import sandbox_fork_provider
 from omnigent.stores.conversation_store import (
     _FORK_ONLY_DROPPED_LABEL_KEYS,
     FORK_SOURCE_LABEL_KEY,
@@ -2048,12 +2044,7 @@ async def test_fork_sandbox_authorizes_files_and_pins_source_generation(
     fork = store.get_conversation(response.json()["id"])
     assert fork is not None
     assert fork.labels[REQUESTED_HOST_ID_LABEL_KEY] == launch["host_id"]
-    assert fork.labels[SANDBOX_FORK_STATE_LABEL] == "pending"
-    assert SANDBOX_FORK_STATE_LABEL not in response.json()["labels"]
     assert store.fork_calls[0]["resume_source_native_session"] is False
-    # A restarted process has no launch tracker; an incomplete copy cannot run fresh.
-    with pytest.raises(OmnigentError, match="sandbox copy is not ready yet"):
-        require_bound_sandbox_fork(fork)
 
 
 @pytest.mark.parametrize(
@@ -2070,17 +2061,6 @@ def test_fork_sandbox_rejects_conflicting_request_fields(body: dict[str, Any]) -
     response = TestClient(_build_app(store)).post(f"/v1/sessions/{source.id}/fork", json=body)
     assert response.status_code == 422, response.text
     assert store.fork_calls == []
-
-
-def test_sandbox_fork_metadata_cannot_be_forged() -> None:
-    source = _make_conversation()
-    store = _ConversationStore({source.id: source})
-    response = TestClient(_build_app(store)).patch(
-        f"/v1/sessions/{source.id}", json={"labels": {SANDBOX_FORK_STATE_LABEL: "ready"}}
-    )
-    assert response.status_code == 400, response.text
-    assert "server-internal" in response.text
-    assert source.labels == {}
 
 
 @pytest.mark.asyncio

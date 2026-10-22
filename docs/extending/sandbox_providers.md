@@ -290,10 +290,8 @@ Providers declare their feature set via a `capabilities` property returning
 
 ## Forking a session's sandbox
 
-Sandbox copying is opt-in. Existing providers and API callers keep their current
-behavior: a session fork can create a fresh sandbox and clone its repositories.
-A provider enables copying by returning `SandboxCapabilities(fork_sandbox=True, ...)`
-and implementing this optional lifecycle method:
+Sandbox copying is opt-in. A provider enables it with
+`SandboxCapabilities(fork_sandbox=True, ...)` and implements this lifecycle hook:
 
 ```python
 def fork(
@@ -310,75 +308,42 @@ def fork(
 ```
 
 For an injected launcher, set `ManagedSandboxConfig.provider` to the launcher's
-provider name so capability discovery and source-provider selection can find it.
+provider name so capability discovery can find it. The adapter can call the
+controller's own HTTP API; Omnigent does not prescribe an endpoint or a storage
+copy mechanism.
 
-Omnigent resolves the source sandbox and cwd from the session, checks the
-requesting user's workspace access, and selects that same provider. The target
-user comes from authentication. The idempotency key is the new managed host's
-stable id. Clients request the copy with `fork_sandbox: true` on the existing
-session fork API; omitting it preserves existing behavior. Eligible sessions
-show **Fork sandbox as well**, checked by default, in the fork dialog.
-
-Workspace access requires edit permission (including inherited edit access) or
-file sharing enabled on the source session itself. A parent's file-sharing
-setting does not enable file sharing on its child sessions.
+Clients request copying with `fork_sandbox: true` and `host_type: "managed"` on
+`POST /v1/sessions/{id}/fork`. Omnigent checks access to the source workspace,
+resolves its sandbox id and provider, and supplies the authenticated destination
+user. The idempotency key is the new managed host's stable id.
 
 The launch sequence is `prepare()` → `fork()` → register a fresh host and token
-→ `start_host()` → wait for the new host to connect. No built-in provider enables
-the capability yet; custom providers can implement it while their controller's
-storage-copy mechanism evolves.
+→ `start_host()` → wait for the host to connect. The controller must:
 
-Providers opting in must satisfy these requirements:
+- Return a new sandbox id with independent writable storage and authorize
+  ownership for `target_user_id`. Files outside the shared workspace require
+  separate authorization or exclusion.
+- Deduplicate calls using `idempotency_key` and reject reuse with a different
+  source or owner. Clean up partial copies if the hook fails before returning an
+  id; after it returns, the existing startup-failure cleanup applies.
+- Remove inherited credentials and runtime identity before exposing the copy.
+  `start_host` receives the new host id, token, and configuration.
+- Preserve copied files during `start_host` instead of recloning repositories,
+  and return the destination cwd corresponding to `source_workspace`. The copy
+  must finish before the destination host starts.
 
-- Return a new sandbox id. The copy has independent writable storage; writes and
-  deletion must not affect the source. The controller authorizes the transfer
-  to `target_user_id` and applies its ownership and file-sharing policy.
-  Omnigent's workspace access check does not authorize copying unrelated files
-  elsewhere in the sandbox; the controller must restrict or separately authorize
-  those files.
-- Deduplicate repeated calls using `idempotency_key`; reject reuse with a
-  different source or target owner. A controller may perform
-  an asynchronous NFS copy internally; the launcher waits for it, or reserves
-  the new id and completes copying in `start_host` before launching the host.
-  The provider cleans up partial copies when `fork` fails before returning an id.
-  After a successful return, Omnigent uses normal sandbox teardown on startup
-  failure. Copy failure never falls back to an empty sandbox.
-- Never start a copied host process or expose the source user's credentials.
-  Remove or replace copied runtime identity, tokens, and credential files before
-  the new user can access the sandbox. `start_host` receives the new host id,
-  token and configuration through the ordinary launch contract.
-- Preserve copied contents during `start_host`, including uncommitted and
-  untracked files. The default exec launcher clones repositories unconditionally,
-  so a fork-capable provider must customize workspace materialization. Return
-  the destination cwd corresponding to `source_workspace`, including a session's
-  subdirectory when ownership changes move the mount to a different path.
-- Resume the destination's own retained storage when it sleeps. Omnigent refuses
-  cold replacement of a forked sandbox if its workspace cannot be recovered;
-  it does not copy a newer version of the source automatically.
-  This protection is stored on the host and survives deletion of the original
-  forked session while other sessions still use that host.
-  Store copy provenance with the controller's sandbox record: resume uses a new
-  launcher instance and calls `resume(target_id)` followed by `start_host`, with
-  no new `fork` call or source cwd. If retained storage is gone, fail instead of
-  silently creating an empty workspace.
+Storage copying, consistency, retention, and recovery remain the controller's
+responsibility under the existing sandbox lifecycle.
 
-Copied sandboxes follow the deployment's normal lifetime, deletion, and reaper
-policies. `terminate` can be called after startup failure, session deletion, or
-the configured offline retention period. The controller owns storage retention
-and backup; the copy capability does not exempt a sandbox from cleanup. Reaping
-detaches the sandbox id from its host, so a reaped copy cannot be resumed through
-the ordinary wake path even if the controller retains its files.
+Eligible sessions show **Fork sandbox as well**, checked by default. Unchecking
+it uses the existing destination picker. Forking from an earlier message copies
+current files; it does not restore historical filesystem state. Omitting the API
+flag preserves existing behavior. No built-in provider enables copying yet.
 
-Copying uses the source's current filesystem. Forking from an earlier message
-truncates conversation history but does not restore historical files. The
-controller defines copy consistency if the source is still writing.
-
-To verify an integration, create both an uncommitted change and an untracked
-file as user A. Share workspace access with user B and fork with the checkbox
-on. Confirm B owns the new sandbox, can see and edit both files, starts in the
-corresponding cwd, and cannot alter A's copy. Check that B receives fresh
-credentials. Repeat with the checkbox off, a controller rejection, a repeated
-idempotency key, and a stopped destination whose storage must be resumed.
+To verify an integration, make an uncommitted change and an untracked file as A,
+share workspace access with B, and fork as B with the checkbox on. Confirm B owns
+an independent copy with both files, the corresponding cwd, and fresh credentials.
+Repeat unchecked and with a controller rejection.
 
 ## Network policy for harness bridge servers
 

@@ -3839,7 +3839,6 @@ async def launch_managed_host(
         on_stage=on_stage,
         slice_key_enabled=slice_key_enabled,
         owner_credentials=config.owner_credentials,
-        preserve_workspace=fork_source is not None,
     )
     return ManagedHostLaunch(host_id=host_id, workspace=workspace)
 
@@ -3853,7 +3852,6 @@ async def relaunch_managed_host(
     agent_name: str | None = None,
     on_stage: SandboxStageObserver | None = None,
     slice_key_enabled: bool = False,
-    preserve_workspace: bool = False,
 ) -> ManagedHostLaunch:
     """
     Provision a NEW sandbox generation for an existing managed host.
@@ -3888,21 +3886,11 @@ async def relaunch_managed_host(
         ``None`` disables progress reporting.
     :param slice_key_enabled: Whether the host routes by its own id, as at its
         first launch (see :func:`host_slice_key_enabled`).
-    :param preserve_workspace: Refuse cold replacement of a copied workspace.
-        Callers may resume its existing sandbox before attempting a relaunch.
     :returns: The (unchanged) host id + fresh in-sandbox workspace.
     :raises HTTPException: 400 when the host's recorded provider no
         longer matches the configured launcher; 502 when
         provisioning, cloning, host startup, or registration fails.
     """
-    if preserve_workspace or host.preserve_workspace:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "The forked sandbox workspace is unavailable. Restore the sandbox with "
-                "your sandbox provider, or fork the session into a new sandbox."
-            ),
-        )
     launcher = _launcher_for_teardown(host, config)
     if launcher is None:
         raise HTTPException(
@@ -4075,7 +4063,6 @@ async def _register_and_start_host(
     keep_host_on_failure: bool = False,
     slice_key_enabled: bool = False,
     owner_credentials: Mapping[str, Callable[[str], Mapping[str, object] | None]] | None = None,
-    preserve_workspace: bool = False,
 ) -> str:
     """
     Arm the credential, start the in-sandbox host, and await its
@@ -4117,7 +4104,6 @@ async def _register_and_start_host(
         (:attr:`ManagedSandboxDeployment.owner_credentials`), so a first
         launch's failure teardown still acts as the owner. ``None`` binds
         none.
-    :param preserve_workspace: Protect this host's copied workspace from cold replacement.
     :returns: The absolute in-sandbox workspace path.
     :raises HTTPException: 502 when cloning, host startup, or
         registration fails.
@@ -4147,7 +4133,6 @@ async def _register_and_start_host(
                 provider=launcher.provider,
                 sandbox_id=sandbox_id,
                 token_expires_at=now_epoch() + config.token_ttl_s,
-                preserve_workspace=preserve_workspace,
             )
         # Uniform across providers: provision() fixed the sandbox id and the
         # token was armed against it above, so start_host starts the host with

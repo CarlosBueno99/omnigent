@@ -109,7 +109,6 @@ def test_fork_drops_sandbox_repo_label(
         {
             MANAGED_REPO_LABEL_KEY: "https://github.com/org/repo#main",
             REQUESTED_HOST_ID_LABEL_KEY: "0123456789abcdef0123456789abcdef",
-            "omnigent.sandbox.fork.state": "ready",
             "kept": "yes",
         },
     )
@@ -119,7 +118,6 @@ def test_fork_drops_sandbox_repo_label(
     assert fork.labels["kept"] == "yes"
     assert MANAGED_REPO_LABEL_KEY not in fork.labels
     assert REQUESTED_HOST_ID_LABEL_KEY not in fork.labels
-    assert "omnigent.sandbox.fork.state" not in fork.labels
 
 
 def test_fork_drops_per_repo_sandbox_labels(

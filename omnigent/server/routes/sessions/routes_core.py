@@ -188,7 +188,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _validate_session_model_selection,
     ensure_runner_connected,
 )
-from omnigent.server.sandbox_forks import SANDBOX_FORK_STATE_LABEL, sandbox_fork_provider
+from omnigent.server.sandbox_forks import sandbox_fork_provider
 from omnigent.server.schemas import (
     AutomaticSessionRenameRequest,
     AutomaticSessionRenameResponse,
@@ -3849,8 +3849,6 @@ def register_core_routes(
             from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY
 
             extra_labels[REQUESTED_HOST_ID_LABEL_KEY] = requested_host_id
-        if body.fork_sandbox:
-            extra_labels[SANDBOX_FORK_STATE_LABEL] = "pending"
 
         # When the fork binds a NATIVE target, the native CLI won't replay
         # the copied Omnigent transcript on its own — mark the fork so the

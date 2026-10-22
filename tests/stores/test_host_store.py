@@ -121,7 +121,6 @@ def test_upsert_creates_host_on_first_connect(
     assert host.status == "online"
     assert host.created_at > 0
     assert host.updated_at == host.created_at
-    assert host.preserve_workspace is False
 
     # Verify the row survives a fresh get.
     fetched = host_store.get_host("bdda8ba7e34130318b54dd872eb160af")
@@ -1125,10 +1124,7 @@ def test_binding_cannot_reactivate_sandbox_pending_termination(host_store: HostS
 # ── Managed-host credential methods ────────────────────────
 
 
-@pytest.mark.parametrize("preserve_workspace", [False, True])
-def test_register_managed_host_and_resolve_token_roundtrip(
-    db_uri: str, preserve_workspace: bool
-) -> None:
+def test_register_managed_host_and_resolve_token_roundtrip(db_uri: str) -> None:
     """
     The raw launch token resolves back to the full pre-registered host
     — owner, provider, sandbox id intact, status ``"offline"`` until
@@ -1145,7 +1141,6 @@ def test_register_managed_host_and_resolve_token_roundtrip(
         provider="modal",
         sandbox_id="sb-m1",
         token_expires_at=now_epoch() + 3600,
-        preserve_workspace=preserve_workspace,
     )
 
     resolved = store.resolve_launch_token("e932ccae9eeb8f2a86f7ebfc5089c28d", "raw-launch-token-1")
@@ -1155,7 +1150,6 @@ def test_register_managed_host_and_resolve_token_roundtrip(
     assert resolved.user_id == "alice@example.com"
     assert resolved.sandbox_provider == "modal"
     assert resolved.sandbox_id == "sb-m1"
-    assert resolved.preserve_workspace is preserve_workspace
     # Pre-registered, not yet connected.
     assert resolved.status == "offline"
 
@@ -1245,7 +1239,6 @@ def test_managed_columns_survive_connect(db_uri: str) -> None:
         provider="modal",
         sandbox_id="sb-m4",
         token_expires_at=now_epoch() + 3600,
-        preserve_workspace=True,
     )
 
     connected = store.upsert_on_connect(
@@ -1258,29 +1251,11 @@ def test_managed_columns_survive_connect(db_uri: str) -> None:
     assert connected.status == "online"
     assert connected.sandbox_provider == "modal"
     assert connected.sandbox_id == "sb-m4"
-    assert connected.preserve_workspace is True
     # The credential still resolves after connect.
     assert (
         store.resolve_launch_token("d55a61010459cea88ed2af0fe916139b", "raw-launch-token-4")
         is not None
     )
-
-    rotated = store.upsert_on_connect(
-        host_id=uuid.uuid4().hex,
-        name="managed-m4",
-        user_id="alice@example.com",
-    )
-    assert rotated.preserve_workspace is True
-    assert store.get_host(rotated.host_id) == rotated
-
-    reowned = store.upsert_on_connect(
-        host_id=rotated.host_id,
-        name="managed-m4",
-        user_id="bob@example.com",
-        allow_host_id_reown=True,
-    )
-    assert reowned.preserve_workspace is True
-    assert store.get_host(reowned.host_id) == reowned
 
 
 def test_delete_host_hides_row_and_retains_cleanup_tombstone(db_uri: str) -> None:
@@ -1621,7 +1596,6 @@ def test_detach_and_resume_rearm_are_atomic_competitors(db_uri: str) -> None:
         provider="modal",
         sandbox_id="sb-race",
         token_expires_at=now_epoch() + 3600,
-        preserve_workspace=True,
     )
     _set_updated_at(db_uri, host_id, 100)
     stale = store.get_host(host_id)
@@ -1636,7 +1610,6 @@ def test_detach_and_resume_rearm_are_atomic_competitors(db_uri: str) -> None:
     )
     assert armed is not None
     assert armed.status == "offline"
-    assert armed.preserve_workspace is True
     assert (
         store.detach_stale_managed_sandbox(
             host_id,
@@ -1668,8 +1641,6 @@ def test_detach_and_resume_rearm_are_atomic_competitors(db_uri: str) -> None:
         is None
     )
     assert store.resolve_launch_token(host_id, "too-late-token") is None
-    detached = store.get_host(host_id)
-    assert detached is not None and detached.preserve_workspace is True
 
 
 def test_pending_cleanup_rejects_reused_active_sandbox_id(db_uri: str) -> None:

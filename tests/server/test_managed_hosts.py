@@ -2549,7 +2549,6 @@ async def test_launch_success_registers_host_and_returns_workspace(
     assert host.status == "online"
     assert host.sandbox_provider == "modal"
     assert host.sandbox_id == "sb-fake-1"
-    assert host.preserve_workspace is False
     # The token injected into the sandbox is the one whose digest was
     # stored: resolving it (the tunnel's auth path) yields this host,
     # which also proves it is unexpired.
@@ -2607,15 +2606,8 @@ async def test_launch_forks_with_target_identity_and_preserves_workspace(db_uri:
     assert result.workspace == "/copied/workspace/subdirectory"
     target = host_store.get_host(result.host_id)
     assert target is not None and target.sandbox_id == "sb-forked"
-    assert target.preserve_workspace is True
     assert host_store.resolve_launch_token(source.host_id, "source-token") is not None
-
-    with pytest.raises(HTTPException, match="forked sandbox workspace") as error:
-        await relaunch_managed_host(config=config, host=target, host_store=host_store)
-    assert error.value.status_code == 409
-    assert fake.provisioned_names == []
     assert fake.terminated == []
-    assert host_store.get_host(target_id) == target
 
 
 async def test_launch_fork_rejects_unsupported_provider_before_preparation(db_uri: str) -> None:
@@ -5225,61 +5217,6 @@ async def test_run_managed_launch_leaves_the_runner_unclassified(
     assert captured["agent_name"] is expected
 
 
-@pytest.mark.parametrize("recovery_source", ["original", "sibling", "deleted-original"])
-async def test_run_managed_launch_preserves_a_forked_workspace_on_recovery(
-    db_uri: str, recovery_source: str
-) -> None:
-    from omnigent.server.routes._sessions import orchestration
-    from omnigent.server.sandbox_forks import SANDBOX_FORK_STATE_LABEL
-
-    host_store = HostStore(db_uri)
-    host = host_store.register_managed_host(
-        host_id=uuid.uuid4().hex,
-        name="copied-host",
-        user_id=_OWNER,
-        token="copied-token",
-        provider="modal",
-        sandbox_id="sb-copied",
-        token_expires_at=now_epoch() + 3600,
-        preserve_workspace=True,
-    )
-    conversations = SqlAlchemyConversationStore(db_uri)
-    copied = conversations.create_conversation(
-        host_id=host.host_id,
-        workspace="/copied/workspace",
-        labels={SANDBOX_FORK_STATE_LABEL: "ready"},
-    )
-    conversation = (
-        copied
-        if recovery_source == "original"
-        else conversations.create_conversation(host_id=host.host_id, workspace="/copied/workspace")
-    )
-    if recovery_source == "deleted-original":
-        assert await conversations.delete_conversation(copied.id)
-
-    fake = FakeSandboxLauncher()
-    tracker = ManagedLaunchTracker()
-    tracker.begin(conversation.id)
-    await orchestration._run_managed_launch(
-        session_id=conversation.id,
-        owner=_OWNER,
-        sandbox_config=_injected_config(fake),
-        repos=[],
-        tracker=tracker,
-        conversation_store=conversations,
-        host_store=host_store,
-        host_registry=None,
-        tunnel_registry=None,
-        relaunch_host=host,
-    )
-    launch = tracker.get(conversation.id)
-    assert launch is not None and launch.settled.is_set()
-    assert "forked sandbox workspace" in (launch.error or "")
-    assert fake.provisioned_names == []
-    assert fake.terminated == []
-    assert host_store.get_host(host.host_id) == host
-
-
 async def test_run_managed_launch_resolves_the_classifier_on_its_own_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5661,7 +5598,7 @@ async def test_recreated_sandbox_records_and_publishes_workspace_reset_notice(
             assert session_id == "conv_1"
             assert host_id == "host_1"
             assert workspace == "/root/workspace/omnigent"
-            return SimpleNamespace(id=session_id, host_id=host_id, workspace=workspace, labels={})
+            return SimpleNamespace(id=session_id, host_id=host_id, workspace=workspace)
 
         def append(self, session_id: str, items: list[object]) -> list[object]:
             assert session_id == "conv_1"

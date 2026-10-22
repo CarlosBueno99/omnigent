@@ -2565,26 +2565,19 @@ def register_events_routes(
         # its runner tunnel already up (the background task awaits
         # it), failure surfaces the recorded reason.
         if runner_client is None and conv.host_id is None:
-            from omnigent.server.sandbox_forks import (
-                SANDBOX_FORK_STATE_LABEL,
-                require_bound_sandbox_fork,
-            )
-
             _managed_tracker = getattr(request.app.state, "managed_launches", None)
             _managed_launch = (
                 _managed_tracker.get(session_id) if _managed_tracker is not None else None
             )
             if _managed_launch is not None:
                 await _await_settled_managed_launch(_managed_launch)
-            if _managed_launch is not None or SANDBOX_FORK_STATE_LABEL in conv.labels:
-                # A copy can finish on this replica or another one after
-                # this handler fetched the row; resolve the current binding.
+                # The launch bound host_id / workspace / runner_id to
+                # the row after this handler's fetch — re-read so the
+                # resolution below sees the bound runner.
                 conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
                 if conv is None:
                     raise _session_not_found()
                 runner_client = await _get_runner_client(session_id, runner_router)
-
-            require_bound_sandbox_fork(conv)
         # Check for a wrong-replica routing miss before attempting healing or
         # dispatch. The runner tunnel is registered on the same replica as its
         # host; when the tunnel is absent here but the host is live elsewhere,

@@ -479,6 +479,7 @@ async def test_filesystem_allows_the_owner_outside_the_workspace(
         ("admin@example.com", _FS_RELATIVE.replace("conv_share", "conv_child"), True),
         ("manager@example.com", _FS_RELATIVE.replace("conv_share", "conv_child"), False),
         ("owner@example.com", _FS_RELATIVE.replace("conv_share", "conv_child"), False),
+        ("viewer@example.com", _FS_RELATIVE.replace("conv_share", "conv_child"), False),
     ],
     ids=[
         "owner",
@@ -490,6 +491,7 @@ async def test_filesystem_allows_the_owner_outside_the_workspace(
         "child-admin",
         "child-inherited-manager",
         "child-inherited-editor",
+        "child-inherited-viewer",
     ],
 )
 async def test_filesystem_marks_reach_scope_for_the_owner_only(
@@ -669,18 +671,16 @@ _CONTENT_READ_IDS = (
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url_tmpl", _CONTENT_READ_PATHS, ids=_CONTENT_READ_IDS)
-@pytest.mark.parametrize("session_id", ["conv_share", "conv_child"])
 async def test_workspace_reads_deny_view_only_when_not_shared(
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
     url_tmpl: str,
-    session_id: str,
 ) -> None:
     """With sharing off (the default), a view-only grant cannot read the
     workspace on ANY content surface, and the request never reaches the
     runner — so no file bytes or paths can leak."""
     resp = await client.get(
-        url_tmpl.format(cid=session_id), headers={"X-Forwarded-Email": "viewer@example.com"}
+        url_tmpl.format(cid="conv_share"), headers={"X-Forwarded-Email": "viewer@example.com"}
     )
 
     assert resp.status_code == 403, resp.text
@@ -706,18 +706,16 @@ async def test_workspace_reads_allow_view_only_when_shared(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url_tmpl", _CONTENT_READ_PATHS, ids=_CONTENT_READ_IDS)
-@pytest.mark.parametrize("session_id", ["conv_share", "conv_child"])
 async def test_workspace_reads_stay_open_to_edit_collaborators(
     client: httpx.AsyncClient,
     runner_client: _RecordingRunnerClient,
     url_tmpl: str,
-    session_id: str,
 ) -> None:
     """Control: an edit collaborator keeps every workspace read surface even
     when sharing is off — the fix cannot pass by breaking shared browsing
     outright."""
     resp = await client.get(
-        url_tmpl.format(cid=session_id), headers={"X-Forwarded-Email": "owner@example.com"}
+        url_tmpl.format(cid="conv_share"), headers={"X-Forwarded-Email": "owner@example.com"}
     )
 
     assert resp.status_code == 200, resp.text

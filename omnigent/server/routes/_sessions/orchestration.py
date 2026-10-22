@@ -365,12 +365,7 @@ from omnigent.server.routes._sessions.helpers import (
     _wait_for_runner_client,
 )
 from omnigent.server.runner_session_init import RunnerSessionInitializer
-from omnigent.server.sandbox_forks import (
-    SANDBOX_FORK_LABEL_PREFIX,
-    SANDBOX_FORK_STATE_LABEL,
-    require_bound_sandbox_fork,
-    sandbox_fork_provider,
-)
+from omnigent.server.sandbox_forks import sandbox_fork_provider
 from omnigent.server.schemas import (
     BackgroundTaskInfo,
     ChildSessionSummary,
@@ -1166,7 +1161,6 @@ def _labels_for_viewer(labels: dict[str, str], user_id: str | None) -> dict[str,
         and not k.startswith(f"{PINNED_LABEL_KEY}.")
         and k != MANAGED_REPO_LABEL_KEY
         and not k.startswith(f"{MANAGED_REPO_LABEL_KEY}.")
-        and not k.startswith(SANDBOX_FORK_LABEL_PREFIX)
     }
     if my_pin is not None:
         cleaned[PINNED_LABEL_KEY] = my_pin
@@ -4412,9 +4406,6 @@ async def _run_managed_launch(
     )
 
     saved_conversation = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-    preserve_workspace = (
-        saved_conversation is not None and SANDBOX_FORK_STATE_LABEL in saved_conversation.labels
-    )
     if saved_conversation is not None:
         sandbox_config = deployment_with_inference_snapshot(
             sandbox_config,
@@ -4447,15 +4438,8 @@ async def _run_managed_launch(
                 and host_slice_key_enabled(saved_conversation.labels, relaunch_host.host_id)
             ),
             fork_source=fork_source,
-            preserve_workspace=preserve_workspace,
         )
         if managed is None:
-            if fork_source is not None:
-                await asyncio.to_thread(
-                    conversation_store.set_labels,
-                    session_id,
-                    {SANDBOX_FORK_STATE_LABEL: "failed"},
-                )
             return
         await _bind_and_launch_managed_runner(
             session_id=session_id,
@@ -4612,10 +4596,6 @@ async def _bind_and_launch_managed_runner(
                 if host is not None:
                     await terminate_managed_host(host, host_store, sandbox_config)
             return
-    if SANDBOX_FORK_STATE_LABEL in conv.labels:
-        await asyncio.to_thread(
-            conversation_store.set_labels, session_id, {SANDBOX_FORK_STATE_LABEL: "ready"}
-        )
     tracker.finish(session_id)
     _publish_sandbox_status(session_id, "ready")
 
@@ -4852,7 +4832,6 @@ async def ensure_runner_connected(
     dead-ending on a 502. Only the wakeable states recover here:
 
     * runner already connected → returned as-is (the common fast path);
-    * managed sandbox still provisioning → wait for its launch to settle;
     * host online, pinned runner still booting → wait the connect grace
       (``_HOST_BOUND_RUNNER_CONNECT_GRACE_S``, racing a ``host.runner_status``
       query) before treating it as dead, so a booting runner isn't orphaned
@@ -4887,16 +4866,6 @@ async def ensure_runner_connected(
     async def _reread() -> Conversation:
         refreshed = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         return refreshed if refreshed is not None else conv
-
-    if conv.host_id is None:
-        managed_tracker = getattr(app_state, "managed_launches", None)
-        managed_launch = managed_tracker.get(session_id) if managed_tracker is not None else None
-        if managed_launch is not None:
-            await _await_settled_managed_launch(managed_launch)
-        if managed_launch is not None or SANDBOX_FORK_STATE_LABEL in conv.labels:
-            # The copy may have finished on this replica or another one.
-            conv = await _reread()
-    require_bound_sandbox_fork(conv)
 
     # Fast path: a live runner tunnel is already reachable.
     runner_client = await _get_runner_client(
