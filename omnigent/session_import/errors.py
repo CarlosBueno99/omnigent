@@ -39,6 +39,11 @@ class ImportErrorCode:
     STREAM_INTERRUPTED = "stream_interrupted"
     INVALID_REQUEST = "invalid_request"
     INTERNAL = "internal"
+    # The session store denied the caller permission to save the session.
+    SESSION_SAVE_DENIED = "session_save_denied"
+    # The machine hasn't been connected to this Omnigent server; user must run a connect
+    # command first.
+    HOST_NOT_CONNECTED = "host_not_connected"
 
 
 # Whether re-running the same import can succeed without the user changing
@@ -62,6 +67,8 @@ _RETRYABLE: Mapping[str, bool] = {
     ImportErrorCode.STREAM_INTERRUPTED: True,
     ImportErrorCode.INVALID_REQUEST: False,
     ImportErrorCode.INTERNAL: True,
+    ImportErrorCode.SESSION_SAVE_DENIED: False,
+    ImportErrorCode.HOST_NOT_CONNECTED: False,
 }
 
 
@@ -119,6 +126,38 @@ def mentions_missing_sqlite(text: object) -> bool:
     if not isinstance(text, str):
         return False
     return "No module named '_sqlite3'" in text or "No module named 'sqlite3'" in text
+
+
+class SessionReadFailure:
+    """Why a host could not read one session (stable wire strings).
+
+    Hosts send one of these as ``read_failure`` next to a ``session_unreadable``
+    failure. The exception text stays on the host because it holds local paths.
+    """
+
+    FILE_MISSING = "file_missing"
+    PERMISSION_DENIED = "permission_denied"
+    INVALID_ENCODING = "invalid_encoding"
+    MALFORMED_RECORD = "malformed_record"
+    UNSUPPORTED_FORMAT = "unsupported_format"
+    READ_ERROR = "read_error"
+
+
+SESSION_READ_FAILURE_REASONS: Mapping[str, str] = {
+    SessionReadFailure.FILE_MISSING: "This session's transcript file is missing.",
+    SessionReadFailure.PERMISSION_DENIED: (
+        "`omnigent host` doesn't have permission to read this session's transcript file."
+    ),
+    SessionReadFailure.INVALID_ENCODING: "This session's transcript isn't valid UTF-8 text.",
+    SessionReadFailure.MALFORMED_RECORD: (
+        "This session's transcript has a line that couldn't be parsed."
+    ),
+    SessionReadFailure.UNSUPPORTED_FORMAT: (
+        "This session's transcript is in a format this version of Omnigent can't read. "
+        "Updating Omnigent on that machine may fix it."
+    ),
+    SessionReadFailure.READ_ERROR: "This session's transcript couldn't be read from disk.",
+}
 
 
 def missing_sqlite_error() -> LocalImportError:
@@ -181,9 +220,11 @@ class LocalImportError(OmnigentError):
 __all__ = [
     "MISSING_SQLITE_FIX_COMMANDS",
     "MISSING_SQLITE_MESSAGE",
+    "SESSION_READ_FAILURE_REASONS",
     "SKIPPED_IMPORT_CODES",
     "ImportErrorCode",
     "LocalImportError",
+    "SessionReadFailure",
     "import_code_is_retryable",
     "mentions_missing_sqlite",
     "missing_sqlite_error",

@@ -65,6 +65,13 @@ async def test_import_checks_host_ownership_before_persisting(
         ),
         prefix="/v1",
     )
+
+    @app.exception_handler(OmnigentError)
+    async def _handle(_request: Request, exc: OmnigentError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.http_status, content={"error": {"message": exc.message}}
+        )
+
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as import_client:
@@ -401,6 +408,13 @@ async def test_rejected_force_import_preserves_existing_session(
         ),
         prefix="/v1",
     )
+
+    @app.exception_handler(OmnigentError)
+    async def _handle(_request: Request, exc: OmnigentError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.http_status, content={"error": {"message": exc.message}}
+        )
+
     payload = {
         "source": "claude",
         "external_session_id": "claude-force-rejected",

@@ -66,6 +66,9 @@ class LocalSessionImport:
     # uncounted amount of later history was left out; see
     # ``omnigent.session_import.local.IMPORT_READ_BUDGET_BYTES``.
     later_history_omitted: bool = False
+    # The harness archived this session (Codex ``threads.archived`` or an
+    # ``archived_sessions/`` rollout), so the import is archived too.
+    archived: bool = False
 
     @property
     def title(self) -> str | None:

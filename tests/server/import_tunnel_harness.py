@@ -115,6 +115,10 @@ class FakeConversationStore:
     def set_labels(self, conversation_id: str, labels: dict[str, str]) -> None:
         self.conversations[conversation_id].labels = labels
 
+    def update_conversation_with_changes(self, conversation_id: str, **changes: Any) -> None:
+        for name, value in changes.items():
+            setattr(self.conversations[conversation_id], name, value)
+
     async def delete_conversation(self, conversation_id: str) -> bool:
         self.deleted.append(conversation_id)
         self.conversations.pop(conversation_id, None)

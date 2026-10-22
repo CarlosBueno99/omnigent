@@ -205,7 +205,9 @@ from omnigent.runtime.websocket_metrics import (
 )
 from omnigent.session_import.errors import (
     MISSING_SQLITE_MESSAGE,
+    SESSION_READ_FAILURE_REASONS,
     ImportErrorCode,
+    SessionReadFailure,
     mentions_missing_sqlite,
 )
 from omnigent.util.env_credentials import env_names_with_omnigent_prefix
@@ -1176,19 +1178,36 @@ class HostRetryableConnectionError(Exception):
     """Server-reported channel failure that should use reconnect backoff."""
 
 
+def _session_read_failure(exc: BaseException) -> str:
+    """The :class:`SessionReadFailure` for an exception reading one transcript."""
+    # Decode and JSON errors are ValueErrors, so they're checked first.
+    if isinstance(exc, UnicodeDecodeError):
+        return SessionReadFailure.INVALID_ENCODING
+    if isinstance(exc, json.JSONDecodeError):
+        return SessionReadFailure.MALFORMED_RECORD
+    if isinstance(exc, FileNotFoundError):
+        return SessionReadFailure.FILE_MISSING
+    if isinstance(exc, PermissionError):
+        return SessionReadFailure.PERMISSION_DENIED
+    if isinstance(exc, OSError):
+        return SessionReadFailure.READ_ERROR
+    return SessionReadFailure.UNSUPPORTED_FORMAT
+
+
 def _unreadable_session_failure(exc: BaseException) -> dict[str, object]:
     """The failure entry for a session the host could not read.
 
     A missing SQLite module gets its own code (and the fix) so the server can
-    say what to do; anything else stays the generic reason, since the
-    exception text may hold local paths.
+    say what to do. Anything else sends only a :class:`SessionReadFailure` and
+    its fixed reason, since the exception text may hold local paths.
     """
     if isinstance(exc, ImportError) and mentions_missing_sqlite(str(exc)):
         return {
             "reason": MISSING_SQLITE_MESSAGE,
             "code": ImportErrorCode.HOST_PYTHON_MISSING_SQLITE,
         }
-    return {"reason": "This session could not be read."}
+    read_failure = _session_read_failure(exc)
+    return {"reason": SESSION_READ_FAILURE_REASONS[read_failure], "read_failure": read_failure}
 
 
 class HostProcess:
@@ -2809,11 +2828,11 @@ class HostProcess:
                 # Designed to be surfaced (e.g. "…was not found"), so pass it
                 # through as the per-session failure reason.
                 return None, {"reason": str(exc)}
-            except (OSError, ValueError, TypeError):
+            except (OSError, ValueError, TypeError) as exc:
                 _logger.exception(
                     "import_local: could not read session source=%r id=%r", source, session_id
                 )
-                return None, {"reason": "This session's transcript could not be read."}
+                return None, _unreadable_session_failure(exc)
             return (
                 HostImportedLocalSession(
                     external_session_id=local.external_session_id,
@@ -2828,6 +2847,7 @@ class HostProcess:
                     ],
                     title=local.title,
                     source=local.source,
+                    archived=local.archived,
                 ),
                 None,
             )

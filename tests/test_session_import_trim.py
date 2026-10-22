@@ -18,7 +18,13 @@ from uuid import UUID
 
 import pytest
 
-from omnigent.entities import ErrorData, MessageData, NewConversationItem, parse_item_data
+from omnigent.entities import (
+    CompactionData,
+    ErrorData,
+    MessageData,
+    NewConversationItem,
+    parse_item_data,
+)
 from omnigent.harnesses.claude_native.bridge import read_transcript_items_from_offset
 from omnigent.session_import import local as local_module
 from omnigent.session_import.local import (
@@ -779,7 +785,10 @@ class TestCodexBudget:
         with patch.object(local_module, "IMPORT_READ_BUDGET_BYTES", path.stat().st_size // 2):
             session = load_local_session("codex", _CODEX_ID)
             full = _full_read("codex", _CODEX_ID, patch)
-        assert _text(session.items[0]) == "last summary" and not _has_notice(session)
+        first = session.items[0].data
+        assert isinstance(first, CompactionData) and first.compacted_messages is not None
+        assert first.compacted_messages[0]["content"][0]["text"] == "last summary"
+        assert not _has_notice(session)
         # Same items and turn ids, and the last session_meta cwd, as the full read.
         assert session.items == full.items
         assert session.workspace == full.workspace == "/moved"

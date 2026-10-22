@@ -20,10 +20,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from omnigent.db.utils import builtin_agent_id, now_epoch
+from omnigent.db.utils import builtin_agent_id, generate_item_id, now_epoch
 from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.debug_logging import add_audit_attrs, debug_event
-from omnigent.entities import NewConversationItem, parse_item_data
+from omnigent.entities import CompactionData, NewConversationItem, parse_item_data
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import (
     CAP_IMPORT_SKIP_KNOWN,
@@ -53,6 +53,7 @@ from omnigent.session_import import (
 )
 from omnigent.session_import.errors import (
     MISSING_SQLITE_MESSAGE,
+    SESSION_READ_FAILURE_REASONS,
     SKIPPED_IMPORT_CODES,
     ImportErrorCode,
     LocalImportError,
@@ -185,6 +186,9 @@ class ImportSessionRequest(BaseModel):
     # the transcript came from and resumes there. Bound only alongside a
     # workspace (the workspace-required-for-host check constraint).
     host_id: str | None = None
+    # The harness had archived this session (e.g. ``codex archive``); the imported
+    # conversation is archived too instead of landing in the sidebar.
+    archived: bool = False
     items: list[ImportItemInput] = Field(min_length=1, max_length=_MAX_IMPORT_ITEMS)
 
     @field_validator("external_session_id")
@@ -275,6 +279,9 @@ class ImportFailureRef(BaseModel):
     # Correlates an ``internal`` failure with the server log line; clients show
     # it as a detail. ``None`` for every classified failure.
     error_id: str | None = None
+    # Why the host couldn't read a ``session_unreadable`` session (a
+    # ``SessionReadFailure``); ``None`` when the host didn't say (older hosts).
+    read_failure: str | None = None
 
 
 class LocalImportResponse(BaseModel):
@@ -525,6 +532,17 @@ def _ago(seconds: float) -> str:
     if seconds < 36 * 3600:
         return f"{round(seconds / 3600)} h"
     return f"{round(seconds / 86400)} d"
+
+
+def _host_not_connected_error() -> LocalImportError:
+    """The 404 for a host this server never registered."""
+    return LocalImportError(
+        "This machine isn't connected to this Omnigent server. "
+        "Run `omnigent host --server <your Omnigent server URL>` on it, then import again.",
+        import_code=ImportErrorCode.HOST_NOT_CONNECTED,
+        code=ErrorCode.NOT_FOUND,
+        http_status=404,
+    )
 
 
 def _host_offline_error(host: Host) -> LocalImportError:
@@ -878,6 +896,8 @@ def _log_import_outcome(
                 code=failure.code,
                 retryable=failure.retryable,
                 external_session_id=failure.external_session_id,
+                read_failure=failure.read_failure,
+                error_id=failure.error_id,
             ),
         )
     outcome = "error" if error is not None else ("partial" if failures else "ok")
@@ -1026,6 +1046,30 @@ def _session_store_error(
     return classified
 
 
+def _anchor_compactions(items: list[NewConversationItem]) -> list[NewConversationItem]:
+    """Point each compaction's ``last_item_id`` at the item stored before it.
+
+    Imported compactions predate any stored id, so without this the runtime
+    history loader finds no anchor and reloads the whole transcript. Only anchors
+    get a minted ``stable_id``, since the store looks up every stable id before
+    appending. A leading compaction names itself.
+    """
+    anchored = list(items)
+    for index, item in enumerate(items):
+        if not isinstance(item.data, CompactionData):
+            continue
+        boundary = index - 1 if index else index
+        if anchored[boundary].stable_id is None:
+            anchored[boundary] = anchored[boundary].model_copy(
+                update={"stable_id": generate_item_id(anchored[boundary].type)}
+            )
+        boundary_id = anchored[boundary].stable_id
+        anchored[index] = anchored[index].model_copy(
+            update={"data": item.data.model_copy(update={"last_item_id": boundary_id})}
+        )
+    return anchored
+
+
 def create_imports_router(
     conversation_store: ConversationStore,
     agent_store: AgentStore,
@@ -1049,6 +1093,7 @@ def create_imports_router(
         native_title: str | None = None,
         project_id: str | None = None,
         host_id: str | None = None,
+        archived: bool = False,
         replace_conversation_id: str | None = None,
     ) -> tuple[str, str | None]:
         """Create the conversation, append items, stamp import labels, grant owner.
@@ -1061,8 +1106,10 @@ def create_imports_router(
         session to the host that read the transcript (``/imports/local``), so
         resuming defaults to the machine the workspace lives on; bound only
         alongside a workspace (the ``ck_conversations_workspace_required_for_host``
-        check constraint). Caller authorizes any ``replace_conversation_id``;
-        replacement waits until validation succeeds. Returns ``(conversation id, title)``.
+        check constraint). ``archived`` files the session under Archived sessions
+        when the harness had archived it. Caller authorizes any
+        ``replace_conversation_id``; replacement waits until validation succeeds.
+        Returns ``(conversation id, title)``.
         """
         native_agent = native_coding_agent_for_harness(f"{source}-native")
         if native_agent is None:
@@ -1090,9 +1137,22 @@ def create_imports_router(
             if host_id is not None:
                 # Host ownership must still hold when the import is persisted.
                 if host_store is not None:
-                    await asyncio.to_thread(
-                        resolve_host_owner, user_id=user_id, host_id=host_id, host_store=host_store
-                    )
+                    try:
+                        await asyncio.to_thread(
+                            resolve_host_owner,
+                            user_id=user_id,
+                            host_id=host_id,
+                            host_store=host_store,
+                        )
+                    except HTTPException as exc:
+                        if exc.status_code != 404:
+                            raise
+                        # `omnigent import` sends its machine's host id even when
+                        # that host never connected to this server. Tell the user
+                        # to connect the machine first; another user's host still
+                        # gets 403.
+                        add_audit_attrs(host_id=host_id)
+                        raise _host_not_connected_error() from exc
                 create_kwargs["host_id"] = host_id
         if project_id is not None:
             create_kwargs["project_id"] = project_id
@@ -1159,13 +1219,21 @@ def create_imports_router(
             # A store may assign its own id (e.g. a numeric key), so every
             # later write targets the created row, not the requested id.
             created.append(conversation.id)
-            await asyncio.to_thread(conversation_store.append, conversation.id, items)
+            await asyncio.to_thread(
+                conversation_store.append, conversation.id, _anchor_compactions(items)
+            )
             labels = {
                 **native_agent.presentation_labels,
                 IMPORT_SOURCE_LABEL_KEY: source,
                 IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY: external_session_id,
             }
             await asyncio.to_thread(conversation_store.set_labels, conversation.id, labels)
+            if archived:
+                await asyncio.to_thread(
+                    conversation_store.update_conversation_with_changes,
+                    conversation.id,
+                    archived=True,
+                )
             if permission_store is not None and user_id is not None:
                 await asyncio.to_thread(permission_store.ensure_user, user_id)
                 await asyncio.to_thread(
@@ -1319,6 +1387,7 @@ def create_imports_router(
                 native_title=body.title,
                 project_id=body.project_id,
                 host_id=body.host_id,
+                archived=body.archived,
                 replace_conversation_id=existing.id if existing is not None else None,
             )
         except (OmnigentError, HTTPException):
@@ -1358,6 +1427,9 @@ def create_imports_router(
                 code=ErrorCode.INTERNAL_ERROR,
             )
         user_id = require_user(request, auth_provider)
+        # Name the target host on the audit row so a pre-stream rejection says which
+        # machine it was.
+        add_audit_attrs(host_id=body.host_id)
         # Owns-host check + live connection, mirroring the runner-launch path.
         host = resolve_host_owner(user_id=user_id, host_id=body.host_id, host_store=host_store)
         host_conn = host_registry.get(body.host_id)
@@ -1457,6 +1529,7 @@ def create_imports_router(
             reason: str,
             code: str = ImportErrorCode.SESSION_UNREADABLE,
             error_id: str | None = None,
+            read_failure: str | None = None,
         ) -> None:
             counts["failed"] += 1
             failures.append(
@@ -1469,6 +1542,7 @@ def create_imports_router(
                     code=code,
                     retryable=import_code_is_retryable(code),
                     error_id=error_id,
+                    read_failure=read_failure,
                 )
             )
 
@@ -1554,6 +1628,7 @@ def create_imports_router(
                     user_id=user_id,
                     native_title=native_title if isinstance(native_title, str) else None,
                     host_id=body.host_id,
+                    archived=session.get("archived") is True,
                 )
             except OmnigentError as exc:
                 # A create that lost the dedup race collides on the deterministic
@@ -1584,6 +1659,7 @@ def create_imports_router(
                     external_session_id,
                     source,
                     "This session's host is no longer available to you.",
+                    ImportErrorCode.INVALID_REQUEST,
                 )
                 return None
             except Exception as exc:  # noqa: BLE001 - one session's failure must not end the batch
@@ -1779,11 +1855,15 @@ def create_imports_router(
                 if code == ImportErrorCode.HOST_PYTHON_MISSING_SQLITE:
                     # A legacy host's raw ImportError text isn't actionable.
                     reason = MISSING_SQLITE_MESSAGE
+                read_failure = entry.get("read_failure")
                 _fail(
                     entry.get("external_session_id"),
                     entry.get("source"),
                     reason,
                     code,
+                    read_failure=(
+                        read_failure if read_failure in SESSION_READ_FAILURE_REASONS else None
+                    ),
                 )
         else:
             for _ in range(int(stats.get("host_failed", 0))):

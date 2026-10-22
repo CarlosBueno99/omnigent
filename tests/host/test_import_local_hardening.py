@@ -34,7 +34,9 @@ from omnigent.session_import import local as local_import
 from omnigent.session_import.errors import (
     MISSING_SQLITE_FIX_COMMANDS,
     MISSING_SQLITE_MESSAGE,
+    SESSION_READ_FAILURE_REASONS,
     ImportErrorCode,
+    SessionReadFailure,
     mentions_missing_sqlite,
 )
 from tests.server.import_tunnel_harness import (
@@ -210,7 +212,7 @@ async def test_unknown_frame_and_unmatched_cancel_are_ignored() -> None:
 
 
 async def test_unexpected_session_error_is_generic(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unexpected per-session error reports a generic reason without its text or a code."""
+    """An unexpected per-session error reports a fixed reason without its text or a code."""
     sessions: dict[str, Any] = {"bad": RuntimeError("/secret/path"), "ok": local_session("ok")}
     serve_local_sessions(monkeypatch, sessions)
     ws = RecordingWs()
@@ -221,7 +223,8 @@ async def test_unexpected_session_error_is_generic(monkeypatch: pytest.MonkeyPat
         {
             "external_session_id": "bad",
             "source": "claude",
-            "reason": "This session could not be read.",
+            "reason": SESSION_READ_FAILURE_REASONS[SessionReadFailure.UNSUPPORTED_FORMAT],
+            "read_failure": SessionReadFailure.UNSUPPORTED_FORMAT,
         }
     ]
 

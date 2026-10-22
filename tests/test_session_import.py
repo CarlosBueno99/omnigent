@@ -983,6 +983,18 @@ def _codex_item_texts(imported: LocalSessionImport) -> list[str]:
     ]
 
 
+def _codex_compaction_texts(imported: LocalSessionImport) -> list[str]:
+    """The text of the messages each compaction item carries, in order."""
+    return [
+        block["text"]
+        for item in imported.items
+        if item.type == "compaction"
+        for message in item.data.model_dump().get("compacted_messages") or []
+        for block in message.get("content", [])
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    ]
+
+
 def _write_codex_rollout_with_compaction(
     tmp_path: Path, session_id: str, *, extra_pre: list[dict] | None = None
 ) -> Path:
@@ -1086,8 +1098,8 @@ def test_load_codex_session_trims_to_last_compaction_when_large(
     # Pre-compaction records the live agent no longer sees are dropped.
     assert "pre compaction question" not in texts
     assert "pre compaction answer" not in texts
-    # The replacement_history baseline and post-compaction turns are kept.
-    assert "compaction summary baseline" in texts
+    # The replacement_history baseline (on a compaction item) and post-compaction turns are kept.
+    assert _codex_compaction_texts(imported) == ["compaction summary baseline"]
     assert "post compaction question" in texts
     assert "post compaction answer" in texts
 
@@ -1128,9 +1140,8 @@ def test_load_codex_session_trims_to_final_compaction_with_multiple(
     imported = load_codex_session(session_id, codex_home=tmp_path)
 
     texts = _codex_item_texts(imported)
-    assert "first summary baseline" not in texts
     assert "between compactions" not in texts
-    assert "compaction summary baseline" in texts
+    assert _codex_compaction_texts(imported) == ["compaction summary baseline"]
     assert "post compaction question" in texts
 
 
@@ -1194,7 +1205,7 @@ def test_load_codex_session_trims_at_real_two_mb_threshold(tmp_path: Path) -> No
     texts = _codex_item_texts(imported)
     assert not any(text.startswith("pre bulk") for text in texts)
     assert "pre compaction question" not in texts
-    assert "compaction summary baseline" in texts
+    assert _codex_compaction_texts(imported) == ["compaction summary baseline"]
     assert "post compaction question" in texts
 
 
