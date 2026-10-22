@@ -38,6 +38,15 @@ mount and authenticates with your `databricks auth login` token automatically:
 OMNIGENT_URL=https://my-workspace.databricks.com pnpm run dev
 ```
 
+When the browser reaches the dev server over a high-latency link (SSH port
+forward, tunnel), set `VITE_BUNDLED_DEV=1` to serve a bundle instead of one
+request per module. This uses Vite's experimental full bundle mode: source edits
+are not picked up until you restart the dev server.
+
+```bash
+VITE_BUNDLED_DEV=1 pnpm run dev
+```
+
 Additional `omnigent server` options:
 
 | Flag                  | Default                | Description                          |

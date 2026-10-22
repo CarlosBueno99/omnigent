@@ -247,6 +247,9 @@ export default defineConfig(({ command }) => ({
   // omnigent/server/app.py). Dev (`vite serve`) stays at root.
   base: command === "build" ? "./" : "/",
   plugins: [safariLookbehindWorkarounds(), react(), tailwindcss()],
+  // Opt-in full bundle dev mode: far fewer requests on high-latency links, but
+  // experimental — source edits are not picked up until the server restarts.
+  experimental: { bundledDev: process.env.VITE_BUNDLED_DEV === "1" },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
