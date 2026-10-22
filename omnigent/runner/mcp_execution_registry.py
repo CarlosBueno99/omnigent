@@ -95,6 +95,11 @@ class McpExecutionRegistry:
             for stored_session, stored_operation, _step in self._entries
         )
 
+    def has_execution(self, session_id: str, operation_id: str) -> bool:
+        """Confirm work is retained, rather than only reserved by a caller."""
+        self._prune()
+        return any(key[:2] == (session_id, operation_id) for key in self._entries)
+
     async def execute(
         self,
         *,

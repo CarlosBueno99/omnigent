@@ -18,6 +18,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -454,10 +455,14 @@ async def test_call_tool_recreates_approval_after_server_reconnect() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["detach", "timeout", 502, 503, 504])
+@pytest.mark.parametrize("denied_on_recovery", [False, True])
 async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
     monkeypatch: pytest.MonkeyPatch,
+    failure: str | int,
+    denied_on_recovery: bool,
 ) -> None:
-    """A reconnect wait pins completed work past its normal retention window."""
+    """Lost responses recover retained work through server policy, without replay."""
     clock = 0.0
     monkeypatch.setattr(mcp_execution_registry_mod, "_COMPLETED_TTL_S", 1.0)
     monkeypatch.setattr(mcp_execution_registry_mod, "monotonic", lambda: clock)
@@ -472,15 +477,17 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
             body = json.loads(request.content)
             self.calls.append(_Call(url=str(request.url), body=body))
             operation_id = body["params"][MCP_OPERATION_ID_PARAM]
+            if len(self.calls) > 1 and denied_on_recovery:
+                return _json_resp({"error": {"code": -32000, "message": "Denied by policy"}})
 
             async def _retained_work() -> McpExecutionResult:
                 self.external_invocations += 1
                 return McpExecutionResult(
                     status_code=200,
-                    content={"result": {"output": "retained"}},
+                    content={"content": [{"type": "text", "text": "retained"}]},
                 )
 
-            await registry.execute(
+            result = await registry.execute(
                 session_id="conv_test",
                 operation_id=operation_id,
                 step="initial",
@@ -488,6 +495,10 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
                 run=_retained_work,
             )
             if len(self.calls) == 1:
+                if failure == "timeout":
+                    raise httpx.ReadTimeout("lost response", request=request)
+                if isinstance(failure, int):
+                    return httpx.Response(failure)
                 return _json_resp(
                     {
                         "jsonrpc": "2.0",
@@ -502,10 +513,7 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
                 {
                     "jsonrpc": "2.0",
                     "id": body["id"],
-                    "result": {
-                        "content": [{"type": "text", "text": "reattached"}],
-                        "isError": False,
-                    },
+                    "result": result.content,
                 }
             )
 
@@ -517,17 +525,28 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
         execution_registry=registry,
     )
     pending_approvals.reset_for_tests()
+    if failure != "detach":
+        monkeypatch.setattr(
+            pending_approvals,
+            "wait_for_server_reconnect",
+            AsyncMock(side_effect=AssertionError("HTTP response loss needs no reconnect")),
+        )
     task = asyncio.create_task(manager.call_tool(None, "github__deploy", {}))
     try:
-        for _ in range(1000):
-            if pending_approvals._server_reconnect_waiters:
-                break
-            await asyncio.sleep(0.001)
-        assert pending_approvals._server_reconnect_waiters
-        clock = 2.0
-        pending_approvals.notify_server_reconnect()
+        if failure == "detach":
+            for _ in range(1000):
+                if pending_approvals._server_reconnect_waiters:
+                    break
+                await asyncio.sleep(0.001)
+            assert pending_approvals._server_reconnect_waiters
+            clock = 2.0
+            pending_approvals.notify_server_reconnect()
 
-        assert await task == "reattached"
+        output = await task
+        if denied_on_recovery:
+            assert json.loads(output) == {"error": "Denied by policy"}
+        else:
+            assert output == "retained"
     finally:
         if not task.done():
             task.cancel()
@@ -539,6 +558,75 @@ async def test_call_tool_reattaches_expired_execution_after_server_disconnect(
     first_params, retry_params = [call.body["params"] for call in transport.calls]
     assert retry_params == first_params
     assert first_params[MCP_OPERATION_ID_PARAM].startswith("mcpop_")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retained,failure,approved,expected_calls",
+    [
+        (False, 502, False, 1),
+        (True, 403, False, 1),
+        (True, 502, False, 2),
+        (True, "timeout", False, 2),
+        (True, 502, True, 2),
+        (True, "timeout", True, 2),
+    ],
+)
+async def test_response_recovery_requires_execution_and_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    retained: bool,
+    failure: str | int,
+    approved: bool,
+    expected_calls: int,
+) -> None:
+    registry = McpExecutionRegistry()
+    calls = executions = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls, executions
+        calls += 1
+        operation = json.loads(request.content)["params"][MCP_OPERATION_ID_PARAM]
+        if approved and calls == 1:
+            return _json_resp(
+                {
+                    "result": {
+                        "resultType": "input_required",
+                        "requestState": "approval",
+                        "inputRequests": {"approve": {}},
+                    }
+                }
+            )
+
+        async def run() -> McpExecutionResult:
+            nonlocal executions
+            executions += 1
+            return McpExecutionResult(200, {"output": "done"})
+
+        if retained:
+            await registry.execute(
+                session_id="conv_test", operation_id=operation, step="initial", params={}, run=run
+            )
+        if failure == "timeout":
+            raise httpx.ReadTimeout("lost response", request=request)
+        assert isinstance(failure, int)
+        return httpx.Response(failure)
+
+    monkeypatch.setattr(
+        pending_approvals, "wait_for_server_reconnect", AsyncMock(side_effect=TimeoutError)
+    )
+    monkeypatch.setattr(
+        pending_approvals,
+        "wait_for_user_verdict",
+        AsyncMock(return_value=pending_approvals.Verdict(approved=True)),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="http://ap"
+    ) as client:
+        manager = ProxyMcpManager("conv_test", client, execution_registry=registry)
+        with pytest.raises(RuntimeError):
+            await manager.call_tool(None, "sys_os_shell", {})
+    assert calls == expected_calls
+    assert executions == int(retained)
 
 
 @pytest.mark.asyncio

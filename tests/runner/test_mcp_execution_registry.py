@@ -43,6 +43,7 @@ async def test_cancelled_tunnel_waiter_reattaches_without_reexecuting() -> None:
         )
     )
     await started.wait()
+    assert registry.has_execution("conv_restart", "mcpop_restart")
     first_waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first_waiter
@@ -83,6 +84,7 @@ async def test_live_operation_lease_survives_result_eviction(
 
     registry.retain_operation("conv_restart", "mcpop_restart")
     assert registry.has_operation("conv_restart", "mcpop_restart")
+    assert not registry.has_execution("conv_restart", "mcpop_restart")
 
     request = {"name": "deploy", "arguments": {}}
     first = await registry.execute(

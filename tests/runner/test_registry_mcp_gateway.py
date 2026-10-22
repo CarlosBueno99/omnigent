@@ -48,17 +48,21 @@ async def test_registry_discovery_and_fresh_native_manager_use_service_route():
     assert len(calls) == 3
 
 
-async def test_registry_transport_failure_is_not_replayed():
+@pytest.mark.parametrize("failure", ["read_error", 502, 503, 504])
+async def test_registry_transport_failure_is_not_replayed(failure):
     calls = []
 
     def handle(request):
         calls.append(request)
+        if isinstance(failure, int):
+            return httpx.Response(failure)
         raise httpx.ReadError("connection closed", request=request)
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handle), base_url="http://test"
     ) as client:
-        with pytest.raises(RuntimeError, match="not retried"):
+        message = "not retried" if failure == "read_error" else "MCP proxy call failed"
+        with pytest.raises(RuntimeError, match=message):
             await ProxyMcpManager("session-test", client).call_tool(
                 spec(), "tracker__read_ticket", {}
             )

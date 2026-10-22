@@ -395,6 +395,7 @@ class ProxyMcpManager:
 
         payload = _initial_payload()
         approval_retries = 0
+        response_recovery_attempted = False
 
         while True:
             request_generation = pending_approvals.current_server_generation()
@@ -416,16 +417,36 @@ class ProxyMcpManager:
                 )
                 resp.raise_for_status()
                 data = _response_json_object(resp)
-            except httpx.TransportError as exc:
-                if managed:
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                if managed and isinstance(exc, httpx.TransportError):
                     raise RuntimeError(
                         "MCP gateway transport failed; completion is unknown. "
                         "Call was not retried."
                     ) from exc
-                await _wait_to_reattach(request_generation, exc)
-                # Reattach the new server generation to the same runner-owned
-                # operation. A fresh JSON-RPC id distinguishes this transport
-                # attempt; the operation id prevents external work from replaying.
+                gateway_failure = isinstance(
+                    exc, httpx.HTTPStatusError
+                ) and exc.response.status_code in {502, 503, 504}
+                registry = self._execution_registry
+                if (
+                    not managed
+                    and (isinstance(exc, httpx.TransportError) or gateway_failure)
+                    and not response_recovery_attempted
+                    # Approval responses may already have been consumed.
+                    and approval_retries == 0
+                    and registry is not None
+                    and registry.has_execution(self._session_id, operation_id)
+                ):
+                    # An HTTP response can be lost while the tunnel stays up.
+                    # Re-enter server policy checks and attach to retained work.
+                    response_recovery_attempted = True
+                elif isinstance(exc, httpx.TransportError):
+                    await _wait_to_reattach(request_generation, exc)
+                else:
+                    raise RuntimeError(
+                        f"MCP proxy call failed for tool {tool_name!r} in session "
+                        f"{self._session_id!r}: {exc}"
+                    ) from exc
+                # Only the JSON-RPC id changes; execution keeps its operation id.
                 request_id += 1
                 payload = cast("_JsonObject", {**payload, "id": request_id})
                 continue
