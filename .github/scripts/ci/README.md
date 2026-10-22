@@ -69,3 +69,36 @@ uv run --no-sync pytest tests/scripts/test_dependency_ci.py \
   tests/scripts/test_dependency_ui_selection.py \
   tests/scripts/test_dependabot_automerge.py --reruns 0 -q
 ```
+
+## Regular E2E shard balancing
+
+`e2e.yml` passes `tests/e2e/durations.json` to the shared E2E action. The
+duration plugin assigns expensive tests first to the least-loaded shard, with
+stable node-ID tie breaking. It partitions pytest's final filtered collection
+and preserves its order within each shard. New tests receive a ten-second
+estimate; removed tests in the profile never enter the collection. The eight
+shards still use two `loadscope` workers each. Backcompat callers omit the
+profile and retain `pytest-shard` assignment.
+
+The initial profile uses median worker completion intervals from five
+successful hosted runs linked in its `source` metadata. These are approximate
+costs, including fixture overhead attributed between result messages. They
+predict scheduling costs, not precise per-test phase durations.
+
+Each regular E2E shard retains its JUnit report and worker progress logs in an
+`e2e-timings-<run>-<attempt>-shard<N>` artifact for seven days, including on
+failure. To refresh the profile manually, download **all eight** artifacts from
+a successful full run (optionally several successful runs into one directory):
+
+```sh
+ghx run download RUN_ID --repo omnigent-ai/omnigent \
+  --pattern 'e2e-timings-*' --dir /tmp/e2e-timings-RUN_ID
+uv run --no-sync python scripts/update_e2e_durations.py /tmp/e2e-timings-RUN_ID \
+  --source-run https://github.com/omnigent-ai/omnigent/actions/runs/RUN_ID
+uv run --no-sync pytest tests/github/test_e2e_shards.py --reruns 0 -q
+```
+
+The refresh uses worker START-to-END elapsed time, including setup and
+teardown, and rejects failed or incomplete shards. Review and commit the
+updated profile. CI never downloads a profile or updates it automatically;
+refresh when runtimes change enough to create a persistent shard imbalance.

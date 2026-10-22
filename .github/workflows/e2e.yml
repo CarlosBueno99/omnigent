@@ -131,7 +131,7 @@ jobs:
       # One red shard shouldn't cancel siblings -- we want every shard's signal.
       fail-fast: false
       max-parallel: 8
-      # Shards from `setup` (deterministic node-ID split); [] when skipped.
+      # Shards from `setup` (deterministic duration balancing); [] when skipped.
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     steps:
@@ -148,5 +148,6 @@ jobs:
         with:
           shard_id: ${{ matrix.shard_id }}
           num_shards: ${{ matrix.num_shards }}
+          shard_durations: tests/e2e/durations.json
           parallelism: ${{ github.event.inputs.parallelism || '2' }}
           nightly_full: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}

@@ -15,11 +15,15 @@ inputs:
     required: false
     default: "false"
   shard_id:
-    description: "pytest-shard shard index"
+    description: "0-based shard index"
     required: true
   num_shards:
-    description: "pytest-shard shard count"
+    description: "Total shard count"
     required: true
+  shard_durations:
+    description: "Optional duration profile; empty retains pytest-shard hash assignment."
+    required: false
+    default: ""
   parallelism:
     description: "pytest workers (-n)"
     required: false
@@ -194,6 +198,7 @@ runs:
         PARALLELISM_INPUT: ${{ inputs.parallelism }}
         SHARD_ID: ${{ inputs.shard_id }}
         NUM_SHARDS: ${{ inputs.num_shards }}
+        SHARD_DURATIONS: ${{ inputs.shard_durations }}
         NIGHTLY_FULL: ${{ inputs.nightly_full }}
         DEPENDENCY_SMOKE: ${{ inputs.dependency_smoke }}
         E2E_TMP_BASE: /tmp/omnigent-e2e-${{ github.run_id }}-shard${{ inputs.shard_id }}
@@ -210,6 +215,9 @@ runs:
         mkdir -p "$E2E_TMP_BASE"
 
         EXTRA_ARGS=()
+        if [[ -n "$SHARD_DURATIONS" ]]; then
+          EXTRA_ARGS+=(-p no:pytest-shard -p tests.helpers.e2e_shards --shard-durations "$SHARD_DURATIONS")
+        fi
         if [[ "$DEPENDENCY_SMOKE" == "true" ]]; then
           EXTRA_ARGS+=(-m "compat_smoke and not nightly" -p tests._helpers.required_tests)
         elif [[ "$NIGHTLY_FULL" != "true" ]]; then
@@ -217,7 +225,7 @@ runs:
         fi
 
         # --junitxml emits per-test results eagerly so diagnostics survive a
-        # wall-clock overrun. --shard-id/--num-shards chunk the node IDs.
+        # wall-clock overrun. Sharding partitions the final collected node IDs.
         # --timeout=180 caps each test; --timeout-method=thread because our
         # pty/subprocess children don't get SIGALRM. --max-worker-restart=0
         # fails the shard fast instead of letting loadscope requeue deadlock
@@ -235,6 +243,17 @@ runs:
           -v --tb=long --showlocals --log-level=INFO -r a \
           "${EXTRA_ARGS[@]}" \
           || { rc=$?; [ "$rc" -eq 5 ] && [ "$DEPENDENCY_SMOKE" != "true" ] && echo "::notice::No tests collected in this shard; treating as a pass." || exit "$rc"; }
+
+    - name: Upload test results and worker timings
+      if: ${{ always() && inputs.shard_durations != '' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      with:
+        name: e2e-timings-${{ github.run_id }}-${{ github.run_attempt }}-shard${{ inputs.shard_id }}${{ inputs.artifact_suffix }}
+        path: |
+          /tmp/omnigent-e2e-${{ github.run_id }}-shard${{ inputs.shard_id }}/junit.xml
+          /tmp/omnigent-e2e-${{ github.run_id }}-shard${{ inputs.shard_id }}/progress/progress-*.log
+        retention-days: 7
+        if-no-files-found: warn
 
     - name: Upload server logs on failure
       # cancelled() too: failure() misses step timeouts (#426).

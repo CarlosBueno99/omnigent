@@ -513,6 +513,8 @@ def test_workflows_connect_selection_to_jobs():
     e2e_steps = workflows["e2e"]["jobs"]["e2e"]["steps"]
     e2e_run = next(step for step in e2e_steps if step.get("uses") == "./.github/actions/e2e-run")
     action = yaml.safe_load((ROOT / ".github/actions/e2e-run/action.yml").read_text())
+    assert e2e_run["with"]["shard_durations"] == "tests/e2e/durations.json"
+    assert action["inputs"]["shard_durations"]["default"] == ""
     assert (
         e2e_run["with"].get("dependency_smoke", action["inputs"]["dependency_smoke"]["default"])
         == "false"
