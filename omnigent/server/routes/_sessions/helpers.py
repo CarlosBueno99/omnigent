@@ -92,6 +92,7 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_wrapper_label,
 )
 from omnigent.native.session_todos import validate_session_todos
+from omnigent.onboarding.sandboxes.types import SandboxForkSource
 from omnigent.policies.types import EvaluationContext
 from omnigent.runner.identity import (
     token_bound_runner_id,
@@ -6434,6 +6435,8 @@ async def _provision_managed_sandbox(
     agent_name: str | None = None,
     host_id: str | None = None,
     relaunch_slice_key_enabled: bool = False,
+    fork_source: SandboxForkSource | None = None,
+    preserve_workspace: bool = False,
 ) -> ManagedHostLaunch | None:
     """
     Run the provision phase of a background managed launch.
@@ -6490,6 +6493,7 @@ async def _provision_managed_sandbox(
                 agent_name=agent_name,
                 on_stage=_on_stage,
                 slice_key_enabled=relaunch_slice_key_enabled,
+                preserve_workspace=preserve_workspace,
             )
         return await launch_managed_host(
             config=sandbox_config,
@@ -6500,6 +6504,7 @@ async def _provision_managed_sandbox(
             agent_name=agent_name,
             on_stage=_on_stage,
             host_id=host_id,
+            fork_source=fork_source,
         )
     except HTTPException as exc:
         _logger.warning(
@@ -10481,6 +10486,13 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
     """
     if not labels:
         return
+    from omnigent.server.sandbox_forks import SANDBOX_FORK_LABEL_PREFIX
+
+    if any(key.startswith(SANDBOX_FORK_LABEL_PREFIX) for key in labels):
+        raise OmnigentError(
+            "Sandbox fork metadata is server-internal and cannot be set by clients",
+            code=ErrorCode.INVALID_INPUT,
+        )
     from omnigent.mcp_selection import MCP_SELECTION_PREFIX
 
     if any(key.startswith(MCP_SELECTION_PREFIX) for key in labels):

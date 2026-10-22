@@ -85,6 +85,7 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_wrapper_label,
 )
+from omnigent.onboarding.sandboxes.types import SandboxForkSource
 from omnigent.policies.types import (
     ElicitationRequest,
     EvaluationContext,
@@ -364,6 +365,13 @@ from omnigent.server.routes._sessions.helpers import (
     _wait_for_runner_client,
 )
 from omnigent.server.runner_session_init import RunnerSessionInitializer
+from omnigent.server.sandbox_forks import (
+    SANDBOX_FORK_LABEL_PREFIX,
+    SANDBOX_FORK_STATE_LABEL,
+    host_has_forked_workspace,
+    require_bound_sandbox_fork,
+    sandbox_fork_provider,
+)
 from omnigent.server.schemas import (
     BackgroundTaskInfo,
     ChildSessionSummary,
@@ -1159,6 +1167,7 @@ def _labels_for_viewer(labels: dict[str, str], user_id: str | None) -> dict[str,
         and not k.startswith(f"{PINNED_LABEL_KEY}.")
         and k != MANAGED_REPO_LABEL_KEY
         and not k.startswith(f"{MANAGED_REPO_LABEL_KEY}.")
+        and not k.startswith(SANDBOX_FORK_LABEL_PREFIX)
     }
     if my_pin is not None:
         cleaned[PINNED_LABEL_KEY] = my_pin
@@ -4329,6 +4338,7 @@ async def _run_managed_launch(
     agent_store: AgentStore | None = None,
     agent_id: str | None = None,
     host_id: str | None = None,
+    fork_source: SandboxForkSource | None = None,
 ) -> None:
     """
     Provision a managed sandbox for a session in the background.
@@ -4403,6 +4413,13 @@ async def _run_managed_launch(
     )
 
     saved_conversation = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+    preserve_workspace = (
+        saved_conversation is not None and SANDBOX_FORK_STATE_LABEL in saved_conversation.labels
+    )
+    if relaunch_host is not None and not preserve_workspace:
+        preserve_workspace = await asyncio.to_thread(
+            host_has_forked_workspace, conversation_store, relaunch_host.host_id
+        )
     if saved_conversation is not None:
         sandbox_config = deployment_with_inference_snapshot(
             sandbox_config,
@@ -4434,8 +4451,16 @@ async def _run_managed_launch(
                 and saved_conversation is not None
                 and host_slice_key_enabled(saved_conversation.labels, relaunch_host.host_id)
             ),
+            fork_source=fork_source,
+            preserve_workspace=preserve_workspace,
         )
         if managed is None:
+            if fork_source is not None:
+                await asyncio.to_thread(
+                    conversation_store.set_labels,
+                    session_id,
+                    {SANDBOX_FORK_STATE_LABEL: "failed"},
+                )
             return
         await _bind_and_launch_managed_runner(
             session_id=session_id,
@@ -4592,6 +4617,10 @@ async def _bind_and_launch_managed_runner(
                 if host is not None:
                     await terminate_managed_host(host, host_store, sandbox_config)
             return
+    if SANDBOX_FORK_STATE_LABEL in conv.labels:
+        await asyncio.to_thread(
+            conversation_store.set_labels, session_id, {SANDBOX_FORK_STATE_LABEL: "ready"}
+        )
     tracker.finish(session_id)
     _publish_sandbox_status(session_id, "ready")
 
@@ -4858,6 +4887,8 @@ async def ensure_runner_connected(
     """
 
     from omnigent.server.routes import sessions as _facade
+
+    require_bound_sandbox_fork(conv)
 
     async def _reread() -> Conversation:
         refreshed = await asyncio.to_thread(conversation_store.get_conversation, session_id)
@@ -13219,6 +13250,7 @@ async def _get_session_snapshot(
     viewer_id: str | None = None,
     request: Request | None = None,
     include_usage: bool = True,
+    workspace_readable: bool = False,
 ) -> SessionResponse:
     """
     Read a full session snapshot from the store.
@@ -13505,10 +13537,14 @@ async def _get_session_snapshot(
     # liveness arrives via the poll/stream). One indexed host read, gated to
     # host-bound sessions.
     host_resumable = False
+    fork_provider = None
     if host_store is not None and sandbox_config is not None and conv.host_id is not None:
         host_for_resume = await asyncio.to_thread(host_store.get_host, conv.host_id)
         if host_for_resume is not None:
             host_resumable = host_resume_supported(host_for_resume, sandbox_config)
+            fork_provider = sandbox_fork_provider(
+                conv, workspace_readable, host_for_resume, sandbox_config
+            )
     response = _build_session_response(
         conv,
         items,
@@ -13538,6 +13574,7 @@ async def _get_session_snapshot(
     )
     response.inference_configured = inference_configured
     response.inference_error = inference_error
+    response.sandbox_fork_provider = fork_provider
     response.usage_included = include_usage
     startup = getattr(request.app.state, "startup_inputs", None) if request is not None else None
     if startup is not None and STARTUP_LABEL in conv.labels:

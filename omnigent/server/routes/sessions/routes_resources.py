@@ -832,13 +832,12 @@ def register_resources_routes(
         # child session, access inherited from the parent chain with no direct
         # grant. Edit collaborators keep the workspace unconditionally; a
         # view-only grant reaches it only once the owner shares its files.
-        if access.level is None or access.level >= LEVEL_EDIT or conv.share_workspace_files:
-            return conv, await _owns_session(user_id, conv, access.level)
-        raise OmnigentError(
-            f"{user_id!r} needs edit access to browse the workspace of session "
-            f"{session_id!r}, or the owner must enable file sharing",
-            code=ErrorCode.FORBIDDEN,
+        from omnigent.server.routes._auth_helpers import require_workspace_read_access
+
+        await require_workspace_read_access(
+            user_id, conv, access.level, permission_store, conversation_store
         )
+        return conv, await _owns_session(user_id, conv, access.level)
 
     async def _owns_session(user_id: str | None, conv: Conversation, level: int | None) -> bool:
         """Whether the caller clears the owner bar :func:`_browse_level` sets.

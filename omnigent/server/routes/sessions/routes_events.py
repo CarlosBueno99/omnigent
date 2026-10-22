@@ -2578,6 +2578,9 @@ def register_events_routes(
                 if conv is None:
                     raise _session_not_found()
                 runner_client = await _get_runner_client(session_id, runner_router)
+            from omnigent.server.sandbox_forks import require_bound_sandbox_fork
+
+            require_bound_sandbox_fork(conv)
         # Check for a wrong-replica routing miss before attempting healing or
         # dispatch. The runner tunnel is registered on the same replica as its
         # host; when the tunnel is absent here but the host is live elsewhere,
