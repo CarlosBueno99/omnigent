@@ -111,7 +111,7 @@ function renderViewer(
     truncated?: boolean;
     markdownSourceFallback?: boolean;
     mediaActive?: boolean;
-    position?: { line: number };
+    position?: { line: number; endLine?: number };
     onRequestEditMode?: () => void;
   } = {},
 ) {
@@ -1173,6 +1173,28 @@ describe("source line navigation", () => {
       expect(scroll).toHaveBeenCalledWith({ block: "center" });
       expect(scroll.mock.instances.at(-1)).toBe(line);
       expect(line).toHaveClass("bg-yellow-200/40");
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("highlights every line of a cited range and centers its first line", () => {
+    const scroll = vi.fn();
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scroll;
+    try {
+      renderViewer("one\ntwo\nthree\nfour\nfive", true, "notes.md", {
+        position: { line: 2, endLine: 4 },
+      });
+      const row = (text: string) =>
+        screen.getByText(text).closest("[data-line]")?.parentElement?.parentElement;
+      expect(scroll.mock.instances.at(-1)).toBe(row("two"));
+      for (const text of ["two", "three", "four"]) {
+        expect(row(text)).toHaveClass("bg-yellow-200/40");
+      }
+      for (const text of ["one", "five"]) {
+        expect(row(text)).not.toHaveClass("bg-yellow-200/40");
+      }
     } finally {
       HTMLElement.prototype.scrollIntoView = original;
     }

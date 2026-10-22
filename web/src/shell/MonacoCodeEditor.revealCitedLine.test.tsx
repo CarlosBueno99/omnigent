@@ -34,7 +34,10 @@ interface FakeEditor {
   getAction: () => undefined;
   getContribution: () => null;
   revealPositionInCenter: ReturnType<typeof vi.fn>;
+  revealRangeInCenter: ReturnType<typeof vi.fn>;
   setPosition: ReturnType<typeof vi.fn>;
+  createDecorationsCollection: ReturnType<typeof vi.fn>;
+  clearDecorations: ReturnType<typeof vi.fn>;
   scrollTops: number[];
 }
 
@@ -77,7 +80,10 @@ function makeFakeEditor(initial: string, lineCount: number): FakeEditor {
     getAction: () => undefined,
     getContribution: () => null,
     revealPositionInCenter: vi.fn(),
+    revealRangeInCenter: vi.fn(),
     setPosition: vi.fn(),
+    createDecorationsCollection: vi.fn(() => ({ clear: editor.clearDecorations })),
+    clearDecorations: vi.fn(),
     scrollTops: [],
   };
   return editor;
@@ -125,7 +131,11 @@ const CONTENT = Array.from({ length: LINE_COUNT }, (_, i) => `filler_${i + 1}`).
 
 function makeEditor(
   revealLine?: number,
-  { column, truncated = false }: { column?: number; truncated?: boolean } = {},
+  {
+    column,
+    endLine,
+    truncated = false,
+  }: { column?: number; endLine?: number; truncated?: boolean } = {},
 ) {
   return (
     <MonacoCodeEditor
@@ -136,7 +146,7 @@ function makeEditor(
       comments={[]}
       activeSelection={null}
       onSetActiveSelection={() => {}}
-      position={revealLine == null ? undefined : { line: revealLine, column }}
+      position={revealLine == null ? undefined : { line: revealLine, column, endLine }}
       truncated={truncated}
     />
   );
@@ -262,6 +272,26 @@ describe("MonacoCodeEditor cited-line reveal", () => {
       expect(fakeEditor!.revealPositionInCenter).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("centers and highlights a cited range until the citation changes", async () => {
+    const range = { startLineNumber: 120, startColumn: 1, endLineNumber: 130, endColumn: 1 };
+    const { rerender } = await renderMounted(makeEditor(120, { endLine: 130 }));
+
+    expect(fakeEditor!.setPosition).toHaveBeenLastCalledWith({ lineNumber: 120, column: 1 });
+    expect(fakeEditor!.revealRangeInCenter).toHaveBeenCalledWith(range, 1);
+    expect(fakeEditor!.revealPositionInCenter).not.toHaveBeenCalled();
+    expect(fakeEditor!.createDecorationsCollection).toHaveBeenCalledWith([
+      { range, options: { isWholeLine: true, className: "oa-cited-lines" } },
+    ]);
+
+    // Scrolling away keeps the highlight; only a new citation replaces it.
+    fakeEditor!.getDomNode().dispatchEvent(new Event("wheel"));
+    expect(fakeEditor!.clearDecorations).not.toHaveBeenCalled();
+    rerender(makeEditor(42));
+    await act(async () => {});
+    expect(fakeEditor!.clearDecorations).toHaveBeenCalledTimes(1);
+    expect(fakeEditor!.createDecorationsCollection).toHaveBeenCalledTimes(1);
+  });
 
   it("removes the layout listener when the editor unmounts", async () => {
     const { unmount } = await renderMounted(makeEditor(1));

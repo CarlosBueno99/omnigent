@@ -394,17 +394,23 @@ function AppShellImpl() {
   const citationPath = searchParams.get("file");
   const citationLine = searchParams.get("line");
   const citationColumn = searchParams.get("column");
+  const citationEndLine = searchParams.get("endLine");
   // Keep URL requests stable across viewer remounts, just like citation clicks.
   const urlNavigation = useMemo(() => {
     const line = Number(citationLine);
     const column = Number(citationColumn);
+    const endLine = Number(citationEndLine);
     if (!citationPath || !Number.isSafeInteger(line) || line < 1) return undefined;
     return {
       conversationId,
       path: citationPath,
-      position: { line, ...(Number.isSafeInteger(column) && column > 0 ? { column } : {}) },
+      position: {
+        line,
+        ...(Number.isSafeInteger(column) && column > 0 ? { column } : {}),
+        ...(Number.isSafeInteger(endLine) && endLine > line ? { endLine } : {}),
+      },
     };
-  }, [conversationId, citationPath, citationLine, citationColumn]);
+  }, [conversationId, citationPath, citationLine, citationColumn, citationEndLine]);
   const filePosition =
     fileNavigation?.conversationId === conversationId && fileNavigation?.path === selectedFilePath
       ? fileNavigation.position
@@ -1353,7 +1359,9 @@ function AppShellImpl() {
 
   const commitFileNavigation = useCallback(
     (path: string, options?: OpenFileOptions) => {
-      const position = options?.line ? { line: options.line, column: options.column } : undefined;
+      const position = options?.line
+        ? { line: options.line, column: options.column, endLine: options.endLine }
+        : undefined;
       setSelectedFilePath(path);
       setFileNavigation({ conversationId, path, position });
       // A file and a shell tab can't both own the rail's content slot —
@@ -1404,6 +1412,8 @@ function AppShellImpl() {
           else next.delete("line");
           if (position?.column != null) next.set("column", String(position.column));
           else next.delete("column");
+          if (position?.endLine != null) next.set("endLine", String(position.endLine));
+          else next.delete("endLine");
           return next;
         },
         { replace: true },
@@ -1445,6 +1455,7 @@ function AppShellImpl() {
         next.delete("comment");
         next.delete("line");
         next.delete("column");
+        next.delete("endLine");
         return next;
       },
       { replace: true },
@@ -1793,6 +1804,7 @@ function AppShellImpl() {
               params.delete("comment");
               params.delete("line"); // stale citation belongs to the closed file
               params.delete("column");
+              params.delete("endLine");
               return params;
             },
             { replace: true },

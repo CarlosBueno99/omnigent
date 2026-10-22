@@ -34,7 +34,14 @@ export function useMonacoFilePosition({
       });
       // Moving the cursor expands collapsed diff context containing the target.
       editor.setPosition(target);
-      editor.revealPositionInCenter(target, 1 /* ScrollType.Immediate */);
+      if (position.endLine) {
+        editor.revealRangeInCenter(
+          citedRange(position.line, position.endLine),
+          1 /* ScrollType.Immediate */,
+        );
+      } else {
+        editor.revealPositionInCenter(target, 1 /* ScrollType.Immediate */);
+      }
     };
     const layout = editor.onDidLayoutChange(center);
     let frame: number | undefined;
@@ -57,4 +64,24 @@ export function useMonacoFilePosition({
     center();
     return stop;
   }, [editorRef, mounted, position, cancelScrollRestoreRef, diffEditorRef]);
+
+  // A cited range stays highlighted while it is the viewer's position, even
+  // after the reader scrolls away from it.
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!mounted || !editor || !position?.endLine) return;
+    const highlight = editor.createDecorationsCollection([
+      {
+        range: citedRange(position.line, position.endLine),
+        options: { isWholeLine: true, className: CITED_LINES_CLASS_NAME },
+      },
+    ]);
+    return () => highlight.clear();
+  }, [editorRef, mounted, position]);
+}
+
+const CITED_LINES_CLASS_NAME = "oa-cited-lines";
+
+function citedRange(startLine: number, endLine: number) {
+  return { startLineNumber: startLine, startColumn: 1, endLineNumber: endLine, endColumn: 1 };
 }

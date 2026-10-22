@@ -213,7 +213,9 @@ export function GridSessionPane({
       navigateWorkspace(path, options, () => {
         onOpenWorkspace();
         setPosition(
-          options?.line === undefined ? undefined : { line: options.line, column: options.column },
+          options?.line === undefined
+            ? undefined
+            : { line: options.line, column: options.column, endLine: options.endLine },
         );
         setWorkspace((previous) => ({
           ...previous,
