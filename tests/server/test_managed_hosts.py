@@ -155,7 +155,7 @@ class _ForkingFakeSandboxLauncher(FakeSandboxLauncher):
 
     @property
     def capabilities(self) -> Any:
-        return replace(super().capabilities, fork=True)
+        return replace(super().capabilities, fork_sandbox=True)
 
     def fork(
         self,
@@ -2225,7 +2225,7 @@ def test_provider_ui_capabilities_reports_opt_in_features_per_provider() -> None
     class _MultiRepoFake(FakeSandboxLauncher):
         @property
         def capabilities(self) -> Any:
-            return replace(super().capabilities, multi_repo=True, fork=True)
+            return replace(super().capabilities, multi_repo=True, fork_sandbox=True)
 
     single = FakeSandboxLauncher()  # exec-model default → multi_repo False
     multi = _MultiRepoFake()
@@ -2246,8 +2246,8 @@ def test_provider_ui_capabilities_reports_opt_in_features_per_provider() -> None
         )
     )
     assert deployment.provider_ui_capabilities() == {
-        "single": {"multi_repo": False, "fork": False},
-        "multi": {"multi_repo": True, "fork": True},
+        "single": {"multi_repo": False, "fork_sandbox": False},
+        "multi": {"multi_repo": True, "fork_sandbox": True},
     }
 
 
@@ -2274,9 +2274,9 @@ def test_provider_ui_capabilities_enable_inference_only_on_configured_target() -
         )
     )
     assert deployment.provider_ui_capabilities() == {
-        "kubernetes": {"multi_repo": False, "fork": False},
-        "modal": {"multi_repo": False, "fork": False},
-        "agent_sandbox": {"multi_repo": False, "fork": False, "inference_models": True},
+        "kubernetes": {"multi_repo": False, "fork_sandbox": False},
+        "modal": {"multi_repo": False, "fork_sandbox": False},
+        "agent_sandbox": {"multi_repo": False, "fork_sandbox": False, "inference_models": True},
     }
 
 
@@ -2328,12 +2328,12 @@ def test_provider_ui_capabilities_advertise_default_models_for_unbound_discovery
         )
     )
     assert deployment.provider_ui_capabilities() == {
-        "hooked": {"multi_repo": False, "fork": False, "default_models": True},
-        "discovered": {"multi_repo": False, "fork": False, "default_models": True},
-        "static": {"multi_repo": False, "fork": False},
-        "bound": {"multi_repo": False, "fork": False, "inference_models": True},
-        "malformed": {"multi_repo": False, "fork": False},
-        "malformed-inference": {"multi_repo": False, "fork": False},
+        "hooked": {"multi_repo": False, "fork_sandbox": False, "default_models": True},
+        "discovered": {"multi_repo": False, "fork_sandbox": False, "default_models": True},
+        "static": {"multi_repo": False, "fork_sandbox": False},
+        "bound": {"multi_repo": False, "fork_sandbox": False, "inference_models": True},
+        "malformed": {"multi_repo": False, "fork_sandbox": False},
+        "malformed-inference": {"multi_repo": False, "fork_sandbox": False},
     }
 
 

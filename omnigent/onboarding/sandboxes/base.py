@@ -586,7 +586,7 @@ class SandboxLifecycle(ABC):
     ) -> str:
         """Copy a sandbox into independent storage and return its new id.
 
-        Optional capability, enabled by ``SandboxCapabilities.fork``. The
+        Optional capability, enabled by ``SandboxCapabilities.fork_sandbox``. The
         provider authorizes copying from the source to ``target_user_id`` and
         makes the copy writable by that user, without modifying the source.
         Repeated calls with the same ``idempotency_key`` identify one copy.

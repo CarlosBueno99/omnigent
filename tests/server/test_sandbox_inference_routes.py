@@ -1033,7 +1033,7 @@ async def test_sandbox_copy_uses_target_users_inference(
         replace(
             env.app.state.sandbox_config.default,
             launcher_factory=lambda: SimpleNamespace(
-                capabilities=SandboxCapabilities(managed_launch=True, fork=True)
+                capabilities=SandboxCapabilities(managed_launch=True, fork_sandbox=True)
             ),
         )
     )

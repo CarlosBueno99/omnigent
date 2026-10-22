@@ -2003,7 +2003,7 @@ async def test_fork_sandbox_authorizes_files_and_pins_source_generation(
     monkeypatch.setattr(
         type(app.state.sandbox_config),
         "provider_ui_capabilities",
-        lambda _self: {"modal": {"fork": capable, "multi_repo": False}},
+        lambda _self: {"modal": {"fork_sandbox": capable, "multi_repo": False}},
     )
 
     async def access(*_args: Any, **_kwargs: Any) -> SessionAccess:
@@ -2118,7 +2118,7 @@ async def test_sandbox_fork_checks_inherited_workspace_permission(
     monkeypatch.setattr(
         type(app.state.sandbox_config),
         "provider_ui_capabilities",
-        lambda _self: {"modal": {"fork": True}},
+        lambda _self: {"modal": {"fork_sandbox": True}},
     )
     client = TestClient(app)
     headers = {"X-Forwarded-Email": "bob@example.com"}

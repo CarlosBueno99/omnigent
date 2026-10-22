@@ -54,7 +54,7 @@ def _managed_info_body(fork_available: bool) -> str:
             "managed_sandboxes_enabled": True,
             "sandbox_provider": "modal",
             "sandbox_providers": ["modal"],
-            "sandbox_provider_capabilities": {"modal": {"fork": fork_available}},
+            "sandbox_provider_capabilities": {"modal": {"fork_sandbox": fork_available}},
             "server_version": "0.0.0-e2e",
             "smart_routing_enabled": False,
         }

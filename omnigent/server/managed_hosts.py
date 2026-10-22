@@ -941,7 +941,7 @@ class ManagedSandboxDeployment:
                 launcher = config.launcher_factory()
                 caps[config.provider] = {
                     "multi_repo": launcher.capabilities.multi_repo,
-                    "fork": launcher.capabilities.fork,
+                    "fork_sandbox": launcher.capabilities.fork_sandbox,
                 }
                 from omnigent.inference_config import parse_inference_config
                 from omnigent.server.inference_catalog import ambient_gateway_providers
@@ -3787,7 +3787,7 @@ async def launch_managed_host(
     """
     entry = _select_provider_config(config, provider)
     launcher = build_owner_launcher(entry, config, owner)
-    if fork_source is not None and not launcher.capabilities.fork:
+    if fork_source is not None and not launcher.capabilities.fork_sandbox:
         raise HTTPException(
             status_code=400,
             detail=f"sandbox provider '{launcher.provider}' does not support sandbox forking",

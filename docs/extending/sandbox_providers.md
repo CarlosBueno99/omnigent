@@ -286,13 +286,13 @@ Providers declare their feature set via a `capabilities` property returning
 | `file_copy` | Supports copying files into the sandbox |
 | `streaming_exec` | Supports streaming process execution |
 | `foreground_exec` | Supports a foreground exec with inherited stdio |
-| `fork` | Copies a sandbox into independent storage owned by the requesting user |
+| `fork_sandbox` | Copies a sandbox into independent storage owned by the requesting user |
 
 ## Forking a session's sandbox
 
 Sandbox copying is opt-in. Existing providers and API callers keep their current
 behavior: a session fork can create a fresh sandbox and clone its repositories.
-A provider enables copying by returning `SandboxCapabilities(fork=True, ...)`
+A provider enables copying by returning `SandboxCapabilities(fork_sandbox=True, ...)`
 and implementing this optional lifecycle method:
 
 ```python

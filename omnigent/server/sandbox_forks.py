@@ -43,7 +43,7 @@ def sandbox_fork_provider(
     ):
         return None
     capabilities = deployment.provider_ui_capabilities().get(host.sandbox_provider, {})
-    return host.sandbox_provider if capabilities.get("fork", False) else None
+    return host.sandbox_provider if capabilities.get("fork_sandbox", False) else None
 
 
 def require_bound_sandbox_fork(conversation: Conversation) -> None:
