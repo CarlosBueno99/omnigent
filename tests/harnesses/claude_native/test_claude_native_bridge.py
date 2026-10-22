@@ -4449,6 +4449,10 @@ def test_inject_user_message_pastes_content_then_submits(
         ("/exit", " /exit"),
         ("/quit now", " /quit now"),
         ("  /help", "   /help"),
+        # Panels that write no transcript record, so their delivery is never confirmed.
+        ("/export", " /export"),
+        ("/rewind", " /rewind"),
+        ("/usage", " /usage"),
         ("/clear", "/clear"),
         ("/compact", "/compact"),
         ("/model sonnet-4", "/model sonnet-4"),
@@ -5019,22 +5023,20 @@ def test_inject_user_message_ignores_prompt_glyph_in_scrollback(
         inject_user_message(bridge_dir, content="hi", timeout_s=0.3)
 
 
-def test_inject_user_message_resends_enter_when_first_submit_swallowed(
+@pytest.mark.parametrize("submit_capture", ["ready", "empty", "whitespace", "failed"])
+@pytest.mark.parametrize("accept_first", [False, True], ids=["swallowed", "accepted"])
+def test_inject_user_message_verifies_submit_after_transient_capture_loss(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    submit_capture: str,
+    accept_first: bool,
 ) -> None:
     """
-    A submit Enter swallowed by the TUI's paste burst is retried.
+    Capture loss cannot confirm a submit or cause a blind retry.
 
-    Claude Code coalesces rapid stdin bursts into a paste; an Enter
-    that lands inside that window becomes a newline in the draft
-    instead of a submit, and the message sits unsent — the "typed but
-    never sent" bug. The helper must observe (via capture-pane) that
-    the draft is still in the input box after Enter and re-send Enter
-    until it clears. Here the fake TUI swallows the first Enter
-    (draft stays put) and submits on the second; a regression to
-    fire-and-forget Enter would send exactly one and return "success"
-    with the message undelivered.
+    If the first Enter is swallowed by Claude's paste burst, a readable
+    draft must return before another Enter. If it was accepted, capture
+    recovery shows the empty input box and no second Enter is sent.
     """
     monkeypatch.setattr("omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", tmp_path)
     # Shrink the polling cadence so the retry happens in milliseconds —
@@ -5052,14 +5054,12 @@ def test_inject_user_message_resends_enter_when_first_submit_swallowed(
     )
 
     enters: list[list[str]] = []
-    # Input-box state machine: the paste deposits the draft; the FIRST
-    # Enter is swallowed (folded into the paste burst — draft stays);
-    # the second Enter submits and clears the box.
-    tui = {"pane": _composer_pane(), "swallowed_enters": 0}
+    # The first Enter may be swallowed; a later Enter clears the draft.
+    tui = {"pane": _composer_pane(), "missing_captures": 0}
 
     def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         """
-        Simulate a TUI that swallows the first submit Enter.
+        Simulate capture loss after a submit that may have been swallowed.
 
         :param cmd: Argv list passed to subprocess.run.
         :param kwargs: Subprocess kwargs (ignored).
@@ -5068,31 +5068,35 @@ def test_inject_user_message_resends_enter_when_first_submit_swallowed(
         """
         del kwargs
         if "capture-pane" in cmd:
+            if len(enters) == 1 and tui["missing_captures"] < 3:
+                tui["missing_captures"] += 1
+                if submit_capture != "ready":
+                    assert len(enters) == 1, "an unreadable pane must not draw another Enter"
+                    return SimpleNamespace(
+                        returncode=1 if submit_capture == "failed" else 0,
+                        stdout="  \n" if submit_capture == "whitespace" else "",
+                        stderr="capture unavailable" if submit_capture == "failed" else "",
+                    )
             return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
         if "paste-buffer" in cmd:
             tui["pane"] = _composer_pane("fix the flaky test")
         if cmd[-1] == "Enter":
             enters.append(cmd)
-            if tui["swallowed_enters"] == 0:
-                tui["swallowed_enters"] = 1  # folded into the paste — draft stays
-            else:
+            if accept_first or len(enters) > 1:
                 tui["pane"] = _composer_pane()  # submitted — input box clears
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("subprocess.run", _fake_run)
     inject_user_message(bridge_dir, content="fix the flaky test")
 
-    # Exactly two Enters: the swallowed one plus one retry. One means
-    # the verify-retry loop regressed to fire-and-forget (the bug);
-    # three+ means retries keep firing after the draft cleared.
-    assert len(enters) == 2, (
-        f"Expected the swallowed Enter to be retried exactly once, got {len(enters)} Enter(s)."
-    )
+    assert len(enters) == (1 if accept_first else 2)
 
 
+@pytest.mark.parametrize("capture_lost", [False, True], ids=["draft-remains", "capture-lost"])
 def test_inject_user_message_raises_when_draft_never_submits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capture_lost: bool,
 ) -> None:
     """
     Injection fails loud when the draft never leaves the input box.
@@ -5116,7 +5120,7 @@ def test_inject_user_message_raises_when_draft_never_submits(
         tmux_target="claude:0.0",
     )
 
-    tui = {"pane": _composer_pane()}
+    tui = {"pane": _composer_pane(), "enters": 0}
 
     def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         """
@@ -5132,15 +5136,23 @@ def test_inject_user_message_raises_when_draft_never_submits(
         """
         del kwargs
         if "capture-pane" in cmd:
-            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+            pane = "" if capture_lost and tui["enters"] else tui["pane"]
+            return SimpleNamespace(returncode=0, stdout=pane, stderr="")
         if "paste-buffer" in cmd:
             tui["pane"] = _composer_pane("fix the flaky test")
+        if cmd[-1] == "Enter":
+            tui["enters"] += 1
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("subprocess.run", _fake_run)
-    with pytest.raises(RuntimeError, match="message was not delivered") as caught:
+    error_message = "could not be confirmed" if capture_lost else "message was not delivered"
+    with pytest.raises(RuntimeError, match=error_message) as caught:
         inject_user_message(bridge_dir, content="fix the flaky test")
-    assert isinstance(caught.value, claude_native_bridge.ClaudeMessageNotAccepted)
+    assert (
+        isinstance(caught.value, claude_native_bridge.ClaudeMessageNotAccepted) is not capture_lost
+    )
+    if capture_lost:
+        assert tui["enters"] == 1
 
 
 def test_inject_user_message_backs_off_enter_retries_on_stalled_tui(
@@ -5526,6 +5538,10 @@ def test_kill_session_raises_when_tmux_target_never_published(
     [
         "no server running on /tmp/example/tmux.sock",
         "can't find session: main",
+        pytest.param(
+            "error connecting to /tmp/example/tmux.sock (No such file or directory)",
+            id="socket-removed-after-idle-cleanup",
+        ),
     ],
 )
 def test_kill_session_is_idempotent_when_tmux_is_absent(
@@ -5716,7 +5732,7 @@ def test_tmux_injections_are_serialized_per_bridge(
     )
     monkeypatch.setattr(claude_native_bridge, "_paste_and_submit", lambda *_a, **_k: None)
     monkeypatch.setattr(claude_native_bridge, "_run_tmux", lambda *_args: None)
-    monkeypatch.setattr(claude_native_bridge, "_capture_pane", lambda *_args: "")
+    monkeypatch.setattr(claude_native_bridge, "_capture_pane", lambda *_args: _composer_pane())
     monkeypatch.setattr(claude_native_bridge, "_PASTE_COMMIT_TIMEOUT_S", 0.0)
     monkeypatch.setattr(claude_native_bridge, "_PASTE_SETTLE_S", 0.0)
 
@@ -10811,7 +10827,14 @@ class _EditableComposer:
 
     _RULE = "──────────────────────────────"
 
-    def __init__(self, draft: str, *, cursor: int, visible_rows: int | None = None) -> None:
+    def __init__(
+        self,
+        draft: str,
+        *,
+        cursor: int,
+        visible_rows: int | None = None,
+        unavailable_clear_captures: int = 0,
+    ) -> None:
         """
         :param draft: Text the person left in the box.
         :param cursor: Cursor offset into *draft*.
@@ -10820,10 +10843,14 @@ class _EditableComposer:
             the closing rule shows framed; a taller one is cut off at the
             bottom of the pane without it (the ``_SLIVER_MULTILINE_DRAFT_PANE``
             geometry). ``None`` shows the whole box.
+        :param unavailable_clear_captures: Captures that fail after clearing
+            starts; readiness captures remain readable.
         """
         self.text = draft
         self.cursor = cursor
         self._visible_rows = visible_rows
+        self._unavailable_clear_captures = unavailable_clear_captures
+        self._clearing_started = False
         self.submitted: list[str] = []
         self._paste_buffer = ""
         self._actions = {
@@ -10854,6 +10881,7 @@ class _EditableComposer:
                 self._actions[sequence]()
                 keys = keys[len(sequence) :]
         elif args[0] == "send-keys" and args[-1] == "Space":
+            self._clearing_started = True
             self._insert(" ")
         elif args[0] == "send-keys" and args[-1] == "Enter":
             self.submitted.append(self.text)
@@ -10861,6 +10889,9 @@ class _EditableComposer:
 
     def _capture_pane(self, socket_path: str, tmux_target: str) -> str:
         del socket_path, tmux_target
+        if self._clearing_started and self._unavailable_clear_captures:
+            self._unavailable_clear_captures -= 1
+            return ""
         first, *rest = self.text.split("\n")
         rows = [f"❯ {first}", *(f"  {row}" for row in rest)]
         if self._visible_rows is not None and len(rows) >= self._visible_rows:
@@ -10994,6 +11025,55 @@ def test_a_draft_the_clearing_budget_cannot_empty_is_refused_not_submitted(
 
     assert composer.submitted == []
     assert "FOUR" in composer.text, "The leftover line should still be the person's to deal with."
+
+
+@pytest.mark.parametrize(
+    ("inject", "expected"),
+    [
+        (
+            lambda bridge_dir: inject_user_message(bridge_dir, content="hello from the web"),
+            "hello from the web",
+        ),
+        (
+            lambda bridge_dir: claude_native_bridge.inject_slash_command(
+                bridge_dir, command="/effort high"
+            ),
+            "/effort high",
+        ),
+    ],
+    ids=["web-message", "slash-command"],
+)
+@pytest.mark.parametrize(
+    "unavailable_clear_captures",
+    [1, claude_native_bridge._COMPOSER_CLEAR_MAX_ROUNDS + 1],
+    ids=["one-failed-capture", "persistent-failed-captures"],
+)
+def test_unavailable_composer_capture_never_submits_the_leftover_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inject: Callable[[Path], None],
+    expected: str,
+    unavailable_clear_captures: int,
+) -> None:
+    """Retry a transient unreadable box; refuse when it stays unreadable."""
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    composer = _EditableComposer(
+        _STALE_MULTILINE_DRAFT,
+        cursor=0,
+        unavailable_clear_captures=unavailable_clear_captures,
+    )
+    composer.install(monkeypatch)
+
+    if unavailable_clear_captures > 1:
+        with pytest.raises(
+            claude_native_bridge.ClaudeComposerNotCleared, match="nothing was sent"
+        ):
+            inject(bridge_dir)
+        assert composer.submitted == []
+        assert "STALE TWO\nSTALE THREE" in composer.text
+    else:
+        inject(bridge_dir)
+        assert [text.strip() for text in composer.submitted] == [expected]
 
 
 @pytest.mark.parametrize(
@@ -11636,17 +11716,17 @@ def test_inject_user_message_restores_an_occupied_input_box_first(
     assert tails[-1] == "Enter"
 
 
-def test_inject_user_message_refuses_a_shell_mode_draft_escape_cannot_clear(
+def test_inject_user_message_refuses_a_shell_mode_draft_it_cannot_clear(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     A shell-mode draft that outlives the reclaim is refused, not waited out.
 
-    Escape does not take a typed shell command out of the box, so the
+    When clearing does not take the typed shell command out of the box, the
     readiness gate would poll its whole slow-boot budget for a ``❯`` that
     cannot appear, and the delivery timeout then kills the healthy pane.
-    Only the dismissal Escapes may reach the pane.
+    Only the clearing keys may reach the pane: nothing that submits.
     """
     bridge_dir = _picker_bridge_dir(tmp_path)
     shell_draft_pane = (
@@ -11667,7 +11747,9 @@ def test_inject_user_message_refuses_a_shell_mode_draft_escape_cannot_clear(
         inject_user_message(bridge_dir, content="hello from the web")
 
     tails = [args[-1] for args in sends]
-    assert tails and set(tails) == {"Escape"}, f"Only dismissal Escapes may be sent; got {tails}."
+    assert tails and set(tails) == {claude_native_bridge._CLEAR_LINE_KEY}, (
+        f"Only the clearing keys may be sent; got {tails}."
+    )
 
 
 _MCP_APPROVAL_DIALOG_PANE = """\
