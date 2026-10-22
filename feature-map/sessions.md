@@ -28,8 +28,8 @@ the header menu), and each place is a separate entry point.
   answer, which Settings → Git can change later.
 - `stop`: Stop session on a hosted parent ends its runner, including side chats
   and sub-agents sharing that runner, and closes its side shells. On a
-  CLI-launched native session it closes that session's side shells and leaves
-  the runner running. Conversation histories are kept.
+  CLI-launched Claude-native or Devin-native session it closes that session's
+  side shells and leaves the runner running. Conversation histories are kept.
 - `side-chat-lifecycle`: generic side chats reuse their parent's live runner;
   closing one stops only that chat. Starting one from a stopped generic hosted
   parent relaunches the parent first, then shares its replacement runner. An
