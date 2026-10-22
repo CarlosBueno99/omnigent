@@ -51,7 +51,7 @@ On first run this creates a localhost certificate in `web/.dev-certs/`, using
 certificate otherwise. Prefer mkcert: Chrome does not cache responses from sites
 with certificate errors. If the browser runs on another machine, make it trust
 the dev machine's mkcert root (`mkcert -CAROOT` shows where it lives). Set
-`VITE_DEV_HTTPS_CERT` and `VITE_DEV_HTTPS_KEY` to use your own certificate.
+`OMNIGENT_DEV_HTTPS_CERT` and `OMNIGENT_DEV_HTTPS_KEY` to use your own certificate.
 
 Additional `omnigent server` options:
 

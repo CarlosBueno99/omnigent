@@ -296,8 +296,8 @@ export default defineConfig(({ command }) => ({
     // HTTPS serves over HTTP/2, so the hundreds of dev module requests share one
     // multiplexed connection instead of queueing on six HTTP/1.1 sockets.
     https:
-      process.env.VITE_DEV_HTTPS_CERT && process.env.VITE_DEV_HTTPS_KEY
-        ? { cert: process.env.VITE_DEV_HTTPS_CERT, key: process.env.VITE_DEV_HTTPS_KEY }
+      process.env.OMNIGENT_DEV_HTTPS_CERT && process.env.OMNIGENT_DEV_HTTPS_KEY
+        ? { cert: process.env.OMNIGENT_DEV_HTTPS_CERT, key: process.env.OMNIGENT_DEV_HTTPS_KEY }
         : undefined,
   },
   build: {

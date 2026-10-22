@@ -6,8 +6,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const certDir = resolve(root, ".dev-certs");
-const cert = process.env.VITE_DEV_HTTPS_CERT ?? resolve(certDir, "localhost.pem");
-const key = process.env.VITE_DEV_HTTPS_KEY ?? resolve(certDir, "localhost-key.pem");
+const cert = process.env.OMNIGENT_DEV_HTTPS_CERT ?? resolve(certDir, "localhost.pem");
+const key = process.env.OMNIGENT_DEV_HTTPS_KEY ?? resolve(certDir, "localhost-key.pem");
 
 function hasCommand(command) {
   try {
@@ -56,8 +56,8 @@ if (!existsSync(cert) || !existsSync(key)) {
 }
 
 // Run Vite's CLI in this process so signals and exit codes behave like `vite`.
-process.env.VITE_DEV_HTTPS_CERT = cert;
-process.env.VITE_DEV_HTTPS_KEY = key;
+process.env.OMNIGENT_DEV_HTTPS_CERT = cert;
+process.env.OMNIGENT_DEV_HTTPS_KEY = key;
 const viteBin = resolve(root, "node_modules/vite/bin/vite.js");
 process.argv = [process.argv[0], viteBin, ...process.argv.slice(2)];
 await import(pathToFileURL(viteBin).href);
