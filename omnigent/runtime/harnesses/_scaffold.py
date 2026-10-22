@@ -681,7 +681,7 @@ class TurnContext:
             if timeout is None:
                 return await self._injection_queue.get()
             return await asyncio.wait_for(self._injection_queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
 
     def _complete_tool(self, call_id: str, output: str) -> bool:
@@ -767,7 +767,7 @@ class TurnContext:
             verdict = await asyncio.wait_for(future, timeout=timeout_s)
             _logger.info("Policy evaluation %s resolved: %s", evaluation_id, verdict.action)
             return verdict
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Phase-aware default: advisory LLM phases and TOOL_RESULT (the
             # tool already ran) fail OPEN so a missing verdict never hangs the
             # turn, but TOOL_CALL is the authoritative gate for
@@ -850,12 +850,9 @@ class HarnessApp:
     .. code-block:: python
 
         class MyHarnessApp(HarnessApp):
-            async def run_turn(
-                self, request: CreateResponseRequest, ctx: TurnContext
-            ) -> None:
-                ctx.emit(OutputTextDeltaEvent(
-                    type="response.output_text.delta", delta="hi"
-                ))
+            async def run_turn(self, request: CreateResponseRequest, ctx: TurnContext) -> None:
+                ctx.emit(OutputTextDeltaEvent(type="response.output_text.delta", delta="hi"))
+
 
         def create_app() -> FastAPI:
             return MyHarnessApp().build()
@@ -1352,8 +1349,11 @@ class HarnessApp:
         1. ``previous_response_id`` matches an in-flight turn →
            in-band injection: enqueue the request body on that
            turn's injection queue, return 204.
-        2. Scaffold is shutting down → refuse with 503.
-        3. Otherwise → start a new turn: allocate ``response_id``,
+        2. A runner steer (``injection_id`` set) with no live turn to
+           inject into → refuse with 409; the runner replays it as its
+           continuation turn.
+        3. Scaffold is shutting down → refuse with 503.
+        4. Otherwise → start a new turn: allocate ``response_id``,
            build a :class:`TurnContext`, register it in
            ``_in_flight``, and return a streaming SSE response
            that runs ``run_turn`` to completion.
@@ -1362,7 +1362,8 @@ class HarnessApp:
         :returns: Either a :class:`StreamingResponse` for the new
             turn or a 204 :class:`Response` for an in-band
             injection.
-        :raises OmnigentError: 503 on shutdown.
+        :raises OmnigentError: 409 for a steer with no live turn; 503 on
+            shutdown.
         """
         if (
             request.previous_response_id is not None
@@ -1386,6 +1387,15 @@ class HarnessApp:
             ):
                 self._active_turn_ctx._push_injection(request)
                 return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+            if request.injection_id is not None:
+                # The steered turn already ended or was interrupted. The runner
+                # keeps the message buffered for its continuation turn, so a turn
+                # started here would run unseen and make that continuation a 204.
+                raise OmnigentError(
+                    "no active turn to inject into",
+                    code=ErrorCode.CONFLICT,
+                )
 
             if self._shutting_down.is_set():
                 raise OmnigentError(
@@ -2031,7 +2041,7 @@ def _utc_now_iso() -> str:
     """
     import datetime
 
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # Note: ``HarnessApp._build_error_detail`` is the canonical
