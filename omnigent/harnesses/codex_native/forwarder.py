@@ -281,6 +281,10 @@ _CODEX_AUTH_HTTP_STATUS_TOKEN = re.compile(r"(?<![\w-])40[13](?![\w-])")
 _CODEX_RATE_LIMIT_ERROR = re.compile(r"(?<![\w-])429(?![\w-])|too many requests|rate[ _-]limit")
 _CODEX_ERROR_KIND_AUTH = "auth"
 _CODEX_ERROR_KIND_GENERIC = "generic"
+_CODEX_ERROR_KIND_SAFETY = "safety"
+# Provider safety refusals. Codex re-sends the whole thread every turn, so a
+# refused turn left in history gets every later request refused too.
+_CODEX_SAFETY_BLOCK_FRAGMENTS = ("blocked by our safety systems",)
 _CODEX_REAUTH_HINT = "If this looks like an auth issue, running `codex login` may help."
 # Budget/quota exhaustion from the AI gateway: the gateway returns HTTP 403 +
 # PERMISSION_DENIED for these, which looks like auth to the generic checks —
@@ -470,6 +474,8 @@ class _CodexForwarderState:
     :param surfaced_terminal_error_turns: Turn ids whose standalone terminal
         ``error`` notification was already surfaced. Used to suppress a later
         terminal boundary for the same turn.
+    :param safety_blocked_turns: Turn ids whose standalone ``error`` was a
+        provider safety refusal, reverted at their terminal boundary.
     :param posted_user_turns: Turn ids whose ``userMessage`` has been
         posted to Omnigent this connection, e.g. ``{"turn_123"}``. Used to
         enforce user-before-assistant ordering: before posting a turn's
@@ -527,6 +533,7 @@ class _CodexForwarderState:
     child_streams: dict[str, _CodexChildStream] = field(default_factory=dict)
     synced_item_keys: set[str] = field(default_factory=set)
     surfaced_terminal_error_turns: set[str] = field(default_factory=set)
+    safety_blocked_turns: set[str] = field(default_factory=set)
     posted_user_turns: set[str] = field(default_factory=set)
     posted_tool_calls: set[str] = field(default_factory=set)
     partial_text_by_turn: dict[str, list[_PartialTextBuffer]] = field(default_factory=dict)
@@ -1037,7 +1044,7 @@ class _CodexTerminalError:
 
     :param message: Human-readable error text, e.g.
         ``"401 Unauthorized: ChatGPT login expired"``.
-    :param kind: Classification, either ``"auth"`` or ``"generic"``.
+    :param kind: Classification: ``"auth"``, ``"safety"``, or ``"generic"``.
     """
 
     message: str
@@ -1048,10 +1055,15 @@ class _CodexTerminalError:
         """:returns: ``True`` when the error was classified as auth-related."""
         return self.kind == _CODEX_ERROR_KIND_AUTH
 
+    @property
+    def is_safety_block(self) -> bool:
+        """:returns: ``True`` when the provider's safety systems refused the turn."""
+        return self.kind == _CODEX_ERROR_KIND_SAFETY
+
 
 def _classify_codex_error(error: _JsonObject, message: str) -> str:
     """
-    Classify a Codex ``turn.error`` / ``error`` item as auth-related or generic.
+    Classify a Codex ``turn.error`` / ``error`` item as auth, safety, or generic.
 
     Prefers the structured ``codexErrorInfo`` (an ``unauthorized`` variant,
     case-insensitive, or an httpStatusCode of 401/403); falls back to a
@@ -1063,12 +1075,14 @@ def _classify_codex_error(error: _JsonObject, message: str) -> str:
 
     :param error: The ``turn.error`` object.
     :param message: Its already-extracted message text.
-    :returns: :data:`_CODEX_ERROR_KIND_AUTH` or
-        :data:`_CODEX_ERROR_KIND_GENERIC`.
+    :returns: :data:`_CODEX_ERROR_KIND_AUTH`, :data:`_CODEX_ERROR_KIND_SAFETY`,
+        or :data:`_CODEX_ERROR_KIND_GENERIC`.
     """
     lowered = message.lower()
     if any(fragment in lowered for fragment in _CODEX_BUDGET_EXHAUSTED_FRAGMENTS):
         return _CODEX_ERROR_KIND_GENERIC
+    if any(fragment in lowered for fragment in _CODEX_SAFETY_BLOCK_FRAGMENTS):
+        return _CODEX_ERROR_KIND_SAFETY
     info = error.get("codexErrorInfo")
     variant: str | None = None
     http_status: object = None
@@ -3819,6 +3833,8 @@ async def _maybe_handle_turn_event(
                     return True
                 if turn_id is not None:
                     forwarder_state.surfaced_terminal_error_turns.add(turn_id)
+                    if error.is_safety_block:
+                        forwarder_state.safety_blocked_turns.add(turn_id)
             compaction_model: str | None = None
             selected_model = forwarder_state.model if forwarder_state is not None else None
             if (
@@ -4117,7 +4133,7 @@ async def _handle_terminal_turn_boundary_inner(
         before terminal status and usage.
     :param elicitation_tracker: Background Codex elicitation tracker.
     :param codex_client: Optional app-server client used for
-        synthesized Plan-mode implementation prompts.
+        synthesized Plan-mode implementation prompts and safety-block reverts.
     :param forwarder_state: Optional Plan-mode prompt state.
     :returns: None.
     """
@@ -4161,6 +4177,13 @@ async def _handle_terminal_turn_boundary_inner(
             session_id=session_id,
             params=params,
         )
+    if handled and codex_client is not None:
+        await _maybe_revert_safety_blocked_turn(
+            codex_client,
+            params=params,
+            edge=terminal.edge,
+            forwarder_state=forwarder_state,
+        )
     if (
         handled
         and method == "turn/completed"
@@ -4178,6 +4201,49 @@ async def _handle_terminal_turn_boundary_inner(
         )
     if handled:
         await usage_coalescer.flush()
+
+
+async def _maybe_revert_safety_blocked_turn(
+    codex_client: CodexAppServerClient,
+    *,
+    params: _JsonObject,
+    edge: _CodexTurnStatusEdge | None,
+    forwarder_state: _CodexForwarderState | None,
+) -> None:
+    """
+    Drop a turn the provider's safety systems refused from Codex's thread history.
+
+    Codex re-sends the whole thread on every turn, so a refused turn left in
+    place gets every later request refused too. File changes are kept.
+
+    :param codex_client: Connected Codex app-server client.
+    :param params: Codex terminal turn event params.
+    :param edge: Status edge derived from the terminal event, if any.
+    :param forwarder_state: Optional state recording standalone safety refusals.
+    :returns: None.
+    """
+    turn_id = _terminal_turn_id_from_params(params)
+    thread_id = _thread_id_from_params(params)
+    if turn_id is None or thread_id is None:
+        return
+    blocked = edge is not None and edge.error is not None and edge.error.is_safety_block
+    if forwarder_state is not None and turn_id in forwarder_state.safety_blocked_turns:
+        forwarder_state.safety_blocked_turns.discard(turn_id)
+        blocked = True
+    if not blocked:
+        return
+    try:
+        await codex_client.request(
+            "thread/revert", {"threadId": thread_id, "beforeTurnId": turn_id}
+        )
+    except Exception:  # the refusal is already surfaced as a failed turn.
+        _logger.warning(
+            "Codex forwarder could not revert safety-blocked turn: turn_id=%s",
+            turn_id,
+            exc_info=True,
+        )
+        return
+    _logger.info("Codex forwarder reverted safety-blocked turn: turn_id=%s", turn_id)
 
 
 def _handle_usage_update(
