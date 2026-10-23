@@ -18,6 +18,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -626,33 +627,63 @@ async def test_call_tool_non_object_rpc_error_raises_precise_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_tool_network_error_raises() -> None:
-    """A network failure must raise RuntimeError containing the tool name and session.
+@pytest.mark.parametrize("route", ["unreserved", "reserved", "managed"])
+async def test_call_tool_network_error_raises(monkeypatch: pytest.MonkeyPatch, route: str) -> None:
+    """Lost responses explain uncertain completion without replaying the write."""
+    calls = []
 
-    Failure means network errors are swallowed, leaving the harness
-    in an undefined state with no feedback about the failed call.
-    """
+    async def fail(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        raise httpx.ReadError("response lost")
 
-    class _FailingTransport(httpx.AsyncBaseTransport):
-        """Transport that always raises a connection error."""
+    reconnect = AsyncMock(side_effect=TimeoutError)
+    monkeypatch.setattr(pending_approvals, "wait_for_server_reconnect", reconnect)
+    generation = pending_approvals.current_server_generation()
+    spec = (
+        AgentSpec(
+            spec_version=1,
+            name="test-agent",
+            mcp_servers=[MCPServerConfig(name="github", transport="registry")],
+        )
+        if route == "managed"
+        else _make_spec("github")
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(fail), base_url="http://ap"
+    ) as client:
+        manager = ProxyMcpManager(
+            session_id="conv_test",
+            ap_client=client,
+            execution_registry=McpExecutionRegistry() if route == "reserved" else None,
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            await manager.call_tool(spec, "github__create_issue", {})
 
-        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-            """Simulate a network failure.
-
-            :param request: Ignored.
-            :raises httpx.ConnectError: Always.
-            """
-            raise httpx.ConnectError("connection refused")
-
-    client = httpx.AsyncClient(transport=_FailingTransport(), base_url="http://ap")
-    manager = ProxyMcpManager(session_id="conv_test", ap_client=client)
-
-    with pytest.raises(RuntimeError) as exc_info:
-        await manager.call_tool(_make_spec("github"), "github__search", {})
-
+    assert len(calls) == 1
     error_msg = str(exc_info.value)
-    assert "github__search" in error_msg, "Tool name must appear in the error message"
-    assert "conv_test" in error_msg, "Session id must appear in the error message"
+    assert "completion is unknown" in error_msg
+    assert "Check saved output or the destination state before repeating a write" in error_msg
+    if route == "reserved":
+        reconnect.assert_awaited_once_with(generation, timeout_seconds=120.0)
+        assert "no replacement server connected within 120s" in error_msg
+    else:
+        reconnect.assert_not_awaited()
+    if route != "managed":
+        assert "github__create_issue" in error_msg
+        assert "conv_test" in error_msg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [502, 503, 504, 403])
+async def test_call_tool_http_failure_guidance(status: int) -> None:
+    """Gateway errors warn about uncertain writes; permission errors stay distinct."""
+    transport = _StubTransport([httpx.Response(status_code=status)])
+    manager = _make_manager(transport)
+    with pytest.raises(RuntimeError) as exc_info:
+        await manager.call_tool(_make_spec("github"), "github__create_issue", {})
+    assert len(transport.calls) == 1
+    assert str(status) in str(exc_info.value)
+    assert ("completion is unknown" in str(exc_info.value)) == (status != 403)
 
 
 # ── dispatch timeout nesting ────────────────────────────────────────────────

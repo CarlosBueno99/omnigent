@@ -45,6 +45,10 @@ _logger = logging.getLogger(__name__)
 
 _EventPublisher = Callable[[str, _JsonObject], None]
 _SERVER_RECONNECT_WAIT_S = 120.0
+_UNKNOWN_COMPLETION_GUIDANCE = (
+    "Tool completion is unknown; it may still be running or have completed. "
+    "Check saved output or the destination state before repeating a write."
+)
 
 
 def _json_object(value: object) -> _JsonObject | None:
@@ -378,8 +382,8 @@ class ProxyMcpManager:
             if registry is None or not registry.has_operation(self._session_id, operation_id):
                 raise RuntimeError(
                     f"MCP proxy call for tool {tool_name!r} in session "
-                    f"{self._session_id!r} lost its server without a reserved "
-                    "runner operation"
+                    f"{self._session_id!r} could not recover its response without a reserved "
+                    f"runner operation. {_UNKNOWN_COMPLETION_GUIDANCE}"
                 ) from cause
             try:
                 await pending_approvals.wait_for_server_reconnect(
@@ -389,8 +393,9 @@ class ProxyMcpManager:
             except TimeoutError as reconnect_exc:
                 raise RuntimeError(
                     f"MCP proxy call for tool {tool_name!r} in session "
-                    f"{self._session_id!r} lost its server and no replacement "
-                    f"connected within {_SERVER_RECONNECT_WAIT_S:.0f}s"
+                    f"{self._session_id!r} did not recover its response; no replacement "
+                    f"server connected within {_SERVER_RECONNECT_WAIT_S:.0f}s. "
+                    f"{_UNKNOWN_COMPLETION_GUIDANCE}"
                 ) from reconnect_exc
 
         payload = _initial_payload()
@@ -419,8 +424,8 @@ class ProxyMcpManager:
             except httpx.TransportError as exc:
                 if managed:
                     raise RuntimeError(
-                        "MCP gateway transport failed; completion is unknown. "
-                        "Call was not retried."
+                        "MCP gateway transport failed. Call was not retried. "
+                        f"{_UNKNOWN_COMPLETION_GUIDANCE}"
                     ) from exc
                 await _wait_to_reattach(request_generation, exc)
                 # Reattach the new server generation to the same runner-owned
@@ -430,9 +435,15 @@ class ProxyMcpManager:
                 payload = cast("_JsonObject", {**payload, "id": request_id})
                 continue
             except Exception as exc:
+                guidance = (
+                    f" {_UNKNOWN_COMPLETION_GUIDANCE}"
+                    if isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code in {502, 503, 504}
+                    else ""
+                )
                 raise RuntimeError(
                     f"MCP proxy call failed for tool {tool_name!r} in session "
-                    f"{self._session_id!r}: {exc}"
+                    f"{self._session_id!r}: {exc}{guidance}"
                 ) from exc
 
             if "error" in data:
