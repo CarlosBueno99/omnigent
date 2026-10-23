@@ -4504,11 +4504,13 @@ async def _bind_and_launch_managed_runner(
             reason,
             extra={"session_id": session_id},
         )
-        host = await asyncio.to_thread(host_store.get_host, managed.host_id)
-        if host is not None:
-            await terminate_managed_host(host, host_store, sandbox_config)
-        tracker.fail(session_id, reason)
-        _publish_sandbox_status(session_id, "failed", reason)
+        try:
+            host = await asyncio.to_thread(host_store.get_host, managed.host_id)
+            if host is not None:
+                await terminate_managed_host(host, host_store, sandbox_config)
+        finally:
+            tracker.fail(session_id, reason)
+            _publish_sandbox_status(session_id, "failed", reason)
 
     async def stopped_first_launch() -> bool:
         if relaunch_host is not None:

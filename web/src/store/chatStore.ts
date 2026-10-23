@@ -110,7 +110,7 @@ import {
   type ConversationsInfiniteData,
 } from "@/lib/sessionListCache";
 import { recordOptimisticTitle } from "@/lib/optimisticTitles";
-import { getSessionDraft, setSessionDraft } from "@/lib/sessionDrafts";
+import { getSessionDraft, joinDraftText, setSessionDraft } from "@/lib/sessionDrafts";
 import { forgetUnsentSend, peekUnsentSend, rememberUnsentSend } from "@/lib/unsentSends";
 import { isSideChatCommand, usesNativeSideChatFork } from "@/lib/sideChat";
 // Re-exported below so existing `@/store/chatStore` importers keep working; the
@@ -904,6 +904,8 @@ export interface ConversationState {
      * settles it (see `committedItemProvesDelivery`).
      */
     unsettled?: boolean;
+    /** Add to the composer's input instead of yielding to it: the server deleted these messages. */
+    appendToDraft?: boolean;
   } | null;
   /**
    * Stable id set by the failedSendDraft restore path so the next send()
@@ -1489,12 +1491,11 @@ function discardedDraft(
   discarded: PostEventResponse["discardedInputs"],
 ): { text: string; files: File[] } | null {
   if (!discarded?.length) return null;
-  const text = discarded
-    .map((input) =>
+  const text = joinDraftText(
+    ...discarded.map((input) =>
       input.content.flatMap((block) => (block.type === "input_text" ? [block.text] : [])).join(""),
-    )
-    .filter((part) => part.trim() !== "")
-    .join("\n\n");
+    ),
+  );
   // Snapshot-replayed bubbles carry their pending id as `tempId`.
   const files = discarded.flatMap(
     (input) =>
@@ -3152,15 +3153,28 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     void interruptSession(sessionId)
       .then((response) => {
         // Hand back the startup messages the server deleted unsent so they can be corrected
-        // and resent. A newer composer draft wins.
-        const savedDraft = discardedDraft(pendingMessages, response.discardedInputs);
-        if (savedDraft === null) return;
-        const draft = getSessionDraft(sessionId) ?? savedDraft;
-        setSessionDraft(sessionId, draft);
-        setActive((s) =>
-          s.conversationId === sessionId
-            ? { failedSendDraft: { ...draft, conversationId: sessionId } }
-            : {},
+        // and resent, after anything already in the composer.
+        const restored = discardedDraft(pendingMessages, response.discardedInputs);
+        if (restored === null) return;
+        if (
+          !isConversationDisposed(sessionId) &&
+          setterForState(sessionId)?.failedSendDraft === null
+        ) {
+          setterFor(sessionId)({
+            failedSendDraft: { ...restored, conversationId: sessionId, appendToDraft: true },
+          });
+          return;
+        }
+        const existing = getSessionDraft(sessionId);
+        setSessionDraft(
+          sessionId,
+          existing
+            ? {
+                ...existing,
+                text: joinDraftText(existing.text, restored.text),
+                files: [...existing.files, ...restored.files],
+              }
+            : restored,
         );
       })
       .catch(() => {
@@ -7161,7 +7175,7 @@ export function takeFailedSendDraft(conversationId: string, hasDraft: boolean) {
   const failed = state?.failedSendDraft;
   if (!state || !failed || failed.conversationId !== conversationId) return null;
   const delivered = committedItemProvesDelivery(state.blocks, failed);
-  const restore = !hasDraft && !delivered;
+  const restore = (!hasDraft || failed.appendToDraft === true) && !delivered;
   const patch: Partial<ConversationState> = { failedSendDraft: null };
   if (!delivered) patch.pendingRetryStableId = restore ? (failed.stableId ?? null) : null;
   // A discarded failure must not untrack an earlier draft still in the composer.

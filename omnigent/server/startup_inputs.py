@@ -504,7 +504,7 @@ class ManagedStartupInputs:
         await asyncio.to_thread(
             self.conversations.set_labels,
             session_id,
-            {STARTUP_LABEL: "stopped" if stop_launch else "cancelled"},
+            {STARTUP_LABEL: "stopped" if stop_launch or state == "stopped" else "cancelled"},
         )
         key = (current_workspace_id(), session_id)
         task = self._deliveries.get(key)

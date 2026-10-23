@@ -1685,6 +1685,57 @@ async def test_managed_launch_fails_when_runner_never_connects(
     assert terminated == [sentinel_host]
 
 
+async def test_stopped_managed_launch_settles_when_teardown_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A teardown error still fails the launch, so message POSTs waiting on it return."""
+    from omnigent.server.routes import sessions as sessions_module
+
+    session_id = "5d0f2b4e6c8a4e1f9b3d7a2c4e6f8a0b"
+    reason = "session was stopped while its sandbox was provisioning"
+    tracker = ManagedLaunchTracker()
+    tracker.begin(session_id)
+    stages: list[tuple[str, str | None]] = []
+
+    class _HostStore:
+        def get_host(self, _host_id: str) -> object:
+            raise RuntimeError("host store unavailable")
+
+    monkeypatch.setattr(
+        sessions_module,
+        "_publish_sandbox_status",
+        lambda _sid, stage, error=None, details=None: stages.append((stage, error)),
+    )
+
+    with pytest.raises(RuntimeError, match="host store unavailable"):
+        await sessions_module._bind_and_launch_managed_runner(
+            session_id=session_id,
+            managed=ManagedHostLaunch(
+                host_id="7e1c3a5b9d2f4e6a8c0b1d3f5a7c9e2b",
+                workspace="/root/workspace",
+            ),
+            sandbox_config=ManagedSandboxDeployment.single(
+                ManagedSandboxConfig(
+                    server_url="https://managed-test.example.com",
+                    launcher_factory=lambda: FakeSandboxLauncher(),
+                    token_ttl_s=3600,
+                )
+            ),
+            tracker=tracker,
+            conversation_store=SimpleNamespace(
+                get_conversation=lambda _sid: SimpleNamespace(labels={STARTUP_LABEL: "stopped"}),
+            ),
+            host_store=_HostStore(),  # type: ignore[arg-type]
+            host_registry=None,
+            tunnel_registry=None,
+        )
+
+    launch = tracker.get(session_id)
+    assert launch is not None and launch.settled.is_set()
+    assert launch.error == reason
+    assert stages == [("failed", reason)]
+
+
 async def test_managed_launch_fails_and_tears_down_when_harness_not_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -374,6 +374,24 @@ async def test_stop_after_interrupt_marks_the_launch_stopped(startup_env: _Env) 
     assert conv is not None and conv.labels[STARTUP_LABEL] == "stopped"
 
 
+async def test_interrupt_after_stop_keeps_the_launch_stopped(startup_env: _Env) -> None:
+    env = startup_env
+    session_id = await _create(env, name=CODEX_NATIVE_CODING_AGENT.agent_name)
+    head = _bind(env, session_id)
+    # A submitted input outlives the stop, so the interrupt still writes the label.
+    assert env.conv_store.transition_pending_input(
+        session_id, head.id, expected="in_progress", status="incomplete"
+    )
+    for control in ("stop_session", "interrupt"):
+        response = await env.client.post(
+            f"/v1/sessions/{session_id}/events", json={"type": control}
+        )
+        assert response.status_code == 202, response.text
+    assert [item.id for item in env.conv_store.list_pending_inputs(session_id)] == [head.id]
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None and conv.labels[STARTUP_LABEL] == "stopped"
+
+
 @pytest.mark.parametrize("head_status,head_discarded", [("incomplete", False), ("failed", True)])
 async def test_interrupt_reports_the_inputs_it_dropped_unsent(
     startup_env: _Env, head_status: str, head_discarded: bool

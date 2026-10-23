@@ -1423,14 +1423,7 @@ export async function postEvent(
   // for the 503 the server returns when a host-bound runner never connects.
   if (!res.ok) throw await apiErrorFromResponse(res);
   return postEventResponseFromWire(
-    (await res.json()) as {
-      queued: boolean;
-      item_id?: string;
-      denied?: boolean;
-      pending_id?: string;
-      recovered?: boolean;
-      recovery?: PostEventResponse["recovery"];
-    },
+    (await res.json()) as Parameters<typeof postEventResponseFromWire>[0],
   );
 }
 

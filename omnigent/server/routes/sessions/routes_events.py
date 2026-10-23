@@ -1716,7 +1716,7 @@ def register_events_routes(
                     session_id,
                     {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE},
                 )
-            if discarded_inputs:
+            if discarded_inputs and body.type == _INTERRUPT_TYPE:
                 return {"queued": False, "discarded_inputs": discarded_inputs}
             return {"queued": False}
         if body.type == _STOP_SESSION_TYPE:

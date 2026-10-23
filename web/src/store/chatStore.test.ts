@@ -6655,19 +6655,85 @@ describe("chatStore — stop", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  const launchNotes = new File(["notes"], "notes.txt", { type: "text/plain" });
+  const launchChart = new File(["chart"], "chart.png", { type: "image/png" });
+  const waitingSend = {
+    conversationId: "conv_launch",
+    text: "retry me",
+    files: [],
+    stableId: "s".repeat(32),
+  };
+  const handoff = (text: string, files: File[]) => ({
+    conversationId: "conv_launch",
+    text,
+    files,
+    appendToDraft: true,
+  });
+  const restoreCase = {
+    interruptOk: true,
+    draft: null,
+    waiting: null,
+    switchAway: false,
+    sessionDraft: undefined,
+  };
   it.each([
-    { scenario: "all unsent", discarded: ["p1", "p2", "p3"], draft: null, interruptOk: true },
-    { scenario: "head delivered", discarded: ["p2", "p3"], draft: null, interruptOk: true },
-    { scenario: "all delivered", discarded: [], draft: null, interruptOk: true },
-    { scenario: "newer draft", discarded: ["p1"], draft: "edited", interruptOk: true },
-    { scenario: "interrupt failed", discarded: ["p1"], draft: null, interruptOk: false },
+    {
+      ...restoreCase,
+      scenario: "all unsent",
+      discarded: ["p1", "p2", "p3"],
+      failedSendDraft: handoff("first\n\nsecond\n\nthird", [launchNotes, launchChart]),
+    },
+    {
+      ...restoreCase,
+      scenario: "head delivered",
+      discarded: ["p2", "p3"],
+      failedSendDraft: handoff("second\n\nthird", [launchChart]),
+    },
+    { ...restoreCase, scenario: "all delivered", discarded: [], failedSendDraft: null },
+    {
+      ...restoreCase,
+      scenario: "interrupt failed",
+      discarded: ["p1"],
+      interruptOk: false,
+      failedSendDraft: null,
+    },
+    {
+      ...restoreCase,
+      scenario: "newer draft",
+      discarded: ["p1"],
+      draft: "edited",
+      failedSendDraft: handoff("first", [launchNotes]),
+      sessionDraft: { text: "edited", files: [] },
+    },
+    {
+      ...restoreCase,
+      scenario: "switched away",
+      discarded: ["p1"],
+      switchAway: true,
+      failedSendDraft: handoff("first", [launchNotes]),
+    },
+    {
+      ...restoreCase,
+      scenario: "failed send waiting",
+      discarded: ["p1"],
+      draft: "edited",
+      waiting: waitingSend,
+      failedSendDraft: waitingSend,
+      sessionDraft: { text: "edited\n\nfirst", files: [launchNotes] },
+    },
   ] as const)(
     "restores the startup messages an Interrupt deleted unsent: $scenario",
-    async ({ discarded, draft, interruptOk }) => {
+    async ({
+      discarded,
+      interruptOk,
+      draft,
+      waiting,
+      switchAway,
+      failedSendDraft,
+      sessionDraft,
+    }) => {
       clearSessionDrafts();
       if (draft) setSessionDraft("conv_launch", { text: draft, files: [] });
-      const notes = new File(["notes"], "notes.txt", { type: "text/plain" });
-      const chart = new File(["chart"], "chart.png", { type: "image/png" });
       const wire = {
         p1: {
           pending_id: "pending_initial",
@@ -6677,23 +6743,26 @@ describe("chatStore — stop", () => {
         p2: { pending_id: "pending_p2", content: [{ type: "input_text", text: "second" }] },
         p3: { pending_id: "pending_p3", content: [{ type: "input_text", text: "third" }] },
       };
-      fetchMock.mockImplementation(async () =>
-        interruptOk
+      fetchMock.mockImplementation(async () => {
+        await Promise.resolve();
+        if (switchAway) useChatStore.setState({ conversationId: "conv_other" });
+        return interruptOk
           ? mockResponse(
               { queued: false, discarded_inputs: discarded.map((key) => wire[key]) },
               { status: 202 },
             )
-          : mockResponse({}, { ok: false, status: 500 }),
-      );
+          : mockResponse({}, { ok: false, status: 500 });
+      });
       useChatStore.setState({
         conversationId: "conv_launch",
         startupPending: true,
         sandboxStatus: { stage: "starting", error: null },
+        failedSendDraft: waiting,
         pendingUserMessages: [
           {
             tempId: "p1",
             content: [{ type: "input_text", text: "first" }],
-            files: [notes],
+            files: [launchNotes],
             posted: true,
             initialInput: true,
           },
@@ -6702,7 +6771,7 @@ describe("chatStore — stop", () => {
           {
             tempId: "p3",
             content: [{ type: "input_text", text: "third" }],
-            files: [chart],
+            files: [launchChart],
             posted: true,
             pendingId: "pending_p3",
             createdAtS: 2,
@@ -6711,26 +6780,17 @@ describe("chatStore — stop", () => {
       });
 
       useChatStore.getState().stop();
+      expect(useChatStore.getState().pendingUserMessages).toEqual([]);
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
       await tick();
 
       const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
       expect(body).toMatchObject({ type: "interrupt" });
-      expect(useChatStore.getState().pendingUserMessages).toEqual([]);
-      const files = { p1: [notes], p2: [], p3: [chart] };
-      const expected =
-        !interruptOk || discarded.length === 0
-          ? undefined
-          : draft
-            ? { text: draft, files: [] }
-            : {
-                text: discarded.map((key) => wire[key].content[0]!.text).join("\n\n"),
-                files: discarded.flatMap((key) => files[key]),
-              };
-      expect(useChatStore.getState().failedSendDraft).toEqual(
-        expected ? { ...expected, conversationId: "conv_launch" } : null,
+      expect(conversationRegistry.peek("conv_launch")!.getState().failedSendDraft).toEqual(
+        failedSendDraft,
       );
-      expect(getSessionDraft("conv_launch")).toEqual(expected);
+      if (switchAway) expect(useChatStore.getState().failedSendDraft).toBeNull();
+      expect(getSessionDraft("conv_launch")).toEqual(sessionDraft);
       clearSessionDrafts();
     },
   );
