@@ -58,7 +58,7 @@ afterEach(() => {
 
 describe("useSessionImportStore", () => {
   it("marks only the reported already-imported session as restored", () => {
-    const existing = { id: "c9", title: "Planning thread", archived: true };
+    const existing = { id: "c9", title: "Planning thread", archived: true, canUnarchive: true };
     useSessionImportStore.setState({ result: { ...DONE, alreadyImportedSession: existing } });
 
     useSessionImportStore.getState().markExistingSessionRestored("c1");

@@ -180,6 +180,8 @@ class ExistingImportRef(BaseModel):
     session_id: str
     title: str | None = None
     archived: bool = False
+    # Unarchiving needs owner access, which a reader of the session may lack.
+    can_unarchive: bool = False
 
 
 class ImportFailureRef(BaseModel):
@@ -548,15 +550,20 @@ def create_imports_router(
             raise host_absent_error(host)
         return user_id, host_conn
 
-    async def _caller_can_read(user_id: str | None, conversation: Conversation) -> bool:
-        """Whether the importing user may see *conversation* (import dedup is workspace-wide)."""
+    async def _caller_has_access(
+        user_id: str | None, conversation: Conversation, level: int
+    ) -> bool:
+        """Whether the importing user holds *level* on *conversation*.
+
+        Import dedup is workspace-wide, so the existing session may be another user's.
+        """
         if permission_store is None:
             return True
         return await asyncio.to_thread(
             check_session_access,
             user_id,
             conversation.id,
-            LEVEL_READ,
+            level,
             permission_store,
             conversation_store,
             conversation,
@@ -595,12 +602,19 @@ def create_imports_router(
             """Report an exact-id import's already-imported session when readable."""
             if body.session_id is None or existing is None:
                 return
-            if await _caller_can_read(user_id, existing):
-                existing_sessions.append(
-                    ExistingImportRef(
-                        session_id=existing.id, title=existing.title, archived=existing.archived
-                    )
+            if not await _caller_has_access(user_id, existing, LEVEL_READ):
+                return
+            can_unarchive = existing.archived and await _caller_has_access(
+                user_id, existing, LEVEL_OWNER
+            )
+            existing_sessions.append(
+                ExistingImportRef(
+                    session_id=existing.id,
+                    title=existing.title,
+                    archived=existing.archived,
+                    can_unarchive=can_unarchive,
                 )
+            )
 
         def _fail(external_session_id: object, source: object, reason: str) -> None:
             counts["failed"] += 1

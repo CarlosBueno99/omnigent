@@ -1795,7 +1795,12 @@ describe("importLocalSessions", () => {
           imported: 0,
           already_imported: 1,
           failed: 0,
-          already_imported_session: { session_id: "c9", title: "Planning", archived: true },
+          already_imported_session: {
+            session_id: "c9",
+            title: "Planning",
+            archived: true,
+            can_unarchive: true,
+          },
         }),
       ]),
     );
@@ -1803,7 +1808,12 @@ describe("importLocalSessions", () => {
     const result = await importLocalSessions("host_1", "claude", 25, undefined, "harness-9");
 
     expect(result.alreadyImported).toBe(1);
-    expect(result.alreadyImportedSession).toEqual({ id: "c9", title: "Planning", archived: true });
+    expect(result.alreadyImportedSession).toEqual({
+      id: "c9",
+      title: "Planning",
+      archived: true,
+      canUnarchive: true,
+    });
   });
 
   it("ignores a malformed existing-session reference", async () => {

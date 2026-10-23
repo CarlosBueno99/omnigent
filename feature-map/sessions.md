@@ -23,8 +23,9 @@ the header menu), and each place is a separate entry point.
   on desktop; long titles are limited.
 - `archive`: archived sessions leave the main list and appear in the archived
   view, which can be filtered by project, searched, and paged. Search matches
-  titles and content, and a pasted Omnigent or source-harness session ID finds
-  that one session. On a server with worktree
+  titles and content, and also matches a pasted Omnigent or source-harness
+  session ID exactly (harness IDs need a signed-in user on split-database
+  servers). On a server with worktree
   cleanup, archiving a session that has a git worktree first asks whether to
   also delete the worktree (the branch is kept); Remember my choice saves the
   answer, which Settings → Git can change later.
@@ -41,7 +42,8 @@ the header menu), and each place is a separate entry point.
   Live side chats accept pasted images in every reply text field.
 - `unarchive`: offered on archived rows, in bulk selection, in the header
   menu of an archived session, and on an exact-ID import that finds the session
-  already imported and archived. Unarchiving an archived row opens the session.
+  already imported and archived. Unarchiving a row in Settings › Archived opens
+  the session.
 - `delete`: confirmed, then removed from the list and the server.
 - `export`: Export in the header menu saves the transcript as a local file.
 - `unread`: Mark as unread flags a session to revisit and survives a reload,
@@ -232,7 +234,7 @@ choice only when the server supports cleanup.
 
 **Archived view:** choose Display → Archived sessions in the sidebar filter
 menu, then filter by project. Settings → Archived sessions has the same list
-with a search box; paste a session ID there to find one archived session.
+with a search box; paste a session ID there to find that archived session.
 
 **Sidebar filter menu:** with `sidebar_grouping_ui` on, the funnel on the
 Projects header holds Grouping, Display, Ordering and Show. In

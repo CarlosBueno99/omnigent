@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 
 from omnigent.db.utils import builtin_agent_id
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.server.auth import LEVEL_OWNER, UnifiedAuthProvider
+from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, UnifiedAuthProvider
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.routes.imports import (
     LocalImportRequest,
@@ -1007,32 +1007,43 @@ async def test_local_import_id_collision_counts_as_already_imported(
         "session_id": winner.id,
         "title": "pre-existing",
         "archived": False,
+        "can_unarchive": False,
     }
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])
+@pytest.mark.parametrize("lost_race", [False, True], ids=["dedup", "race"])
 async def test_exact_local_import_names_the_existing_session_to_its_reader(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
+    lost_race: bool,
 ) -> None:
     """Re-importing a known session id points at the existing, archived session.
 
     Import dedup is workspace-wide, so a second user importing the same harness
     session also gets "already imported" but must not learn another user's
-    session id or title.
+    session id or title. Only an owner is offered Unarchive. The race case
+    leaves the external id unindexed so only the create's id collision finds it.
     """
     from omnigent.server.routes import imports as imports_module
+    from omnigent.server.routes.imports import _import_conversation_id
 
     agent_id = _seed_claude_agent(db_uri)
     conversation_store = SqlAlchemyConversationStore(db_uri)
     permission_store = SqlAlchemyPermissionStore(db_uri)
-    existing = conversation_store.create_conversation(agent_id=agent_id, title="Planning thread")
-    conversation_store.set_external_session_id(existing.id, "claude-known-1")
+    existing = conversation_store.create_conversation(
+        agent_id=agent_id,
+        title="Planning thread",
+        conversation_id=_import_conversation_id("claude", "claude-known-1"),
+    )
+    if not lost_race:
+        conversation_store.set_external_session_id(existing.id, "claude-known-1")
     conversation_store.update_conversation(existing.id, archived=True)
-    for user in ("alice@example.com", "bob@example.com"):
+    for user in ("alice@example.com", "bob@example.com", "carol@example.com"):
         permission_store.ensure_user(user)
     permission_store.grant("alice@example.com", existing.id, LEVEL_OWNER)
+    permission_store.grant("carol@example.com", existing.id, LEVEL_READ)
 
     async def _fake_stream(**kwargs: object):
         assert kwargs["session_id"] == "claude-known-1"
@@ -1051,7 +1062,11 @@ async def test_exact_local_import_names_the_existing_session_to_its_reader(
         }
 
     monkeypatch.setattr(imports_module, "_stream_local_sessions_from_host", _fake_stream)
-    host_owners = {"alice-host": "alice@example.com", "bob-host": "bob@example.com"}
+    host_owners = {
+        "alice-host": "alice@example.com",
+        "bob-host": "bob@example.com",
+        "carol-host": "carol@example.com",
+    }
     app = FastAPI()
     app.include_router(
         create_imports_router(
@@ -1091,11 +1106,20 @@ async def test_exact_local_import_names_the_existing_session_to_its_reader(
         "session_id": existing.id,
         "title": "Planning thread",
         "archived": True,
+        "can_unarchive": True,
     }
 
     bob_result = await _import_as("bob@example.com", "bob-host")
     assert (bob_result["imported"], bob_result["already_imported"]) == (0, 1)
     assert bob_result["already_imported_session"] is None
+
+    carol_result = await _import_as("carol@example.com", "carol-host")
+    assert carol_result["already_imported_session"] == {
+        "session_id": existing.id,
+        "title": "Planning thread",
+        "archived": True,
+        "can_unarchive": False,
+    }
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])

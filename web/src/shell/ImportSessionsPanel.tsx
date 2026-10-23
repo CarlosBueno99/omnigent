@@ -304,7 +304,6 @@ function ExistingImportNotice({ existing }: { existing: ExistingImportRef }) {
   const unarchive = useArchiveConversation();
   const markRestored = useSessionImportStore((state) => state.markExistingSessionRestored);
   const [restored, setRestored] = useState(false);
-  const archived = existing.archived;
   const restore = () =>
     unarchive
       .mutateAsync({ id: existing.id, archived: false })
@@ -323,7 +322,7 @@ function ExistingImportNotice({ existing }: { existing: ExistingImportRef }) {
     >
       <span className="text-muted-foreground">
         Already imported as <span className="text-foreground">“{title}”</span>
-        {archived ? " (archived)" : ""}.
+        {existing.archived ? " (archived)" : ""}.
       </span>
       <Link
         to={`/c/${existing.id}`}
@@ -332,7 +331,7 @@ function ExistingImportNotice({ existing }: { existing: ExistingImportRef }) {
       >
         Open session
       </Link>
-      {archived && (
+      {existing.archived && existing.canUnarchive && (
         <Button
           variant="outline"
           size="sm"
@@ -343,7 +342,7 @@ function ExistingImportNotice({ existing }: { existing: ExistingImportRef }) {
           Unarchive
         </Button>
       )}
-      {restored && (
+      {restored && !existing.archived && (
         <span className="text-muted-foreground" data-testid="import-existing-session-restored">
           Restored to your sessions.
         </span>

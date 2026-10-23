@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 
@@ -247,7 +247,7 @@ describe("ImportSessionsPanel", () => {
     );
   });
 
-  async function importArchivedExactSession() {
+  async function importArchivedExactSession(canUnarchive = true) {
     useHostsMock.mockReturnValue({
       data: [{ host_id: "host_1", name: "mac-laptop", owner: "alice", status: "online" }],
     } as unknown as ReturnType<typeof useHosts>);
@@ -257,7 +257,12 @@ describe("ImportSessionsPanel", () => {
       failed: 0,
       sessions: [],
       failures: [],
-      alreadyImportedSession: { id: "c9", title: "Planning thread", archived: true },
+      alreadyImportedSession: {
+        id: "c9",
+        title: "Planning thread",
+        archived: true,
+        canUnarchive,
+      },
     });
 
     const view = renderPanel();
@@ -295,12 +300,30 @@ describe("ImportSessionsPanel", () => {
     const { notice } = await importArchivedExactSession();
     fireEvent.click(screen.getByTestId("import-existing-session-unarchive"));
     await waitFor(() => expect(unarchiveMutateAsync).toHaveBeenCalledTimes(1));
-    await Promise.resolve();
+    // Let the rejected restore chain settle before checking nothing changed.
+    await act(async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    });
 
     expect(notice).toHaveTextContent("(archived)");
     expect(screen.getByTestId("import-existing-session-unarchive")).toBeInTheDocument();
     expect(screen.queryByTestId("import-existing-session-restored")).toBeNull();
     expect(useSessionImportStore.getState().result?.alreadyImportedSession?.archived).toBe(true);
+  });
+
+  it("disables Unarchive while the restore is in flight", async () => {
+    mockUnarchiveState({ isPending: true });
+    await importArchivedExactSession();
+    expect(screen.getByTestId("import-existing-session-unarchive")).toBeDisabled();
+  });
+
+  it("does not offer Unarchive to a reader who cannot unarchive the session", async () => {
+    const { notice } = await importArchivedExactSession(false);
+    expect(notice).toHaveTextContent("Already imported as “Planning thread” (archived).");
+    expect(screen.getByTestId("import-existing-session-open")).toHaveAttribute("href", "/c/c9");
+    expect(screen.queryByTestId("import-existing-session-unarchive")).toBeNull();
   });
 
   it("does not offer Unarchive for an already-imported active session", async () => {
@@ -313,7 +336,7 @@ describe("ImportSessionsPanel", () => {
       failed: 0,
       sessions: [],
       failures: [],
-      alreadyImportedSession: { id: "c3", title: null, archived: false },
+      alreadyImportedSession: { id: "c3", title: null, archived: false, canUnarchive: false },
     });
 
     renderPanel();

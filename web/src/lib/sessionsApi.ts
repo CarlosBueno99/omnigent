@@ -548,6 +548,8 @@ export interface ExistingImportRef {
   id: string;
   title: string | null;
   archived: boolean;
+  /** Unarchiving needs owner access, which a reader may lack. */
+  canUnarchive: boolean;
 }
 
 /** One session that could not be imported, with a user-facing reason. */
@@ -579,6 +581,7 @@ function toExistingImportRef(value: unknown): ExistingImportRef | null {
     id: record.session_id,
     title: typeof record.title === "string" ? record.title : null,
     archived: record.archived === true,
+    canUnarchive: record.can_unarchive === true,
   };
 }
 

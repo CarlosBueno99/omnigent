@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from omnigent.server.auth import LEVEL_OWNER
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
     _session_id_search_terms,
@@ -15,7 +16,6 @@ from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissi
 
 _ALICE = "alice@example.com"
 _BOB = "bob@example.com"
-_LEVEL_OWNER = 4
 
 
 @pytest.fixture(params=["single_db", "split_db"])
@@ -56,7 +56,7 @@ def test_search_finds_archived_session_by_any_spelling_of_its_id(
     other = store.create_conversation(title="Unrelated")
     for conversation in (target, other):
         store.update_conversation(conversation.id, archived=True)
-        permissions.grant(_ALICE, conversation.id, _LEVEL_OWNER)
+        permissions.grant(_ALICE, conversation.id, LEVEL_OWNER)
 
     dashed = str(uuid.UUID(target.id))
     for spelling in (target.id, dashed, f"conv_{target.id}", f"  {target.id}\n"):
@@ -71,7 +71,7 @@ def test_search_finds_archived_session_by_any_spelling_of_its_id(
     # Bob's archived session stays hidden from Alice even by its exact id.
     bob_session = store.create_conversation(title="Bob's planning")
     store.update_conversation(bob_session.id, archived=True)
-    permissions.grant(_BOB, bob_session.id, _LEVEL_OWNER)
+    permissions.grant(_BOB, bob_session.id, LEVEL_OWNER)
     assert _archived_ids(store, bob_session.id) == set()
 
 
@@ -84,13 +84,13 @@ def test_search_finds_archived_import_by_its_harness_session_id(
     alice_import = store.create_conversation(title="Imported from Claude")
     store.set_external_session_id(alice_import.id, harness_session_id)
     store.update_conversation(alice_import.id, archived=True)
-    permissions.grant(_ALICE, alice_import.id, _LEVEL_OWNER)
+    permissions.grant(_ALICE, alice_import.id, LEVEL_OWNER)
 
     # Another user's session wrapping the same harness id stays invisible.
     bob_import = store.create_conversation(title="Bob's copy")
     store.set_external_session_id(bob_import.id, harness_session_id)
     store.update_conversation(bob_import.id, archived=True)
-    permissions.grant(_BOB, bob_import.id, _LEVEL_OWNER)
+    permissions.grant(_BOB, bob_import.id, LEVEL_OWNER)
 
     assert _archived_ids(store, harness_session_id) == {alice_import.id}
     assert _archived_ids(store, f" {harness_session_id} ") == {alice_import.id}
@@ -99,7 +99,7 @@ def test_search_finds_archived_import_by_its_harness_session_id(
     opencode_import = store.create_conversation(title="Imported from OpenCode")
     store.set_external_session_id(opencode_import.id, opencode_id)
     store.update_conversation(opencode_import.id, archived=True)
-    permissions.grant(_ALICE, opencode_import.id, _LEVEL_OWNER)
+    permissions.grant(_ALICE, opencode_import.id, LEVEL_OWNER)
     assert _archived_ids(store, opencode_id) == {opencode_import.id}
 
     # Restoring it moves it from the archived search to the active one.

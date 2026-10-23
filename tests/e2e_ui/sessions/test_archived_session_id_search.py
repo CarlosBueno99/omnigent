@@ -24,15 +24,33 @@ import json
 import os
 import uuid
 from collections.abc import Iterator
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-from playwright.sync_api import Page, Route, expect
+from playwright.sync_api import Page, Response, Route, expect
 
 _HOST_ID = "host_e2e_id_search"
 _HOSTS_BODY = {
     "hosts": [{"host_id": _HOST_ID, "name": "e2e-laptop", "owner": "e2e", "status": "online"}]
 }
+
+
+def _search_archived(page: Page, query: str) -> None:
+    """Type *query* into the archived search and wait for the server's answer to it.
+
+    The search is debounced, so without this the previous query's rows can
+    satisfy the next assertion before the new request is sent.
+    """
+
+    def _is_search_response(response: Response) -> bool:
+        url = urlparse(response.url)
+        return url.path.endswith("/v1/sessions") and parse_qs(url.query).get("search_query") == [
+            query
+        ]
+
+    with page.expect_response(_is_search_response):
+        page.get_by_test_id("archived-search").fill(query)
 
 
 def _hold_for_recording(page: Page) -> None:
@@ -130,24 +148,24 @@ def test_archived_search_finds_and_unarchives_session_by_id(
     expect(rows.filter(has_text=decoy_title)).to_have_count(1)
     _hold_for_recording(page)
 
-    search = page.get_by_test_id("archived-search")
-    search.fill(harness_session_id)
+    _search_archived(page, harness_session_id)
     expect(rows).to_have_count(1)
     expect(rows.first).to_contain_text(target_title)
     _hold_for_recording(page)
 
-    search.fill(target_id)
+    _search_archived(page, target_id)
     expect(rows).to_have_count(1)
     expect(rows.first).to_contain_text(target_title)
     _hold_for_recording(page)
 
-    search.fill(f"no-such-session-{unique}")
+    _search_archived(page, f"no-such-session-{unique}")
     expect(page.get_by_test_id("archived-empty")).to_contain_text(
         f"No archived sessions match “no-such-session-{unique}”."
     )
     _hold_for_recording(page)
 
-    search.fill(harness_session_id)
+    # Back from the empty state, so the row count waits for this result.
+    page.get_by_test_id("archived-search").fill(harness_session_id)
     expect(rows).to_have_count(1)
     _hold_for_recording(page)
     rows.first.get_by_test_id("unarchive-conversation").click()
@@ -193,6 +211,7 @@ def test_reimporting_archived_session_offers_unarchive(
                 "session_id": session_id,
                 "title": title,
                 "archived": True,
+                "can_unarchive": True,
             },
         }
         route.fulfill(

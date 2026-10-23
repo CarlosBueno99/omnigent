@@ -163,15 +163,13 @@ def _encode_session_state(
 # ``SEARCH_FETCH_TIMEOUT_MS`` so the browser gives up first on the happy path.
 _SEARCH_STATEMENT_TIMEOUT_MS = 15_000
 
-# A search query is also tried as an exact session id when it is one token in
-# this length range. The upper bound is the ``external_session_id`` column width;
-# the lower bound keeps short words off the id lookup. Supported harness ids
-# (uuids, ``ses_…``-style ids) are all longer than this.
+# Token length bounds for exact-id search: the max is the external_session_id
+# column width; the min keeps short words off the id lookup.
 _SESSION_ID_SEARCH_MIN_LEN = 8
 _SESSION_ID_SEARCH_MAX_LEN = 128
 
-# Cap on sessions one harness id resolves to in a split-DB search. Dedup keeps
-# one session per importer, so real matches are far below this.
+# Cap on sessions one harness id resolves to in a split-DB search. Import dedup
+# is workspace-wide, so one harness id rarely maps to more than one session.
 _EXTERNAL_SESSION_ID_MATCH_LIMIT = 50
 
 

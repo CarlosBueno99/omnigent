@@ -2318,6 +2318,11 @@
             "title": "Archived",
             "type": "boolean"
           },
+          "can_unarchive": {
+            "default": false,
+            "title": "Can Unarchive",
+            "type": "boolean"
+          },
           "session_id": {
             "title": "Session Id",
             "type": "string"
