@@ -355,13 +355,54 @@ async def test_stop_before_host_ready_cancels_all_saved_inputs(
 async def test_stop_after_interrupt_marks_the_launch_stopped(startup_env: _Env) -> None:
     env = startup_env
     session_id = await _create(env)
+    host_id = uuid4().hex
+    env.conv_store.set_host_id(session_id, host_id, "/tmp/managed-workspace")
+    connection = _connect_host(env, host_id)
+    startup = env.app.state.startup_inputs
     for control, label in (("interrupt", "cancelled"), ("stop_session", "stopped")):
         response = await env.client.post(
             f"/v1/sessions/{session_id}/events", json={"type": control}
         )
         assert response.status_code == 202, response.text
+        # The host's worker runs while the launch has bound the host but not its runner.
+        await startup._recover_session(env.app, session_id, connection)
         conv = env.conv_store.get_conversation(session_id)
         assert conv is not None and conv.labels[STARTUP_LABEL] == label
+    env.conv_store.set_runner_id(session_id, uuid4().hex)
+    await startup._recover_session(env.app, session_id, connection)
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None and conv.labels[STARTUP_LABEL] == "stopped"
+
+
+@pytest.mark.parametrize("head_status,head_discarded", [("incomplete", False), ("failed", True)])
+async def test_interrupt_reports_the_inputs_it_dropped_unsent(
+    startup_env: _Env, head_status: str, head_discarded: bool
+) -> None:
+    env = startup_env
+    session_id = await _create(env, name=CODEX_NATIVE_CODING_AGENT.agent_name)
+    head = _bind(env, session_id)
+    followup = await env.client.post(f"/v1/sessions/{session_id}/events", json=_INPUT)
+    assert followup.status_code == 202, followup.text
+    # An incomplete input was already submitted to the native CLI, so it may have run.
+    assert env.conv_store.transition_pending_input(
+        session_id, head.id, expected="in_progress", status=head_status
+    )
+    response = await env.client.post(
+        f"/v1/sessions/{session_id}/events", json={"type": "interrupt"}
+    )
+    assert response.status_code == 202, response.text
+    head_entry = {
+        "pending_id": pending_inputs.make_pending_id(session_id, head.id),
+        "content": _INPUT["data"]["content"],
+        "initial": True,
+    }
+    followup_entry = {
+        "pending_id": followup.json()["pending_id"],
+        "content": _INPUT["data"]["content"],
+    }
+    assert response.json()["discarded_inputs"] == (
+        [head_entry, followup_entry] if head_discarded else [followup_entry]
+    )
 
 
 async def test_stop_cancels_local_dispatch_and_clears_saved_input(startup_env: _Env) -> None:

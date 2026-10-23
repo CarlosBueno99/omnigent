@@ -6656,58 +6656,57 @@ describe("chatStore — stop", () => {
   });
 
   it.each([
-    {
-      scenario: "launching",
-      stage: "provisioning",
-      draft: null,
-      interruptOk: true,
-      restored: true,
-    },
-    {
-      scenario: "host bound",
-      stage: "connecting",
-      draft: null,
-      interruptOk: true,
-      restored: false,
-    },
-    { scenario: "launch failed", stage: "failed", draft: null, interruptOk: true, restored: false },
-    {
-      scenario: "newer draft",
-      stage: "provisioning",
-      draft: "edited",
-      interruptOk: true,
-      restored: true,
-    },
-    {
-      scenario: "interrupt failed",
-      stage: "provisioning",
-      draft: null,
-      interruptOk: false,
-      restored: false,
-    },
+    { scenario: "all unsent", discarded: ["p1", "p2", "p3"], draft: null, interruptOk: true },
+    { scenario: "head delivered", discarded: ["p2", "p3"], draft: null, interruptOk: true },
+    { scenario: "all delivered", discarded: [], draft: null, interruptOk: true },
+    { scenario: "newer draft", discarded: ["p1"], draft: "edited", interruptOk: true },
+    { scenario: "interrupt failed", discarded: ["p1"], draft: null, interruptOk: false },
   ] as const)(
-    "restores startup messages saved for a sandbox launch on Interrupt: $scenario",
-    async ({ stage, draft, interruptOk, restored }) => {
+    "restores the startup messages an Interrupt deleted unsent: $scenario",
+    async ({ discarded, draft, interruptOk }) => {
       clearSessionDrafts();
       if (draft) setSessionDraft("conv_launch", { text: draft, files: [] });
-      if (!interruptOk)
-        fetchMock.mockImplementation(async () => mockResponse({}, { ok: false, status: 500 }));
-      const attachment = new File(["notes"], "notes.txt", { type: "text/plain" });
+      const notes = new File(["notes"], "notes.txt", { type: "text/plain" });
+      const chart = new File(["chart"], "chart.png", { type: "image/png" });
+      const wire = {
+        p1: {
+          pending_id: "pending_initial",
+          content: [{ type: "input_text", text: "first" }],
+          initial: true,
+        },
+        p2: { pending_id: "pending_p2", content: [{ type: "input_text", text: "second" }] },
+        p3: { pending_id: "pending_p3", content: [{ type: "input_text", text: "third" }] },
+      };
+      fetchMock.mockImplementation(async () =>
+        interruptOk
+          ? mockResponse(
+              { queued: false, discarded_inputs: discarded.map((key) => wire[key]) },
+              { status: 202 },
+            )
+          : mockResponse({}, { ok: false, status: 500 }),
+      );
       useChatStore.setState({
         conversationId: "conv_launch",
         startupPending: true,
-        sandboxStatus: { stage, error: null },
+        sandboxStatus: { stage: "starting", error: null },
         pendingUserMessages: [
           {
             tempId: "p1",
             content: [{ type: "input_text", text: "first" }],
-            files: [attachment],
+            files: [notes],
             posted: true,
-            createdAtS: 1,
+            initialInput: true,
           },
-          { tempId: "p2", content: [{ type: "input_text", text: "second" }] },
-          // Its POST hasn't settled, so it can still reach the server after the Interrupt.
-          { tempId: "p3", content: [{ type: "input_text", text: "third" }], createdAtS: 2 },
+          // Replayed from the snapshot, which names it by its pending id.
+          { tempId: "pending_p2", content: [{ type: "input_text", text: "second" }] },
+          {
+            tempId: "p3",
+            content: [{ type: "input_text", text: "third" }],
+            files: [chart],
+            posted: true,
+            pendingId: "pending_p3",
+            createdAtS: 2,
+          },
         ],
       });
 
@@ -6718,13 +6717,20 @@ describe("chatStore — stop", () => {
       const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
       expect(body).toMatchObject({ type: "interrupt" });
       expect(useChatStore.getState().pendingUserMessages).toEqual([]);
-      const expected = draft
-        ? { text: draft, files: [] }
-        : { text: "first\n\nsecond", files: [attachment] };
+      const files = { p1: [notes], p2: [], p3: [chart] };
+      const expected =
+        !interruptOk || discarded.length === 0
+          ? undefined
+          : draft
+            ? { text: draft, files: [] }
+            : {
+                text: discarded.map((key) => wire[key].content[0]!.text).join("\n\n"),
+                files: discarded.flatMap((key) => files[key]),
+              };
       expect(useChatStore.getState().failedSendDraft).toEqual(
-        restored ? { ...expected, conversationId: "conv_launch" } : null,
+        expected ? { ...expected, conversationId: "conv_launch" } : null,
       );
-      expect(getSessionDraft("conv_launch")).toEqual(restored ? expected : undefined);
+      expect(getSessionDraft("conv_launch")).toEqual(expected);
       clearSessionDrafts();
     },
   );

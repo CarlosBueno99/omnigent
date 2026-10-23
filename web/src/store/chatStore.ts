@@ -73,6 +73,7 @@ import {
   interrupt as interruptSession,
   openSessionStream,
   postEvent,
+  type PostEventResponse,
   type SessionItemsPage,
   updateSession,
 } from "@/lib/sessionsApi";
@@ -478,8 +479,9 @@ export function hydrateLocalConversation(
             ? {
                 ...message,
                 posted: true,
+                initialInput: true,
                 initialDraft: undefined,
-                files: message.initialDraft?.files,
+                files: message.initialDraft?.files ?? message.files,
               }
             : message,
         ),
@@ -569,6 +571,8 @@ export interface PendingUserMessage {
   initialDraft?: { text: string; files: File[] };
   /** The send's attachments, handed back if an Interrupt deletes the server's copy. */
   files?: File[];
+  /** Accepted by the session create as its initial input, so it has no `pendingId`. */
+  initialInput?: boolean;
   /** Client epoch seconds stamped ONCE at send time — the optimistic
    *  bubble's display timestamp. Stamping here (not at render or
    *  promotion) keeps the shown time pinned to when the user hit send.
@@ -1479,32 +1483,27 @@ function nativeSandboxLaunching(state: ConversationState): boolean {
   );
 }
 
-// The server forwards saved messages only after it binds the sandbox's host ("connecting").
-function sandboxHostUnbound(state: ConversationState): boolean {
-  const stage = state.sandboxStatus?.stage;
-  return (
-    stage === "provisioning" ||
-    stage === "action_required" ||
-    stage === "cloning" ||
-    stage === "starting"
-  );
-}
-
-/** The text and files of the pending messages the server holds, if any. */
-function serverHeldDraft(state: ConversationState): { text: string; files: File[] } | null {
-  // Snapshot-replayed bubbles carry no send stamp; an unsettled POST may still land after Interrupt.
-  const held = state.pendingUserMessages.filter(
-    (message) => message.posted === true || message.createdAtS === undefined,
-  );
-  const text = held
-    .map((message) =>
-      message.content
-        .flatMap((block) => (block.type === "input_text" ? [block.text] : []))
-        .join(""),
+/** The text and files of the messages an Interrupt cancelled before the agent received them. */
+function discardedDraft(
+  pending: PendingUserMessage[],
+  discarded: PostEventResponse["discardedInputs"],
+): { text: string; files: File[] } | null {
+  if (!discarded?.length) return null;
+  const text = discarded
+    .map((input) =>
+      input.content.flatMap((block) => (block.type === "input_text" ? [block.text] : [])).join(""),
     )
     .filter((part) => part.trim() !== "")
     .join("\n\n");
-  const files = held.flatMap((message) => message.files ?? []);
+  // Snapshot-replayed bubbles carry their pending id as `tempId`.
+  const files = discarded.flatMap(
+    (input) =>
+      pending.find(
+        (message) =>
+          (message.pendingId ?? message.tempId) === input.pendingId ||
+          (input.initial === true && message.initialInput === true),
+      )?.files ?? [],
+  );
   return text || files.length > 0 ? { text, files } : null;
 }
 
@@ -3143,10 +3142,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         return;
     }
     if (isTempConvId(sessionId)) return;
-    // Interrupt deletes the messages the server saved for a launching sandbox; once it
-    // lands, hand them back so they can be corrected and resent. A newer composer draft wins.
-    const savedDraft =
-      state.startupPending && sandboxHostUnbound(state) ? serverHeldDraft(state) : null;
+    const pendingMessages = state.pendingUserMessages;
     // Fire-and-forget interrupt; the server emits session.interrupted
     // + response.incomplete on the open stream, which the pump
     // translates into the cancelled bubble decoration. We deliberately
@@ -3154,7 +3150,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // turns; switchTo or tab unload is the only thing that tears it
     // down.
     void interruptSession(sessionId)
-      .then(() => {
+      .then((response) => {
+        // Hand back the startup messages the server deleted unsent so they can be corrected
+        // and resent. A newer composer draft wins.
+        const savedDraft = discardedDraft(pendingMessages, response.discardedInputs);
         if (savedDraft === null) return;
         const draft = getSessionDraft(sessionId) ?? savedDraft;
         setSessionDraft(sessionId, draft);

@@ -4468,9 +4468,8 @@ async def _bind_and_launch_managed_runner(
     deleted while its sandbox provisioned surfaces here as
     ``ConversationNotFoundError``, and the fresh sandbox is torn down
     (the delete route could not see the host binding yet). A first
-    launch whose session was stopped is torn down before the bind, or
-    unbound and torn down after its runner launch, for the same reason.
-    Settles the tracker on every path.
+    launch stopped before its runner launch returns is torn down too;
+    a later stop only stops the runner. Settles the tracker on every path.
 
     A launch failure after the host is online also tears the sandbox
     down — UNLESS *relaunch_host* is set: that means ``managed.host_id``
@@ -4587,7 +4586,7 @@ async def _bind_and_launch_managed_runner(
                 tracker.fail(session_id, reason)
                 _publish_sandbox_status(session_id, "failed", reason)
                 return
-    # A stop that raced the bind saw no runner to stop; one after the runner_id write stops it.
+    # A stop accepted before the runner_id write found no runner to stop.
     if await stopped_first_launch():
         with contextlib.suppress(ConversationNotFoundError):
             await asyncio.to_thread(conversation_store.clear_host_binding, session_id)

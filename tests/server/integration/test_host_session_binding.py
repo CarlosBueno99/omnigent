@@ -2162,12 +2162,16 @@ async def test_managed_session_stopped_during_provision_terminates_sandbox(
             future.cancel()
 
 
+@pytest.mark.parametrize("worker_turn", [None, "after_bind", "after_runner_launch"])
 async def test_managed_session_stopped_during_bind_terminates_sandbox(
     managed_session_env: ManagedSessionEnv,
     monkeypatch: pytest.MonkeyPatch,
+    worker_turn: str | None,
 ) -> None:
     """A stop accepted after the host bind, before the runner is recorded, still tears down."""
     import threading
+
+    from omnigent.server.routes import sessions as sessions_module
 
     env = managed_session_env
     monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
@@ -2191,14 +2195,32 @@ async def test_managed_session_stopped_during_bind_terminates_sandbox(
     install_fake_modal_launcher(monkeypatch, fake)
     stops: list[Any] = []
     bind_host = env.conv_store.set_host_id
+    launch_runner = sessions_module._launch_runner_on_host
+
+    async def _host_worker_turn(session_id: str) -> None:
+        conv = env.conv_store.get_conversation(session_id)
+        assert conv is not None and conv.host_id is not None
+        connection = env.app.state.host_registry.get(conv.host_id)
+        await env.app.state.startup_inputs._recover_session(env.app, session_id, connection)
 
     def _bind_then_stop(session_id: str, *args: Any, **kwargs: Any) -> Conversation:
         bound = bind_host(session_id, *args, **kwargs)
         stop = env.client.post(f"/v1/sessions/{session_id}/events", json={"type": "stop_session"})
         stops.append(asyncio.run_coroutine_threadsafe(stop, loop).result(timeout=10))
+        if worker_turn == "after_bind":
+            asyncio.run_coroutine_threadsafe(_host_worker_turn(session_id), loop).result(10)
         return bound
 
+    async def _launch_then_worker_turn(conv: Conversation, *args: Any, **kwargs: Any) -> Any:
+        attempt = await launch_runner(conv, *args, **kwargs)
+        launched = env.conv_store.get_conversation(conv.id)
+        assert launched is not None and launched.runner_id == attempt.runner_id
+        await _host_worker_turn(conv.id)
+        return attempt
+
     monkeypatch.setattr(env.conv_store, "set_host_id", _bind_then_stop)
+    if worker_turn == "after_runner_launch":
+        monkeypatch.setattr(sessions_module, "_launch_runner_on_host", _launch_then_worker_turn)
 
     agent = await create_test_agent(env.client, name="managed-stop-bind-race-agent")
     resp = await env.client.post(
