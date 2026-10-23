@@ -269,6 +269,7 @@ import {
   codexApprovalModeLabel,
 } from "@/lib/codexApprovalMode";
 import { isCodexNativeSession } from "@/lib/codexPlanMode";
+import { isPermissionModeCycleKey, nextCycledPermissionMode } from "@/lib/permissionModeCycle";
 import { getCliServerUrl } from "@/lib/host";
 import { useOmnigentAnalytics } from "@/lib/analyticsEmit";
 import { GoalDialog, CommandGoalDialog, GoalStatusPill, useGoalState } from "@/components/goal";
@@ -2572,8 +2573,24 @@ function ComposerImpl(
         claudePermissionMode)
       : claudePermissionModeLabel(claudePermissionMode)
     : codexApprovalModeLabel(codexApprovalMode);
-  const changePermission = async (mode: string) => {
-    if (isReadOnly || unreachable || configBusyRef.current) return;
+  const selectedPermissionMode = showClaudePermissionMode
+    ? claudePermissionMode
+    : codexApprovalMode;
+  // Classifies modes for the Shift+Tab cycle; the session's own harness string
+  // can be an alias, so name the vocabulary the options come from.
+  const permissionVocabularyHarness = showClaudePermissionMode
+    ? devinPermissionControl
+      ? "devin-native"
+      : "claude-native"
+    : "codex-native";
+  const permissionControlInteractive =
+    (showClaudePermissionMode || showCodexApprovalMode) &&
+    !isReadOnly &&
+    !unreachable &&
+    isOwnerLevel(permissionLevel);
+  /** Applies *mode*; resolves to whether the server accepted it. */
+  const changePermission = async (mode: string): Promise<boolean> => {
+    if (isReadOnly || unreachable || configBusyRef.current) return false;
     configBusyRef.current = true;
     setConfigBusy(true);
     const sourceSessionId = useChatStore.getState().conversationId;
@@ -2581,13 +2598,42 @@ function ComposerImpl(
       const store = useChatStore.getState();
       if (showClaudePermissionMode) await store.setClaudePermissionMode(mode);
       else if (showCodexApprovalMode) await store.setCodexApprovalMode(mode);
+      return true;
     } catch (error) {
       if (useChatStore.getState().conversationId === sourceSessionId)
         setCommandError(error instanceof Error ? error.message : "Unable to change permissions");
+      return false;
     } finally {
       configBusyRef.current = false;
       setConfigBusy(false);
     }
+  };
+  // Modes this session refused during a Shift+Tab cycle (e.g. Auto when the
+  // account lacks it), skipped by later presses so the cycle can't get stuck.
+  const refusedCycleModesRef = useRef<{ sessionId: string | null; modes: Set<string> }>({
+    sessionId: null,
+    modes: new Set(),
+  });
+  /** Shift+Tab: step to the next permission mode. Returns whether it took the key. */
+  const cyclePermissionMode = (): boolean => {
+    if (!permissionControlInteractive) return false;
+    // Hold the key while a change is in flight so focus doesn't jump away.
+    if (configBusyRef.current) return true;
+    const sessionId = useChatStore.getState().conversationId;
+    if (refusedCycleModesRef.current.sessionId !== sessionId)
+      refusedCycleModesRef.current = { sessionId, modes: new Set() };
+    const refused = refusedCycleModesRef.current.modes;
+    const next = nextCycledPermissionMode(
+      permissionVocabularyHarness,
+      permissionOptions,
+      selectedPermissionMode,
+      refused,
+    );
+    if (next === null) return false;
+    void changePermission(next).then((applied) => {
+      if (!applied && refusedCycleModesRef.current.sessionId === sessionId) refused.add(next);
+    });
+    return true;
   };
   useEffect(() => setGoalDialogOpen(false), [conversationId]);
   const { goal, setGoal: setGoalState } = useGoalState(
@@ -3525,6 +3571,11 @@ function ComposerImpl(
     // submission.
     if (slashCompletion.handleKey(e, { shouldPreferSendOverCompletion })) return;
 
+    if (isPermissionModeCycleKey(e) && cyclePermissionMode()) {
+      e.preventDefault();
+      return;
+    }
+
     // Mobile Enter behavior takes precedence over this desktop preference:
     // software-keyboard Enter inserts a newline and Send remains an explicit tap.
     if (shouldSubmitFromKeyboard) {
@@ -3972,13 +4023,9 @@ function ComposerImpl(
                   label="Permission mode"
                   value={permissionLabel || "Permission mode"}
                   harness={sessionHarness}
-                  selectedValue={
-                    showClaudePermissionMode ? claudePermissionMode : codexApprovalMode
-                  }
+                  selectedValue={selectedPermissionMode}
                   options={permissionOptions}
-                  disabled={
-                    isReadOnly || unreachable || configBusy || !isOwnerLevel(permissionLevel)
-                  }
+                  disabled={!permissionControlInteractive || configBusy}
                   disabledReason={
                     isOwnerLevel(permissionLevel)
                       ? undefined

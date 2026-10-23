@@ -2783,6 +2783,110 @@ describe("Composer shared visible controls", () => {
   });
 });
 
+describe("Composer permission-mode shortcut", () => {
+  const { setClaudePermissionMode, setCodexApprovalMode } = useChatStore.getState();
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    clearSessionDrafts();
+    // Zustand copies spies into each new state object, so restore the setters.
+    useChatStore.setState({ setClaudePermissionMode, setCodexApprovalMode });
+  });
+
+  /** Spy on the Claude setter, mirroring the server's accepted mode into the store. */
+  function spyClaudeSetter(refused: ReadonlySet<string> = new Set()) {
+    return vi
+      .spyOn(useChatStore.getState(), "setClaudePermissionMode")
+      .mockImplementation(async (mode) => {
+        if (refused.has(mode)) throw new Error(`Could not switch to ${mode} mode`);
+        useChatStore.setState({ claudePermissionMode: mode });
+      });
+  }
+
+  it("cycles a Claude session's mode with Shift+Tab and keeps the draft focused", async () => {
+    useChatStore.setState({
+      conversationId: "cycle-claude",
+      sessionHarness: "claude-native",
+      claudePermissionMode: "default",
+    });
+    const setMode = spyClaudeSetter();
+    renderWithTooltips(<Composer {...composerProps({ showClaudePermissionMode: true })} />);
+    const input = textarea();
+    input.focus();
+    fireEvent.change(input, { target: { value: "half-written prompt" } });
+
+    expect(fireEvent.keyDown(input, { key: "Tab", shiftKey: true })).toBe(false);
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-permission-chip")).toHaveTextContent("Auto"),
+    );
+    await waitFor(() => expect(screen.getByTestId("composer-permission-chip")).toBeEnabled());
+    fireEvent.keyDown(input, { key: "Tab", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-permission-chip")).toHaveTextContent("Accept edits"),
+    );
+
+    expect(setMode.mock.calls.map(([mode]) => mode)).toEqual(["auto", "acceptEdits"]);
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue("half-written prompt");
+  });
+
+  it("skips a mode the session refused on the next press", async () => {
+    useChatStore.setState({
+      conversationId: "cycle-refused",
+      sessionHarness: "claude-native",
+      claudePermissionMode: "default",
+    });
+    const setMode = spyClaudeSetter(new Set(["auto"]));
+    renderWithTooltips(<Composer {...composerProps({ showClaudePermissionMode: true })} />);
+    const input = textarea();
+
+    fireEvent.keyDown(input, { key: "Tab", shiftKey: true });
+    expect(await screen.findByText("Could not switch to auto mode")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("composer-permission-chip")).toBeEnabled());
+    fireEvent.keyDown(input, { key: "Tab", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-permission-chip")).toHaveTextContent("Accept edits"),
+    );
+    expect(setMode.mock.calls.map(([mode]) => mode)).toEqual(["auto", "acceptEdits"]);
+  });
+
+  it("does not cycle a Codex session into Full Access", async () => {
+    useChatStore.setState({
+      conversationId: "cycle-codex",
+      sessionHarness: "codex-native",
+      codexApprovalMode: "approve-for-me",
+    });
+    const setApproval = vi
+      .spyOn(useChatStore.getState(), "setCodexApprovalMode")
+      .mockResolvedValue(undefined);
+    renderWithTooltips(<Composer {...composerProps({ showCodexApprovalMode: true })} />);
+
+    fireEvent.keyDown(textarea(), { key: "Tab", shiftKey: true });
+    await waitFor(() => expect(setApproval).toHaveBeenCalledWith("ask-for-approval"));
+  });
+
+  it.each([
+    { name: "a session without a permission control", props: {} },
+    { name: "a viewer", props: { showClaudePermissionMode: true, permissionLevel: 2 } },
+    {
+      name: "an unreachable session",
+      props: { showClaudePermissionMode: true, unreachable: true },
+    },
+  ])("leaves Shift+Tab to the browser for $name", ({ props }) => {
+    useChatStore.setState({
+      conversationId: "cycle-inert",
+      sessionHarness: "claude-native",
+      claudePermissionMode: "default",
+    });
+    const setMode = spyClaudeSetter();
+    renderWithTooltips(<Composer {...composerProps(props)} />);
+
+    expect(fireEvent.keyDown(textarea(), { key: "Tab", shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(textarea(), { key: "Tab", shiftKey: true, ctrlKey: true })).toBe(true);
+    expect(setMode).not.toHaveBeenCalled();
+  });
+});
+
 describe("Composer background tasks", () => {
   beforeEach(() => {
     clearSessionDrafts();

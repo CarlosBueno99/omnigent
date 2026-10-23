@@ -45,6 +45,12 @@ const PERMISSION_MODE_CONCEPTS: Record<string, Record<string, PermissionModeConc
     default: "manual",
     skip: "full-access",
   },
+  "devin-native": {
+    normal: "manual",
+    "accept-edits": "edit-automatic",
+    smart: "automatic",
+    dangerous: "full-access",
+  },
 };
 
 const NATIVE_HARNESS_ALIASES: Record<string, string> = {

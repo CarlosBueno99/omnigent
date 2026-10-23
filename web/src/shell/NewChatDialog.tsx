@@ -38,6 +38,7 @@ import {
   codexCreateApprovalOptions,
   applyCodexApprovalSelection,
 } from "@/lib/codexApprovalOptions";
+import { isPermissionModeCycleKey, nextCycledPermissionMode } from "@/lib/permissionModeCycle";
 import {
   ChatComposer,
   COMPOSER_COLUMN_WIDTH,
@@ -4187,6 +4188,37 @@ export function NewChatLandingScreen() {
     else if (supportsDevinPermission) setDevinPermissionMode(mode);
     rememberPickerOptions(selectedNativeHarness, { mode });
   };
+  const selectedDirectMode =
+    selectedNativeHarness === "claude-native"
+      ? permissionMode
+      : selectedNativeHarness === "codex-native"
+        ? bypassSandbox
+          ? CODEX_NATIVE_BYPASS_APPROVAL_VALUE
+          : approvalMode
+        : selectedNativeHarness === "cursor-native"
+          ? cursorExecMode
+          : selectedNativeHarness === "antigravity-native"
+            ? agySkipMode
+            : selectedNativeHarness === "devin-native"
+              ? devinPermissionMode
+              : undefined;
+  /** Shift+Tab: step the launch permission mode. Returns whether it took the key. */
+  const cycleDirectMode = (): boolean => {
+    const pickerInteractive =
+      !noExecutionTargetSelected &&
+      visiblePermissionRow != null &&
+      !(pickerLoading && !interactiveWhileLoading) &&
+      !creating;
+    if (!pickerInteractive) return false;
+    const next = nextCycledPermissionMode(
+      selectedNativeHarness,
+      directModeOptions,
+      selectedDirectMode,
+    );
+    if (next === null) return false;
+    selectDirectMode(next);
+    return true;
+  };
   // Clear shared state on agent changes; the harness seed restores its own
   // saved options. Initial agent resolution must preserve the landing draft.
   const prevAgentIdRef = useRef<string | null | undefined>(undefined);
@@ -6781,6 +6813,11 @@ export function NewChatLandingScreen() {
                   // submission (same UX as the in-session composer).
                   if (slashCompletion.handleKey(e, { shouldPreferSendOverCompletion })) return;
 
+                  if (isPermissionModeCycleKey(e) && cycleDirectMode()) {
+                    e.preventDefault();
+                    return;
+                  }
+
                   if (shouldSubmitFromKeyboard) {
                     e.preventDefault();
                     // The mention menu is briefly closed while its listing loads;
@@ -7163,21 +7200,7 @@ export function NewChatLandingScreen() {
                         label={visiblePermissionRow.label}
                         value={visiblePermissionRow.value}
                         harness={selectedNativeHarness}
-                        selectedValue={
-                          selectedNativeHarness === "claude-native"
-                            ? permissionMode
-                            : selectedNativeHarness === "codex-native"
-                              ? bypassSandbox
-                                ? CODEX_NATIVE_BYPASS_APPROVAL_VALUE
-                                : approvalMode
-                              : selectedNativeHarness === "cursor-native"
-                                ? cursorExecMode
-                                : selectedNativeHarness === "antigravity-native"
-                                  ? agySkipMode
-                                  : selectedNativeHarness === "devin-native"
-                                    ? devinPermissionMode
-                                    : undefined
-                        }
+                        selectedValue={selectedDirectMode}
                         loading={pickerLoading}
                         interactiveWhileLoading={interactiveWhileLoading}
                         options={directModeOptions}

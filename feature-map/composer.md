@@ -39,6 +39,12 @@ and steers messages while the agent is busy.
   in the composer, and a composer pick is not reverted by later terminal turns.
 - `permission-mode`: the harness's native approval modes; the current mode is
   marked and the choice persists.
+- `permission-mode-hotkey`: Shift+Tab in either composer steps the permission
+  chip to the next mode in menu order, wrapping, and never selects a
+  full-access mode. States: slash/mention menu open (menu wins), control
+  read-only/viewer/unreachable/loading (native focus move), change in flight
+  (press swallowed), mode refused by the session (error shown, later presses
+  skip it).
 - `managed-mcp-picker`: choose administrator-configured services before launch
   on a host or sandbox. States: loading, empty, error/retry, selected, unavailable,
   remembered selection, explicitly none, restored connection needing sign-in.
@@ -120,6 +126,8 @@ and steers messages while the agent is busy.
   it is connected; click it to open the host menu.
 - In configuration, open the model picker, the effort picker, or the permission
   mode menu.
+- With focus in the prompt, press Shift+Tab to step the permission mode without
+  opening the menu; the draft and focus stay put.
 - For a custom `claude-sdk` or `codex` agent session, open configuration and
   pick an effort rung; the ladder is the harness's declared family (anthropic
   or openai) and the pick persists on the session. Changing effort after a
@@ -181,7 +189,8 @@ and steers messages while the agent is busy.
 - Hover the host chip to see the selected host or sandbox and its connection.
 - Pick a harness, then open its configuration for model, effort (Codex, Claude,
   Pi, Devin), and permission mode before the session exists. Ctrl+Shift+M also
-  opens the agent/model picker here.
+  opens the agent/model picker here, and Shift+Tab in the prompt steps the
+  launch permission mode.
 - With a managed sandbox selected and no connected host, the model picker lists
   the sandbox's default catalog when `/v1/info` advertises `default_models` (an
   unbound gateway with `sandbox.model_discovery`, or a provider hook): rows under
@@ -315,6 +324,12 @@ Other connection providers alone do not enable the managed MCP picker.
   `tests/e2e_ui/chat/test_codex_effort_terminal_composer_mirror.py::test_composer_effort_pick_survives_terminal_turns`
 - **`permission-mode`:**
   `tests/e2e_ui/chat/test_claude_model_picker.py::test_claude_native_permission_mode_switch_persists`
+- **`permission-mode-hotkey`:** in session with a real Claude CLI,
+  `tests/e2e_ui/chat/test_claude_native_permission_switch_from_dont_ask.py::test_shift_tab_cycles_permission_mode_from_composer`;
+  new-session composer,
+  `tests/e2e_ui/start_session/test_start_session.py::test_start_session_shift_tab_cycles_permission_mode`.
+  Inert and refused-mode states are component tests in
+  `web/src/pages/ChatPage.composer.test.tsx` and `web/src/shell/NewChatDialog.test.tsx`.
 - **`model-picker`, `effort-picker`, `permission-mode`, Fork dialog:** the
   permission-mode picker has component coverage in
   `web/src/shell/ForkSessionDialog.test.tsx`; drive the model and effort
