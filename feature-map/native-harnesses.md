@@ -40,7 +40,11 @@ implements them separately, so a fix for one harness does not reach the others.
   and exit status.
 - `working-status`: quiet work stays working; waiting for input is explained;
   completion, interruption and process exit settle the indicator. A following
-  turn and reconnect must not leave a stale idle or working state.
+  turn and reconnect must not leave a stale idle or working state. With the
+  Claude mod live (flag on, Claude 2.1.301 or newer), its turn events set
+  running and idle: a long quiet turn stays working, a lost event heals within
+  about one heartbeat, and a stale heartbeat hands status back to the older
+  sources.
 - `side-chat`: Codex forks an ephemeral native thread through `/side`; follow-ups
   stay in that thread, and closing it leaves the parent usable.
 - `cleanup`: stopping, cancelling, or idling a session reaps the harness's
@@ -283,6 +287,28 @@ Cross-harness journeys:
   isolation, reconnect/forwarded-idle replay, fallback, and exit. The concurrency
   tests pause real file reads; they are not elapsed-time or live-Claude canaries.
   Legacy-file and role-gating results do not prove other vendor CLIs ran.
+- **`working-status`, Claude mod turn events (component checks, plain `uv run --no-sync pytest --reruns 0`):**
+  `tests/harnesses/claude_native/test_mod_status.py::test_turn_events_own_running_and_idle_and_mute_the_structured_source`,
+  `tests/harnesses/claude_native/test_mod_status.py::test_quick_completion_then_a_new_turn_publishes_no_idle`,
+  `tests/harnesses/claude_native/test_mod_status.py::test_idle_is_published_once_after_the_grace`,
+  `tests/harnesses/claude_native/test_mod_status.py::test_long_turn_stays_owned_and_running_while_its_heartbeat_names_it`,
+  `tests/harnesses/claude_native/test_mod_status.py::test_lost_completion_is_healed_by_the_next_heartbeat`,
+  `tests/harnesses/claude_native/test_mod_status.py::test_lost_start_is_healed_by_the_next_heartbeat`,
+  `tests/harnesses/claude_native/test_mod_status.py::test_heartbeat_inside_the_settle_window_is_ignored`,
+  `tests/harnesses/claude_native/test_mod_status.py::test_subagent_turns_do_not_move_the_main_loop_status`, and
+  `tests/harnesses/claude_native/test_mod_status.py::test_unusable_mod_files_hand_the_status_back_to_the_structured_source`
+  cover ownership, the 1 s idle grace, healing, and hand-back.
+  `tests/harnesses/claude_native/test_mod_events.py::test_heartbeat_is_current_only_when_fresh_and_from_the_named_server`
+  covers the 90 s freshness and server check, and
+  `tests/harnesses/claude_native/test_mod_events.py::test_partial_trailing_record_waits_for_its_newline`
+  covers the event reader. The runner's order against the status file is covered by
+  `tests/runner/test_resource_registry.py::test_mod_turn_events_own_status_over_the_status_file`
+  and
+  `tests/runner/test_resource_registry.py::test_stale_mod_heartbeat_hands_status_back_to_the_status_file`.
+  No live run of this source is recorded yet. Live, with the flag on and Claude
+  2.1.301 or newer, use the real CLI steps below: hold a tool operation open past
+  the pane idle threshold, expect working with the viewer closed, then expect idle
+  about a second after the turn ends, and no idle between back-to-back turns.
 - **`working-status`, Claude (real CLI and browser):** requires Claude Code
   2.1.295+ for OSC. In an isolated host/runner, leave `OMNIGENT_FEATURES` unset
   to exercise the enabled default, restart and launch a fresh session. Do not set
@@ -912,3 +938,7 @@ separate compatibility gaps; these automated checks do not prove live Gemini.
   hosts fall back to tmux even with the flag on.
 - The mod's abort operation exists but nothing calls it, because an abort writes
   no Interrupted row. Interrupts stay on Escape.
+- Mod turn events drive working status only while the mod is live: its heartbeat
+  must be under 90 s old and come from the server in `server.json`. A run with
+  the flag off, or with Claude older than 2.1.301, exercises only the older
+  sources, so it cannot show this source.
