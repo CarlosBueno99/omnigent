@@ -166,6 +166,8 @@ import type { ReplyQuote, StoredReplyDraft } from "@/lib/replyDraft";
 import { toast } from "sonner";
 
 export interface SendOptions {
+  /** Preserve the queued message's startup attempt if the server refuses again. */
+  hostReconnectAttempted?: boolean;
   /** Compact is a control event, not a user-message turn. */
   command?: "compact";
   /** Client-only quote provenance, retained if the composer needs to retry. */
@@ -636,6 +638,8 @@ export interface QueuedMessage {
   requiresRetry?: boolean;
   /** The session's host was offline; held until it reconnects, then sent. */
   waitingForHost?: boolean;
+  /** Avoid repeated host starts if delivery is refused again after recovery. */
+  hostReconnectAttempted?: boolean;
 }
 
 /**
@@ -2309,9 +2313,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
 
     // Per-conversation status from the sidebar cache (kept live by the WS
     // /v1/sessions/updates overlay + poll), so we can tell whether a
-    // navigated-away conversation is idle without its SSE stream. A conversation
-    // scrolled past the loaded pages has no row here → treated as not-idle and
-    // left for the foreground flush when the user navigates back to it.
+    // navigated-away conversation is idle without its SSE stream. Off-sidebar
+    // sessions can use their snapshot, fetched by held-send recovery.
     const statusById = new Map<string, string | undefined>();
     for (const [, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
       queryKey: ["conversations"],
@@ -2329,7 +2332,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // next idle (via WS/poll) triggers this again for the next message (FIFO).
     const now = Date.now();
     for (const conversationId of candidateIds) {
-      if (statusById.get(conversationId) !== "idle") continue;
+      const sessionStatus =
+        statusById.get(conversationId) ??
+        queryClient.getQueryData<Session>(["session", conversationId])?.status;
+      if (sessionStatus !== "idle") continue;
       // The sidebar can still say idle while a compact control starts.
       const local = setterForState(conversationId);
       if (local !== null && holdsInitialDraft(local)) continue;
@@ -2398,12 +2404,20 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           ...fileBlocks,
           ...(head.text.trim() ? [{ type: "input_text" as const, text: head.text }] : []),
         ];
-        await postEvent(conversationId, {
-          type: "message",
-          data: { role: "user", content, stable_id: head.stableId },
-        });
+        await postEvent(
+          conversationId,
+          {
+            type: "message",
+            data: { role: "user", content, stable_id: head.stableId },
+          },
+          { holdWhenHostOffline: true },
+        );
       })()
-        .catch(() => {
+        .catch((error: unknown) => {
+          if (error instanceof ApiError && error.code === HOST_OFFLINE_CODE) {
+            holdSendForHost(conversationId, describeSendFailure(error).message, head);
+            return;
+          }
           backgroundFlushCooldownUntil.set(
             conversationId,
             Date.now() + BACKGROUND_FLUSH_COOLDOWN_MS,
@@ -2838,6 +2852,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         holdSendForHost(holdTarget, message, {
           text,
           stableId,
+          ...(opts?.hostReconnectAttempted ? { hostReconnectAttempted: true } : {}),
           ...(agentId ? { agentId } : {}),
           ...(files && files.length > 0 ? { files } : {}),
           ...(opts?.replyDraft ? { replyDraft: opts.replyDraft } : {}),
@@ -3795,6 +3810,7 @@ function queuedSendOptions(
   const stableId = message.stableId ?? randomUUID().replace(/-/g, "");
   return {
     command: message.command,
+    hostReconnectAttempted: message.hostReconnectAttempted,
     replyDraft: message.replyDraft,
     stableId,
     pinnedConversationId: message.conversationId,

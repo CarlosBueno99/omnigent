@@ -3191,11 +3191,25 @@ describe("chatStore — send (first-send ordering)", () => {
     useChatStore.getState().maybeFlushQueuedHead();
     expect(holdHeaders).toHaveLength(1);
 
+    // Startup can succeed before delivery is ready; retain its attempt on refusal.
+    useChatStore.setState((s) => ({
+      queuedMessages: s.queuedMessages.map((m) => ({ ...m, hostReconnectAttempted: true })),
+    }));
+    useChatStore.getState().releaseHostHeldMessages("conv_existing");
+    useChatStore.getState().maybeFlushQueuedHead();
+    await vi.waitFor(() =>
+      expect(useChatStore.getState().queuedMessages[0]).toMatchObject({
+        waitingForHost: true,
+        hostReconnectAttempted: true,
+      }),
+    );
+    expect(holdHeaders).toEqual(["on", "on"]);
+
     hostBack = true;
     useChatStore.getState().releaseHostHeldMessages("conv_existing");
     // ChatPage's level-triggered flush effect runs on the queue change.
     useChatStore.getState().maybeFlushQueuedHead();
-    await vi.waitFor(() => expect(holdHeaders).toEqual(["on", "on"]));
+    await vi.waitFor(() => expect(holdHeaders).toEqual(["on", "on", "on"]));
     expect(useChatStore.getState().queuedMessages).toEqual([]);
   });
 
@@ -18645,6 +18659,59 @@ describe("chatStore — background cross-session flush", () => {
         )?.text;
         return { id, text };
       });
+
+  it.each([true, false])(
+    "holds a background refusal and delivers to its original session (sidebar row: %s)",
+    async (hasSidebarRow) => {
+      seedSession("conv_bg");
+      client.setQueryData(["session", "conv_bg"], await getSessionSlim("conv_bg"));
+      seedConversationsCache([
+        conv("conv_active", "idle"),
+        ...(hasSidebarRow ? [conv("conv_bg", "idle")] : []),
+      ]);
+      useChatStore.setState({
+        conversationId: "conv_active",
+        queuedMessages: [
+          {
+            queueId: "q_original",
+            text: "Continue in the original session",
+            conversationId: "conv_bg",
+            stableId: "original-message",
+          },
+        ],
+      });
+      const headers: (string | null)[] = [];
+      fetchMock.mockImplementation((input, init) => {
+        if (String(input).endsWith("/v1/sessions/conv_bg/events")) {
+          headers.push(new Headers(init?.headers).get("x-omnigent-hold-when-host-offline"));
+          return headers.length === 1
+            ? mockResponse(
+                { error: { code: "host_offline", message: "Waiting for the host." } },
+                { ok: false, status: 503 },
+              )
+            : mockResponse({ queued: true });
+        }
+        return defaultFetchHandler(input, init);
+      });
+
+      useChatStore.getState().flushBackgroundQueues();
+      await vi.waitFor(() =>
+        expect(useChatStore.getState().queuedMessages[0]?.waitingForHost).toBe(true),
+      );
+      expect(useChatStore.getState().queuedMessages[0]).toMatchObject({
+        conversationId: "conv_bg",
+        stableId: "original-message",
+      });
+      expect(headers).toEqual(["on"]);
+      useChatStore.getState().flushBackgroundQueues();
+      expect(headers).toHaveLength(1);
+      useChatStore.getState().releaseHostHeldMessages("conv_bg");
+      useChatStore.getState().flushBackgroundQueues();
+      await vi.waitFor(() => expect(headers).toEqual(["on", "on"]));
+      expect(useChatStore.getState().queuedMessages).toEqual([]);
+      expect(useChatStore.getState().conversationId).toBe("conv_active");
+    },
+  );
 
   it("flushes an idle non-active conversation's head via postEvent", async () => {
     // Viewing conv_active; conv_bg is idle in the sidebar cache with a queue.

@@ -10,6 +10,9 @@ from urllib.parse import urlparse
 import pytest
 from playwright.sync_api import Page, Request, Route, expect
 
+from tests._helpers.desktop_host_recovery import (
+    ARCA_DESKTOP_BRIDGE_INIT_SCRIPT as _DESKTOP_BRIDGE_INIT_SCRIPT,
+)
 from tests.e2e_ui.conftest import configure_mock_llm, fetch_with_retry
 from tests.e2e_ui.sessions.test_reconnect_local_host_from_app import (
     _DESKTOP_BRIDGE_INIT_SCRIPT as _LOCAL_DESKTOP_BRIDGE_INIT_SCRIPT,
@@ -20,39 +23,6 @@ from tests.e2e_ui.sessions.test_reconnect_local_host_from_app import (
 
 _ARCA_HOST_ID = "host_arca"
 _OLD_CREATED_AT = 1_700_000_000
-
-_DESKTOP_BRIDGE_INIT_SCRIPT = """
-window.__connectArcaCalls = 0;
-window.__hostStatusListeners = [];
-window.omnigentDesktop = {
-  kind: "electron",
-  setBadgeCount: function () {},
-  notify: function () { return Promise.resolve(false); },
-  onNotificationActivated: function () { return function () {}; },
-  getServerPicker: function () { return Promise.resolve(null); },
-  switchServer: function () { return Promise.resolve(); },
-  openServerSetup: function () {},
-  getHostIdentity: function () {
-    return Promise.resolve({ cliInstalled: true, hostId: "host_this_machine" });
-  },
-  onHostStatusChanged: function (callback) {
-    window.__hostStatusListeners.push(callback);
-    return () => {
-      window.__hostStatusListeners = window.__hostStatusListeners.filter(cb => cb !== callback);
-    };
-  },
-  connectArcaHost: function () {
-    window.__connectArcaCalls += 1;
-    return new Promise(resolve => {
-      window.__finishArcaReconnect = result => {
-        resolve(result);
-        window.__hostStatusListeners.forEach(callback => callback());
-      };
-    });
-  },
-  getDesktopFeatures: function () { return Promise.resolve(null); },
-};
-"""
 
 
 @pytest.fixture(autouse=True)

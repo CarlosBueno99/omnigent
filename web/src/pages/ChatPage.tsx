@@ -187,7 +187,6 @@ import {
 import { useSession } from "@/hooks/useSession";
 import { useOpenGithubTab } from "@/shell/FileViewerContext";
 import { useSessionHostOnline, useSessionRunnerOnline } from "@/hooks/RunnerHealthProvider";
-import { useReleaseHostHeldSends } from "@/hooks/useReleaseHostHeldSends";
 import { useRefreshSessionStateOnRunnerOnline } from "@/hooks/useSessionOnlineRefresh";
 import {
   type LivenessRow,
@@ -901,9 +900,6 @@ export function ChatPage() {
     urlConvId,
     conversationsData !== undefined,
   );
-  const hasHostHeldMessages = useChatStore((s) =>
-    s.queuedMessages.some((m) => m.conversationId === urlConvId && m.waitingForHost),
-  );
   const {
     reconnect,
     canReconnectOnSend,
@@ -916,7 +912,6 @@ export function ChatPage() {
     hostId: activeSession?.hostId ?? activeConv?.host_id ?? null,
     hostName: sessionHost?.name,
     isOwner: isOwnerLevel(permissionLevel),
-    hasHostHeldMessages,
   });
 
   const onSend = useCallback(
@@ -938,8 +933,9 @@ export function ChatPage() {
       if (urlConvId && isUnreachable) {
         if (canReconnectOnSend) {
           useChatStore.getState().enqueueMessage(text, files, replyDraft, { waitingForHost: true });
+        } else {
+          void reconnect();
         }
-        void reconnect();
         return;
       }
       // Queue instead of POSTing now (see shouldQueueSend). enqueueMessage flushes
@@ -2497,8 +2493,6 @@ function ComposerImpl(
   // No server session behind a temp id — gate goal/workspace fetches on it so
   // the create window issues no `/v1/sessions/temp:*` requests.
   const composerSessionId = isTempConvId(conversationId) ? null : conversationId;
-  // A send held while the host was offline goes out once the host is back.
-  useReleaseHostHeldSends(composerSessionId);
   const { session: composerSession } = useSession(composerSessionId);
   const mcpPanelRequested = composerSessionId !== null && value.trim() === "/mcp";
   const nativeMcpHarness = nativeCodingAgentForHarness(sessionHarness)?.key;

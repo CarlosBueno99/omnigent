@@ -68,8 +68,9 @@ the header menu), and each place is a separate entry point.
   The desktop app starts a local host or an Arca host recognized by its saved ID
   or CLI-seeded name directly from that action, with progress and a dialog for
   failure and retry. Sending to an offline host also requests recovery and holds
-  the message, including attachments, until the host is online. Other hosts show
-  a dialog with the command to run.
+  the message, including attachments, until the host is online. Recovery stays
+  with the original session after navigation. Other hosts show a dialog with the
+  command to run.
   States: reconnecting (spinner), reconnect failed (retry), host offline.
 - `workspace-recovery`: a missing-workspace error offers **Continue in another
   directory…**. Choose an existing host directory to fork the conversation into
@@ -276,6 +277,8 @@ As the session owner in the desktop app, type a message to an offline Arca or
 this machine and press Enter or Send. The message waits above the composer while
 the host reconnects, then sends automatically with its attachments. On a failed
 reconnect, retry in the dialog without re-entering or re-sending the message.
+Switch to another session while the send is pending; recovery and delivery still
+belong to the first session and leave the second session's draft alone.
 
 **Message recovery:** send the first prompt while a runner is starting, or send
 another message after its runner restarts. Also open a sub-agent's conversation
@@ -653,11 +656,21 @@ plain `uv run pytest`, which starts a private server for the test.
   text and attachment retention, failure and retry, waiting beyond bridge
   completion for host readiness, and one persisted message and scripted reply
   through the real server and runner. A refused send also triggers recovery when
-  health still reads online. Desktop control and liveness are injected;
+  health initially reads online, then changes to offline during recovery.
+  Desktop control and liveness are injected;
   no live SSH or Mac sign-in is exercised. Component coverage in
   `web/src/pages/ChatPage.composer.test.tsx` checks both send actions and read-only
   guards; `web/src/store/chatStore.test.ts` checks startup holds, attachments,
   quotes, stable ids, and navigation without sending into another session.
+- **`reconnect`, `message-recovery`, late refusal and unchanged online health (browser contract):**
+  `tests/browser_ui/chat/test_desktop_host_send_recovery.py::test_desktop_send_recovers_without_an_offline_health_edge`
+  keeps health online throughout recovery. It checks prompt delivery of the same
+  text, attachment and stable ID after startup, both in the original Arca session
+  and after navigation away from an Arca or this machine. The second session's
+  draft stays intact. Backend contracts and desktop control are mocked; this
+  does not prove backend persistence or native startup. Component coverage in
+  `web/src/hooks/QueueFlushProvider.test.tsx` also checks that another offline
+  refusal keeps the message held without repeated host starts.
 - **`message-recovery`, native binding races (own environment):**
   `tests/e2e/test_native_runner_binding_races_e2e.py::test_native_send_rechecks_binding_after_runner_miss`
   drives real servers, runners, and Claude/Codex CLIs with a mock model. It
@@ -849,7 +862,10 @@ plain `uv run pytest`, which starts a private server for the test.
   just any stopped session.
 - The desktop app's direct reconnect is not available in a browser; a browser
   shows the command instead.
-- Desktop send-triggered reconnect requires session ownership and a bound host.
+- Desktop send-triggered reconnect requires session ownership and a recognized
+  Arca or this machine's installed CLI identity. Other remote hosts need manual
+  recovery. A successful startup request allows an immediate delivery retry if
+  health reads online; a second offline refusal waits without restarting again.
   Messages stay in the existing in-memory queue during reconnect and retry;
   navigating does not change their destination, but a hard reload clears them.
 - Tests marked "own environment" fail under `verify-env run` with an explicit

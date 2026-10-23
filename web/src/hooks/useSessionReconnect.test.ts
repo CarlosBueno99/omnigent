@@ -41,6 +41,63 @@ afterEach(() => {
 });
 
 describe("useSessionReconnect", () => {
+  it("keeps an owned remote host blocked without opening an automatic recovery dialog", async () => {
+    const { result } = renderHook(() =>
+      useSessionReconnect({
+        ...localSession,
+        hostId: "another-machine",
+        hasHostHeldMessages: true,
+      }),
+    );
+    await act(async () => {});
+    expect(result.current.canReconnectOnSend).toBe(false);
+    expect(result.current.dialogOpen).toBe(false);
+    expect(controlHost).not.toHaveBeenCalled();
+    expect(connectArcaHost).not.toHaveBeenCalled();
+  });
+
+  it("waits for a seeded Arca host's name before starting automatic recovery", async () => {
+    const { result, rerender } = renderHook(useSessionReconnect, {
+      initialProps: {
+        ...localSession,
+        hostId: "arca-host",
+        hostName: undefined as string | undefined,
+        hasHostHeldMessages: true,
+      },
+    });
+    await act(async () => {});
+    expect(result.current.dialogOpen).toBe(false);
+    expect(controlHost).not.toHaveBeenCalled();
+    expect(connectArcaHost).not.toHaveBeenCalled();
+
+    await act(async () => {
+      rerender({
+        ...localSession,
+        hostId: "arca-host",
+        hostName: "e2e's arca",
+        hasHostHeldMessages: true,
+      });
+    });
+    expect(connectArcaHost).toHaveBeenCalledOnce();
+    expect(result.current.dialogOpen).toBe(false);
+  });
+
+  it("does not restart automatic recovery when a local host's name finishes loading", async () => {
+    const { rerender } = renderHook(useSessionReconnect, {
+      initialProps: {
+        ...localSession,
+        hostName: undefined as string | undefined,
+        hasHostHeldMessages: true,
+      },
+    });
+    await act(async () => {});
+    expect(controlHost).toHaveBeenCalledOnce();
+    await act(async () => {
+      rerender({ ...localSession, hostName: "This Mac", hasHostHeldMessages: true });
+    });
+    expect(controlHost).toHaveBeenCalledOnce();
+  });
+
   it.each([
     { hostId: "this-mac", hostName: "This Mac", arca: false },
     { hostId: "arca-host", hostName: "e2e's arca", arca: true },
@@ -63,6 +120,7 @@ describe("useSessionReconnect", () => {
     const pending = deferred<HostActionResult>();
     vi.mocked(controlHost).mockReturnValue(pending.promise);
     const { result } = renderHook(() => useSessionReconnect(localSession));
+    await act(async () => {});
     expect(result.current.canReconnectOnSend).toBe(true);
 
     let reconnect!: Promise<void>;
