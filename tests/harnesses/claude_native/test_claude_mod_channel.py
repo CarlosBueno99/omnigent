@@ -513,3 +513,21 @@ def test_augment_loads_the_mod_only_when_the_launch_asks_for_it(mod_bridge: Path
     assert (
         with_dir / mod_channel.MOD_PLUGIN_DIR_NAME / ".claude-plugin" / "plugin.json"
     ).is_file()
+
+
+@pytest.mark.parametrize("feature_on", [False, True])
+def test_cli_launch_loads_the_mod_only_with_the_feature_flag(
+    mod_bridge: Path, monkeypatch: pytest.MonkeyPatch, feature_on: bool
+) -> None:
+    from omnigent.harnesses.claude_native import main as claude_main
+
+    monkeypatch.setenv("OMNIGENT_FEATURES", "claude_mod_channel" if feature_on else "")
+    monkeypatch.setattr(claude_main, "resolve_cli_binary", lambda command: f"/bin/{command}")
+    monkeypatch.setattr(mod_channel, "claude_cli_supports_mod", lambda binary: True)
+    bridge_dir = mod_bridge / ("on" if feature_on else "off")
+    bridge_dir.mkdir()
+
+    body = claude_main._claude_terminal_request((), command="claude", bridge_dir=bridge_dir)
+
+    args = body["spec"]["args"]
+    assert ("--plugin-dir" in args) is feature_on

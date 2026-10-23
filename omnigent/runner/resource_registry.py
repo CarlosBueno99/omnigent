@@ -525,6 +525,15 @@ class SessionResourceRegistry:
         self._terminal_exit_tasks: set[asyncio.Task[None]] = set()
         self._terminal_exit_scheduled: asyncio.Event = asyncio.Event()
 
+    def feature_enabled(self, feature: Feature) -> bool:
+        """
+        Return whether *feature* was on when this runner's registry was built.
+
+        :param feature: Release feature to check, e.g. ``Feature.CLAUDE_MOD_CHANNEL``.
+        :returns: The feature's value in this registry's immutable snapshot.
+        """
+        return self._feature_flags.enabled(feature)
+
     def set_terminal_activity_publisher(
         self,
         publisher: Callable[[str, str], None],
