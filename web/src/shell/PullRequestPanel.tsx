@@ -1365,7 +1365,7 @@ function StoredPullRequestDetails({
   refreshButton?: React.ReactNode;
 }) {
   const title = pr.title?.trim() || `${pr.repository} ${copy.prNumberPrefix}${pr.number}`;
-  const age = pr.state_checked_at ? relativeTime(pr.state_checked_at * 1000) : "";
+  const lastSync = pr.state_checked_at ? absoluteTime(pr.state_checked_at * 1000) : "";
   return (
     <TooltipProvider delayDuration={0}>
       <div className="flex h-full min-h-0 flex-col" data-testid="github-stored-pr">
@@ -1395,10 +1395,10 @@ function StoredPullRequestDetails({
           </div>
         </div>
         <p role="status" className="p-3 text-ui text-muted-foreground">
-          {sandboxAsleep ? "The sandbox is offline." : "The host is offline."}{" "}
-          {pr.state
-            ? `Status as of ${age === "now" ? "just now" : age ? `${age} ago` : "earlier"}; the description, checks, comments, and changes load when it’s back online.`
-            : "This PR’s details load when it’s back online."}
+          {lastSync && `Last sync time: ${lastSync}. `}
+          {sandboxAsleep
+            ? "To load the PR details, send a message to start the session’s sandbox."
+            : "To load the PR details, please reconnect the session’s host."}
         </p>
       </div>
     </TooltipProvider>

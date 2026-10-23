@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type * as UsePullRequestsModule from "@/hooks/usePullRequests";
 import type * as UseSessionPullRequestsModule from "@/hooks/useSessionPullRequests";
+import type * as UseWorkspaceChangedFilesModule from "@/hooks/useWorkspaceChangedFiles";
 import type {
   PullRequest,
   PullRequestAssociation,
@@ -69,6 +70,7 @@ const state = vi.hoisted(() => ({
   // The server's stored PRs per session; absent sessions keep what the panel seeded.
   stored: {} as Record<string, PullRequestAssociation[]>,
   unlink: { mutate: vi.fn(), isPending: false, isError: false, error: null as Error | null },
+  sandboxAsleep: false,
 }));
 
 vi.mock("@/hooks/usePullRequests", async (importOriginal) => {
@@ -126,6 +128,10 @@ vi.mock("@/hooks/useSessionPullRequests", async (importOriginal) => {
   };
 });
 vi.mock("@/hooks/usePermissions", () => ({ useCanEdit: () => state.canEdit }));
+vi.mock("@/hooks/useWorkspaceChangedFiles", async (importOriginal) => ({
+  ...(await importOriginal<typeof UseWorkspaceChangedFilesModule>()),
+  useWorkspaceAsleep: () => state.sandboxAsleep,
+}));
 
 // The diff rendering (@pierre/diffs) is exercised by the library itself; here
 // we only assert a section renders one diff per parsed file. parsePatchFiles is
@@ -238,6 +244,7 @@ beforeEach(() => {
   window.localStorage.clear();
   state.stored = {};
   state.unlink = { mutate: vi.fn(), isPending: false, isError: false, error: null };
+  state.sandboxAsleep = false;
   // Fire the observer callback immediately on observe so lazy sections mount.
   class IO {
     private cb: IntersectionObserverCallback;
@@ -2141,6 +2148,7 @@ describe("session PR selection", () => {
     const user = userEvent.setup();
     const one = "https://github.com/example/one/pull/42";
     const two = "https://github.com/example/two/pull/7";
+    const checkedAt = Date.UTC(2026, 9, 22, 17, 30) / 1000;
     state.info = { isLoading: false, error: new RunnerOfflineError(), isFetching: false };
     state.stored.conv_1 = [
       {
@@ -2152,7 +2160,7 @@ describe("session PR selection", () => {
         relationship: "created",
         state: "MERGED",
         is_draft: false,
-        state_checked_at: Date.now() / 1000 - 120,
+        state_checked_at: checkedAt,
       },
       {
         url: two,
@@ -2171,7 +2179,7 @@ describe("session PR selection", () => {
     expect(within(stored).getByRole("link", { name: /Ship it/ })).toHaveAttribute("href", one);
     expect(within(stored).getByLabelText("Pull request status: Merged")).toBeInTheDocument();
     expect(within(stored).getByRole("status")).toHaveTextContent(
-      "The host is offline. Status as of 2m ago; the description, checks, comments, and changes load when it’s back online.",
+      `Last sync time: ${new Date(checkedAt * 1000).toLocaleString()}. To load the PR details, please reconnect the session’s host.`,
     );
     // Linking verifies the PR with the host's account; unlinking is the server's.
     expect(
@@ -2183,8 +2191,9 @@ describe("session PR selection", () => {
     const [, { onSuccess }] = state.unlink.mutate.mock.calls[0];
     act(() => onSuccess(state.stored.conv_1.slice(1)));
     expect(picker).toHaveTextContent("example/two #7 (from branch)");
-    expect(screen.getByTestId("github-stored-pr")).toHaveTextContent(
-      "The host is offline. This PR’s details load when it’s back online.",
+    // A PR the host never fetched has no sync time to show.
+    expect(within(screen.getByTestId("github-stored-pr")).getByRole("status")).toHaveTextContent(
+      /^To load the PR details, please reconnect the session’s host\.$/,
     );
   });
 
@@ -2224,6 +2233,32 @@ describe("session PR selection", () => {
     );
     expect(within(stored).getByLabelText("Pull request status: Open")).toBeInTheDocument();
     expect(screen.queryByText(/The agent is asleep/)).toBeNull();
+  });
+
+  it("asks to start a sleeping sandbox rather than reconnect a host", () => {
+    const url = "https://github.com/acme/app/pull/6000";
+    state.sandboxAsleep = true;
+    state.info = { isLoading: false, error: null, isFetching: false };
+    state.stored.conv_1 = [
+      {
+        url,
+        host: "github.com",
+        repository: "acme/app",
+        number: 6000,
+        title: "Sandbox PR",
+        relationship: "created",
+        state: "OPEN",
+        is_draft: false,
+        state_checked_at: null,
+      },
+    ];
+    renderPanel();
+
+    return waitFor(() =>
+      expect(within(screen.getByTestId("github-stored-pr")).getByRole("status")).toHaveTextContent(
+        /^To load the PR details, send a message to start the session’s sandbox\.$/,
+      ),
+    );
   });
 
   it.each([undefined, null, "", "   "])(
