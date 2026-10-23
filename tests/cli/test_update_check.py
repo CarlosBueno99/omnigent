@@ -2431,10 +2431,16 @@ def test_cli_upgrade_refuses_pip_and_prints_manual_command(
     ("args", "exit_code", "expected_output"),
     [
         (["--nightly"], 0, "    brew upgrade --fetch-HEAD omnigent-ai/tap/omnigent\n"),
+        (["--dry-run"], 0, "    brew upgrade omnigent-ai/tap/omnigent\n"),
         (["--check"], 1, "A new release is available: v0.1.0 → v0.2.0."),
         (["--check", "--nightly"], 1, "Newest nightly: v0.2.0.dev20260804 (currently v0.1.0)."),
     ],
-    ids=["nightly-defers-to-brew", "check-only-reports", "nightly-check-only-reports"],
+    ids=[
+        "nightly-defers-to-brew",
+        "dry-run-defers-to-brew",
+        "check-only-reports",
+        "nightly-check-only-reports",
+    ],
 )
 def test_cli_upgrade_never_runs_an_installer_in_a_homebrew_keg(
     monkeypatch: pytest.MonkeyPatch, args: list[str], exit_code: int, expected_output: str

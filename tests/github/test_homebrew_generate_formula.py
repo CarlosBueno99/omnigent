@@ -256,9 +256,15 @@ def test_head_build_installs_lockstep_sdks_from_its_checkout(monkeypatch) -> Non
     for name, path in sdk_paths.items():
         project = tomllib.loads((repo_root / path / "pyproject.toml").read_text())["project"]
         assert project["name"] == name
-    assert install.index("venv.pip_install lockstep_sdks.values") < install.index(
-        "venv.pip_install_and_link buildpath"
+    assert (
+        "formula_resources = build.head? ? "
+        "resources.reject { |r| lockstep_sdks.key?(r.name) } : resources"
+    ) in install
+    assert "formula_resources.partition" in install
+    head_sdk_install = (
+        "venv.pip_install lockstep_sdks.values.map { |path| buildpath/path } if build.head?"
     )
+    assert install.index(head_sdk_install) < install.index("venv.pip_install_and_link buildpath")
     # setup.py builds the web UI from a checkout that has no prebuilt bundle.
     assert 'depends_on "node" => :build' in formula
     assert 'depends_on "pnpm" => :build' in formula

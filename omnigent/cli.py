@@ -6158,6 +6158,7 @@ def upgrade(
 
     # Homebrew owns its keg and deletes the old one (with the interpreter
     # running this command) on upgrade, so every upgrade must go through brew.
+    # Its post-install cleaner rewrites the keg's INSTALLER to "brew".
     if info.detected_installer == "brew" and not check_only:
         click.echo(
             "omnigent was installed with Homebrew, which manages its files. "
