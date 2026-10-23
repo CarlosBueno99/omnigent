@@ -44,6 +44,8 @@ const mocks = vi.hoisted(() => ({
   conversationSearch: vi.fn(),
   // Server-side search results keyed by the exact query the hook receives.
   searchResults: {} as Record<string, Conversation[]>,
+  // When true, a new search key serves no rows for one render, like a real fetch.
+  searchInFlight: false,
   // Optional multi-page dataset (array of per-page row arrays) for pagination
   // tests. When unset the mock serves a single page of `conversations`.
   pages: undefined as Conversation[][] | undefined,
@@ -85,7 +87,7 @@ vi.mock("@/hooks/useConversations", async () => {
   // A stateful mock that emulates useInfiniteQuery pagination: it tracks how
   // many pages are "loaded" and reveals the next on fetchNextPage, so a click
   // on "Load more" re-renders with more rows (as the real hook would).
-  const { useState } = await import("react");
+  const { useEffect, useState } = await import("react");
   return {
     PROJECT_LABEL_KEY: "omni_project",
     // The Archived view drives the visible list from this hook; filter on the
@@ -106,7 +108,10 @@ vi.mock("@/hooks/useConversations", async () => {
         ? [mocks.searchResults[searchQuery] ?? []]
         : (mocks.pages ?? [mocks.conversations]);
       const [shown, setShown] = useState(1);
-      const pages = source.slice(0, shown).map((rows) => ({
+      const [fetchedSearch, setFetchedSearch] = useState(searchQuery);
+      useEffect(() => setFetchedSearch(searchQuery), [searchQuery]);
+      const inFlight = mocks.searchInFlight && fetchedSearch !== searchQuery;
+      const pages = (inFlight ? [] : source.slice(0, shown)).map((rows) => ({
         data: project ? rows.filter((c) => c.labels?.["omni_project"] === project) : rows,
       }));
       return {
@@ -251,6 +256,7 @@ beforeEach(() => {
   mocks.conversationQuery.mockReset();
   mocks.conversationSearch.mockReset();
   mocks.searchResults = {};
+  mocks.searchInFlight = false;
   mocks.theme = "system";
   mocks.isEmbedded = false;
   mocks.accountsEnabled = true;
@@ -1739,17 +1745,17 @@ describe("SettingsPage", () => {
       conv("a3", { archived: true, title: "Chat C" }),
     ];
     mocks.searchResults = { "harness-b": [match] };
+    mocks.searchInFlight = true;
     renderPage("/settings/archived");
 
     fireEvent.click(screen.getByTestId("archived-toggle-selection"));
     fireEvent.click(screen.getByRole("button", { name: "Select all" }));
     expect(screen.getByText("3 selected")).toBeInTheDocument();
 
-    // Searching drops hidden rows from the selection; Select all picks only matches.
+    // The search fetch briefly empties the list, which clears the selection.
     fireEvent.change(screen.getByTestId("archived-search"), { target: { value: "harness-b" } });
     await waitFor(() => expect(screen.getAllByTestId("archived-row")).toHaveLength(1));
-    expect(screen.getByText("1 selected")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Deselect all" }));
+    expect(screen.getByText("None selected")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Select all" }));
     expect(screen.getByText("1 selected")).toBeInTheDocument();
 

@@ -169,11 +169,11 @@ def test_harness_id_search_composes_with_project_and_owner_scope(
 def test_harness_id_match_sql_stays_scoped(
     stores: tuple[SqlAlchemyConversationStore, SqlAlchemyPermissionStore],
 ) -> None:
-    """The harness-id predicate probes the metadata primary key, never the whole table.
+    """The harness-id predicate is limited to the outer row or the caller's sessions.
 
     Single-DB correlates an EXISTS on the outer row; split-DB probes only the
     caller's qualifying ids, with a row cap. Asserted on the emitted SQL because
-    an unscoped scan returns the same rows.
+    an unscoped probe returns the same rows.
     """
     store, permissions = stores
     harness_session_id = str(uuid.uuid4())

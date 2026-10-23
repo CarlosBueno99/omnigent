@@ -22,13 +22,14 @@ the header menu), and each place is a separate entry point.
 - `rename`: from the row, the header menu, the header title, or Cmd/Ctrl+Alt+R
   on desktop; long titles are limited.
 - `archive`: archived sessions leave the main list and appear in the archived
-  view, which can be filtered by project, searched, and paged. Search matches
-  titles and content, and also matches a pasted Omnigent or source-harness
-  session ID exactly. A harness ID must be 8 to 128 characters and contain a
-  digit, `-` or `_`, and on split-database servers it needs a signed-in user. On a server with worktree
-  cleanup, archiving a session that has a git worktree first asks whether to
-  also delete the worktree (the branch is kept); Remember my choice saves the
-  answer, which Settings → Git can change later.
+  view, which can be filtered by project and paged. Settings → Archived can
+  also be searched: search matches titles and content, and also matches a
+  pasted Omnigent or source-harness session ID exactly. A harness ID must be 8
+  to 128 characters and contain a digit, `-` or `_`, and on split-database
+  servers it needs a signed-in user. On a server with worktree cleanup,
+  archiving a session that has a git worktree first asks whether to also delete
+  the worktree (the branch is kept); Remember my choice saves the answer, which
+  Settings → Git can change later.
 - `stop`: Stop session on a hosted parent ends its runner, including side chats
   and sub-agents sharing that runner. Conversation histories are kept.
 - `side-chat-lifecycle`: generic side chats reuse their parent's live runner;
@@ -42,7 +43,7 @@ the header menu), and each place is a separate entry point.
   Live side chats accept pasted images in every reply text field.
 - `unarchive`: offered on archived rows, in bulk selection, in the header
   menu of an archived session, and on an exact-ID import that finds the session
-  already imported and archived. Unarchiving a row in Settings › Archived opens
+  already imported and archived. Unarchiving a row in Settings → Archived opens
   the session.
 - `delete`: confirmed, then removed from the list and the server.
 - `export`: Export in the header menu saves the transcript as a local file.

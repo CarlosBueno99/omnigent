@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 
 from omnigent.db.utils import builtin_agent_id
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, UnifiedAuthProvider
+from omnigent.server.auth import LEVEL_MANAGE, LEVEL_OWNER, LEVEL_READ, UnifiedAuthProvider
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.routes.imports import (
     LocalImportRequest,
@@ -1013,11 +1013,13 @@ async def test_local_import_id_collision_counts_as_already_imported(
 
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])
 @pytest.mark.parametrize("lost_race", [False, True], ids=["dedup", "race"])
+@pytest.mark.parametrize("sharer_level", [LEVEL_READ, LEVEL_MANAGE], ids=["read", "manage"])
 async def test_exact_local_import_names_the_existing_session_to_its_reader(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
     lost_race: bool,
+    sharer_level: int,
 ) -> None:
     """Re-importing a known session id points at the existing, archived session.
 
@@ -1043,7 +1045,7 @@ async def test_exact_local_import_names_the_existing_session_to_its_reader(
     for user in ("alice@example.com", "bob@example.com", "carol@example.com"):
         permission_store.ensure_user(user)
     permission_store.grant("alice@example.com", existing.id, LEVEL_OWNER)
-    permission_store.grant("carol@example.com", existing.id, LEVEL_READ)
+    permission_store.grant("carol@example.com", existing.id, sharer_level)
 
     async def _fake_stream(**kwargs: object):
         assert kwargs["session_id"] == "claude-known-1"
