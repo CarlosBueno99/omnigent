@@ -28,6 +28,7 @@ __all__ = [
     "classify_native_turn_error",
     "classify_terminal_failure",
     "describe_failure_code",
+    "describe_gateway_policy_refusal",
     "diagnose_client_update_required",
     "diagnose_codex_compaction_model_failure",
     "diagnose_codex_model_rejection",
