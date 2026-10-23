@@ -479,9 +479,9 @@ class _CodexForwarderState:
         terminal boundary for the same turn.
     :param safety_blocked_turns: Turn ids whose standalone ``error`` was a
         provider safety refusal, reverted at their terminal boundary.
-    :param history_dropped_turns: Turn ids already dropped from Codex history
-        this connection, so a duplicate boundary or a reconnect cannot drop a
-        second turn.
+    :param attempted_history_drop_turns: Turn ids whose drop from Codex history
+        this forwarder has already decided on, recorded before the request
+        because a drop that times out can still land.
     :param posted_user_turns: Turn ids whose ``userMessage`` has been
         posted to Omnigent this connection, e.g. ``{"turn_123"}``. Used to
         enforce user-before-assistant ordering: before posting a turn's
@@ -540,7 +540,7 @@ class _CodexForwarderState:
     synced_item_keys: set[str] = field(default_factory=set)
     surfaced_terminal_error_turns: set[str] = field(default_factory=set)
     safety_blocked_turns: set[str] = field(default_factory=set)
-    history_dropped_turns: set[str] = field(default_factory=set)
+    attempted_history_drop_turns: set[str] = field(default_factory=set)
     posted_user_turns: set[str] = field(default_factory=set)
     posted_tool_calls: set[str] = field(default_factory=set)
     partial_text_by_turn: dict[str, list[_PartialTextBuffer]] = field(default_factory=dict)
@@ -2988,7 +2988,6 @@ async def _post_resume_terminal_status(
     if codex_client is not None:
         await _maybe_revert_safety_blocked_turn(
             codex_client,
-            bridge_dir=bridge_dir,
             thread_id=thread_id,
             turn_id=edge.turn_id if edge is not None else None,
             edge=edge,
@@ -4201,7 +4200,6 @@ async def _handle_terminal_turn_boundary_inner(
     if handled and codex_client is not None:
         await _maybe_revert_safety_blocked_turn(
             codex_client,
-            bridge_dir=bridge_dir,
             thread_id=_thread_id_from_params(params),
             turn_id=_terminal_turn_id_from_params(params),
             edge=terminal.edge,
@@ -4229,7 +4227,6 @@ async def _handle_terminal_turn_boundary_inner(
 async def _maybe_revert_safety_blocked_turn(
     codex_client: CodexAppServerClient,
     *,
-    bridge_dir: Path | None,
     thread_id: str | None,
     turn_id: str | None,
     edge: _CodexTurnStatusEdge | None,
@@ -4243,8 +4240,6 @@ async def _maybe_revert_safety_blocked_turn(
     live terminal boundary and a refusal first seen in resume data come here.
 
     :param codex_client: Connected Codex app-server client.
-    :param bridge_dir: Native Codex bridge directory, used to rule out a turn
-        this forwarder started while the refusal was being surfaced.
     :param thread_id: Codex thread id, e.g. ``"thread_abc123"``.
     :param turn_id: Terminal Codex turn id, e.g. ``"turn_abc123"``.
     :param edge: Status edge derived from the terminal event, if any.
@@ -4258,17 +4253,19 @@ async def _maybe_revert_safety_blocked_turn(
         forwarder_state.safety_blocked_turns.discard(turn_id)
         blocked = True
     if not blocked or (
-        forwarder_state is not None and turn_id in forwarder_state.history_dropped_turns
+        forwarder_state is not None and turn_id in forwarder_state.attempted_history_drop_turns
     ):
         return
+    if forwarder_state is not None:
+        forwarder_state.attempted_history_drop_turns.add(turn_id)
     try:
         async with asyncio.timeout(_CODEX_SAFETY_REVERT_TIMEOUT_SECONDS):
             if not await _safety_blocked_turn_is_newest(
-                codex_client, bridge_dir=bridge_dir, thread_id=thread_id, turn_id=turn_id
+                codex_client, thread_id=thread_id, turn_id=turn_id
             ):
                 _logger.info(
-                    "Codex forwarder left safety-blocked turn in history behind a newer "
-                    "turn: turn_id=%s",
+                    "Codex forwarder left safety-blocked turn in history, not provably "
+                    "the newest turn: turn_id=%s",
                     turn_id,
                 )
                 return
@@ -4284,44 +4281,32 @@ async def _maybe_revert_safety_blocked_turn(
                     "thread/rollback", {"threadId": thread_id, "numTurns": 1}
                 )
     except Exception:  # the refusal is already surfaced as a failed turn.
-        # The request may still land: asyncio.timeout only stops waiting.
         _logger.warning(
             "Codex forwarder could not confirm the safety-blocked turn was dropped: turn_id=%s",
             turn_id,
             exc_info=True,
         )
         return
-    if forwarder_state is not None:
-        forwarder_state.history_dropped_turns.add(turn_id)
     _logger.info("Codex forwarder reverted safety-blocked turn: turn_id=%s", turn_id)
 
 
 async def _safety_blocked_turn_is_newest(
     codex_client: CodexAppServerClient,
     *,
-    bridge_dir: Path | None,
     thread_id: str,
     turn_id: str,
 ) -> bool:
     """
     Report whether the refused turn is still the newest turn in Codex history.
 
-    Both drop spellings remove the tail of the thread, so a turn started while
-    the refusal was being surfaced would be deleted along with the refused one.
-    The bridge state is checked first because it already knows about a turn this
-    forwarder has started but Codex has not registered yet.
+    Both drop methods cut the thread tail, so skip when a newer turn exists.
 
     :param codex_client: Connected Codex app-server client.
-    :param bridge_dir: Native Codex bridge directory, or ``None`` when the
-        caller has no bridge state to consult.
     :param thread_id: Codex thread id, e.g. ``"thread_abc123"``.
     :param turn_id: Refused Codex turn id, e.g. ``"turn_abc123"``.
-    :returns: ``True`` when the refused turn is still the newest turn.
+    :returns: ``True`` when the refused turn is still the newest turn, or
+        ``False`` when that cannot be established.
     """
-    if bridge_dir is not None:
-        state = read_bridge_state(bridge_dir)
-        if state is not None and state.active_turn_id not in {None, turn_id}:
-            return False
     try:
         response = await codex_client.request(
             "thread/turns/list",
@@ -4335,8 +4320,9 @@ async def _safety_blocked_turn_is_newest(
     except CodexAppServerResponseError as exc:
         if not codex_rejects_method(exc, "thread/turns/list"):
             raise
-        # Codex too old to list turns: the bridge check above is all there is.
-        return True
+        # Codex too old to list turns: leaving the refusal in history is the
+        # lesser harm, since dropping could take a newer turn with it.
+        return False
     result = response.get("result")
     turns = result.get("data") if isinstance(result, dict) else None
     if not isinstance(turns, list) or not turns:
