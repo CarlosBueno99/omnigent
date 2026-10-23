@@ -82,6 +82,7 @@ import {
   MODEL_SELECT_DEFAULT,
   MODEL_SELECT_SMART,
   defaultModelLabel,
+  nativeEffortOptions,
   nativeModelLabel,
 } from "@/components/HarnessConfigControls";
 import { ProjectLandingIcon } from "@/components/ProjectIconPicker";
@@ -2231,6 +2232,7 @@ export function NewChatLandingScreen() {
       agentId: c.agent_id,
       useWorktree: c.use_worktree,
       model: c.model,
+      effort: c.effort,
     };
   }, [
     projectParam,
@@ -3863,6 +3865,7 @@ export function NewChatLandingScreen() {
       selectedNativeHarness ?? (sandboxHasModelCatalog ? previewHarness : null);
     if (!selectionHarness) return;
     const picked = effort === EFFORT_SELECT_NONE ? "" : effort;
+    userPickedEffortRef.current = true;
     setPickedEffort(picked);
     rememberPickerOptions(selectionHarness, { effort: picked });
   };
@@ -4195,11 +4198,14 @@ export function NewChatLandingScreen() {
   // cache refresh must not reseed the project default over the user's choice;
   // an agent switch starts a fresh visit and re-arms the seed.
   const userPickedModelRef = useRef(false);
+  // Same guard for an explicit effort pick against the project's default effort.
+  const userPickedEffortRef = useRef(false);
   useEffect(() => {
     const prev = prevAgentIdRef.current;
     prevAgentIdRef.current = effectiveAgentId;
     if (prev === undefined || prev === null || prev === effectiveAgentId) return;
     userPickedModelRef.current = false;
+    userPickedEffortRef.current = false;
     setBypassSandbox(false);
     setCostControlMode(null);
   }, [effectiveAgentId, setCostControlMode]);
@@ -4232,6 +4238,14 @@ export function NewChatLandingScreen() {
   const projectDefaultModelValid =
     projectDefaultModel != null && projectModelVocab.some((m) => m.id === projectDefaultModel)
       ? projectDefaultModel
+      : null;
+  // A project-configured default effort, scoped to the project's agent like the
+  // model. The seeds below validate it against the harness's effort ladder.
+  const projectDefaultEffort =
+    prefillConfig?.effort != null &&
+    prefillConfig.agentId != null &&
+    effectiveAgentId === prefillConfig.agentId
+      ? prefillConfig.effort
       : null;
   // Seed the harness's knobs from the user's last picks when the selected
   // harness changes (including the first mount), so a returning user starts a
@@ -4274,6 +4288,19 @@ export function NewChatLandingScreen() {
       options.some((m) => m.id === projectDefaultModel)
         ? projectDefaultModel
         : null;
+    // The project's default effort, when the seeded model's ladder offers it,
+    // outranks the remembered effort the same way (an explicit pick wins).
+    const projectEffortSeed = (
+      modelOptions: readonly NativeModelOption[],
+      model: string,
+    ): string | null =>
+      !userPickedEffortRef.current &&
+      projectDefaultEffort != null &&
+      (nativeEffortOptions(selectedNativeHarness, modelOptions, model) ?? []).some(
+        (option) => option.value === projectDefaultEffort,
+      )
+        ? projectDefaultEffort
+        : null;
     if (selectedNativeHarness === "pi-native") {
       setPickedModel(
         projectSeed(piModelOptions) ??
@@ -4282,9 +4309,10 @@ export function NewChatLandingScreen() {
             : ""),
       );
       setPickedEffort(
-        stored.effort != null && PI_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
-          ? stored.effort
-          : "",
+        projectEffortSeed(piModelOptions, "") ??
+          (stored.effort != null && PI_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
+            ? stored.effort
+            : ""),
       );
     }
     if (supportsPermissionMode) {
@@ -4304,11 +4332,12 @@ export function NewChatLandingScreen() {
             : ""),
       );
       setPickedEffort(
-        !storedRoutingOn &&
+        projectEffortSeed(claudeModelOptions, "") ??
+          (!storedRoutingOn &&
           stored.effort != null &&
           CLAUDE_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
-          ? stored.effort
-          : "",
+            ? stored.effort
+            : ""),
       );
     } else if (supportsApprovalMode) {
       setBypassSandbox(
@@ -4333,15 +4362,18 @@ export function NewChatLandingScreen() {
       // it — anything else resolves to "" so a level another harness left in
       // the shared state never rides a Codex create.
       setPickedEffort(
-        !storedRoutingOn &&
+        (selectedNativeHarness === "codex-native"
+          ? projectEffortSeed(codexModelOptions, seededCodexModel)
+          : null) ??
+          (!storedRoutingOn &&
           selectedNativeHarness === "codex-native" &&
           stored.effort != null &&
           codexEffortLevelsForModel(
             codexModelOptions,
             seededCodexModel || (codexModelOptions.find((m) => m.isDefault)?.id ?? null),
           ).includes(stored.effort)
-          ? stored.effort
-          : "",
+            ? stored.effort
+            : ""),
       );
     } else if (supportsCursorMode) {
       setCursorExecMode(resolve(CURSOR_NATIVE_EXEC_MODES, CURSOR_NATIVE_DEFAULT_EXEC_MODE));
@@ -4353,9 +4385,9 @@ export function NewChatLandingScreen() {
       );
     }
     // Reseed on harness changes, when the selected host's catalog resolves,
-    // and when the project's configured default model settles (its config
-    // loads async, so the first run may see it as null); capability flags are
-    // derived from the same harness and stay omitted.
+    // and when the project's configured default model or effort settles (its
+    // config loads async, so the first run may see it as null); capability
+    // flags are derived from the same harness and stay omitted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     sandboxInferenceConfigured,
@@ -4364,6 +4396,7 @@ export function NewChatLandingScreen() {
     codexModelOptions,
     piModelOptions,
     projectDefaultModel,
+    projectDefaultEffort,
   ]);
   useEffect(() => {
     if (!sandboxDefaultModelsEnabled || !previewHarness) return;
@@ -4378,11 +4411,15 @@ export function NewChatLandingScreen() {
         : saved.model;
     const model = sandboxCatalog?.find((row) => row.id === candidate);
     setPickedModel(model?.id ?? "");
+    const effortLevels = codexEffortLevelsForModel(sandboxCatalog ?? [], model?.id);
+    const effortCandidate =
+      !userPickedEffortRef.current &&
+      projectDefaultEffort != null &&
+      effortLevels.includes(projectDefaultEffort)
+        ? projectDefaultEffort
+        : saved.effort;
     setPickedEffort(
-      saved.effort &&
-        codexEffortLevelsForModel(sandboxCatalog ?? [], model?.id).includes(saved.effort)
-        ? saved.effort
-        : "",
+      effortCandidate && effortLevels.includes(effortCandidate) ? effortCandidate : "",
     );
   }, [
     sandboxDefaultModelsEnabled,
@@ -4391,6 +4428,7 @@ export function NewChatLandingScreen() {
     sandboxCatalog,
     pickerEdits,
     projectDefaultModel,
+    projectDefaultEffort,
     setPickedModel,
   ]);
   useEffect(() => {

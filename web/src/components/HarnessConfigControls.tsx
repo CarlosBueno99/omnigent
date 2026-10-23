@@ -9,6 +9,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { SMART_ROUTING_LABEL } from "@/lib/agentLabels";
+import { codexEffortLevelsForModel } from "@/lib/codexNativeModels";
+import { normalizeEffortLabel } from "@/lib/composerModelLabel";
+import type { NativeModelOption } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // Sentinel Select values for the Model row. Radix requires a non-empty value,
@@ -152,6 +155,34 @@ export const PI_NATIVE_EFFORTS: { value: string; label: string }[] = [
   { value: "xhigh", label: "xHigh" },
   { value: "max", label: "Max" },
 ];
+
+/**
+ * Reasoning-effort ladder a native harness offers at session create.
+ *
+ * Claude Code and Pi have fixed ladders. Codex's ladder belongs to the model,
+ * so it is read from the host catalog for ``model`` (or the catalog's default
+ * row when no model is pinned); an unresolved model yields no levels.
+ *
+ * @param harness - Native harness id, e.g. ``"codex-native"``.
+ * @param modelOptions - The harness's host model catalog (used by Codex only).
+ * @param model - Pinned model id, or empty/null for the harness default.
+ * @returns The selectable efforts, or ``null`` when the harness takes no
+ *   create-time effort.
+ */
+export function nativeEffortOptions(
+  harness: string | null | undefined,
+  modelOptions: readonly NativeModelOption[],
+  model: string | null | undefined,
+): { value: string; label: string }[] | null {
+  if (harness === "claude-native") return CLAUDE_NATIVE_EFFORTS;
+  if (harness === "pi-native") return PI_NATIVE_EFFORTS;
+  if (harness !== "codex-native") return null;
+  const effortModel = model || modelOptions.find((option) => option.isDefault)?.id;
+  return codexEffortLevelsForModel(modelOptions, effortModel).map((value) => ({
+    value,
+    label: normalizeEffortLabel(value),
+  }));
+}
 
 /**
  * A labeled configuration row: bold label + muted sub-description on the left,

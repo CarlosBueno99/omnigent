@@ -35,6 +35,10 @@ and steers messages while the agent is busy.
 - `effort-picker`: reasoning effort for harnesses that support it (Codex, Claude,
   Pi, Devin). States: available, unavailable placeholder, max/ultra levels, refused
   change (the pill keeps the applied level).
+- `project-defaults`: Project settings store a default agent and, for Claude
+  Code, Codex, and Pi, a default model and reasoning effort; the new-session
+  composer opened in that project starts with them. States: no default, a Codex
+  effort the pinned model lacks, an explicit composer pick, another agent chosen.
 - `effort-terminal-mirror`: an effort change typed in the Codex terminal shows
   in the composer, and a composer pick is not reverted by later terminal turns.
 - `permission-mode`: the harness's native approval modes; the current mode is
@@ -212,6 +216,9 @@ and steers messages while the agent is busy.
   `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py`,
   `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`
   and `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_sandbox_harness_without_reachable_models_blocks_launch`.
+- Open a project's actions menu in the sidebar → **Project settings**, pick
+  Claude Code, Codex, or Pi as the agent, then set **Model** and **Effort**.
+  Click **New session in project** and check the pill shows both.
 - Attach files or type `/` before the first send.
 - For a managed sandbox, submit a prompt and close the browser once the session
   URL appears, while provisioning is still in progress. Reopen that URL after
@@ -306,6 +313,13 @@ Other connection providers alone do not enable the managed MCP picker.
   `tests/e2e_ui/start_session/test_composer_transition.py::test_selected_model_survives_delayed_create`
 - **`effort-picker`, new-session composer:**
   `tests/e2e_ui/start_session/test_codex_effort_prelaunch.py::test_new_codex_session_gear_offers_reasoning_effort`
+- **`project-defaults`:**
+  `tests/e2e_ui/sessions/test_project_settings_effort_default.py::test_project_effort_default_seeds_new_session`
+  (real host and Claude CLI against the mock model),
+  `tests/e2e_ui/sessions/test_project_settings_effort_default.py::test_project_settings_effort_default_round_trips`,
+  `tests/e2e_ui/sessions/test_project_settings_model_default.py::test_project_settings_model_default_round_trips`;
+  ladder and precedence cases in `web/src/shell/ProjectSettingsDialog.test.tsx`
+  and `web/src/shell/NewChatDialog.projectPrefill.test.tsx`.
 - **`effort-picker`, SDK in-session composer:**
   `tests/e2e_ui/chat/test_sdk_effort_dial.py::test_claude_sdk_session_offers_the_effort_dial`
   covers selection, persistence and reload. The stale-catalog cases in
