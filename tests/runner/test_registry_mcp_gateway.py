@@ -63,12 +63,14 @@ async def test_registry_transport_failure_is_not_replayed(failure):
         operation = json.loads(request.content)["params"][MCP_OPERATION_ID_PARAM]
 
         async def run():
-            return McpExecutionResult(200, {"result": {"output": "done"}})
+            return McpExecutionResult(
+                200, {"result": {"output": "done"}}, recovery_token="receipt"
+            )
 
         await registry.execute(
             session_id="session-test", operation_id=operation, step="initial", params={}, run=run
         )
-        assert registry.has_recoverable_result("session-test", operation)
+        assert registry.response_recovery_token("session-test", operation)
         if isinstance(failure, int):
             return httpx.Response(failure)
         raise httpx.ReadError("connection closed", request=request)

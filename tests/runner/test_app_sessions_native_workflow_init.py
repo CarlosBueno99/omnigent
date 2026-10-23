@@ -2099,7 +2099,10 @@ async def test_mcp_execute_dispatches_builtin_tool_with_runner_workspace(
 
 
 @pytest.mark.asyncio
-async def test_mcp_execute_dispatches_full_namespaced_mcp_tool_name() -> None:
+@pytest.mark.parametrize("recovery_token", [None, "receipt"])
+async def test_mcp_execute_dispatches_full_namespaced_mcp_tool_name(
+    recovery_token: str | None,
+) -> None:
     """``/mcp/execute`` must not strip the MCP server prefix before dispatch."""
     app, mcp_manager, _harness_client, _server_client = _build_app_with_mcp_tool(
         tool_name="jira__search_issues"
@@ -2118,11 +2121,23 @@ async def test_mcp_execute_dispatches_full_namespaced_mcp_tool_name() -> None:
             "/v1/sessions/6a09e2c1b63301fc6be99bb645418905/mcp/execute",
             json={
                 "method": "tools/call",
+                "_omnigent_operation": {
+                    "id": "operation",
+                    "step": "initial",
+                    "recovery_token": recovery_token,
+                },
                 "params": {
                     "name": "jira__search_issues",
                     "arguments": {"query": "asyncio"},
                 },
             },
+        )
+
+        assert (
+            app.state.mcp_execution_registry.response_recovery_token(
+                "6a09e2c1b63301fc6be99bb645418905", "operation"
+            )
+            == recovery_token
         )
 
     assert execute_resp.status_code == 200

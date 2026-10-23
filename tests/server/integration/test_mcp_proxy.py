@@ -171,20 +171,35 @@ async def test_mcp_tools_list_no_runner_returns_error(
 # ── Tests: tools/call validation ──────────────────────────
 
 
+@pytest.mark.parametrize(
+    "method,params,message",
+    [
+        ("tools/call", {}, "Missing tool name"),
+        ("omnigent/recover_tool_result", {}, "Missing response recovery token"),
+        (
+            "omnigent/recover_tool_result",
+            {"_omnigent_response_recovery": "unknown"},
+            "Completed MCP response receipt unavailable",
+        ),
+    ],
+)
 async def test_mcp_tools_call_missing_name_returns_error(
     client: httpx.AsyncClient,
+    method: str,
+    params: dict[str, Any],
+    message: str,
 ) -> None:
-    """``tools/call`` without a ``name`` param returns an application error."""
+    """Call and recovery methods validate their inputs before execution."""
     session = await create_test_session(client, name="mcp-call-no-name")
     resp = await _post_mcp(
         client,
         session["id"],
-        _jsonrpc("tools/call", rpc_id=9, params={}),
+        _jsonrpc(method, rpc_id=9, params=params),
     )
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["error"]["code"] == -32000
-    assert "Missing tool name" in payload["error"]["message"]
+    assert payload["error"]["code"] in {-32000, -32602}
+    assert message in payload["error"]["message"]
 
 
 # ── Tests: nonexistent session ────────────────────────────

@@ -20,6 +20,10 @@ from omnigent.errors import SESSION_AGENT_MISSING_MESSAGE, ErrorCode, OmnigentEr
 from omnigent.host.identity import MANAGED_HOST_TOKEN_HEADER
 from omnigent.mcp_selection import MCP_SELECTION_HEADER, MCP_SELECTION_PREFIX, selected_mcp_spec
 from omnigent.native.native_coding_agents import native_coding_agent_for_agent_name
+from omnigent.runner.mcp_execution_registry import (
+    MCP_RESPONSE_RECOVERY_METHOD,
+    MCP_RESPONSE_RECOVERY_PARAM,
+)
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
@@ -462,6 +466,7 @@ def register_agent_routes(
         - ``initialize`` — capability negotiation.
         - ``tools/list`` — list all tools; delegated to runner execute.
         - ``tools/call`` — policy eval on AP, execution on runner.
+        - ``omnigent/recover_tool_result`` — read-only policy checks on saved output.
 
         :param session_id: Session whose agent's MCP servers to proxy,
             e.g. ``"conv_abc123"``.
@@ -547,7 +552,11 @@ def register_agent_routes(
                         return _mcp_ok_response(rpc_id, {**data["result"], "tools": tools + extra})
             return response
 
-        if method == "tools/call":
+        if method in {"tools/call", MCP_RESPONSE_RECOVERY_METHOD}:
+            if method == MCP_RESPONSE_RECOVERY_METHOD and not isinstance(
+                params.get(MCP_RESPONSE_RECOVERY_PARAM), str
+            ):
+                return _mcp_error_response(rpc_id, -32602, "Missing response recovery token")
             from omnigent.server.mcp_identity import mcp_policy_actor
 
             conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)

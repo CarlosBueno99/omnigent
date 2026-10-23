@@ -33,6 +33,8 @@ import httpx
 from omnigent.runner import pending_approvals
 from omnigent.runner.mcp_execution_registry import (
     MCP_OPERATION_ID_PARAM,
+    MCP_RESPONSE_RECOVERY_METHOD,
+    MCP_RESPONSE_RECOVERY_PARAM,
     RUNNER_MCP_EXECUTION_DETACHED_CODE,
     McpExecutionRegistry,
 )
@@ -393,6 +395,12 @@ class ProxyMcpManager:
                     f"connected within {_SERVER_RECONNECT_WAIT_S:.0f}s"
                 ) from reconnect_exc
 
+        def proxy_call_failed(exc: Exception) -> RuntimeError:
+            return RuntimeError(
+                f"MCP proxy call failed for tool {tool_name!r} in session "
+                f"{self._session_id!r}: {exc}"
+            )
+
         payload = _initial_payload()
         approval_retries = 0
         response_recovery_attempted = False
@@ -423,38 +431,47 @@ class ProxyMcpManager:
                         "MCP gateway transport failed; completion is unknown. "
                         "Call was not retried."
                     ) from exc
-                gateway_failure = isinstance(
+                recoverable_http_status = isinstance(
                     exc, httpx.HTTPStatusError
                 ) and exc.response.status_code in {502, 503, 504}
                 registry = self._execution_registry
+                recovery_token = (
+                    registry.response_recovery_token(self._session_id, operation_id)
+                    if registry is not None
+                    else None
+                )
                 if (
                     not managed
-                    and (isinstance(exc, httpx.TransportError) or gateway_failure)
+                    and (isinstance(exc, httpx.TransportError) or recoverable_http_status)
                     and not response_recovery_attempted
                     # Approval responses may already have been consumed.
                     and approval_retries == 0
-                    and registry is not None
-                    and registry.has_recoverable_result(self._session_id, operation_id)
+                    and recovery_token is not None
                 ):
                     # An HTTP response can be lost while the tunnel stays up.
                     # Recheck policy for a completed, non-interactive result.
                     response_recovery_attempted = True
+                    payload = cast(
+                        "_JsonObject",
+                        {
+                            **payload,
+                            "method": MCP_RESPONSE_RECOVERY_METHOD,
+                            "params": {
+                                **cast("_JsonObject", payload["params"]),
+                                MCP_RESPONSE_RECOVERY_PARAM: recovery_token,
+                            },
+                        },
+                    )
                 elif isinstance(exc, httpx.TransportError):
                     await _wait_to_reattach(request_generation, exc)
                 else:
-                    raise RuntimeError(
-                        f"MCP proxy call failed for tool {tool_name!r} in session "
-                        f"{self._session_id!r}: {exc}"
-                    ) from exc
+                    raise proxy_call_failed(exc) from exc
                 # A new JSON-RPC id per attempt; the shared operation id prevents replay.
                 request_id += 1
                 payload = cast("_JsonObject", {**payload, "id": request_id})
                 continue
             except Exception as exc:
-                raise RuntimeError(
-                    f"MCP proxy call failed for tool {tool_name!r} in session "
-                    f"{self._session_id!r}: {exc}"
-                ) from exc
+                raise proxy_call_failed(exc) from exc
 
             if "error" in data:
                 err = _json_object(data.get("error"))

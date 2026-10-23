@@ -27,6 +27,8 @@ from omnigent.runner import mcp_execution_registry as mcp_execution_registry_mod
 from omnigent.runner import pending_approvals
 from omnigent.runner.mcp_execution_registry import (
     MCP_OPERATION_ID_PARAM,
+    MCP_RESPONSE_RECOVERY_METHOD,
+    MCP_RESPONSE_RECOVERY_PARAM,
     RUNNER_MCP_EXECUTION_DETACHED_CODE,
     McpExecutionRegistry,
     McpExecutionResult,
@@ -495,6 +497,7 @@ async def test_call_tool_recovers_retained_result_without_replay(
                 return McpExecutionResult(
                     status_code=200,
                     content={"result": {"output": "retained"}},
+                    recovery_token="receipt",
                 )
 
             result = await registry.execute(
@@ -567,8 +570,14 @@ async def test_call_tool_recovers_retained_result_without_replay(
 
     assert transport.external_invocations == 1
     assert [call.body["id"] for call in transport.calls] == [1, 2]
+    assert transport.calls[-1].body["method"] == (
+        "tools/call" if failure == "detach" else MCP_RESPONSE_RECOVERY_METHOD
+    )
     first_params, retry_params = [call.body["params"] for call in transport.calls]
-    assert retry_params == first_params
+    assert retry_params == {
+        **first_params,
+        **({} if failure == "detach" else {MCP_RESPONSE_RECOVERY_PARAM: "receipt"}),
+    }
     assert first_params[MCP_OPERATION_ID_PARAM].startswith("mcpop_")
 
 
@@ -577,6 +586,7 @@ async def test_call_tool_recovers_retained_result_without_replay(
     "retained,failure,approved,expected_calls",
     [
         ("reserved", 502, False, 1),
+        ("old_server", 502, False, 1),
         ("completed", 500, False, 1),
         ("completed", 502, False, 2),
         ("completed", "timeout", False, 2),
@@ -616,7 +626,11 @@ async def test_response_recovery_requires_execution_and_is_bounded(
             nonlocal executions
             executions += 1
             result = {"input_required": {}} if retained == "input_required" else {"output": "done"}
-            return McpExecutionResult(200, {"result": result})
+            return McpExecutionResult(
+                200,
+                {"result": result},
+                recovery_token=None if retained == "old_server" else "receipt",
+            )
 
         if retained != "reserved":
             await registry.execute(

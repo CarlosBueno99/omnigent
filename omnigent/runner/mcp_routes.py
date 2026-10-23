@@ -152,6 +152,11 @@ def register_mcp_routes(
                 return McpExecutionResult(
                     status_code=nested_response.status_code,
                     content=cast("_JsonObject", nested_content),
+                    recovery_token=(
+                        operation.get("recovery_token")
+                        if isinstance(operation.get("recovery_token"), str)
+                        else None
+                    ),
                 )
 
             try:
@@ -455,7 +460,7 @@ def register_mcp_routes(
             if family.base_url:
                 conn["base_url"] = family.base_url
             return conn or None
-        except Exception:
+        except Exception:  # noqa: BLE001
             _logger.warning(
                 "/v1/summarize: failed to resolve provider %r",
                 provider_name,

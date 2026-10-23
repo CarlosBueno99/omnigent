@@ -25,6 +25,10 @@ _MAX_COMPLETED = 1024
 # Private runner/server protocol fields. The detached error is only actionable
 # when the caller can prove it still owns the matching operation locally.
 MCP_OPERATION_ID_PARAM = "_omnigent_operation_id"
+MCP_RESPONSE_RECOVERY_PARAM = "_omnigent_response_recovery"
+
+# Older servers must reject recovery rather than execute another tools/call.
+MCP_RESPONSE_RECOVERY_METHOD = "omnigent/recover_tool_result"
 RUNNER_MCP_EXECUTION_DETACHED_CODE = -32098
 RUNNER_MCP_EXECUTION_DETACHED_MESSAGE = "Runner MCP execution detached."
 
@@ -39,6 +43,7 @@ class McpExecutionResult:
 
     status_code: int
     content: JsonObject
+    recovery_token: str | None = None
 
 
 @dataclass
@@ -95,22 +100,24 @@ class McpExecutionRegistry:
             for stored_session, stored_operation, _step in self._entries
         )
 
-    def has_recoverable_result(self, session_id: str, operation_id: str) -> bool:
-        """Recover only completed initial results that cannot re-open elicitation."""
+    def response_recovery_token(self, session_id: str, operation_id: str) -> str | None:
+        """Return the server token only for completed, non-interactive initial work."""
         self._prune()
         entry = self._entries.get((session_id, operation_id, "initial"))
         if entry is None or not entry.task.done() or entry.task.cancelled():
-            return False
+            return None
         if entry.task.exception() is not None:
-            return False
+            return None
         response = entry.task.result()
         result = response.content.get("result")
-        return (
+        if (
             response.status_code == 200
             and isinstance(result, dict)
             and "input_required" not in result
             and isinstance(result.get("output"), str)
-        )
+        ):
+            return response.recovery_token
+        return None
 
     async def execute(
         self,

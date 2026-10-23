@@ -17,8 +17,10 @@ import secrets
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+import cachetools
 import httpx
 from fastapi import (
     HTTPException,
@@ -92,6 +94,7 @@ from omnigent.policies.types import (
 )
 from omnigent.runner.mcp_execution_registry import (
     MCP_OPERATION_ID_PARAM,
+    MCP_RESPONSE_RECOVERY_PARAM,
     RUNNER_MCP_EXECUTION_DETACHED_CODE,
     RUNNER_MCP_EXECUTION_DETACHED_MESSAGE,
 )
@@ -9989,12 +9992,16 @@ async def _evaluate_policy_with_fresh_engine(
     conversation_store: ConversationStore,
     conv: Conversation,
     ctx: EvaluationContext,
+    *,
+    read_only: bool = False,
 ) -> tuple[PolicyEngine, PolicyResult]:
     """Build and evaluate atomically against persisted policy state."""
     async with _policy_evaluation_lock(session_id):
         engine = await asyncio.to_thread(
             _build_policy_engine_from_spec, spec, session_id, conversation_store, conv
         )
+        if read_only:
+            return engine, await engine.evaluate(ctx, read_only=True)
         return engine, await engine.evaluate(ctx)
 
 
@@ -12262,6 +12269,20 @@ async def _child_session_summaries_from_conversations(
     ]
 
 
+@dataclass(frozen=True)
+class _McpResponseReceipt:
+    identity: str
+    arguments: str
+    execution: dict[str, Any]
+    size: int
+
+
+# Recovery needs completed server policy processing, not just completed tool work.
+_mcp_response_receipts: WorkspaceScopedCache[str, _McpResponseReceipt] = WorkspaceScopedCache(
+    lambda: cachetools.TTLCache(maxsize=16 * 1024 * 1024, ttl=300, getsizeof=lambda r: r.size)
+)
+
+
 async def _handle_mcp_tools_call(
     rpc_id: int | str | None,
     session_id: str,
@@ -12332,6 +12353,29 @@ async def _handle_mcp_tools_call(
     operation_id = cast("str | None", operation_id_value)
     is_retry = request_state_str is not None
 
+    recovery_token = params.get(MCP_RESPONSE_RECOVERY_PARAM)
+    recovering = recovery_token is not None
+    receipt_identity = hashlib.sha256(
+        json.dumps(
+            [session_id, operation_id, namespaced_name, arguments, actor, credential_user],
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    receipt = (
+        _mcp_response_receipts.get(recovery_token) if isinstance(recovery_token, str) else None
+    )
+    if recovering and (
+        not isinstance(recovery_token, str)
+        or is_retry
+        or operation_id is None
+        or receipt is None
+        or receipt.identity != receipt_identity
+    ):
+        return _mcp_error_response(rpc_id, -32000, "Completed MCP response receipt unavailable")
+    receipt_token = (
+        secrets.token_hex(16) if operation_id and not is_retry and not recovering else None
+    )
+
     def _runner_execute_body(
         execute_params: dict[str, Any],
         *,
@@ -12339,7 +12383,11 @@ async def _handle_mcp_tools_call(
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"method": "tools/call", "params": execute_params}
         if operation_id is not None:
-            body["_omnigent_operation"] = {"id": operation_id, "step": step}
+            body["_omnigent_operation"] = {
+                "id": operation_id,
+                "step": step,
+                "recovery_token": receipt_token,
+            }
         return body
 
     _logger.debug(
@@ -12367,6 +12415,15 @@ async def _handle_mcp_tools_call(
     spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store)
     if spec is None:
         return _mcp_error_response(rpc_id, -32000, f"Agent not found: {conv.agent_id!r}")
+
+    async def evaluate_policy(ctx: EvaluationContext) -> tuple[PolicyEngine, PolicyResult]:
+        if recovering:
+            return await _evaluate_policy_with_fresh_engine(
+                session_id, spec, conversation_store, conv, ctx, read_only=True
+            )
+        return await _evaluate_policy_with_fresh_engine(
+            session_id, spec, conversation_store, conv, ctx
+        )
 
     if is_retry:
         # ── Retry path: user has responded to the elicitation ────────
@@ -12464,9 +12521,7 @@ async def _handle_mcp_tools_call(
             tool_name=namespaced_name,
             actor=actor,
         )
-        engine, call_result = await _evaluate_policy_with_fresh_engine(
-            session_id, spec, conversation_store, conv, call_ctx
-        )
+        engine, call_result = await evaluate_policy(call_ctx)
 
         _logger.debug(
             "MCP tools/call TOOL_CALL policy: session=%r tool=%r action=%r reason=%r",
@@ -12478,7 +12533,7 @@ async def _handle_mcp_tools_call(
         )
 
         if call_result.action == PolicyAction.DENY:
-            if call_result.set_labels:
+            if call_result.set_labels and not recovering:
                 await asyncio.to_thread(engine.apply_label_writes, call_result.set_labels)
             return _mcp_error_response(
                 rpc_id,
@@ -12487,6 +12542,8 @@ async def _handle_mcp_tools_call(
             )
 
         if call_result.action == PolicyAction.ASK:
+            if recovering:
+                return _mcp_error_response(rpc_id, -32000, "Recovery requires new policy approval")
             # Emit elicitation SSE event (for REPL approval UI) and return
             # InputRequiredResult per the MCP MRTR spec so the runner can
             # park on the approval Future and retry when the user decides.
@@ -12524,7 +12581,7 @@ async def _handle_mcp_tools_call(
                 session_id=session_id,
             )
         # ALLOW — apply labels now that we know the action is not ASK.
-        if call_result.set_labels:
+        if call_result.set_labels and not recovering:
             await asyncio.to_thread(engine.apply_label_writes, call_result.set_labels)
         # If the policy returned transformed arguments (e.g.
         # PII-redacted args), use them instead of the originals.
@@ -12557,7 +12614,12 @@ async def _handle_mcp_tools_call(
             ),
             None,
         )
-    if execute_tool is not None:
+    if recovering:
+        assert receipt is not None
+        if json.dumps(arguments, sort_keys=True) != receipt.arguments:
+            return _mcp_error_response(rpc_id, -32000, "Recovery policy changed tool arguments")
+        exec_data = receipt.execution
+    elif execute_tool is not None:
         exec_data = await execute_tool(arguments)
     elif registry_config is not None:
         from omnigent.server.registry_gateway import execute_registry_tool
@@ -12720,11 +12782,9 @@ async def _handle_mcp_tools_call(
         request_data={"name": namespaced_name, "arguments": arguments},
         actor=actor,
     )
-    engine, result_policy = await _evaluate_policy_with_fresh_engine(
-        session_id, spec, conversation_store, conv, result_ctx
-    )
+    engine, result_policy = await evaluate_policy(result_ctx)
 
-    if result_policy.set_labels and result_policy.action != PolicyAction.ASK:
+    if not recovering and result_policy.set_labels and result_policy.action != PolicyAction.ASK:
         await asyncio.to_thread(engine.apply_label_writes, result_policy.set_labels)
 
     _logger.debug(
@@ -12737,7 +12797,7 @@ async def _handle_mcp_tools_call(
     )
 
     if result_policy.action == PolicyAction.ASK and (
-        execute_tool is not None or registry_config is not None
+        recovering or execute_tool is not None or registry_config is not None
     ):
         output = "[Result withheld: MCP gateway result-review approval is not supported]"
     elif result_policy.action == PolicyAction.DENY:
@@ -12755,6 +12815,23 @@ async def _handle_mcp_tools_call(
         output = (
             result_policy.data if isinstance(result_policy.data, str) else str(result_policy.data)
         )
+
+    if (
+        not recovering
+        and receipt_token is not None
+        and runner_client is not None
+        and mcp_input_required is None
+        and result_policy.action != PolicyAction.ASK
+    ):
+        stored_arguments = json.dumps(arguments, sort_keys=True)
+        # Oversized results remain unrecoverable instead of growing this cache.
+        with contextlib.suppress(ValueError):
+            _mcp_response_receipts[receipt_token] = _McpResponseReceipt(
+                identity=receipt_identity,
+                arguments=stored_arguments,
+                execution=exec_data,
+                size=len(json.dumps(exec_data).encode()) + len(stored_arguments.encode()) + 256,
+            )
 
     result: dict[str, Any] = {"content": [{"type": "text", "text": output}]}
     if "isError" in exec_data:

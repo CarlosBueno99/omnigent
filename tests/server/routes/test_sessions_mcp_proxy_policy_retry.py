@@ -886,3 +886,156 @@ async def test_retry_dispatches_policy_owned_arguments(
             assert "transformed_arguments" not in json.loads(initial["result"]["requestState"])
         finally:
             _pending_policy_ask_writes.pop(eid, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        "allow",
+        "call-deny",
+        "call-ask",
+        "arguments",
+        "result-deny",
+        "result-ask",
+        "redact",
+        "expired",
+        "actor",
+        "incomplete",
+    ],
+)
+async def test_response_recovery_rechecks_policy_without_repeating_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    approval_state: tuple[SqlAlchemyConversationStore, Conversation, PolicyEngine],
+    change: str,
+) -> None:
+    """Only completed calls can recover, with fresh decisions but no second writes."""
+    from omnigent.policies.function import FunctionPolicy
+    from omnigent.runner.mcp_execution_registry import (
+        MCP_OPERATION_ID_PARAM,
+        MCP_RESPONSE_RECOVERY_PARAM,
+    )
+    from omnigent.spec.types import FunctionPolicySpec, FunctionRef, PhaseSelector
+
+    store, conv, _ = approval_state
+    recovering = False
+    seen_phases: list[str] = []
+    label_writes: list[dict[str, str]] = []
+    set_labels = store.set_labels
+
+    def record_labels(session_id, labels):
+        label_writes.append(labels)
+        set_labels(session_id, labels)
+
+    def evaluate(event):
+        phase = event["type"]
+        seen_phases.append(phase)
+        action = "ALLOW"
+        if recovering and change == ("call-" if phase == "tool_call" else "result-") + "deny":
+            action = "DENY"
+        if recovering and change == ("call-" if phase == "tool_call" else "result-") + "ask":
+            action = "ASK"
+        result = {
+            "result": action,
+            "set_labels": {"review": str(event["session_state"].get("count", 0) + 1)},
+            "state_updates": [{"key": "count", "action": "increment", "value": 1}],
+        }
+        if recovering and change == "arguments" and phase == "tool_call":
+            result["data"] = {"value": "changed"}
+        if recovering and change == "redact" and phase == "tool_result":
+            result["data"] = "redacted"
+        return result
+
+    policy = FunctionPolicy(
+        FunctionPolicySpec(
+            name="counter",
+            on=[PhaseSelector(phase=Phase.TOOL_CALL), PhaseSelector(phase=Phase.TOOL_RESULT)],
+            function=FunctionRef(path="test.not.used"),
+        ),
+        evaluate,
+    )
+
+    def build_engine(spec, session_id, conversation_store, conversation=None):
+        current = store.get_conversation(session_id)
+        return PolicyEngine(
+            policies=[policy],
+            label_defs={},
+            ask_timeout=30,
+            conversation_id=session_id,
+            initial_labels=current.labels,
+            initial_session_state=current.session_state,
+            conversation_store=store,
+        )
+
+    monkeypatch.setattr(store, "set_labels", record_labels)
+    monkeypatch.setattr(sessions_mod, "_load_agent_spec_for_session", lambda *args: "spec")
+    monkeypatch.setattr(sessions_mod, "_build_policy_engine_from_spec", build_engine)
+    operation: dict[str, Any] = {}
+    requests = 0
+    params = {"name": "example__lookup", "arguments": {}, MCP_OPERATION_ID_PARAM: "operation"}
+
+    async def call(extra=None, actor=None):
+        response = await _handle_mcp_tools_call(
+            rpc_id=1,
+            session_id=conv.id,
+            params={**params, **(extra or {})},
+            conversation_store=store,
+            agent_store=_StubAgentStore(),
+            runner_router=None,
+            actor=actor,
+        )
+        return json.loads(bytes(response.body))
+
+    async def execute(request):
+        nonlocal requests
+        requests += 1
+        operation.update(json.loads(request.content)["_omnigent_operation"])
+        # The token exists before the original result-policy processing finishes.
+        if change == "incomplete":
+            pending = await call({MCP_RESPONSE_RECOVERY_PARAM: operation["recovery_token"]})
+            assert "receipt unavailable" in pending["error"]["message"]
+        return httpx.Response(200, json={"result": {"output": "original"}})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(execute), base_url="http://runner.test"
+    ) as runner:
+
+        async def get_runner(*args):
+            return runner
+
+        monkeypatch.setattr(sessions_mod, "_get_runner_client", get_runner)
+        original = await call()
+        assert "result" in original, original
+        assert original["result"]["content"][0]["text"] == "original"
+        assert store.get_conversation(conv.id).session_state == {"count": 2}
+        first_writes = list(label_writes)
+        recovering = True
+        token = operation["recovery_token"]
+        if change == "expired":
+            orchestration._mcp_response_receipts.pop(token)
+        replay = await call(
+            {MCP_RESPONSE_RECOVERY_PARAM: token},
+            actor={"run_as": "different"} if change == "actor" else None,
+        )
+
+    assert requests == 1
+    assert store.get_conversation(conv.id).session_state == {"count": 2}
+    assert label_writes == first_writes
+    assert store.get_conversation(conv.id).labels == {"review": "2"}
+    if change in {"call-deny", "call-ask", "arguments", "expired", "actor"}:
+        assert "error" in replay
+    else:
+        output = replay["result"]["content"][0]["text"]
+        if change == "result-deny":
+            assert "suppressed by policy" in output
+        elif change == "result-ask":
+            assert "withheld" in output
+        else:
+            assert output == ("redacted" if change == "redact" else "original")
+    assert len(seen_phases) == (
+        2
+        if change in {"expired", "actor"}
+        else 3
+        if change in {"call-deny", "call-ask", "arguments"}
+        else 4
+    )

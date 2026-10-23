@@ -27,7 +27,9 @@ async def test_cancelled_tunnel_waiter_reattaches_without_reexecuting() -> None:
         invocations += 1
         started.set()
         await release.wait()
-        return McpExecutionResult(status_code=200, content={"result": {"output": "done"}})
+        return McpExecutionResult(
+            status_code=200, content={"result": {"output": "done"}}, recovery_token="receipt"
+        )
 
     request = {
         "method": "tools/call",
@@ -43,7 +45,7 @@ async def test_cancelled_tunnel_waiter_reattaches_without_reexecuting() -> None:
         )
     )
     await started.wait()
-    assert not registry.has_recoverable_result("conv_restart", "mcpop_restart")
+    assert not registry.response_recovery_token("conv_restart", "mcpop_restart")
     first_waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first_waiter
@@ -63,9 +65,10 @@ async def test_cancelled_tunnel_waiter_reattaches_without_reexecuting() -> None:
     assert await second_waiter == McpExecutionResult(
         status_code=200,
         content={"result": {"output": "done"}},
+        recovery_token="receipt",
     )
     assert invocations == 1
-    assert registry.has_recoverable_result("conv_restart", "mcpop_restart")
+    assert registry.response_recovery_token("conv_restart", "mcpop_restart")
 
 
 @pytest.mark.asyncio
@@ -81,11 +84,13 @@ async def test_live_operation_lease_survives_result_eviction(
     async def _external_work() -> McpExecutionResult:
         nonlocal invocations
         invocations += 1
-        return McpExecutionResult(status_code=200, content={"result": {"output": "done"}})
+        return McpExecutionResult(
+            status_code=200, content={"result": {"output": "done"}}, recovery_token="receipt"
+        )
 
     registry.retain_operation("conv_restart", "mcpop_restart")
     assert registry.has_operation("conv_restart", "mcpop_restart")
-    assert not registry.has_recoverable_result("conv_restart", "mcpop_restart")
+    assert not registry.response_recovery_token("conv_restart", "mcpop_restart")
 
     request = {"name": "deploy", "arguments": {}}
     first = await registry.execute(
@@ -119,7 +124,9 @@ async def test_reattach_rejects_changed_execution_parameters() -> None:
     async def _external_work() -> McpExecutionResult:
         nonlocal invocations
         invocations += 1
-        return McpExecutionResult(status_code=200, content={"result": {"output": "done"}})
+        return McpExecutionResult(
+            status_code=200, content={"result": {"output": "done"}}, recovery_token="receipt"
+        )
 
     await registry.execute(
         session_id="conv_restart",
