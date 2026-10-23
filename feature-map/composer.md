@@ -10,6 +10,10 @@ and steers messages while the agent is busy.
 
 ## Sub-features
 
+- `prompt-link`: opening the new-session page with `?prompt=`
+  fills an editable draft without starting a session. The consumed prompt is
+  removed from the URL while other query parameters and the fragment remain.
+  A new link replaces a parked draft; subsequent edits survive navigation.
 - `offline-hosts`: the new-session host picker keeps other offline hosts collapsed,
   revealing five at a time in server recency order in a scrollable list. The selected
   offline host and desktop reconnect action stay visible. Closing the menu resets it.
@@ -35,6 +39,15 @@ and steers messages while the agent is busy.
   in the composer, and a composer pick is not reverted by later terminal turns.
 - `permission-mode`: the harness's native approval modes; the current mode is
   marked and the choice persists.
+- `permission-mode-hotkey`: Shift+Tab in the in-session composer for Claude,
+  Codex, and Devin native sessions steps through every mode in the chip's menu,
+  including Full Access and Dangerous, wrapping while the chip is clickable. States:
+  slash/mention menu acting on Tab, chip disabled, session in a mode the chip can't switch back to
+  (Codex read-only, Claude Don't ask; menu only), change in flight (Shift+Tab
+  holds focus without sending another request; Tab still moves focus forward), change
+  refused or failed (next press moves past it, or retries it when it is the only
+  other mode), no other mode (native focus move, no
+  `aria-keyshortcuts`).
 - `managed-mcp-picker`: choose administrator-configured services before launch
   on a host or sandbox. States: loading, empty, error/retry, selected, unavailable,
   remembered selection, explicitly none, restored connection needing sign-in.
@@ -47,6 +60,11 @@ and steers messages while the agent is busy.
   such as `/help` is handled locally; a recognised skill routes through
   `slash_command` so it runs on an in-process harness. A native terminal side
   chat shows no menu and sends slash text to the vendor TUI.
+- `session-mcp-status`: selecting `/mcp` in a started session replaces the slash
+  suggestions with a read-only list of MCP servers enabled for that session and
+  links to harness Settings with the session’s host preselected. Host-native entries are limited to the
+  active harness, and a host lookup failure leaves known agent entries visible.
+  It is absent before a session starts and from side chat.
 - `codex-plugin-skills`: typing `$` lists enabled Codex plugin skills in both
   composers, including cached plugins whose marketplace inventory is unavailable.
   Selecting a row inserts its namespaced identifier.
@@ -90,6 +108,11 @@ and steers messages while the agent is busy.
   waiting for the check. Refresh is explicit; launch needs another submit after
   renewal. States: valid, invalid, checking, skipped, refreshing, failed, and
   CLI not installed.
+- `launch-action-required`: while a managed launch needs the user to do
+  something, such as an Arclet waiting for its owner's dbcert, the session's chat
+  transcript shows a yellow banner with the deployment's instructions. Provisioning
+  continues, and the banner leaves when the launch moves on. Dismissing hides
+  only that warning; a later one shows again.
 - `import-bundle`: Create custom agent → Import bundle installs a `.tar.gz` agent
   bundle and selects it. States: import in flight (Cancel and Create locked),
   rejected bundle, imported agent missing from the refreshed list, and hidden on
@@ -106,6 +129,8 @@ and steers messages while the agent is busy.
   it is connected; click it to open the host menu.
 - In configuration, open the model picker, the effort picker, or the permission
   mode menu.
+- With focus in the prompt, press Shift+Tab to step the permission mode without
+  opening the menu; the draft and focus stay put.
 - For a custom `claude-sdk` or `codex` agent session, open configuration and
   pick an effort rung; the ladder is the harness's declared family (anthropic
   or openai) and the pick persists on the session. Changing effort after a
@@ -119,6 +144,9 @@ and steers messages while the agent is busy.
   return to Chat.
 - Type `/` in the message box; attach files with the button, by paste, or by
   dropping them on the transcript.
+- Select `/mcp` to replace the suggestions with the MCP servers enabled for the
+  session. An empty list points to Settings; the command is absent on the
+  new-session composer.
 - For Codex plugin skills, type `$<skill-name>` in Chat and select the
   namespaced suggestion. The vendor terminal owns its own completion menu.
 - Click the microphone button, or press ⌘/Ctrl+Alt+V, to dictate into the
@@ -137,12 +165,23 @@ and steers messages while the agent is busy.
 
 **New-session composer** (landing page, or New session):
 
+- Open `/?prompt=Explain%20this%20code`. Check that the
+  draft is filled and editable, no session starts until Send, and an embedded
+  deployment stays under its mount path. Browser proof:
+  `tests/browser_ui/chat/test_prompt_url.py`; router and draft edge cases:
+  `web/src/shell/NewChatDialog.test.tsx` (`prompt URL handoff`).
+
 - In the managed desktop app, choose **Arclet Sandbox** and submit a task with
   missing or expired laptop credentials. Click **Refresh dbcert** in the yellow
   banner, finish browser sign-in, then submit the preserved task again. Sending
   alone must not open the browser, and renewal alone must not create a sandbox.
   While **Checking laptop credentials…** is visible, **Skip** starts that launch
   without waiting for verification or opening sign-in. Later launches check again.
+- On a deployment whose launches report that the user needs to act, such as
+  Databricks' managed Arclets, start a managed session whose launch needs you,
+  e.g. an Arclet whose owner's dbcert hasn't arrived. The session's chat
+  transcript keeps showing **Provisioning sandbox…** and adds a yellow banner
+  saying what to do. The terminal view doesn't show it.
 - Open the host chip, expand **Offline hosts (N)**, then **Show more**. Check the
   same menu on mobile and with a managed sandbox available. Offline rows remain
   disabled; a remembered offline selection still requires an explicit switch.
@@ -159,11 +198,20 @@ and steers messages while the agent is busy.
   unbound gateway with `sandbox.model_discovery`, or a provider hook): rows under
   the provider's label plus a "Default" row, for native and SDK agents.
   A failed listing shows its error and keeps Default launchable; a
-  harness the catalog cannot serve keeps its ordinary list. This is distinct
-  from a connected host's own catalog and from a bound (`inference_models`)
-  target. Covered by
-  `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py`
-  and `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`.
+  harness the catalog cannot serve keeps its ordinary list. When the provider
+  reports `unsupported` (no model can serve the harness), the composer shows
+  its reason and submit stays disabled; opening the picker (including by
+  Ctrl+Shift+M) or its "Other..." harness submenu prefetches the shown harness
+  rows' previews, and a harness row
+  whose preview is `unsupported` renders disabled with that reason. Agent rows
+  (bundle and your own) are never grayed out, since they can switch brains or
+  bring their own provider; selecting one with no models still blocks submit,
+  and a blocked brain harness is named in the message. A failed or timed-out
+  preview never disables anything. This is distinct from a connected host's
+  own catalog and from a bound (`inference_models`) target. Covered by
+  `tests/e2e_ui/start_session/test_sandbox_gateway_models_without_binding.py`,
+  `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_optional_gateway_preview_without_a_host`
+  and `tests/e2e_ui/start_session/test_sandbox_model_selection.py::test_sandbox_harness_without_reachable_models_blocks_launch`.
 - Attach files or type `/` before the first send.
 - For a managed sandbox, submit a prompt and close the browser once the session
   URL appears, while provisioning is still in progress. Reopen that URL after
@@ -278,6 +326,18 @@ Other connection providers alone do not enable the managed MCP picker.
   `tests/e2e_ui/chat/test_codex_effort_terminal_composer_mirror.py::test_composer_effort_pick_survives_terminal_turns`
 - **`permission-mode`:**
   `tests/e2e_ui/chat/test_claude_model_picker.py::test_claude_native_permission_mode_switch_persists`
+- **`permission-mode-hotkey`:** in session with a real Claude CLI,
+  `tests/e2e_ui/chat/test_claude_native_permission_switch_from_dont_ask.py::test_shift_tab_cycles_permission_mode_from_composer`.
+  The E2E is nightly; Codex and Devin have component tests but no dedicated
+  shortcut E2E in the suite.
+  Component tests cover the in-flight, refused, downgraded, next-lap, menu-reset,
+  Codex/Devin full cycles, slash-menu, viewer, read-only
+  and unreachable states in `web/src/pages/ChatPage.composer.test.tsx`, mention-menu
+  priority in `web/src/pages/ChatPage.mention.test.tsx`; mode ordering and
+  wraparound are in
+  `web/src/lib/permissionModeCycle.test.ts`.
+  `web/src/shell/NewChatDialog.test.tsx` checks that Shift+Tab on the landing
+  page leaves the launch mode unchanged and does not prevent focus traversal.
 - **`model-picker`, `effort-picker`, `permission-mode`, Fork dialog:** the
   permission-mode picker has component coverage in
   `web/src/shell/ForkSessionDialog.test.tsx`; drive the model and effort
@@ -324,6 +384,16 @@ Other connection providers alone do not enable the managed MCP picker.
 - **`slash-menu`:**
   `tests/browser_ui/chat/test_slash_menu.py::test_slash_menu_tracks_real_focus_and_wrapping_keyboard_navigation`,
   `tests/e2e_ui/chat/test_side_chat_slash_command.py::test_side_chat_slash_menu_and_skill_invocation`
+- **`session-mcp-status`, in-session composer:** component coverage lives in
+  `web/src/pages/ChatPage.composer.test.tsx`. Manually open a started session,
+  select `/mcp`, and expect the effective MCP names and descriptions under
+  **Enabled for this session**. Repeat with no MCPs and expect the empty state
+  and Settings link; confirm `/mcp` is absent on the landing page and side chat.
+  Native host entries must match the active harness; a host error is shown
+  without hiding MCPs declared by the bound session agent. While the host loads,
+  its loading status stays visible alongside agent entries; a session without a
+  known host shows unavailable status rather than an empty inventory. Click
+  **Go to Settings** and confirm the session’s harness and host are selected.
 - **`codex-plugin-skills`, both composers:**
   `tests/e2e_ui/chat/test_codex_plugin_skills.py::test_plugin_skill_in_both_composers_after_inventory_failure`
   installs an enabled local plugin using the real Codex CLI, moves away its
@@ -423,6 +493,14 @@ Other connection providers alone do not enable the managed MCP picker.
   `web/src/shell/NewChatDialog.test.tsx` and
   `web/src/components/DbcertBanner.test.tsx` cover leaving during a check, late
   results after skipping, retry, dismissal, check errors, and older shells.
+- **`launch-action-required`, session chat transcript:**
+  `tests/browser_ui/chat/test_status_indicators.py::test_action_banner_follows_the_launch`
+  shows the snapshot's instructions in the banner and clears it when the stream
+  moves on. Component tests in `web/src/pages/ChatIndicators.test.tsx` cover
+  dismissals, and
+  `tests/server/integration/test_host_session_binding.py::test_managed_launch_action_required_reaches_snapshot_and_stream`
+  covers the server. Nothing in this repo emits the stage, so a live check needs
+  a deployment that does.
 - **`new-session-hotkey`:**
   `tests/e2e_ui/sessions/test_new_session_hotkey.py::test_new_session_hotkey_from_focused_composer`
 - **`import-bundle`:** no browser-level coverage; the web unit tests for the
@@ -443,6 +521,9 @@ Other connection providers alone do not enable the managed MCP picker.
   certificate instead; refreshing it does not prove new-session gating works.
   Skip bypasses only this launch's check; it does not renew credentials or
   guarantee that sandbox authentication will succeed.
+- The launch action banner appears only on deployments whose launch code
+  reports it; Omnigent's own sandbox providers never do. Its text comes from the
+  deployment, so check the wording there rather than in the web UI.
 - Session choices and server-stored project defaults are separate from local
   YAML and the shared-preference foundation; see
   [Preferences and config defaults](./preferences.md) for those boundaries.
