@@ -1614,6 +1614,54 @@ async def test_a_turn_started_during_the_refusal_is_not_dropped(
 
 
 @pytest.mark.asyncio
+async def test_a_refusal_seen_only_on_reconnect_is_reverted(tmp_path: Path) -> None:
+    """A forwarder that missed the live boundary still clears the refused turn."""
+    _seed_active_turn(tmp_path, "turn_123")
+    codex_client = _InterruptRecordingCodexClient()
+    client = _RecordingClient()
+
+    await fwd._post_resume_terminal_status(
+        client,  # type: ignore[arg-type]
+        session_id="conv_x",
+        bridge_dir=tmp_path,
+        thread_id="thread_123",
+        turns=[
+            {"id": "turn_123", "status": "failed", "error": {"message": _SAFETY_BLOCK_MESSAGE}}
+        ],
+        forwarder_state=fwd._CodexForwarderState(
+            codex_client=codex_client,  # type: ignore[arg-type]
+        ),
+    )
+
+    assert codex_client.requests == [
+        ("thread/turns/list", {"threadId": "thread_123", "limit": 1}),
+        ("thread/revert", {"threadId": "thread_123", "beforeTurnId": "turn_123"}),
+    ]
+    assert [post["output"] for post in _status_posts(client)] == [_SAFETY_BLOCK_MESSAGE]
+
+
+@pytest.mark.asyncio
+async def test_a_clean_resume_turn_is_left_in_codex_history(tmp_path: Path) -> None:
+    """Reconnecting onto an ordinary finished turn must not touch history."""
+    _seed_active_turn(tmp_path, "turn_123")
+    codex_client = _InterruptRecordingCodexClient()
+    client = _RecordingClient()
+
+    await fwd._post_resume_terminal_status(
+        client,  # type: ignore[arg-type]
+        session_id="conv_x",
+        bridge_dir=tmp_path,
+        thread_id="thread_123",
+        turns=[{"id": "turn_123", "status": "completed"}],
+        forwarder_state=fwd._CodexForwarderState(
+            codex_client=codex_client,  # type: ignore[arg-type]
+        ),
+    )
+
+    assert codex_client.requests == []
+
+
+@pytest.mark.asyncio
 async def test_codex_that_cannot_list_turns_still_reverts(tmp_path: Path) -> None:
     """Without a history read to check against, the refused turn is still dropped."""
     _seed_active_turn(tmp_path, "turn_123")

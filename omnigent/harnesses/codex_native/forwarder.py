@@ -286,7 +286,7 @@ _CODEX_ERROR_KIND_SAFETY = "safety"
 # Codex reports provider safety refusals only as message text, so this phrase
 # must track the provider's wording.
 _CODEX_SAFETY_BLOCK_FRAGMENTS = ("blocked by our safety systems",)
-# Bounds the history revert so an unresponsive app-server cannot stall forwarding.
+# Caps how long the history revert can delay forwarding.
 _CODEX_SAFETY_REVERT_TIMEOUT_SECONDS = 10.0
 _CODEX_REAUTH_HINT = "If this looks like an auth issue, running `codex login` may help."
 # Budget/quota exhaustion from the AI gateway: the gateway returns HTTP 403 +
@@ -2929,6 +2929,7 @@ async def _replay_resume_response(
         bridge_dir=bridge_dir,
         thread_id=thread_id,
         turns=turns,
+        forwarder_state=forwarder_state,
     )
 
 
@@ -2953,6 +2954,7 @@ async def _post_resume_terminal_status(
     bridge_dir: Path,
     thread_id: str | None,
     turns: list[object],
+    forwarder_state: _CodexForwarderState | None = None,
 ) -> None:
     """
     Publish a missing terminal status edge from ``thread/resume`` data.
@@ -2970,12 +2972,23 @@ async def _post_resume_terminal_status(
     :param thread_id: Codex thread id from the resume payload, e.g.
         ``"thread_123"``.
     :param turns: Raw Codex resume turn list.
+    :param forwarder_state: Optional state carrying the app-server client used
+        to drop a refusal this forwarder only learned about on reconnect.
     :returns: None.
     """
     if thread_id is None:
         return
     edge = _resume_terminal_status_edge_for_latest_turn(bridge_dir, thread_id, turns)
     await _post_turn_status_edge(client, session_id, edge)
+    codex_client = forwarder_state.codex_client if forwarder_state is not None else None
+    if codex_client is not None:
+        await _maybe_revert_safety_blocked_turn(
+            codex_client,
+            thread_id=thread_id,
+            turn_id=edge.turn_id if edge is not None else None,
+            edge=edge,
+            forwarder_state=forwarder_state,
+        )
 
 
 def _resume_terminal_status_edge_for_latest_turn(
@@ -4183,7 +4196,8 @@ async def _handle_terminal_turn_boundary_inner(
     if handled and codex_client is not None:
         await _maybe_revert_safety_blocked_turn(
             codex_client,
-            params=params,
+            thread_id=_thread_id_from_params(params),
+            turn_id=_terminal_turn_id_from_params(params),
             edge=terminal.edge,
             forwarder_state=forwarder_state,
         )
@@ -4209,7 +4223,8 @@ async def _handle_terminal_turn_boundary_inner(
 async def _maybe_revert_safety_blocked_turn(
     codex_client: CodexAppServerClient,
     *,
-    params: _JsonObject,
+    thread_id: str | None,
+    turn_id: str | None,
     edge: _CodexTurnStatusEdge | None,
     forwarder_state: _CodexForwarderState | None,
 ) -> None:
@@ -4217,16 +4232,16 @@ async def _maybe_revert_safety_blocked_turn(
     Drop a turn the provider's safety systems refused from Codex's thread history.
 
     Codex re-sends the whole thread on every turn, so a refused turn left in
-    place gets every later request refused too. File changes are kept.
+    place gets every later request refused too. File changes are kept. Both the
+    live terminal boundary and a refusal first seen in resume data come here.
 
     :param codex_client: Connected Codex app-server client.
-    :param params: Codex terminal turn event params.
+    :param thread_id: Codex thread id, e.g. ``"thread_abc123"``.
+    :param turn_id: Terminal Codex turn id, e.g. ``"turn_abc123"``.
     :param edge: Status edge derived from the terminal event, if any.
     :param forwarder_state: Optional state recording standalone safety refusals.
     :returns: None.
     """
-    turn_id = _terminal_turn_id_from_params(params)
-    thread_id = _thread_id_from_params(params)
     if turn_id is None or thread_id is None:
         return
     blocked = edge is not None and edge.error is not None and edge.error.is_safety_block
