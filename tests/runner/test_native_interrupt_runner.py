@@ -651,6 +651,7 @@ async def test_claude_interrupt_resolves_bridge_id_and_injects(
     injected: list[Any] = []
     monkeypatch.setattr(interrupt_mod, "_claude_native_bridge_id_for_session", _fake_bridge_id)
     monkeypatch.setattr(claude_bridge, "bridge_dir_for_bridge_id", lambda bid: f"dir/{bid}")
+    monkeypatch.setattr(claude_bridge, "send_mod_command", _mod_not_live)
     monkeypatch.setattr(
         claude_bridge,
         "inject_interrupt",
@@ -664,4 +665,73 @@ async def test_claude_interrupt_resolves_bridge_id_and_injects(
     assert injected == [("dir/bid-conv_cl", 1.0)]
     # No optimistic 'cancelled': the outcome is unknown until an edge lands.
     assert captured["wakes"] == []
+    assert runner.take_pending_interrupt("conv_cl")[0] is True
+
+
+def _mod_not_live(bridge_dir: Any, operation: str, arguments: Any, *, timeout_s: float) -> Any:
+    """Stand in for a mod channel that is not live, so the tmux interrupt runs."""
+    from omnigent.harnesses.claude_native.mod_channel import ModCommandOutcome
+
+    return ModCommandOutcome(status="not_started", error="the Claude mod is not live")
+
+
+async def _interrupt_through_mod(
+    monkeypatch: pytest.MonkeyPatch, outcome: Any
+) -> tuple[NativeInterruptRunner, list[tuple[str, dict[str, Any], float]]]:
+    import omnigent.harnesses.claude_native.bridge as claude_bridge
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    async def _fake_bridge_id(*, server_client: Any, session_id: str) -> str:
+        return f"bid-{session_id}"
+
+    mod_calls: list[tuple[str, dict[str, Any], float]] = []
+    injected: list[Any] = []
+
+    def _send(bridge_dir: Any, operation: str, arguments: Any, *, timeout_s: float) -> Any:
+        mod_calls.append((operation, arguments, timeout_s))
+        return outcome
+
+    monkeypatch.setattr(interrupt_mod, "_claude_native_bridge_id_for_session", _fake_bridge_id)
+    monkeypatch.setattr(claude_bridge, "bridge_dir_for_bridge_id", lambda bid: f"dir/{bid}")
+    monkeypatch.setattr(claude_bridge, "send_mod_command", _send)
+    monkeypatch.setattr(
+        claude_bridge,
+        "inject_interrupt",
+        lambda bridge_dir, *, timeout_s: injected.append(bridge_dir),
+    )
+    runner, _ = _make_runner()
+    resp = await runner.interrupt("claude-native", "conv_cl")
+    assert isinstance(resp, Response) and resp.status_code == 204
+    assert injected == []
+    return runner, mod_calls
+
+
+@pytest.mark.asyncio
+async def test_claude_interrupt_settles_at_once_when_the_mod_confirms_the_turn_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An abort the mod confirmed ended the turn settles the interrupt without waiting."""
+    from omnigent.harnesses.claude_native.mod_channel import ModCommandOutcome
+
+    runner, mod_calls = await _interrupt_through_mod(
+        monkeypatch, ModCommandOutcome(status="ok", result={"ended": True})
+    )
+
+    assert mod_calls == [("abort", {}, 6.0)]
+    # The grace timer was never armed: nothing remains pending for the dispatch.
+    assert runner.take_pending_interrupt("conv_cl")[0] is False
+
+
+@pytest.mark.asyncio
+async def test_claude_interrupt_waits_for_the_grace_timer_when_the_turn_end_is_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An abort the mod did not see end the turn stays pending until an edge or the grace timer."""
+    from omnigent.harnesses.claude_native.mod_channel import ModCommandOutcome
+
+    runner, mod_calls = await _interrupt_through_mod(
+        monkeypatch, ModCommandOutcome(status="ok", result={"ended": False})
+    )
+
+    assert mod_calls == [("abort", {}, 6.0)]
     assert runner.take_pending_interrupt("conv_cl")[0] is True

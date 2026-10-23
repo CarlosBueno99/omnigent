@@ -398,8 +398,10 @@ async def test_events_permission_mode_change_on_non_native_session_is_204_noop(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mod_confirms", [False, True])
 async def test_events_compact_on_native_session_types_slash_command(
     monkeypatch: pytest.MonkeyPatch,
+    mod_confirms: bool,
 ) -> None:
     """
     POST ``/events`` with ``{"type":"compact"}`` on a claude-native
@@ -415,7 +417,8 @@ async def test_events_compact_on_native_session_types_slash_command(
     The 200 (not 204) is load-bearing: the Omnigent server reads it to know
     the control was handled in the terminal. A regression returning 204 here
     would make the server return a 400 "not available for this session type"
-    error instead of the native compact succeeding.
+    error instead of the native compact succeeding. When the Claude mod
+    confirms the compaction, nothing is typed into the pane.
     """
     from omnigent.runner.app import _session_event_queues_ref
 
@@ -434,6 +437,14 @@ async def test_events_compact_on_native_session_types_slash_command(
         captured.append((bridge_dir, command, timeout_s, auto_confirm))
 
     monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _fake_inject)
+    if mod_confirms:
+        from omnigent.harnesses.claude_native.mod_channel import ModCommandOutcome
+
+        monkeypatch.setattr(
+            claude_native_bridge,
+            "send_mod_command_if_pane_ready",
+            lambda *args, **kwargs: ModCommandOutcome(status="ok"),
+        )
 
     native_spec = _harness_spec("claude-native")
 
@@ -476,27 +487,33 @@ async def test_events_compact_on_native_session_types_slash_command(
     assert resp.status_code == 200, (
         f"Native compact must return 200 from /events; got {resp.status_code}: {resp.text}"
     )
-    # Exactly one inject call. 0 = native dispatch missed; 2+ = handler ran twice.
-    assert len(captured) == 1, (
-        f"Expected one inject_slash_command call from native compact, got {len(captured)}."
-    )
-    bridge_dir, command, timeout_s, auto_confirm = captured[0]
-    assert bridge_dir == bridge_dir_for_conversation_id("f70a14aaa23f51a5c4d915b9a29b0cd3")
-    # Body contract: the literal ``/compact`` is what Claude Code's TUI
-    # accepts. A shape regression (``compact``, missing slash) would
-    # land as plain prompt text instead of running compaction.
-    assert command == "/compact", f"Expected '/compact' literal, got {command!r}."
-    # 1.0s short timeout: missing tmux.json means the pane isn't
-    # attached, so there's no live Claude to compact.
-    assert timeout_s == 1.0
-    # auto_confirm must be False — unlike /effort and /model, /compact
-    # does not pop a confirmation dialog, so an extra Enter would land
-    # on the prompt and submit a stray empty turn.
-    assert auto_confirm is False, (
-        f"compact must not auto-confirm; got auto_confirm={auto_confirm!r}."
-    )
-    # /compact is a control signal, not a state change.
-    assert queued_events == [], f"compact must not publish session events; got {queued_events!r}."
+    if mod_confirms:
+        # The mod ran /compact, so the tmux fallback typed nothing.
+        assert captured == [], f"a mod-confirmed compact must not type; got {captured!r}."
+    else:
+        # Exactly one inject call. 0 = native dispatch missed; 2+ = handler ran twice.
+        assert len(captured) == 1, (
+            f"Expected one inject_slash_command call from native compact, got {len(captured)}."
+        )
+        bridge_dir, command, timeout_s, auto_confirm = captured[0]
+        assert bridge_dir == bridge_dir_for_conversation_id("f70a14aaa23f51a5c4d915b9a29b0cd3")
+        # Body contract: the literal ``/compact`` is what Claude Code's TUI
+        # accepts. A shape regression (``compact``, missing slash) would
+        # land as plain prompt text instead of running compaction.
+        assert command == "/compact", f"Expected '/compact' literal, got {command!r}."
+        # 1.0s short timeout: missing tmux.json means the pane isn't
+        # attached, so there's no live Claude to compact.
+        assert timeout_s == 1.0
+        # auto_confirm must be False — unlike /effort and /model, /compact
+        # does not pop a confirmation dialog, so an extra Enter would land
+        # on the prompt and submit a stray empty turn.
+        assert auto_confirm is False, (
+            f"compact must not auto-confirm; got auto_confirm={auto_confirm!r}."
+        )
+        # /compact is a control signal, not a state change.
+        assert queued_events == [], (
+            f"compact must not publish session events; got {queued_events!r}."
+        )
 
 
 @pytest.mark.asyncio

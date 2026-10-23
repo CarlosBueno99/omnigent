@@ -2128,3 +2128,148 @@ async def test_run_turn_ignores_missing_tmux_during_timeout_reap(
 
     assert isinstance(events[0], ExecutorError)
     assert events[0].message == "terminal did not become ready"
+
+
+def _mod_outcome(status: str, error: str | None = None) -> Any:
+    """Build a mod outcome for the executor's pane-ready wrapper."""
+    from omnigent.harnesses.claude_native.mod_channel import ModCommandOutcome
+
+    return ModCommandOutcome(status=status, error=error)  # type: ignore[arg-type]
+
+
+def _record_mod_commands(
+    monkeypatch: pytest.MonkeyPatch, status: str = "ok"
+) -> list[tuple[str, dict[str, Any]]]:
+    """Replace the mod call with a recorder that answers *status*."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_send(
+        bridge_dir: Path, operation: str, arguments: dict[str, Any], **kwargs: Any
+    ) -> Any:
+        del bridge_dir, kwargs
+        calls.append((operation, arguments))
+        return _mod_outcome(status)
+
+    monkeypatch.setattr(claude_native_executor, "send_mod_command_if_pane_ready", fake_send)
+    return calls
+
+
+def _forbid_tmux_typing(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    typed: list[str] = []
+
+    def fake_inject_user_message(
+        bridge_dir: Path, *, content: str, timeout_s: float = 30.0
+    ) -> None:
+        del bridge_dir, timeout_s
+        typed.append(content)
+
+    monkeypatch.setattr(claude_native_executor, "inject_user_message", fake_inject_user_message)
+    return typed
+
+
+async def _run_turn_text(executor: ClaudeNativeExecutor, text: str) -> list[Any]:
+    return [
+        event
+        async for event in executor.run_turn(
+            messages=[{"role": "user", "content": text}],
+            tools=[],
+            system_prompt="ignored",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_idle_turn_is_submitted_through_the_mod_when_it_confirms(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An idle web message goes through the Claude mod and is not typed into the pane."""
+    calls = _record_mod_commands(monkeypatch, status="ok")
+    typed = _forbid_tmux_typing(monkeypatch)
+
+    events = await _run_turn_text(ClaudeNativeExecutor(tmp_path), "hello from web")
+
+    assert calls == [("submit", {"text": "hello from web"})]
+    assert typed == []
+    assert events == [TurnComplete(response=None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["rejected", "not_started"])
+async def test_idle_turn_is_typed_when_the_mod_did_not_take_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str
+) -> None:
+    """A refused or unreachable mod leaves the message to the tmux path, as before."""
+    _record_mod_commands(monkeypatch, status=status)
+    typed = _forbid_tmux_typing(monkeypatch)
+
+    events = await _run_turn_text(ClaudeNativeExecutor(tmp_path), "hello from web")
+
+    assert typed == ["hello from web"]
+    assert events == [TurnComplete(response=None)]
+
+
+@pytest.mark.asyncio
+async def test_unanswered_mod_submit_is_not_typed_a_second_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A prompt the mod may have submitted without answering must not be retyped."""
+    _record_mod_commands(monkeypatch, status="unanswered")
+    typed = _forbid_tmux_typing(monkeypatch)
+
+    events = await _run_turn_text(ClaudeNativeExecutor(tmp_path), "hello from web")
+
+    assert typed == []
+    assert len(events) == 1
+    assert isinstance(events[0], ExecutorError)
+    assert "did not confirm" in events[0].message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["/compact", "!ls -la", "#remember this", "read @src/app.py"])
+async def test_input_the_tui_expands_stays_on_tmux(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str
+) -> None:
+    """Slash commands, shell mode, memory shortcuts and @file mentions stay typed."""
+    calls = _record_mod_commands(monkeypatch, status="ok")
+    typed = _forbid_tmux_typing(monkeypatch)
+
+    await _run_turn_text(ClaudeNativeExecutor(tmp_path), text)
+
+    assert calls == []
+    assert typed == [text]
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_steering_is_always_typed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Steering lands in Claude's queue by typing; the mod never takes it."""
+    calls = _record_mod_commands(monkeypatch, status="ok")
+    typed = _forbid_tmux_typing(monkeypatch)
+
+    assert await ClaudeNativeExecutor(tmp_path).enqueue_session_message("key", "steer me")
+
+    assert calls == []
+    assert typed == ["steer me"]
+
+
+@pytest.mark.asyncio
+async def test_routed_model_switch_goes_through_the_mod(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A routed /model switch is sent to the mod, and the typed /model is skipped."""
+    calls = _record_mod_commands(monkeypatch, status="ok")
+    slashes: list[str] = []
+
+    def fake_inject_slash_command(bridge_dir: Path, *, command: str, **kwargs: Any) -> None:
+        del bridge_dir, kwargs
+        slashes.append(command)
+
+    monkeypatch.setattr(claude_native_executor, "inject_slash_command", fake_inject_slash_command)
+    typed = _forbid_tmux_typing(monkeypatch)
+
+    await ClaudeNativeExecutor(tmp_path)._inject_turn("hi", [], None, "sonnet")
+
+    assert calls == [("model", {"model": "sonnet"}), ("submit", {"text": "hi"})]
+    assert slashes == []
+    assert typed == []

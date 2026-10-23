@@ -73,6 +73,12 @@ _CLAUDE_MODEL_CONFIRM_TIMEOUT_S = 10.0
 _CLAUDE_MODEL_CONFIRM_POLL_S = 0.25
 
 
+# Wait for the Claude mod's answer to a control before falling back to tmux typing.
+_CLAUDE_MOD_CONTROL_TIMEOUT_S = 8.0
+# How long a mod-sent /effort is watched for its confirm dialog to appear.
+_CLAUDE_MOD_DIALOG_WINDOW_S = 2.0
+
+
 # A session woken for a control may still be booting its TUI, so typing waits for
 # the prompt, capped so the rest fits the server's ~20s wait for the control.
 _CLAUDE_CONTROL_PROMPT_WAIT_S = 9.0
@@ -1236,7 +1242,9 @@ def build_native_controls(
         from omnigent.harnesses.claude_native.bridge import (
             EFFORT_DIALOG_HINT,
             bridge_dir_for_bridge_id,
+            confirm_dialog_if_open,
             inject_slash_command,
+            send_mod_command_if_pane_ready,
         )
         from omnigent.util.reasoning_effort import CLAUDE_EFFORTS
 
@@ -1250,6 +1258,23 @@ def build_native_controls(
         bridge_dir = bridge_dir_for_bridge_id(bridge_id)
         await _prepare_claude_native_pane_for_injection(conv_id, bridge_dir)
         command = f"/effort {effort}"
+        mod_outcome = await asyncio.to_thread(
+            send_mod_command_if_pane_ready,
+            bridge_dir,
+            "effort",
+            {"level": effort},
+            timeout_s=_CLAUDE_MOD_CONTROL_TIMEOUT_S,
+        )
+        if mod_outcome.status == "ok":
+            # On a warm cache /effort still asks to confirm, and only the pane can
+            # answer that dialog; the watch presses Enter only while it is shown.
+            dialog_deadline = time.monotonic() + _CLAUDE_MOD_DIALOG_WINDOW_S
+            while time.monotonic() < dialog_deadline and not deadline.is_set():
+                await _drive_claude_pane(
+                    deadline, confirm_dialog_if_open, bridge_dir, hint=EFFORT_DIALOG_HINT
+                )
+                await asyncio.sleep(_CLAUDE_MODEL_CONFIRM_POLL_S)
+            return Response(status_code=204)
         try:
             # An effort switch invalidates the prompt cache on a session with
             # history, so Claude Code asks to confirm; the chat UI cannot render
@@ -1336,6 +1361,7 @@ def build_native_controls(
             read_claude_status_model,
             read_model_env,
             read_model_picker_values,
+            send_mod_command_if_pane_ready,
             wait_for_input_ready,
         )
         from omnigent.harnesses.claude_native.main import (
@@ -1480,22 +1506,32 @@ def build_native_controls(
             return bool(current and (current in expected or (baseline and current != baseline)))
 
         try:
-            # Accepted trade-off: ``/model <id>`` also saves the pick as the
-            # person's global default in ``~/.claude/settings.json``. Driving
-            # the interactive picker instead avoided that write but needed
-            # ~35s of fragile tmux automation, so the write stands.
-            await _drive_claude_pane(
-                deadline,
-                inject_slash_command,
+            mod_outcome = await asyncio.to_thread(
+                send_mod_command_if_pane_ready,
                 bridge_dir,
-                command=command,
-                timeout_s=1.0,
-                # A boot that used the prompt budget still leaves the injection a
-                # short wait for a torn capture right after the prompt rendered.
-                ready_timeout_s=min(deadline.remaining_s(), max(1.0, prompt_budget_s - waited_s)),
-                auto_confirm=True,
-                confirm_hint=SWITCH_MODEL_DIALOG_HINT,
+                "model",
+                {"model": model_arg},
+                timeout_s=_CLAUDE_MOD_CONTROL_TIMEOUT_S,
             )
+            if mod_outcome.status != "ok":
+                # Accepted trade-off: ``/model <id>`` also saves the pick as the
+                # person's global default in ``~/.claude/settings.json``. Driving
+                # the interactive picker instead avoided that write but needed
+                # ~35s of fragile tmux automation, so the write stands.
+                await _drive_claude_pane(
+                    deadline,
+                    inject_slash_command,
+                    bridge_dir,
+                    command=command,
+                    timeout_s=1.0,
+                    # A boot that used the prompt budget still leaves the injection a
+                    # short wait for a torn capture right after the prompt rendered.
+                    ready_timeout_s=min(
+                        deadline.remaining_s(), max(1.0, prompt_budget_s - waited_s)
+                    ),
+                    auto_confirm=True,
+                    confirm_hint=SWITCH_MODEL_DIALOG_HINT,
+                )
         except ClaudeInjectionCancelled as exc:
             # The budget can lapse in the dialog watch after ``/model`` was submitted;
             # a pane that already switched must not be rolled back. Read only, no keys.
@@ -1800,6 +1836,34 @@ def build_native_controls(
         return Response(status_code=200)
 
     async def _handle_claude_native_compact(conv_id: str) -> Response:
+        from omnigent.harnesses.claude_native.bridge import (
+            bridge_dir_for_bridge_id,
+            send_mod_command_if_pane_ready,
+        )
+        from omnigent.harnesses.claude_native.mod_channel import may_fall_back_to_tmux
+
+        bridge_id = await _claude_native_bridge_id_for_session(
+            server_client=server_client,
+            session_id=conv_id,
+        )
+        mod_outcome = await asyncio.to_thread(
+            send_mod_command_if_pane_ready,
+            bridge_dir_for_bridge_id(bridge_id),
+            "compact",
+            {},
+            timeout_s=_CLAUDE_MOD_CONTROL_TIMEOUT_S,
+        )
+        if mod_outcome.status == "ok":
+            return Response(status_code=200)
+        if not may_fall_back_to_tmux(mod_outcome):
+            # A compaction the mod may have started must not be typed a second time.
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "claude_native_compact_failed",
+                    "detail": "the Claude terminal did not confirm the compaction",
+                },
+            )
         return await _inject_claude_native_slash(conv_id, command="/compact", action="compact")
 
     async def _handle_claude_native_clear(conv_id: str) -> Response:

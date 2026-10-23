@@ -329,6 +329,8 @@ def native_cancel_capability(wrapper_label: str | None) -> str:
 # hook, so this timer is the liveness floor that keeps the parent from
 # hanging; a confirmed completion that lands later still corrects the record.
 _NATIVE_INTERRUPT_CANCEL_GRACE_S = 20.0
+# The Claude mod answers an abort once the turn has ended, or after this long.
+_CLAUDE_MOD_ABORT_TIMEOUT_S = 6.0
 
 
 class NativeInterruptRunner:
@@ -635,6 +637,7 @@ class NativeInterruptRunner:
         from omnigent.harnesses.claude_native.bridge import (
             bridge_dir_for_bridge_id,
             inject_interrupt,
+            send_mod_command,
         )
 
         bridge_id = await _claude_native_bridge_id_for_session(
@@ -642,6 +645,20 @@ class NativeInterruptRunner:
             session_id=conv_id,
         )
         bridge_dir = bridge_dir_for_bridge_id(bridge_id)
+        outcome = await asyncio.to_thread(
+            send_mod_command,
+            bridge_dir,
+            "abort",
+            {},
+            timeout_s=_CLAUDE_MOD_ABORT_TIMEOUT_S,
+        )
+        if outcome.status == "ok":
+            self._defer_parent_wake_after_native_interrupt(conv_id)
+            if outcome.result.get("ended") is True:
+                # An abort fires no Stop hook, so the idle edge that normally
+                # settles the interrupt never comes; the mod confirmed the turn ended.
+                self._deliver_unconfirmed_interrupt_cancel(conv_id)
+            return Response(status_code=204)
         try:
             await asyncio.to_thread(inject_interrupt, bridge_dir, timeout_s=1.0)
         except RuntimeError as exc:
