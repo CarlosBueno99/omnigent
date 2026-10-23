@@ -6154,6 +6154,20 @@ def upgrade(
             f"not `{cli_invocation(name='omni')} upgrade`."
         )
 
+    # Homebrew owns its keg and deletes the old one (with the interpreter
+    # running this command) on upgrade, so every upgrade must go through brew.
+    if info.detected_installer == "brew" and not check_only:
+        click.echo(
+            "omnigent was installed with Homebrew, which manages its files. "
+            "Upgrade it with Homebrew instead:\n\n"
+            "    brew upgrade omnigent-ai/tap/omnigent\n"
+            "    # or, for a --HEAD install:\n"
+            "    brew upgrade --fetch-HEAD omnigent-ai/tap/omnigent\n\n"
+            "The tap's formula is updated after each PyPI release, so it can "
+            "briefly lag the newest version."
+        )
+        raise SystemExit(0)
+
     # Nightly channel: resolved from git tags, not the index, and applies to
     # every install shape, so it dispatches before the VCS-vs-registry split
     # (a VCS install pinned to an older nightly tag must move tags, not
@@ -6190,19 +6204,6 @@ def upgrade(
     # a manual command instead. We still allow ``--check`` because that only
     # reports availability.
     if not check_only:
-        # Homebrew owns its keg and deletes the old one (with the interpreter
-        # running this command) on upgrade, so the upgrade must go through brew.
-        if info.detected_installer == "brew":
-            click.echo(
-                "omnigent was installed with Homebrew, which manages its files. "
-                "Upgrade it with Homebrew instead:\n\n"
-                "    brew upgrade omnigent-ai/tap/omnigent\n"
-                "    # or, for a --HEAD install:\n"
-                "    brew upgrade --fetch-HEAD omnigent-ai/tap/omnigent\n\n"
-                "The tap's formula is updated after each PyPI release, so it can "
-                "briefly lag the newest version."
-            )
-            raise SystemExit(0)
         if info.detected_installer == "pip":
             pip = _pip_invocation()
             click.echo(

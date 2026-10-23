@@ -262,8 +262,11 @@ def test_upgrade_homebrew_install_offers_brew_upgrade(
 
     result = CliRunner().invoke(cli, ["upgrade"])
 
+    assert result.exit_code == 0, result.output
+    assert ran == []
     assert "No automatic upgrade command is known" not in result.output
-    assert "brew upgrade" in "\n".join([result.output, *ran]), result.output
+    assert "    brew upgrade omnigent-ai/tap/omnigent\n" in result.output
+    assert "    brew upgrade --fetch-HEAD omnigent-ai/tap/omnigent\n" in result.output
 
 
 def test_upgrade_pre_check_detects_release_candidate(

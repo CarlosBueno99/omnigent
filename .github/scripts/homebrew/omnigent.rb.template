@@ -32,9 +32,8 @@ class Omnigent < Formula
   # Most compiled extensions come from upstream wheels (see PREFER_WHEEL in
   # generate_formula.py). jiter, tiktoken and watchfiles still build here, because
   # their maturin wheels have no Mach-O install-name padding and Homebrew cannot
-  # relocate them -- hence the Rust toolchain and the RUSTFLAGS below. A HEAD
-  # checkout has no prebuilt web UI (release sdists ship it), so `setup.py`
-  # builds it with node and pnpm.
+  # relocate them -- hence the Rust toolchain and the RUSTFLAGS below.
+  # HEAD checkouts lack the prebuilt web UI; setup.py builds it with node/pnpm.
   depends_on "node" => :build
   depends_on "pkgconf" => :build
   depends_on "pnpm" => :build
@@ -81,16 +80,16 @@ __RESOURCES__
       ENV["CARGO_HOME"] = buildpath/".cargo"
     end
 
+    # HEAD builds install the version-locked SDKs from the checkout, not release resources.
+    lockstep_sdks = { "omnigent-client" => "sdks/python-client", "omnigent-ui-sdk" => "sdks/ui" }
+    formula_resources = build.head? ? resources.reject { |r| lockstep_sdks.key?(r.name) } : resources
+
     # Pure-Python resources are sdists Homebrew builds in place. Every other
     # compiled extension is pinned to an upstream wheel (WHEEL_REQUIRED /
     # PREFER_WHEEL in generate_formula.py), which is what keeps this formula out of
     # cc/rustc on a 3-core bottle builder. Homebrew only auto-installs
     # `py3-none-any` wheels, so copy each platform wheel's cached download back to
     # its real filename and pip-install the file directly.
-    # omnigent pins its SDKs to its own version, so a HEAD build installs them
-    # from the same checkout instead of the stable release's resources.
-    lockstep_sdks = { "omnigent-client" => "sdks/python-client", "omnigent-ui-sdk" => "sdks/ui" }
-    formula_resources = build.head? ? resources.reject { |r| lockstep_sdks.key?(r.name) } : resources
     wheels, sdists = formula_resources.partition { |r| r.url.end_with?(".whl") }
     venv.pip_install sdists
     wheels.each do |r|

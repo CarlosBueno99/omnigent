@@ -2417,10 +2417,18 @@ def test_cli_upgrade_refuses_pip_and_prints_manual_command(
     assert "/opt/omnigent/bin/python -m pip install -U 'omnigent[" in result.output
 
 
-def test_cli_upgrade_defers_homebrew_install_to_brew(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("args", "exit_code", "expected_output"),
+    [
+        (["--nightly"], 0, "    brew upgrade --fetch-HEAD omnigent-ai/tap/omnigent\n"),
+        (["--check"], 1, "A new release is available: v0.1.0 → v0.2.0."),
+    ],
+    ids=["nightly-defers-to-brew", "check-only-reports"],
+)
+def test_cli_upgrade_never_runs_an_installer_in_a_homebrew_keg(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], exit_code: int, expected_output: str
 ) -> None:
-    """Homebrew owns its keg, so ``omni upgrade`` prints brew commands and runs nothing."""
+    """``--nightly`` defers to brew like a release upgrade, and ``--check`` only reports."""
     monkeypatch.setattr(
         "omnigent.update_check._read_installed_wheel_info",
         lambda: _make_wheel_info(installer="brew", detected_installer="brew"),
@@ -2428,17 +2436,19 @@ def test_cli_upgrade_defers_homebrew_install_to_brew(
     monkeypatch.setattr("omnigent.update_check._find_repo_root", lambda: None)
     monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.1.0")
     monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda **_: "0.2.0")
+    monkeypatch.setattr(
+        "omnigent.update_check._latest_nightly_version", lambda: "0.2.0.dev20260804"
+    )
 
     def _unexpected_run(command: str, _console: object) -> int:
         raise AssertionError(f"ran an installer inside a Homebrew keg: {command}")
 
     monkeypatch.setattr("omnigent.update_check._run_upgrade_command", _unexpected_run)
 
-    result = CliRunner().invoke(cli, ["upgrade"])
+    result = CliRunner().invoke(cli, ["upgrade", *args])
 
-    assert result.exit_code == 0, result.output
-    assert "    brew upgrade omnigent-ai/tap/omnigent\n" in result.output
-    assert "    brew upgrade --fetch-HEAD omnigent-ai/tap/omnigent\n" in result.output
+    assert result.exit_code == exit_code, result.output
+    assert expected_output in result.output
 
 
 def test_cli_upgrade_refuses_uv_pip_and_prints_manual_command(
