@@ -9744,9 +9744,7 @@ _CONTEXT_OVERFLOW_REPLACEMENT = (
 # delete the only instruction that fixes them, stranding the user with
 # advice for a different problem.
 #
-# The CLI also prefixes every first-party 401/403 with "Please run /login",
-# including gateway budget and IP access list refusals that signing in cannot clear;
-# those get their real cause and remedy instead.
+# Gateway budget and IP access list 403s also say "Please run /login"; they get their real cause.
 #
 # Matching the bare token anywhere in the message is only safe because
 # it is paired with :func:`_is_api_error_entry`: a flagged record is not
