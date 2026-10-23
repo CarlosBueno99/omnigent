@@ -41,10 +41,29 @@ afterEach(() => {
 });
 
 describe("useSessionReconnect", () => {
+  it.each([
+    { hostId: "this-mac", hostName: "This Mac", arca: false },
+    { hostId: "arca-host", hostName: "e2e's arca", arca: true },
+  ])("reconnects a host when a send discovers it offline: $hostName", async ({ arca, ...host }) => {
+    const { result, rerender } = renderHook(useSessionReconnect, {
+      initialProps: { ...localSession, ...host, hasHostHeldMessages: false },
+    });
+    expect(controlHost).not.toHaveBeenCalled();
+    expect(connectArcaHost).not.toHaveBeenCalled();
+    await act(async () => {
+      rerender({ ...localSession, ...host, hasHostHeldMessages: true });
+    });
+    expect(arca ? connectArcaHost : controlHost).toHaveBeenCalledOnce();
+    expect(result.current.dialogOpen).toBe(false);
+    rerender({ ...localSession, ...host, hasHostHeldMessages: true });
+    expect(arca ? connectArcaHost : controlHost).toHaveBeenCalledOnce();
+  });
+
   it("starts the local host on the first action without opening the dialog", async () => {
     const pending = deferred<HostActionResult>();
     vi.mocked(controlHost).mockReturnValue(pending.promise);
     const { result } = renderHook(() => useSessionReconnect(localSession));
+    expect(result.current.canReconnectOnSend).toBe(true);
 
     let reconnect!: Promise<void>;
     await act(async () => {
@@ -106,7 +125,7 @@ describe("useSessionReconnect", () => {
     expect(controlHost).not.toHaveBeenCalled();
   });
 
-  it("offers an explicit Arca reconnect without starting it from the offline banner", async () => {
+  it("reconnects Arca on the first action without querying this machine's identity", async () => {
     writeArcaHostId("arca-host");
     const { result } = renderHook(() =>
       useSessionReconnect({ ...localSession, hostId: "arca-host" }),
@@ -116,9 +135,10 @@ describe("useSessionReconnect", () => {
       await result.current.reconnect();
     });
 
-    expect(result.current.dialogOpen).toBe(true);
+    expect(result.current.dialogOpen).toBe(false);
     expect(result.current.arcaReconnect).toBeDefined();
-    expect(connectArcaHost).not.toHaveBeenCalled();
+    expect(result.current.canReconnectOnSend).toBe(true);
+    expect(connectArcaHost).toHaveBeenCalledOnce();
     expect(getHostIdentity).not.toHaveBeenCalled();
     expect(controlHost).not.toHaveBeenCalled();
   });
@@ -139,17 +159,10 @@ describe("useSessionReconnect", () => {
         await result.current.reconnect();
       });
 
-      expect(result.current.dialogOpen).toBe(true);
-      expect(result.current.arcaReconnect).toBeDefined();
-      expect(connectArcaHost).not.toHaveBeenCalled();
-      expect(controlHost).not.toHaveBeenCalled();
-
-      await act(async () => {
-        result.current.arcaReconnect?.onReconnect();
-      });
-
-      expect(connectArcaHost).toHaveBeenCalledOnce();
       expect(result.current.dialogOpen).toBe(false);
+      expect(connectArcaHost).toHaveBeenCalledOnce();
+      expect(getHostIdentity).not.toHaveBeenCalled();
+      expect(controlHost).not.toHaveBeenCalled();
       expect(toast.success).toHaveBeenCalledWith("Arca reconnect requested.");
     },
   );
@@ -178,35 +191,45 @@ describe("useSessionReconnect", () => {
     expect(controlHost).not.toHaveBeenCalled();
   });
 
-  it("reconnects the remembered Arca host only after the explicit dialog action", async () => {
+  it("starts Arca directly and ignores repeated reconnect actions while it is pending", async () => {
     writeArcaHostId("arca-host");
     const pending = deferred<ArcaConnectResult>();
     vi.mocked(connectArcaHost).mockReturnValue(pending.promise);
     const { result } = renderHook(() =>
       useSessionReconnect({ ...localSession, hostId: "arca-host" }),
     );
+    let reconnect!: Promise<void>;
     await act(async () => {
-      await result.current.reconnect();
+      reconnect = result.current.reconnect();
     });
 
-    act(() => result.current.arcaReconnect?.onReconnect());
     expect(connectArcaHost).toHaveBeenCalledOnce();
+    expect(result.current.dialogOpen).toBe(false);
     expect(result.current.arcaReconnect?.reconnecting).toBe(true);
+    expect(toast.loading).toHaveBeenCalledWith("Reconnecting Arca…");
+    expect(toast.success).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.reconnect();
+      result.current.arcaReconnect?.onReconnect();
+    });
+    expect(connectArcaHost).toHaveBeenCalledOnce();
 
     await act(async () => {
       pending.resolve({ ok: true });
-      await pending.promise;
+      await reconnect;
     });
     expect(result.current.dialogOpen).toBe(false);
     expect(result.current.arcaReconnect?.reconnecting).toBe(false);
     expect(toast.success).toHaveBeenCalledWith("Arca reconnect requested.");
+    expect(toast.dismiss).toHaveBeenCalledWith("progress");
   });
 
   it.each([
     { result: { ok: false, canceled: true }, expectedError: null },
     { result: { ok: false, shownInConsole: true }, expectedError: null },
     { result: { ok: false, error: "Arca failed" }, expectedError: "Arca failed" },
-  ])("keeps the reconnect dialog open after an Arca non-success: $result", async (testCase) => {
+  ])("opens the recovery dialog after an Arca non-success: $result", async (testCase) => {
     writeArcaHostId("arca-host");
     vi.mocked(connectArcaHost).mockResolvedValue(testCase.result);
     const { result } = renderHook(() =>
@@ -215,13 +238,55 @@ describe("useSessionReconnect", () => {
     await act(async () => {
       await result.current.reconnect();
     });
-    act(() => {
-      result.current.arcaReconnect?.onReconnect();
-    });
-    await vi.waitFor(() => expect(result.current.arcaReconnect?.reconnecting).toBe(false));
-
+    expect(connectArcaHost).toHaveBeenCalledOnce();
+    expect(result.current.arcaReconnect?.reconnecting).toBe(false);
     expect(result.current.dialogOpen).toBe(true);
     expect(result.current.arcaReconnect?.error).toBe(testCase.expectedError);
+    expect(toast.dismiss).toHaveBeenCalledWith("progress");
+  });
+
+  it("offers a retry after Arca reconnect fails", async () => {
+    writeArcaHostId("arca-host");
+    vi.mocked(connectArcaHost).mockResolvedValueOnce({ ok: false, error: "Arca failed" });
+    const { result } = renderHook(() =>
+      useSessionReconnect({ ...localSession, hostId: "arca-host" }),
+    );
+    await act(async () => {
+      await result.current.reconnect();
+    });
+    expect(result.current.dialogOpen).toBe(true);
+    expect(result.current.arcaReconnect?.error).toBe("Arca failed");
+
+    await act(async () => {
+      result.current.arcaReconnect?.onReconnect();
+    });
+    expect(connectArcaHost).toHaveBeenCalledTimes(2);
+    expect(result.current.dialogOpen).toBe(false);
+    expect(result.current.arcaReconnect?.error).toBeNull();
+    expect(toast.success).toHaveBeenCalledOnce();
+  });
+
+  it("clears Arca progress and ignores its result after navigating to another session", async () => {
+    writeArcaHostId("arca-host");
+    const pending = deferred<ArcaConnectResult>();
+    vi.mocked(connectArcaHost).mockReturnValue(pending.promise);
+    const { result, rerender } = renderHook(useSessionReconnect, {
+      initialProps: { ...localSession, hostId: "arca-host" },
+    });
+    let reconnect!: Promise<void>;
+    await act(async () => {
+      reconnect = result.current.reconnect();
+    });
+    rerender({ ...localSession, sessionId: "other-session", hostId: "other-host" });
+    expect(toast.dismiss).toHaveBeenCalledWith("progress");
+
+    await act(async () => {
+      pending.resolve({ ok: false, error: "Old failure" });
+      await reconnect;
+    });
+    expect(result.current.dialogOpen).toBe(false);
+    expect(result.current.arcaReconnect).toBeUndefined();
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -230,13 +295,16 @@ describe("useSessionReconnect", () => {
     { label: "unbound session", desktop: true, hostId: null, isOwner: true },
   ])("uses the dialog for a $label without querying the desktop", async ({ desktop, ...props }) => {
     vi.mocked(isElectronShell).mockReturnValue(desktop);
-    const { result } = renderHook(() => useSessionReconnect({ ...localSession, ...props }));
+    const { result } = renderHook(() =>
+      useSessionReconnect({ ...localSession, ...props, hasHostHeldMessages: true }),
+    );
     await act(async () => {
       await result.current.reconnect();
     });
     expect(result.current.dialogOpen).toBe(true);
     expect(getHostIdentity).not.toHaveBeenCalled();
     expect(controlHost).not.toHaveBeenCalled();
+    expect(result.current.canReconnectOnSend).toBe(false);
   });
 
   it.each([

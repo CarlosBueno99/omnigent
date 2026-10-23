@@ -64,11 +64,13 @@ the header menu), and each place is a separate entry point.
   host-switch controls stay visible but disabled, with hover and keyboard
   explanations. Their forms cannot submit.
 - `clone`: copy a session into a new workspace, including a typed `~` path.
-- `reconnect`: a stopped or stranded session shows a reconnect affordance and a
-  dialog with the command to run; the desktop app can reconnect a local host
-  itself or explicitly reconnect an Arca host recognized by its saved ID or
-  CLI-seeded name. States: reconnecting
-  (spinner), reconnect failed (retry), host offline.
+- `reconnect`: a stopped or stranded session shows a reconnect affordance.
+  The desktop app starts a local host or an Arca host recognized by its saved ID
+  or CLI-seeded name directly from that action, with progress and a dialog for
+  failure and retry. Sending to an offline host also requests recovery and holds
+  the message, including attachments, until the host is online. Other hosts show
+  a dialog with the command to run.
+  States: reconnecting (spinner), reconnect failed (retry), host offline.
 - `workspace-recovery`: a missing-workspace error offers **Continue in another
   directory…**. Choose an existing host directory to fork the conversation into
   a new session; the original remains available and missing files are not restored.
@@ -267,9 +269,13 @@ status and live session updates, including when the app is embedded.
 **Reconnect:** in a session whose agent stopped, use the reconnect affordance
 in the chat; the dialog shows the command for this situation (for example
 `omnigent host` when the host is offline, or the harness's `--resume` command
-when a local session is stranded). In the desktop app, reconnect acts directly
-for this machine; an Arca-hosted session offers an explicit **Reconnect Arca**
-action in the same dialog.
+when a local session is stranded). In the desktop app, **Reconnect host** starts
+this machine or a recognized Arca host directly. A failed reconnect opens the
+dialog for retry or terminal instructions.
+As the session owner in the desktop app, type a message to an offline Arca or
+this machine and press Enter or Send. The message waits above the composer while
+the host reconnects, then sends automatically with its attachments. On a failed
+reconnect, retry in the dialog without re-entering or re-sending the message.
 
 **Message recovery:** send the first prompt while a runner is starting, or send
 another message after its runner restarts. Also open a sub-agent's conversation
@@ -638,8 +644,20 @@ plain `uv run pytest`, which starts a private server for the test.
   `tests/e2e_ui/sessions/test_reconnect_arca_from_app.py::test_desktop_reconnects_arca_from_current_chat`
   drive the real SPA with an injected desktop bridge and controlled offline
   host responses. The Arca journey covers both a remembered host and a
-  CLI-seeded host with no saved desktop ID; it verifies explicit confirmation,
-  progress, and the restored online display, not live SSH or Mac sign-in.
+  CLI-seeded host with no saved desktop ID; it verifies that the first action
+  calls the bridge without opening a dialog, progress, and the restored online
+  display, not live SSH or Mac sign-in.
+- **`reconnect`, `message-recovery`, desktop composer (own environment):**
+  `tests/e2e_ui/sessions/test_reconnect_arca_from_app.py::test_desktop_send_reconnects_host_and_delivers_message`
+  sends with Enter to a CLI-seeded Arca and with Send to this machine. It checks
+  text and attachment retention, failure and retry, waiting beyond bridge
+  completion for host readiness, and one persisted message and scripted reply
+  through the real server and runner. A refused send also triggers recovery when
+  health still reads online. Desktop control and liveness are injected;
+  no live SSH or Mac sign-in is exercised. Component coverage in
+  `web/src/pages/ChatPage.composer.test.tsx` checks both send actions and read-only
+  guards; `web/src/store/chatStore.test.ts` checks startup holds, attachments,
+  quotes, stable ids, and navigation without sending into another session.
 - **`message-recovery`, native binding races (own environment):**
   `tests/e2e/test_native_runner_binding_races_e2e.py::test_native_send_rechecks_binding_after_runner_miss`
   drives real servers, runners, and Claude/Codex CLIs with a mock model. It
@@ -831,6 +849,9 @@ plain `uv run pytest`, which starts a private server for the test.
   just any stopped session.
 - The desktop app's direct reconnect is not available in a browser; a browser
   shows the command instead.
+- Desktop send-triggered reconnect requires session ownership and a bound host.
+  Messages stay in the existing in-memory queue during reconnect and retry;
+  navigating does not change their destination, but a hard reload clears them.
 - Tests marked "own environment" fail under `verify-env run` with an explicit
   message. That is expected; run them with plain `uv run pytest`.
 - Grouping and ordering apply to the loaded pages only: an older session joins

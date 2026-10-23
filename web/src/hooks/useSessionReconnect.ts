@@ -10,11 +10,13 @@ export function useSessionReconnect({
   hostId,
   hostName,
   isOwner,
+  hasHostHeldMessages = false,
 }: {
   sessionId: string | null;
   hostId: string | null;
   hostName?: string | null;
   isOwner: boolean;
+  hasHostHeldMessages?: boolean;
 }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -22,6 +24,7 @@ export function useSessionReconnect({
   const [canReconnectThisMachine, setCanReconnectThisMachine] = useState(false);
   const [canReconnectArca, setCanReconnectArca] = useState(false);
   const inFlight = useRef<{ progressToast?: string | number } | null>(null);
+  const canReconnectOnSend = Boolean(hostId && isOwner && isElectronShell());
   const isSessionArcaHost = useCallback(
     () =>
       hostId !== null && isArcaHost({ host_id: hostId, name: hostName ?? "" }, readArcaHostId()),
@@ -42,18 +45,52 @@ export function useSessionReconnect({
     };
   }, [sessionId, hostId, isOwner]);
 
+  const reconnectArca = useCallback(async () => {
+    if (inFlight.current) return;
+    if (!hostId || !isOwner || !isElectronShell() || !isSessionArcaHost()) {
+      setCanReconnectArca(false);
+      setDialogOpen(true);
+      return;
+    }
+
+    const operation: { progressToast?: string | number } = {};
+    inFlight.current = operation;
+    setCanReconnectArca(true);
+    setReconnecting(true);
+    setError(null);
+    try {
+      operation.progressToast = toast.loading("Reconnecting Arca…");
+      const result = await connectArcaHost();
+      if (inFlight.current !== operation) return;
+      if (!result.ok) {
+        if (!result.canceled && !result.shownInConsole) {
+          setError(result.error ?? "Couldn't reconnect Arca. Try again.");
+        }
+        setDialogOpen(true);
+        return;
+      }
+      setDialogOpen(false);
+      toast.success(
+        result.alreadyRunning ? "Arca host is connected." : "Arca reconnect requested.",
+      );
+    } finally {
+      if (inFlight.current === operation) {
+        if (operation.progressToast !== undefined) toast.dismiss(operation.progressToast);
+        inFlight.current = null;
+        setReconnecting(false);
+      }
+    }
+  }, [hostId, isOwner, isSessionArcaHost]);
+
   const reconnect = useCallback(async () => {
     if (inFlight.current) return;
     if (!hostId || !isOwner || !isElectronShell()) {
       setDialogOpen(true);
       return;
     }
-    // Arca is a remote machine, so it can never match the desktop host
-    // identity below. Surface its reconnect action in the dialog and wait for
-    // the user to explicitly start it.
+    // Arca cannot match this machine's desktop identity.
     if (isSessionArcaHost()) {
-      setCanReconnectArca(true);
-      setDialogOpen(true);
+      await reconnectArca();
       return;
     }
 
@@ -94,44 +131,16 @@ export function useSessionReconnect({
         setReconnecting(false);
       }
     }
-  }, [hostId, isOwner, isSessionArcaHost]);
+  }, [hostId, isOwner, isSessionArcaHost, reconnectArca]);
 
-  const reconnectArca = useCallback(async () => {
-    if (inFlight.current) return;
-    if (!hostId || !isOwner || !isElectronShell() || !isSessionArcaHost()) {
-      setCanReconnectArca(false);
-      setDialogOpen(true);
-      return;
-    }
-
-    const operation = {};
-    inFlight.current = operation;
-    setReconnecting(true);
-    setError(null);
-    try {
-      const result = await connectArcaHost();
-      if (inFlight.current !== operation) return;
-      if (!result.ok) {
-        if (!result.canceled && !result.shownInConsole) {
-          setError(result.error ?? "Couldn't reconnect Arca. Try again.");
-        }
-        setDialogOpen(true);
-        return;
-      }
-      setDialogOpen(false);
-      toast.success(
-        result.alreadyRunning ? "Arca host is connected." : "Arca reconnect requested.",
-      );
-    } finally {
-      if (inFlight.current === operation) {
-        inFlight.current = null;
-        setReconnecting(false);
-      }
-    }
-  }, [hostId, isOwner, isSessionArcaHost]);
+  // A send can discover the outage before health polling reports it.
+  useEffect(() => {
+    if (hasHostHeldMessages && canReconnectOnSend) void reconnect();
+  }, [sessionId, hasHostHeldMessages, canReconnectOnSend, reconnect]);
 
   return {
     reconnect,
+    canReconnectOnSend,
     dialogOpen,
     setDialogOpen,
     localReconnect: canReconnectThisMachine

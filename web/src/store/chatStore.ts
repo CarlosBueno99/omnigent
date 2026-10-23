@@ -1209,10 +1209,15 @@ export interface ChatActions {
   clearSideChatComposer: (childSessionId: string) => void;
   /**
    * Queue a message client-side instead of POSTing it now, for a send made
-   * while the agent is busy. The head is flushed automatically (FIFO, one per
-   * turn) when the session next goes idle — see the `session_status` handler.
+   * while the agent is busy or its host is reconnecting. Held messages wait
+   * for host readiness; otherwise the idle session drains FIFO, one per turn.
    */
-  enqueueMessage: (text: string, files?: File[], replyDraft?: StoredReplyDraft) => void;
+  enqueueMessage: (
+    text: string,
+    files?: File[],
+    replyDraft?: StoredReplyDraft,
+    opts?: { waitingForHost?: boolean },
+  ) => void;
   /** Let a conversation's messages held for an offline host flush again. */
   releaseHostHeldMessages: (conversationId: string) => void;
   /** Remove a queued message by id (the strip's per-row delete). */
@@ -2094,10 +2099,15 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   abortController: null,
   historyGeneration: 0,
 
-  enqueueMessage: (text, files, replyDraft) => {
+  enqueueMessage: (text, files, replyDraft, opts) => {
     const { conversationId, boundAgentId, sessionHarness, startupPending } = get();
     if (conversationId === null) return;
-    if (startupPending && boundAgentId && !isCompactControl(sessionHarness, text, files)) {
+    if (
+      startupPending &&
+      boundAgentId &&
+      !opts?.waitingForHost &&
+      !isCompactControl(sessionHarness, text, files)
+    ) {
       void get().send(text, boundAgentId, files, {
         replyDraft,
         pinnedConversationId: conversationId,
@@ -2125,6 +2135,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           ...(boundAgentId !== null ? { agentId: boundAgentId } : {}),
           ...(files && files.length > 0 ? { files } : {}),
           ...(replyDraft ? { replyDraft } : {}),
+          ...(opts?.waitingForHost ? { waitingForHost: true } : {}),
         },
       ],
     }));

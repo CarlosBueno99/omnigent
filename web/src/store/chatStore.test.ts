@@ -17860,6 +17860,75 @@ describe("chatStore — client-side message queue", () => {
     expect(useChatStore.getState().queuedMessages).toEqual([]);
   });
 
+  it.each([false, true])(
+    "holds a desktop reconnecting send with its file and quote across navigation (startup: %s)",
+    async (startupPending) => {
+      seedSession("conv_offline", []);
+      seedSession("conv_other", []);
+      await useChatStore.getState().switchTo("conv_offline");
+      useChatStore.setState({ startupPending, status: "idle", sessionStatus: "idle" });
+      const file = new File(["pixels"], "screenshot.png", { type: "image/png" });
+      const replyDraft: StoredReplyDraft = {
+        version: 1,
+        quotes: [{ before: "", text: "Original question" }],
+        text: "Continue here",
+      };
+      const text = serializeReplyDraft(replyDraft);
+      fetchMock.mockImplementation((input, init) => {
+        if (String(input).endsWith("/resources/files")) {
+          return mockResponse({
+            id: "file_recovered",
+            name: file.name,
+            metadata: { filename: file.name, bytes: file.size, created_at: 0 },
+          });
+        }
+        return defaultFetchHandler(input, init);
+      });
+      const posts = () =>
+        fetchMock.mock.calls.filter(
+          ([url, init]) => String(url).endsWith("/events") && init?.method === "POST",
+        );
+      useChatStore.getState().enqueueMessage(text, [file], replyDraft, { waitingForHost: true });
+      const [held] = useChatStore.getState().queuedMessages;
+      expect(held).toMatchObject({
+        text,
+        files: [file],
+        replyDraft,
+        conversationId: "conv_offline",
+        waitingForHost: true,
+      });
+      useChatStore.getState().maybeFlushQueuedHead();
+      await tick();
+      expect(posts()).toEqual([]);
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resources/files"))).toBe(
+        false,
+      );
+
+      await useChatStore.getState().switchTo("conv_other");
+      useChatStore.getState().releaseHostHeldMessages("conv_other");
+      useChatStore.getState().maybeFlushQueuedHead();
+      expect(useChatStore.getState().queuedMessages[0]).toBe(held);
+      expect(posts()).toEqual([]);
+
+      useChatStore.getState().releaseHostHeldMessages("conv_offline");
+      useChatStore.getState().maybeFlushQueuedHead();
+      expect(posts()).toEqual([]);
+      await useChatStore.getState().switchTo("conv_offline");
+      useChatStore.getState().maybeFlushQueuedHead();
+      useChatStore.getState().maybeFlushQueuedHead();
+      await vi.waitFor(() => expect(posts()).toHaveLength(1));
+      expect(posts()[0]![0]).toBe("/v1/sessions/conv_offline/events");
+      expect(JSON.parse(posts()[0]![1]!.body as string).data).toMatchObject({
+        stable_id: held!.stableId,
+        content: [
+          { type: "input_image", file_id: "file_recovered", filename: file.name },
+          { type: "input_text", text },
+        ],
+      });
+      expect(useChatStore.getState().queuedMessages).toEqual([]);
+    },
+  );
+
   it.each(["steer", "idle", "bulk"])("carries quote provenance from enqueue through %s", (mode) => {
     const replyDraft: StoredReplyDraft = {
       version: 1,
