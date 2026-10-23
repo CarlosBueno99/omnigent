@@ -9,14 +9,18 @@ the header menu), and each place is a separate entry point.
 
 ## Sub-features
 
+- `session-grid`: behind `grid_sessions_display_ui`, drag sidebar sessions into a
+  conversation to split left/right or top/bottom with a hover preview. Up to four
+  independent chats fit in two rows and two columns. Grids live at `/grid/<id>`
+  and are saved only in this browser, scoped to server and user.
 - `pin`: pinned sessions move to their own section and back.
 - `pin-undo`: unpinning shows an Undo toast that re-pins the session into its
   old Pinned slot. Dragging a pinned row into a folder unpins it without one.
 - `pin-reorder`: drag a pinned row onto another pinned row to change the Pinned
   order, which persists across reloads; dropping an unpinned row onto a pinned
   row pins it into that slot.
-- `rename`: from the row, the header menu, or the header title; long titles are
-  limited.
+- `rename`: from the row, the header menu, the header title, or Cmd/Ctrl+Alt+R
+  on desktop; long titles are limited.
 - `archive`: archived sessions leave the main list and appear in the archived
   view, which can be filtered by project and paged. On a server with worktree
   cleanup, archiving a session that has a git worktree first asks whether to
@@ -26,21 +30,27 @@ the header menu), and each place is a separate entry point.
   and sub-agents sharing that runner. Conversation histories are kept.
 - `side-chat-lifecycle`: generic side chats reuse their parent's live runner;
   closing one stops only that chat. Starting one from a stopped generic hosted
-  parent relaunches the parent first, then shares its replacement runner.
+  parent relaunches the parent first, then shares its replacement runner. An
+  existing side chat whose shared runner exited does the same on its next
+  message or Resume.
 - `side-chat-quotes`: Ask in side chat adds selected parent text to the visible,
-  writable side chat; Reply on side-chat text quotes it in that chat. Both keep
-  the existing draft and attachments, and quotes can be removed before sending.
+  writable side chat; Reply on side-chat text quotes it in that chat. Both preserve
+  interleaved comments and existing attachments; removing a quote keeps its comments.
+  Live side chats accept pasted images in every reply text field.
 - `unarchive`: offered on archived rows, in bulk selection, and in the header
   menu of an archived session.
 - `delete`: confirmed, then removed from the list and the server.
 - `export`: Export in the header menu saves the transcript as a local file.
-- `unread`: Mark as unread re-lights a row's unread dot and Mark as read clears
-  it; the state survives a reload.
+- `unread`: Mark as unread flags a session to revisit and survives a reload,
+  including for the session being viewed. Its dot appears once the turn is
+  idle; approval and error indicators can take precedence. A row showing the
+  unread dot offers Mark as read instead. Bulk selection also offers these actions.
 - `project`: Add to project (Move session once filed) puts a session in a
   project folder from the row menu, the header menu, or the header's folder tag.
 - `project-rename`: the project menu opens a dialog with the name selected;
   typing replaces it without losing characters as the menu closes.
-- `bulk-actions`: select several rows, then archive, unarchive, or delete them.
+- `bulk-actions`: select several rows, then mark as read or unread, archive,
+  unarchive, or delete them.
 - `fork`: fork the whole session or from a message; the fork keeps images and
   their files, elapsed "worked for" time, and can switch agent or host.
   For a native target, the fork dialog also offers model, reasoning effort,
@@ -71,7 +81,9 @@ the header menu), and each place is a separate entry point.
   unchanged.
 - `message-recovery`: a message racing initial runner binding or replacement
   reaches the available runner without a false failed turn. Native sessions
-  initialize before delivery; SDK sub-agents reuse their loaded session state.
+  initialize before delivery, including when an idle reconnect already restored
+  the tunnel. Later messages reuse that generation's completed initialization;
+  SDK sub-agents reuse their loaded session state.
 - `import-progress`: import recent sessions or one session by ID from an online
   machine. Settings shows a spinner and count; the sidebar heading retains
   progress after leaving Settings. Results stay compact, with expandable failure
@@ -81,7 +93,10 @@ the header menu), and each place is a separate entry point.
   Control+Tab; Tab and Shift+Tab cycle, releasing Control switches, and Escape cancels.
 - `browser-storage`: browser soft tabs, including one opened by the agent, share
   cookies within a session; different sessions stay isolated. Navigation stays
-  per-tab.
+  per-tab. On macOS the browser toolbar can also import the current site's
+  cookies from a local Chrome profile into that same session jar (Site scope
+  picks the host or a parent domain); the copy is in-memory and never written
+  back to Chrome.
 - `canvas-workspace`: Canvas collapses the shared sidebar on entry; clicking a
   card opens its session beside the project board. Switching cards keeps
   drafts and board state; resize, focus, and close controls adjust the split.
@@ -122,6 +137,47 @@ the header menu), and each place is a separate entry point.
 
 ## How to get to it (user POV)
 
+**Session grids (desktop only):** enable `OMNIGENT_FEATURES=grid_sessions_display_ui`, open a
+session, and drag another sidebar row over it. Hover **Split left/right/top/bottom**
+to preview, then drop. Split a remaining full-width or full-height pane again
+to reach three or four panes. Alternatively, use a row's menu or right-click
+menu → **Open in grid** and choose the pane and direction. Each pane has its own
+transcript and composer; terminal-capable sessions have a Chat/Terminal switch in
+each cell header. The shortcut ⌘/Ctrl+Alt+\ switches
+only the active cell. Choices survive reloads and follow the session into full
+screen; drafts and terminal connections survive view changes. Shared-session
+terminals are read-only for non-owners. One shared Workspace panel follows the active cell. Open the session full screen
+for additional controls; close a pane to expand its neighbor. Closing down to
+one pane returns to `/c/<id>`. Reopen saved grids in **Grids**, above Projects and Pinned, or use
+their `/grid/<id>` URL on the same desktop browser. All sessions in the open grid
+are highlighted in the sidebar. Mobile-width viewports, touch-primary devices, and
+the iOS/Android apps hide grid menus and saved entries; grid URLs show a desktop-only
+message without changing saved grids. Narrowing an open grid unmounts its cells
+and disconnects terminal views; widening it restores the saved layout and reconnects.
+The coarse-primary-pointer check also blocks tablets with attached keyboards;
+touch-capable desktops whose primary pointer is fine remain eligible.
+Double-click a grid title or use
+its Rename menu action to edit it inline.
+Enter or blur saves; Escape cancels. Grid names persist locally. Click anywhere
+in a cell (or focus its controls) to activate it: its outline and inverted header
+identify the session shown in Workspace. The grid header toggles the shared
+panel; it spans the full app height beside the grid header and cells. Its width
+is saved per grid and stays fixed when switching sessions; the header shrinks
+with the cells when the panel opens.
+Files, tabs, and unsaved edits remain session-specific. Maximizing Workspace
+fills the grid area, including its header. Drag a cell titlebar onto another cell
+to swap positions. With exactly two sessions side by side, drop a titlebar
+near the whole grid's top/bottom edge to stack them. When stacked, use the
+left/right edge to place them side by side, including along the dragged cell's
+side. Only edges that change orientation appear; their preview spans the grid.
+The center swaps positions and Escape cancels the preview.
+Alternatively, focus the title and press Space, choose a cell with the arrow keys, and
+press Space again. Escape cancels. The sidebar's Delete grid menu action forgets
+only the grid, leaving sessions untouched. Unknown local grids show a recovery link.
+Grids wait for account identity; if it is unavailable, use Reload to retry.
+Failed sends restore text and supported attachments unless the cell has a newer draft.
+Quoted replies recover as serialized text.
+
 **Import:** open Settings → Import sessions, or choose **Import your recent
 sessions** on the empty landing. Choose a machine, harness, and recent count
 or session ID. After starting, go Back to the session list; its heading shows
@@ -141,13 +197,19 @@ the Pinned section, or drop an unpinned row onto a pinned row to pin it into
 that slot.
 
 **Bulk selection:** select several rows in the sidebar, then use the selection
-actions (archive, unarchive, delete).
+actions (mark as read or unread, archive, unarchive, delete).
 
 **Session header menu:** open a session and use the menu next to its title for
 pin, fork, export, rename, mark as unread, add to project, archive or
 unarchive, and delete. Clicking the title also renames, and the title's folder
 tag also moves the session into a project. Sub-agent sessions hide owner-only
 actions.
+
+**Rename shortcut:** in an owner-managed top-level session on desktop, press
+Cmd+Option+R on macOS or Ctrl+Alt+R elsewhere, including while writing a draft.
+The header title becomes an input with its text selected. Enter or blur saves;
+Escape cancels. The shortcut leaves terminals, code editors, and open menus or
+dialogs alone. It is listed in Keyboard shortcuts and Settings.
 
 **Message actions:** fork through a specific assistant message, excluding later
 turns. The header's Fork action copies the whole session instead. In either
@@ -256,10 +318,14 @@ a separate action that leaves the session connected.
 
 **Side-chat lifecycle:** use **Workspace → + → Side chat**, type `/side` in the
 parent composer, or choose **Start a new side chat** from the composer's add
-tray. Selecting assistant text also offers **Ask in side chat**. On mobile,
+tray. Selecting assistant text also offers **Ask in side chat** unless the
+composer is read-only. On mobile,
 side chats open in a drawer; the header's **Conversation actions → Side
 chats** reopens it. A generic hosted parent can start a new side chat
-after stopping; this relaunches the parent and both use one runner. Close a side
+after stopping; this relaunches the parent and both use one runner. Sending to
+an existing side chat or choosing Resume after the parent's runner exited (for
+example, on its idle timeout) also relaunches the parent, then moves the side
+chat to that runner. Close a side
 chat with its tab's close button; the parent and sibling chats keep running. A
 chat-only side chat can also send messages from its direct `/c/<child_id>` URL
 without choosing a workspace. The side-chat composer opens the same `/` menu
@@ -273,7 +339,13 @@ side chat**. It appends a removable quote to the visible side-chat tab, includin
 an unsent tab, while keeping the draft. With no eligible tab visible, it opens a
 new unsent tab. In the desktop side-chat pane or mobile drawer, select transcript
 text and choose **Reply** to quote it in that chat's composer. Adding a quote
-does not send a message; enter a question and send when ready.
+keeps existing comments before that quote. Edit between quotes or after the last
+one, then send when ready. Paste an image into any reply text field after the
+side chat has started. The first question is text-only; an image paste there
+explains that the chat must be started first. Grid sessions use the same reply
+composer and support interleaved comments and pasted images too. A viewer whose
+composer is read-only (for example a Read grant) gets neither **Reply** nor
+**Ask in side chat** when selecting parent text.
 
 **Desktop browser:** choose **+ → Browser** in the Workspace panel or press
 ⌘/Ctrl+Alt+B. Agent browser requests and chat links with in-app opening enabled
@@ -298,6 +370,21 @@ Tests that stop a runner, restart the server, or read the database cannot run
 through `verify-env run`. They are marked "own environment" below; run them with
 plain `uv run pytest`, which starts a private server for the test.
 
+- **`session-grid` (browser contract):**
+  `tests/browser_ui/chat/test_session_grid.py` drives sidebar drops, previews,
+  the four-pane limit, independent sends, rejected-send recovery and live updates, reloads, pane closure,
+  per-cell terminal input, switching without reattaching, active-cell shortcuts,
+  keyboard menu creation, inline rename/cancel/persistence, active-cell selection,
+  shared workspace contents and width persistence, grid-wide maximize, rejected
+  drops without navigation, sidebar
+  reopening/deletion, highlighting all grid members, titlebar rearrangement and cancellation,
+  mobile and tablet entry-point gating (including resize and reload), identity recovery, and missing/disabled grid routes. With the flag absent or false,
+  ordinary session routes retain native link dragging and expose no grid menus,
+  drop targets, or saved-grid sidebar entries. Run with `--browser-ui-skip-build --video=on` after building.
+  Layout combinations and malformed local storage have unit coverage in
+  `web/src/grid/gridLayout.test.ts`. For a real-server drive, enable
+  `grid_sessions_display_ui` on the isolated server. Also check a collapsed sidebar manually.
+
 - **`pin`:**
   `tests/e2e_ui/sessions/test_sidebar_pin_unpin.py::test_unpin_moves_session_back_to_recent`
 - **`pin-undo`, sidebar row:**
@@ -311,6 +398,8 @@ plain `uv run pytest`, which starts a private server for the test.
 - **`rename`:**
   `tests/e2e_ui/sessions/test_sidebar_rename.py::test_rename_session_enforces_user_title_limit`,
   `tests/e2e_ui/sessions/test_header_session_menu.py::test_header_session_menu_renames_owner_and_hides_for_subagent`.
+  The desktop shortcut, including draft preservation, cancellation, and reload:
+  `tests/e2e_ui/sessions/test_header_session_menu.py::test_rename_hotkey_from_composer_persists_and_cancels`.
   The iOS drawer rename under the soft keyboard:
   `tests/e2e_ui/mobile/test_rename_keeps_sidebar_sessions_reachable.py::test_rename_keeps_sidebar_sessions_reachable`,
   `tests/e2e_ui/mobile/test_rename_keeps_sidebar_sessions_reachable.py::test_rename_scrolls_edit_row_into_view_above_keyboard`
@@ -344,10 +433,21 @@ plain `uv run pytest`, which starts a private server for the test.
 - **`export`, header menu (own environment):**
   `tests/e2e_ui/sessions/test_export_chat_menu.py::test_header_session_menu_offers_export`,
   `tests/e2e_ui/sessions/test_export_chat_menu.py::test_header_export_downloads_transcript`
-  seed the transcript into the spawned server's database.
-- **`unread`, sidebar row:**
-  `tests/e2e_ui/sessions/test_sidebar_mark_unread.py::test_mark_unread_lights_the_dot_and_persists_across_reload`.
-  Repeat from the header menu by hand and expect the row's unread dot.
+  seed the transcript into the spawned server's database; run them with plain
+  `uv run pytest`, outside `verify-env run`.
+- **`unread`, sidebar row menu:**
+  `tests/e2e_ui/sessions/test_sidebar_mark_unread.py::test_mark_unread_lights_the_dot_and_persists_across_reload`,
+  `tests/e2e_ui/sessions/test_sidebar_mark_unread.py::test_unread_dot_survives_reload_from_localStorage_when_server_seed_is_empty`.
+  The header-menu rename test above lists Mark as unread; manually choose it
+  and expect the row's dot. The row dropdown's Mark as read action has coverage
+  in `web/src/shell/Sidebar.readStateActions.test.tsx`. Right-click read-state
+  actions need a manual check: mark an idle row unread, expect its dot, then
+  choose Mark as read and expect it cleared.
+- **`unread`, bulk selection:** coverage in
+  `web/src/shell/Sidebar.readStateActions.test.tsx`, without a browser test. Select
+  idle sessions with at least one unread row, choose Mark as read, and expect
+  their dots to clear and selection mode to close. Select only read sessions,
+  choose Mark as unread, and expect their dots to appear and selection to close.
 - **`project`, sidebar row and header folder tag:**
   `tests/e2e_ui/sessions/test_move_to_project.py::test_move_session_into_project_regroups_sidebar_row`
   and, seeding its own environment,
@@ -491,6 +591,21 @@ plain `uv run pytest`, which starts a private server for the test.
   all histories. An unrelated session stays online, and a new side chat
   relaunches its parent before both share the replacement runner.
   Only model replies are scripted.
+- **`side-chat-lifecycle`, shared-runner recovery (server integration, plain `uv run pytest`):**
+  `tests/server/integration/test_session_host_launch.py::test_side_chat_message_relaunches_exited_source_runner`,
+  `tests/server/integration/test_session_host_launch.py::test_side_chat_retry_relaunches_exited_source_runner`,
+  and
+  `tests/server/integration/test_session_host_launch.py::test_side_chat_message_rebinds_to_already_relaunched_source_runner`
+  use a mock host. After the parent's runner exits, a side-chat message or
+  Resume relaunches the parent on its host and initializes the side chat on the
+  replacement runner. A parent that already has a replacement is reused
+  without another launch.
+- **`side-chat-lifecycle`, shared-runner recovery (real host, plain `uv run pytest`):**
+  `tests/e2e/test_host_e2e.py::test_host_side_chat_recovers_after_shared_runner_exits`
+  kills the shared runner while the host stays connected. The side chat's next
+  message relaunches the parent's runner and both continue on it; after a
+  second kill, Resume on the side chat does the same. Only model replies are
+  scripted.
 - **`side-chat-lifecycle`, creation entry points:**
   `tests/e2e_ui/chat/test_side_chat_entrypoints.py` covers `/side`, the Workspace
   menu, the composer add tray, selected text's Ask in side chat action, and the
@@ -499,14 +614,17 @@ plain `uv run pytest`, which starts a private server for the test.
   above proves live-parent reuse with actual runner processes.
 - **`side-chat-quotes`, desktop Ask in side chat and Reply:**
   `tests/e2e_ui/chat/test_side_chat_entrypoints.py::test_ask_in_side_chat_opens_a_quoted_side_chat_tab`
-  checks pending/live tab reuse, draft preservation, and replies sent only to
-  the child. Hide Workspace and repeat Ask in side chat to verify
+  checks pending/live tab reuse, interleaved comments, pasted images, and replies
+  sent only to the child. Hide Workspace and repeat Ask in side chat to verify
   a new tab opens instead of changing the hidden draft.
+  `tests/e2e_ui/collaboration/test_sharing_journey.py::test_share_grant_downgrade_revoke_journey`
+  checks that an Edit collaborator is offered Reply on selected text and a
+  Read viewer is not.
 - **`side-chat-quotes`, mobile drawer Reply:**
   `tests/e2e_ui/chat/test_side_chat_entrypoints.py::test_side_chat_opens_in_a_drawer_on_mobile`
-  checks that Reply stays on screen and the quoted follow-up reaches only the
-  side chat. Component coverage in `web/src/components/chat/SideChatPane.test.tsx`
-  checks quote removal, preserved text/files, read-only chats, and starting-tab
+  checks that Reply stays on screen and interleaved comments with a pasted image
+  reach only the side chat. Component coverage in `web/src/components/chat/SideChatPane.test.tsx`
+  checks side-chat and grid composers, quote removal, preserved text/files, read-only chats, and starting-tab
   eligibility; `web/src/pages/ChatPage.composer.test.tsx` checks target routing
   and parent isolation. In an embedded app, repeat text selection in both the
   parent and side chat and check the popup's theme and button styling.
@@ -541,6 +659,16 @@ plain `uv run pytest`, which starts a private server for the test.
   distinguishes a replacement live on another replica from a failed launch
   with an old heartbeat or a local heartbeat. This controls liveness evidence;
   it does not drive an actual cross-replica host migration.
+- **`message-recovery`, already-connected native runner (server integration):**
+  `tests/server/integration/test_session_host_launch.py::test_relaunch_posts_session_init_before_forwarding_message`
+  checks Claude and Codex first-input initialization, suppression of replaying
+  persisted input, and reuse on the next message without repeating child recovery.
+- **`message-recovery`, rotated Codex session (own environment):**
+  `tests/e2e/test_codex_rotated_bridge_relaunch_e2e.py::test_rotated_codex_session_relaunches_into_its_bridge_directory`
+  drives `/new` in real Codex, stops that session's host-launched runner, then
+  sends a chat message to relaunch it. Chat and terminal replies must both
+  reach the rotated conversation with retained or missing bridge state. Only
+  model replies are scripted; no browser interaction is claimed.
 - **`message-recovery`, SDK sub-agent (server integration, plain `uv run pytest`):**
   `tests/server/integration/test_sessions_child_sessions.py::test_sdk_subagent_recovery_skips_session_init`
   covers recovery during ancestor healing and during the final binding refresh,
@@ -568,7 +696,10 @@ plain `uv run pytest`, which starts a private server for the test.
   `web/electron/e2e/desktop_cookie_isolation.e2e.js`. Sign into a site in one
   tab, open it in another tab and the agent browser, and confirm both are signed
   in. Another session should be signed out. Log out and refresh the same-session
-  tabs; all should be signed out.
+  tabs; all should be signed out. Chrome cookie import needs a real Keychain and
+  Chrome profile, so it is manual: sign into a site in Chrome, open that site in
+  the pane, click the cookie button, confirm the native prompt, and check the
+  page is signed in while an unrelated site in the same session is not.
 - **`canvas-workspace` (sidebar entry, project cards, chat, focus, and history):**
   `tests/e2e_ui/sessions/test_canvas_workspace.py::test_canvas_keeps_board_drafts_and_sidebar_while_switching_sessions`.
   Workspace open/close, independent focus, maximizing, and pane sizing on wide
@@ -577,6 +708,8 @@ plain `uv run pytest`, which starts a private server for the test.
   Grouping, feature gating, drag persistence, and live updates also run in
   `tests/e2e_ui/sessions/test_canvas_page.py`, with selection churn in
   `tests/e2e_ui/sessions/test_canvas_selected_highlight_persists.py::test_clicked_card_keeps_selected_highlight_across_live_updates`.
+  The selection journey covers duplicate titles and a long list whose nodes
+  move outside the rendered viewport after a live update.
   Unit tests in `web/src/canvas/canvasNavigation.test.ts` distinguish Canvas
   from similarly named routes under standalone and embedded mount paths.
   `web/src/canvas/CanvasWorkspace.test.tsx` verifies that dismissing a nested
@@ -647,9 +780,15 @@ plain `uv run pytest`, which starts a private server for the test.
   Hostless CLI Stop keeps its existing per-conversation behavior.
 - Starting a side chat after its parent stopped relaunches the parent. The new
   chat shares that replacement runner and stops with the parent again.
+- A side chat has no host of its own. When its shared runner is gone, recovery
+  goes through the parent. It requires edit access to the parent and, as for
+  attaching a runner, ownership of the parent's runner. Another editor gets an
+  error saying the parent runs on another user's runner, and their side chat
+  stays unbound.
 - Ask in side chat reuses only a visible, writable tab belonging to the current
   parent. Hidden, ended, and currently starting tabs are ineligible; another
-  selection opens a new unsent tab. Ended chats do not offer Reply.
+  selection opens a new unsent tab. Ended chats do not offer Reply, and a
+  read-only parent composer offers neither Reply nor Ask in side chat.
 - A phone-width browser run does not prove the mobile side-chat drawer in the
   embedded web app or the native apps. Both style the drawer only inside the
   app's own page area: placed outside it, the drawer stays off screen when
