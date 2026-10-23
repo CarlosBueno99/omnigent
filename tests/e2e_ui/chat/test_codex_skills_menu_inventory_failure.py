@@ -1,8 +1,9 @@
-"""A failed Codex plugin inventory must not read as an empty, healthy skill catalog.
+"""Unreadable Codex plugin skills must not read as an empty, healthy skill catalog.
 
-The host's ``codex plugin list`` is scripted to fail after the session exists, so
-the composer's ``$`` picker must explain the incomplete catalog instead of showing
-the empty-catalog row, and ``GET /v1/skills`` must carry that warning.
+The host's ``codex plugin list`` and its ``codex app-server`` skill catalog are
+scripted to fail before the session is opened, so the composer's ``$`` picker
+must explain the incomplete catalog instead of showing the empty-catalog row,
+and ``GET /v1/skills`` must carry that warning.
 """
 
 from __future__ import annotations
@@ -31,14 +32,22 @@ _INVENTORY = {
     ],
     "available": [],
 }
-# Stand-in codex binary: only the plugin inventory is scripted (mode/inventory files);
-# every other invocation reaches the real CLI when one is installed.
+# Stand-in codex binary: the plugin inventory is scripted (mode/inventory files), and
+# fail mode also fails app-servers for the seeded home, which only skill discovery
+# starts. Every other invocation, including session app-servers with private homes,
+# reaches the real CLI when one is installed.
 _SHIM = """#!/bin/sh
-if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
-  if [ "$(cat {mode} 2>/dev/null)" = "fail" ]; then
+if [ "$(cat {mode} 2>/dev/null)" = "fail" ]; then
+  failing=
+  if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then failing=1; fi
+  home=$(cd "$CODEX_HOME" 2>/dev/null && pwd -P)
+  if [ "$1" = "app-server" ] && [ "$home" = {codex_home} ]; then failing=1; fi
+  if [ -n "$failing" ]; then
     echo "Error:" {error} >&2
     exit 1
   fi
+fi
+if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
   cat {inventory}
   exit 0
 fi
@@ -62,7 +71,7 @@ def _seed_plugin_cache(codex_home: Path) -> None:
     )
 
 
-def _write_codex_shim(root: Path) -> tuple[Path, Path]:
+def _write_codex_shim(root: Path, codex_home: Path) -> tuple[Path, Path]:
     root.mkdir(parents=True)
     mode = root / "mode"
     mode.write_text("ok")
@@ -72,6 +81,7 @@ def _write_codex_shim(root: Path) -> tuple[Path, Path]:
     shim.write_text(
         _SHIM.format(
             mode=shlex.quote(str(mode)),
+            codex_home=shlex.quote(str(codex_home.resolve())),
             inventory=shlex.quote(str(inventory)),
             error=shlex.quote(_INVENTORY_ERROR),
             real=shlex.quote(shutil.which("codex") or ""),
@@ -97,7 +107,7 @@ def test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog(
     workspace.mkdir()
     codex_home = tmp_path / "codex-home"
     _seed_plugin_cache(codex_home)
-    shim, mode = _write_codex_shim(tmp_path / "codex-shim")
+    shim, mode = _write_codex_shim(tmp_path / "codex-shim", codex_home)
     host_env = {
         "OMNIGENT_RUNNER_ZYGOTE": "0",
         "OMNIGENT_CODEX_PATH": str(shim),
