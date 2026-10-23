@@ -5920,6 +5920,7 @@ def _upgrade_to_nightly(
         _NIGHTLY_REPO_URL,
         _build_nightly_upgrade_suggestion,
         _latest_nightly_version,
+        _pip_hint_invocation,
         _probe_installed_distribution,
         _run_upgrade_command,
         _upgrade_failure_message,
@@ -5957,13 +5958,14 @@ def _upgrade_to_nightly(
     if info.vcs_url is None:
         manual = f"git+{_NIGHTLY_REPO_URL}@v{target}"
         if info.detected_installer == "pip":
+            pip = _pip_hint_invocation()
             click.echo(
                 "omnigent was installed with pip, and pip does not record which "
                 f"extras were requested. `{cli_invocation(name='omni')} upgrade --nightly` "
                 "cannot preserve them safely, so install the nightly manually:\n\n"
-                f"    pip install --force-reinstall '{manual}'\n"
+                f"    {pip} install --force-reinstall '{manual}'\n"
                 "    # or, if you need extras:\n"
-                f"    pip install --force-reinstall '{manual}#egg=omnigent[your,extras,here]'"
+                f"    {pip} install --force-reinstall '{manual}#egg=omnigent[your,extras,here]'"
             )
             raise SystemExit(0)
         if info.detected_installer == "uv" and _uv_tool_receipt_path() is None:
@@ -6119,7 +6121,7 @@ def upgrade(
         _build_upgrade_suggestion,
         _find_repo_root,
         _is_newer,
-        _pip_invocation,
+        _pip_hint_invocation,
         _probe_installed_distribution,
         _read_installed_wheel_info,
         _run_upgrade_command,
@@ -6205,7 +6207,7 @@ def upgrade(
     # reports availability.
     if not check_only:
         if info.detected_installer == "pip":
-            pip = _pip_invocation()
+            pip = _pip_hint_invocation()
             click.echo(
                 "omnigent was installed with pip, and pip does not record which extras "
                 f"were requested. `{cli_invocation(name='omni')} upgrade` cannot preserve them "

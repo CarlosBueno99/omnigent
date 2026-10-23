@@ -749,7 +749,9 @@ def test_nightly_suggestion_preserves_and_unions_extras() -> None:
 def test_upgrade_nightly_refuses_registry_pip(
     monkeypatch: pytest.MonkeyPatch, _wheel_install: None
 ) -> None:
-    """A registry pip install → manual git command, exit 0, installer never runs."""
+    """A registry pip install → venv-pinned manual git command, exit 0, installer never runs."""
+    monkeypatch.setattr("omnigent._platform.IS_WINDOWS", False)
+    monkeypatch.setattr(sys, "executable", "/opt/omnigent/bin/python")
     pip_info = _InstalledWheelInfo(
         install_time_epoch=0.0,
         installer="pip",
@@ -773,7 +775,10 @@ def test_upgrade_nightly_refuses_registry_pip(
 
     assert result.exit_code == 0, result.output
     assert "install the nightly manually" in result.output
-    assert "git+https://github.com/omnigent-ai/omnigent@v0.2.0.dev20260804" in result.output
+    assert (
+        "    /opt/omnigent/bin/python -m pip install --force-reinstall "
+        "'git+https://github.com/omnigent-ai/omnigent@v0.2.0.dev20260804'\n"
+    ) in result.output
 
 
 def test_upgrade_nightly_dry_run_prints_without_running(
