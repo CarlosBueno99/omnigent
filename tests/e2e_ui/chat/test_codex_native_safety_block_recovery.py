@@ -42,6 +42,9 @@ _SAFETY_BLOCK = (
 _ERROR_HEADLINE = "Codex ran into an error during this turn."
 _FOLLOW_UP_REPLY = "Hello again! What would you like to do next?"
 _FOLLOW_UPS = ("hellO??", "what is the activity? i intended")
+# The forwarder drops the refused turn over an app-server round trip that lands
+# after the error card, and reports no client-visible signal of its own.
+_HISTORY_REVERT_SETTLE_MS = 1_500
 
 
 def _send_and_wait_for_outcome(
@@ -106,6 +109,7 @@ def test_codex_native_follow_up_after_safety_block_gets_reply(
         page, f"Scan this workspace and tidy up anything unused. {marker}", errors_before=0
     )
     _show_error_details(page, 0)
+    page.wait_for_timeout(_HISTORY_REVERT_SETTLE_MS)
 
     set_fallback_mock_llm(mock_llm_server_url, _CODEX_MOCK_MODEL, _FOLLOW_UP_REPLY)
     try:

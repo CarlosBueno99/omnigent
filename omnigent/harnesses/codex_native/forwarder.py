@@ -4237,6 +4237,15 @@ async def _maybe_revert_safety_blocked_turn(
         return
     try:
         async with asyncio.timeout(_CODEX_SAFETY_REVERT_TIMEOUT_SECONDS):
+            if not await _safety_blocked_turn_is_newest(
+                codex_client, thread_id=thread_id, turn_id=turn_id
+            ):
+                _logger.info(
+                    "Codex forwarder left safety-blocked turn in history behind a newer "
+                    "turn: turn_id=%s",
+                    turn_id,
+                )
+                return
             try:
                 await codex_client.request(
                     "thread/revert", {"threadId": thread_id, "beforeTurnId": turn_id}
@@ -4256,6 +4265,44 @@ async def _maybe_revert_safety_blocked_turn(
         )
         return
     _logger.info("Codex forwarder reverted safety-blocked turn: turn_id=%s", turn_id)
+
+
+async def _safety_blocked_turn_is_newest(
+    codex_client: CodexAppServerClient,
+    *,
+    thread_id: str,
+    turn_id: str,
+) -> bool:
+    """
+    Report whether the refused turn is still the newest turn in Codex history.
+
+    Both drop spellings remove the tail of the thread, so a turn started while
+    the refusal was being surfaced would be deleted along with the refused one.
+
+    :param codex_client: Connected Codex app-server client.
+    :param thread_id: Codex thread id, e.g. ``"thread_abc123"``.
+    :param turn_id: Refused Codex turn id, e.g. ``"turn_abc123"``.
+    :returns: ``True`` when the refused turn is newest, or when this Codex
+        cannot list turns and the caller should drop it unverified.
+    """
+    try:
+        response = await codex_client.request(
+            "thread/turns/list", {"threadId": thread_id, "limit": 1}
+        )
+    except CodexAppServerResponseError as exc:
+        if not codex_rejects_method(exc, "thread/turns/list"):
+            raise
+        return True
+    result = response.get("result")
+    turns = result.get("data") if isinstance(result, dict) else None
+    if not isinstance(turns, list) or not turns:
+        raise ValueError("Codex thread/turns/list returned no turns")
+    newest = turns[0]
+    if not isinstance(newest, dict):
+        raise ValueError("Codex thread/turns/list item must be an object")
+    # Codex reports the refused turn as completed on some releases and failed on
+    # others, so only its identity decides whether dropping is safe.
+    return newest.get("id") == turn_id
 
 
 def _handle_usage_update(
