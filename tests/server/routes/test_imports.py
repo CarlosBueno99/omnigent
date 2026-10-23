@@ -937,7 +937,7 @@ async def test_local_import_id_collision_counts_as_already_imported(
     store = SqlAlchemyConversationStore(db_uri)
     # Occupy the deterministic id but leave the external id unindexed, so the
     # pre-check misses and only the create surfaces the collision (the race).
-    store.create_conversation(
+    winner = store.create_conversation(
         agent_id=agent_id,
         title="pre-existing",
         conversation_id=_import_conversation_id("claude", "race-1"),
@@ -987,10 +987,27 @@ async def test_local_import_id_collision_counts_as_already_imported(
             },
         )
 
+        exact_resp = await c.post(
+            "/v1/imports/local",
+            json={
+                "host_id": "host_0123456789abcdef0123456789abcdef",
+                "source": "claude",
+                "session_id": "race-1",
+            },
+        )
+
     assert resp.status_code == 200
     body = resp.json()
     assert (body["imported"], body["already_imported"], body["failed"]) == (0, 1, 0)
     assert body["failures"] == []
+    assert body["already_imported_session"] is None
+    # An exact-id import that loses the race still names the winning session.
+    assert exact_resp.status_code == 200
+    assert exact_resp.json()["already_imported_session"] == {
+        "session_id": winner.id,
+        "title": "pre-existing",
+        "archived": False,
+    }
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])

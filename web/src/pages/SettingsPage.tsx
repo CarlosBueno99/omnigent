@@ -2851,6 +2851,19 @@ function ImportSection() {
 /** Matches the sidebar and command-palette search debounce. */
 const ARCHIVED_SEARCH_DEBOUNCE_MS = 300;
 
+/** Definitive empty-state copy for the archived list under the active filters. */
+function archivedEmptyMessage(searchQuery: string, project: string | undefined): string {
+  const scope = project ? " in this project" : "";
+  if (searchQuery) return `No archived sessions match “${searchQuery}”${scope}.`;
+  return `No archived sessions${scope}.`;
+}
+
+/** Copy for a loaded page with no archived rows while more pages remain. */
+function archivedPageEmptyMessage(searchQuery: string, project: string | undefined): string {
+  if (searchQuery) return "No matching archived sessions on this page.";
+  return `No archived sessions${project ? " in this project" : ""} on this page.`;
+}
+
 function ArchivedSection() {
   // `undefined` = all projects; a name scopes the list to that project.
   const [project, setProject] = useState<string | undefined>(undefined);
@@ -2913,6 +2926,9 @@ function ArchivedSection() {
     if (cutoff === null) return [];
     return archived.filter((c) => archivedAtSeconds(c) < cutoff);
   }, [archived, cutoff]);
+
+  // Expired counts come from the searched list, so the copy says when they are narrowed.
+  const expiredScope = `${searchQuery ? "matching your search " : ""}${listQuery.hasNextPage ? "on loaded pages " : ""}`;
 
   // Filter expired sessions to only owned ones (same pattern as ArchivedBulkActionBar)
   const ownedExpiredSessions = useMemo(() => {
@@ -3086,8 +3102,7 @@ function ArchivedSection() {
             {ownedExpiredSessions.length === 1
               ? "1 expired session"
               : `${ownedExpiredSessions.length} expired sessions`}{" "}
-            {listQuery.hasNextPage ? "on loaded pages " : ""}past the {retentionDays}-day retention
-            period.
+            {expiredScope}past the {retentionDays}-day retention period.
           </span>
           <Button
             type="button"
@@ -3107,8 +3122,9 @@ function ArchivedSection() {
                   {ownedExpiredSessions.length === 1
                     ? "1 owned archived session"
                     : `${ownedExpiredSessions.length} owned archived sessions`}{" "}
-                  older than {retentionDays} days {listQuery.hasNextPage ? "on loaded pages " : ""}
-                  will be permanently deleted. This cannot be undone.
+                  {searchQuery ? "matching your search " : ""}older than {retentionDays} days{" "}
+                  {listQuery.hasNextPage ? "on loaded pages " : ""}will be permanently deleted. This
+                  cannot be undone.
                   {listQuery.hasNextPage && (
                     <span className="mt-2 block text-sm">
                       Note: More archived sessions may exist on unfetched pages. Click "Load more"
@@ -3150,11 +3166,7 @@ function ArchivedSection() {
         // Definitive empty only when there are no archived rows AND no further
         // pages to fetch.
         <p className="text-ui text-muted-foreground" data-testid="archived-empty">
-          {searchQuery
-            ? `No archived sessions match “${searchQuery}”${project ? " in this project" : ""}.`
-            : project
-              ? "No archived sessions in this project."
-              : "No archived sessions."}
+          {archivedEmptyMessage(searchQuery, project)}
         </p>
       ) : (
         <>
@@ -3187,11 +3199,7 @@ function ArchivedSection() {
             // onto later pages, so a page with none isn't the end. Offer to page
             // forward instead of dead-ending on the definitive empty state.
             <p className="text-ui text-muted-foreground">
-              {searchQuery
-                ? "No matching archived sessions on this page."
-                : project
-                  ? "No archived sessions in this project on this page."
-                  : "No archived sessions on this page."}
+              {archivedPageEmptyMessage(searchQuery, project)}
             </p>
           )}
           {/* Keep the pager visible whenever more pages exist, independent of the

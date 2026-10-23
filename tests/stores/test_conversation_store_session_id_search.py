@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from omnigent.stores.conversation_store.sqlalchemy_store import (
+    SqlAlchemyConversationStore,
+    _session_id_search_terms,
+)
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 
 _ALICE = "alice@example.com"
@@ -62,6 +65,14 @@ def test_search_finds_archived_session_by_any_spelling_of_its_id(
     # Exact ids only: a fragment or an id with inner whitespace finds nothing.
     assert _archived_ids(store, target.id[:12]) == set()
     assert _archived_ids(store, f"{target.id[:16]} {target.id[16:]}") == set()
+    # Another id type's prefix does not name a session.
+    assert _archived_ids(store, f"host_{target.id}") == set()
+
+    # Bob's archived session stays hidden from Alice even by its exact id.
+    bob_session = store.create_conversation(title="Bob's planning")
+    store.update_conversation(bob_session.id, archived=True)
+    permissions.grant(_BOB, bob_session.id, _LEVEL_OWNER)
+    assert _archived_ids(store, bob_session.id) == set()
 
 
 def test_search_finds_archived_import_by_its_harness_session_id(
@@ -96,3 +107,37 @@ def test_search_finds_archived_import_by_its_harness_session_id(
     assert _archived_ids(store, harness_session_id) == set()
     active = store.list_conversations(search_query=harness_session_id, accessible_by=_ALICE)
     assert [conversation.id for conversation in active.data] == [alice_import.id]
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("a1b2c3d", (None, None)),  # 7 chars: too short to be an id
+        ("a1b2c3d4", (None, "a1b2c3d4")),
+        ("x" * 127 + "1", (None, "x" * 127 + "1")),
+        ("x" * 128 + "1", (None, None)),  # wider than external_session_id
+        ("migration", (None, None)),  # a plain word skips the id lookup
+        ("ses 7f3a9c2e1b", (None, None)),
+        ("0" * 32, ("0" * 32, "0" * 32)),
+        ("conv_" + "0" * 32, ("0" * 32, "conv_" + "0" * 32)),
+        ("host_" + "0" * 32, (None, "host_" + "0" * 32)),
+    ],
+)
+def test_session_id_search_terms(query: str, expected: tuple[str | None, str | None]) -> None:
+    """Only one id-shaped token is tried as an Omnigent or harness session id."""
+    assert _session_id_search_terms(query) == expected
+
+
+def test_unscoped_split_db_search_skips_the_harness_id_lookup(tmp_path: Path) -> None:
+    """Without a permission scope, split-DB search avoids the unindexed harness-id scan."""
+    store = SqlAlchemyConversationStore(
+        f"sqlite:///{tmp_path}/omnigent.db", f"sqlite:///{tmp_path}/conversations.db"
+    )
+    harness_session_id = str(uuid.uuid4())
+    imported = store.create_conversation(title="Imported from Claude")
+    store.set_external_session_id(imported.id, harness_session_id)
+
+    by_harness_id = store.list_conversations(search_query=harness_session_id)
+    assert by_harness_id.data == []
+    by_omnigent_id = store.list_conversations(search_query=imported.id)
+    assert [conversation.id for conversation in by_omnigent_id.data] == [imported.id]

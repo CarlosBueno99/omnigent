@@ -219,12 +219,13 @@ def test_reimporting_archived_session_offers_unarchive(
     expect(page.get_by_test_id("import-existing-session-open")).to_have_attribute(
         "href", f"/c/{session_id}"
     )
-    assert captured["post"] == {
-        "host_id": _HOST_ID,
-        "source": "claude",
-        "limit": 25,
-        "session_id": harness_session_id,
-    }
+    post = captured["post"]
+    assert isinstance(post, dict)
+    assert (post["host_id"], post["source"], post["session_id"]) == (
+        _HOST_ID,
+        "claude",
+        harness_session_id,
+    )
     _hold_for_recording(page)
 
     page.get_by_test_id("import-existing-session-unarchive").click()

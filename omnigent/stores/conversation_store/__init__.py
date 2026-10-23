@@ -917,7 +917,9 @@ class ConversationStore(ABC):
             does. A query that is one id-shaped token (8-128
             characters, no inner whitespace) also matches the
             conversation with that exact id (bare, dashed, or
-            legacy-prefixed) or that exact ``external_session_id``.
+            ``conv_``-prefixed) or that exact ``external_session_id``.
+            On a split-DB store the harness-id match needs
+            ``accessible_by`` or ``owned_by`` to scope it.
             Powers the sidebar's session search on
             ``GET /v1/sessions?search_query=...``.
         :param accessible_by: When set, filter to sessions the

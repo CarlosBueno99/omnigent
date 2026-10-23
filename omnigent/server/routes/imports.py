@@ -591,6 +591,17 @@ def create_imports_router(
         counts["already_imported"] = 0
         counts["failed"] = 0
 
+        async def _note_existing_import(existing: Conversation | None) -> None:
+            """Report an exact-id import's already-imported session when readable."""
+            if body.session_id is None or existing is None:
+                return
+            if await _caller_can_read(user_id, existing):
+                existing_sessions.append(
+                    ExistingImportRef(
+                        session_id=existing.id, title=existing.title, archived=existing.archived
+                    )
+                )
+
         def _fail(external_session_id: object, source: object, reason: str) -> None:
             counts["failed"] += 1
             failures.append(
@@ -647,14 +658,7 @@ def create_imports_router(
             )
             if existing is not None:
                 counts["already_imported"] += 1
-                if body.session_id is not None and await _caller_can_read(user_id, existing):
-                    existing_sessions.append(
-                        ExistingImportRef(
-                            session_id=existing.id,
-                            title=existing.title,
-                            archived=existing.archived,
-                        )
-                    )
+                await _note_existing_import(existing)
                 continue
             try:
                 items = [ImportItemInput.model_validate(raw).to_item() for raw in raw_items]
@@ -675,6 +679,13 @@ def create_imports_router(
                 # it's already-imported, never a failure and never a duplicate.
                 if exc.code == ErrorCode.CONFLICT:
                     counts["already_imported"] += 1
+                    if body.session_id is not None:
+                        await _note_existing_import(
+                            await asyncio.to_thread(
+                                conversation_store.get_conversation,
+                                _import_conversation_id(source, external_session_id),
+                            )
+                        )
                     continue
                 _fail(external_session_id, source, exc.message)
                 continue

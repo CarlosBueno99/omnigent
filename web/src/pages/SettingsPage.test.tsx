@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
 import { BACKGROUND_SESSION_TITLES_STORAGE_KEY } from "@/lib/backgroundSessionTitlesPreferences";
+import { writeRetentionDays } from "@/lib/retentionPreferences";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import * as host from "@/lib/host";
 import {
@@ -51,6 +52,8 @@ const mocks = vi.hoisted(() => ({
   projectNames: [] as string[],
   hasNextPage: false,
   fetchNextPage: vi.fn(),
+  // When set, `mutateAsync` rejects with it (a failed unarchive).
+  archiveAsyncError: null as Error | null,
 }));
 
 vi.mock("next-themes", () => ({
@@ -130,7 +133,9 @@ vi.mock("@/hooks/useConversations", async () => {
       },
       mutateAsync: (vars: { id: string; archived: boolean }) => {
         mocks.archiveMutate(vars);
-        return Promise.resolve();
+        return mocks.archiveAsyncError
+          ? Promise.reject(mocks.archiveAsyncError)
+          : Promise.resolve();
       },
       isPending: false,
     }),
@@ -257,6 +262,7 @@ beforeEach(() => {
   mocks.pages = undefined;
   mocks.projectNames = [];
   mocks.hasNextPage = false;
+  mocks.archiveAsyncError = null;
   delete (window as unknown as Record<string, unknown>).omnigentDesktop;
 });
 afterEach(() => {
@@ -1394,6 +1400,53 @@ describe("SettingsPage", () => {
     // Clearing the search restores the unfiltered project list.
     fireEvent.change(screen.getByTestId("archived-search"), { target: { value: "" } });
     await waitFor(() => expect(screen.getAllByTestId("archived-row")).toHaveLength(1));
+  });
+
+  it("stays on the archived list when unarchiving fails", async () => {
+    mocks.conversations = [conv("conv_archived", { archived: true, title: "Old chat" })];
+    mocks.archiveAsyncError = new Error("network down");
+    renderPage("/settings/archived");
+
+    fireEvent.click(screen.getByTestId("unarchive-conversation"));
+    expect(mocks.archiveMutate).toHaveBeenCalledWith({ id: "conv_archived", archived: false });
+    // Let the rejected mutation settle before checking nothing navigated.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("location").textContent).toBe("/settings/archived");
+  });
+
+  it("scopes the expired-session banner and its delete to the active search", async () => {
+    writeRetentionDays(30);
+    const expired = conv("conv_expired", { archived: true, title: "Stale import", owner: null });
+    mocks.conversations = [
+      expired,
+      conv("conv_expired_other", { archived: true, title: "Stale other", owner: null }),
+    ];
+    mocks.searchResults = { "harness-7": [expired] };
+    try {
+      renderPage("/settings/archived");
+      expect(
+        screen.getByText(/2 expired sessions past the 30-day retention period/),
+      ).toBeInTheDocument();
+
+      fireEvent.change(screen.getByTestId("archived-search"), { target: { value: "harness-7" } });
+      await waitFor(() =>
+        expect(
+          screen.getByText(
+            /1 expired session matching your search past the 30-day retention period/,
+          ),
+        ).toBeInTheDocument(),
+      );
+      fireEvent.click(screen.getByTestId("delete-expired"));
+      expect(
+        screen.getByText(/1 owned archived session matching your search older than 30 days/),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Delete 1 session" }));
+      expect(mocks.bulkDeleteMutate).toHaveBeenCalledWith({ ids: ["conv_expired"] });
+    } finally {
+      writeRetentionDays(null);
+    }
   });
 
   it("deletes an archived session after confirming, with no row-click navigation", () => {

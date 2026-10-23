@@ -302,7 +302,19 @@ export function ImportSessionsPanel() {
  */
 function ExistingImportNotice({ existing }: { existing: ExistingImportRef }) {
   const unarchive = useArchiveConversation();
-  const archived = existing.archived && !unarchive.isSuccess;
+  const markRestored = useSessionImportStore((state) => state.markExistingSessionRestored);
+  const [restored, setRestored] = useState(false);
+  const archived = existing.archived;
+  const restore = () =>
+    unarchive
+      .mutateAsync({ id: existing.id, archived: false })
+      .then(() => {
+        // The import result outlives this panel, so a remount stays current.
+        markRestored(existing.id);
+        setRestored(true);
+      })
+      // The hook's onError already rolls back and shows a toast.
+      .catch(() => {});
   const title = existing.title ?? "Untitled session";
   return (
     <div
@@ -326,12 +338,12 @@ function ExistingImportNotice({ existing }: { existing: ExistingImportRef }) {
           size="sm"
           data-testid="import-existing-session-unarchive"
           loading={unarchive.isPending}
-          onClick={() => unarchive.mutate({ id: existing.id, archived: false })}
+          onClick={restore}
         >
           Unarchive
         </Button>
       )}
-      {unarchive.isSuccess && (
+      {restored && (
         <span className="text-muted-foreground" data-testid="import-existing-session-restored">
           Restored to your sessions.
         </span>
