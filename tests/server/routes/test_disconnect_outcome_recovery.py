@@ -14,12 +14,17 @@ from tests.debug_log_helpers import capture_debug_rows
     [
         (True, "resume", ["turn_resumed"]),
         (True, "user_turn", ["superseded_by_user_turn"]),
+        (True, "user_turn_during_recovery", []),
         # An explicit rebind is already a user action; the old turn can't resume.
         (False, "resume", []),
     ],
 )
 async def test_disconnect_failure_outcome_after_reconnect(
-    db_uri: str, passive: bool, next_step: str, expected: list[str]
+    db_uri: str,
+    passive: bool,
+    next_step: str,
+    expected: list[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A reconnect-cleared disconnect failure records whether its turn resumed."""
     from omnigent.runtime import disconnect_outcome, session_stream
@@ -32,6 +37,7 @@ async def test_disconnect_failure_outcome_after_reconnect(
     session_id = conv.id
     store.set_session_live_status(session_id, "running")
     sessions_module._session_status_cache[session_id] = "running"
+    sessions_module._session_active_response_cache[session_id] = "turn-outcome"
     snapshot = store.get_conversation(session_id)
     assert snapshot is not None
     try:
@@ -41,16 +47,33 @@ async def test_disconnect_failure_outcome_after_reconnect(
             store,
         )
         assert sessions_module._session_status_cache.get(session_id) == "failed"
+        if next_step == "user_turn_during_recovery":
+            lookup = store.get_conversation
+
+            def accept_during_lookup(conversation_id: str):
+                row = lookup(conversation_id)
+                disconnect_outcome.note_user_turn(conversation_id)
+                return row
+
+            monkeypatch.setattr(store, "get_conversation", accept_during_lookup)
         with capture_debug_rows("server") as rows:
             await sessions_module._publish_runner_recovered_status(
                 session_id, store, require_disconnect_code=passive
             )
             if next_step == "user_turn":
                 disconnect_outcome.note_user_turn(session_id)
-            session_stream.publish(
-                session_id, {"type": "response.output_text.delta", "delta": "still working"}
-            )
-        assert sessions_module._session_status_cache.get(session_id) == "idle"
+            event = {
+                "type": "response.output_text.delta",
+                "response_id": "turn-outcome",
+                "delta": "still working",
+            }
+            session_stream.publish(session_id, event)
+            if next_step != "user_turn":
+                assert not any(row["event_name"] == "session_turn_failure_outcome" for row in rows)
+            disconnect_outcome.observe_event(session_id, event, runner_id="runner-outcome")
+        assert sessions_module._session_status_cache.get(session_id) == (
+            "failed" if next_step == "user_turn_during_recovery" else "idle"
+        )
         outcomes = [
             row["attributes"]["outcome"]
             for row in rows
@@ -60,6 +83,7 @@ async def test_disconnect_failure_outcome_after_reconnect(
     finally:
         disconnect_outcome.reset_for_tests()
         sessions_module._session_status_cache.pop(session_id, None)
+        sessions_module._session_active_response_cache.pop(session_id, None)
         session_stream.close(session_id)
 
 
