@@ -11568,9 +11568,10 @@ def test_managed_gateway_endpoint_takes_precedence(
     assert claude_native.claude_catalog_fingerprint(None) == fingerprint
 
 
-def test_catalog_fingerprint_changes_with_managed_gateway(
+def test_catalog_fingerprint_changes_with_managed_gateway_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Managed settings decide which models Claude Code offers, so changing them must miss."""
     _point_claude_at(monkeypatch, tmp_path / "claude")
     (tmp_path / "claude").write_text("binary")
     managed_settings = tmp_path / "managed-settings.json"
@@ -11581,8 +11582,27 @@ def test_catalog_fingerprint_changes_with_managed_gateway(
     managed_settings.write_text(
         json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"}})
     )
+    gateway_only = claude_native.claude_catalog_fingerprint(None)
 
-    assert claude_native.claude_catalog_fingerprint(None) != direct
+    def pin_opus(model: str) -> None:
+        managed_settings.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://gateway.example/anthropic",
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+                    }
+                }
+            )
+        )
+
+    pin_opus("databricks-claude-opus-4-8")
+    previous_opus = claude_native.claude_catalog_fingerprint(None)
+    pin_opus("databricks-claude-opus-5-5")
+
+    assert gateway_only != direct
+    assert previous_opus != gateway_only
+    assert claude_native.claude_catalog_fingerprint(None) != previous_opus
 
 
 def test_ambient_env_is_non_anthropic_gateway_detects_databricks(
