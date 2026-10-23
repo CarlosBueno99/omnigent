@@ -1,6 +1,6 @@
 """Persistent store for the pull requests linked to each session.
 
-Hosts report the PRs they observe and the summaries they fetch; this store
+Hosts report the PRs they observe and the states they fetch; this store
 keeps them so the Pull Requests tab can list a session's PRs while its host is
 offline. Reports merge commutatively, so a host re-reporting its local
 registry on every poll converges on the same rows in any order. An unlinked PR
@@ -10,9 +10,7 @@ reports until the user links it again.
 
 from __future__ import annotations
 
-import json
-import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
@@ -25,15 +23,19 @@ from omnigent.db.db_models import (
     current_workspace_id,
     pull_request_url_cksum,
 )
-from omnigent.db.enum_codecs import decode_session_pr_relationship, encode_session_pr_relationship
+from omnigent.db.enum_codecs import (
+    SESSION_PR_STATE,
+    decode_session_pr_relationship,
+    decode_session_pr_state,
+    encode_session_pr_relationship,
+    encode_session_pr_state,
+)
 from omnigent.db.utils import (
     get_or_create_engine,
     make_named_managed_session_maker,
     now_epoch_us,
     run_write_transaction,
 )
-
-_logger = logging.getLogger(__name__)
 
 Relationship = Literal["created", "worked_on", "attached", "inferred"]
 
@@ -76,15 +78,16 @@ class PullRequestReport:
 
 @dataclass(frozen=True)
 class StoredPullRequest(PullRequestReport):
-    """A linked PR with the last summary its host fetched.
+    """A linked PR with the last state its host fetched.
 
-    :ivar summary: The PR's state, checks, labels and reviewers, or ``None``
-        until the host fetches them.
-    :ivar summary_synced_at: Epoch seconds the summary was fetched.
+    :ivar state: ``"OPEN"``, ``"CLOSED"`` or ``"MERGED"``, or ``None`` until fetched.
+    :ivar is_draft: Whether the PR was a draft at that fetch.
+    :ivar state_checked_at: Epoch seconds of that fetch, or ``None``.
     """
 
-    summary: dict[str, Any] | None = None
-    summary_synced_at: float | None = None
+    state: str | None = None
+    is_draft: bool = False
+    state_checked_at: float | None = None
 
 
 def _us(seconds: float) -> int:
@@ -96,13 +99,6 @@ def _seconds(micros: int | None) -> float | None:
 
 
 def _to_entity(row: SqlSessionPullRequest) -> StoredPullRequest:
-    summary: dict[str, Any] | None = None
-    if row.summary:
-        try:
-            loaded = json.loads(row.summary)
-            summary = loaded if isinstance(loaded, dict) else None
-        except ValueError:
-            _logger.warning("Ignoring an unreadable pull request summary", exc_info=True)
     return StoredPullRequest(
         url=row.url,
         provider=row.provider,
@@ -116,8 +112,9 @@ def _to_entity(row: SqlSessionPullRequest) -> StoredPullRequest:
         title=row.title,
         title_checked_at=row.title_checked_at / 1_000_000,
         title_lookup_timed_out=row.title_lookup_timed_out,
-        summary=summary,
-        summary_synced_at=_seconds(row.summary_synced_at),
+        state=None if row.state is None else decode_session_pr_state(row.state),
+        is_draft=row.is_draft,
+        state_checked_at=_seconds(row.state_checked_at),
     )
 
 
@@ -338,22 +335,33 @@ class SessionPullRequestStore:
             run_write_transaction(self._session_immediate, "unlink_session_pull_request", write),
         )
 
-    def update_summary(
-        self, conversation_id: str, url: str, summary: Mapping[str, Any], *, synced_at: float
+    def update_state(
+        self,
+        conversation_id: str,
+        url: str,
+        *,
+        state: str,
+        is_draft: bool,
+        title: str | None,
+        checked_at: float,
     ) -> bool:
-        """Store the summary a host fetched for a linked PR.
+        """Store the state a host fetched for a linked PR, and refresh its title.
 
-        Its title also refreshes the cached title. An older summary than the
-        stored one, or one for a PR that is not linked, is ignored.
+        A fetch older than the stored one, an unknown state, or a PR that is
+        not linked is ignored.
 
         :param conversation_id: The session, e.g. ``"conv_abc123"``.
         :param url: The linked PR's URL.
-        :param summary: JSON-serializable summary, e.g. ``{"state": "OPEN", ...}``.
-        :param synced_at: Epoch seconds the host fetched it.
-        :returns: Whether the stored summary changed.
+        :param state: ``"OPEN"``, ``"CLOSED"`` or ``"MERGED"``.
+        :param is_draft: Whether the PR is a draft.
+        :param title: The fetched title, or ``None`` to keep the stored one.
+        :param checked_at: Epoch seconds the host fetched it.
+        :returns: Whether the row changed.
         """
-        encoded = json.dumps(summary, sort_keys=True)
-        synced_us = _us(synced_at)
+        if state not in SESSION_PR_STATE:
+            return False
+        checked_us = _us(checked_at)
+        fetched_title = title.strip()[:_TITLE_MAX] if title and title.strip() else None
 
         def write(session: Session) -> bool:
             row = session.get(
@@ -361,20 +369,19 @@ class SessionPullRequestStore:
             )
             if row is None or row.removed_at is not None:
                 return False
-            if row.summary_synced_at is not None and row.summary_synced_at > synced_us:
+            if row.state_checked_at is not None and row.state_checked_at > checked_us:
                 return False
-            changed = row.summary != encoded
-            row.summary = encoded
-            row.summary_synced_at = synced_us
-            title = summary.get("title")
-            if isinstance(title, str) and title.strip():
-                changed = changed or row.title != title.strip()[:_TITLE_MAX]
-                row.title = title.strip()[:_TITLE_MAX]
-            return changed
+            before = (row.state, row.is_draft, row.title)
+            row.state = encode_session_pr_state(state)
+            row.is_draft = is_draft
+            row.state_checked_at = checked_us
+            if fetched_title is not None:
+                row.title = fetched_title
+            return before != (row.state, row.is_draft, row.title)
 
         return cast(
             bool,
             run_write_transaction(
-                self._session_immediate, "update_session_pull_request_summary", write
+                self._session_immediate, "update_session_pull_request_state", write
             ),
         )

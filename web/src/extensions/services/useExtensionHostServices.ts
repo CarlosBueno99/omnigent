@@ -191,18 +191,20 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
             pr = info.available ? info.pr : null;
           } catch (error) {
             if (!(error instanceof RunnerOfflineError)) throw error;
-            // The host is offline; answer with the summary the server last stored.
+            // The host is offline; answer with the state the server last stored.
             const [stored] = await queryClient.fetchQuery({
               queryKey: sessionPullRequestsKey(sessionId),
               queryFn: () => fetchSessionPullRequests(sessionId),
               staleTime: 30_000,
             });
-            pr = stored?.summary && {
-              number: stored.number,
-              title: stored.summary.title || stored.title || "",
-              state: stored.summary.state,
-              url: stored.url,
-            };
+            pr = stored?.state
+              ? {
+                  number: stored.number,
+                  title: stored.title ?? "",
+                  state: stored.state,
+                  url: stored.url,
+                }
+              : null;
           }
           if (!pr || !/^https:\/\//.test(pr.url)) return null;
           externalUrlsRef.current.add(pr.url);

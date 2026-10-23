@@ -727,8 +727,8 @@ def test_reported_pull_request_pushes_changed_frame(
                 )
             ],
         )
-        pull_requests.update_summary(
-            s1, url, {"state": "MERGED", "title": "Ship it", "is_draft": False}, synced_at=2.0
+        pull_requests.update_state(
+            s1, url, state="MERGED", is_draft=False, title="Ship it", checked_at=2.0
         )
         changed = _recv_until(ws, {"changed"})
         assert changed["items"][0]["pull_request"] == {

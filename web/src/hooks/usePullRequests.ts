@@ -197,25 +197,6 @@ export interface PullRequestCapabilities {
 export type PullRequestUnavailableReason =
   "not_a_git_repo" | "no_os_env" | "unsupported_remote" | "provider_unavailable" | "host_outdated";
 
-/** What the server kept from a PR's last fetch, shown while the host is offline. */
-export interface PullRequestSummary {
-  title: string;
-  /** "OPEN" | "MERGED" | "CLOSED" as last fetched. */
-  state: string;
-  is_draft: boolean;
-  author: string | null;
-  base_ref: string | null;
-  head_ref: string | null;
-  checks: Pick<
-    PullRequestChecks,
-    "passing" | "failing" | "pending" | "cancelled" | "skipped" | "total"
-  >;
-  labels: Pick<PullRequestLabel, "name" | "color">[];
-  reviewers: PullRequestReviewer[];
-  /** False when the signed-in token could not read check runs. */
-  checks_supported?: boolean;
-}
-
 export interface PullRequestAssociation {
   url: string;
   host: string;
@@ -226,10 +207,12 @@ export interface PullRequestAssociation {
   /** Git provider id; absent from hosts that predate providers (GitHub). */
   provider?: string;
   provider_display?: GitProviderDisplay;
-  /** The last summary the host fetched; null until it fetches the PR. */
-  summary?: PullRequestSummary | null;
-  /** Epoch seconds of that fetch. */
-  summary_synced_at?: number | null;
+  /** "OPEN" | "MERGED" | "CLOSED" as the host last fetched it; null until it does. */
+  state?: string | null;
+  /** Whether the PR was a draft at that fetch. */
+  is_draft?: boolean;
+  /** Epoch seconds of that fetch, or null. */
+  state_checked_at?: number | null;
 }
 
 function prQuery(prUrl?: string): string {

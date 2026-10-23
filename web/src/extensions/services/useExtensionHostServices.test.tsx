@@ -343,7 +343,7 @@ describe("useExtensionHostServices", () => {
                     number: 42,
                     title: "Add canvas",
                     relationship: "created",
-                    summary: { title: "Add canvas", state: "MERGED" },
+                    state: "MERGED",
                   },
                 ],
               }),

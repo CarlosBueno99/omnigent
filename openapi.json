@@ -15351,7 +15351,7 @@
     },
     "/v1/sessions/{session_id}/pull-requests": {
       "delete": {
-        "description": "Unlink a pull request from the session without contacting its host.\n\nThe runner or host applies it with the next Pull Requests tab request.\n\n**Returns:** The session's remaining linked PRs.",
+        "description": "Unlink a pull request from the session, whether or not its host is online.\n\nThe server records the unlink, then passes it to the runner or host when\none is reachable; otherwise they apply it with their next PR request.\n\n**Returns:** The session's remaining linked PRs.",
         "operationId": "unlink_session_pull_request_v1_sessions__session_id__pull_requests_delete",
         "parameters": [
           {
@@ -15401,7 +15401,7 @@
         ]
       },
       "get": {
-        "description": "List the session's linked pull requests from the server.\n\nNever contacts the runner or host, so it answers while both are\noffline. Each entry carries the summary the host last fetched.\n\n**Returns:** A `list` object of linked PRs in display order.",
+        "description": "List the session's linked pull requests from the server.\n\nNever contacts the runner or host, so it answers while both are\noffline. Each entry carries the state the host last fetched.\n\n**Returns:** A `list` object of linked PRs in display order.",
         "operationId": "list_session_pull_requests_v1_sessions__session_id__pull_requests_get",
         "parameters": [
           {
@@ -17269,7 +17269,7 @@
     },
     "/v1/sessions/{session_id}/resources/github/prs": {
       "post": {
-        "description": "Link a pull request the session's host can read, or unlink one.\n\nLinking asks the runner or host to verify the PR with its provider\naccount, so it needs one of them online. Unlinking is recorded on the\nserver and then refreshes the panel through the runner or host.\n\n**Returns:** The refreshed `session.github.info` object.",
+        "description": "Link a pull request the session's host can read, or unlink one.\n\nBoth need the runner or host online: linking verifies the PR with its\nprovider account. `DELETE /pull-requests` unlinks while they are offline.\n\n**Returns:** The refreshed `session.github.info` object.",
         "operationId": "update_session_github_pr_v1_sessions__session_id__resources_github_prs_post",
         "parameters": [
           {

@@ -1121,7 +1121,7 @@ def pull_request_url_cksum(url: str) -> bytes:
 class SqlSessionPullRequest(OmnigentBase):
     """SQLAlchemy model for the ``session_pull_requests`` table.
 
-    The pull requests linked to a session, with the last summary its host
+    The pull requests linked to a session, with the last state its host
     fetched, so they stay visible while the host is offline. The host remains
     the only forge client; the server stores what it reports. A row with
     ``removed_at`` set records an unlink: it is hidden and later observations
@@ -1141,8 +1141,10 @@ class SqlSessionPullRequest(OmnigentBase):
     :param title: The last title the host looked up, or ``None``.
     :param title_checked_at: Epoch microseconds of that lookup; ``0`` for never.
     :param title_lookup_timed_out: The last lookup timed out, so it retries sooner.
-    :param summary: JSON of the PR's state, checks, labels and reviewers, or ``None``.
-    :param summary_synced_at: Epoch microseconds the summary was fetched.
+    :param state: The PR's state, an int code (see
+        :data:`omnigent.db.enum_codecs.SESSION_PR_STATE`), or ``None`` until fetched.
+    :param is_draft: Whether the PR was a draft when its state was fetched.
+    :param state_checked_at: Epoch microseconds the state was fetched, or ``None``.
     :param removed_at: Epoch microseconds the user unlinked it, or ``None``.
     """
 
@@ -1174,14 +1176,20 @@ class SqlSessionPullRequest(OmnigentBase):
     title_lookup_timed_out: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
-    summary: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
-    summary_synced_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Enum stored as a stable int code (see omnigent.db.enum_codecs
+    # SESSION_PR_STATE: OPEN=1, CLOSED=2, MERGED=3).
+    state: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    is_draft: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    state_checked_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     removed_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
             "relationship IN (1, 2, 3, 4)", name="ck_session_pull_requests_relationship"
         ),
+        CheckConstraint("state IN (1, 2, 3)", name="ck_session_pull_requests_state"),
     )
 
 

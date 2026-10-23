@@ -3237,7 +3237,7 @@ def register_resources_routes(
         List the session's linked pull requests from the server.
 
         Never contacts the runner or host, so it answers while both are
-        offline. Each entry carries the summary the host last fetched.
+        offline. Each entry carries the state the host last fetched.
 
         :param request: The incoming FastAPI request (for auth).
         :param session_id: Session/conversation identifier.

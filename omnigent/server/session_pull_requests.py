@@ -33,7 +33,6 @@ _logger = logging.getLogger(__name__)
 
 # Bounds what one response can write; a session links a handful of PRs.
 _MAX_REPORTED_PRS = 200
-_MAX_SUMMARY_ITEMS = 50
 
 # custom-lint: disable-next=workspace-scoped-cache -- keyed by database URL; queries scope rows
 _stores: dict[str, SessionPullRequestStore] = {}
@@ -100,56 +99,18 @@ def reports_from_info(info: Mapping[str, Any]) -> list[PullRequestReport]:
     return reports
 
 
-def _optional_str(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
+def fetched_state(pr: object) -> tuple[str, bool, str | None] | None:
+    """Read the state, draft flag and title the tab shows while the host is offline.
 
-
-def _count(value: object) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
-
-
-def summary_from_pr(pr: object) -> dict[str, Any] | None:
-    """Reduce a payload's ``pr`` to the fields the tab shows while the host is offline.
-
-    The body, comments, changed files and diff stay with the host.
+    The body, checks, comments, changed files and diff stay with the host.
 
     :param pr: The ``pr`` object of a ``session.github.info`` payload.
-    :returns: The summary, or ``None`` when ``pr`` is not a PR object.
+    :returns: ``(state, is_draft, title)``, or ``None`` when ``pr`` is not a PR object.
     """
     if not isinstance(pr, dict) or not isinstance(pr.get("state"), str):
         return None
-    checks = pr.get("checks") if isinstance(pr.get("checks"), dict) else {}
-    labels = pr.get("labels") if isinstance(pr.get("labels"), list) else []
-    reviewers = pr.get("reviewers") if isinstance(pr.get("reviewers"), list) else []
-    summary: dict[str, Any] = {
-        "title": _optional_str(pr.get("title")) or "",
-        "state": pr["state"],
-        "is_draft": pr.get("is_draft") is True,
-        "author": _optional_str(pr.get("author")),
-        "base_ref": _optional_str(pr.get("base_ref")),
-        "head_ref": _optional_str(pr.get("head_ref")),
-        "checks": {
-            key: _count(checks.get(key))
-            for key in ("passing", "failing", "pending", "cancelled", "skipped", "total")
-        },
-        "labels": [
-            {"name": label["name"], "color": _optional_str(label.get("color"))}
-            for label in labels[:_MAX_SUMMARY_ITEMS]
-            if isinstance(label, dict) and isinstance(label.get("name"), str)
-        ],
-        "reviewers": [
-            {
-                "login": reviewer["login"],
-                "kind": _optional_str(reviewer.get("kind")) or "user",
-                "state": _optional_str(reviewer.get("state")) or "PENDING",
-            }
-            for reviewer in reviewers[:_MAX_SUMMARY_ITEMS]
-            if isinstance(reviewer, dict) and isinstance(reviewer.get("login"), str)
-        ],
-    }
-    if pr.get("checks_supported") is False:
-        summary["checks_supported"] = False
-    return summary
+    title = pr.get("title")
+    return pr["state"], pr.get("is_draft") is True, title if isinstance(title, str) else None
 
 
 def entry_payload(entry: StoredPullRequest) -> dict[str, Any]:
@@ -171,8 +132,9 @@ def entry_payload(entry: StoredPullRequest) -> dict[str, Any]:
         "title_checked_at": entry.title_checked_at,
         "title_lookup_timed_out": entry.title_lookup_timed_out,
         "provider_display": provider_display(entry.provider),
-        "summary": entry.summary,
-        "summary_synced_at": entry.summary_synced_at,
+        "state": entry.state,
+        "is_draft": entry.is_draft,
+        "state_checked_at": entry.state_checked_at,
     }
 
 
@@ -193,7 +155,7 @@ def ingest_info(
     *,
     synced_at: float | None = None,
 ) -> bool:
-    """Merge a host payload's PRs and the selected PR's summary into the store.
+    """Merge a host payload's PRs and the selected PR's state into the store.
 
     :param store: The server's PR store.
     :param session_id: The session the payload describes.
@@ -204,18 +166,21 @@ def ingest_info(
     reports = reports_from_info(info)
     changed = store.record(session_id, reports)
     selected = info.get("selected_pr_url")
-    summary = summary_from_pr(info.get("pr"))
     pr = info.get("pr")
-    if isinstance(selected, str) and summary is not None and isinstance(pr, dict):
+    fetched = fetched_state(pr)
+    if isinstance(selected, str) and fetched is not None and isinstance(pr, dict):
         reported = next((report for report in reports if report.url == selected), None)
         # The host may describe a branch PR that the selection does not name.
         if reported is not None and pr.get("number") == reported.number:
+            state, is_draft, title = fetched
             changed = (
-                store.update_summary(
+                store.update_state(
                     session_id,
                     selected,
-                    summary,
-                    synced_at=time.time() if synced_at is None else synced_at,
+                    state=state,
+                    is_draft=is_draft,
+                    title=title,
+                    checked_at=time.time() if synced_at is None else synced_at,
                 )
                 or changed
             )
@@ -251,7 +216,6 @@ def primary_summary(entry: StoredPullRequest) -> dict[str, Any]:
 
     :param entry: The session's first PR in display order.
     """
-    summary = entry.summary or {}
     return {
         "url": entry.url,
         "provider": entry.provider,
@@ -259,8 +223,8 @@ def primary_summary(entry: StoredPullRequest) -> dict[str, Any]:
         "repository": entry.repository,
         "number": entry.number,
         "title": entry.title,
-        "state": summary.get("state"),
-        "is_draft": summary.get("is_draft") is True,
+        "state": entry.state,
+        "is_draft": entry.is_draft,
     }
 
 

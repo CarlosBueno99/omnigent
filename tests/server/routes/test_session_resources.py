@@ -3282,14 +3282,17 @@ async def test_session_pull_requests_stay_listed_and_unlinkable_offline(
     live = await pr_client.get(f"/v1/sessions/{session}/resources/github")
     assert live.status_code == 200, live.text
     assert [pr["url"] for pr in live.json()["prs"]] == [first, second]
-    assert live.json()["prs"][0]["summary"]["state"] == "OPEN"
+    assert live.json()["prs"][0]["state"] == "OPEN"
 
     set_runner_router(_FakeRunnerRouter(_OfflineRunnerClient()))  # type: ignore[arg-type]
     offline = await pr_client.get(f"/v1/sessions/{session}/resources/github")
     assert offline.status_code == 503
     listed = await pr_client.get(f"/v1/sessions/{session}/pull-requests")
     assert [pr["url"] for pr in listed.json()["data"]] == [first, second]
-    assert listed.json()["data"][0]["summary"]["title"] == "Ship it"
+    assert (listed.json()["data"][0]["title"], listed.json()["data"][0]["state"]) == (
+        "Ship it",
+        "OPEN",
+    )
     unlinked = await pr_client.delete(
         f"/v1/sessions/{session}/pull-requests", params={"url": first}
     )

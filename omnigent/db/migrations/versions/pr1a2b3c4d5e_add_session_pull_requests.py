@@ -5,7 +5,7 @@ Revises: c8e4f2a6b901
 Create Date: 2026-10-22 00:00:00.000000
 
 Adds ``session_pull_requests``: the pull requests linked to a session and the
-last summary its host fetched, so the Pull Requests tab lists them while the
+last state its host fetched, so the Pull Requests tab lists them while the
 host is offline. One row per ``(workspace_id, conversation_id, url_cksum)``,
 where ``url_cksum`` is sha256 of the PR URL. New table only, created at the
 current schema state with the tenant ``workspace_id`` leading the primary key
@@ -56,13 +56,16 @@ def upgrade() -> None:
         sa.Column(
             "title_lookup_timed_out", sa.Boolean(), nullable=False, server_default=sa.false()
         ),
-        # JSON summary stored compressed (CompressedText → LargeBinary).
-        sa.Column("summary", sa.LargeBinary(), nullable=True),
-        sa.Column("summary_synced_at", sa.BigInteger(), nullable=True),
+        # Enum stored as a stable int code (see omnigent.db.enum_codecs
+        # SESSION_PR_STATE: OPEN=1, CLOSED=2, MERGED=3).
+        sa.Column("state", sa.SmallInteger(), nullable=True),
+        sa.Column("is_draft", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("state_checked_at", sa.BigInteger(), nullable=True),
         sa.Column("removed_at", sa.BigInteger(), nullable=True),
         sa.CheckConstraint(
             "relationship IN (1, 2, 3, 4)", name="ck_session_pull_requests_relationship"
         ),
+        sa.CheckConstraint("state IN (1, 2, 3)", name="ck_session_pull_requests_state"),
         sa.PrimaryKeyConstraint("workspace_id", "conversation_id", "url_cksum"),
     )
 

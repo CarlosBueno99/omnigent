@@ -74,7 +74,9 @@ def test_unlink_hides_pr_until_the_user_links_it_again(store: SessionPullRequest
 
     # A replayed observation must not undo the user's unlink.
     assert not store.record(SESSION, [_report(A, relationship="created", last_seen_at=500.0)])
-    assert store.update_summary(SESSION, A, {"state": "OPEN"}, synced_at=1.0) is False
+    assert not store.update_state(
+        SESSION, A, state="OPEN", is_draft=False, title=None, checked_at=1.0
+    )
     assert [entry.url for entry in store.list_for_session(SESSION)] == [B]
 
     store.attach(SESSION, _report(A, last_seen_at=600.0))
@@ -83,14 +85,22 @@ def test_unlink_hides_pr_until_the_user_links_it_again(store: SessionPullRequest
     assert (first.url, first.relationship) == (A, "attached")
 
 
-def test_summary_keeps_newest_fetch_and_refreshes_title(store: SessionPullRequestStore) -> None:
+def test_state_keeps_newest_fetch_and_refreshes_title(store: SessionPullRequestStore) -> None:
     store.record(SESSION, [_report(A, title="Old")])
-    assert store.update_summary(SESSION, A, {"state": "OPEN", "title": "New "}, synced_at=20.0)
-    assert not store.update_summary(SESSION, A, {"state": "CLOSED"}, synced_at=10.0)
+    assert store.update_state(
+        SESSION, A, state="OPEN", is_draft=True, title="New " + "x" * 2000, checked_at=20.0
+    )
+    assert not store.update_state(
+        SESSION, A, state="CLOSED", is_draft=False, title=None, checked_at=10.0
+    )
+    # A state the providers never report is not stored.
+    assert not store.update_state(
+        SESSION, A, state="LOCKED", is_draft=False, title=None, checked_at=30.0
+    )
     [entry] = store.list_for_session(SESSION)
-    assert entry.summary == {"state": "OPEN", "title": "New "}
-    assert entry.summary_synced_at == 20.0
-    assert entry.title == "New"
+    assert (entry.state, entry.is_draft, entry.state_checked_at) == ("OPEN", True, 20.0)
+    assert entry.title is not None
+    assert entry.title.startswith("New x") and len(entry.title) == 1024
 
 
 def test_display_order_and_primary_pr(store: SessionPullRequestStore) -> None:

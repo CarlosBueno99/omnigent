@@ -34,29 +34,15 @@ def _entry(url: str, number: int, **overrides: Any) -> dict[str, Any]:
     }
 
 
-def _pr(number: int, **overrides: Any) -> dict[str, Any]:
+def _pr(number: int) -> dict[str, Any]:
     return {
         "number": number,
         "title": "Add offline PRs",
         "state": "OPEN",
         "url": A,
         "is_draft": True,
-        "author": "octocat",
-        "base_ref": "main",
-        "head_ref": "offline-prs",
         "body": "A long description that stays on the host.",
-        "comments": [{"author": "reviewer", "body": "LGTM"}],
-        "checks": {
-            "passing": 3,
-            "failing": 1,
-            "pending": 0,
-            "skipped": 1,
-            "total": 5,
-            "runs": [{"name": "ci"}],
-        },
-        "labels": [{"name": "bug", "color": "d73a4a", "description": "Broken"}],
-        "reviewers": [{"login": "reviewer", "kind": "user", "state": "APPROVED"}],
-        **overrides,
+        "labels": [{"name": "bug", "color": "d73a4a"}],
     }
 
 
@@ -91,45 +77,29 @@ def test_entries_from_hosts_that_predate_providers_are_github() -> None:
     assert (report.provider, report.source) == ("github", "host")
 
 
-def test_summary_keeps_what_the_tab_shows_offline_and_drops_the_rest() -> None:
-    summary = server_prs.summary_from_pr(_pr(42, checks_supported=False))
-    assert summary == {
-        "title": "Add offline PRs",
-        "state": "OPEN",
-        "is_draft": True,
-        "author": "octocat",
-        "base_ref": "main",
-        "head_ref": "offline-prs",
-        "checks": {
-            "passing": 3,
-            "failing": 1,
-            "pending": 0,
-            "cancelled": 0,
-            "skipped": 1,
-            "total": 5,
-        },
-        "labels": [{"name": "bug", "color": "d73a4a"}],
-        "reviewers": [{"login": "reviewer", "kind": "user", "state": "APPROVED"}],
-        "checks_supported": False,
-    }
-    assert server_prs.summary_from_pr(None) is None
-    assert server_prs.summary_from_pr({"number": 1}) is None
+def test_only_the_state_draft_flag_and_title_are_kept() -> None:
+    assert server_prs.fetched_state(_pr(42)) == ("OPEN", True, "Add offline PRs")
+    assert server_prs.fetched_state(None) is None
+    assert server_prs.fetched_state({"number": 1}) is None
 
 
-def test_ingest_stores_the_selected_prs_summary(store: SessionPullRequestStore) -> None:
+def test_ingest_stores_the_selected_prs_state(store: SessionPullRequestStore) -> None:
     info = {"prs": [_entry(A, 42), _entry(B, 7)], "selected_pr_url": A, "pr": _pr(42)}
     assert server_prs.ingest_info(store, SESSION, info, synced_at=50.0)
     entries = {entry.url: entry for entry in store.list_for_session(SESSION)}
-    assert entries[A].summary is not None
-    assert entries[A].summary["state"] == "OPEN"
-    assert entries[A].summary_synced_at == 50.0
-    assert entries[B].summary is None
+    assert (entries[A].state, entries[A].is_draft, entries[A].state_checked_at) == (
+        "OPEN",
+        True,
+        50.0,
+    )
+    assert entries[A].title == "Add offline PRs"
+    assert entries[B].state is None
 
 
 def test_ingest_ignores_a_pr_that_is_not_the_selected_one(store: SessionPullRequestStore) -> None:
     info = {"prs": [_entry(A, 42)], "selected_pr_url": A, "pr": _pr(99)}
     server_prs.ingest_info(store, SESSION, info)
-    assert store.list_for_session(SESSION)[0].summary is None
+    assert store.list_for_session(SESSION)[0].state is None
 
 
 def test_answers_with_the_server_list(store: SessionPullRequestStore) -> None:
@@ -138,7 +108,7 @@ def test_answers_with_the_server_list(store: SessionPullRequestStore) -> None:
     server_prs.ingest_info(store, SESSION, info)
     answered = server_prs.apply_server_state(store, SESSION, info)
     assert [entry["url"] for entry in answered["prs"]] == [A, B]
-    assert answered["prs"][0]["summary"]["state"] == "OPEN"
+    assert (answered["prs"][0]["state"], answered["prs"][0]["is_draft"]) == ("OPEN", True)
     assert answered["prs"][0]["provider_display"]["number_prefix"] == "#"
     assert answered["selected_pr_url"] == A
     # Payloads without session tracking are passed through untouched.

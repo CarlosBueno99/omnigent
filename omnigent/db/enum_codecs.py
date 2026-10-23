@@ -72,6 +72,14 @@ SESSION_PR_RELATIONSHIP: dict[str, int] = {
     "created": 4,
 }
 
+# A pull request's last fetched state (``session_pull_requests.state``), as the
+# runner's git providers normalize it.
+SESSION_PR_STATE: dict[str, int] = {
+    "OPEN": 1,
+    "CLOSED": 2,
+    "MERGED": 3,
+}
+
 # Last relay-observed turn status persisted on the conversation's metadata
 # row (``omnigent_conversation_metadata.live_status``) so any server replica
 # can serve the sidebar's activity state, not just the pod holding the
@@ -257,6 +265,16 @@ def encode_session_pr_relationship(name: str) -> int:
 def decode_session_pr_relationship(code: int) -> str:
     """Decode a ``session_pull_requests.relationship`` int code to its name."""
     return _decode(SESSION_PR_RELATIONSHIP, code, field="session_pull_requests.relationship")
+
+
+def encode_session_pr_state(name: str) -> int:
+    """Encode a ``session_pull_requests.state`` name to its int code."""
+    return _encode(SESSION_PR_STATE, name, field="session_pull_requests.state")
+
+
+def decode_session_pr_state(code: int) -> str:
+    """Decode a ``session_pull_requests.state`` int code to its name."""
+    return _decode(SESSION_PR_STATE, code, field="session_pull_requests.state")
 
 
 def encode_session_live_status(name: str) -> int:

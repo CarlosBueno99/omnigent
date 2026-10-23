@@ -723,7 +723,6 @@ function PullRequestSummaryTab({
   checksSupported,
   checksUnavailableHint,
   body,
-  showDescription = true,
 }: {
   reviewers: React.ReactNode;
   labels: React.ReactNode;
@@ -731,9 +730,7 @@ function PullRequestSummaryTab({
   checks: PullRequestChecks;
   checksSupported: boolean;
   checksUnavailableHint?: string;
-  body?: string | null;
-  /** False while the host is offline, since only the host has the description. */
-  showDescription?: boolean;
+  body: string | null | undefined;
 }) {
   const showChecks = checks.total > 0 || checks.partial || !checksSupported;
   const showReviewers = !!reviewers;
@@ -810,23 +807,21 @@ function PullRequestSummaryTab({
           {merge}
         </div>
       )}
-      {showDescription && (showPeople || showStatus) && <Separator />}
+      {(showPeople || showStatus) && <Separator />}
       {/* Extra bottom padding so the end of a long description can scroll clear
           of the very bottom edge, where it's awkward to read. */}
-      {showDescription && (
-        <section className="space-y-1.5 p-3 pb-16">
-          <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            Description
-          </h3>
-          {body ? (
-            <div className="text-ui break-words">
-              <MessageResponse>{body}</MessageResponse>
-            </div>
-          ) : (
-            <p className="text-ui text-muted-foreground italic">No description provided.</p>
-          )}
-        </section>
-      )}
+      <section className="space-y-1.5 p-3 pb-16">
+        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          Description
+        </h3>
+        {body ? (
+          <div className="text-ui break-words">
+            <MessageResponse>{body}</MessageResponse>
+          </div>
+        ) : (
+          <p className="text-ui text-muted-foreground italic">No description provided.</p>
+        )}
+      </section>
     </div>
   );
 }
@@ -1353,28 +1348,24 @@ function useHostOffline(
 
 /**
  * The selected PR as the server last stored it, while the runner and host are
- * offline: the header, reviewers, labels and check counts. The description,
- * comments and diff stay on the host, so the panel says when they come back.
+ * offline: its title, link and state. Everything else stays on the host, so the
+ * panel says when it comes back.
  */
 function StoredPullRequestDetails({
-  conversationId,
   pr,
   copy,
   sandboxAsleep,
   showProviderIcon,
   refreshButton,
 }: {
-  conversationId: string;
   pr: PullRequestAssociation;
   copy: GitProviderCopy;
   sandboxAsleep: boolean;
   showProviderIcon: boolean;
   refreshButton?: React.ReactNode;
 }) {
-  const summary = pr.summary;
-  const title = summary?.title || pr.title || `${pr.repository} ${copy.prNumberPrefix}${pr.number}`;
-  const syncedAt = pr.summary_synced_at ? pr.summary_synced_at * 1000 : undefined;
-  const age = syncedAt === undefined ? "" : relativeTime(syncedAt);
+  const title = pr.title?.trim() || `${pr.repository} ${copy.prNumberPrefix}${pr.number}`;
+  const age = pr.state_checked_at ? relativeTime(pr.state_checked_at * 1000) : "";
   return (
     <TooltipProvider delayDuration={0}>
       <div className="flex h-full min-h-0 flex-col" data-testid="github-stored-pr">
@@ -1383,15 +1374,6 @@ function StoredPullRequestDetails({
             {showProviderIcon && <PanelTitle copy={copy} />}
             <span className="block min-w-0 truncate text-xs text-muted-foreground">
               {pr.repository}
-              {summary?.head_ref && (
-                <>
-                  {" · "}
-                  <span className="font-mono">{summary.head_ref}</span>
-                  {summary.base_ref && (
-                    <span className="text-muted-foreground"> → {summary.base_ref}</span>
-                  )}
-                </>
-              )}
             </span>
             <div className="ml-auto shrink-0">{refreshButton}</div>
           </div>
@@ -1409,54 +1391,15 @@ function StoredPullRequestDetails({
               </span>
               <ExternalLinkIcon className="size-3 shrink-0 text-muted-foreground" />
             </a>
-            {summary && <PullRequestStatus state={summary.state} />}
+            {pr.state && <PullRequestStatus state={pr.state} />}
           </div>
         </div>
-        <p
-          role="status"
-          className="shrink-0 border-b border-border p-2 text-ui text-muted-foreground"
-        >
+        <p role="status" className="p-3 text-ui text-muted-foreground">
           {sandboxAsleep ? "The sandbox is offline." : "The host is offline."}{" "}
-          {summary
-            ? `Showing details from ${age === "now" ? "just now" : age ? `${age} ago` : "earlier"}; the description, comments, and changes load when it’s back online.`
+          {pr.state
+            ? `Status as of ${age === "now" ? "just now" : age ? `${age} ago` : "earlier"}; the description, checks, comments, and changes load when it’s back online.`
             : "This PR’s details load when it’s back online."}
         </p>
-        {summary && (
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <PullRequestSummaryTab
-              reviewers={
-                <PullRequestReviewers
-                  conversationId={conversationId}
-                  prUrl={pr.url}
-                  reviewers={summary.reviewers}
-                  author={summary.author}
-                  editable={false}
-                />
-              }
-              labels={
-                summary.labels.length > 0 && (
-                  <section className="space-y-1.5">
-                    <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                      Labels
-                    </h3>
-                    <div className="flex flex-wrap gap-1">
-                      {summary.labels.map((label) => (
-                        <Badge key={label.name} variant="outline" className="text-xs">
-                          {label.name}
-                        </Badge>
-                      ))}
-                    </div>
-                  </section>
-                )
-              }
-              merge={null}
-              checks={{ ...summary.checks, runs: [] }}
-              checksSupported={summary.checks_supported !== false}
-              checksUnavailableHint={copy.checksUnavailableHint}
-              showDescription={false}
-            />
-          </div>
-        )}
       </div>
     </TooltipProvider>
   );
@@ -1659,7 +1602,6 @@ function PullRequestPanelDetails({
   if (storedPr) {
     return (
       <StoredPullRequestDetails
-        conversationId={conversationId}
         pr={storedPr}
         copy={gitProviderCopy(storedPr.provider, undefined, storedPr.provider_display)}
         sandboxAsleep={sandboxAsleep}

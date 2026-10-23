@@ -26,6 +26,7 @@ _CODECS = [
         ec.encode_session_pr_relationship,
         ec.decode_session_pr_relationship,
     ),
+    (ec.SESSION_PR_STATE, ec.encode_session_pr_state, ec.decode_session_pr_state),
     (ec.ACCOUNT_TOKEN_KIND, ec.encode_account_token_kind, ec.decode_account_token_kind),
     (ec.POLICY_TYPE, ec.encode_policy_type, ec.decode_policy_type),
     (ec.POLICY_SCOPE, ec.encode_policy_scope, ec.decode_policy_scope),
@@ -118,6 +119,7 @@ def test_shipped_codes_are_stable() -> None:
         "attached": 3,
         "created": 4,
     }
+    assert ec.SESSION_PR_STATE == {"OPEN": 1, "CLOSED": 2, "MERGED": 3}
     assert ec.ACCOUNT_TOKEN_KIND == {"invite": 1, "magic": 2}
     assert ec.POLICY_TYPE == {"python": 1, "url": 2}
     assert ec.POLICY_SCOPE == {"default": 1, "session": 2}

@@ -2150,18 +2150,9 @@ describe("session PR selection", () => {
         number: 42,
         title: "Ship it",
         relationship: "created",
-        summary: {
-          title: "Ship it",
-          state: "MERGED",
-          is_draft: false,
-          author: "octocat",
-          base_ref: "main",
-          head_ref: "offline-prs",
-          checks: { passing: 2, failing: 1, pending: 0, total: 3 },
-          labels: [{ name: "bug", color: "d73a4a" }],
-          reviewers: [{ login: "reviewer", kind: "user", state: "APPROVED" }],
-        },
-        summary_synced_at: Date.now() / 1000 - 120,
+        state: "MERGED",
+        is_draft: false,
+        state_checked_at: Date.now() / 1000 - 120,
       },
       {
         url: two,
@@ -2179,13 +2170,9 @@ describe("session PR selection", () => {
     const stored = screen.getByTestId("github-stored-pr");
     expect(within(stored).getByRole("link", { name: /Ship it/ })).toHaveAttribute("href", one);
     expect(within(stored).getByLabelText("Pull request status: Merged")).toBeInTheDocument();
-    expect(within(stored).getByText(/offline-prs/)).toBeInTheDocument();
     expect(within(stored).getByRole("status")).toHaveTextContent(
-      "The host is offline. Showing details from 2m ago; the description, comments, and changes load when it’s back online.",
+      "The host is offline. Status as of 2m ago; the description, checks, comments, and changes load when it’s back online.",
     );
-    expect(within(stored).getByText("bug")).toBeInTheDocument();
-    expect(within(stored).getByText("reviewer")).toBeInTheDocument();
-    expect(within(stored).queryByText("Description")).toBeNull();
     // Linking verifies the PR with the host's account; unlinking is the server's.
     expect(
       screen.getByRole("button", { name: "Link a PR (needs the host online)" }),
@@ -2210,18 +2197,9 @@ describe("session PR selection", () => {
       number: 6000,
       title: "Attached while online",
       relationship: "attached",
-      summary: {
-        title: "Attached while online",
-        state: "OPEN",
-        is_draft: false,
-        author: "octocat",
-        base_ref: "main",
-        head_ref: "test/pr-view",
-        checks: { passing: 1, failing: 0, pending: 0, total: 1 },
-        labels: [],
-        reviewers: [],
-      },
-      summary_synced_at: Date.now() / 1000 - 60,
+      state: "OPEN",
+      is_draft: false,
+      state_checked_at: Date.now() / 1000 - 60,
     };
     Object.assign(state.info!.data!, {
       tracking_available: true,
