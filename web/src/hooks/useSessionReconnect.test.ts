@@ -123,6 +123,61 @@ describe("useSessionReconnect", () => {
     expect(controlHost).not.toHaveBeenCalled();
   });
 
+  it.each([null, "previous-arca-host"])(
+    "reconnects a seeded Arca host when the remembered host is %s",
+    async (rememberedHostId) => {
+      writeArcaHostId(rememberedHostId);
+      const { result } = renderHook(() =>
+        useSessionReconnect({
+          ...localSession,
+          hostId: "arca-host",
+          hostName: "e2e's arca",
+        }),
+      );
+
+      await act(async () => {
+        await result.current.reconnect();
+      });
+
+      expect(result.current.dialogOpen).toBe(true);
+      expect(result.current.arcaReconnect).toBeDefined();
+      expect(connectArcaHost).not.toHaveBeenCalled();
+      expect(controlHost).not.toHaveBeenCalled();
+
+      await act(async () => {
+        result.current.arcaReconnect?.onReconnect();
+      });
+
+      expect(connectArcaHost).toHaveBeenCalledOnce();
+      expect(result.current.dialogOpen).toBe(false);
+      expect(toast.success).toHaveBeenCalledWith("Arca reconnect requested.");
+    },
+  );
+
+  it.each([
+    { desktop: false, isOwner: true },
+    { desktop: true, isOwner: false },
+  ])("keeps seeded Arca reconnect owner-only and desktop-only: %s", async (context) => {
+    vi.mocked(isElectronShell).mockReturnValue(context.desktop);
+    const { result } = renderHook(() =>
+      useSessionReconnect({
+        ...localSession,
+        hostId: "arca-host",
+        hostName: "e2e's arca",
+        isOwner: context.isOwner,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.reconnect();
+    });
+
+    expect(result.current.dialogOpen).toBe(true);
+    expect(result.current.arcaReconnect).toBeUndefined();
+    expect(connectArcaHost).not.toHaveBeenCalled();
+    expect(controlHost).not.toHaveBeenCalled();
+  });
+
   it("reconnects the remembered Arca host only after the explicit dialog action", async () => {
     writeArcaHostId("arca-host");
     const pending = deferred<ArcaConnectResult>();

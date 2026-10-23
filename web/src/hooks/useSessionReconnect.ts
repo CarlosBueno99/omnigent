@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { readArcaHostId } from "@/lib/arcaHost";
+import { isArcaHost, readArcaHostId } from "@/lib/arcaHost";
 import { connectArcaHost, controlHost, getHostIdentity, isElectronShell } from "@/lib/nativeBridge";
 
 /** Reconnect this desktop's host directly; use the dialog for fallback and retry. */
 export function useSessionReconnect({
   sessionId,
   hostId,
+  hostName,
   isOwner,
 }: {
   sessionId: string | null;
   hostId: string | null;
+  hostName?: string | null;
   isOwner: boolean;
 }) {
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -20,6 +22,11 @@ export function useSessionReconnect({
   const [canReconnectThisMachine, setCanReconnectThisMachine] = useState(false);
   const [canReconnectArca, setCanReconnectArca] = useState(false);
   const inFlight = useRef<{ progressToast?: string | number } | null>(null);
+  const isSessionArcaHost = useCallback(
+    () =>
+      hostId !== null && isArcaHost({ host_id: hostId, name: hostName ?? "" }, readArcaHostId()),
+    [hostId, hostName],
+  );
 
   useEffect(() => {
     setDialogOpen(false);
@@ -44,7 +51,7 @@ export function useSessionReconnect({
     // Arca is a remote machine, so it can never match the desktop host
     // identity below. Surface its reconnect action in the dialog and wait for
     // the user to explicitly start it.
-    if (readArcaHostId() === hostId) {
+    if (isSessionArcaHost()) {
       setCanReconnectArca(true);
       setDialogOpen(true);
       return;
@@ -87,11 +94,11 @@ export function useSessionReconnect({
         setReconnecting(false);
       }
     }
-  }, [hostId, isOwner]);
+  }, [hostId, isOwner, isSessionArcaHost]);
 
   const reconnectArca = useCallback(async () => {
     if (inFlight.current) return;
-    if (!hostId || !isOwner || !isElectronShell() || readArcaHostId() !== hostId) {
+    if (!hostId || !isOwner || !isElectronShell() || !isSessionArcaHost()) {
       setCanReconnectArca(false);
       setDialogOpen(true);
       return;
@@ -121,7 +128,7 @@ export function useSessionReconnect({
         setReconnecting(false);
       }
     }
-  }, [hostId, isOwner]);
+  }, [hostId, isOwner, isSessionArcaHost]);
 
   return {
     reconnect,

@@ -66,7 +66,8 @@ the header menu), and each place is a separate entry point.
 - `clone`: copy a session into a new workspace, including a typed `~` path.
 - `reconnect`: a stopped or stranded session shows a reconnect affordance and a
   dialog with the command to run; the desktop app can reconnect a local host
-  itself or explicitly reconnect a remembered Arca host. States: reconnecting
+  itself or explicitly reconnect an Arca host recognized by its saved ID or
+  CLI-seeded name. States: reconnecting
   (spinner), reconnect failed (retry), host offline.
 - `workspace-recovery`: a missing-workspace error offers **Continue in another
   directory…**. Choose an existing host directory to fork the conversation into
@@ -633,7 +634,12 @@ plain `uv run pytest`, which starts a private server for the test.
   that stays usable after closing its side chat.
 - **`reconnect`, desktop app (own environment):**
   `tests/e2e_ui/sessions/test_reconnect_local_host_from_app.py::test_desktop_reconnect_performs_local_host_reconnect`,
-  `tests/e2e_ui/sessions/test_reconnect_local_host_from_app.py::test_desktop_reconnect_failure_offers_retry`
+  `tests/e2e_ui/sessions/test_reconnect_local_host_from_app.py::test_desktop_reconnect_failure_offers_retry`,
+  `tests/e2e_ui/sessions/test_reconnect_arca_from_app.py::test_desktop_reconnects_arca_from_current_chat`
+  drive the real SPA with an injected desktop bridge and controlled offline
+  host responses. The Arca journey covers both a remembered host and a
+  CLI-seeded host with no saved desktop ID; it verifies explicit confirmation,
+  progress, and the restored online display, not live SSH or Mac sign-in.
 - **`message-recovery`, native binding races (own environment):**
   `tests/e2e/test_native_runner_binding_races_e2e.py::test_native_send_rechecks_binding_after_runner_miss`
   drives real servers, runners, and Claude/Codex CLIs with a mock model. It

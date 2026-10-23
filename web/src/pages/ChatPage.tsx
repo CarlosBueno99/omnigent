@@ -905,6 +905,7 @@ export function ChatPage() {
     useSessionReconnect({
       sessionId: urlConvId ?? null,
       hostId: activeSession?.hostId ?? activeConv?.host_id ?? null,
+      hostName: sessionHost?.name,
       isOwner: isOwnerLevel(permissionLevel),
     });
 

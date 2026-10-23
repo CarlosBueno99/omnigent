@@ -15,38 +15,37 @@ from tests.e2e_ui.conftest import fetch_with_retry
 _ARCA_HOST_ID = "host_arca"
 _OLD_CREATED_AT = 1_700_000_000
 
-_DESKTOP_BRIDGE_INIT_SCRIPT = f"""
-window.localStorage.setItem("omnigent:arca-host-id", {_ARCA_HOST_ID!r});
+_DESKTOP_BRIDGE_INIT_SCRIPT = """
 window.__connectArcaCalls = 0;
 window.__hostStatusListeners = [];
-window.omnigentDesktop = {{
+window.omnigentDesktop = {
   kind: "electron",
-  setBadgeCount: function () {{}},
-  notify: function () {{ return Promise.resolve(false); }},
-  onNotificationActivated: function () {{ return function () {{}}; }},
-  getServerPicker: function () {{ return Promise.resolve(null); }},
-  switchServer: function () {{ return Promise.resolve(); }},
-  openServerSetup: function () {{}},
-  getHostIdentity: function () {{
-    return Promise.resolve({{ cliInstalled: true, hostId: "host_this_machine" }});
-  }},
-  onHostStatusChanged: function (callback) {{
+  setBadgeCount: function () {},
+  notify: function () { return Promise.resolve(false); },
+  onNotificationActivated: function () { return function () {}; },
+  getServerPicker: function () { return Promise.resolve(null); },
+  switchServer: function () { return Promise.resolve(); },
+  openServerSetup: function () {},
+  getHostIdentity: function () {
+    return Promise.resolve({ cliInstalled: true, hostId: "host_this_machine" });
+  },
+  onHostStatusChanged: function (callback) {
     window.__hostStatusListeners.push(callback);
-    return () => {{
+    return () => {
       window.__hostStatusListeners = window.__hostStatusListeners.filter(cb => cb !== callback);
-    }};
-  }},
-  connectArcaHost: function () {{
+    };
+  },
+  connectArcaHost: function () {
     window.__connectArcaCalls += 1;
-    return new Promise(resolve => {{
-      window.__finishArcaReconnect = result => {{
+    return new Promise(resolve => {
+      window.__finishArcaReconnect = result => {
         resolve(result);
         window.__hostStatusListeners.forEach(callback => callback());
-      }};
-    }});
-  }},
-  getDesktopFeatures: function () {{ return Promise.resolve(null); }},
-}};
+      };
+    });
+  },
+  getDesktopFeatures: function () { return Promise.resolve(null); },
+};
 """
 
 
@@ -57,11 +56,11 @@ def _drop_routes(page: Page) -> Iterator[None]:
         page.unroute_all(behavior="ignoreErrors")
 
 
-def _patch_offline_arca_host(page: Page, session_id: str) -> dict[str, bool]:
+def _patch_offline_arca_host(page: Page, session_id: str, host_name: str) -> dict[str, bool]:
     host_state = {"online": False}
     host = {
         "host_id": _ARCA_HOST_ID,
-        "name": "arca-devbox",
+        "name": host_name,
         "owner": "e2e",
         "status": "offline",
         "sandbox_provider": None,
@@ -140,19 +139,33 @@ def _patch_offline_arca_host(page: Page, session_id: str) -> dict[str, bool]:
     return host_state
 
 
+@pytest.mark.parametrize(
+    ("remembered", "host_name"),
+    [(True, "arca-devbox"), (False, "e2e's arca")],
+    ids=["remembered", "seeded"],
+)
 def test_desktop_reconnects_arca_from_current_chat(
     page: Page,
     seeded_session: tuple[str, str],
+    remembered: bool,
+    host_name: str,
 ) -> None:
     """The dialog waits for the explicit Arca action and reports progress."""
     base_url, session_id = seeded_session
     page.add_init_script(_DESKTOP_BRIDGE_INIT_SCRIPT)
-    host_state = _patch_offline_arca_host(page, session_id)
+    page.add_init_script(
+        f"window.localStorage.setItem('omnigent:arca-host-id', {_ARCA_HOST_ID!r});"
+        if remembered
+        else "window.localStorage.removeItem('omnigent:arca-host-id');"
+    )
+    host_state = _patch_offline_arca_host(page, session_id, host_name)
 
     page.goto(f"{base_url}/c/{session_id}")
     host_picker = page.get_by_test_id("composer-host-select")
     expect(host_picker).to_be_visible(timeout=15_000)
-    expect(host_picker).to_have_attribute("aria-label", re.compile(r"arca-devbox, offline$"))
+    expect(host_picker).to_have_attribute(
+        "aria-label", re.compile(rf"{re.escape(host_name)}, offline$")
+    )
     page.wait_for_timeout(800)
 
     host_picker.click()
@@ -172,6 +185,8 @@ def test_desktop_reconnects_arca_from_current_chat(
     host_state["online"] = True
     page.evaluate("window.__finishArcaReconnect({ ok: true })")
     expect(dialog).not_to_be_visible()
-    expect(host_picker).to_have_attribute("aria-label", re.compile(r"arca-devbox, online$"))
+    expect(host_picker).to_have_attribute(
+        "aria-label", re.compile(rf"{re.escape(host_name)}, online$")
+    )
     expect(page.get_by_text("Arca reconnect requested.", exact=True)).to_be_visible()
     page.wait_for_timeout(1500)
