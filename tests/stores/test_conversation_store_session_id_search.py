@@ -121,6 +121,7 @@ def test_search_finds_archived_import_by_its_harness_session_id(
         ("ses 7f3a9c2e1b", (None, None)),
         ("0" * 32, ("0" * 32, "0" * 32)),
         ("conv_" + "0" * 32, ("0" * 32, "conv_" + "0" * 32)),
+        ("CONV_" + "AB" * 16, ("ab" * 16, "CONV_" + "AB" * 16)),
         ("host_" + "0" * 32, (None, "host_" + "0" * 32)),
     ],
 )

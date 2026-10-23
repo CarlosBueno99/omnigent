@@ -24,8 +24,8 @@ the header menu), and each place is a separate entry point.
 - `archive`: archived sessions leave the main list and appear in the archived
   view, which can be filtered by project, searched, and paged. Search matches
   titles and content, and also matches a pasted Omnigent or source-harness
-  session ID exactly (harness IDs need a signed-in user on split-database
-  servers). On a server with worktree
+  session ID exactly. A harness ID must be 8 to 128 characters and contain a
+  digit, `-` or `_`, and on split-database servers it needs a signed-in user. On a server with worktree
   cleanup, archiving a session that has a git worktree first asks whether to
   also delete the worktree (the branch is kept); Remember my choice saves the
   answer, which Settings → Git can change later.

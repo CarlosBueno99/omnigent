@@ -176,16 +176,9 @@ _EXTERNAL_SESSION_ID_MATCH_LIMIT = 50
 def _session_id_search_terms(search_query: str) -> tuple[str | None, str | None]:
     """Return the session ids a pasted search query could name.
 
-    A user who knows a session's id (an Omnigent id, or the harness id it was
-    imported from) can paste it into session search. Surrounding whitespace is
-    ignored; a query containing inner whitespace is never an id.
-
     :param search_query: The raw search text, e.g. ``"  conv_<32 hex>  "``.
-    :returns: ``(conversation_id, external_session_id)``. ``conversation_id`` is
-        the bare 32-char hex form when the token is an Omnigent session id (bare,
-        dashed, or ``conv_``-prefixed), else ``None``. ``external_session_id`` is
-        the token when it looks like a harness id (it has a digit, ``-`` or
-        ``_``, so a plain word skips the lookup), else ``None``.
+    :returns: ``(conversation_id, external_session_id)``: the bare hex form of an
+        Omnigent id, and the token if it has a digit, ``-`` or ``_``; else ``None``.
     """
     token = search_query.strip()
     if not _SESSION_ID_SEARCH_MIN_LEN <= len(token) <= _SESSION_ID_SEARCH_MAX_LEN:
@@ -194,9 +187,10 @@ def _session_id_search_terms(search_query: str) -> tuple[str | None, str | None]
         return None, None
     conversation_id: str | None = None
     # Other id types' prefixes (``ag_``, ``host_``, ...) never name a session.
-    if "_" not in token or token.startswith("conv_"):
+    has_conv_prefix = token[:5].lower() == "conv_"
+    if "_" not in token or has_conv_prefix:
         try:
-            conversation_id = uuid_to_bytes(token).hex()
+            conversation_id = uuid_to_bytes(token[5:] if has_conv_prefix else token).hex()
         except InvalidUuidError:
             conversation_id = None
     looks_like_id = any(character.isdigit() or character in "-_" for character in token)
@@ -2943,11 +2937,8 @@ class SqlAlchemyConversationStore(ConversationStore):
     ) -> Any | None:
         """Build a ``conversations`` filter for one exact harness session id.
 
-        Single-DB: a correlated EXISTS on the metadata primary key, so each
-        candidate row costs one index probe. Split-DB: the metadata table is on
-        another database, so resolve matching ids first by primary-key probes
-        over *qualifying_ids*. ``external_session_id`` has no index, so an
-        unscoped split-DB list skips the match rather than scan the workspace.
+        Single-DB uses a correlated EXISTS on the metadata primary key. Split-DB
+        probes *qualifying_ids*, and skips the match when the list is unscoped.
 
         :param external_session_id: Exact source harness id, e.g. a Claude
             session uuid.
