@@ -2,7 +2,8 @@
 
 Reuses the native Codex registry format and reconciliation with an
 OpenCode-specific file, so a runner killed before it closes its servers
-leaves entries the host janitor can reap.
+leaves entries the host janitor can reap. A runner killed between spawning a
+server and registering it leaves that server unrecorded.
 """
 
 from __future__ import annotations

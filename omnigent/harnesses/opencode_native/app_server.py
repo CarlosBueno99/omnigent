@@ -566,11 +566,11 @@ class OpenCodeNativeServer:
         if process is None:
             return
         if process.poll() is None:
-            process.terminate()
+            _proc.terminate_tree(process)
             try:
                 await asyncio.to_thread(process.wait, 10)
             except subprocess.TimeoutExpired:
-                process.kill()
+                _proc.kill_tree(process)
                 await asyncio.to_thread(process.wait)
         if self.process_registration is not None:
             self.process_registration.release()

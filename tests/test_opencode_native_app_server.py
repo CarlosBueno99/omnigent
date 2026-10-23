@@ -25,6 +25,7 @@ from omnigent.harnesses.opencode_native.app_server import (
     parse_opencode_version,
 )
 from omnigent.inner import _proc
+from tests._helpers.polling import poll_until_async
 
 
 def test_parse_opencode_version() -> None:
@@ -180,6 +181,17 @@ def registrations(monkeypatch: pytest.MonkeyPatch) -> list[_FakeRegistration]:
     return recorded
 
 
+@pytest.fixture
+def fake_tree_signals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Route process-tree signals to the fake process so its fake PID is never signalled.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(appsrv._proc, "terminate_tree", lambda process: process.terminate())
+    monkeypatch.setattr(appsrv._proc, "kill_tree", lambda process: process.kill())
+
+
 def _server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> OpenCodeNativeServer:
     monkeypatch.setattr(appsrv.shutil, "which", lambda name: f"/usr/bin/{name}")
     return OpenCodeNativeServer(
@@ -249,6 +261,7 @@ async def test_start_closes_process_when_readiness_is_cancelled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     registrations: list[_FakeRegistration],
+    fake_tree_signals: None,
 ) -> None:
     """Cancelling the readiness wait must reap the OpenCode server."""
     server = _server(monkeypatch, tmp_path)
@@ -297,6 +310,7 @@ async def test_start_closes_process_when_readiness_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     registrations: list[_FakeRegistration],
+    fake_tree_signals: None,
 ) -> None:
     """A readiness probe that gives up must not leave ``opencode serve`` running."""
     server = _server(monkeypatch, tmp_path)
@@ -396,13 +410,13 @@ async def test_start_skips_version_gate_when_env_set(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX process groups")
-async def test_server_registration_lasts_until_close(
+async def test_close_stops_server_group_and_releases_registration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The registry holds a live server's group until close releases it."""
+    """The registry holds a live server's group until close stops and releases it."""
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
     opencode = tmp_path / "opencode"
-    opencode.write_text("#!/bin/sh\nexec sleep 300\n", encoding="utf-8")
+    opencode.write_text("#!/bin/sh\nsleep 300 &\necho $! > child.pid\nwait\n", encoding="utf-8")
     opencode.chmod(0o755)
 
     async def _ready(self: OpenCodeNativeServer) -> None:
@@ -425,10 +439,17 @@ async def test_server_registration_lasts_until_close(
         assert os.getpgid(process.pid) == process.pid
         [entry] = json.loads(registry_path.read_text(encoding="utf-8"))
         assert (entry["pid"], entry["pgid"]) == (process.pid, process.pid)
+        child_pid_file = tmp_path / "child.pid"
+        await poll_until_async(
+            lambda: child_pid_file.read_text().strip() if child_pid_file.exists() else "",
+            timeout_s=10.0,
+        )
+        child_pid = int(child_pid_file.read_text())
     finally:
         await server.close()
 
     assert process.poll() is not None
+    await poll_until_async(lambda: not _proc.process_alive(child_pid), timeout_s=10.0)
     assert json.loads(registry_path.read_text(encoding="utf-8")) == []
     assert server.process_registration is None
 

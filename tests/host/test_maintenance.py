@@ -12,6 +12,7 @@ from pathlib import Path
 import psutil
 import pytest
 
+from omnigent.harnesses.opencode_native import process_registry as opencode_process_registry
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from tests._helpers.polling import poll_until_async
 
@@ -145,7 +146,7 @@ async def test_runner_lifecycle_trigger_reaps_native_bridge_dirs(
     calls: list[str] = []
     _stub_machine_cleanup_except_opencode(monkeypatch, calls)
     monkeypatch.setattr(
-        "omnigent.harnesses.opencode_native.process_registry."
+        opencode_process_registry,
         "reconcile_opencode_native_process_registry",
         lambda: calls.append("opencode_servers"),
     )
