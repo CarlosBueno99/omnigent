@@ -466,6 +466,8 @@ include = ["omnigent*"]
 "omnigent.resources.pi_native" = ["*.js", "*.cjs"]
 "omnigent.resources.pi_gateway" = ["*.js"]
 "omnigent.resources.scripts" = ["*.sh"]
+# Claude mod shipped beside the native bridge; the dot-folder needs its own pattern.
+"omnigent.harnesses.claude_native" = ["claude_mod/.claude-plugin/*.json", "claude_mod/hooks/*.json", "claude_mod/hooks/*.ts"]
 # include UI assets in build, plus the static API-only landing page served
 # at "/" when no web UI bundle is present
 "omnigent.server" = ["static/web-ui/**/*", "static/api_only_landing.html"]
