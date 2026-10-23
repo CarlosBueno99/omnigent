@@ -11,6 +11,7 @@ directory. The HTTP and file plumbing lives in
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import threading
@@ -290,14 +291,23 @@ def mod_event_record(event: JsonObject, *, now: float) -> JsonObject:
 
 
 _GENERATED_MOD_NAMES: Final = frozenset({"types", "tsconfig.json", "__pycache__", "node_modules"})
+MOD_PLUGIN_MANIFEST: Final[JsonObject] = {
+    "name": "omnigent-bridge",
+    "version": "0.1.0",
+    "description": (
+        "Connects this Claude Code session to Omnigent: reports turn boundaries and runs "
+        "the prompt, abort, model, effort and compact commands Omnigent sends."
+    ),
+}
 
 
 def install_claude_mod(bridge_dir: Path) -> Path:
-    """Copy the shipped mod into the bridge directory and return the copy's folder.
+    """Copy the shipped mod into the bridge directory and write its plugin manifest.
 
     Claude Code writes ``tsconfig.json`` and ``.claude-plugin/types`` into any
     folder it loads a mod from, so each session loads a copy and the package
-    stays untouched.
+    stays untouched. The manifest is written here, not shipped: git ignores
+    dot-folders in the source tree.
 
     :param bridge_dir: Session bridge directory, e.g. ``/tmp/.../<digest>``.
     :returns: ``<bridge_dir>/claude-mod``.
@@ -308,6 +318,11 @@ def install_claude_mod(bridge_dir: Path) -> Path:
         destination,
         dirs_exist_ok=True,
         ignore=lambda _directory, names: _GENERATED_MOD_NAMES.intersection(names),
+    )
+    manifest_dir = destination / ".claude-plugin"
+    manifest_dir.mkdir(exist_ok=True)
+    (manifest_dir / "plugin.json").write_text(
+        json.dumps(MOD_PLUGIN_MANIFEST, indent=2) + "\n", encoding="utf-8"
     )
     return destination
 

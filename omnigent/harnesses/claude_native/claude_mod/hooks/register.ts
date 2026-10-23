@@ -14,8 +14,8 @@ const EVENT_RETRY_BASE_MS = 250
 // A model, effort or compact command is acknowledged as started after this
 // long, so a switch the dialog holds open does not hold the harness.
 const ACK_AFTER_MS = 1_500
-// An abort is answered once the turn it cancelled has ended, so the harness can
-// settle the interrupt without waiting for the Stop hook, which abort skips.
+// An abort is answered once the turn it cancelled has ended, so the caller knows
+// the turn stopped.
 const ABORT_END_WAIT_MS = 5_000
 const ERROR_MAX_CHARS = 2_000
 const MOD_VERSION_FALLBACK = 'unknown'

@@ -307,24 +307,35 @@ def test_queue_requeues_a_command_whose_poll_response_was_lost() -> None:
 # --- Installed copy, version gate and the shipped mod ----------------------------
 
 
-def test_install_copies_only_the_shipped_plugin_files(
+def test_install_copies_only_the_shipped_plugin_files_and_writes_the_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     package = tmp_path / "package"
     shutil.copytree(mod_channel.MOD_PACKAGE_DIR, package)
     (package / "tsconfig.json").write_text("{}")
-    (package / ".claude-plugin" / "types").mkdir()
-    (package / ".claude-plugin" / "types" / "index.d.ts").write_text("")
+    (package / "types").mkdir()
+    (package / "types" / "index.d.ts").write_text("")
+    (package / "hooks" / "tsconfig.json").write_text("{}")
     monkeypatch.setattr(mod_channel, "MOD_PACKAGE_DIR", package)
 
     installed = mod_channel.install_claude_mod(tmp_path / "bridge")
 
     assert installed == tmp_path / "bridge" / "claude-mod"
-    assert (installed / ".claude-plugin" / "plugin.json").is_file()
+    manifest = json.loads((installed / ".claude-plugin" / "plugin.json").read_text())
+    assert manifest["name"] == "omnigent-bridge"
+    assert set(manifest) == {"name", "version", "description"}
     assert (installed / "hooks" / "hooks.json").is_file()
     assert (installed / "hooks" / "register.ts").is_file()
     assert not (installed / "tsconfig.json").exists()
-    assert not (installed / ".claude-plugin" / "types").exists()
+    assert not (installed / "types").exists()
+    assert not (installed / "hooks" / "tsconfig.json").exists()
+
+
+def test_shipped_mod_has_no_dot_folder_for_git_to_ignore() -> None:
+    """The repository ignores dot-folders (``.gitignore`` ``.*/``), so none may ship."""
+    dot_folders = [path for path in mod_channel.MOD_PACKAGE_DIR.rglob(".*") if path.is_dir()]
+
+    assert dot_folders == []
 
 
 def test_mod_launch_needs_the_feature_flag_and_the_version_floor(
