@@ -1142,6 +1142,18 @@ class _InterruptRecordingCodexClient:
         return {"result": {}}
 
 
+_TURNS_LIST_REQUEST = (
+    "thread/turns/list",
+    {
+        "threadId": "thread_123",
+        "limit": 1,
+        "sortDirection": "desc",
+        "itemsView": "notLoaded",
+    },
+)
+_REVERT_REQUEST = ("thread/revert", {"threadId": "thread_123", "beforeTurnId": "turn_123"})
+
+
 def _record_launcher_certificate_failure(bridge_dir: Path) -> None:
     failure = detect_certificate_failure(_CERTIFICATE_LINE)
     assert failure is not None
@@ -1389,6 +1401,13 @@ def _terminal_error_event(message: str) -> dict:
     }
 
 
+def _turn_started_event(turn_id: str) -> dict:
+    return {
+        "method": "turn/started",
+        "params": {"threadId": "thread_123", "turn": {"id": turn_id}},
+    }
+
+
 def _failed_turn_completed_event(message: str | None) -> dict:
     turn: dict = {"id": "turn_123", "status": "failed", "items": []}
     if message is not None:
@@ -1445,10 +1464,7 @@ async def test_safety_blocked_turn_is_reverted_from_codex_history(
 
     client = await _forward_turn_events(tmp_path, events, codex_client=codex_client)
 
-    assert codex_client.requests == [
-        ("thread/turns/list", {"threadId": "thread_123", "limit": 1}),
-        ("thread/revert", {"threadId": "thread_123", "beforeTurnId": "turn_123"}),
-    ]
+    assert codex_client.requests == [_TURNS_LIST_REQUEST, _REVERT_REQUEST]
     assert _status_posts(client) == [
         {"status": "failed", "response_id": "codex_turn_123", "output": _SAFETY_BLOCK_MESSAGE}
     ]
@@ -1492,25 +1508,30 @@ _REVERT_UNKNOWN = {
     "message": "Invalid request: unknown variant `thread/revert`, expected one of "
     "`initialize`, `thread/rollback`, `thread/list`",
 }
-_TURNS_LIST_UNKNOWN = {"code": -32601, "message": "Method not found"}
+_METHOD_NOT_FOUND = {"code": -32601, "message": "Method not found"}
 _THREAD_NOT_FOUND = {"code": -32600, "message": "thread not found: thread_123"}
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rejection",
+    [_REVERT_UNKNOWN, _METHOD_NOT_FOUND],
+    ids=["unknown-variant", "method-not-found"],
+)
 async def test_codex_without_thread_revert_rolls_back_the_safety_blocked_turn(
-    tmp_path: Path,
+    tmp_path: Path, rejection: dict
 ) -> None:
     """Codex releases that predate thread/revert drop the refused turn by rollback."""
     _seed_active_turn(tmp_path, "turn_123")
-    codex_client = _RejectingCodexClient({"thread/revert": _REVERT_UNKNOWN})
+    codex_client = _RejectingCodexClient({"thread/revert": rejection})
 
     await _forward_turn_events(
         tmp_path, [_failed_turn_completed_event(_SAFETY_BLOCK_MESSAGE)], codex_client=codex_client
     )
 
     assert codex_client.requests == [
-        ("thread/turns/list", {"threadId": "thread_123", "limit": 1}),
-        ("thread/revert", {"threadId": "thread_123", "beforeTurnId": "turn_123"}),
+        _TURNS_LIST_REQUEST,
+        _REVERT_REQUEST,
         ("thread/rollback", {"threadId": "thread_123", "numTurns": 1}),
     ]
 
@@ -1552,30 +1573,48 @@ async def test_failed_revert_still_ends_the_safety_blocked_turn(
 
     assert [method for method, _params in codex_client.requests] == attempted
     assert [post["output"] for post in _status_posts(client)] == [_SAFETY_BLOCK_MESSAGE]
-    assert any("could not revert safety-blocked turn" in r.getMessage() for r in caplog.records)
+    assert any("could not confirm" in r.getMessage() for r in caplog.records)
     state = read_bridge_state(tmp_path)
     assert state is not None and state.active_turn_id is None
 
 
 class _UnansweredCodexClient(_InterruptRecordingCodexClient):
-    """Records RPCs and never answers them, like a wedged app-server."""
+    """Records RPCs and never answers ``hangs``, like a wedged app-server.
+
+    :param hangs: Method that never gets a response, e.g. ``"thread/revert"``.
+    """
+
+    def __init__(self, hangs: str) -> None:
+        super().__init__()
+        self.hangs = hangs
 
     async def request(self, method: str, params: dict) -> dict:
+        if method != self.hangs:
+            return await super().request(method, params)
         self.requests.append((method, params))
         await asyncio.Event().wait()
         return {"result": {}}
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hangs", "attempted"),
+    [
+        ("thread/turns/list", ["thread/turns/list"]),
+        ("thread/revert", ["thread/turns/list", "thread/revert"]),
+    ],
+)
 async def test_unanswered_revert_does_not_stall_forwarding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    hangs: str,
+    attempted: list[str],
 ) -> None:
     """An app-server that never answers the revert cannot hold up later events."""
     monkeypatch.setattr(fwd, "_CODEX_SAFETY_REVERT_TIMEOUT_SECONDS", 0.01)
     _seed_active_turn(tmp_path, "turn_123")
-    codex_client = _UnansweredCodexClient()
+    codex_client = _UnansweredCodexClient(hangs)
 
     with caplog.at_level("WARNING", logger=fwd.__name__):
         client = await asyncio.wait_for(
@@ -1587,9 +1626,9 @@ async def test_unanswered_revert_does_not_stall_forwarding(
             timeout=5,
         )
 
-    assert [method for method, _params in codex_client.requests] == ["thread/turns/list"]
+    assert [method for method, _params in codex_client.requests] == attempted
     assert [post["output"] for post in _status_posts(client)] == [_SAFETY_BLOCK_MESSAGE]
-    assert any("could not revert safety-blocked turn" in r.getMessage() for r in caplog.records)
+    assert any("could not confirm" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -1633,10 +1672,7 @@ async def test_a_refusal_seen_only_on_reconnect_is_reverted(tmp_path: Path) -> N
         ),
     )
 
-    assert codex_client.requests == [
-        ("thread/turns/list", {"threadId": "thread_123", "limit": 1}),
-        ("thread/revert", {"threadId": "thread_123", "beforeTurnId": "turn_123"}),
-    ]
+    assert codex_client.requests == [_TURNS_LIST_REQUEST, _REVERT_REQUEST]
     assert [post["output"] for post in _status_posts(client)] == [_SAFETY_BLOCK_MESSAGE]
 
 
@@ -1663,9 +1699,9 @@ async def test_a_clean_resume_turn_is_left_in_codex_history(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_codex_that_cannot_list_turns_still_reverts(tmp_path: Path) -> None:
-    """Without a history read to check against, the refused turn is still dropped."""
+    """Codex too old to list turns is trusted once the bridge shows no newer turn."""
     _seed_active_turn(tmp_path, "turn_123")
-    codex_client = _RejectingCodexClient({"thread/turns/list": _TURNS_LIST_UNKNOWN})
+    codex_client = _RejectingCodexClient({"thread/turns/list": _METHOD_NOT_FOUND})
 
     await _forward_turn_events(
         tmp_path, [_failed_turn_completed_event(_SAFETY_BLOCK_MESSAGE)], codex_client=codex_client
@@ -1675,3 +1711,50 @@ async def test_codex_that_cannot_list_turns_still_reverts(tmp_path: Path) -> Non
         "thread/turns/list",
         "thread/revert",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_this_forwarder_started_blocks_an_unverifiable_drop(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bridge's own newer turn stops a drop Codex history cannot rule out."""
+    _seed_active_turn(tmp_path, "turn_123")
+    codex_client = _RejectingCodexClient({"thread/turns/list": _METHOD_NOT_FOUND})
+
+    with caplog.at_level("INFO", logger=fwd.__name__):
+        await _forward_turn_events(
+            tmp_path,
+            [
+                _terminal_error_event(_SAFETY_BLOCK_MESSAGE),
+                _turn_started_event("turn_456"),
+                _failed_turn_completed_event(_SAFETY_BLOCK_MESSAGE),
+            ],
+            codex_client=codex_client,
+        )
+
+    assert codex_client.requests == []
+    assert any("behind a newer turn" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_dropped_live_is_not_dropped_again_on_reconnect(tmp_path: Path) -> None:
+    """Stale resume data must not make a second drop remove a legitimate turn."""
+    _seed_active_turn(tmp_path, "turn_123")
+    codex_client = _InterruptRecordingCodexClient()
+    forwarder_state = fwd._CodexForwarderState(
+        codex_client=codex_client,  # type: ignore[arg-type]
+    )
+    turns = [{"id": "turn_123", "status": "failed", "error": {"message": _SAFETY_BLOCK_MESSAGE}}]
+
+    for _attempt in range(2):
+        await fwd._post_resume_terminal_status(
+            _RecordingClient(),  # type: ignore[arg-type]
+            session_id="conv_x",
+            bridge_dir=tmp_path,
+            thread_id="thread_123",
+            turns=turns,
+            forwarder_state=forwarder_state,
+        )
+
+    assert codex_client.requests == [_TURNS_LIST_REQUEST, _REVERT_REQUEST]
