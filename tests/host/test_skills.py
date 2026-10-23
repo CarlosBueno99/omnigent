@@ -259,16 +259,20 @@ def test_incomplete_codex_catalog_reports_warnings_and_is_cached_only_briefly(
     monkeypatch.setattr("omnigent.inner.codex_executor._find_codex_cli", lambda: "/test/codex")
     cli = Mock(side_effect=subprocess.CalledProcessError(1, "codex", stderr="Error: broken"))
     monkeypatch.setattr("omnigent.spec.codex_plugin_skills.subprocess.run", cli)
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.skill_discovery.loaded_codex_skills",
+        Mock(side_effect=RuntimeError("Codex skills/list connection failed")),
+    )
     discovery = HostSkillDiscovery(lambda _: pytest.fail("No bundle expected"))
     frame = HostSkillsFrame("request", "codex-native", str(tmp_path))
 
     def names(warnings: list[str]) -> list[str]:
         return [skill["name"] for skill in discovery.discover(frame, tmp_path, warnings=warnings)]
 
-    # Standalone skills survive a failed inventory, and the catalog says why it is incomplete.
+    # Standalone skills survive both failed plugin sources, and the catalog says why.
     warning = (
-        "Codex plugin skills unavailable: `codex plugin list` exited 1; "
-        "see the host log for details."
+        "Codex plugin skills unavailable: `codex plugin list` exited 1 and "
+        "`codex app-server` could not list skills; see the host log for details."
     )
     assert names(warnings := []) == ["later", "local"]
     assert warnings == [warning]
