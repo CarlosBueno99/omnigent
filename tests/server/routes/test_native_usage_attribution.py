@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from omnigent.errors import OmnigentError
 from omnigent.llms.context_window import ModelPricing
 from omnigent.server.routes._sessions.orchestration import (
     _persist_native_cumulative_usage,
@@ -59,6 +60,10 @@ def test_pi_incomplete_cost_does_not_become_a_resume_baseline(
     assert usage["total_cost_usd"] == 0.75
     assert usage["input_tokens"] == 200
     assert usage.get("native_cost_complete") is not True
+    with pytest.raises(OmnigentError, match="cost_complete must be a bool"):
+        _persist_native_cumulative_usage(
+            conv.id, {"cumulative_input_tokens": 300, "cost_complete": "true"}, store
+        )
 
 
 def test_per_model_cost_sums_across_model_switch(db_uri: str) -> None:
