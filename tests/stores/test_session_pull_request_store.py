@@ -24,7 +24,6 @@ def _report(url: str, **overrides: object) -> PullRequestReport:
         "repository": repository,
         "number": int(number),
         "relationship": "worked_on",
-        "source": "native_hook",
         "first_seen_at": 100.0,
         "last_seen_at": 100.0,
     }
@@ -47,22 +46,16 @@ def test_reports_merge_in_any_order(store: SessionPullRequestStore) -> None:
     [entry] = store.list_for_session(SESSION)
     assert entry.relationship == "created"
     assert (entry.first_seen_at, entry.last_seen_at) == (50.0, 90.0)
-    assert entry.source == "native_hook"
 
 
-def test_newer_title_lookup_wins_and_failed_lookup_keeps_title(
+def test_latest_reported_title_wins_and_a_failed_lookup_keeps_it(
     store: SessionPullRequestStore,
 ) -> None:
-    store.record(SESSION, [_report(A, title="First", title_checked_at=10.0)])
-    store.record(SESSION, [_report(A, title="Stale", title_checked_at=5.0)])
-    assert store.list_for_session(SESSION)[0].title == "First"
-
-    timed_out = _report(A, title=None, title_checked_at=20.0, title_lookup_timed_out=True)
-    store.record(SESSION, [timed_out])
-    [entry] = store.list_for_session(SESSION)
-    assert entry.title == "First"
-    assert entry.title_checked_at == 20.0
-    assert entry.title_lookup_timed_out
+    store.record(SESSION, [_report(A, title="First")])
+    assert store.record(SESSION, [_report(A, title="Renamed")])
+    # A host whose title lookup failed reports no title.
+    assert not store.record(SESSION, [_report(A, title=None)])
+    assert store.list_for_session(SESSION)[0].title == "Renamed"
 
 
 def test_unlink_hides_pr_until_the_user_links_it_again(store: SessionPullRequestStore) -> None:
@@ -131,7 +124,7 @@ def test_display_order_and_primary_pr(store: SessionPullRequestStore) -> None:
 
 
 def test_long_titles_are_truncated(store: SessionPullRequestStore) -> None:
-    store.record(SESSION, [replace(_report(A), title="x" * 2000, title_checked_at=1.0)])
+    store.record(SESSION, [replace(_report(A), title="x" * 2000)])
     assert len(store.list_for_session(SESSION)[0].title or "") == 1024
 
 

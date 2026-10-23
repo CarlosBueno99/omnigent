@@ -721,7 +721,6 @@ def test_reported_pull_request_pushes_changed_frame(
                     repository="example/one",
                     number=42,
                     relationship="created",
-                    source="native_hook",
                     first_seen_at=1.0,
                     last_seen_at=1.0,
                 )

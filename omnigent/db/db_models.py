@@ -1127,24 +1127,30 @@ class SqlSessionPullRequest(OmnigentBase):
     ``removed_at`` set records an unlink: it is hidden and later observations
     cannot link it again until the user does. Cleaned up with the conversation.
 
-    :param url_cksum: sha256 of ``url``, the PK component in place of the URL.
+    :param url_cksum: sha256 of ``url``. It keys the row because a URL of up to
+        2048 characters is too long for a MySQL primary key.
     :param url: The PR's canonical URL as the host's git provider normalized it.
     :param provider: Git provider id, e.g. ``"github"``.
     :param host: Forge host, e.g. ``"github.com"``.
     :param repository: Base repository, e.g. ``"owner/repo"``.
     :param number: The PR number.
     :param relationship: How the PR joined the session, an int code (see
-        :data:`omnigent.db.enum_codecs.SESSION_PR_RELATIONSHIP`).
-    :param source: The first observer that reported it, e.g. ``"native_hook"``.
-    :param first_seen_at: Epoch microseconds the PR was first observed.
-    :param last_seen_at: Epoch microseconds the PR was last observed.
-    :param title: The last title the host looked up, or ``None``.
-    :param title_checked_at: Epoch microseconds of that lookup; ``0`` for never.
-    :param title_lookup_timed_out: The last lookup timed out, so it retries sooner.
+        :data:`omnigent.db.enum_codecs.SESSION_PR_RELATIONSHIP`): the agent created
+        or worked on it, the user attached it, or it matches the checked-out branch
+        (inferred). Inferred PRs list after the others and read "(from branch)";
+        a later report never downgrades it.
+    :param first_seen_at: Epoch microseconds the session first saw the PR. Orders
+        inferred PRs, whose ``last_seen_at`` moves on every branch check.
+    :param last_seen_at: Epoch microseconds of the PR's latest activity in the
+        session (a tool call or branch check, not a fetch). Orders the other PRs,
+        most recent first; the first PR in order is the session's primary PR.
+    :param title: The latest title the host reported, or ``None`` until it has one.
     :param state: The PR's state, an int code (see
         :data:`omnigent.db.enum_codecs.SESSION_PR_STATE`), or ``None`` until fetched.
     :param is_draft: Whether the PR was a draft when its state was fetched.
-    :param state_checked_at: Epoch microseconds the state was fetched, or ``None``.
+    :param state_checked_at: Epoch microseconds the host last fetched the PR's
+        details, shown as the last sync time; an older fetch never overwrites a
+        newer one. ``None`` until the PR is first selected while the host is online.
     :param removed_at: Epoch microseconds the user unlinked it, or ``None``.
     """
 
@@ -1168,14 +1174,9 @@ class SqlSessionPullRequest(OmnigentBase):
     # Enum stored as a stable int code (see omnigent.db.enum_codecs
     # SESSION_PR_RELATIONSHIP: inferred=1, worked_on=2, attached=3, created=4).
     relationship: Mapped[int] = mapped_column(SmallInteger)
-    source: Mapped[str] = mapped_column(String(64))
     first_seen_at: Mapped[int] = mapped_column(BigInteger)
     last_seen_at: Mapped[int] = mapped_column(BigInteger)
     title: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    title_checked_at: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
-    title_lookup_timed_out: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=false()
-    )
     # Enum stored as a stable int code (see omnigent.db.enum_codecs
     # SESSION_PR_STATE: OPEN=1, CLOSED=2, MERGED=3).
     state: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)

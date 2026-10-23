@@ -48,14 +48,9 @@ def upgrade() -> None:
         # Enum stored as a stable int code (see omnigent.db.enum_codecs
         # SESSION_PR_RELATIONSHIP: inferred=1, worked_on=2, attached=3, created=4).
         sa.Column("relationship", sa.SmallInteger(), nullable=False),
-        sa.Column("source", sa.String(64), nullable=False),
         sa.Column("first_seen_at", sa.BigInteger(), nullable=False),
         sa.Column("last_seen_at", sa.BigInteger(), nullable=False),
         sa.Column("title", sa.String(1024), nullable=True),
-        sa.Column("title_checked_at", sa.BigInteger(), nullable=False, server_default="0"),
-        sa.Column(
-            "title_lookup_timed_out", sa.Boolean(), nullable=False, server_default=sa.false()
-        ),
         # Enum stored as a stable int code (see omnigent.db.enum_codecs
         # SESSION_PR_STATE: OPEN=1, CLOSED=2, MERGED=3).
         sa.Column("state", sa.SmallInteger(), nullable=True),

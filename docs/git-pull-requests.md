@@ -94,8 +94,8 @@ session's linked requests (`session_pull_requests`) from the `prs` and
 selected `pr` of every pull request response it proxies, and after each turn it
 reads the PR resource itself. Its own list then replaces `prs` in the response.
 Each row keeps the request's title, state, and draft flag, with when the host
-fetched them; the description, checks, comments, changed files, and diff stay on
-the host.
+last fetched its details; the description, checks, comments, changed files, and
+diff stay on the host.
 
 `GET /v1/sessions/{id}/pull-requests` answers without the runner or host, so
 the panel, sidebar, canvas, composer, and extension API keep showing requests

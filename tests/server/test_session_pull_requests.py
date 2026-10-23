@@ -72,9 +72,9 @@ def test_malformed_entries_are_skipped(bad: dict[str, Any]) -> None:
 
 def test_entries_from_hosts_that_predate_providers_are_github() -> None:
     legacy = _entry(A, 42)
-    del legacy["provider"], legacy["source"]
+    del legacy["provider"]
     [report] = server_prs.reports_from_info({"prs": [legacy]})
-    assert (report.provider, report.source) == ("github", "host")
+    assert report.provider == "github"
 
 
 def test_only_the_state_draft_flag_and_title_are_kept() -> None:

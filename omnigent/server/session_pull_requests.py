@@ -72,12 +72,9 @@ class _ReportedPullRequest(BaseModel):
     repository: Annotated[str, StringConstraints(min_length=1, max_length=512)]
     number: int = Field(ge=0)
     relationship: Literal["created", "worked_on", "attached", "inferred"]
-    source: Annotated[str, StringConstraints(max_length=64)] = "host"
     first_seen_at: float = Field(ge=0)
     last_seen_at: float = Field(ge=0)
     title: str | None = None
-    title_checked_at: float = Field(default=0, ge=0)
-    title_lookup_timed_out: bool = False
 
 
 def reports_from_info(info: Mapping[str, Any]) -> list[PullRequestReport]:
@@ -125,12 +122,9 @@ def entry_payload(entry: StoredPullRequest) -> dict[str, Any]:
         "repository": entry.repository,
         "number": entry.number,
         "relationship": entry.relationship,
-        "source": entry.source,
         "first_seen_at": entry.first_seen_at,
         "last_seen_at": entry.last_seen_at,
         "title": entry.title,
-        "title_checked_at": entry.title_checked_at,
-        "title_lookup_timed_out": entry.title_lookup_timed_out,
         "provider_display": provider_display(entry.provider),
         "state": entry.state,
         "is_draft": entry.is_draft,

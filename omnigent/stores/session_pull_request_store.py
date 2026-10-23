@@ -54,12 +54,9 @@ class PullRequestReport:
     :ivar repository: Base repository, e.g. ``"owner/repo"``.
     :ivar number: The PR number.
     :ivar relationship: How the PR joined the session.
-    :ivar source: The observer that reported it, e.g. ``"native_hook"``.
     :ivar first_seen_at: When the PR was first observed.
     :ivar last_seen_at: When the PR was last observed.
-    :ivar title: The looked-up title, or ``None`` when unknown.
-    :ivar title_checked_at: When the title was looked up; ``0`` for never.
-    :ivar title_lookup_timed_out: The last lookup timed out.
+    :ivar title: The host's latest title, or ``None`` when it has none.
     """
 
     url: str
@@ -68,12 +65,9 @@ class PullRequestReport:
     repository: str
     number: int
     relationship: Relationship
-    source: str
     first_seen_at: float
     last_seen_at: float
     title: str | None = None
-    title_checked_at: float = 0
-    title_lookup_timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -106,12 +100,9 @@ def _to_entity(row: SqlSessionPullRequest) -> StoredPullRequest:
         repository=row.repository,
         number=row.number,
         relationship=cast(Relationship, decode_session_pr_relationship(row.relationship)),
-        source=row.source,
         first_seen_at=row.first_seen_at / 1_000_000,
         last_seen_at=row.last_seen_at / 1_000_000,
         title=row.title,
-        title_checked_at=row.title_checked_at / 1_000_000,
-        title_lookup_timed_out=row.title_lookup_timed_out,
         state=None if row.state is None else decode_session_pr_state(row.state),
         is_draft=row.is_draft,
         state_checked_at=_seconds(row.state_checked_at),
@@ -132,37 +123,16 @@ def _display_order(entries: Iterable[StoredPullRequest]) -> list[StoredPullReque
 
 def _merge(row: SqlSessionPullRequest, report: PullRequestReport) -> bool:
     """Fold ``report`` into ``row``; return whether anything changed."""
-    before = (
-        row.relationship,
-        row.first_seen_at,
-        row.last_seen_at,
-        row.title,
-        row.title_checked_at,
-        row.title_lookup_timed_out,
-    )
+    before = (row.relationship, row.first_seen_at, row.last_seen_at, row.title)
     current = decode_session_pr_relationship(row.relationship)
     if _RELATIONSHIP_RANK[report.relationship] > _RELATIONSHIP_RANK[current]:
         row.relationship = encode_session_pr_relationship(report.relationship)
     row.first_seen_at = min(row.first_seen_at, _us(report.first_seen_at))
     row.last_seen_at = max(row.last_seen_at, _us(report.last_seen_at))
-    checked_at = _us(report.title_checked_at)
-    if checked_at > row.title_checked_at:
-        # A failed lookup keeps the previous title, matching the host's own cache.
-        if report.title is not None:
-            row.title = report.title[:_TITLE_MAX]
-        row.title_checked_at = checked_at
-        row.title_lookup_timed_out = report.title_lookup_timed_out
-    elif report.title is not None and row.title is None:
+    # The host reports its current title, or none when a lookup failed.
+    if report.title:
         row.title = report.title[:_TITLE_MAX]
-    after = (
-        row.relationship,
-        row.first_seen_at,
-        row.last_seen_at,
-        row.title,
-        row.title_checked_at,
-        row.title_lookup_timed_out,
-    )
-    return before != after
+    return before != (row.relationship, row.first_seen_at, row.last_seen_at, row.title)
 
 
 def _new_row(conversation_id: str, report: PullRequestReport) -> SqlSessionPullRequest:
@@ -176,12 +146,9 @@ def _new_row(conversation_id: str, report: PullRequestReport) -> SqlSessionPullR
         repository=report.repository,
         number=report.number,
         relationship=encode_session_pr_relationship(report.relationship),
-        source=report.source,
         first_seen_at=_us(report.first_seen_at),
         last_seen_at=_us(report.last_seen_at),
         title=report.title[:_TITLE_MAX] if report.title else None,
-        title_checked_at=_us(report.title_checked_at),
-        title_lookup_timed_out=report.title_lookup_timed_out,
     )
 
 
