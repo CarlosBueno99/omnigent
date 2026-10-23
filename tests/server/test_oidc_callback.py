@@ -265,13 +265,22 @@ def test_oidc_accepts_es384_id_token(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("seconds_since_expiry", "accepted"),
-    [(_AUTH_STATE_TTL_SECONDS - 10, True), (_AUTH_STATE_TTL_SECONDS + 10, False)],
+    ("time_claims", "accepted"),
+    [
+        pytest.param(
+            {"iat": -3600, "exp": 10 - _AUTH_STATE_TTL_SECONDS}, True, id="exp-in-window"
+        ),
+        pytest.param(
+            {"iat": -3600, "exp": -10 - _AUTH_STATE_TTL_SECONDS}, False, id="exp-too-old"
+        ),
+        pytest.param({"nbf": _AUTH_STATE_TTL_SECONDS + 10}, False, id="nbf-too-far-ahead"),
+        pytest.param({"iat": _AUTH_STATE_TTL_SECONDS + 10}, False, id="iat-too-far-ahead"),
+    ],
 )
-def test_id_token_expiry_leeway_is_bounded(
-    monkeypatch: pytest.MonkeyPatch, seconds_since_expiry: int, accepted: bool
+def test_id_token_clock_leeway_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, time_claims: dict[str, int], accepted: bool
 ) -> None:
-    """Accept an id_token that expired within the login window, but not an older one."""
+    """Accept id_token time claims within the login window of now, but not beyond it."""
     keys = _IdpKeys()
     monkeypatch.setattr(
         jwt.PyJWKClient,
@@ -283,8 +292,7 @@ def test_id_token_expiry_leeway_is_bounded(
         {
             "email": "alice@example.com",
             "email_verified": True,
-            "iat": now - 3600,
-            "exp": now - seconds_since_expiry,
+            **{claim: now + offset for claim, offset in time_claims.items()},
         }
     )
 
