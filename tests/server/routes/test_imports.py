@@ -815,6 +815,7 @@ async def test_local_import_stream_emits_ndjson_session_then_done(
         "already_imported": 0,
         "failed": 0,
         "failures": [],
+        "already_imported_session": None,
     }
     # Each streamed session was actually persisted.
     for e in session_events:
@@ -990,6 +991,94 @@ async def test_local_import_id_collision_counts_as_already_imported(
     body = resp.json()
     assert (body["imported"], body["already_imported"], body["failed"]) == (0, 1, 0)
     assert body["failures"] == []
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])
+async def test_exact_local_import_names_the_existing_session_to_its_reader(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """Re-importing a known session id points at the existing, archived session.
+
+    Import dedup is workspace-wide, so a second user importing the same harness
+    session also gets "already imported" but must not learn another user's
+    session id or title.
+    """
+    from omnigent.server.routes import imports as imports_module
+
+    agent_id = _seed_claude_agent(db_uri)
+    conversation_store = SqlAlchemyConversationStore(db_uri)
+    permission_store = SqlAlchemyPermissionStore(db_uri)
+    existing = conversation_store.create_conversation(agent_id=agent_id, title="Planning thread")
+    conversation_store.set_external_session_id(existing.id, "claude-known-1")
+    conversation_store.update_conversation(existing.id, archived=True)
+    for user in ("alice@example.com", "bob@example.com"):
+        permission_store.ensure_user(user)
+    permission_store.grant("alice@example.com", existing.id, LEVEL_OWNER)
+
+    async def _fake_stream(**kwargs: object):
+        assert kwargs["session_id"] == "claude-known-1"
+        yield {
+            "external_session_id": "claude-known-1",
+            "workspace": None,
+            "items": [
+                {
+                    "type": "message",
+                    "response_id": "claude:1",
+                    "data": {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                }
+            ],
+            "title": "Planning thread",
+            "source": "claude",
+        }
+
+    monkeypatch.setattr(imports_module, "_stream_local_sessions_from_host", _fake_stream)
+    host_owners = {"alice-host": "alice@example.com", "bob-host": "bob@example.com"}
+    app = FastAPI()
+    app.include_router(
+        create_imports_router(
+            conversation_store,
+            SqlAlchemyAgentStore(db_uri),
+            permission_store=permission_store,
+            host_registry=SimpleNamespace(  # type: ignore[arg-type]
+                get=lambda host_id: SimpleNamespace(host_id=host_id, pending_import_local={})
+            ),
+            host_store=SimpleNamespace(  # type: ignore[arg-type]
+                get_host=lambda host_id: SimpleNamespace(user_id=host_owners[host_id])
+            ),
+            auth_provider=UnifiedAuthProvider(source="header", local_single_user=False),
+        ),
+        prefix="/v1",
+    )
+
+    async def _import_as(user: str, host_id: str) -> dict[str, object]:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as import_client:
+            response = await import_client.post(
+                "/v1/imports/local/stream" if stream else "/v1/imports/local",
+                headers={"X-Forwarded-Email": user},
+                json={"host_id": host_id, "source": "claude", "session_id": "claude-known-1"},
+            )
+        assert response.status_code == 200, response.text
+        if not stream:
+            return response.json()
+        events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+        assert events[-1]["event"] == "done"
+        return events[-1]
+
+    alice_result = await _import_as("alice@example.com", "alice-host")
+    assert (alice_result["imported"], alice_result["already_imported"]) == (0, 1)
+    assert alice_result["already_imported_session"] == {
+        "session_id": existing.id,
+        "title": "Planning thread",
+        "archived": True,
+    }
+
+    bob_result = await _import_as("bob@example.com", "bob-host")
+    assert (bob_result["imported"], bob_result["already_imported"]) == (0, 1)
+    assert bob_result["already_imported_session"] is None
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "stream"])

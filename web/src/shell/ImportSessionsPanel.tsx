@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useHosts } from "@/hooks/useHosts";
+import { useArchiveConversation } from "@/hooks/useConversations";
 import { Link } from "@/lib/routing";
 import { HostLabel } from "./HostLabel";
 import { Button } from "@/components/ui/button";
@@ -14,7 +15,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { ImportSourceSelector } from "@/lib/sessionsApi";
+import type { ExistingImportRef, ImportSourceSelector } from "@/lib/sessionsApi";
 import { useSessionImportStore } from "@/store/sessionImport";
 
 // Harnesses the import endpoint accepts, with human labels for the picker.
@@ -37,7 +38,8 @@ type ImportMode = "recent" | "session";
  * Inline (non-modal) import UI for the Settings "Import sessions" section.
  * Imports recent transcripts or one known harness session through the chosen
  * host, then refreshes the sidebar. Already-imported sessions are skipped
- * server-side; progress and results show aggregate counts.
+ * server-side; progress and results show aggregate counts, and an exact-id
+ * import that was already imported links back to the existing session.
  */
 export function ImportSessionsPanel() {
   const queryClient = useQueryClient();
@@ -235,6 +237,12 @@ export function ImportSessionsPanel() {
               Imported {importedCount} before the import stopped.
             </p>
           ) : null}
+          {result?.alreadyImportedSession && (
+            <ExistingImportNotice
+              key={result.alreadyImportedSession.id}
+              existing={result.alreadyImportedSession}
+            />
+          )}
           {importedCount > 0 && (
             <Link to="/" className="w-fit text-sm text-primary hover:underline">
               View sessions
@@ -283,6 +291,50 @@ export function ImportSessionsPanel() {
         <p className="text-sm text-destructive" data-testid="import-error">
           {error}
         </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Points an exact-id import back at the session it already created, so a user
+ * can reopen it (and restore it if it was archived) instead of hunting for it.
+ */
+function ExistingImportNotice({ existing }: { existing: ExistingImportRef }) {
+  const unarchive = useArchiveConversation();
+  const archived = existing.archived && !unarchive.isSuccess;
+  const title = existing.title ?? "Untitled session";
+  return (
+    <div
+      className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm"
+      data-testid="import-existing-session"
+    >
+      <span className="text-muted-foreground">
+        Already imported as <span className="text-foreground">“{title}”</span>
+        {archived ? " (archived)" : ""}.
+      </span>
+      <Link
+        to={`/c/${existing.id}`}
+        className="text-primary hover:underline"
+        data-testid="import-existing-session-open"
+      >
+        Open session
+      </Link>
+      {archived && (
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="import-existing-session-unarchive"
+          loading={unarchive.isPending}
+          onClick={() => unarchive.mutate({ id: existing.id, archived: false })}
+        >
+          Unarchive
+        </Button>
+      )}
+      {unarchive.isSuccess && (
+        <span className="text-muted-foreground" data-testid="import-existing-session-restored">
+          Restored to your sessions.
+        </span>
       )}
     </div>
   );

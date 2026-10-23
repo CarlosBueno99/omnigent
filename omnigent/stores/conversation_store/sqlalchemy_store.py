@@ -117,6 +117,7 @@ from omnigent.stores.conversation_store.overrides import (
 from omnigent.stores.conversation_store.overrides import (
     encode_session_overrides as _encode_session_overrides,
 )
+from omnigent.util.uuid import InvalidUuidError
 
 _logger = logging.getLogger(__name__)
 
@@ -161,6 +162,38 @@ def _encode_session_state(
 # to the connection's next pooled use. Longer than the client's own
 # ``SEARCH_FETCH_TIMEOUT_MS`` so the browser gives up first on the happy path.
 _SEARCH_STATEMENT_TIMEOUT_MS = 15_000
+
+# A search query is also tried as an exact session id when it is one token in
+# this length range. The upper bound is the ``external_session_id`` column width;
+# the lower bound keeps ordinary short words off the id lookup.
+_SESSION_ID_SEARCH_MIN_LEN = 8
+_SESSION_ID_SEARCH_MAX_LEN = 128
+
+
+def _session_id_search_terms(search_query: str) -> tuple[str | None, str | None]:
+    """Return the session ids a pasted search query could name.
+
+    A user who knows a session's id (an Omnigent id, or the harness id it was
+    imported from) can paste it into session search. Surrounding whitespace is
+    ignored; a query containing inner whitespace is never an id.
+
+    :param search_query: The raw search text, e.g. ``"  conv_<32 hex>  "``.
+    :returns: ``(conversation_id, external_session_id)``. ``conversation_id`` is
+        the bare 32-char hex form when the token parses as an Omnigent id (bare,
+        dashed, or legacy-prefixed), else ``None``. ``external_session_id`` is
+        the token itself, or ``None`` when the query cannot be an id at all.
+    """
+    token = search_query.strip()
+    if not _SESSION_ID_SEARCH_MIN_LEN <= len(token) <= _SESSION_ID_SEARCH_MAX_LEN:
+        return None, None
+    if any(character.isspace() for character in token):
+        return None, None
+    try:
+        conversation_id: str | None = uuid_to_bytes(token).hex()
+    except InvalidUuidError:
+        conversation_id = None
+    return conversation_id, token
+
 
 # Upper bound on rows fetched per SQL statement when listing conversation
 # items. A deployed managed-Postgres backend failed one oversized read of a
@@ -2897,6 +2930,42 @@ class SqlAlchemyConversationStore(ConversationStore):
 
         run_write_transaction(self._conv_session_immediate, "delete_label", write)
 
+    def _external_session_id_match(
+        self, external_session_id: str, qualifying_ids: list[str] | None
+    ) -> Any:
+        """Build a ``conversations`` filter for one exact harness session id.
+
+        Single-DB: a correlated EXISTS on the metadata primary key, so each
+        candidate row costs one index probe. Split-DB: the metadata table is on
+        another database, so resolve matching ids first, bounded to
+        *qualifying_ids* when the caller is permission-scoped.
+
+        :param external_session_id: Exact source harness id, e.g. a Claude
+            session uuid.
+        :param qualifying_ids: Permission-qualifying conversation ids already
+            prefetched for a split-DB list, or ``None``.
+        :returns: A boolean SQL expression over :class:`SqlConversation`.
+        """
+        if self._conv_engine is self._engine:
+            return (
+                select(SqlConversationMetadata.id)
+                .where(
+                    SqlConversationMetadata.workspace_id == SqlConversation.workspace_id,
+                    SqlConversationMetadata.id == SqlConversation.id,
+                    SqlConversationMetadata.external_session_id == external_session_id,
+                )
+                .exists()
+            )
+        id_stmt = select(SqlConversationMetadata.id).where(
+            SqlConversationMetadata.workspace_id == current_workspace_id(),
+            SqlConversationMetadata.external_session_id == external_session_id,
+        )
+        if qualifying_ids is not None:
+            id_stmt = id_stmt.where(SqlConversationMetadata.id.in_(qualifying_ids))
+        with self._session("list_conversations") as meta_sess:
+            matching_ids = list(meta_sess.execute(id_stmt).scalars())
+        return SqlConversation.id.in_(matching_ids)
+
     def list_conversations(
         self,
         limit: int = 20,
@@ -2961,6 +3030,9 @@ class SqlAlchemyConversationStore(ConversationStore):
             query. Implemented with the SQL ``LIKE`` operator
             (no FTS) so it works against both SQLite and
             Postgres without extra extensions.
+            A query that is one id-shaped token also matches the
+            session with that exact id or exact harness
+            ``external_session_id``.
         :param include_archived: When ``False`` (default), exclude
             rows where ``archived`` is true. When ``True``, include
             archived rows alongside non-archived ones.
@@ -3204,7 +3276,15 @@ class SqlAlchemyConversationStore(ConversationStore):
                     )
                     .exists()
                 )
-                stmt = stmt.where(or_(title_match, content_match))
+                search_matches: list[Any] = [title_match, content_match]
+                conversation_id_term, external_id_term = _session_id_search_terms(search_query)
+                if conversation_id_term is not None:
+                    search_matches.append(SqlConversation.id == conversation_id_term)
+                if external_id_term is not None:
+                    search_matches.append(
+                        self._external_session_id_match(external_id_term, qualifying_ids)
+                    )
+                stmt = stmt.where(or_(*search_matches))
             if project is not None:
                 # Dual-read by project NAME: a session is "in <name>" if it has
                 # EITHER the first-class membership (metadata.project_id → the

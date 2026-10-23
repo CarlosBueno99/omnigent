@@ -40,6 +40,9 @@ const mocks = vi.hoisted(() => ({
   me: { id: "alice", is_admin: false } as { id: string; is_admin: boolean } | null,
   conversations: [] as Conversation[],
   conversationQuery: vi.fn(),
+  conversationSearch: vi.fn(),
+  // Server-side search results keyed by the exact query the hook receives.
+  searchResults: {} as Record<string, Conversation[]>,
   // Optional multi-page dataset (array of per-page row arrays) for pagination
   // tests. When unset the mock serves a single page of `conversations`.
   pages: undefined as Conversation[][] | undefined,
@@ -86,16 +89,19 @@ vi.mock("@/hooks/useConversations", async () => {
     // fourth (`project`) arg so the mock mirrors the server-side ?project=
     // scoping.
     useConversations: (
-      _searchQuery?: string,
+      searchQuery?: string,
       includeArchived?: boolean,
       _options?: unknown,
       project?: string,
       visibility?: "mine" | "shared" | "archived",
     ) => {
       mocks.conversationQuery({ includeArchived, project, visibility });
+      mocks.conversationSearch(searchQuery ?? "");
       // `mocks.pages` (array of per-page row arrays) drives multi-page tests;
       // otherwise serve a single page of `mocks.conversations`.
-      const source = mocks.pages ?? [mocks.conversations];
+      const source = searchQuery
+        ? [mocks.searchResults[searchQuery] ?? []]
+        : (mocks.pages ?? [mocks.conversations]);
       const [shown, setShown] = useState(1);
       const pages = source.slice(0, shown).map((rows) => ({
         data: project ? rows.filter((c) => c.labels?.["omni_project"] === project) : rows,
@@ -121,6 +127,10 @@ vi.mock("@/hooks/useConversations", async () => {
       mutate: (vars: { id: string; archived: boolean }, opts?: { onSuccess?: () => void }) => {
         mocks.archiveMutate(vars, opts);
         opts?.onSuccess?.();
+      },
+      mutateAsync: (vars: { id: string; archived: boolean }) => {
+        mocks.archiveMutate(vars);
+        return Promise.resolve();
       },
       isPending: false,
     }),
@@ -234,6 +244,8 @@ beforeEach(() => {
   mocks.bulkDeleteMutate.mockReset();
   mocks.fetchNextPage.mockReset();
   mocks.conversationQuery.mockReset();
+  mocks.conversationSearch.mockReset();
+  mocks.searchResults = {};
   mocks.theme = "system";
   mocks.isEmbedded = false;
   mocks.accountsEnabled = true;
@@ -1290,7 +1302,7 @@ describe("SettingsPage", () => {
     expect(localStorage.getItem("omnigent:default-base-branch")).toBeNull();
   });
 
-  it("lists archived sessions and unarchives on click", () => {
+  it("lists archived sessions and unarchives on click", async () => {
     mocks.conversations = [
       conv("conv_active"),
       conv("conv_archived", { archived: true, title: "Old chat" }),
@@ -1311,8 +1323,77 @@ describe("SettingsPage", () => {
       id: "conv_archived",
       archived: false,
     });
-    // Unarchiving opens the restored session (the mock mutate runs onSuccess).
-    expect(screen.getByTestId("location").textContent).toBe("/c/conv_archived");
+    // Unarchiving opens the restored session once the mutation settles.
+    await waitFor(() =>
+      expect(screen.getByTestId("location").textContent).toBe("/c/conv_archived"),
+    );
+  });
+
+  it("searches archived sessions server-side by a pasted session ID and unarchives the match", async () => {
+    const imported = conv("conv_imported", { archived: true, title: "Imported planning" });
+    mocks.conversations = [conv("conv_other", { archived: true, title: "Other chat" }), imported];
+    mocks.searchResults = { "claude-harness-1": [imported] };
+    renderPage("/settings/archived");
+
+    expect(mocks.conversationSearch).toHaveBeenLastCalledWith("");
+    expect(screen.getAllByTestId("archived-row")).toHaveLength(2);
+
+    fireEvent.change(screen.getByTestId("archived-search"), {
+      target: { value: "  claude-harness-1 " },
+    });
+    // Debounced, then trimmed before it reaches the server query.
+    await waitFor(() =>
+      expect(mocks.conversationSearch).toHaveBeenLastCalledWith("claude-harness-1"),
+    );
+    const rows = screen.getAllByTestId("archived-row");
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]).getByText("Imported planning")).toBeInTheDocument();
+    expect(mocks.conversationQuery).toHaveBeenLastCalledWith({
+      includeArchived: true,
+      project: undefined,
+      visibility: "archived",
+    });
+
+    fireEvent.click(within(rows[0]).getByTestId("unarchive-conversation"));
+    expect(mocks.archiveMutate.mock.calls[0][0]).toEqual({
+      id: "conv_imported",
+      archived: false,
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("location").textContent).toBe("/c/conv_imported"),
+    );
+  });
+
+  it("shows a search-specific empty state and composes search with the project filter", async () => {
+    mocks.projectNames = ["Alpha"];
+    mocks.conversations = [
+      conv("conv_a", { archived: true, title: "Alpha chat", labels: { omni_project: "Alpha" } }),
+    ];
+    renderPage("/settings/archived");
+
+    fireEvent.change(screen.getByTestId("archived-search"), { target: { value: "missing-id-9" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("archived-empty")).toHaveTextContent(
+        "No archived sessions match “missing-id-9”.",
+      ),
+    );
+
+    fireEvent.change(screen.getByTestId("archived-project-filter"), {
+      target: { value: "project:Alpha" },
+    });
+    expect(mocks.conversationQuery).toHaveBeenLastCalledWith({
+      includeArchived: true,
+      project: "Alpha",
+      visibility: undefined,
+    });
+    expect(mocks.conversationSearch).toHaveBeenLastCalledWith("missing-id-9");
+    expect(screen.getByTestId("archived-empty")).toHaveTextContent(
+      "No archived sessions match “missing-id-9” in this project.",
+    );
+
+    // Clearing the search restores the unfiltered project list.
+    fireEvent.change(screen.getByTestId("archived-search"), { target: { value: "" } });
+    await waitFor(() => expect(screen.getAllByTestId("archived-row")).toHaveLength(1));
   });
 
   it("deletes an archived session after confirming, with no row-click navigation", () => {

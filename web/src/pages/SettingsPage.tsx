@@ -2848,9 +2848,19 @@ function ImportSection() {
   );
 }
 
+/** Matches the sidebar and command-palette search debounce. */
+const ARCHIVED_SEARCH_DEBOUNCE_MS = 300;
+
 function ArchivedSection() {
   // `undefined` = all projects; a name scopes the list to that project.
   const [project, setProject] = useState<string | undefined>(undefined);
+  // Server-side search: title, content, or an exact Omnigent / harness session id.
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchQuery(searchInput.trim()), ARCHIVED_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
   const [retentionDays, setRetentionDays] = useState<number | null>(() => readRetentionDays());
   const [deleteExpiredOpen, setDeleteExpiredOpen] = useState(false);
   const bulkDelete = useBulkDeleteConversations();
@@ -2883,7 +2893,7 @@ function ArchivedSection() {
   // The unfiltered view can request only archives across all accessible sessions.
   // Keep includeArchived for older servers that ignore visibility.
   const listQuery = useConversations(
-    "",
+    searchQuery,
     true,
     undefined,
     project,
@@ -2973,6 +2983,17 @@ function ArchivedSection() {
       title="Archived sessions"
       description="Sessions you've archived. Restore one to the sidebar, or delete it for good."
     >
+      <Input
+        type="search"
+        value={searchInput}
+        onChange={(event) => setSearchInput(event.target.value)}
+        placeholder="Search by name, content, or session ID"
+        aria-label="Search archived sessions"
+        data-testid="archived-search"
+        autoComplete="off"
+        maxLength={256}
+        className="mb-4 w-full sm:max-w-md"
+      />
       <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-2">
         <div className="flex items-center gap-2">
           <label htmlFor="archived-retention" className="text-ui text-muted-foreground">
@@ -3128,8 +3149,12 @@ function ArchivedSection() {
       ) : archived.length === 0 && !listQuery.hasNextPage ? (
         // Definitive empty only when there are no archived rows AND no further
         // pages to fetch.
-        <p className="text-ui text-muted-foreground">
-          {project ? "No archived sessions in this project." : "No archived sessions."}
+        <p className="text-ui text-muted-foreground" data-testid="archived-empty">
+          {searchQuery
+            ? `No archived sessions match “${searchQuery}”${project ? " in this project" : ""}.`
+            : project
+              ? "No archived sessions in this project."
+              : "No archived sessions."}
         </p>
       ) : (
         <>
@@ -3162,9 +3187,11 @@ function ArchivedSection() {
             // onto later pages, so a page with none isn't the end. Offer to page
             // forward instead of dead-ending on the definitive empty state.
             <p className="text-ui text-muted-foreground">
-              {project
-                ? "No archived sessions in this project on this page."
-                : "No archived sessions on this page."}
+              {searchQuery
+                ? "No matching archived sessions on this page."
+                : project
+                  ? "No archived sessions in this project on this page."
+                  : "No archived sessions on this page."}
             </p>
           )}
           {/* Keep the pager visible whenever more pages exist, independent of the
@@ -3430,10 +3457,13 @@ function ArchivedRow({
             data-testid="unarchive-conversation"
             disabled={busy}
             onClick={() =>
-              archive.mutate(
-                { id: conversation.id, archived: false },
-                { onSuccess: () => navigate(`/c/${conversation.id}`) },
-              )
+              // The optimistic overlay drops this row from the archived list (unmounting
+              // it), which skips per-call mutate callbacks; the promise still settles.
+              archive
+                .mutateAsync({ id: conversation.id, archived: false })
+                .then(() => navigate(`/c/${conversation.id}`))
+                // The hook's onError already rolls back and shows a toast.
+                .catch(() => {})
             }
           >
             <ArchiveRestoreIcon className="size-3.5" />

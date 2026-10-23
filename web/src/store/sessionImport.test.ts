@@ -18,6 +18,7 @@ const DONE: LocalImportResult = {
   failed: 0,
   sessions: [],
   failures: [],
+  alreadyImportedSession: null,
 };
 
 /** A stream the test settles by hand, so the in-flight state can be inspected. */
