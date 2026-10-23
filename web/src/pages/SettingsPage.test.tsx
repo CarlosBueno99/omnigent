@@ -1731,6 +1731,35 @@ describe("SettingsPage", () => {
     expect(screen.getByText("None selected")).toBeInTheDocument();
   });
 
+  it("bulk actions during a search touch only the matching rows", async () => {
+    const match = conv("a2", { archived: true, title: "Chat B" });
+    mocks.conversations = [
+      conv("a1", { archived: true, title: "Chat A" }),
+      match,
+      conv("a3", { archived: true, title: "Chat C" }),
+    ];
+    mocks.searchResults = { "harness-b": [match] };
+    renderPage("/settings/archived");
+
+    fireEvent.click(screen.getByTestId("archived-toggle-selection"));
+    fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+    expect(screen.getByText("3 selected")).toBeInTheDocument();
+
+    // Searching drops hidden rows from the selection; Select all picks only matches.
+    fireEvent.change(screen.getByTestId("archived-search"), { target: { value: "harness-b" } });
+    await waitFor(() => expect(screen.getAllByTestId("archived-row")).toHaveLength(1));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Deselect all" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("archived-bulk-unarchive"));
+    expect(mocks.bulkArchiveMutate).toHaveBeenCalledWith(
+      { ids: ["a2"], archived: false },
+      expect.anything(),
+    );
+  });
+
   it("hides the Select button when there are no archived sessions", () => {
     mocks.conversations = [conv("conv_active")];
     renderPage("/settings/archived");

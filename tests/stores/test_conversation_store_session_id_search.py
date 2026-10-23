@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from sqlalchemy import event
 
 from omnigent.server.auth import LEVEL_OWNER
 from omnigent.stores.conversation_store.sqlalchemy_store import (
@@ -141,3 +142,69 @@ def test_unscoped_split_db_search_skips_the_harness_id_lookup(tmp_path: Path) ->
     assert by_harness_id.data == []
     by_omnigent_id = store.list_conversations(search_query=imported.id)
     assert [conversation.id for conversation in by_omnigent_id.data] == [imported.id]
+
+
+def test_harness_id_search_composes_with_project_and_owner_scope(
+    stores: tuple[SqlAlchemyConversationStore, SqlAlchemyPermissionStore],
+) -> None:
+    """A harness-id match still honours the project filter and the "mine" scope."""
+    store, permissions = stores
+    harness_session_id = str(uuid.uuid4())
+    imported = store.create_conversation(title="Imported from Claude")
+    store.set_external_session_id(imported.id, harness_session_id)
+    store.set_labels(imported.id, {"omni_project": "Work"})
+    permissions.grant(_ALICE, imported.id, LEVEL_OWNER)
+
+    def _ids(**filters: object) -> set[str]:
+        page = store.list_conversations(search_query=harness_session_id, **filters)
+        return {conversation.id for conversation in page.data}
+
+    assert _ids(owned_by=_ALICE) == {imported.id}
+    assert _ids(owned_by=_ALICE, project="Work") == {imported.id}
+    assert _ids(owned_by=_ALICE, project="Personal") == set()
+    assert _ids(owned_by=_BOB) == set()
+
+
+def test_harness_id_match_sql_stays_scoped(
+    stores: tuple[SqlAlchemyConversationStore, SqlAlchemyPermissionStore],
+) -> None:
+    """The harness-id predicate probes the metadata primary key, never the whole table.
+
+    Single-DB correlates an EXISTS on the outer row; split-DB probes only the
+    caller's qualifying ids, with a row cap. Asserted on the emitted SQL because
+    an unscoped scan returns the same rows.
+    """
+    store, permissions = stores
+    harness_session_id = str(uuid.uuid4())
+    imported = store.create_conversation(title="Imported from Claude")
+    store.set_external_session_id(imported.id, harness_session_id)
+    permissions.grant(_ALICE, imported.id, LEVEL_OWNER)
+
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _params, _context, _executemany) -> None:
+        statements.append(" ".join(statement.split()).lower())
+
+    engines = {store._engine, store._conv_engine}
+    for engine in engines:
+        event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        page = store.list_conversations(search_query=harness_session_id, accessible_by=_ALICE)
+    finally:
+        for engine in engines:
+            event.remove(engine, "before_cursor_execute", _capture)
+    assert [conversation.id for conversation in page.data] == [imported.id]
+
+    if store._conv_engine is store._engine:
+        [list_sql] = [sql for sql in statements if sql.startswith("select conversations.")]
+        assert "omnigent_conversation_metadata.id = conversations.id" in list_sql, list_sql
+        assert "omnigent_conversation_metadata.external_session_id = ?" in list_sql, list_sql
+    else:
+        [probe_sql] = [
+            sql
+            for sql in statements
+            if sql.startswith("select omnigent_conversation_metadata.id from")
+            and "external_session_id = ?" in sql
+        ]
+        assert "omnigent_conversation_metadata.id in (" in probe_sql, probe_sql
+        assert " limit ?" in probe_sql, probe_sql

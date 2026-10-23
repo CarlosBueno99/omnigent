@@ -168,8 +168,8 @@ _SEARCH_STATEMENT_TIMEOUT_MS = 15_000
 _SESSION_ID_SEARCH_MIN_LEN = 8
 _SESSION_ID_SEARCH_MAX_LEN = 128
 
-# Cap on sessions one harness id resolves to in a split-DB search. Import dedup
-# is workspace-wide, so one harness id rarely maps to more than one session.
+# Caps split-DB matches for one harness id; import dedup keeps this to
+# roughly one session per source.
 _EXTERNAL_SESSION_ID_MATCH_LIMIT = 50
 
 
