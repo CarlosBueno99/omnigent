@@ -1669,6 +1669,7 @@ async def test_managed_launch_fails_when_runner_never_connects(
         ),
         tracker=tracker,
         conversation_store=SimpleNamespace(
+            get_conversation=lambda _sid: None,
             set_host_id=lambda _sid, _host_id, _workspace: conv,
         ),
         host_store=_HostStore(),  # type: ignore[arg-type]
@@ -1744,6 +1745,7 @@ async def test_managed_launch_fails_and_tears_down_when_harness_not_configured(
         ),
         tracker=tracker,
         conversation_store=SimpleNamespace(
+            get_conversation=lambda _sid: None,
             set_host_id=lambda _sid, _host_id, _workspace: conv,
         ),
         host_store=_HostStore(),  # type: ignore[arg-type]
@@ -2087,6 +2089,80 @@ async def test_managed_session_deleted_during_provision_terminates_sandbox(
     # don't surface as unretrieved-exception noise after the test.
     for future in host_futures:
         future.cancel()
+
+
+async def test_managed_session_stopped_during_provision_terminates_sandbox(
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An accepted stop during provisioning leaves no sandbox running for the session."""
+    import threading
+
+    env = managed_session_env
+    monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
+    # Keep the never-connecting fake runner's own timeout teardown out of the window.
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S", 120
+    )
+    loop = asyncio.get_running_loop()
+    gate = threading.Event()
+    host_futures: list[asyncio.Future[ApplicationCommunicator]] = []
+
+    def _start_fake_sandbox_host(invocation: HostStartInvocation) -> None:
+        future = asyncio.run_coroutine_threadsafe(
+            _fake_sandbox_host(
+                env.app, invocation.host_id, invocation.host_name, invocation.token
+            ),
+            loop,
+        )
+        host_futures.append(asyncio.wrap_future(future, loop=loop))
+
+    fake = FakeSandboxLauncher(provision_gate=gate, on_host_start=_start_fake_sandbox_host)
+    install_fake_modal_launcher(monkeypatch, fake)
+
+    agent = await create_test_agent(env.client, name="managed-stop-race-agent")
+    resp = await env.client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "host_type": "managed"},
+    )
+    assert resp.status_code == 201, resp.text
+    session_id = resp.json()["id"]
+    events = f"/v1/sessions/{session_id}/events"
+    queued = await env.client.post(
+        events,
+        json={
+            "type": "message",
+            "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+        },
+    )
+    assert queued.status_code == 202 and queued.json()["queued"] is True, queued.text
+
+    stop = await env.client.post(events, json={"type": "stop_session"})
+    try:
+        if not stop.is_success:
+            # Refusing the stop mid-launch is acceptable only if the message stays queued.
+            assert env.conv_store.list_pending_inputs(session_id), stop.text
+            return
+        assert env.conv_store.list_pending_inputs(session_id) == []
+
+        gate.set()
+        deadline = loop.time() + 15.0
+        while loop.time() < deadline and not fake.terminated:
+            await asyncio.sleep(0.05)
+        conv = env.conv_store.get_conversation(session_id)
+        assert conv is not None
+        launched = [future.done() and not future.cancelled() for future in host_futures]
+        hosts = [host.host_id for host in env.host_store.list_hosts(RESERVED_USER_LOCAL)]
+        leaked = (
+            f"terminated={fake.terminated!r}, runner launch sent to host={launched!r}, "
+            f"session host_id={conv.host_id!r}, runner_id={conv.runner_id!r}, hosts={hosts!r}"
+        )
+        assert fake.terminated == ["sb-fake-1"], f"stopped session's sandbox kept up: {leaked}"
+        assert hosts == [], leaked
+    finally:
+        gate.set()
+        for future in host_futures:
+            future.cancel()
 
 
 async def test_delete_reaped_managed_session_removes_durable_host(

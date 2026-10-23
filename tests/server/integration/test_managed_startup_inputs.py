@@ -335,6 +335,10 @@ async def test_stop_before_host_ready_cancels_all_saved_inputs(
     response = await env.client.post(f"/v1/sessions/{session_id}/events", json={"type": control})
     assert response.status_code == 202, response.text
     assert env.conv_store.list_pending_inputs(session_id) == []
+    # Only a stop also abandons the managed launch (see _bind_and_launch_managed_runner).
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None
+    assert conv.labels[STARTUP_LABEL] == ("stopped" if control == "stop_session" else "cancelled")
     # SDK startup/reconnect loads this endpoint and resumes a trailing user item.
     history = await env.client.get(f"/v1/sessions/{session_id}/items")
     assert history.status_code == 200, history.text
@@ -346,6 +350,18 @@ async def test_stop_before_host_ready_cancels_all_saved_inputs(
     finally:
         await runner.aclose()
     assert forwarded == []
+
+
+async def test_stop_after_interrupt_still_abandons_the_launch(startup_env: _Env) -> None:
+    env = startup_env
+    session_id = await _create(env)
+    for control, label in (("interrupt", "cancelled"), ("stop_session", "stopped")):
+        response = await env.client.post(
+            f"/v1/sessions/{session_id}/events", json={"type": control}
+        )
+        assert response.status_code == 202, response.text
+        conv = env.conv_store.get_conversation(session_id)
+        assert conv is not None and conv.labels[STARTUP_LABEL] == label
 
 
 async def test_stop_cancels_local_dispatch_and_clears_saved_input(startup_env: _Env) -> None:

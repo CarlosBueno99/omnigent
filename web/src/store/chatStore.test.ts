@@ -6652,6 +6652,39 @@ describe("chatStore — stop", () => {
     useChatStore.getState().stop();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { scenario: "launching", stage: "provisioning", draft: null, restored: "first\n\nsecond" },
+    { scenario: "launch failed", stage: "failed", draft: null, restored: null },
+    { scenario: "newer draft", stage: "provisioning", draft: "edited", restored: "edited" },
+  ] as const)(
+    "restores startup messages saved for a sandbox launch on Interrupt: $scenario",
+    async ({ stage, draft, restored }) => {
+      clearSessionDrafts();
+      if (draft) setSessionDraft("conv_launch", { text: draft, files: [] });
+      useChatStore.setState({
+        conversationId: "conv_launch",
+        startupPending: true,
+        sandboxStatus: { stage, error: null },
+        pendingUserMessages: [
+          { tempId: "p1", content: [{ type: "input_text", text: "first" }], posted: true },
+          { tempId: "p2", content: [{ type: "input_text", text: "second" }] },
+        ],
+      });
+
+      useChatStore.getState().stop();
+      await tick();
+
+      const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+      expect(body).toMatchObject({ type: "interrupt" });
+      expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+      expect(useChatStore.getState().failedSendDraft).toEqual(
+        restored === null ? null : { conversationId: "conv_launch", text: restored, files: [] },
+      );
+      expect(getSessionDraft("conv_launch")?.text).toBe(restored ?? undefined);
+      clearSessionDrafts();
+    },
+  );
 });
 
 describe("chatStore — handleSessionEvent (session.* events)", () => {

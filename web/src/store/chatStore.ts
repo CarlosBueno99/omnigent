@@ -1462,14 +1462,26 @@ function modelSelectionPending(state: ConversationState): boolean {
   );
 }
 
+function sandboxLaunching(state: ConversationState): boolean {
+  return state.sandboxStatus !== null && state.sandboxStatus.stage !== "failed";
+}
+
 // A native CLI can't take input until its sandbox is up, and a launch can take
 // minutes; the server holds a message for less than that.
 function nativeSandboxLaunching(state: ConversationState): boolean {
-  return (
-    state.isNativeTerminalSession &&
-    state.sandboxStatus !== null &&
-    state.sandboxStatus.stage !== "failed"
-  );
+  return state.isNativeTerminalSession && sandboxLaunching(state);
+}
+
+/** The text of the messages waiting in the session's pending bubbles. */
+function pendingMessagesText(state: ConversationState): string {
+  return state.pendingUserMessages
+    .map((message) =>
+      message.content
+        .flatMap((block) => (block.type === "input_text" ? [block.text] : []))
+        .join(""),
+    )
+    .filter((text) => text.trim() !== "")
+    .join("\n\n");
 }
 
 // Restores a draft held through a launch whose end never reaches this tab; well
@@ -3106,6 +3118,15 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         return;
     }
     if (isTempConvId(sessionId)) return;
+    // Interrupt deletes the messages the server saved for a launching sandbox; hand their
+    // text back so it can be corrected and resent. A newer composer draft wins.
+    const savedText =
+      state.startupPending && sandboxLaunching(state) ? pendingMessagesText(state) : "";
+    if (savedText) {
+      const draft = getSessionDraft(sessionId) ?? { text: savedText, files: [] };
+      setSessionDraft(sessionId, draft);
+      setActive({ failedSendDraft: { ...draft, conversationId: sessionId } });
+    }
     // Fire-and-forget interrupt; the server emits session.interrupted
     // + response.incomplete on the open stream, which the pump
     // translates into the cancelled bubble decoration. We deliberately
