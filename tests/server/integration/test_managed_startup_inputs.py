@@ -335,7 +335,7 @@ async def test_stop_before_host_ready_cancels_all_saved_inputs(
     response = await env.client.post(f"/v1/sessions/{session_id}/events", json={"type": control})
     assert response.status_code == 202, response.text
     assert env.conv_store.list_pending_inputs(session_id) == []
-    # Only a stop also abandons the managed launch (see _bind_and_launch_managed_runner).
+    # Only a stop also abandons the managed launch.
     conv = env.conv_store.get_conversation(session_id)
     assert conv is not None
     assert conv.labels[STARTUP_LABEL] == ("stopped" if control == "stop_session" else "cancelled")

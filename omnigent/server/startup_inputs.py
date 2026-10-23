@@ -331,7 +331,8 @@ class ManagedStartupInputs:
             return False
         items = await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
         if state in _CANCELLED_STATES:
-            # A first launch reads the label until its runner is bound, and settles a stop itself.
+            # Keep the label until a runner is recorded so a later stop can still abandon
+            # the launch, and keep a stop for the launch's check after it records one.
             if not items and state == "cancelled" and conv.runner_id is not None:
                 await self._finish(session_id)
             return False

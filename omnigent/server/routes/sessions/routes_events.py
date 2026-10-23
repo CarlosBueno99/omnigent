@@ -1048,10 +1048,11 @@ def register_events_routes(
           deleting the conversation (owner-only). Forwarded
           harness-agnostically to the runner, which hard-kills the
           external process for harnesses that have one (claude-native
-          kills its tmux pane) and 204s otherwise. Stop is non-sticky:
-          it writes no persistent marker, so the next message
-          auto-relaunches the session on its (still-online) host via
-          the normal message-dispatch relaunch path.
+          kills its tmux pane) and 204s otherwise. Stopping a bound
+          runner is non-sticky: the next message auto-relaunches the
+          session on its (still-online) host via the normal
+          message-dispatch relaunch path. A stop during a managed first
+          launch, before its runner is recorded, abandons the sandbox.
         - ``"retry_session"`` reconnects or relaunches the existing runner
           and retries a failed saved startup input, if one is present.
         - ``"message"`` on an ``omnigent claude`` terminal session
@@ -1831,11 +1832,10 @@ def register_events_routes(
                         conversation_store,
                         int(time.time()) - RUNNER_LIVENESS_TTL_S,
                     )
-            # Stop is non-sticky: no persistent marker is written. The
-            # runner tunnel dropping above flips ``runner_online`` to false
-            # honestly, and the next message auto-relaunches the session on
-            # its (still-online) host via the normal message-dispatch
-            # relaunch path below.
+            # Stopping a bound runner is non-sticky: the runner tunnel dropping
+            # above flips ``runner_online`` to false honestly, and the next
+            # message auto-relaunches the session on its (still-online) host
+            # via the normal message-dispatch relaunch path below.
             try:
                 _srv_id = _get_installation_id()
                 _anon = _tel_anon_user_id(user_id, _srv_id)
