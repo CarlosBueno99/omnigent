@@ -6097,8 +6097,9 @@ def upgrade(
     Requires the install to have come from a tool that records extras:
     ``uv tool install`` or ``pipx install``. ``pip`` does not record
     extras, so ``omni upgrade`` refuses to auto-upgrade it and prints the
-    manual command instead. Source checkouts / editable installs are not
-    upgraded here — update those with ``git pull``.
+    manual command instead, as it does for Homebrew installs. Source
+    checkouts / editable installs are not upgraded here — update those with
+    ``git pull``.
 
     :param check_only: Only report availability; do not upgrade. Exits
         with status 1 when a newer release exists.
@@ -6118,6 +6119,7 @@ def upgrade(
         _build_upgrade_suggestion,
         _find_repo_root,
         _is_newer,
+        _pip_invocation,
         _probe_installed_distribution,
         _read_installed_wheel_info,
         _run_upgrade_command,
@@ -6188,14 +6190,28 @@ def upgrade(
     # a manual command instead. We still allow ``--check`` because that only
     # reports availability.
     if not check_only:
+        # Homebrew owns its keg and deletes the old one (with the interpreter
+        # running this command) on upgrade, so the upgrade must go through brew.
+        if info.detected_installer == "brew":
+            click.echo(
+                "omnigent was installed with Homebrew, which manages its files. "
+                "Upgrade it with Homebrew instead:\n\n"
+                "    brew upgrade omnigent-ai/tap/omnigent\n"
+                "    # or, for a --HEAD install:\n"
+                "    brew upgrade --fetch-HEAD omnigent-ai/tap/omnigent\n\n"
+                "The tap's formula is updated after each PyPI release, so it can "
+                "briefly lag the newest version."
+            )
+            raise SystemExit(0)
         if info.detected_installer == "pip":
+            pip = _pip_invocation()
             click.echo(
                 "omnigent was installed with pip, and pip does not record which extras "
                 f"were requested. `{cli_invocation(name='omni')} upgrade` cannot preserve them "
                 "safely, so you should upgrade manually:\n\n"
-                "    pip install -U omnigent\n"
+                f"    {pip} install -U omnigent\n"
                 "    # or, if you need extras:\n"
-                "    pip install -U 'omnigent[your,extras,here]'"
+                f"    {pip} install -U 'omnigent[your,extras,here]'"
             )
             raise SystemExit(0)
         if info.detected_installer == "uv" and _uv_tool_receipt_path() is None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,7 @@ from omnigent.update_check import (
     _build_upgrade_suggestion,
     _InstalledWheelInfo,
     _newest_nightly_version,
+    _read_installed_wheel_info,
     _upgrade_failure_message,
     _uv_python_pin,
 )
@@ -223,6 +226,44 @@ def test_upgrade_rejects_editable(monkeypatch: pytest.MonkeyPatch, _wheel_instal
 
     assert result.exit_code != 0
     assert "git pull" in result.output
+
+
+def test_upgrade_homebrew_install_offers_brew_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _wheel_install: None
+) -> None:
+    """A Homebrew keg (INSTALLER=brew, no RECORD) upgrades via brew, not a reinstall hint."""
+    libexec = tmp_path / "opt/homebrew/Cellar/omnigent/0.1.0/libexec"
+    dist_info = libexec / "lib/python3.14/site-packages/omnigent-0.1.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text("Metadata-Version: 2.1\nName: omnigent\nVersion: 0.1.0\n")
+    (dist_info / "INSTALLER").write_text("brew\n")
+    monkeypatch.setattr(
+        "omnigent.update_check._get_distribution",
+        lambda: importlib.metadata.PathDistribution(dist_info),
+    )
+    monkeypatch.setattr(
+        "omnigent.update_check._read_installed_wheel_info", _read_installed_wheel_info
+    )
+    monkeypatch.setattr(sys, "executable", str(libexec / "bin/python"))
+    monkeypatch.setattr(sys, "prefix", str(libexec))
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda *_a, **_k: "0.2.0")
+    monkeypatch.setattr("omnigent.cli._wait_for_local_sessions_to_drain", lambda: None)
+
+    ran: list[str] = []
+
+    def _run(command: str, _console: object) -> int:
+        ran.append(command)
+        return 0
+
+    monkeypatch.setattr("omnigent.update_check._run_upgrade_command", _run)
+    monkeypatch.setattr(
+        "omnigent.update_check._probe_installed_distribution", lambda: ("0.2.0", None)
+    )
+
+    result = CliRunner().invoke(cli, ["upgrade"])
+
+    assert "No automatic upgrade command is known" not in result.output
+    assert "brew upgrade" in "\n".join([result.output, *ran]), result.output
 
 
 def test_upgrade_pre_check_detects_release_candidate(

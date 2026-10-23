@@ -27,12 +27,17 @@ class Omnigent < Formula
   url "__OMNIGENT_URL__"
   sha256 "__OMNIGENT_SHA256__"
   license "Apache-2.0"
+  head "https://github.com/omnigent-ai/omnigent.git", branch: "main"
 
   # Most compiled extensions come from upstream wheels (see PREFER_WHEEL in
   # generate_formula.py). jiter, tiktoken and watchfiles still build here, because
   # their maturin wheels have no Mach-O install-name padding and Homebrew cannot
-  # relocate them -- hence the Rust toolchain and the RUSTFLAGS below.
+  # relocate them -- hence the Rust toolchain and the RUSTFLAGS below. A HEAD
+  # checkout has no prebuilt web UI (release sdists ship it), so `setup.py`
+  # builds it with node and pnpm.
+  depends_on "node" => :build
   depends_on "pkgconf" => :build
+  depends_on "pnpm" => :build
   depends_on "rust" => :build
   # certifi, cryptography, pydantic (which bundles pydantic-core), and rpds-py
   # are provided by Homebrew formulae rather than built as virtualenv resources.
@@ -82,13 +87,18 @@ __RESOURCES__
     # cc/rustc on a 3-core bottle builder. Homebrew only auto-installs
     # `py3-none-any` wheels, so copy each platform wheel's cached download back to
     # its real filename and pip-install the file directly.
-    wheels, sdists = resources.partition { |r| r.url.end_with?(".whl") }
+    # omnigent pins its SDKs to its own version, so a HEAD build installs them
+    # from the same checkout instead of the stable release's resources.
+    lockstep_sdks = { "omnigent-client" => "sdks/python-client", "omnigent-ui-sdk" => "sdks/ui" }
+    formula_resources = build.head? ? resources.reject { |r| lockstep_sdks.key?(r.name) } : resources
+    wheels, sdists = formula_resources.partition { |r| r.url.end_with?(".whl") }
     venv.pip_install sdists
     wheels.each do |r|
       whl = buildpath/r.url.split("/").last
       cp r.cached_download, whl
       venv.pip_install whl
     end
+    venv.pip_install lockstep_sdks.values.map { |path| buildpath/path } if build.head?
 
     venv.pip_install_and_link buildpath
 

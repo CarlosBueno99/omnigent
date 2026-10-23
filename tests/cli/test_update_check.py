@@ -2398,19 +2398,47 @@ def _make_wheel_info(**kwargs: object) -> _InstalledWheelInfo:
 def test_cli_upgrade_refuses_pip_and_prints_manual_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pip installs are refused because extras cannot be recovered."""
+    """pip installs are refused because extras cannot be recovered.
+
+    The manual command targets the interpreter running ``omni``, not ``pip`` on PATH."""
     monkeypatch.setattr(
         "omnigent.update_check._read_installed_wheel_info",
         lambda: _make_wheel_info(installer="pip", detected_installer="pip"),
     )
     monkeypatch.setattr("omnigent.update_check._find_repo_root", lambda: None)
     monkeypatch.setattr("omnigent.update_check._uv_tool_receipt_path", lambda: None)
+    monkeypatch.setattr(sys, "executable", "/opt/omnigent/bin/python")
 
     runner = CliRunner()
     result = runner.invoke(cli, ["upgrade"])
     assert result.exit_code == 0
     assert "pip does not record which extras" in result.output
-    assert "pip install -U omnigent" in result.output
+    assert "/opt/omnigent/bin/python -m pip install -U omnigent\n" in result.output
+    assert "/opt/omnigent/bin/python -m pip install -U 'omnigent[" in result.output
+
+
+def test_cli_upgrade_defers_homebrew_install_to_brew(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Homebrew owns its keg, so ``omni upgrade`` prints brew commands and runs nothing."""
+    monkeypatch.setattr(
+        "omnigent.update_check._read_installed_wheel_info",
+        lambda: _make_wheel_info(installer="brew", detected_installer="brew"),
+    )
+    monkeypatch.setattr("omnigent.update_check._find_repo_root", lambda: None)
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.1.0")
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda **_: "0.2.0")
+
+    def _unexpected_run(command: str, _console: object) -> int:
+        raise AssertionError(f"ran an installer inside a Homebrew keg: {command}")
+
+    monkeypatch.setattr("omnigent.update_check._run_upgrade_command", _unexpected_run)
+
+    result = CliRunner().invoke(cli, ["upgrade"])
+
+    assert result.exit_code == 0, result.output
+    assert "    brew upgrade omnigent-ai/tap/omnigent\n" in result.output
+    assert "    brew upgrade --fetch-HEAD omnigent-ai/tap/omnigent\n" in result.output
 
 
 def test_cli_upgrade_refuses_uv_pip_and_prints_manual_command(
