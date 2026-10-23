@@ -296,7 +296,7 @@ MOD_PLUGIN_MANIFEST: Final[JsonObject] = {
     "version": "0.1.0",
     "description": (
         "Connects this Claude Code session to Omnigent: reports turn boundaries and runs "
-        "the prompt, abort, model, effort and compact commands Omnigent sends."
+        "the commands Omnigent sends."
     ),
 }
 

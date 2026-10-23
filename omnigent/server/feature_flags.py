@@ -122,7 +122,7 @@ FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
     FeatureDefinition(
         feature=Feature.CLAUDE_MOD_CHANNEL,
         description=(
-            "Claude-native sessions drive prompts, aborts and model/effort/compact through"
+            "Claude-native sessions drive prompts, model, effort and compact through"
             " the omnigent-bridge mod, with tmux as the fallback"
         ),
         owner="runner",
