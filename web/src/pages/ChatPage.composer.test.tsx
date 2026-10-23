@@ -4,6 +4,7 @@ import type { SkillSummary, SkillsStatus } from "@/lib/types";
 import type * as UseWorkspaceChangedFilesModule from "@/hooks/useWorkspaceChangedFiles";
 import type * as UseSessionModule from "@/hooks/useSession";
 import type * as UseHostsModule from "@/hooks/useHosts";
+import type * as UseHarnessInventoryModule from "@/hooks/useHarnessInventory";
 import type * as RunnerHealthProviderModule from "@/hooks/RunnerHealthProvider";
 import type * as AgentLabelsModule from "@/lib/agentLabels";
 import type * as GoalApiModule from "@/lib/goalApi";
@@ -14,8 +15,9 @@ import type * as FileViewerContextModule from "@/shell/FileViewerContext";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createRef, StrictMode, type ComponentRef, type ReactElement } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { setSessionHost } from "@/lib/sessionHost";
 import { SideChatPane } from "@/components/chat/SideChatPane";
 import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
@@ -27,6 +29,8 @@ import {
   setSessionDraft,
 } from "@/lib/sessionDrafts";
 import { setOmnigentHostConfig } from "@/lib/host";
+import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
+import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import * as host from "@/lib/host";
 import * as identity from "@/lib/identity";
 import {
@@ -34,6 +38,7 @@ import {
   readSessionModelLabelCache,
 } from "@/lib/sessionModelLabelCache";
 import { serializeReplyDraft, type StoredReplyDraft } from "@/lib/replyDraft";
+import { ApiError } from "@/lib/sessionsApi";
 import { COMPOSER_SEND_SHORTCUT_STORAGE_KEY } from "@/lib/composerSendShortcutPreferences";
 import { composerContextToLabels } from "@/lib/composerContextAdapters";
 import { CHAT_COLUMN_WIDTH } from "./chatLayout";
@@ -144,6 +149,17 @@ vi.mock("@/hooks/useSession", async (importOriginal) => ({
 vi.mock("@/hooks/useHosts", async (importOriginal) => ({
   ...(await importOriginal<typeof UseHostsModule>()),
   useHosts: () => ({ data: [] }),
+}));
+const { hostMcpQueryMock } = vi.hoisted(() => ({
+  hostMcpQueryMock: vi.fn(() => ({
+    data: [] as UseHarnessInventoryModule.HostMcpServer[] | undefined,
+    isLoading: false,
+    isError: false,
+  })),
+}));
+vi.mock("@/hooks/useHarnessInventory", async (importOriginal) => ({
+  ...(await importOriginal<typeof UseHarnessInventoryModule>()),
+  useHostMcpServers: hostMcpQueryMock,
 }));
 vi.mock("@/hooks/RunnerHealthProvider", async (importOriginal) => ({
   ...(await importOriginal<typeof RunnerHealthProviderModule>()),
@@ -2720,6 +2736,39 @@ describe("Composer shared visible controls", () => {
     await waitFor(() => expect(setApproval).toHaveBeenCalledWith("full-access"));
   });
 
+  it.each([
+    { permissionLevel: 2, enabled: false },
+    { permissionLevel: 3, enabled: false },
+    { permissionLevel: 4, enabled: true },
+  ])(
+    "lets only the owner change the permission mode (level $permissionLevel)",
+    ({ permissionLevel, enabled }) => {
+      useChatStore.setState({
+        conversationId: "owner-only-permissions",
+        codexApprovalMode: "ask-for-approval",
+      });
+      const setApproval = vi
+        .spyOn(useChatStore.getState(), "setCodexApprovalMode")
+        .mockResolvedValue(undefined);
+      renderWithTooltips(
+        <Composer {...composerProps({ showCodexApprovalMode: true, permissionLevel })} />,
+      );
+      const chip = screen.getByTestId("composer-permission-chip");
+      if (enabled) {
+        expect(chip).toBeEnabled();
+        return;
+      }
+      expect(chip).toBeDisabled();
+      expect(chip).toHaveAttribute(
+        "title",
+        "Only the session owner can change the permission mode",
+      );
+      fireEvent.keyDown(chip, { key: "ArrowDown" });
+      expect(screen.queryByTestId("composer-permission-option-full-access")).toBeNull();
+      expect(setApproval).not.toHaveBeenCalled();
+    },
+  );
+
   it("doesn't offer Read Only as a codex runtime switch", () => {
     useChatStore.setState({
       conversationId: "codex-no-read-only",
@@ -2732,6 +2781,312 @@ describe("Composer shared visible controls", () => {
     fireEvent.keyDown(chip, { key: "ArrowDown" });
     expect(screen.getByTestId("composer-permission-option-full-access")).toBeInTheDocument();
     expect(screen.queryByTestId("composer-permission-option-read-only")).toBeNull();
+  });
+});
+
+describe("Composer permission-mode shortcut", () => {
+  beforeEach(() => {
+    const {
+      conversationId,
+      sessionHarness,
+      claudePermissionMode,
+      codexApprovalMode,
+      setClaudePermissionMode,
+      setCodexApprovalMode,
+    } = useChatStore.getState();
+    // Zustand copies spies into later states, so restore both identity and setters.
+    onTestFinished(() =>
+      useChatStore.setState({
+        conversationId,
+        sessionHarness,
+        claudePermissionMode,
+        codexApprovalMode,
+        setClaudePermissionMode,
+        setCodexApprovalMode,
+      }),
+    );
+  });
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    clearSessionDrafts();
+  });
+
+  /**
+   * Spy on the Claude setter. By default the store lands on the requested mode;
+   * *answer* can instead throw, or land on another mode, for a given request.
+   */
+  function spyClaudeSetter(answer: (mode: string, call: number) => string | Error = (m) => m) {
+    let call = 0;
+    return vi
+      .spyOn(useChatStore.getState(), "setClaudePermissionMode")
+      .mockImplementation(async (mode) => {
+        const outcome = answer(mode, call++);
+        if (outcome instanceof Error) throw outcome;
+        useChatStore.setState({ claudePermissionMode: outcome });
+      });
+  }
+  const refuseAuto = (mode: string) =>
+    mode === "auto"
+      ? new ApiError("Could not switch to auto mode", 503, "runner_unavailable")
+      : mode;
+
+  function renderClaudeSession(conversationId: string, mode = "default") {
+    useChatStore.setState({
+      conversationId,
+      sessionHarness: "claude-native",
+      claudePermissionMode: mode,
+    });
+    renderWithTooltips(<Composer {...composerProps({ showClaudePermissionMode: true })} />);
+    return textarea();
+  }
+  const chip = () => screen.getByTestId("composer-permission-chip");
+  const pressShiftTab = (input: HTMLElement) =>
+    fireEvent.keyDown(input, { key: "Tab", shiftKey: true });
+  const settled = () => waitFor(() => expect(chip()).toBeEnabled());
+  const cycleTo = async (label: string) => {
+    pressShiftTab(textarea());
+    await waitFor(() => expect(chip()).toHaveTextContent(label));
+    await settled();
+  };
+
+  it("cycles a Claude session's mode with Shift+Tab and keeps the draft focused", async () => {
+    const setMode = spyClaudeSetter();
+    const input = renderClaudeSession("cycle-claude");
+    input.focus();
+    fireEvent.change(input, { target: { value: "half-written prompt" } });
+    expect(input).toHaveAttribute("aria-keyshortcuts", "Shift+Tab");
+
+    expect(pressShiftTab(input)).toBe(false);
+    await waitFor(() => expect(chip()).toHaveTextContent("Auto"));
+    await settled();
+    pressShiftTab(input);
+    await waitFor(() => expect(chip()).toHaveTextContent("Accept edits"));
+
+    expect(setMode.mock.calls.map(([mode]) => mode)).toEqual(["auto", "acceptEdits"]);
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue("half-written prompt");
+  });
+
+  it("holds Shift+Tab without a second request while a change is in flight", async () => {
+    let finish: () => void = () => {};
+    const setMode = vi.spyOn(useChatStore.getState(), "setClaudePermissionMode").mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const input = renderClaudeSession("cycle-in-flight");
+
+    pressShiftTab(input);
+    await waitFor(() => expect(chip()).toBeDisabled());
+    expect(input).not.toHaveAttribute("aria-keyshortcuts");
+    expect(pressShiftTab(input)).toBe(false);
+    expect(setMode).toHaveBeenCalledTimes(1);
+    finish();
+    await settled();
+    expect(input).toHaveAttribute("aria-keyshortcuts", "Shift+Tab");
+  });
+
+  it("moves past a mode the server refused on the next press", async () => {
+    const setMode = spyClaudeSetter(refuseAuto);
+    const input = renderClaudeSession("cycle-refused");
+
+    pressShiftTab(input);
+    expect(await screen.findByText("Could not switch to auto mode")).toBeInTheDocument();
+    await settled();
+    pressShiftTab(input);
+    await waitFor(() => expect(chip()).toHaveTextContent("Accept edits"));
+    expect(setMode.mock.calls.map(([mode]) => mode)).toEqual(["auto", "acceptEdits"]);
+  });
+
+  it("moves past a mode the server confirmed as a different one", async () => {
+    const setMode = spyClaudeSetter((mode) => (mode === "auto" ? "default" : mode));
+    const input = renderClaudeSession("cycle-downgraded");
+
+    pressShiftTab(input);
+    await waitFor(() => expect(setMode).toHaveBeenCalledTimes(1));
+    await settled();
+    expect(chip()).toHaveTextContent("Manual");
+    pressShiftTab(input);
+    await waitFor(() => expect(chip()).toHaveTextContent("Accept edits"));
+    expect(setMode.mock.calls.map(([mode]) => mode)).toEqual(["auto", "acceptEdits"]);
+  });
+
+  it("reaches a failed mode again on the next lap", async () => {
+    const setMode = spyClaudeSetter((mode, call) =>
+      call === 0 ? new TypeError("Failed to fetch") : mode,
+    );
+    const input = renderClaudeSession("cycle-next-lap");
+
+    pressShiftTab(input);
+    expect(await screen.findByText("Failed to fetch")).toBeInTheDocument();
+    const step = async (label: string) => {
+      await settled();
+      pressShiftTab(input);
+      await waitFor(() => expect(chip()).toHaveTextContent(label));
+    };
+    await step("Accept edits");
+    await step("Plan");
+    await step("Manual");
+    await step("Auto");
+    expect(setMode.mock.calls.map(([mode]) => mode)).toEqual([
+      "auto",
+      "acceptEdits",
+      "plan",
+      "default",
+      "auto",
+    ]);
+  });
+
+  it("starts from the selected mode again after a menu change", async () => {
+    const setMode = spyClaudeSetter((mode, call) => (call === 0 ? refuseAuto(mode) : mode));
+    const input = renderClaudeSession("cycle-menu-reset");
+    const pick = async (mode: string) => {
+      fireEvent.keyDown(chip(), { key: "ArrowDown" });
+      fireEvent.click(screen.getByTestId(`composer-permission-option-${mode}`));
+      await settled();
+    };
+
+    pressShiftTab(input);
+    await screen.findByText("Could not switch to auto mode");
+    await settled();
+    await pick("plan");
+    await pick("default");
+    pressShiftTab(input);
+    await waitFor(() => expect(chip()).toHaveTextContent("Auto"));
+    expect(setMode.mock.calls.map(([mode]) => mode)).toEqual(["auto", "plan", "default", "auto"]);
+  });
+
+  it("cycles through every Codex mode, including Full Access, and wraps", async () => {
+    useChatStore.setState({
+      conversationId: "cycle-codex",
+      sessionHarness: "codex-native",
+      codexApprovalMode: "approve-for-me",
+    });
+    const setApproval = vi
+      .spyOn(useChatStore.getState(), "setCodexApprovalMode")
+      .mockImplementation(async (mode) => {
+        useChatStore.setState({ codexApprovalMode: mode });
+      });
+    renderWithTooltips(<Composer {...composerProps({ showCodexApprovalMode: true })} />);
+
+    await cycleTo("Full Access");
+    await cycleTo("Ask for approval");
+    await cycleTo("Approve for me");
+    expect(setApproval.mock.calls.map(([mode]) => mode)).toEqual([
+      "full-access",
+      "ask-for-approval",
+      "approve-for-me",
+    ]);
+  });
+
+  it("moves past a failed Codex mode to Full Access on the next press", async () => {
+    useChatStore.setState({
+      conversationId: "cycle-codex-retry",
+      sessionHarness: "codex-native",
+      codexApprovalMode: "ask-for-approval",
+    });
+    let call = 0;
+    const setApproval = vi
+      .spyOn(useChatStore.getState(), "setCodexApprovalMode")
+      .mockImplementation(async (mode) => {
+        if (call++ === 0) throw new ApiError("Runner refused", 503, "runner_unavailable");
+        useChatStore.setState({ codexApprovalMode: mode });
+      });
+    renderWithTooltips(<Composer {...composerProps({ showCodexApprovalMode: true })} />);
+
+    pressShiftTab(textarea());
+    await screen.findByText("Runner refused");
+    await settled();
+    expect(pressShiftTab(textarea())).toBe(false);
+    await waitFor(() => expect(chip()).toHaveTextContent("Full Access"));
+    expect(setApproval.mock.calls.map(([mode]) => mode)).toEqual(["approve-for-me", "full-access"]);
+  });
+
+  it.each([
+    { name: "a read-only Codex session", harness: "codex-native", codex: "read-only" },
+    { name: "a Claude session in Don't ask", harness: "claude-native", claude: "dontAsk" },
+  ])("leaves the mode alone in $name, which the chip can't switch back to", (session) => {
+    useChatStore.setState({
+      conversationId: "cycle-off-menu",
+      sessionHarness: session.harness,
+      claudePermissionMode: session.claude ?? "",
+      codexApprovalMode: session.codex ?? "",
+    });
+    const setMode = spyClaudeSetter();
+    const setApproval = vi.spyOn(useChatStore.getState(), "setCodexApprovalMode");
+    renderWithTooltips(
+      <Composer
+        {...composerProps(
+          session.codex ? { showCodexApprovalMode: true } : { showClaudePermissionMode: true },
+        )}
+      />,
+    );
+
+    expect(textarea()).not.toHaveAttribute("aria-keyshortcuts");
+    expect(pressShiftTab(textarea())).toBe(true);
+    expect(setMode).not.toHaveBeenCalled();
+    expect(setApproval).not.toHaveBeenCalled();
+  });
+
+  it("cycles through every Devin mode, including Dangerous, and wraps", async () => {
+    useChatStore.setState({
+      conversationId: "cycle-devin",
+      sessionHarness: "devin-native",
+      claudePermissionMode: "smart",
+    });
+    const setMode = spyClaudeSetter();
+    renderWithTooltips(
+      <Composer {...composerProps({ showClaudePermissionMode: true, modelPickerKind: "devin" })} />,
+    );
+
+    await cycleTo("Dangerous");
+    await cycleTo("Normal");
+    await cycleTo("Accept edits");
+    await cycleTo("Smart");
+    expect(setMode.mock.calls.map(([mode]) => mode)).toEqual([
+      "dangerous",
+      "normal",
+      "accept-edits",
+      "smart",
+    ]);
+  });
+
+  it("leaves Shift+Tab to an open slash menu", () => {
+    const setMode = spyClaudeSetter();
+    const input = renderClaudeSession("cycle-slash");
+    fireEvent.change(input, { target: { value: "/n" } });
+    expect(activeRow()).not.toBeNull();
+
+    expect(pressShiftTab(input)).toBe(false);
+    expect(input).toHaveValue("/new ");
+    expect(setMode).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "a session without a permission control", props: {} },
+    { name: "a viewer", props: { showClaudePermissionMode: true, permissionLevel: 2 } },
+    {
+      name: "a read-only session",
+      props: { showClaudePermissionMode: true, readOnlyReason: "Session is read-only" },
+    },
+    {
+      name: "an unreachable session",
+      props: { showClaudePermissionMode: true, unreachable: true },
+    },
+  ])("leaves Shift+Tab to the browser for $name", ({ props }) => {
+    useChatStore.setState({
+      conversationId: "cycle-inert",
+      sessionHarness: "claude-native",
+      claudePermissionMode: "default",
+    });
+    const setMode = spyClaudeSetter();
+    renderWithTooltips(<Composer {...composerProps(props)} />);
+
+    expect(textarea()).not.toHaveAttribute("aria-keyshortcuts");
+    expect(pressShiftTab(textarea())).toBe(true);
+    expect(setMode).not.toHaveBeenCalled();
   });
 });
 
@@ -2907,6 +3262,281 @@ describe("Composer effort slash-command visibility", () => {
     );
     fireEvent.change(textarea(), { target: { value: "/" } });
     expect(screen.getByTestId("slash-menu-item-model")).toBeInTheDocument();
+  });
+});
+
+describe("Composer MCP status command", () => {
+  let previous: ChatState;
+
+  beforeEach(() => {
+    previous = useChatStore.getState();
+    setComposerState({ conversationId: "conv_mcp", boundAgentId: null, skills: [] });
+  });
+
+  afterEach(() => {
+    cleanup();
+    useChatStore.setState(previous, true);
+    composerSessionSnapshot.hostId = null;
+    hostMcpQueryMock.mockReset();
+    hostMcpQueryMock.mockReturnValue({ data: [], isLoading: false, isError: false });
+  });
+
+  it("shows the effective session MCPs in a read-only panel", () => {
+    setComposerState({
+      boundAgentId: "agent_mcp",
+      skills: [{ name: "mcp-builder", description: "Build MCP servers" }],
+    });
+    const onSendSlashCommand = vi.fn();
+    render(
+      <MemoryRouter>
+        <Composer
+          {...composerProps({
+            agents: [
+              {
+                id: "agent_mcp",
+                name: "MCP agent",
+                mcp_servers: [
+                  { name: "github", transport: "http", description: "GitHub tools" },
+                  { name: "local-files", transport: "stdio" },
+                ],
+              },
+              {
+                id: "wrong_agent",
+                name: "Wrong agent",
+                mcp_servers: [{ name: "wrong-server", transport: "stdio" }],
+              },
+            ],
+            selectedAgentId: "wrong_agent",
+            onSendSlashCommand,
+          })}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(textarea(), { target: { value: "/" } });
+    fireEvent.click(screen.getByTestId("slash-menu-item-mcp"));
+
+    expect(textarea()).toHaveValue("/mcp");
+    const panel = screen.getByTestId("mcp-server-menu");
+    expect(panel).toHaveTextContent("Enabled for this session");
+    expect(panel).toHaveTextContent("github");
+    expect(panel).toHaveTextContent("GitHub tools");
+    expect(panel).toHaveTextContent("local-files");
+    expect(panel).not.toHaveTextContent("wrong-server");
+    expect(within(panel).getByRole("link", { name: "Go to Settings" })).toHaveAttribute(
+      "href",
+      "/settings/harnesses",
+    );
+
+    fireEvent.keyDown(textarea(), { key: "ArrowDown" });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(textarea()).toHaveValue("/mcp");
+    expect(onSendSlashCommand).not.toHaveBeenCalled();
+  });
+
+  it("shows an empty state and stays absent before the session starts", () => {
+    setComposerState({ boundAgentId: "agent_empty" });
+    const { unmount } = render(
+      <MemoryRouter>
+        <Composer
+          {...composerProps({
+            agents: [{ id: "agent_empty", name: "Empty agent", mcp_servers: [] }],
+            selectedAgentId: "agent_empty",
+          })}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "No MCP servers enabled for this session.",
+    );
+    unmount();
+
+    setComposerState({ conversationId: null });
+    render(<Composer {...composerProps()} />);
+    fireEvent.change(textarea(), { target: { value: "/" } });
+    expect(screen.queryByTestId("slash-menu-item-mcp")).toBeNull();
+  });
+
+  it("shows native MCPs and navigates to their harness settings without blurring", async () => {
+    const user = userEvent.setup();
+    function Location() {
+      const location = useLocation();
+      return (
+        <output data-testid="location">
+          {location.pathname}
+          {location.search}
+        </output>
+      );
+    }
+    composerSessionSnapshot.hostId = "host_native";
+    setComposerState({ boundAgentId: "agent_native", sessionHarness: "codex-native" });
+    hostMcpQueryMock.mockReturnValue({
+      data: [
+        {
+          name: "docs",
+          harness: "codex",
+          transport: "http",
+          scope: "user",
+          url_host: "docs.example.com",
+        },
+        {
+          name: "host-only",
+          harness: "codex",
+          transport: "stdio",
+          scope: "user",
+        },
+        {
+          name: "github",
+          harness: "claude",
+          transport: "stdio",
+          scope: "user",
+        },
+      ],
+      isLoading: false,
+      isError: false,
+    });
+    render(
+      <MemoryRouter>
+        <Location />
+        <Composer
+          {...composerProps({
+            agents: [
+              {
+                id: "agent_native",
+                name: "Native agent",
+                mcp_servers: [
+                  { name: "docs", transport: "http", description: "Agent docs" },
+                  { name: "agent-only", transport: "stdio" },
+                ],
+              },
+            ],
+          })}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+
+    const panel = screen.getByTestId("mcp-server-menu");
+    expect(panel).toHaveTextContent("docs");
+    expect(panel).toHaveTextContent("Agent docs");
+    expect(panel).not.toHaveTextContent("docs.example.com");
+    expect(panel).toHaveTextContent("host-only");
+    expect(panel).toHaveTextContent("agent-only");
+    expect(panel).not.toHaveTextContent("github");
+    expect(hostMcpQueryMock).toHaveBeenCalledWith("host_native", true);
+    await user.click(textarea());
+    await user.pointer({ target: panel, keys: "[MouseLeft>]" });
+    expect(textarea()).toHaveFocus();
+    await user.pointer({ keys: "[/MouseLeft]" });
+    await user.click(within(panel).getByRole("link", { name: "Go to Settings" }));
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/settings/harnesses/codex-native?host=host_native",
+    );
+  });
+
+  it.each([false, true])(
+    "distinguishes host loading and errors without hiding agent MCPs: %j",
+    (hasAgentServers) => {
+      const mcpServers = hasAgentServers
+        ? [{ name: "known-agent-server", transport: "stdio" as const }]
+        : [];
+      composerSessionSnapshot.hostId = "host_native";
+      setComposerState({ boundAgentId: "agent_native", sessionHarness: "codex-native" });
+      hostMcpQueryMock.mockReturnValue({ data: undefined, isLoading: true, isError: false });
+      const props = composerProps({
+        agents: [{ id: "agent_native", name: "Native agent", mcp_servers: mcpServers }],
+      });
+      const { unmount } = render(
+        <MemoryRouter>
+          <Composer {...props} />
+        </MemoryRouter>,
+      );
+      fireEvent.change(textarea(), { target: { value: "/mcp" } });
+      expect(screen.getByRole("status")).toHaveTextContent("Loading MCP servers…");
+      if (mcpServers.length)
+        expect(screen.getByTestId("mcp-server-menu")).toHaveTextContent("known-agent-server");
+      unmount();
+
+      hostMcpQueryMock.mockReturnValue({ data: undefined, isLoading: false, isError: true });
+      render(
+        <MemoryRouter>
+          <Composer
+            {...composerProps({
+              agents: [
+                {
+                  id: "agent_native",
+                  name: "Native agent",
+                  mcp_servers: [{ name: "known-agent-server", transport: "stdio" }],
+                },
+              ],
+            })}
+          />
+        </MemoryRouter>,
+      );
+      fireEvent.change(textarea(), { target: { value: "/mcp" } });
+      const panel = screen.getByTestId("mcp-server-menu");
+      expect(panel).toHaveTextContent("known-agent-server");
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Couldn’t load MCP servers from this session’s host.",
+      );
+    },
+  );
+
+  it.each(["claude-native", "codex-native", "cursor-native"] as const)(
+    "keeps host status unknown until a routing host is available for %s",
+    (harness) => {
+      setComposerState({ boundAgentId: "agent_native", sessionHarness: harness });
+      hostMcpQueryMock.mockReturnValue({ data: undefined, isLoading: false, isError: false });
+      const { rerender } = render(
+        <MemoryRouter>
+          <Composer
+            {...composerProps({
+              agents: [
+                {
+                  id: "agent_native",
+                  name: "Native agent",
+                  mcp_servers: [{ name: "known-agent-server", transport: "stdio" }],
+                },
+              ],
+            })}
+          />
+        </MemoryRouter>,
+      );
+      fireEvent.change(textarea(), { target: { value: "/mcp" } });
+      const panel = screen.getByTestId("mcp-server-menu");
+      expect(panel).toHaveTextContent("known-agent-server");
+      expect(panel).toHaveTextContent("Host MCP servers unavailable");
+      expect(panel).not.toHaveTextContent("No MCP servers enabled");
+      expect(hostMcpQueryMock).toHaveBeenLastCalledWith(null, true);
+      rerender(
+        <MemoryRouter>
+          <Composer {...composerProps({ agents: [] })} />
+        </MemoryRouter>,
+      );
+      expect(panel).not.toHaveTextContent("known-agent-server");
+      expect(panel).toHaveTextContent("Host MCP servers unavailable");
+      expect(panel).not.toHaveTextContent("No MCP servers enabled");
+
+      hostMcpQueryMock.mockReturnValue({ data: undefined, isLoading: true, isError: false });
+      act(() => setSessionHost("conv_mcp", "late-host"));
+      expect(hostMcpQueryMock).toHaveBeenLastCalledWith("late-host", true);
+      expect(panel).toHaveTextContent("Loading MCP servers…");
+      expect(panel).not.toHaveTextContent("Host MCP servers unavailable");
+      act(() => setSessionHost("conv_mcp", null));
+    },
+  );
+
+  it("shows usage feedback for unsupported arguments", () => {
+    render(
+      <MemoryRouter>
+        <Composer {...composerProps()} />
+      </MemoryRouter>,
+    );
+    fireEvent.change(textarea(), { target: { value: "/mcp list" } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(screen.getByText("Usage: /mcp")).toBeInTheDocument();
   });
 });
 
@@ -4050,7 +4680,7 @@ describe("Composer reply quotes", () => {
     if (structured) expect(vi.mocked(props.onSend).mock.calls[0]?.[2]).toEqual(replyDraft);
   });
 
-  it("empties the composer when a restored failed send turns out delivered", () => {
+  it.each(["none", "failed", "delivered"])("retracts after a second send: %s", (secondSend) => {
     const stableId = "c".repeat(32);
     render(<Composer {...composerProps()} />);
     act(() =>
@@ -4064,19 +4694,49 @@ describe("Composer reply quotes", () => {
       }),
     );
     expect(textarea()).toHaveValue("resend me");
-    expect(useChatStore.getState().restoredSendDraft).toMatchObject({ stableId, delivered: false });
+    expect(useChatStore.getState().restoredSendDraft).toMatchObject({
+      stableId,
+      delivered: false,
+    });
 
-    // The send's committed item arrived (see retractDeliveredSendDraft):
-    // the message was delivered, so the untouched restore must go away.
+    if (secondSend !== "none") {
+      const secondId = "second-send";
+      if (secondSend === "delivered")
+        act(() =>
+          handleSessionEvent({
+            type: "session_input_consumed",
+            itemId: secondId,
+            itemType: "message",
+            data: { role: "user", content: [{ type: "input_text", text: "second message" }] },
+          }),
+        );
+      act(() =>
+        useChatStore.setState({
+          failedSendDraft: {
+            conversationId: "conv_test",
+            text: "second message",
+            files: [],
+            stableId: secondId,
+          },
+        }),
+      );
+      expect(textarea()).toHaveValue("resend me");
+      expect(useChatStore.getState().restoredSendDraft).toMatchObject({
+        stableId,
+        delivered: false,
+      });
+      expect(useChatStore.getState().pendingRetryStableId).toBe(
+        secondSend === "delivered" ? stableId : null,
+      );
+    }
+
+    // Delivery of the first send still retracts its unchanged draft.
     act(() =>
-      useChatStore.setState({
-        restoredSendDraft: {
-          conversationId: "conv_test",
-          stableId,
-          text: "resend me",
-          files: [],
-          delivered: true,
-        },
+      handleSessionEvent({
+        type: "session_input_consumed",
+        itemId: stableId,
+        itemType: "message",
+        data: { role: "user", content: [{ type: "input_text", text: "resend me" }] },
       }),
     );
     expect(textarea()).toHaveValue("");
@@ -4367,17 +5027,56 @@ describe("Composer startSideChat (text-select → Ask in side chat)", () => {
       render(<Composer {...composerProps()} ref={ref} />);
 
       act(() => ref.current?.startSideChat("first selection"));
+      act(() =>
+        useChatStore.getState().updateSideChatComposer(childId, (current) => ({
+          ...current,
+          text: "first answer",
+        })),
+      );
       act(() => ref.current?.startSideChat("second selection"));
 
       expect(useChatStore.getState().sideChatToOpen).toBeNull();
       expect(useChatStore.getState().sideChatComposers[childId]).toEqual({
-        text: "my question",
+        text: "",
         files: [],
-        quotes: ["first selection", "second selection"],
+        quotes: [
+          { id: expect.any(String), before: "my question", text: "first selection" },
+          { id: expect.any(String), before: "first answer", text: "second selection" },
+        ],
       });
       expect(textarea()).toHaveValue("");
     },
   );
+
+  it("interleaves replies to parent selections before starting a side chat", () => {
+    const onStart = vi.fn().mockResolvedValue(undefined);
+    const ref = createRef<ComponentRef<typeof Composer>>();
+    render(<Composer {...composerProps()} ref={ref} />);
+    act(() => ref.current?.startSideChat("First passage"));
+    const childId = useChatStore.getState().sideChatToOpen!.childId;
+    const pane = (
+      <QueryClientProvider client={new QueryClient()}>
+        <SideChatPane childId={childId} selectionParentId="conv_test" onStart={onStart} />
+      </QueryClientProvider>
+    );
+    const view = render(pane);
+    fireEvent.change(screen.getByTestId("side-chat-input"), {
+      target: { value: "First answer" },
+    });
+    act(() => ref.current?.startSideChat("Second passage"));
+    const between = screen.getByRole("textbox", { name: "Reply text before quote 2" });
+    expect(between).toHaveValue("First answer");
+    fireEvent.change(between, { target: { value: "Edited first answer" } });
+    fireEvent.change(screen.getByTestId("side-chat-input"), {
+      target: { value: "Second answer" },
+    });
+    view.unmount();
+    render(pane);
+    fireEvent.click(screen.getByTestId("side-chat-send"));
+    expect(onStart).toHaveBeenCalledExactlyOnceWith(
+      "> First passage\n\nEdited first answer\n\n> Second passage\n\nSecond answer",
+    );
+  });
 
   it("keeps a selection made during side-chat creation in a new pending tab", async () => {
     let resolveStart!: () => void;
@@ -4465,6 +5164,26 @@ describe("Composer file-attachment focus", () => {
     if (!el) throw new Error("file input not found");
     return el;
   }
+
+  it("offers and accepts any file when the server delivers all types as files", () => {
+    render(
+      <CapabilitiesProvider
+        info={{
+          ...FALLBACK_SERVER_INFO,
+          filesystem_attachments: { extensions: [".zip"], all_types: true },
+        }}
+      >
+        <Composer {...composerProps()} />
+      </CapabilitiesProvider>,
+    );
+    expect(fileInput().hasAttribute("accept")).toBe(false);
+
+    const trace = new File([new Uint8Array(4)], "trace.gz", { type: "application/gzip" });
+    fireEvent.change(fileInput(), { target: { files: [trace] } });
+
+    expect(screen.getByText("trace.gz")).toBeTruthy();
+    expect(screen.queryByText(/can't be attached/)).toBeNull();
+  });
 
   it("focuses the textarea after a file is attached", () => {
     render(<Composer {...composerProps()} />);
