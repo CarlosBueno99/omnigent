@@ -51,6 +51,16 @@ implements them separately, so a fix for one harness does not reach the others.
 - `subagent-discovery`: Claude children appear under the agent that spawned
   them, including delayed spawns; an unresolved spawn does not keep an idle
   runner re-reading unchanged conversations.
+- `claude-mod-channel`: with `claude_mod_channel` on and Claude 2.1.301 or
+  newer, idle sends, effort, compact, and model picks by alias (`sonnet`,
+  `opus`) use the Claude mod. A model picked by its full id, as the web picker
+  sends it, still goes through tmux. The flag off or an older Claude keeps
+  every control on tmux.
+- `claude-mod-fallback`: a missing mod, a busy mod, or a dialog on screen sends
+  the control to tmux. A send the mod took but did not confirm errors and is
+  not typed again.
+- `claude-mod-tmux-only`: mid-turn sends, Escape interrupts, idle
+  permission-mode switches, `/btw`, and startup dialogs never use the mod.
 - `disconnect`: startup waits and active operations settle when their native
   connection ends; reconnect can receive fresh events. Distinguish a native
   CLI disconnect, a runner going offline, and a browser stream reconnect.
@@ -109,6 +119,15 @@ without a session ID to resume.
 the linked session's Agents panel and check the child under its parent. Ask a
 child to delegate again to check nested ownership; completed children remain
 visible while the runner idles.
+
+**Claude mod channel:** with `OMNIGENT_FEATURES=claude_mod_channel` in the
+runner's environment (web launches) or in the environment of `omnigent claude`
+(local launches), and Claude 2.1.301 or newer, these go through the mod:
+sending while the session is idle, the model picker, the effort control, and
+`/compact` from the slash menu. A message sent through the mod appears in the
+Terminal view as a submitted prompt, not as text typed into the input box.
+Mid-turn sends, Escape interrupts, permission-mode switches, `/btw`, and startup
+dialogs still use tmux.
 
 **Native Gemini setup:** run `omni setup` → Antigravity → Configure native agy
 API key / gateway. If existing providers conflict, choose the Gemini default
@@ -754,6 +773,68 @@ Cross-harness journeys:
   does not establish the reporter's macOS result. This is a manual recipe,
   not maintained real-runner automation.
 
+- **`claude-mod-channel`, launch gate (`omnigent claude`, plain `uv run --no-sync pytest --reruns 0`):**
+  `tests/harnesses/claude_native/test_claude_mod_channel.py::test_cli_launch_loads_the_mod_only_with_the_feature_flag`
+  and
+  `tests/harnesses/claude_native/test_claude_mod_channel.py::test_mod_launch_needs_the_feature_flag_and_the_version_floor`
+  check the flag and the 2.1.301 floor. Live: run
+  `OMNIGENT_FEATURES=claude_mod_channel omnigent claude` on Claude 2.1.301 or
+  newer, then open the session's bridge directory under
+  `/tmp/omnigent-<UID>/claude-native/<digest>`. Expect a `claude-mod/` directory
+  with `.claude-plugin/plugin.json`, and `--plugin-dir` in the Claude process
+  arguments. Without the flag, or with an older Claude, expect neither.
+- **`claude-mod-channel`, web composer send while idle (component checks with a stubbed mod outcome):**
+  `tests/inner/test_claude_native_executor.py::test_idle_turn_is_submitted_through_the_mod_when_it_confirms`,
+  `tests/inner/test_claude_native_executor.py::test_idle_turn_is_typed_when_the_mod_did_not_take_it`,
+  `tests/inner/test_claude_native_executor.py::test_unanswered_mod_submit_is_not_typed_a_second_time`,
+  `tests/inner/test_claude_native_executor.py::test_input_the_tui_expands_stays_on_tmux`,
+  and
+  `tests/inner/test_claude_native_executor.py::test_mid_turn_steering_is_always_typed`.
+  Live, with the isolated runner started under `OMNIGENT_FEATURES=claude_mod_channel`
+  and a web Claude 2.1.301 or newer session that has finished a turn: send a
+  message from the composer. Expect one turn, the message shown once in Chat, and
+  the Terminal view showing it as a submitted prompt. `mod.json` in the session's
+  bridge directory gets a `main_turn_id` while the turn runs and `null` after it.
+  A session launched with the flag off has no `claude-mod/` directory and types
+  the same message through tmux.
+- **`claude-mod-channel`, web model picker and effort control:** no test drives
+  the runner's model or effort routes through the mod. The per-turn routed model
+  switch is covered by
+  `tests/inner/test_claude_native_executor.py::test_routed_model_switch_goes_through_the_mod`.
+  Live, after a completed turn (warm cache): pick another model in the model
+  picker. The picker sends the full model id, which the mod's model row does
+  not take, so the Terminal shows `/model <id>` typed through tmux; expect the
+  pill to show the new model and the next turn to run on it. Only an alias pick
+  goes through the mod. Then change effort in configuration: the Terminal shows
+  `/effort <level>` and the status line the new level. On a warm
+  cache Claude may ask to confirm; the existing tmux watcher answers it, so no
+  dialog stays open in the Terminal. The picker's persisted pick and label are
+  covered by
+  `tests/e2e_ui/chat/test_claude_model_picker.py::test_claude_native_alias_selection_persists`,
+  which does not exercise the mod.
+- **`claude-mod-channel`, web `/compact`:**
+  `tests/runner/test_app_sessions_native_events_options.py::test_events_compact_on_native_session_types_slash_command`
+  runs both branches: with the mod confirming, nothing is typed; otherwise the
+  tmux `/compact` is typed once. Live, on an idle session, run `/compact` from the
+  slash menu. Expect one compaction in the Terminal, no stray `/compact` left in
+  the input box, and a successful response. While a turn runs, the web refuses
+  compact.
+- **`claude-mod-fallback`, mod absent or busy:**
+  `tests/harnesses/claude_native/test_claude_mod_channel.py::test_command_without_a_live_mod_never_connects`,
+  `tests/harnesses/claude_native/test_claude_mod_channel.py::test_command_nobody_takes_is_not_started`,
+  and
+  `tests/harnesses/claude_native/test_claude_mod_channel.py::test_harness_command_the_mod_refuses_reaches_the_caller_as_rejected`
+  cover the outcomes that let tmux run. Live: start a session with the flag off,
+  send a web message, and expect the tmux path, with no `claude-mod/` directory
+  and the message typed and submitted in the Terminal. A dialog on screen is
+  covered only at the pane gate, by
+  `tests/harnesses/claude_native/test_claude_native_bridge.py::test_claude_pane_ready_is_true_only_at_an_idle_input_box`.
+  No live dialog-on-screen check has been run.
+- **`claude-mod-tmux-only`, interrupts:**
+  `tests/runner/test_native_interrupt_runner.py::test_claude_interrupt_stays_on_escape_while_the_mod_is_live`
+  checks that a live mod is not asked to abort. Live: stop a running turn with the
+  web Stop control, and expect the Interrupted row in Chat, as before.
+
 - **`plugin-inventory` (component and host tests):**
   `tests/e2e/test_host_plugins_e2e.py::test_host_plugin_inventory` starts a real
   host against the test server and checks metadata and secret exclusion.
@@ -819,3 +900,15 @@ separate compatibility gaps; these automated checks do not prove live Gemini.
 - OpenCode accepts an abort even when nothing is running, so an accepted
   interrupt does not prove a turn was stopped. Check the session state and the
   model request instead.
+- The mock Claude cannot run the mod path on a host whose managed settings pin a
+  gateway. Use live Claude 2.1.301 or newer through the managed gateway, with
+  `repro-claude` removed, as the preconditions above describe.
+- A model or effort pick made through the mod still saves the person's default,
+  as typing `/model` or `/effort` does. The mod path does not avoid that write.
+- The flag is hidden from the web settings, so set it in the environment. A run
+  can look right while using tmux, so check `claude-mod/` and `mod.json` to see
+  which path ran.
+- Organization policies that allow only managed hooks block user-tier mods. Such
+  hosts fall back to tmux even with the flag on.
+- The mod's abort operation exists but nothing calls it, because an abort writes
+  no Interrupted row. Interrupts stay on Escape.
