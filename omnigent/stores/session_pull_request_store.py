@@ -1,0 +1,380 @@
+"""Persistent store for the pull requests linked to each session.
+
+Hosts report the PRs they observe and the summaries they fetch; this store
+keeps them so the Pull Requests tab can list a session's PRs while its host is
+offline. Reports merge commutatively, so a host re-reporting its local
+registry on every poll converges on the same rows in any order. An unlinked PR
+keeps its row with ``removed_at`` set, which hides it and ignores further
+reports until the user links it again.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Literal, cast
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from omnigent.db.db_models import (
+    SqlSessionPullRequest,
+    current_workspace_id,
+    pull_request_url_cksum,
+)
+from omnigent.db.enum_codecs import decode_session_pr_relationship, encode_session_pr_relationship
+from omnigent.db.utils import (
+    get_or_create_engine,
+    make_named_managed_session_maker,
+    now_epoch_us,
+    run_write_transaction,
+)
+
+_logger = logging.getLogger(__name__)
+
+Relationship = Literal["created", "worked_on", "attached", "inferred"]
+
+# A stronger relationship survives any later report; "created" is never downgraded.
+_RELATIONSHIP_RANK: dict[str, int] = {"inferred": 0, "worked_on": 1, "attached": 2, "created": 3}
+_TITLE_MAX = 1024
+
+
+@dataclass(frozen=True)
+class PullRequestReport:
+    """One PR as a host's registry describes it; times are epoch seconds.
+
+    :ivar url: Canonical PR URL, as the host's git provider normalized it.
+    :ivar provider: Git provider id, e.g. ``"github"``.
+    :ivar host: Forge host, e.g. ``"github.com"``.
+    :ivar repository: Base repository, e.g. ``"owner/repo"``.
+    :ivar number: The PR number.
+    :ivar relationship: How the PR joined the session.
+    :ivar source: The observer that reported it, e.g. ``"native_hook"``.
+    :ivar first_seen_at: When the PR was first observed.
+    :ivar last_seen_at: When the PR was last observed.
+    :ivar title: The looked-up title, or ``None`` when unknown.
+    :ivar title_checked_at: When the title was looked up; ``0`` for never.
+    :ivar title_lookup_timed_out: The last lookup timed out.
+    """
+
+    url: str
+    provider: str
+    host: str
+    repository: str
+    number: int
+    relationship: Relationship
+    source: str
+    first_seen_at: float
+    last_seen_at: float
+    title: str | None = None
+    title_checked_at: float = 0
+    title_lookup_timed_out: bool = False
+
+
+@dataclass(frozen=True)
+class StoredPullRequest(PullRequestReport):
+    """A linked PR with the last summary its host fetched.
+
+    :ivar summary: The PR's state, checks, labels and reviewers, or ``None``
+        until the host fetches them.
+    :ivar summary_synced_at: Epoch seconds the summary was fetched.
+    """
+
+    summary: dict[str, Any] | None = None
+    summary_synced_at: float | None = None
+
+
+def _us(seconds: float) -> int:
+    return int(seconds * 1_000_000)
+
+
+def _seconds(micros: int | None) -> float | None:
+    return None if micros is None else micros / 1_000_000
+
+
+def _to_entity(row: SqlSessionPullRequest) -> StoredPullRequest:
+    summary: dict[str, Any] | None = None
+    if row.summary:
+        try:
+            loaded = json.loads(row.summary)
+            summary = loaded if isinstance(loaded, dict) else None
+        except ValueError:
+            _logger.warning("Ignoring an unreadable pull request summary", exc_info=True)
+    return StoredPullRequest(
+        url=row.url,
+        provider=row.provider,
+        host=row.host,
+        repository=row.repository,
+        number=row.number,
+        relationship=cast(Relationship, decode_session_pr_relationship(row.relationship)),
+        source=row.source,
+        first_seen_at=row.first_seen_at / 1_000_000,
+        last_seen_at=row.last_seen_at / 1_000_000,
+        title=row.title,
+        title_checked_at=row.title_checked_at / 1_000_000,
+        title_lookup_timed_out=row.title_lookup_timed_out,
+        summary=summary,
+        summary_synced_at=_seconds(row.summary_synced_at),
+    )
+
+
+def _display_order(entries: Iterable[StoredPullRequest]) -> list[StoredPullRequest]:
+    """Explicit activity first, most recent first; then inferred PRs, oldest first."""
+    return sorted(
+        entries,
+        key=lambda pr: (
+            pr.relationship == "inferred",
+            pr.first_seen_at if pr.relationship == "inferred" else -pr.last_seen_at,
+            pr.url,
+        ),
+    )
+
+
+def _merge(row: SqlSessionPullRequest, report: PullRequestReport) -> bool:
+    """Fold ``report`` into ``row``; return whether anything changed."""
+    before = (
+        row.relationship,
+        row.first_seen_at,
+        row.last_seen_at,
+        row.title,
+        row.title_checked_at,
+        row.title_lookup_timed_out,
+    )
+    current = decode_session_pr_relationship(row.relationship)
+    if _RELATIONSHIP_RANK[report.relationship] > _RELATIONSHIP_RANK[current]:
+        row.relationship = encode_session_pr_relationship(report.relationship)
+    row.first_seen_at = min(row.first_seen_at, _us(report.first_seen_at))
+    row.last_seen_at = max(row.last_seen_at, _us(report.last_seen_at))
+    checked_at = _us(report.title_checked_at)
+    if checked_at > row.title_checked_at:
+        # A failed lookup keeps the previous title, matching the host's own cache.
+        if report.title is not None:
+            row.title = report.title[:_TITLE_MAX]
+        row.title_checked_at = checked_at
+        row.title_lookup_timed_out = report.title_lookup_timed_out
+    elif report.title is not None and row.title is None:
+        row.title = report.title[:_TITLE_MAX]
+    after = (
+        row.relationship,
+        row.first_seen_at,
+        row.last_seen_at,
+        row.title,
+        row.title_checked_at,
+        row.title_lookup_timed_out,
+    )
+    return before != after
+
+
+def _new_row(conversation_id: str, report: PullRequestReport) -> SqlSessionPullRequest:
+    return SqlSessionPullRequest(
+        workspace_id=current_workspace_id(),
+        conversation_id=conversation_id,
+        url_cksum=pull_request_url_cksum(report.url),
+        url=report.url,
+        provider=report.provider,
+        host=report.host,
+        repository=report.repository,
+        number=report.number,
+        relationship=encode_session_pr_relationship(report.relationship),
+        source=report.source,
+        first_seen_at=_us(report.first_seen_at),
+        last_seen_at=_us(report.last_seen_at),
+        title=report.title[:_TITLE_MAX] if report.title else None,
+        title_checked_at=_us(report.title_checked_at),
+        title_lookup_timed_out=report.title_lookup_timed_out,
+    )
+
+
+class SessionPullRequestStore:
+    """SQLAlchemy-backed store of the pull requests linked to each session."""
+
+    def __init__(self, storage_location: str) -> None:
+        """Open the store.
+
+        :param storage_location: SQLAlchemy database URI, e.g. ``"sqlite:///omnigent.db"``.
+        """
+        self.storage_location = storage_location
+        engine = get_or_create_engine(storage_location)
+        self._session = make_named_managed_session_maker(
+            engine, query_name_prefix="omnigent.session_pull_request_store"
+        )
+        self._session_immediate = make_named_managed_session_maker(
+            engine, query_name_prefix="omnigent.session_pull_request_store", immediate=True
+        )
+
+    def _key(self, conversation_id: str, url: str) -> tuple[int, str, bytes]:
+        return (current_workspace_id(), conversation_id, pull_request_url_cksum(url))
+
+    def _rows(
+        self, session: Session, conversation_ids: Sequence[str]
+    ) -> list[SqlSessionPullRequest]:
+        stmt = select(SqlSessionPullRequest).where(
+            SqlSessionPullRequest.workspace_id == current_workspace_id(),
+            SqlSessionPullRequest.conversation_id.in_(conversation_ids),
+        )
+        return list(session.execute(stmt).scalars().all())
+
+    def list_for_session(self, conversation_id: str) -> list[StoredPullRequest]:
+        """Return the session's linked PRs in display order, without unlinked ones.
+
+        :param conversation_id: The session, e.g. ``"conv_abc123"``.
+        """
+        with self._session("list_session_pull_requests") as session:
+            rows = self._rows(session, [conversation_id])
+            return _display_order(_to_entity(row) for row in rows if row.removed_at is None)
+
+    def removed_urls(self, conversation_id: str) -> list[str]:
+        """Return the URLs the user unlinked from the session.
+
+        :param conversation_id: The session, e.g. ``"conv_abc123"``.
+        """
+        stmt = select(SqlSessionPullRequest.url).where(
+            SqlSessionPullRequest.workspace_id == current_workspace_id(),
+            SqlSessionPullRequest.conversation_id == conversation_id,
+            SqlSessionPullRequest.removed_at.is_not(None),
+        )
+        with self._session("list_unlinked_session_pull_requests") as session:
+            return sorted(session.execute(stmt).scalars().all())
+
+    def primary_for_sessions(
+        self, conversation_ids: Sequence[str]
+    ) -> dict[str, StoredPullRequest]:
+        """Return each session's first linked PR in display order.
+
+        :param conversation_ids: Sessions to summarize; ones without PRs are absent.
+        """
+        if not conversation_ids:
+            return {}
+        with self._session("list_primary_session_pull_requests") as session:
+            rows = self._rows(session, conversation_ids)
+            by_session: dict[str, list[StoredPullRequest]] = {}
+            for row in rows:
+                if row.removed_at is None:
+                    by_session.setdefault(row.conversation_id, []).append(_to_entity(row))
+        return {
+            conversation_id: _display_order(entries)[0]
+            for conversation_id, entries in by_session.items()
+        }
+
+    def _write(self, operation: str, callback: Any) -> Any:
+        """Run a write, replaying it once when a concurrent insert claimed the same row."""
+        try:
+            return run_write_transaction(self._session_immediate, operation, callback)
+        except IntegrityError:
+            return run_write_transaction(self._session_immediate, operation, callback)
+
+    def record(self, conversation_id: str, reports: Sequence[PullRequestReport]) -> bool:
+        """Merge reported PRs into the session; unlinked ones are ignored.
+
+        :param conversation_id: The session, e.g. ``"conv_abc123"``.
+        :param reports: PRs as the host's registry describes them.
+        :returns: Whether any row was added or changed.
+        """
+        unique = list({report.url: report for report in reports}.values())
+        if not unique:
+            return False
+
+        def write(session: Session) -> bool:
+            changed = False
+            for report in unique:
+                row = session.get(
+                    SqlSessionPullRequest,
+                    self._key(conversation_id, report.url),
+                    with_for_update=True,
+                )
+                if row is None:
+                    session.add(_new_row(conversation_id, report))
+                    changed = True
+                elif row.removed_at is None:
+                    changed = _merge(row, report) or changed
+            return changed
+
+        return cast(bool, self._write("record_session_pull_requests", write))
+
+    def attach(self, conversation_id: str, report: PullRequestReport) -> None:
+        """Link a PR the user chose, clearing an earlier unlink.
+
+        :param conversation_id: The session, e.g. ``"conv_abc123"``.
+        :param report: The PR as the host that verified it describes it.
+        """
+        attached = replace(report, relationship="attached")
+
+        def write(session: Session) -> None:
+            row = session.get(
+                SqlSessionPullRequest,
+                self._key(conversation_id, report.url),
+                with_for_update=True,
+            )
+            if row is None:
+                session.add(_new_row(conversation_id, attached))
+                return
+            row.removed_at = None
+            _merge(row, attached)
+
+        self._write("attach_session_pull_request", write)
+
+    def remove(self, conversation_id: str, url: str) -> bool:
+        """Unlink a PR, remembering it so later reports cannot link it again.
+
+        :param conversation_id: The session, e.g. ``"conv_abc123"``.
+        :param url: The linked PR's URL.
+        :returns: Whether the PR was linked.
+        """
+
+        def write(session: Session) -> bool:
+            row = session.get(
+                SqlSessionPullRequest, self._key(conversation_id, url), with_for_update=True
+            )
+            if row is None or row.removed_at is not None:
+                return False
+            row.removed_at = now_epoch_us()
+            return True
+
+        return cast(
+            bool,
+            run_write_transaction(self._session_immediate, "unlink_session_pull_request", write),
+        )
+
+    def update_summary(
+        self, conversation_id: str, url: str, summary: Mapping[str, Any], *, synced_at: float
+    ) -> bool:
+        """Store the summary a host fetched for a linked PR.
+
+        Its title also refreshes the cached title. An older summary than the
+        stored one, or one for a PR that is not linked, is ignored.
+
+        :param conversation_id: The session, e.g. ``"conv_abc123"``.
+        :param url: The linked PR's URL.
+        :param summary: JSON-serializable summary, e.g. ``{"state": "OPEN", ...}``.
+        :param synced_at: Epoch seconds the host fetched it.
+        :returns: Whether the stored summary changed.
+        """
+        encoded = json.dumps(summary, sort_keys=True)
+        synced_us = _us(synced_at)
+
+        def write(session: Session) -> bool:
+            row = session.get(
+                SqlSessionPullRequest, self._key(conversation_id, url), with_for_update=True
+            )
+            if row is None or row.removed_at is not None:
+                return False
+            if row.summary_synced_at is not None and row.summary_synced_at > synced_us:
+                return False
+            changed = row.summary != encoded
+            row.summary = encoded
+            row.summary_synced_at = synced_us
+            title = summary.get("title")
+            if isinstance(title, str) and title.strip():
+                changed = changed or row.title != title.strip()[:_TITLE_MAX]
+                row.title = title.strip()[:_TITLE_MAX]
+            return changed
+
+        return cast(
+            bool,
+            run_write_transaction(
+                self._session_immediate, "update_session_pull_request_summary", write
+            ),
+        )

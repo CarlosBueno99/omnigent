@@ -1113,6 +1113,78 @@ class SqlComment(OmnigentBase):
     __table_args__ = (CheckConstraint("status IN (1, 2)", name="ck_comments_status"),)
 
 
+def pull_request_url_cksum(url: str) -> bytes:
+    """Return the sha256 digest a session pull request row keys on instead of its URL."""
+    return hashlib.sha256(url.encode("utf-8")).digest()
+
+
+class SqlSessionPullRequest(OmnigentBase):
+    """SQLAlchemy model for the ``session_pull_requests`` table.
+
+    The pull requests linked to a session, with the last summary its host
+    fetched, so they stay visible while the host is offline. The host remains
+    the only forge client; the server stores what it reports. A row with
+    ``removed_at`` set records an unlink: it is hidden and later observations
+    cannot link it again until the user does. Cleaned up with the conversation.
+
+    :param url_cksum: sha256 of ``url``, the PK component in place of the URL.
+    :param url: The PR's canonical URL as the host's git provider normalized it.
+    :param provider: Git provider id, e.g. ``"github"``.
+    :param host: Forge host, e.g. ``"github.com"``.
+    :param repository: Base repository, e.g. ``"owner/repo"``.
+    :param number: The PR number.
+    :param relationship: How the PR joined the session, an int code (see
+        :data:`omnigent.db.enum_codecs.SESSION_PR_RELATIONSHIP`).
+    :param source: The first observer that reported it, e.g. ``"native_hook"``.
+    :param first_seen_at: Epoch microseconds the PR was first observed.
+    :param last_seen_at: Epoch microseconds the PR was last observed.
+    :param title: The last title the host looked up, or ``None``.
+    :param title_checked_at: Epoch microseconds of that lookup; ``0`` for never.
+    :param title_lookup_timed_out: The last lookup timed out, so it retries sooner.
+    :param summary: JSON of the PR's state, checks, labels and reviewers, or ``None``.
+    :param summary_synced_at: Epoch microseconds the summary was fetched.
+    :param removed_at: Epoch microseconds the user unlinked it, or ``None``.
+    """
+
+    __tablename__ = "session_pull_requests"
+
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    conversation_id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    url_cksum: Mapped[bytes] = mapped_column(_CKSUM32, primary_key=True)
+    url: Mapped[str] = mapped_column(String(2048))
+    provider: Mapped[str] = mapped_column(String(64))
+    host: Mapped[str] = mapped_column(String(255))
+    repository: Mapped[str] = mapped_column(String(512))
+    number: Mapped[int] = mapped_column(BigInteger)
+    # Enum stored as a stable int code (see omnigent.db.enum_codecs
+    # SESSION_PR_RELATIONSHIP: inferred=1, worked_on=2, attached=3, created=4).
+    relationship: Mapped[int] = mapped_column(SmallInteger)
+    source: Mapped[str] = mapped_column(String(64))
+    first_seen_at: Mapped[int] = mapped_column(BigInteger)
+    last_seen_at: Mapped[int] = mapped_column(BigInteger)
+    title: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    title_checked_at: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    title_lookup_timed_out: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    summary: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
+    summary_synced_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    removed_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "relationship IN (1, 2, 3, 4)", name="ck_session_pull_requests_relationship"
+        ),
+    )
+
+
 def policy_name_cksum(name: str) -> bytes:
     """Return the sha256 digest of a policy name.
 

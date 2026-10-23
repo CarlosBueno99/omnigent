@@ -197,6 +197,25 @@ export interface PullRequestCapabilities {
 export type PullRequestUnavailableReason =
   "not_a_git_repo" | "no_os_env" | "unsupported_remote" | "provider_unavailable" | "host_outdated";
 
+/** What the server kept from a PR's last fetch, shown while the host is offline. */
+export interface PullRequestSummary {
+  title: string;
+  /** "OPEN" | "MERGED" | "CLOSED" as last fetched. */
+  state: string;
+  is_draft: boolean;
+  author: string | null;
+  base_ref: string | null;
+  head_ref: string | null;
+  checks: Pick<
+    PullRequestChecks,
+    "passing" | "failing" | "pending" | "cancelled" | "skipped" | "total"
+  >;
+  labels: Pick<PullRequestLabel, "name" | "color">[];
+  reviewers: PullRequestReviewer[];
+  /** False when the signed-in token could not read check runs. */
+  checks_supported?: boolean;
+}
+
 export interface PullRequestAssociation {
   url: string;
   host: string;
@@ -207,6 +226,10 @@ export interface PullRequestAssociation {
   /** Git provider id; absent from hosts that predate providers (GitHub). */
   provider?: string;
   provider_display?: GitProviderDisplay;
+  /** The last summary the host fetched; null until it fetches the PR. */
+  summary?: PullRequestSummary | null;
+  /** Epoch seconds of that fetch. */
+  summary_synced_at?: number | null;
 }
 
 function prQuery(prUrl?: string): string {
@@ -652,21 +675,28 @@ export function usePullRequestDiff(
   });
 }
 
+/** Link or unlink a PR through the runner or host; returns the refreshed info. */
+export async function updateSessionPr(
+  conversationId: string,
+  body: { url: string; action: "attach" | "remove" },
+): Promise<PullRequestInfo> {
+  const response = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(conversationId)}/resources/github/prs`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!response.ok) throw await errorFromResponse(response);
+  return normalizePullRequestInfo((await response.json()) as PullRequestInfo);
+}
+
 export function useUpdateSessionPr(conversationId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (body: { url: string; action: "attach" | "remove" }) => {
-      const response = await authenticatedFetch(
-        `/v1/sessions/${encodeURIComponent(conversationId)}/resources/github/prs`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-      );
-      if (!response.ok) throw await errorFromResponse(response);
-      return normalizePullRequestInfo((await response.json()) as PullRequestInfo);
-    },
+    mutationFn: (body: { url: string; action: "attach" | "remove" }) =>
+      updateSessionPr(conversationId, body),
     onSuccess: async (info, body) => {
       await queryClient.cancelQueries({ queryKey: ["github-info", conversationId] });
       queryClient.setQueryData(["github-info", conversationId], info);
