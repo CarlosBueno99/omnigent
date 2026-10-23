@@ -508,6 +508,14 @@ Cross-harness journeys:
   terminal. Check retained history and cumulative input usage 1,000 → 1,100 →
   1,200. The provider replies and usage are scripted; this does not prove live
   billing or recovery after the runner deletes the bridge directory.
+- **`resume`, Pi cost reporting (component boundaries):**
+  `tests/harnesses/pi_native/test_pi_native_extension.py` exercises Pi-reported
+  dollars, duplicate callbacks, local/server restart baselines and missing pricing.
+  `tests/server/routes/test_sessions_usage_loading.py` checks the real HTTP
+  snapshot-to-runner handoff, excluding child-session cost. An incomplete or
+  older reporter keeps server pricing; its last display subtotal is not a complete
+  cost baseline. Check the session cost before and after a resumed turn; provider
+  pricing must be available to compare dollars. These tests do not prove live billing.
 - **`resume`, bare picker scoped to this host:**
   `tests/e2e/test_native_resume_picker_cross_host_e2e.py::test_bare_resume_picker_excludes_other_hosts_sessions`
 - **`approvals`, Pi extension dialogs:**

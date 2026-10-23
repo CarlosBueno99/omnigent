@@ -30,6 +30,37 @@ def _usage(store: SqlAlchemyConversationStore, conv_id: str) -> dict:
     return dict(conv.session_usage)
 
 
+@pytest.mark.parametrize("coverage", [{"cost_complete": False}, {}])
+def test_pi_incomplete_cost_does_not_become_a_resume_baseline(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, coverage: dict
+) -> None:
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing_with_provider", lambda *a, **kw: None
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="pi-cost", agent_id=_AGENT_ID)
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_input_tokens": 100,
+            "cumulative_cost_usd": 0.75,
+            "cost_complete": True,
+            "model": "unpriced-model",
+        },
+        store,
+    )
+    assert _usage(store, conv.id)["native_cost_complete"] is True
+    _persist_native_cumulative_usage(
+        conv.id,
+        {"cumulative_input_tokens": 200, **coverage, "model": "unpriced-model"},
+        store,
+    )
+    usage = _usage(store, conv.id)
+    assert usage["total_cost_usd"] == 0.75
+    assert usage["input_tokens"] == 200
+    assert usage.get("native_cost_complete") is not True
+
+
 def test_per_model_cost_sums_across_model_switch(db_uri: str) -> None:
     store = SqlAlchemyConversationStore(db_uri)
     conv = store.create_conversation(title="switch", agent_id=_AGENT_ID)
