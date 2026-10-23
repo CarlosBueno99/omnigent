@@ -188,6 +188,25 @@ their screen-only excerpt independently of this flag; the flag is not a master
 content switch for ordinary lifecycle logs. Other terminals still export no
 pane text in these event attributes.
 
+## Native startup failure context
+
+Native terminal startup failures carry bounded `failure_context` metadata on
+the existing runner status event and terminal-ensure error response. Updated
+servers retain it on the existing `session_turn_failed` record for both delivery
+paths, including when the runner's local logs are unavailable.
+
+`failure_id` matches the runner's `native_terminal_start_failed` `error_id`, and
+`failure_source` is `native_terminal_start`. `exception_type`,
+`exception_cause_type`, and `exception_context_type` name available exception
+classes. `native_launch_os_errno`, `native_launch_os_errno_name`, and
+`native_launch_winerror` preserve available OS facts from the bounded cause
+chain. Missing fields mean unavailable evidence. These fields contain no raw
+exception messages, paths, arguments, or pane output.
+
+Older runners can omit the context; malformed and unknown fields are ignored.
+The context does not change error codes, display text, status handling, or
+retry policy, and does not add failure records.
+
 ## Codex startup failure snapshot
 
 When a fresh native Codex session's TUI exits, thread discovery times out, or
@@ -270,6 +289,19 @@ error or the CLI's startup error. Cancellation emits no event. If the collector
 fails, the row carries `diagnostics_error_type` instead of the snapshot; a
 logging failure cannot replace the startup error or skip teardown.
 
+When the readiness budget expires while the spawned process is still alive and
+has never accepted a probe, `start()` instead emits
+`event_name=codex_app_server_silent_start_respawn` at WARNING level, terminates
+that process, and spawns one replacement on the same transport with a fresh
+readiness budget, so recovery can take two full budgets plus teardown rather
+than ending after the first. The row carries the same snapshot attributes for
+the silent process plus `recent_stderr_bytes`, the size of its retained stderr
+tail, and `last_error_type`, the class of the last failed readiness probe (for
+example `ConnectionRefusedError`); the stderr text itself appears only in the
+opt-in, redacted `stderr_tail` attribute, never in the message. If the replacement fails in turn, the
+`codex_app_server_start_failed` row describes the replacement, so the respawn
+row is the only record of the original silent process.
+
 ## Native turn failure evidence
 
 Failed `external_session_status` events accept optional `failure_context`
@@ -300,6 +332,20 @@ output, it records `detail_source=missing`.
 | `native_request_id`, `native_error_request_id` | Claude's `requestId` and an unqualified error-body `request_id`, respectively; neither is assumed to be a provider ID |
 | `gateway_request_id`, `provider_request_id` | Only populated when the source explicitly names that ownership |
 | `failure_context_missing_fields` | Comma-separated list of unavailable source fields, including IDs, versions, and inference details |
+
+The server also retains typed provider fields from explicit failed-status
+`output` or `failure_detail`, including gateway JSON whose message contains
+another JSON error. Parsing is limited to 16,384 characters and three envelopes; malformed
+or unmarked text adds no inferred facts. Stored assistant prose and idle or
+cancelled status edges are not parsed for provider facts.
+
+`provider_error_type`, `provider_error_code`, `provider_error_param`, available
+HTTP status and explicitly named request IDs reach the existing failure record
+with `inference_detail_source=provider_error_json`. An unqualified error-body
+`request_id` remains separate from the session event's transport request ID.
+Existing structured evidence takes precedence. Values use the shared bounds
+and credential redaction; raw messages, unrelated fields and request bodies
+are not copied into this metadata. Status policy and display text stay the same.
 
 Claude forwarding failures retain the rejected delivery's `http_status` and,
 when recognized, `forwarder_rejection_reason`. The reason is restricted to
@@ -417,6 +463,26 @@ possible append overshoot). This is CLI-version-dependent, not an Omnigent disk
 quota. The next enabled launch in the same bridge directory removes the prior
 owned file and its rotated predecessor. Other user debug files are never read
 or deleted.
+
+## Codex bridge availability
+
+When an input cannot be delivered because bridge state is unavailable, the
+executor emits one INFO `codex_bridge_state_unavailable` record after its
+existing startup wait. Polling does not emit this record. `bridge_state_status`
+distinguishes `missing`, `not_file`, `unreadable`, `invalid_encoding`,
+`invalid_json`, and `invalid_state`; `bridge_state_errno` retains an observed
+OS error number when available. Invalid UTF-8 is treated as unavailable state,
+like malformed JSON, rather than escaping as a decoding exception.
+
+`wait_sleep_ms` is accumulated polling sleep, and `wait_budget_ms` is the
+current nominal budget. `startup_wait_extended` records whether a configured
+command received its longer allowance. `startup_error_present` distinguishes
+a runner-reported startup failure, and `startup_failure_coded` indicates a
+semantic failure code without exporting the marker's content.
+The record uses the same state read that stopped delivery and carries existing
+input correlation IDs when available. It contains no file paths, state bytes,
+startup-error text, or user input. Error wording, wait budgets, and undelivered
+input handling are unchanged.
 
 ## Verification
 

@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import time
+import tomllib
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
@@ -27,7 +28,6 @@ from typing import Any
 
 import httpx
 import pytest
-import tomllib
 
 from omnigent.harnesses.codex_native.app_server import client_for_transport
 from omnigent.harnesses.codex_native.bridge import read_bridge_state
@@ -438,6 +438,98 @@ def test_codex_model_switch_clamps_inherited_effort(codex_effort_rig: _Rig) -> N
             rig.api.patch(f"/v1/sessions/{session.id}", json={"model_override": _STANDARD_MODEL})
         )
         _assert_turn(rig, session, _STANDARD_MODEL, "xhigh")
+
+
+@pytest.mark.parametrize("main_turn_first", [True, False], ids=["after_main_turn", "side_first"])
+def test_codex_side_chat_uses_switched_model_and_effort(
+    codex_effort_rig: _Rig, main_turn_first: bool
+) -> None:
+    """A /side fork opened after a model and effort switch sends the parent's new settings."""
+    rig = codex_effort_rig
+    assert "max" in rig.capabilities(_EXTENDED_MODEL)
+    assert "max" not in rig.capabilities(_STANDARD_MODEL)
+    with _session(rig, _STANDARD_MODEL, "high") as session:
+        _assert_turn(rig, session, _STANDARD_MODEL, "high")
+        _json(
+            rig.api.patch(
+                f"/v1/sessions/{session.id}",
+                json={"model_override": _EXTENDED_MODEL, "reasoning_effort": "max"},
+            )
+        )
+        if main_turn_first:
+            _assert_turn(rig, session, _EXTENDED_MODEL, "max")
+
+        # Longer than the turn markers, which the fork's inherited history also contains.
+        marker = f"SIDE_CHAT_REPLY_OK_{uuid.uuid4().hex}"
+        _json(
+            rig.model.post(
+                "/mock/configure", json={"key": marker, "responses": [], "match": marker}
+            )
+        )
+        _json(rig.model.post("/mock/set_fallback", json={"key": marker, "text": marker}))
+        before = len(_json(rig.model.get("/mock/requests"))["requests"])
+        rig.api.post(
+            f"/v1/sessions/{session.id}/events",
+            json={
+                "type": "message",
+                "data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": f"/side Reply with {marker}"}],
+                },
+            },
+        ).raise_for_status()
+        deadline = time.monotonic() + 90
+        side_requests: list[dict[str, Any]] = []
+        replied = False
+        while time.monotonic() < deadline and not (side_requests and replied):
+            requests = _json(rig.model.get("/mock/requests"))["requests"][before:]
+            side_requests = [
+                request for request in requests if marker in json.dumps(request.get("input"))
+            ]
+            children = _json(rig.api.get(f"/v1/sessions/{session.id}/child_sessions"))["data"]
+            replied = any(
+                item.get("role") == "assistant" and marker in json.dumps(item.get("content"))
+                for child in children
+                for item in _json(
+                    rig.api.get(f"/v1/sessions/{child['id']}/items", params={"limit": 100})
+                )["data"]
+            )
+            time.sleep(0.5)
+        observed = [
+            (request.get("model"), request.get("reasoning", {}).get("effort"))
+            for request in side_requests
+        ]
+        assert side_requests, f"The side fork never reached the model.\n{rig.stack.log_tail()}"
+        assert set(observed) == {(_EXTENDED_MODEL, "max")}, observed
+        assert replied, f"The side chat never showed its reply.\n{rig.stack.log_tail()}"
+
+
+def test_codex_model_pick_recreates_closed_terminal(codex_effort_rig: _Rig) -> None:
+    """A model pick restores an exited TUI and keeps the live Codex thread."""
+    rig = codex_effort_rig
+    assert "high" in rig.capabilities("gpt-6-sol")
+    assert "low" in rig.capabilities("gpt-6-astra")
+    with _session(rig, "gpt-6-sol", "high") as session:
+        _assert_turn(rig, session, "gpt-6-sol", "high")
+        original = read_bridge_state(session.bridge)
+        assert original is not None
+        terminal_path = f"/v1/sessions/{session.id}/resources/terminals/{session.terminal['id']}"
+        _json(rig.api.delete(terminal_path))
+        assert rig.api.get(terminal_path).status_code == 404
+
+        _json(
+            rig.api.patch(
+                f"/v1/sessions/{session.id}",
+                json={"model_override": "gpt-6-astra", "reasoning_effort": "low"},
+            )
+        )
+        session.terminal = _json(rig.api.get(terminal_path))
+        recovered = read_bridge_state(session.bridge)
+        assert recovered is not None
+        assert recovered.thread_id == original.thread_id
+        assert recovered.socket_path == original.socket_path
+        _assert_turn(rig, session, "gpt-6-astra", "low", terminal=True)
+        _assert_turn(rig, session, "gpt-6-astra", "low")
 
 
 def test_codex_effort_reset_survives_next_turn(codex_effort_rig: _Rig) -> None:

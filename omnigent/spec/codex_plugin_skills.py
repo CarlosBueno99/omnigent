@@ -1,4 +1,4 @@
-"""Discover plugin skills from Codex's installed-plugin inventory."""
+"""Discover plugin skills from Codex's inventory or loaded-skill catalog."""
 
 from __future__ import annotations
 
@@ -17,6 +17,11 @@ from omnigent.spec.parser import _discover_skills, _parse_skill
 from omnigent.spec.types import SkillSpec
 
 _log = logging.getLogger(__name__)
+
+
+def _is_path_segment(part: object) -> bool:
+    """Whether *part* names exactly one directory level under the plugin cache."""
+    return isinstance(part, str) and part not in {"", ".", ".."} and Path(part).name == part
 
 
 def _skill_roots(root: Path, paths: object) -> list[Path]:
@@ -70,6 +75,61 @@ def _without_inventory(summary: str, detail: str, warnings: list[str] | None) ->
     return []
 
 
+def _inventory_plugins(codex_path: str, codex_home: Path, cwd: Path | None) -> list[object]:
+    """Return the installed entries of ``codex plugin list --json``.
+
+    :raises OSError, subprocess.SubprocessError, ValueError: The inventory is unreadable.
+    """
+    result = subprocess.run(
+        [codex_path, "plugin", "list", "--json"],
+        cwd=cwd or codex_home,
+        env={**os.environ, "CODEX_HOME": str(codex_home)},
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    inventory = json.loads(result.stdout)
+    plugins = inventory.get("installed") if isinstance(inventory, dict) else None
+    if not isinstance(plugins, list):
+        raise ValueError("inventory has no list of installed plugins")
+    return plugins
+
+
+def _loaded_plugin_skills(
+    codex_path: str, codex_home: Path, skills_filter: str | list[str], cwd: Path | None
+) -> list[SkillSpec]:
+    """Use Codex's effective configuration and version selection when inventory fails.
+
+    :raises OSError, RuntimeError, TimeoutError, ValueError: Codex could not list its skills.
+    """
+    from omnigent.harnesses.codex_native.skill_discovery import loaded_codex_skills
+
+    skills = loaded_codex_skills(codex_path, codex_home, cwd or codex_home)
+    cache = (codex_home / "plugins" / "cache").resolve()
+    filter_names = set(skills_filter) if isinstance(skills_filter, list) else None
+    out: list[SkillSpec] = []
+    for skill in skills:
+        name, path = skill.get("name"), skill.get("path")
+        if skill.get("enabled") is not True or not isinstance(name, str):
+            continue
+        if not isinstance(path, str) or not Path(path).resolve().is_relative_to(cache):
+            continue
+        if (
+            filter_names is not None
+            and name not in filter_names
+            and name.partition(":")[2] not in filter_names
+        ):
+            continue
+        try:
+            spec = _parse_skill(Path(path))
+        except (OmnigentError, OSError, yaml.YAMLError) as exc:
+            _log.warning("Could not read loaded Codex skill %r: %s", name, exc)
+            continue
+        out.append(replace(spec, name=name, display_name=None))
+    return out
+
+
 def discover_codex_plugin_skills(
     codex_home: Path,
     skills_filter: str | list[str],
@@ -79,9 +139,10 @@ def discover_codex_plugin_skills(
 ) -> list[SkillSpec]:
     """Ask Codex which plugin versions are installed, then parse their skills.
 
-    When the inventory cannot be read, plugin skills are omitted and, if
-    ``warnings`` is given, a user-facing explanation is appended to it so
-    the caller can show the catalog as incomplete rather than empty.
+    When the inventory cannot be read, Codex's loaded-skill catalog supplies
+    the plugin skills. When that fails too, plugin skills are omitted and, if
+    ``warnings`` is given, a user-facing explanation is appended to it so the
+    caller can show the catalog as incomplete rather than empty.
     """
     from omnigent.inner.codex_executor import _find_codex_cli
 
@@ -93,33 +154,26 @@ def discover_codex_plugin_skills(
     if (codex_path := _find_codex_cli()) is None:
         return _without_inventory("`codex` was not found on the host", "", warnings)
     try:
-        result = subprocess.run(
-            [codex_path, "plugin", "list", "--json"],
-            cwd=cwd or codex_home,
-            env={**os.environ, "CODEX_HOME": str(codex_home)},
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        )
-        inventory = json.loads(result.stdout)
+        plugins = _inventory_plugins(codex_path, codex_home, cwd)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        return _without_inventory(*_inventory_failure(exc), warnings)
-    plugins = inventory.get("installed") if isinstance(inventory, dict) else None
-    if not isinstance(plugins, list):
-        return _without_inventory(
-            "`codex plugin list` returned an unexpected inventory", "", warnings
-        )
+        summary, detail = _inventory_failure(exc)
+        _log.info("Codex plugin inventory unavailable: %s", detail or summary)
+        try:
+            return _loaded_plugin_skills(codex_path, codex_home, skills_filter, cwd)
+        except (OSError, RuntimeError, TimeoutError, ValueError) as catalog_exc:
+            catalog_detail = str(catalog_exc) or type(catalog_exc).__name__
+            return _without_inventory(
+                f"{summary} and `codex app-server` could not list skills",
+                f"{detail}; {catalog_detail}" if detail else catalog_detail,
+                warnings,
+            )
     filter_names = set(skills_filter) if isinstance(skills_filter, list) else None
     out: list[SkillSpec] = []
     for plugin in plugins:
         if not isinstance(plugin, dict) or plugin.get("enabled") is not True:
             continue
         parts = [plugin.get(key) for key in ("marketplaceName", "name", "version")]
-        if not all(
-            isinstance(part, str) and part not in {"", ".", ".."} and Path(part).name == part
-            for part in parts
-        ):
+        if not all(_is_path_segment(part) for part in parts):
             continue
         root = cache.joinpath(*cast(list[str], parts))
         manifest_path = root / ".codex-plugin" / "plugin.json"
