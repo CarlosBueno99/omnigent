@@ -157,17 +157,9 @@ export const PI_NATIVE_EFFORTS: { value: string; label: string }[] = [
 ];
 
 /**
- * Reasoning-effort ladder a native harness offers at session create.
- *
- * Claude Code and Pi have fixed ladders. Codex's ladder belongs to the model,
- * so it is read from the host catalog for ``model`` (or the catalog's default
- * row when no model is pinned); an unresolved model yields no levels.
- *
- * @param harness - Native harness id, e.g. ``"codex-native"``.
- * @param modelOptions - The harness's host model catalog (used by Codex only).
- * @param model - Pinned model id, or empty/null for the harness default.
- * @returns The selectable efforts, or ``null`` when the harness takes no
- *   create-time effort.
+ * Create-time effort ladder for a native harness, or `null` when it takes none.
+ * Claude Code and Pi are fixed; Codex reads `model` (or the default row) from
+ * `modelOptions`, and an unresolved model yields no levels.
  */
 export function nativeEffortOptions(
   harness: string | null | undefined,
