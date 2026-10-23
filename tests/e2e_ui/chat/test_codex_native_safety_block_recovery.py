@@ -108,10 +108,14 @@ def test_codex_native_follow_up_after_safety_block_gets_reply(
     _show_error_details(page, 0)
 
     set_fallback_mock_llm(mock_llm_server_url, _CODEX_MOCK_MODEL, _FOLLOW_UP_REPLY)
-    replies = page.locator(_ASSISTANT, has_text=_FOLLOW_UP_REPLY)
-    for answered, follow_up in enumerate(_FOLLOW_UPS):
-        _send_and_wait_for_outcome(page, follow_up, errors_before=1, replies_before=answered)
-        expect(replies).to_have_count(answered + 1)
-    expect(page.get_by_test_id("error-pill")).to_have_count(1)
-    replies.last.scroll_into_view_if_needed()
-    page.wait_for_timeout(1_500)
+    try:
+        replies = page.locator(_ASSISTANT, has_text=_FOLLOW_UP_REPLY)
+        for answered, follow_up in enumerate(_FOLLOW_UPS):
+            _send_and_wait_for_outcome(page, follow_up, errors_before=1, replies_before=answered)
+            expect(replies).to_have_count(answered + 1)
+        expect(page.get_by_test_id("error-pill")).to_have_count(1)
+        replies.last.scroll_into_view_if_needed()
+        page.wait_for_timeout(1_500)
+    finally:
+        # Fallbacks survive reset_mock_llm; restore the empty reply other Codex tests use.
+        set_fallback_mock_llm(mock_llm_server_url, _CODEX_MOCK_MODEL, "")

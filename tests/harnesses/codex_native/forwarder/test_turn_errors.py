@@ -6,6 +6,7 @@ Resume uses the same verdict. Empty turns warn and stay idle, as do clean turns.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -1542,3 +1543,38 @@ async def test_failed_revert_still_ends_the_safety_blocked_turn(
     assert any("could not revert safety-blocked turn" in r.getMessage() for r in caplog.records)
     state = read_bridge_state(tmp_path)
     assert state is not None and state.active_turn_id is None
+
+
+class _UnansweredCodexClient(_InterruptRecordingCodexClient):
+    """Records RPCs and never answers them, like a wedged app-server."""
+
+    async def request(self, method: str, params: dict) -> dict:
+        self.requests.append((method, params))
+        await asyncio.Event().wait()
+        return {"result": {}}
+
+
+@pytest.mark.asyncio
+async def test_unanswered_revert_does_not_stall_forwarding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An app-server that never answers the revert cannot hold up later events."""
+    monkeypatch.setattr(fwd, "_CODEX_SAFETY_REVERT_TIMEOUT_SECONDS", 0.01)
+    _seed_active_turn(tmp_path, "turn_123")
+    codex_client = _UnansweredCodexClient()
+
+    with caplog.at_level("WARNING", logger=fwd.__name__):
+        client = await asyncio.wait_for(
+            _forward_turn_events(
+                tmp_path,
+                [_failed_turn_completed_event(_SAFETY_BLOCK_MESSAGE)],
+                codex_client=codex_client,
+            ),
+            timeout=5,
+        )
+
+    assert [method for method, _params in codex_client.requests] == ["thread/revert"]
+    assert [post["output"] for post in _status_posts(client)] == [_SAFETY_BLOCK_MESSAGE]
+    assert any("could not revert safety-blocked turn" in r.getMessage() for r in caplog.records)

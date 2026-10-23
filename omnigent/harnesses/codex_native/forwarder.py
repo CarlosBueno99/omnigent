@@ -283,9 +283,11 @@ _CODEX_RATE_LIMIT_ERROR = re.compile(r"(?<![\w-])429(?![\w-])|too many requests|
 _CODEX_ERROR_KIND_AUTH = "auth"
 _CODEX_ERROR_KIND_GENERIC = "generic"
 _CODEX_ERROR_KIND_SAFETY = "safety"
-# Provider safety refusals. Codex re-sends the whole thread every turn, so a
-# refused turn left in history gets every later request refused too.
+# Codex reports provider safety refusals only as message text, so this phrase
+# must track the provider's wording.
 _CODEX_SAFETY_BLOCK_FRAGMENTS = ("blocked by our safety systems",)
+# Bounds the history revert so an unresponsive app-server cannot stall forwarding.
+_CODEX_SAFETY_REVERT_TIMEOUT_SECONDS = 10.0
 _CODEX_REAUTH_HINT = "If this looks like an auth issue, running `codex login` may help."
 # Budget/quota exhaustion from the AI gateway: the gateway returns HTTP 403 +
 # PERMISSION_DENIED for these, which looks like auth to the generic checks —
@@ -4234,15 +4236,18 @@ async def _maybe_revert_safety_blocked_turn(
     if not blocked:
         return
     try:
-        try:
-            await codex_client.request(
-                "thread/revert", {"threadId": thread_id, "beforeTurnId": turn_id}
-            )
-        except CodexAppServerResponseError as exc:
-            if not codex_rejects_method(exc, "thread/revert"):
-                raise
-            # Codex releases before thread/revert can only drop the latest turns.
-            await codex_client.request("thread/rollback", {"threadId": thread_id, "numTurns": 1})
+        async with asyncio.timeout(_CODEX_SAFETY_REVERT_TIMEOUT_SECONDS):
+            try:
+                await codex_client.request(
+                    "thread/revert", {"threadId": thread_id, "beforeTurnId": turn_id}
+                )
+            except CodexAppServerResponseError as exc:
+                if not codex_rejects_method(exc, "thread/revert"):
+                    raise
+                # Codex releases before thread/revert can only drop the latest turns.
+                await codex_client.request(
+                    "thread/rollback", {"threadId": thread_id, "numTurns": 1}
+                )
     except Exception:  # the refusal is already surfaced as a failed turn.
         _logger.warning(
             "Codex forwarder could not revert safety-blocked turn: turn_id=%s",
