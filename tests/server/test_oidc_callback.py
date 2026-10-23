@@ -41,6 +41,7 @@ from omnigent.server.auth import UnifiedAuthProvider
 from omnigent.server.oidc import OIDCConfig
 from omnigent.server.routes.auth import (
     _AUTH_STATE_COOKIE_PLAIN,
+    _AUTH_STATE_TTL_SECONDS,
     _resolve_oidc_email,
     create_auth_router,
 )
@@ -257,6 +258,35 @@ def test_oidc_accepts_es384_id_token(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert _resolve_oidc_email({"id_token": token}, _oidc_config()) == "Alice@Example.com"
+
+
+@pytest.mark.parametrize(
+    ("seconds_since_expiry", "accepted"),
+    [(_AUTH_STATE_TTL_SECONDS - 10, True), (_AUTH_STATE_TTL_SECONDS + 10, False)],
+)
+def test_id_token_expiry_leeway_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, seconds_since_expiry: int, accepted: bool
+) -> None:
+    """Accept an id_token that expired within the login window, but not an older one."""
+    keys = _IdpKeys()
+    monkeypatch.setattr(
+        jwt.PyJWKClient,
+        "get_signing_key_from_jwt",
+        lambda self, token: keys.signing_key,
+    )
+    now = int(time.time())
+    token = keys.sign_id_token(
+        {
+            "email": "alice@example.com",
+            "email_verified": True,
+            "iat": now - 3600,
+            "exp": now - seconds_since_expiry,
+        }
+    )
+
+    email = _resolve_oidc_email({"id_token": token}, _oidc_config())
+
+    assert email == ("alice@example.com" if accepted else None)
 
 
 def test_callback_verified_email_mints_session(
@@ -608,10 +638,21 @@ def test_non_reauth_callback_ignores_auth_time(
 # ── CLI login tickets + login-issued refresh grants ───────────────
 
 
-@pytest.mark.parametrize("reauth", ["1", "0", None])
+def _entra_shaped_claims(claims: dict[str, object], max_age: int) -> dict[str, object]:
+    """Reshape claims like Entra's ``max_age`` id_token: ``iat`` five minutes back,
+    ``exp`` at ``auth_time + max(max_age, 1)``."""
+    auth_time = int(claims["auth_time"])
+    return {**claims, "iat": auth_time - 300, "exp": auth_time + max(max_age, 1)}
+
+
+@pytest.mark.parametrize(
+    ("reauth", "id_token_shape"),
+    [("1", "generic"), ("0", "generic"), (None, "generic"), ("1", "entra")],
+)
 def test_cli_ticket_generic_oidc_reauth_round_trip(
     callback_client: tuple[TestClient, _IdpKeys],
     reauth: str | None,
+    id_token_shape: str,
 ) -> None:
     client, keys = callback_client
     verifier, challenge = _cli_pkce_pair()
@@ -629,15 +670,22 @@ def test_cli_ticket_generic_oidc_reauth_round_trip(
         client.cookies[_AUTH_STATE_COOKIE_PLAIN], _TEST_SECRET, algorithms=["HS256"]
     )
     assert state["ticket"] == created["ticket"]
-    client.app.state.pending_id_token[0] = keys.sign_id_token(
-        {"email": "alice@example.com", "email_verified": True, "auth_time": state["reauth_at"]}
-    )
+    claims: dict[str, object] = {
+        "email": "alice@example.com",
+        "email_verified": True,
+        "auth_time": state["reauth_at"],
+    }
+    if id_token_shape == "entra":
+        claims = _entra_shaped_claims(claims, int(authorization["max_age"][0]))
+        # The browser redirect reaches the callback at least a second after the user signs in.
+        time.sleep(max(0.0, state["reauth_at"] + 1 - time.time()))
+    client.app.state.pending_id_token[0] = keys.sign_id_token(claims)
     callback = client.get(
         "/auth/callback",
         params={"code": "auth-code", "state": authorization["state"][0]},
         follow_redirects=False,
     )
-    assert callback.status_code == 302
+    assert callback.status_code == 302, callback.text
     consent = client.get(callback.headers["location"])
     assert "Authorize sign-in" in consent.text
     poll_params = {"ticket": created["ticket"]}
