@@ -2139,10 +2139,7 @@ async def test_managed_session_stopped_during_provision_terminates_sandbox(
 
     stop = await env.client.post(events, json={"type": "stop_session"})
     try:
-        if not stop.is_success:
-            # Refusing the stop mid-launch is acceptable only if the message stays queued.
-            assert env.conv_store.list_pending_inputs(session_id), stop.text
-            return
+        assert stop.is_success, stop.text
         assert env.conv_store.list_pending_inputs(session_id) == []
 
         gate.set()
@@ -2159,6 +2156,86 @@ async def test_managed_session_stopped_during_provision_terminates_sandbox(
         )
         assert fake.terminated == ["sb-fake-1"], f"stopped session's sandbox kept up: {leaked}"
         assert hosts == [], leaked
+    finally:
+        gate.set()
+        for future in host_futures:
+            future.cancel()
+
+
+async def test_managed_session_stopped_during_bind_terminates_sandbox(
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop accepted after the host bind, before the runner is recorded, still tears down."""
+    import threading
+
+    env = managed_session_env
+    monkeypatch.setattr("omnigent.server.managed_hosts.MANAGED_HOST_ONLINE_TIMEOUT_S", 10)
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S", 120
+    )
+    loop = asyncio.get_running_loop()
+    gate = threading.Event()
+    host_futures: list[asyncio.Future[ApplicationCommunicator]] = []
+
+    def _start_fake_sandbox_host(invocation: HostStartInvocation) -> None:
+        future = asyncio.run_coroutine_threadsafe(
+            _fake_sandbox_host(
+                env.app, invocation.host_id, invocation.host_name, invocation.token
+            ),
+            loop,
+        )
+        host_futures.append(asyncio.wrap_future(future, loop=loop))
+
+    fake = FakeSandboxLauncher(provision_gate=gate, on_host_start=_start_fake_sandbox_host)
+    install_fake_modal_launcher(monkeypatch, fake)
+    stops: list[Any] = []
+    bind_host = env.conv_store.set_host_id
+
+    def _bind_then_stop(session_id: str, *args: Any, **kwargs: Any) -> Conversation:
+        bound = bind_host(session_id, *args, **kwargs)
+        stop = env.client.post(f"/v1/sessions/{session_id}/events", json={"type": "stop_session"})
+        stops.append(asyncio.run_coroutine_threadsafe(stop, loop).result(timeout=10))
+        return bound
+
+    monkeypatch.setattr(env.conv_store, "set_host_id", _bind_then_stop)
+
+    agent = await create_test_agent(env.client, name="managed-stop-bind-race-agent")
+    resp = await env.client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "host_type": "managed"},
+    )
+    assert resp.status_code == 201, resp.text
+    session_id = resp.json()["id"]
+    queued = await env.client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "message",
+            "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+        },
+    )
+    assert queued.status_code == 202 and queued.json()["queued"] is True, queued.text
+
+    try:
+        gate.set()
+        deadline = loop.time() + 15.0
+        conv = env.conv_store.get_conversation(session_id)
+        while loop.time() < deadline and (
+            conv is None or conv.labels.get(STARTUP_LABEL) != "failed"
+        ):
+            await asyncio.sleep(0.05)
+            conv = env.conv_store.get_conversation(session_id)
+        assert [stop.status_code for stop in stops] == [202], [stop.text for stop in stops]
+        assert conv is not None
+        hosts = [host.host_id for host in env.host_store.list_hosts(RESERVED_USER_LOCAL)]
+        leaked = (
+            f"terminated={fake.terminated!r}, session host_id={conv.host_id!r}, "
+            f"runner_id={conv.runner_id!r}, hosts={hosts!r}"
+        )
+        assert fake.terminated == ["sb-fake-1"], f"stopped session's sandbox kept up: {leaked}"
+        assert hosts == [], leaked
+        assert (conv.host_id, conv.runner_id) == (None, None), leaked
+        assert conv.labels.get(STARTUP_LABEL) == "failed", leaked
     finally:
         gate.set()
         for future in host_futures:

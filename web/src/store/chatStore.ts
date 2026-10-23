@@ -475,7 +475,12 @@ export function hydrateLocalConversation(
         startupPending: true,
         pendingUserMessages: state.pendingUserMessages.map((message) =>
           message.tempId === pendingMsgTempId
-            ? { ...message, posted: true, initialDraft: undefined }
+            ? {
+                ...message,
+                posted: true,
+                initialDraft: undefined,
+                files: message.initialDraft?.files,
+              }
             : message,
         ),
       }));
@@ -562,6 +567,8 @@ export interface PendingUserMessage {
   content: MessageContentBlock[];
   /** Unsent draft awaiting session/model readiness, including unuploaded files. */
   initialDraft?: { text: string; files: File[] };
+  /** The send's attachments, handed back if an Interrupt deletes the server's copy. */
+  files?: File[];
   /** Client epoch seconds stamped ONCE at send time — the optimistic
    *  bubble's display timestamp. Stamping here (not at render or
    *  promotion) keeps the shown time pinned to when the user hit send.
@@ -1462,26 +1469,43 @@ function modelSelectionPending(state: ConversationState): boolean {
   );
 }
 
-function sandboxLaunching(state: ConversationState): boolean {
-  return state.sandboxStatus !== null && state.sandboxStatus.stage !== "failed";
-}
-
 // A native CLI can't take input until its sandbox is up, and a launch can take
 // minutes; the server holds a message for less than that.
 function nativeSandboxLaunching(state: ConversationState): boolean {
-  return state.isNativeTerminalSession && sandboxLaunching(state);
+  return (
+    state.isNativeTerminalSession &&
+    state.sandboxStatus !== null &&
+    state.sandboxStatus.stage !== "failed"
+  );
 }
 
-/** The text of the messages waiting in the session's pending bubbles. */
-function pendingMessagesText(state: ConversationState): string {
-  return state.pendingUserMessages
+// The server forwards saved messages only after it binds the sandbox's host ("connecting").
+function sandboxHostUnbound(state: ConversationState): boolean {
+  const stage = state.sandboxStatus?.stage;
+  return (
+    stage === "provisioning" ||
+    stage === "action_required" ||
+    stage === "cloning" ||
+    stage === "starting"
+  );
+}
+
+/** The text and files of the pending messages the server holds, if any. */
+function serverHeldDraft(state: ConversationState): { text: string; files: File[] } | null {
+  // Snapshot-replayed bubbles carry no send stamp; an unsettled POST may still land after Interrupt.
+  const held = state.pendingUserMessages.filter(
+    (message) => message.posted === true || message.createdAtS === undefined,
+  );
+  const text = held
     .map((message) =>
       message.content
         .flatMap((block) => (block.type === "input_text" ? [block.text] : []))
         .join(""),
     )
-    .filter((text) => text.trim() !== "")
+    .filter((part) => part.trim() !== "")
     .join("\n\n");
+  const files = held.flatMap((message) => message.files ?? []);
+  return text || files.length > 0 ? { text, files } : null;
 }
 
 // Restores a draft held through a launch whose end never reaches this tab; well
@@ -2636,6 +2660,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
                 tempId,
                 content,
                 ...(initialDraft ? { initialDraft } : {}),
+                ...(files && files.length > 0 ? { files } : {}),
                 createdAtS: Math.floor(Date.now() / 1000),
                 ...(selfAuthor !== null ? { author: selfAuthor } : {}),
                 ...(sentMidTurn ? { sentMidTurn } : {}),
@@ -3118,26 +3143,32 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         return;
     }
     if (isTempConvId(sessionId)) return;
-    // Interrupt deletes the messages the server saved for a launching sandbox; hand their
-    // text back so it can be corrected and resent. A newer composer draft wins.
-    const savedText =
-      state.startupPending && sandboxLaunching(state) ? pendingMessagesText(state) : "";
-    if (savedText) {
-      const draft = getSessionDraft(sessionId) ?? { text: savedText, files: [] };
-      setSessionDraft(sessionId, draft);
-      setActive({ failedSendDraft: { ...draft, conversationId: sessionId } });
-    }
+    // Interrupt deletes the messages the server saved for a launching sandbox; once it
+    // lands, hand them back so they can be corrected and resent. A newer composer draft wins.
+    const savedDraft =
+      state.startupPending && sandboxHostUnbound(state) ? serverHeldDraft(state) : null;
     // Fire-and-forget interrupt; the server emits session.interrupted
     // + response.incomplete on the open stream, which the pump
     // translates into the cancelled bubble decoration. We deliberately
     // do NOT abort the local SSE stream — it remains open across
     // turns; switchTo or tab unload is the only thing that tears it
     // down.
-    void interruptSession(sessionId).catch(() => {
-      // Interrupt is best-effort. A network failure here means the
-      // user's cancel won't reach the server, but the local UI already
-      // reflects the user's stop request below.
-    });
+    void interruptSession(sessionId)
+      .then(() => {
+        if (savedDraft === null) return;
+        const draft = getSessionDraft(sessionId) ?? savedDraft;
+        setSessionDraft(sessionId, draft);
+        setActive((s) =>
+          s.conversationId === sessionId
+            ? { failedSendDraft: { ...draft, conversationId: sessionId } }
+            : {},
+        );
+      })
+      .catch(() => {
+        // Interrupt is best-effort. A network failure here means the
+        // user's cancel won't reach the server, but the local UI already
+        // reflects the user's stop request below.
+      });
     setActive((s) => {
       if (s.conversationId !== sessionId) return {};
       const patch: Partial<ChatState> = {

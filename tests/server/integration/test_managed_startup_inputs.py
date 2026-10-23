@@ -352,7 +352,7 @@ async def test_stop_before_host_ready_cancels_all_saved_inputs(
     assert forwarded == []
 
 
-async def test_stop_after_interrupt_still_abandons_the_launch(startup_env: _Env) -> None:
+async def test_stop_after_interrupt_marks_the_launch_stopped(startup_env: _Env) -> None:
     env = startup_env
     session_id = await _create(env)
     for control, label in (("interrupt", "cancelled"), ("stop_session", "stopped")):
