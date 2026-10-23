@@ -33,9 +33,7 @@ def _watch() -> disconnect_outcome.Failure:
 
 
 def _observe(session_id: str, event: dict[str, object]) -> None:
-    disconnect_outcome.observe_event(
-        session_id, {"response_id": "turn-a", **event}, runner_id="runner-a"
-    )
+    disconnect_outcome.observe_event(session_id, event, runner_id="runner-a", response_id="turn-a")
 
 
 @pytest.mark.parametrize(
@@ -76,6 +74,16 @@ def test_progress_before_a_user_turn_records_resumed(event: dict[str, object]) -
         {"type": "response.output_item.done", "item": {"type": "error"}},
         {"type": "response.output_item.done", "item": {"type": "message", "role": "user"}},
         {"type": "session.presence"},
+        {"type": "response.output_item.done", "item": {"type": "function_call"}},
+        {"type": "response.output_item.done", "item": {"type": "function_call_output"}},
+        {"type": "session.status", "status": "running", "error": {"code": "failed"}},
+        {"type": "response.output_text.delta", "delta": "x", "response_id": "other-turn"},
+        {"type": "response.output_text.delta", "delta": "x", "response": {"id": "other-turn"}},
+        {
+            "type": "response.output_text.delta",
+            "delta": "x",
+            "item": {"response_id": "other-turn"},
+        },
     ],
 )
 def test_non_progress_events_keep_watching(event: dict[str, object]) -> None:
@@ -101,11 +109,20 @@ def test_unwatched_sessions_log_nothing() -> None:
     assert _outcomes(rows) == []
 
 
-def test_resume_after_the_watch_window_is_not_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("recovery_delay", [0, disconnect_outcome._WATCH_TTL_S - 1])
+def test_resume_after_the_watch_window_is_not_recorded(
+    monkeypatch: pytest.MonkeyPatch, recovery_delay: float
+) -> None:
     now = [1000.0]
     monkeypatch.setattr(disconnect_outcome.time, "monotonic", lambda: now[0])
-    _watch()
-    now[0] += disconnect_outcome._WATCH_TTL_S + 1
+    failure = disconnect_outcome.note_disconnect_failure(
+        "conv_a", runner_id="runner-a", response_id="turn-a"
+    )
+    now[0] += recovery_delay
+    disconnect_outcome.note_disconnect_failure_cleared(
+        "conv_a", failure_code="runner_disconnected", runner_id="runner-a", failure=failure
+    )
+    now[0] = 1000.0 + disconnect_outcome._WATCH_TTL_S + 1
     with capture_debug_rows("server") as rows:
         _observe("conv_a", {"type": "session.status", "status": "running"})
     assert _outcomes(rows) == []
@@ -122,8 +139,9 @@ def test_unrelated_progress_cannot_resolve_watch(
     with capture_debug_rows("server") as rows:
         disconnect_outcome.observe_event(
             "conv_a",
-            {"type": "response.output_text.delta", "response_id": response_id, "delta": "x"},
+            {"type": "response.output_text.delta", "delta": "x"},
             runner_id=runner_id,
+            response_id=response_id,
         )
         assert not _outcomes(rows)
         _observe("conv_a", {"type": "response.output_text.delta", "delta": "owned"})
@@ -150,10 +168,20 @@ def test_delayed_registration_cannot_replace_a_newer_episode(replacement: str) -
     assert not _outcomes(rows)
 
 
-def test_unidentified_recovery_does_not_install_a_watch() -> None:
+@pytest.mark.parametrize("identity", [None, (None, "turn-a"), ("runner-a", None)])
+def test_unidentified_recovery_does_not_install_a_watch(
+    identity: tuple[str | None, str | None] | None,
+) -> None:
+    failure = (
+        disconnect_outcome.note_disconnect_failure(
+            "conv_a", runner_id=identity[0], response_id=identity[1]
+        )
+        if identity is not None
+        else None
+    )
     with capture_debug_rows("server") as rows:
         disconnect_outcome.note_disconnect_failure_cleared(
-            "conv_a", failure_code="runner_disconnected"
+            "conv_a", failure_code="runner_disconnected", failure=failure, runner_id="runner-a"
         )
         _observe("conv_a", {"type": "session.status", "status": "running"})
     assert not _outcomes(rows)

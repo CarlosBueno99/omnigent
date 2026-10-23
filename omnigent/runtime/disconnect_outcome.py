@@ -29,9 +29,8 @@ class Failure:
     """Identity captured when a disconnect actually fails a turn."""
 
     episode_id: str
-    runner_id: str
-    response_id: str
-    failed_at: float
+    runner_id: str | None
+    response_id: str | None
 
 
 @dataclass(frozen=True)
@@ -51,14 +50,12 @@ _watches: WorkspaceScopedCache[str, _Watch] = WorkspaceScopedCache(
 
 def note_disconnect_failure(
     session_id: str, *, runner_id: str | None, response_id: str | None
-) -> Failure | None:
-    """Capture the owner before publishing a disconnect failure closes its turn."""
+) -> Failure:
+    """Capture an episode token, retaining any known runner and turn identity."""
     with _lock:
         _watches.pop(session_id, None)
         _failures.pop(session_id, None)
-        if not runner_id or not response_id:
-            return None
-        failure = Failure(uuid4().hex, runner_id, response_id, time.monotonic())
+        failure = Failure(uuid4().hex, runner_id, response_id)
         _failures[session_id] = failure
         return failure
 
@@ -81,6 +78,8 @@ def note_disconnect_failure_cleared(
         if (
             failure is None
             or failure_code != "runner_disconnected"
+            or not failure.runner_id
+            or not failure.response_id
             or failure.runner_id != runner_id
             or _failures.get(session_id) is not failure
         ):
@@ -109,17 +108,31 @@ def note_user_turn(session_id: str) -> None:
         _log_outcome(session_id, watch, "superseded_by_user_turn", signal="user_turn")
 
 
-def observe_event(session_id: str, event: dict[str, Any], *, runner_id: str | None = None) -> None:
+def observe_event(
+    session_id: str,
+    event: dict[str, Any],
+    *,
+    runner_id: str | None = None,
+    response_id: str | None = None,
+) -> None:
     """Observe a trusted runner event without accepting unidentified stream output.
 
-    ``runner_id`` comes from the bound relay, never from the event payload.
-    Generic stream publishers omit it and cannot establish a resumed turn.
+    Both identities come from the bound relay's lifecycle state. Runner
+    deltas need not repeat the response identity on the wire.
     """
+    if not runner_id or not response_id:
+        return
+    named_ids = [event.get("response_id")]
+    for field, key in (("response", "id"), ("item", "response_id")):
+        nested = event.get(field)
+        if isinstance(nested, dict):
+            named_ids.append(nested.get(key))
+    if any(value is not None and value != response_id for value in named_ids):
+        return
     with _lock:
         watch = _watches.get(session_id)
         if watch is None or watch.failure.runner_id != runner_id:
             return
-        response_id = event.get("response_id")
         if response_id != watch.failure.response_id:
             return
         event_type = event.get("type")
@@ -140,8 +153,6 @@ def observe_event(session_id: str, event: dict[str, Any], *, runner_id: str | No
         if _failures.get(session_id) is not watch.failure:
             return
         _failures.pop(session_id, None)
-        if time.monotonic() - watch.failure.failed_at > _WATCH_TTL_S:
-            return
     _log_outcome(session_id, watch, "turn_resumed", signal=str(event_type))
 
 

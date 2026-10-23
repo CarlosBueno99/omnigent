@@ -3954,8 +3954,9 @@ async def _publish_runner_recovered_status_impl(
         last_error = _last_task_error_from_labels(conv.labels) if conv is not None else None
         if last_error is None or last_error.get("code") != "runner_disconnected":
             return
+        current_failure = disconnect_outcome.pending_failure(session_id)
         if _session_status_cache.get(session_id) != "failed" or (
-            failure is not None and disconnect_outcome.pending_failure(session_id) is not failure
+            current_failure is not None and current_failure is not failure
         ):
             return
     _session_status_cache[session_id] = "idle"
@@ -9092,7 +9093,14 @@ async def _relay_runner_stream_once(
                         ):
                             continue
 
-                    disconnect_outcome.observe_event(session_id, event, runner_id=runner_id)
+                    disconnect_outcome.observe_event(
+                        session_id,
+                        event,
+                        runner_id=runner_id,
+                        response_id=(
+                            current_response_id or _session_active_response_cache.get(session_id)
+                        ),
+                    )
                     if evt_type == "session.status":
                         status = event.get("status", "")
                         if status in {"idle", "failed"} and pending_subagent_return_id is not None:
