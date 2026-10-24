@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, cast
 
+from omnigent.models.claude_model_vocabulary import is_claude_model_alias
 from omnigent.util.json_types import JsonObject
 from omnigent.util.reasoning_effort import CLAUDE_EFFORTS
 
@@ -43,7 +44,6 @@ MOD_TURN_REASONS: Final = ("answer", "aborted", "refusal", "error")
 # The mod was checked on this release and on 2.1.308; older CLIs keep the tmux path.
 _CLAUDE_MOD_MIN_VERSION: Final = "2.1.301"
 
-_MODEL_ARGUMENT_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,199}")
 _COMPACT_INSTRUCTIONS_MAX_BYTES: Final = 16 * 1024
 _TEXT_FIELD_MAX_CHARS: Final = 256
 _VERSION_FIELD_MAX_CHARS: Final = 64
@@ -99,9 +99,10 @@ def _normalize_abort(arguments: JsonObject) -> JsonObject:
 
 def _normalize_model(arguments: JsonObject) -> JsonObject:
     model = arguments.get("model")
-    if not isinstance(model, str) or not _MODEL_ARGUMENT_PATTERN.fullmatch(model):
-        raise ValueError("model must be a /model argument such as an alias or a model id")
-    return {"model": model}
+    # The mod switches through Claude's config row, which takes aliases only.
+    if not isinstance(model, str) or not is_claude_model_alias(model):
+        raise ValueError("model must be a Claude alias such as sonnet or opus[1m]")
+    return {"model": model.strip().lower()}
 
 
 def _normalize_effort(arguments: JsonObject) -> JsonObject:

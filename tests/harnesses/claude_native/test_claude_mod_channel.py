@@ -126,7 +126,7 @@ def _run_fake_mod(bridge_dir: Path, *, answer: dict[str, object]) -> threading.T
         ("submit", {"text": "hello"}, {"text": "hello"}),
         ("abort", {}, {}),
         ("model", {"model": "sonnet"}, {"model": "sonnet"}),
-        ("model", {"model": "opus[1m]"}, {"model": "opus[1m]"}),
+        ("model", {"model": "Opus[1M]"}, {"model": "opus[1m]"}),
         ("effort", {"level": "low"}, {"level": "low"}),
         ("compact", {}, {}),
         ("compact", {"instructions": "keep the plan"}, {"instructions": "keep the plan"}),
@@ -149,6 +149,9 @@ def test_normalize_mod_command_accepts_allowlisted_operations(
         ("abort", {"turn": "x"}),
         ("model", {"model": "sonnet; rm -rf ~"}),
         ("model", {"model": "two words"}),
+        # The mod switches through Claude's config row, which takes aliases only.
+        ("model", {"model": "system.ai.claude-haiku-5-5"}),
+        ("model", {"model": "claude-opus-4-7"}),
         ("effort", {"level": "extreme"}),
         ("compact", {"instructions": "x" * 20_000}),
         ("submit", ["not", "an", "object"]),
