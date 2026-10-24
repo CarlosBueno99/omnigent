@@ -5613,8 +5613,12 @@ def send_mod_command_if_pane_ready(
     :param operation: Allowlisted operation, e.g. ``"submit"``.
     :param arguments: Operation arguments.
     :param timeout_s: Seconds the control server waits for the mod's answer.
-    :returns: The mod's outcome, or ``not_started`` when a dialog is open.
+    :returns: The mod's outcome, or ``not_started`` when no mod is live or a
+        dialog is open.
     """
+    # Without a live mod the pane is never captured, so the tmux path runs as before.
+    if not mod_channel_live(bridge_dir):
+        return _not_started("the Claude mod is not live")
     if not claude_pane_ready(bridge_dir):
         return _not_started("the Claude pane shows a dialog or picker")
     return send_mod_command(bridge_dir, operation, arguments, timeout_s=timeout_s)

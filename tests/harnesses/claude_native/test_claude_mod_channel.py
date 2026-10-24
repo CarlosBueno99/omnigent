@@ -495,6 +495,29 @@ def test_command_without_a_live_mod_never_connects(mod_bridge: Path) -> None:
     assert "not live" in (outcome.error or "")
 
 
+def test_pane_is_captured_only_once_the_mod_is_live(
+    mod_bridge: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a live mod the pane is never read, so the tmux path costs what it did."""
+    probed: list[Path] = []
+
+    def pane_with_a_dialog(bridge_dir: Path) -> bool:
+        probed.append(bridge_dir)
+        return False
+
+    monkeypatch.setattr(claude_bridge, "claude_pane_ready", pane_with_a_dialog)
+
+    before = claude_bridge.send_mod_command_if_pane_ready(mod_bridge, "compact", {}, timeout_s=0.2)
+    _post_hello(mod_bridge)
+    after = claude_bridge.send_mod_command_if_pane_ready(mod_bridge, "compact", {}, timeout_s=0.2)
+
+    assert before.status == "not_started"
+    assert "not live" in (before.error or "")
+    assert after.status == "not_started"
+    assert "dialog" in (after.error or "")
+    assert probed == [mod_bridge]
+
+
 def test_result_for_an_unknown_command_is_not_found(mod_bridge: Path) -> None:
     status, _ = _request(mod_bridge, "POST", "/mod/result", {"id": "0" * 32, "ok": True})
     assert status == 404
