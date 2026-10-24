@@ -47,7 +47,7 @@ def write_mod_heartbeat(
         {
             "v": 1,
             "mod_version": "0.1.0",
-            "claude_version": "2.1.300",
+            "claude_version": "2.1.301",
             "claude_session_id": "claude-mod",
             "main_turn_id": main_turn_id,
             "server_pid": server_pid,

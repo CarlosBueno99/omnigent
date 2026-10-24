@@ -16,6 +16,7 @@ import pytest
 
 from omnigent.harnesses.claude_native.mod_events import (
     MOD_EVENTS_FILE_NAME,
+    MOD_HEARTBEAT_FUTURE_SKEW_S,
     MOD_HEARTBEAT_MAX_AGE_S,
     ModEventsCursor,
     ModHeartbeat,
@@ -42,7 +43,7 @@ def _heartbeat_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "v": 1,
         "mod_version": "0.1.0",
-        "claude_version": "2.1.300",
+        "claude_version": "2.1.301",
         "claude_session_id": "claude-mod",
         "main_turn_id": None,
         "server_pid": 77,
@@ -178,18 +179,20 @@ def test_event_drops_unknown_kinds_and_incomplete_records(record: object) -> Non
     [
         (0.0, 77, True),
         (MOD_HEARTBEAT_MAX_AGE_S, 77, True),
-        (-MOD_HEARTBEAT_MAX_AGE_S, 77, True),
         (MOD_HEARTBEAT_MAX_AGE_S + 0.5, 77, False),
-        (-(MOD_HEARTBEAT_MAX_AGE_S + 0.5), 77, False),
+        (-MOD_HEARTBEAT_FUTURE_SKEW_S, 77, True),
+        (-(MOD_HEARTBEAT_FUTURE_SKEW_S + 0.5), 77, False),
+        (-MOD_HEARTBEAT_MAX_AGE_S, 77, False),
         (0.0, 99, False),
         (0.0, None, False),
     ],
     ids=[
         "fresh",
         "exactly-max-age",
-        "skewed-ahead-at-max-age",
         "stale",
-        "skewed-ahead-beyond-max-age",
+        "ahead-within-skew",
+        "ahead-beyond-skew",
+        "far-in-the-future",
         "pid-mismatch",
         "server-pid-unreadable",
     ],

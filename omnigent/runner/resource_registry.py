@@ -1487,13 +1487,9 @@ class SessionResourceRegistry:
             record_activity: bool = False,
             trace_source: str | None = None,
         ) -> None:
-            # Publish one running/idle edge: dedup against the last value,
-            # memo for exit classification, and hop to the loop (publishers
-            # are loop-only). Shared by the PTY edges and the claude-native
-            # structured-state and mod turn-event pollers so both go through
-            # the same dedup/memo. The dedup baseline lives on the registry, not
-            # this closure, so a forwarder's hook-derived edge resyncs it (see
-            # :meth:`note_external_session_status`).
+            # Shared dedup, exit memo, and loop hop for PTY, structured, and mod-turn edges.
+            # The dedup baseline lives on the registry, so a forwarder's hook-derived edge
+            # resyncs it (see :meth:`note_external_session_status`).
             if status_publisher is None:
                 return
             explicit_activity = record_activity and status in {"running", "waiting"}

@@ -3,8 +3,8 @@
 The mod runs inside the Claude Code process as a function-hooks plugin. The
 serve-mcp server rewrites ``<bridge_dir>/mod.json`` on every mod heartbeat and
 appends one JSON record per event to ``<bridge_dir>/mod_events.jsonl``. This
-module is the consumer side of that contract. It uses only the standard library
-so that the producer can import the same records.
+module is the consumer side of that contract. It imports nothing from the bridge,
+so the producer can import the same records without an import cycle.
 
 Records with a ``v`` other than 1 and records of unknown kinds are ignored, and
 unknown fields are ignored. Fields the consumer acts on are required; diagnostic
@@ -20,12 +20,16 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from omnigent.harnesses.claude_native.status_file import _read_json_file
+
 MOD_SCHEMA_VERSION = 1
 MOD_STATE_FILE_NAME = "mod.json"
 MOD_EVENTS_FILE_NAME = "mod_events.jsonl"
 SERVER_STATE_FILE_NAME = "server.json"
 # Three 30-second heartbeat intervals. An older mod.json means the mod is gone.
 MOD_HEARTBEAT_MAX_AGE_S = 90.0
+# Writer and reader share the host clock, so only a write racing the read looks newer.
+MOD_HEARTBEAT_FUTURE_SKEW_S = 5.0
 # Bytes sampled before a cursor. A mismatch means the file was truncated or recreated.
 _CURSOR_FINGERPRINT_BYTES = 256
 _TURN_START_KIND = "turn.start"
@@ -195,12 +199,14 @@ def heartbeat_is_current(
     :param heartbeat: Parsed ``mod.json``, or ``None`` when absent or invalid.
     :param server_pid: ``pid`` from ``server.json``, or ``None`` when unreadable.
     :param now: Server-clock time (unix seconds) to judge freshness against.
-    :returns: ``True`` only when the heartbeat is fresh and was written by the
-        server that ``server.json`` names.
+    :returns: ``True`` only when the heartbeat is at most ``MOD_HEARTBEAT_MAX_AGE_S``
+        old, at most ``MOD_HEARTBEAT_FUTURE_SKEW_S`` ahead of ``now``, and was
+        written by the server that ``server.json`` names.
     """
     if heartbeat is None or server_pid is None or heartbeat.server_pid != server_pid:
         return False
-    return abs(now - heartbeat.updated_at) <= MOD_HEARTBEAT_MAX_AGE_S
+    age_s = now - heartbeat.updated_at
+    return -MOD_HEARTBEAT_FUTURE_SKEW_S <= age_s <= MOD_HEARTBEAT_MAX_AGE_S
 
 
 def read_mod_heartbeat(bridge_dir: Path) -> ModHeartbeat | None:
@@ -209,7 +215,7 @@ def read_mod_heartbeat(bridge_dir: Path) -> ModHeartbeat | None:
     :param bridge_dir: Bridge directory, e.g. ``Path("/tmp/omnigent-1000/claude-native/ab12")``.
     :returns: The heartbeat, or ``None`` when the file is missing, unreadable, or invalid.
     """
-    return parse_mod_heartbeat(_read_json(bridge_dir / MOD_STATE_FILE_NAME))
+    return parse_mod_heartbeat(_read_json_file(bridge_dir / MOD_STATE_FILE_NAME))
 
 
 def read_server_pid(bridge_dir: Path) -> int | None:
@@ -219,8 +225,8 @@ def read_server_pid(bridge_dir: Path) -> int | None:
     :returns: The server pid, or ``None`` when the file is missing or has no
         integer ``pid``.
     """
-    payload = _read_json(bridge_dir / SERVER_STATE_FILE_NAME)
-    if not isinstance(payload, dict):
+    payload = _read_json_file(bridge_dir / SERVER_STATE_FILE_NAME)
+    if payload is None:
         return None
     return _as_int(payload.get("pid"))
 
@@ -309,18 +315,6 @@ def _cursor_fingerprint(path: Path, byte_offset: int) -> str | None:
     except OSError:
         return None
     return hashlib.sha256(byte_offset.to_bytes(8, "big") + sample).hexdigest()
-
-
-def _read_json(path: Path) -> object:
-    """Read a JSON document, returning ``None`` when it is missing or invalid.
-
-    :param path: File to read.
-    :returns: The decoded value, or ``None``.
-    """
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
 
 
 def _as_int(value: object) -> int | None:

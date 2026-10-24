@@ -29,11 +29,9 @@ from omnigent.harnesses.claude_native.mod_events import (
 
 _logger = logging.getLogger(__name__)
 
-# A heartbeat computed just before a turn event can be delivered after it. Its view may
-# correct the applied events only once it is this much newer than the last applied event.
+# A heartbeat may predate a turn event it arrives after; trust it only once this much newer.
 MOD_HEARTBEAT_SETTLE_S = 5.0
-# Quiet window before an idle view is published. It matches the pane watcher's threshold,
-# so a follow-up turn that starts right after the completion never shows the session as idle.
+# Matches the pane idle threshold so back-to-back turns never show idle.
 MOD_TURN_IDLE_GRACE_S = 1.0
 
 _RUNNING = "running"
@@ -70,13 +68,8 @@ class ModTurnStatusPoller:
     while its heartbeat is current. Otherwise the structured source and the pane
     watcher decide, as they did before this source existed.
 
-    The heartbeat corrects the event-derived state. Its ``main_turn_id`` names the
-    main-loop turn the mod believes is running, or null. When that view disagrees
-    with the applied events and the heartbeat was written at least
-    ``heartbeat_settle_s`` after the last applied event, the heartbeat's view is
-    adopted. A lost turn.complete is therefore healed by the next heartbeat, and a
-    lost turn.start likewise. A long turn is not released on elapsed time while its
-    heartbeat keeps naming it.
+    The heartbeat corrects a lost turn event (see :meth:`_reconcile_with_heartbeat`),
+    and a long turn is never released on elapsed time while its heartbeat names it.
 
     A running status is published at once. An idle status, from a turn.complete or
     from an adopted heartbeat, is published only after ``idle_grace_s`` with no new
@@ -159,8 +152,6 @@ class ModTurnStatusPoller:
         with self._resync_lock:
             resync_requested = self._resync_requested
             self._resync_requested = False
-        if resync_requested:
-            self._last_published = None
         was_owning = self._owning
         heartbeat = read_mod_heartbeat(self._bridge_dir)
         usable = heartbeat_is_current(
@@ -179,6 +170,9 @@ class ModTurnStatusPoller:
                 "Mod turn events own the session status",
                 extra={"session_id": self._session_id},
             )
+        # Cleared only after the hand-back, which reads what was last published.
+        if resync_requested:
+            self._last_published = None
         self._structured.tick()
         if self._owning:
             self._publish_owned_status()
@@ -213,8 +207,10 @@ class ModTurnStatusPoller:
     def _reconcile_with_heartbeat(self, heartbeat: ModHeartbeat) -> None:
         """Adopt the heartbeat's main-loop view when it disagrees with the applied events.
 
-        A heartbeat written too soon after the last applied event may have been computed
-        before that event, so it must not flip the state back.
+        This heals a lost turn.complete or turn.start, but only once a first turn event
+        has been applied. A heartbeat written less than ``heartbeat_settle_s`` after the
+        last applied event may have been computed before that event, so it must not
+        flip the state back.
 
         :param heartbeat: The current, usable heartbeat.
         """
@@ -245,11 +241,12 @@ class ModTurnStatusPoller:
 
     def _hand_back(self) -> None:
         """Give the status back to the structured source and pane when the mod lets go."""
+        last_published = self._last_published
         self._last_published = None
         self._structured.resync()
-        # The pane's own idle edge may have fired while the mod owned the status and was
-        # dropped, so the quiet check is repeated here rather than waiting for a new edge.
-        if self._turn_status == _RUNNING and not self._structured.active and self._pane_quiet():
+        # The pane idle edge may have been muted while the mod showed running; re-check quiet.
+        showed_running = last_published is not None and last_published[0] == _RUNNING
+        if showed_running and not self._structured.active and self._pane_quiet():
             self._on_pane_status(_IDLE, None)
 
     def _publish_owned_status(self) -> None:

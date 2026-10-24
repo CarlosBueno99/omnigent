@@ -437,9 +437,12 @@ def test_idle_is_published_once_after_the_grace(tmp_path: Path) -> None:
     assert h.edges.calls == [("mod", "running", None), ("mod", "idle", None)]
 
 
-def test_hand_back_during_the_grace_publishes_no_idle(tmp_path: Path) -> None:
-    """A mod that stops heartbeating mid-grace leaves the idle to the structured source."""
+def test_hand_back_during_the_grace_leaves_the_idle_to_an_active_structured_source(
+    tmp_path: Path,
+) -> None:
+    """A mod that goes stale mid-grace publishes no idle; the resynced file source settles it."""
     h = _build(tmp_path)
+    h.source.active = True
     append_event_record(h.bridge, turn_start_record("t1", at=NOW))
     h.poller.tick()
     append_event_record(h.bridge, turn_complete_record("t1", at=NOW + 1))
@@ -447,11 +450,13 @@ def test_hand_back_during_the_grace_publishes_no_idle(tmp_path: Path) -> None:
     h.clocks.wall = NOW + MOD_HEARTBEAT_MAX_AGE_S + 1
     _settle(h)  # the grace has passed, but the mod no longer owns the status
     assert h.edges.calls == [("mod", "running", None)]
+    assert h.source.resyncs == 1
 
-    h.source.emit("idle")
+    h.source.emit("idle")  # the active source re-asserts its value after the resync
     assert h.edges.calls == [("mod", "running", None), ("structured", "idle", None)]
 
 
+@pytest.mark.parametrize("phase", ["mid-turn", "mid-grace", "mid-grace-with-resync"])
 @pytest.mark.parametrize(
     ("pane_last_change", "expected_pane_edges"),
     [
@@ -462,17 +467,28 @@ def test_hand_back_during_the_grace_publishes_no_idle(tmp_path: Path) -> None:
 )
 def test_pane_only_hand_back_publishes_idle_only_when_the_pane_is_quiet(
     tmp_path: Path,
+    phase: str,
     pane_last_change: float,
     expected_pane_edges: list[tuple[str, str, str | None]],
 ) -> None:
-    """Without a structured source, a dropped pane idle edge is replaced by a quiet check."""
+    """Without a structured source, a muted pane idle edge is replaced by a quiet check.
+
+    The mod still shows running when it goes stale, either mid-turn or while it
+    holds a completed turn's idle for the grace, so only the pane can settle it.
+    """
     h = _build(tmp_path)
     append_event_record(h.bridge, turn_start_record("t1", at=NOW))
     h.poller.tick()
+    if phase != "mid-turn":
+        h.clocks.monotonic = 1_001.5
+        append_event_record(h.bridge, turn_complete_record("t1", at=NOW + 1))
+        h.poller.tick()  # the idle is held until 1_002.5, so running still shows
+    if phase == "mid-grace-with-resync":
+        h.poller.resync()  # a reconnect lands on the same tick as the hand-back
     h.clocks.monotonic = pane_last_change
     h.poller.note_pane_activity()
     h.clocks.monotonic = 1_002.0
-    h.clocks.wall = NOW + MOD_HEARTBEAT_MAX_AGE_S + 1  # the mod goes stale mid-turn
+    h.clocks.wall = NOW + MOD_HEARTBEAT_MAX_AGE_S + 1  # the mod goes stale
 
     h.poller.tick()
     assert h.edges.calls == [("mod", "running", None), *expected_pane_edges]
