@@ -67,7 +67,6 @@ from omnigent.server.auth import (
     LEVEL_OWNER,
     LEVEL_READ,
     AuthProvider,
-    local_single_user_enabled,
 )
 from omnigent.server.background_session_titles import (
     BackgroundSessionTitleCoordinator,
@@ -114,7 +113,6 @@ from omnigent.server.routes._sessions.common import (
     _CODEX_NATIVE_WRAPPER_LABEL_VALUE,
     _DEVIN_NATIVE_WRAPPER_LABEL_VALUE,
     _logger,
-    _managed_launch_tasks,
     get_server_runner_router,
     set_server_runner_router,
 )
@@ -160,6 +158,7 @@ from omnigent.server.routes._sessions.helpers import (
     _same_provider_family,
     _session_status_cache,
     _set_read_state,
+    _start_managed_launch_task,
     _surface_model_change_forward_failure,
     _title_content_from_item,
     _validate_terminal_launch_args,
@@ -385,6 +384,16 @@ async def _restore_refused_settings(
 def _codex_update_unconfirmed(result: _RunnerForwardResult) -> bool:
     """Return whether Codex timed out before confirming a settings update it may still apply."""
     return _runner_reply_field(result.body, "error") == "codex_native_settings_update_timeout"
+
+
+def _unsupported_model_detail(result: _RunnerForwardResult | None) -> str | None:
+    """Return the runner's reason when the terminal has no way to select the requested model."""
+    if result is None or _runner_reply_field(result.body, "error") != (
+        "claude_native_model_unsupported"
+    ):
+        return None
+    detail = _runner_reply_field(result.body, "detail")
+    return detail if isinstance(detail, str) and detail else "This terminal cannot use that model."
 
 
 def register_core_routes(
@@ -625,24 +634,13 @@ def register_core_routes(
             agent_id=agent_id,
             host_id=requested_host_id,
         )
-        startup = getattr(request.app.state, "startup_inputs", None)
-
-        async def launch_and_record_failure() -> None:
-            try:
-                await launch
-            except Exception as exc:
-                if startup is not None:
-                    await startup.record_launch_failure(
-                        session_id, f"managed sandbox failed to launch: {exc}"
-                    )
-                raise
-            failed = managed_launches.get(session_id)
-            if startup is not None and failed is not None and failed.error is not None:
-                await startup.record_launch_failure(session_id, failed.error)
-
-        launch_task = asyncio.create_task(launch_and_record_failure())
-        _managed_launch_tasks.add(launch_task)
-        launch_task.add_done_callback(_managed_launch_tasks.discard)
+        _start_managed_launch_task(
+            session_id,
+            launch,
+            conversation_store=conversation_store,
+            tracker=managed_launches,
+            startup=getattr(request.app.state, "startup_inputs", None),
+        )
 
     async def _check_requested_host_id(
         request: Request, requested_host_id: str, user_id: str | None
@@ -807,6 +805,8 @@ def register_core_routes(
                     if target.conv.inference_snapshot
                     else None
                 ),
+                # The session had no runner bound, so nothing is superseded.
+                superseded_runner_ids=(),
             )
         )
         launch_timeout_s = resolve_launch_timeout_s()
@@ -815,7 +815,7 @@ def register_core_routes(
             launch_result = await asyncio.wait_for(future, timeout=launch_timeout_s)
         except ConnectionError as exc:
             launch_result = {"status": "failed", "error": str(exc)}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             launch_result = {
                 "status": "failed",
                 "error": (
@@ -1199,7 +1199,7 @@ def register_core_routes(
         spec = await asyncio.to_thread(
             validate_agent_bundle,
             bundle_bytes,
-            enforce_handler_allowlist=not local_single_user_enabled(),
+            enforce_handler_allowlist=True,
         )
 
         if parsed_metadata.mcp_registry_services:
@@ -2538,7 +2538,8 @@ def register_core_routes(
         #   session may pin it — including a read-only collaborator on a session
         #   shared with them. Only when the pinned label is the request's ONLY
         #   mutation.
-        # * OWNER — archiving/unarchiving or filing into a project. Both are
+        # * OWNER — launch arguments and permission mode control host execution.
+        #   Archiving/unarchiving and filing into a project are also
         #   owner-only: projects are owner-private (an editor must not move a
         #   session between them), and archive pairs with a client-driven,
         #   owner-gated stop (an editor must not hide/stop a session they can't
@@ -2555,13 +2556,19 @@ def register_core_routes(
         # resolved (strictest requested) level gates them all with no redundant
         # second permission-store read.
         set_project = "project_id" in body.model_fields_set
+        set_launch_args = (
+            body.terminal_launch_args is not None
+            or body.permission_mode is not None
+            or body.approval_mode is not None
+            or _CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY in (body.labels or {})
+        )
         set_share_workspace = "share_workspace_files" in body.model_fields_set
         pin_only = body.model_fields_set == {"labels"} and set(body.labels or {}) == {
             PINNED_LABEL_KEY
         }
         if pin_only:
             required_level = LEVEL_READ
-        elif body.archived is not None or set_project:
+        elif body.archived is not None or set_project or set_launch_args:
             required_level = LEVEL_OWNER
         elif set_share_workspace:
             required_level = LEVEL_MANAGE
@@ -2882,18 +2889,15 @@ def register_core_routes(
                 )
                 parent_initialized = False
                 if _runner_client is not None and conv is not None and conv.agent_id is not None:
-                    # The versioned payload's snapshot carries harness_override,
-                    # so a rebind after a cross-harness create initializes the
-                    # override harness — a bare body left the runner resolving
-                    # from the spec, and the recovery turn that executes seeded
-                    # initial_items ran on the spec's harness. Recovery stays
-                    # enabled: on rebind it is what runs the pending kickoff.
+                    # The versioned snapshot keeps harness_override on rebind.
+                    # Recovery runs the pending kickoff, except a side chat's copied turn.
                     try:
                         runner_init_resp = await _runner_client.post(
                             "/v1/sessions",
                             json=build_runner_session_init_payload(
                                 conv,
                                 server_version=VERSION,
+                                suppress_recovery_turn=conv.labels.get(SIDE_CHAT_LABEL_KEY) == "1",
                             ),
                             timeout=10.0,
                         )
@@ -3174,13 +3178,20 @@ def register_core_routes(
                 unconfirmed = _model_forward is not None and _codex_update_unconfirmed(
                     _model_forward
                 )
-                forward_failed = not unconfirmed and _surface_model_change_forward_failure(
-                    session_id,
-                    updated.model_override,
-                    _model_forward,
+                # A model the terminal can't select is a bad request, not a failed session.
+                unsupported = _unsupported_model_detail(_model_forward)
+                forward_failed = (
+                    unsupported is None
+                    and not unconfirmed
+                    and _surface_model_change_forward_failure(
+                        session_id,
+                        updated.model_override,
+                        _model_forward,
+                    )
                 )
                 if conv is not None and (
-                    (wake_for_model_change and (_model_forward is None or forward_failed))
+                    unsupported is not None
+                    or (wake_for_model_change and (_model_forward is None or forward_failed))
                     or (forward_failed and configured_snapshot(conv.inference_snapshot))
                 ):
                     if combined_model_forward:
@@ -3204,6 +3215,8 @@ def register_core_routes(
                         model_override=conv.model_override,
                         _unset_model_override=conv.model_override is None,
                     )
+                    if unsupported is not None:
+                        raise OmnigentError(unsupported, code=ErrorCode.INVALID_INPUT)
                     raise OmnigentError(
                         "The terminal did not apply the model change. "
                         "The previous selection has been restored.",
@@ -3862,10 +3875,12 @@ def register_core_routes(
                     break
                 files_after = files_page.last_id
 
-            from omnigent.inner.native_attachments import requires_filesystem
+            from omnigent.inner.native_attachments import uses_filesystem_delivery
 
             filesystem_sources = [
-                stored for stored in fork_source_files if requires_filesystem(stored.filename)
+                stored
+                for stored in fork_source_files
+                if uses_filesystem_delivery(stored.filename, stored.source_metadata)
             ]
             if filesystem_sources:
                 await asyncio.to_thread(
