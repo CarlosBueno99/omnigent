@@ -30,6 +30,7 @@ import sqlite3 as _sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -471,6 +472,82 @@ def test_pending_scan_reports_no_calls_for_an_unreadable_store(tmp_path: Path) -
         ]
     finally:
         scan.close()
+
+
+def test_pending_scan_reads_a_live_wal_store_without_holding_back_checkpoints(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Blobs appended to a WAL store held open by its writer are folded, and the
+    writer can truncate the WAL while the scan parses them."""
+    store = tmp_path / "store.db"
+    _write_store(store, [_framed(_pending_tool_call_obj("call_w", "Write", {}))])
+    writer = _sqlite3.connect(str(store), timeout=0)
+    checkpoint_busy: list[int] = []
+    parse = cnp._iter_embedded_json_objects
+
+    def checkpoint_mid_parse(raw: bytes) -> list[dict[str, object]]:
+        (busy, _log_frames, _checkpointed) = writer.execute(
+            "PRAGMA wal_checkpoint(TRUNCATE)"
+        ).fetchone()
+        checkpoint_busy.append(busy)
+        return parse(raw)
+
+    scan = cnp.CursorPendingToolCallScan()
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        writer.execute(
+            "INSERT INTO blobs (id, data) VALUES (?, ?)",
+            ("blob-v", _framed(_pending_tool_call_obj("call_v", "Delete", {}))),
+        )
+        writer.commit()
+        monkeypatch.setattr(cnp, "_iter_embedded_json_objects", checkpoint_mid_parse)
+        assert [c.tool_call_id for c in read_cursor_pending_tool_calls(store, scan)] == [
+            "call_w",
+            "call_v",
+        ]
+        writer.execute(
+            "INSERT INTO blobs (id, data) VALUES (?, ?)",
+            ("blob-result", _json.dumps(_tool_result_obj("call_w")).encode("utf-8")),
+        )
+        writer.commit()
+        assert [c.tool_call_id for c in read_cursor_pending_tool_calls(store, scan)] == ["call_v"]
+    finally:
+        scan.close()
+        writer.close()
+    assert checkpoint_busy == [0, 0, 0]
+
+
+def test_pending_scan_retries_read_only_after_a_writable_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A ``mode=rw`` fallback connection serves one read, and the next read tries
+    ``mode=ro`` again; the fallback never creates a missing store."""
+    store = tmp_path / "store.db"
+    _write_store(store, [_framed(_pending_tool_call_obj("call_f", "Write", {}))])
+    real_connect = _sqlite3.connect
+    store_uris: list[str] = []
+
+    def connect(database: str, *args: Any, **kwargs: Any) -> _sqlite3.Connection:
+        if database.startswith("file:"):
+            store_uris.append(database.rsplit("?", 1)[1])
+            if store_uris == ["mode=ro"]:
+                raise _sqlite3.OperationalError("unable to open database file")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(_sqlite3, "connect", connect)
+    scan = cnp.CursorPendingToolCallScan()
+    try:
+        assert [c.tool_call_id for c in read_cursor_pending_tool_calls(store, scan)] == ["call_f"]
+        _append_blob(store, "blob-result", _json.dumps(_tool_result_obj("call_f")).encode("utf-8"))
+        assert read_cursor_pending_tool_calls(store, scan) == []
+    finally:
+        scan.close()
+    assert store_uris == ["mode=ro", "mode=rw", "mode=ro"]
+
+    missing = tmp_path / "missing.db"
+    with pytest.raises(_sqlite3.Error):
+        cnp._connect_store(missing)
+    assert not missing.exists()
 
 
 def test_tool_call_elicitation_id_is_stable_and_scoped(tmp_path: Path) -> None:

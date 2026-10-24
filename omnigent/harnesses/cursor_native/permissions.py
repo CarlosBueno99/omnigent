@@ -536,16 +536,24 @@ class _PendingToolCallFold:
         return list(self.pending.values())
 
 
-def _connect_store(store_path: Path) -> sqlite3.Connection:
-    """Open *store_path* for repeated reads, preferring ``mode=ro`` like :func:`_read_blob_rows`.
+def _connect_store(store_path: Path) -> tuple[sqlite3.Connection, bool]:
+    """Open *store_path*, preferring ``mode=ro`` like :func:`_read_blob_rows`.
 
+    The ``mode=rw`` fallback covers a briefly absent ``-shm`` without creating a
+    missing store.
+
+    :returns: The connection and whether it is read-only.
     :raises sqlite3.Error: When neither connection can read the ``blobs`` table.
     """
     last_error: sqlite3.Error = sqlite3.OperationalError(f"cannot read {store_path}")
-    for uri, use_uri in ((f"file:{store_path}?mode=ro", True), (str(store_path), False)):
+    for mode in ("ro", "rw"):
         try:
             connection = sqlite3.connect(
-                uri, timeout=5.0, uri=use_uri, isolation_level=None, check_same_thread=False
+                f"file:{store_path}?mode={mode}",
+                timeout=5.0,
+                uri=True,
+                isolation_level=None,
+                check_same_thread=False,
             )
         except sqlite3.Error as exc:
             last_error = exc
@@ -556,7 +564,7 @@ def _connect_store(store_path: Path) -> sqlite3.Connection:
             connection.close()
             last_error = exc
             continue
-        return connection
+        return connection, mode == "ro"
     raise last_error
 
 
@@ -565,9 +573,10 @@ class CursorPendingToolCallScan:
 
     Keeps one connection open so ``PRAGMA data_version`` can report an unchanged
     store without reading it, and folds only blobs past the last folded rowid.
-    The store is refolded from the start if earlier rows were deleted or
-    replaced, or if the path now names a different file. One thread reads at a
-    time; :meth:`close` may be called from another thread.
+    Cursor never rewrites a blob under its content-addressed id, so the store is
+    refolded from the start only if earlier rows were deleted or replaced, or if
+    the path now names a different file. One thread reads at a time;
+    :meth:`close` may be called from another thread.
     """
 
     def __init__(self) -> None:
@@ -575,6 +584,7 @@ class CursorPendingToolCallScan:
         self._reading = False
         self._closed = False
         self._connection: sqlite3.Connection | None = None
+        self._connection_read_only = True
         self._identity: tuple[str, int, int] | None = None
         self._data_version: int | None = None
         self._last_rowid = 0
@@ -645,19 +655,33 @@ class CursorPendingToolCallScan:
 
     def _read_changes(self, store_path: Path) -> list[CursorPendingToolCall]:
         if self._connection is None:
-            self._connection = _connect_store(store_path)
+            self._connection, self._connection_read_only = _connect_store(store_path)
         connection = self._connection
         if _store_data_version(connection) == self._data_version:
             return self._fold.awaiting()
         connection.execute("BEGIN")
         try:
-            self._fold_changes(connection)
-            self._data_version = _store_data_version(connection)
+            rows, refold = self._changed_rows(connection)
+            data_version = _store_data_version(connection)
         finally:
             connection.rollback()
+        # Parse after the snapshot ends so it does not hold back Cursor's WAL checkpoints.
+        if refold:
+            self._restart_fold()
+        self._fold_rows(rows)
+        if self._connection_read_only:
+            self._data_version = data_version
+        else:
+            # A writable fallback serves one read; the next poll retries ``mode=ro``.
+            connection.close()
+            self._connection = None
+            self._data_version = None
         return self._fold.awaiting()
 
-    def _fold_changes(self, connection: sqlite3.Connection) -> None:
+    def _changed_rows(
+        self, connection: sqlite3.Connection
+    ) -> tuple[list[tuple[int, object, object]], bool]:
+        """Return the rows to fold and whether they replace the current fold."""
         if self._row_count:
             new_rows = connection.execute(
                 "SELECT rowid, id, data FROM blobs WHERE rowid > ? ORDER BY rowid",
@@ -668,10 +692,10 @@ class CursorPendingToolCallScan:
                 "SELECT id FROM blobs WHERE rowid = ?", (self._last_rowid,)
             ).fetchone()
             if row_count == self._row_count + len(new_rows) and last_row == (self._last_blob_id,):
-                self._fold_rows(new_rows)
-                return
-            self._restart_fold()
-        self._fold_rows(connection.execute("SELECT rowid, id, data FROM blobs ORDER BY rowid"))
+                return new_rows, False
+        return connection.execute(
+            "SELECT rowid, id, data FROM blobs ORDER BY rowid"
+        ).fetchall(), True
 
     def _fold_rows(self, rows: Iterable[tuple[int, object, object]]) -> None:
         for rowid, blob_id, data in rows:
@@ -704,8 +728,9 @@ def read_cursor_pending_tool_calls(
     resolved). Empirically a call that's genuinely blocked on the human appears
     ONLY with the marker (never committed) until answered, while an
     auto-approved / committed call appears without it — so this excludes the
-    auto-approve flash structurally, with no timing heuristic. Pure / read-only,
-    so it is safe to run alongside the forwarder tailing the same store.
+    auto-approve flash structurally, with no timing heuristic. Read-only, so it
+    is safe to run alongside the forwarder tailing the same store; *scan* carries
+    state between calls.
 
     :param store_path: This session's cursor ``store.db``.
     :param scan: State kept between one poller's calls so a repeated read skips

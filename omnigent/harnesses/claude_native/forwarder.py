@@ -32,6 +32,7 @@ from omnigent.harnesses.claude_native.bridge import (
     TranscriptCostTally,
     TranscriptReadResult,
     _display_text,
+    _read_complete_jsonl_records,
     _transcript_items_from_entry,
     _transcript_timestamp,
     read_active_session_id,
@@ -2568,43 +2569,40 @@ def _tool_use_ids_in_transcript(
         offset after the last of them, or ``None`` when the file could not be
         read so the caller retries on the next poll.
     """
-    tool_use_ids: set[str] = set()
-    end_offset = byte_offset
     try:
-        with transcript_path.open("rb") as handle:
-            handle.seek(byte_offset)
-            for line in handle:
-                if not line.endswith(b"\n"):
-                    break
-                end_offset += len(line)
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                if record.get("isSidechain") is True and not include_sidechains:
-                    continue
-                message = record.get("message")
-                if not isinstance(message, dict):
-                    continue
-                content = message.get("content")
-                if not isinstance(content, list):
-                    continue
-                for block in content:
-                    if not isinstance(block, dict) or block.get("type") != "tool_use":
-                        continue
-                    # Only the sub-agent spawn tool mints the ids in ``.meta.json``.
-                    # Restricting to it keeps an unrelated tool-use id collision from
-                    # making a legitimate spawn look ambiguous.
-                    if block.get("name") not in _SUBAGENT_SPAWN_TOOL_NAMES:
-                        continue
-                    tool_use_id = block.get("id")
-                    if isinstance(tool_use_id, str) and tool_use_id:
-                        tool_use_ids.add(tool_use_id)
+        read = _read_complete_jsonl_records(transcript_path, byte_offset=byte_offset, start_line=0)
     except OSError:
         return None
-    return tool_use_ids, end_offset
+    tool_use_ids: set[str] = set()
+    for jsonl_record in read.records:
+        if jsonl_record.text is None:
+            continue
+        try:
+            record = json.loads(jsonl_record.text)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("isSidechain") is True and not include_sidechains:
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            # Only the sub-agent spawn tool mints the ids in ``.meta.json``.
+            # Restricting to it keeps an unrelated tool-use id collision from
+            # making a legitimate spawn look ambiguous.
+            if block.get("name") not in _SUBAGENT_SPAWN_TOOL_NAMES:
+                continue
+            tool_use_id = block.get("id")
+            if isinstance(tool_use_id, str) and tool_use_id:
+                tool_use_ids.add(tool_use_id)
+    return tool_use_ids, read.byte_offset
 
 
 @dataclass(frozen=True)
@@ -2636,7 +2634,7 @@ def _spawn_tool_use_ids_cached(
     transcript_path: Path,
     *,
     include_sidechains: bool,
-) -> frozenset[str]:
+) -> frozenset[str] | None:
     """
     :func:`_tool_use_ids_in_transcript`, reading only what changed since the
     previous scan.
@@ -2647,15 +2645,15 @@ def _spawn_tool_use_ids_cached(
 
     :param transcript_path: Claude JSONL transcript to inspect.
     :param include_sidechains: Forwarded to :func:`_tool_use_ids_in_transcript`.
-    :returns: Spawn tool-use ids owned by this transcript; empty when it
-        cannot be read.
+    :returns: Spawn tool-use ids owned by this transcript, empty when it does
+        not exist, or ``None`` when it exists but could not be read.
     """
     try:
         stat = transcript_path.stat()
-    except OSError:
+    except OSError as exc:
         with _SPAWN_TOOL_USE_ID_CACHE_LOCK:
             _SPAWN_TOOL_USE_ID_CACHE.pop(transcript_path, None)
-        return frozenset()
+        return frozenset() if isinstance(exc, FileNotFoundError) else None
     with _SPAWN_TOOL_USE_ID_CACHE_LOCK:
         cached = _SPAWN_TOOL_USE_ID_CACHE.pop(transcript_path, None)
         if (
@@ -2687,11 +2685,10 @@ def _spawn_tool_use_ids_cached(
     if scanned is None:
         # A failed read is not an empty transcript; keep only a validated
         # earlier scan so the next poll retries the rest.
-        if resume is None:
-            return frozenset()
-        with _SPAWN_TOOL_USE_ID_CACHE_LOCK:
-            _SPAWN_TOOL_USE_ID_CACHE[transcript_path] = resume
-        return resume.tool_use_ids
+        if resume is not None:
+            with _SPAWN_TOOL_USE_ID_CACHE_LOCK:
+                _SPAWN_TOOL_USE_ID_CACHE[transcript_path] = resume
+        return None
     new_ids, byte_offset = scanned
     tool_use_ids = frozenset(new_ids) | (
         resume.tool_use_ids if resume is not None else frozenset()
@@ -2729,7 +2726,7 @@ def _subagent_own_spawn_tool_use_id(agent_jsonl_path: Path) -> str | None:
 def _subagent_parents_by_tool_use(
     transcript_path: Path,
     subagents_dir: Path,
-) -> dict[str, str | None]:
+) -> tuple[dict[str, str | None], bool]:
     """Correlate Claude spawn tool ids to their immediate transcript owner.
 
     Scans the root transcript and every ``agent-*.jsonl``, reading a file
@@ -2737,9 +2734,13 @@ def _subagent_parents_by_tool_use(
     only grew, only its appended records. The caller only invokes this while
     unregistered meta files exist, so an unresolved meta costs one ``stat``
     per idle transcript per poll rather than a full re-parse of every file.
+
+    :returns: The owners map and whether every transcript could be read; an
+        unreadable transcript may own a spawn id missing from the map.
     """
     owners: dict[str, str | None] = {}
     ambiguous: set[str] = set()
+    complete = True
     transcript_owners: list[tuple[Path, str | None]] = [(transcript_path, None)]
     transcript_owners.extend(
         (path, _subagent_id_from_meta_path(path))
@@ -2757,10 +2758,14 @@ def _subagent_parents_by_tool_use(
         own_spawn_tool_use_id = (
             _subagent_own_spawn_tool_use_id(path) if owner_id is not None else None
         )
-        for tool_use_id in _spawn_tool_use_ids_cached(
+        spawn_tool_use_ids = _spawn_tool_use_ids_cached(
             path,
             include_sidechains=owner_id is not None,
-        ):
+        )
+        if spawn_tool_use_ids is None:
+            complete = False
+            continue
+        for tool_use_id in spawn_tool_use_ids:
             if tool_use_id == own_spawn_tool_use_id:
                 continue
             if tool_use_id in owners and owners[tool_use_id] != owner_id:
@@ -2769,7 +2774,7 @@ def _subagent_parents_by_tool_use(
                 owners[tool_use_id] = owner_id
     for tool_use_id in ambiguous:
         owners.pop(tool_use_id, None)
-    return owners
+    return owners, complete
 
 
 async def _forward_available_subagents(
@@ -2847,14 +2852,14 @@ async def _forward_available_subagents(
             candidate_metas.append((meta_path, meta))
     # Metas that can never correlate (teammates, malformed files) must not
     # trigger a transcript scan on every poll.
-    parents_by_tool_use = (
+    parents_by_tool_use, spawn_scan_complete = (
         await asyncio.to_thread(
             _subagent_parents_by_tool_use,
             transcript_path,
             subagents_dir,
         )
         if candidate_metas
-        else {}
+        else ({}, True)
     )
 
     async def _note_unresolved(
@@ -2862,6 +2867,9 @@ async def _forward_available_subagents(
     ) -> None:
         """Count a poll without a resolved parent; park once the budget is spent."""
         nonlocal updated
+        if not spawn_scan_complete:
+            # An unreadable transcript may hold the spawn record; retry uncharged.
+            return
         resolve_key = f"subagent_resolve:{subagent_id}"
         attempts = start_retry_tracker.record_unresolved(resolve_key)
         if attempts < _SUBAGENT_RESOLVE_MAX_ATTEMPTS:

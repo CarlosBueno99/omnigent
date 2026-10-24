@@ -781,8 +781,9 @@ def test_fork_inherited_spawn_record_resolves_to_the_real_parent(
     )
 
     subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
-    owners = forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir)
+    owners, complete = forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir)
 
+    assert complete
     assert "toolu_fork" in owners, "fork spawn id was dropped as ambiguous"
     assert owners["toolu_fork"] is None, "fork should attach to the root transcript"
 
@@ -979,8 +980,8 @@ def test_spawn_id_memo_resumes_growth_and_rescans_a_rewritten_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Growth past the scanned prefix reads only complete appended records and
-    keeps the prior ids across a failed read; growth after a prefix rewrite
-    rescans from byte 0 so ids no longer in the file are dropped."""
+    keeps the prior scan across a failed read; growth after a prefix rewrite or
+    a shrink rescans from byte 0 so ids no longer in the file are dropped."""
     scan_offsets: list[int] = []
     fail_next_scan = [False]
     real_scan = forwarder._tool_use_ids_in_transcript
@@ -1011,12 +1012,16 @@ def test_spawn_id_memo_resumes_growth_and_rescans_a_rewritten_prefix(
     with path.open("a", encoding="utf-8") as handle:
         handle.write(second[20:])
     fail_next_scan[0] = True
-    assert forwarder._spawn_tool_use_ids_cached(path, include_sidechains=False) == {"toolu_a"}
+    assert forwarder._spawn_tool_use_ids_cached(path, include_sidechains=False) is None
     assert forwarder._spawn_tool_use_ids_cached(path, include_sidechains=False) == {
         "toolu_a",
         "toolu_b",
     }
     assert scan_offsets == [0, len(first), len(first), len(first)]
+
+    path.write_text(first, encoding="utf-8")
+    assert forwarder._spawn_tool_use_ids_cached(path, include_sidechains=False) == {"toolu_a"}
+    assert scan_offsets[-1] == 0
 
     path.write_text(
         spawn_line("toolu_c", "rewritten spawn")
@@ -1059,11 +1064,12 @@ def test_transient_read_failure_is_not_memoized_as_an_empty_scan(
 
     monkeypatch.setattr(Path, "open", flaky_open)
 
-    assert forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir) == {}
+    assert forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir) == ({}, False)
     assert transcript_path not in forwarder._SPAWN_TOOL_USE_ID_CACHE
-    assert forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir) == {
-        "toolu_child": None
-    }
+    assert forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir) == (
+        {"toolu_child": None},
+        True,
+    )
 
 
 # One minute of forwarder polls at the production 0.25 s cadence.
@@ -1250,3 +1256,113 @@ async def test_teammate_meta_without_tool_use_id_does_not_rescan_transcripts(
         f"{polls} polls with only a teammate meta pending read {bytes_read} bytes of a "
         f"{transcript_size}-byte transcript"
     )
+
+
+async def test_unreadable_transcript_does_not_spend_the_resolve_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Polls that cannot read a transcript holding the spawn record keep the
+    sub-agent pending instead of setting it aside; it registers once the read
+    recovers."""
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="a-child",
+        agent_type="general-purpose",
+        description="spawn behind an unreadable transcript",
+        tool_use_id="toolu_child",
+    )
+    real_open = Path.open
+    transcript_unreadable = [True]
+
+    def failing_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == transcript_path and transcript_unreadable[0]:
+            raise OSError(errno.EIO, "transcript read failure")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    caplog.set_level(logging.WARNING, logger=forwarder.__name__)
+
+    async with _registering_client() as client:
+        poll_kwargs = _subagent_poll_kwargs(
+            client, bridge_dir=bridge_dir, transcript_path=transcript_path
+        )
+        state = forwarder.SubagentForwardState(subagents={})
+        for _ in range(forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS + 20):
+            state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
+        assert state.subagents == {}
+        assert "Setting aside" not in caplog.text
+
+        transcript_unreadable[0] = False
+        state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
+
+    assert state.subagents["a-child"].child_conversation_id == "conv_a-child"
+
+
+async def test_parent_retrying_its_start_does_not_spend_its_child_budget(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A nested child waits uncharged while its parent's start POST keeps
+    failing transiently, then registers under that parent."""
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    parent_transcript = _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="z-parent",
+        agent_type="general-purpose",
+        description="parent worker",
+        tool_use_id="toolu_parent",
+    )
+    _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="a-child",
+        agent_type="general-purpose",
+        description="nested child",
+        tool_use_id="toolu_child",
+        spawn_transcript_path=parent_transcript,
+    )
+    parent_start_failing = [True]
+    registered = _batch_safe_handler(
+        lambda item: (
+            {"queued": False, "child_session_id": f"conv_{item['data']['subagent_id']}"}
+            if item.get("type") == "external_subagent_start"
+            else {"item_id": "ack"}
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else {}
+        if (
+            parent_start_failing[0]
+            and isinstance(body, dict)
+            and body.get("type") == "external_subagent_start"
+            and body["data"]["subagent_id"] == "z-parent"
+        ):
+            return httpx.Response(503, json={"detail": "unavailable"})
+        return registered(request)
+
+    caplog.set_level(logging.WARNING, logger=forwarder.__name__)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://ap"
+    ) as client:
+        poll_kwargs = _subagent_poll_kwargs(
+            client, bridge_dir=bridge_dir, transcript_path=transcript_path
+        )
+        state = forwarder.SubagentForwardState(subagents={})
+        for _ in range(forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS + 20):
+            state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
+        assert state.subagents == {}
+        assert "Setting aside" not in caplog.text
+
+        parent_start_failing[0] = False
+        state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
+
+    assert state.subagents["z-parent"].child_conversation_id == "conv_z-parent"
+    assert state.subagents["a-child"].child_conversation_id == "conv_a-child"
+    assert state.subagents["a-child"].parent_subagent_id == "z-parent"
