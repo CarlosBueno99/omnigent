@@ -838,6 +838,25 @@ describe("side-chat interrupt", () => {
     expect(sessionsApi.interrupt).not.toHaveBeenCalled();
   });
 
+  it("reports a failed interrupt and allows retry without clearing the draft", async () => {
+    vi.mocked(sessionsApi.interrupt).mockRejectedValueOnce(new Error("Host unavailable"));
+    renderPane(<SideChatPane childId={childId} />);
+    const input = screen.getByTestId("side-chat-input");
+    fireEvent.change(input, { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt side chat" }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledOnce());
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/interrupt.*try again/i));
+    const interrupt = screen.getByRole("button", { name: "Interrupt side chat" });
+    await waitFor(() => expect(interrupt).toBeEnabled());
+    expect(input).toHaveValue("Keep this draft");
+    expect(send).not.toHaveBeenCalled();
+
+    fireEvent.click(interrupt);
+    await waitFor(() => expect(sessionsApi.interrupt).toHaveBeenCalledTimes(2));
+    expect(sessionsApi.interrupt).toHaveBeenLastCalledWith(childId, "codex_turn_side");
+  });
+
   it("sends a follow-up from Send with Always steer off and keeps Interrupt available", () => {
     renderPane(<SideChatPane childId={childId} />);
     const input = screen.getByTestId("side-chat-input");
@@ -864,25 +883,6 @@ describe("side-chat interrupt", () => {
     expect(input).toHaveValue("Wait for this turn");
     expect(screen.queryByTestId("side-chat-send")).toBeNull();
     expect(screen.getByRole("button", { name: "Interrupt session" })).toBeEnabled();
-  });
-
-  it("reports a failed interrupt and allows retry without clearing the draft", async () => {
-    vi.mocked(sessionsApi.interrupt).mockRejectedValueOnce(new Error("Host unavailable"));
-    renderPane(<SideChatPane childId={childId} />);
-    const input = screen.getByTestId("side-chat-input");
-    fireEvent.change(input, { target: { value: "Keep this draft" } });
-    fireEvent.click(screen.getByRole("button", { name: "Interrupt side chat" }));
-
-    await waitFor(() => expect(toast.error).toHaveBeenCalledOnce());
-    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/interrupt.*try again/i));
-    const interrupt = screen.getByRole("button", { name: "Interrupt side chat" });
-    await waitFor(() => expect(interrupt).toBeEnabled());
-    expect(input).toHaveValue("Keep this draft");
-    expect(send).not.toHaveBeenCalled();
-
-    fireEvent.click(interrupt);
-    await waitFor(() => expect(sessionsApi.interrupt).toHaveBeenCalledTimes(2));
-    expect(sessionsApi.interrupt).toHaveBeenLastCalledWith(childId, "codex_turn_side");
   });
 
   it.each([
