@@ -781,9 +781,9 @@ def test_fork_inherited_spawn_record_resolves_to_the_real_parent(
     )
 
     subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
-    owners, complete = forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir)
+    owners, unreadable = forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir)
 
-    assert complete
+    assert unreadable == []
     assert "toolu_fork" in owners, "fork spawn id was dropped as ambiguous"
     assert owners["toolu_fork"] is None, "fork should attach to the root transcript"
 
@@ -1064,11 +1064,14 @@ def test_transient_read_failure_is_not_memoized_as_an_empty_scan(
 
     monkeypatch.setattr(Path, "open", flaky_open)
 
-    assert forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir) == ({}, False)
+    assert forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir) == (
+        {},
+        [transcript_path],
+    )
     assert transcript_path not in forwarder._SPAWN_TOOL_USE_ID_CACHE
     assert forwarder._subagent_parents_by_tool_use(transcript_path, subagents_dir) == (
         {"toolu_child": None},
-        True,
+        [],
     )
 
 
@@ -1264,8 +1267,8 @@ async def test_unreadable_transcript_does_not_spend_the_resolve_budget(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Polls that cannot read a transcript holding the spawn record keep the
-    sub-agent pending instead of setting it aside; it registers once the read
-    recovers."""
+    sub-agent pending instead of setting it aside, with one WARNING naming the
+    transcript; it registers once the read recovers."""
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     transcript_path.write_text("", encoding="utf-8")
@@ -1295,7 +1298,10 @@ async def test_unreadable_transcript_does_not_spend_the_resolve_budget(
         for _ in range(forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS + 20):
             state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
         assert state.subagents == {}
-        assert "Setting aside" not in caplog.text
+        warnings = [record.getMessage() for record in caplog.records]
+        assert len(warnings) == 1, warnings
+        assert "a-child" in warnings[0] and transcript_path.name in warnings[0]
+        assert "Setting aside" not in warnings[0]
 
         transcript_unreadable[0] = False
         state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)

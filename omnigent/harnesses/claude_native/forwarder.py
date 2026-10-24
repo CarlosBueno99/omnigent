@@ -2726,7 +2726,7 @@ def _subagent_own_spawn_tool_use_id(agent_jsonl_path: Path) -> str | None:
 def _subagent_parents_by_tool_use(
     transcript_path: Path,
     subagents_dir: Path,
-) -> tuple[dict[str, str | None], bool]:
+) -> tuple[dict[str, str | None], list[Path]]:
     """Correlate Claude spawn tool ids to their immediate transcript owner.
 
     Scans the root transcript and every ``agent-*.jsonl``, reading a file
@@ -2735,12 +2735,12 @@ def _subagent_parents_by_tool_use(
     unregistered meta files exist, so an unresolved meta costs one ``stat``
     per idle transcript per poll rather than a full re-parse of every file.
 
-    :returns: The owners map and whether every transcript could be read; an
+    :returns: The owners map and the transcripts that could not be read; an
         unreadable transcript may own a spawn id missing from the map.
     """
     owners: dict[str, str | None] = {}
     ambiguous: set[str] = set()
-    complete = True
+    unreadable_transcripts: list[Path] = []
     transcript_owners: list[tuple[Path, str | None]] = [(transcript_path, None)]
     transcript_owners.extend(
         (path, _subagent_id_from_meta_path(path))
@@ -2763,7 +2763,7 @@ def _subagent_parents_by_tool_use(
             include_sidechains=owner_id is not None,
         )
         if spawn_tool_use_ids is None:
-            complete = False
+            unreadable_transcripts.append(path)
             continue
         for tool_use_id in spawn_tool_use_ids:
             if tool_use_id == own_spawn_tool_use_id:
@@ -2774,7 +2774,7 @@ def _subagent_parents_by_tool_use(
                 owners[tool_use_id] = owner_id
     for tool_use_id in ambiguous:
         owners.pop(tool_use_id, None)
-    return owners, complete
+    return owners, unreadable_transcripts
 
 
 async def _forward_available_subagents(
@@ -2852,14 +2852,14 @@ async def _forward_available_subagents(
             candidate_metas.append((meta_path, meta))
     # Metas that can never correlate (teammates, malformed files) must not
     # trigger a transcript scan on every poll.
-    parents_by_tool_use, spawn_scan_complete = (
+    parents_by_tool_use, unreadable_transcripts = (
         await asyncio.to_thread(
             _subagent_parents_by_tool_use,
             transcript_path,
             subagents_dir,
         )
         if candidate_metas
-        else ({}, True)
+        else ({}, [])
     )
 
     async def _note_unresolved(
@@ -2867,8 +2867,21 @@ async def _forward_available_subagents(
     ) -> None:
         """Count a poll without a resolved parent; park once the budget is spent."""
         nonlocal updated
-        if not spawn_scan_complete:
+        if unreadable_transcripts:
             # An unreadable transcript may hold the spawn record; retry uncharged.
+            unreadable_polls = start_retry_tracker.record_unresolved(
+                f"subagent_unreadable:{subagent_id}"
+            )
+            if unreadable_polls == _SUBAGENT_RESOLVE_MAX_ATTEMPTS:
+                _logger.warning(
+                    "Cannot read claude-native transcripts to resolve sub-agent; still "
+                    "retrying; parent_session=%s subagent_id=%s tool_use_id=%s "
+                    "transcripts=%s",
+                    parent_session_id,
+                    subagent_id,
+                    tool_use_id,
+                    [path.name for path in unreadable_transcripts],
+                )
             return
         resolve_key = f"subagent_resolve:{subagent_id}"
         attempts = start_retry_tracker.record_unresolved(resolve_key)
@@ -2897,6 +2910,7 @@ async def _forward_available_subagents(
             attempts,
         )
         start_retry_tracker.discard(resolve_key)
+        start_retry_tracker.discard(f"subagent_unreadable:{subagent_id}")
         updated = SubagentForwardState(
             subagents={
                 **updated.subagents,
@@ -3029,6 +3043,7 @@ async def _forward_available_subagents(
                 continue
             start_retry_tracker.clear(retry_key)
             start_retry_tracker.discard(f"subagent_resolve:{subagent_id}")
+            start_retry_tracker.discard(f"subagent_unreadable:{subagent_id}")
             updated = SubagentForwardState(
                 subagents={
                     **updated.subagents,
