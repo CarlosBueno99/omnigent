@@ -31,7 +31,7 @@ _logger = logging.getLogger(__name__)
 
 # A heartbeat may predate a turn event it arrives after; trust it only once this much newer.
 MOD_HEARTBEAT_SETTLE_S = 5.0
-# Matches the pane idle threshold so back-to-back turns never show idle.
+# Matches the pane idle threshold so this source shows no idle between back-to-back turns.
 MOD_TURN_IDLE_GRACE_S = 1.0
 
 _RUNNING = "running"

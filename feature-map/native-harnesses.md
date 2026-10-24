@@ -304,7 +304,11 @@ Cross-harness journeys:
   covers the runner's order against the status file. Live, with the flag on and
   Claude 2.1.301 or newer, use the real CLI steps below: hold a tool operation open
   past the pane idle threshold, expect working with the viewer closed, then expect
-  idle about a second after the turn ends, and no idle between back-to-back turns.
+  idle when the turn ends. The forwarder still relays Claude's Stop hook as idle
+  straight to the server, usually just before the mod's own idle, which waits a
+  1 s grace; that grace keeps only the mod's edges from flickering between
+  back-to-back turns. The runner log line "Mod turn events own the session
+  status" and `mod_events.jsonl` in the bridge directory show the mod took over.
 - **`working-status`, Claude (real CLI and browser):** requires Claude Code
   2.1.295+ for OSC. In an isolated host/runner, leave `OMNIGENT_FEATURES` unset
   to exercise the enabled default, restart and launch a fresh session. Do not set
