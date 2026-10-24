@@ -97,7 +97,7 @@ from omnigent.runner.session_init_protocol import (
     RunnerSessionInitEnvelope,
 )
 from omnigent.runner.transports.ws_tunnel.event_delivery import RunnerEventDispatcher
-from omnigent.server.feature_flags import Feature
+from omnigent.server.feature_flags import Feature, resolve_feature_flags
 from omnigent.spec.types import AgentSpec
 
 _logger = logging.getLogger("omnigent.runner.app")
@@ -9334,8 +9334,10 @@ async def _auto_create_claude_terminal(
 
     _harness_cfg = load_effective_config(workspace=workspace)
     launch_command = resolve_harness_command("claude-native", default="claude", cfg=_harness_cfg)
-    claude_mod = claude_mod_enabled_for_launch(
-        feature_enabled=resource_registry.feature_enabled(Feature.CLAUDE_MOD_CHANNEL),
+    # The version probe runs ``claude --version``, so keep it off the event loop.
+    claude_mod = await asyncio.to_thread(
+        claude_mod_enabled_for_launch,
+        feature_enabled=resolve_feature_flags().enabled(Feature.CLAUDE_MOD_CHANNEL),
         claude_binary=resolve_cli_binary(launch_command),
     )
     claude_args = augment_claude_args(
@@ -9363,13 +9365,9 @@ async def _auto_create_claude_terminal(
         claude_mod=claude_mod,
     )
 
-    # Apply the per-harness startup command/args override from config
-    # (``harness.claude-native.{command,args}`` in ~/.omnigent/config.yaml) so a
-    # downstream integration can wrap this managed-host launch — e.g. Databricks'
-    # ``isaac`` sets ``command: isaac`` + ``args: ["--"]`` to run
-    # ``isaac -- <augmented args>`` (the config args prepend, and augmentation
-    # appended above, so the ``--`` stays first). The command was resolved above,
-    # before augmentation, so the mod's version probe sees the same binary.
+    # Config ``harness.claude-native.{command,args}`` can wrap this launch, as isaac does
+    # with ``args: ["--"]``: config args prepend the augmented ones, as on the local-CLI
+    # path. The command was resolved above so the mod's version probe saw this binary.
     launch_args = resolve_harness_args("claude-native", tuple(claude_args), cfg=_harness_cfg)
     # Validate the binary this terminal will actually spawn: ``launch_command``
     # already reflects the OMNIGENT_CLAUDE_PATH / config overrides, and a bare

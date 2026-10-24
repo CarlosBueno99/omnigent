@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, cast
 
+from omnigent.models.claude_model_vocabulary import is_claude_model_alias
 from omnigent.util.json_types import JsonObject
 from omnigent.util.reasoning_effort import CLAUDE_EFFORTS
 
@@ -43,7 +44,6 @@ MOD_TURN_REASONS: Final = ("answer", "aborted", "refusal", "error")
 # The mod was checked on this release and on 2.1.308; older CLIs keep the tmux path.
 _CLAUDE_MOD_MIN_VERSION: Final = "2.1.301"
 
-_MODEL_ARGUMENT_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,199}")
 _COMPACT_INSTRUCTIONS_MAX_BYTES: Final = 16 * 1024
 _TEXT_FIELD_MAX_CHARS: Final = 256
 _VERSION_FIELD_MAX_CHARS: Final = 64
@@ -99,9 +99,10 @@ def _normalize_abort(arguments: JsonObject) -> JsonObject:
 
 def _normalize_model(arguments: JsonObject) -> JsonObject:
     model = arguments.get("model")
-    if not isinstance(model, str) or not _MODEL_ARGUMENT_PATTERN.fullmatch(model):
-        raise ValueError("model must be a /model argument such as an alias or a model id")
-    return {"model": model}
+    # The mod switches through Claude's config row, which takes aliases only.
+    if not isinstance(model, str) or not is_claude_model_alias(model):
+        raise ValueError("model must be a Claude alias such as sonnet or opus[1m]")
+    return {"model": model.strip().lower()}
 
 
 def _normalize_effort(arguments: JsonObject) -> JsonObject:
@@ -215,24 +216,23 @@ def normalize_mod_result(payload: object) -> tuple[str, bool, JsonObject, str | 
     """Validate a ``POST /mod/result`` body.
 
     :param payload: Decoded request body, e.g.
-        ``{"id": "<32 hex digits>", "ok": true, "result": {}}``.
+        ``{"v": 1, "id": "<32 hex digits>", "ok": true, "result": {}}``.
     :returns: ``(command_id, ok, result, error)``.
-    :raises ValueError: If the body is malformed.
+    :raises ValueError: If the body is not a well-formed version 1 result.
     """
-    if not isinstance(payload, dict):
-        raise ValueError("result must be a JSON object")
-    command_id = payload.get("id")
+    body = _protocol_object(payload, "result")
+    command_id = body.get("id")
     if not isinstance(command_id, str) or not _COMMAND_ID_PATTERN.fullmatch(command_id):
         raise ValueError("result id is not a command id")
-    ok = payload.get("ok")
+    ok = body.get("ok")
     if not isinstance(ok, bool):
         raise ValueError("result ok must be a boolean")
     if ok:
-        result = payload.get("result", {})
+        result = body.get("result", {})
         if not isinstance(result, dict):
             raise ValueError("result payload must be a JSON object")
         return command_id, True, result, None
-    error = payload.get("error")
+    error = body.get("error")
     if not isinstance(error, str):
         raise ValueError("a failed result needs an error string")
     return command_id, False, {}, error[:_ERROR_MAX_CHARS]
@@ -291,6 +291,7 @@ def mod_event_record(event: JsonObject, *, now: float) -> JsonObject:
 
 
 _GENERATED_MOD_NAMES: Final = frozenset({"types", "tsconfig.json", "__pycache__", "node_modules"})
+_MOD_SHIPPED_FILES: Final = ("hooks/hooks.json", "hooks/register.ts")
 MOD_PLUGIN_MANIFEST: Final[JsonObject] = {
     "name": "omnigent-bridge",
     "version": "0.1.0",
@@ -311,12 +312,17 @@ def install_claude_mod(bridge_dir: Path) -> Path:
 
     :param bridge_dir: Session bridge directory, e.g. ``/tmp/.../<digest>``.
     :returns: ``<bridge_dir>/claude-mod``.
+    :raises FileNotFoundError: If this install lacks a file the mod ships with.
     """
+    missing = [name for name in _MOD_SHIPPED_FILES if not (MOD_PACKAGE_DIR / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Claude mod files missing from the package: {', '.join(missing)}")
     destination = bridge_dir / MOD_PLUGIN_DIR_NAME
+    # A copy left by an older install may hold files this version no longer ships.
+    shutil.rmtree(destination, ignore_errors=True)
     shutil.copytree(
         MOD_PACKAGE_DIR,
         destination,
-        dirs_exist_ok=True,
         ignore=lambda _directory, names: _GENERATED_MOD_NAMES.intersection(names),
     )
     manifest_dir = destination / ".claude-plugin"

@@ -11,6 +11,7 @@ import threading
 from collections.abc import AsyncIterator, Callable
 from functools import partial
 from pathlib import Path
+from typing import Literal, TypeVar
 
 from omnigent.harnesses.claude_native.bridge import (
     BRIDGE_DIR_ENV_VAR,
@@ -54,9 +55,14 @@ from omnigent.inner.native_attachments import (
     attachment_reference_line,
     framework_notices,
 )
-from omnigent.models.claude_model_vocabulary import claude_model_command_arg, normalized_model_id
+from omnigent.models.claude_model_vocabulary import (
+    claude_model_command_arg,
+    is_claude_model_alias,
+    normalized_model_id,
+)
 
 _logger = logging.getLogger(__name__)
+_DeliveryResult = TypeVar("_DeliveryResult")
 
 # How long a turn waits for the person to answer a Claude question or permission
 # prompt that held its message before anything was typed. Inside the server's
@@ -172,11 +178,10 @@ class ClaudeNativeExecutor(Executor):
             context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
             context_path.unlink(missing_ok=True)
             if wanted_model_arg is not None:
-                if not await self._switch_model_via_mod(wanted_model_arg):
-                    # Accepted trade-off: ``/model <id>`` also saves the
-                    # pick as the person's global default for new Claude
-                    # sessions. Runs to completion before the message
-                    # inject below (same lock), so its confirm Enter can't
+                switch = await self._switch_model_via_mod(wanted_model_arg)
+                if switch == "fall_back":
+                    # Accepted trade-off: ``/model`` also saves the pick as the global
+                    # default. It finishes under this lock, so its confirm Enter cannot
                     # race the message.
                     await self._inject(
                         partial(
@@ -187,36 +192,45 @@ class ClaudeNativeExecutor(Executor):
                             confirm_hint=SWITCH_MODEL_DIALOG_HINT,
                         )
                     )
-                # Track the routed id, not the alias: the next turn's
-                # comparison is against what routing asked for.
-                self._applied_model = wanted_model
+                if switch != "unconfirmed":
+                    # Track the routed id, not the alias: the next turn's
+                    # comparison is against what routing asked for.
+                    self._applied_model = wanted_model
             await self._inject_prompt(text, notices, via_mod=True)
 
-    async def _switch_model_via_mod(self, model_arg: str) -> bool:
+    async def _switch_model_via_mod(
+        self, model_arg: str
+    ) -> Literal["switched", "fall_back", "unconfirmed"]:
         """
         Switch the pane's model through the Claude mod.
 
         :param model_arg: ``/model`` argument the pane accepts, e.g. ``"sonnet"``.
-        :returns: ``True`` when the mod handled the switch, or may have;
-            ``False`` when the tmux ``/model`` path must type it.
+        :returns: ``"switched"`` when the mod confirmed it, ``"fall_back"`` when
+            the tmux ``/model`` path must type it (the mod takes aliases only), or
+            ``"unconfirmed"`` when the mod took it without answering.
         """
-        outcome = await asyncio.to_thread(
-            send_mod_command_if_pane_ready,
-            self._bridge_dir,
-            "model",
-            {"model": model_arg},
-            timeout_s=_MOD_CONTROL_TIMEOUT_S,
+        if not is_claude_model_alias(model_arg):
+            return "fall_back"
+        outcome = await self._run_delivery(
+            partial(
+                send_mod_command_if_pane_ready,
+                self._bridge_dir,
+                "model",
+                {"model": model_arg},
+                timeout_s=_MOD_CONTROL_TIMEOUT_S,
+            )
         )
         if outcome.status == "ok":
-            return True
+            return "switched"
         if may_fall_back_to_tmux(outcome):
-            return False
-        # The switch may already have landed, and typing it again could pop a second dialog.
+            return "fall_back"
+        # It may have landed, and typing it could pop a second dialog; the mod's
+        # config write is safe to repeat, so the next turn retries it instead.
         _logger.warning(
-            "claude-native: model switch via the mod was not confirmed; sending the turn",
+            "claude-native: the mod did not confirm the model switch; sending the turn",
             extra={"session_id": self._request_session_id},
         )
-        return True
+        return "unconfirmed"
 
     async def _submit_via_mod(self, text: str) -> bool:
         """
@@ -230,12 +244,14 @@ class ClaudeNativeExecutor(Executor):
         """
         if not _can_submit_via_mod(text):
             return False
-        outcome = await asyncio.to_thread(
-            send_mod_command_if_pane_ready,
-            self._bridge_dir,
-            "submit",
-            {"text": text},
-            timeout_s=_MOD_SUBMIT_TIMEOUT_S,
+        outcome = await self._run_delivery(
+            partial(
+                send_mod_command_if_pane_ready,
+                self._bridge_dir,
+                "submit",
+                {"text": text},
+                timeout_s=_MOD_SUBMIT_TIMEOUT_S,
+            )
         )
         if outcome.status == "ok":
             return True
@@ -480,11 +496,24 @@ class ClaudeNativeExecutor(Executor):
 
     async def _inject(self, operation: Callable[[], None]) -> None:
         """Drain cancelled delivery workers before releasing the pane's injection lock."""
+        await self._run_delivery(operation)
+
+    async def _run_delivery(self, operation: Callable[[], _DeliveryResult]) -> _DeliveryResult:
+        """
+        Run one pane delivery in a worker thread and return its result.
+
+        A cancelled turn waits for the worker before the injection lock is
+        released, then reaps the pane, so neither a half-typed message nor a
+        prompt the mod submits late outlives the cancellation.
+
+        :param operation: Blocking delivery, e.g. a tmux inject or a mod command.
+        :returns: What *operation* returned.
+        """
         cancelled = threading.Event()
         with cancellable_injection(cancelled):
             worker = asyncio.create_task(asyncio.to_thread(operation))
         try:
-            await asyncio.shield(worker)
+            return await asyncio.shield(worker)
         except asyncio.CancelledError:
             cancelled.set()
             while not worker.done():

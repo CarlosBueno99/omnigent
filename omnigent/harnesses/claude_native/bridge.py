@@ -36,6 +36,7 @@ import asyncio
 import contextlib
 import functools
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -244,6 +245,15 @@ _TOOLS_CHANGED_BODY_MAX_BYTES = 4096
 _MOD_COMMAND_HTTP_MARGIN_S = 5.0
 _MOD_COMMAND_MAX_WAIT_S = 60.0
 _MOD_POST_PATHS = frozenset({"/mod/hello", "/mod/event", "/mod/result", "/mod/command"})
+# Answers the control server sends before it queues a command.
+_MOD_COMMAND_REFUSED_STATUSES = frozenset(
+    {
+        HTTPStatus.BAD_REQUEST,
+        HTTPStatus.UNAUTHORIZED,
+        HTTPStatus.NOT_FOUND,
+        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+    }
+)
 # Ceiling the relay HTTP handler (``_run_relay_tool``) waits for a single
 # tool dispatch to complete on the harness event loop.
 _TOOL_CALL_TIMEOUT_S = 300.0
@@ -2851,7 +2861,14 @@ def augment_claude_args(
         roots = (workspace, bundle_dir) if bundle_dir is not None else (workspace,)
         args.extend(claude_agents_skill_args(bridge_dir, roots, skills_filter))
     if claude_mod:
-        args.extend(["--plugin-dir", str(mod_channel.install_claude_mod(bridge_dir))])
+        try:
+            args.extend(["--plugin-dir", str(mod_channel.install_claude_mod(bridge_dir))])
+        except OSError:
+            # Every mod path falls back to tmux, so a broken install only costs the mod.
+            _logger.warning(
+                "Claude mod files could not be installed; launching without the mod",
+                exc_info=True,
+            )
     from omnigent.harnesses.claude_native.diagnostics import augment_claude_debug_args
 
     return augment_claude_debug_args(args, bridge_dir)
@@ -5570,10 +5587,12 @@ def send_mod_command(
         connection = _control_connection(server, timeout=timeout_s + _MOD_COMMAND_HTTP_MARGIN_S)
     except RuntimeError as exc:
         return _not_started(str(exc))
+    # Raw UTF-8 rather than ``\u`` escapes, so a submit within its cap fits the body cap.
     body = json.dumps(
         {"op": operation, "args": arguments, "timeout_s": timeout_s},
         separators=(",", ":"),
-    )
+        ensure_ascii=False,
+    ).encode("utf-8")
     try:
         connection.request(
             "POST",
@@ -5613,8 +5632,12 @@ def send_mod_command_if_pane_ready(
     :param operation: Allowlisted operation, e.g. ``"submit"``.
     :param arguments: Operation arguments.
     :param timeout_s: Seconds the control server waits for the mod's answer.
-    :returns: The mod's outcome, or ``not_started`` when a dialog is open.
+    :returns: The mod's outcome, or ``not_started`` when no mod is live or a
+        dialog is open.
     """
+    # Without a live mod the pane is never captured, so the tmux path runs as before.
+    if not mod_channel_live(bridge_dir):
+        return _not_started("the Claude mod is not live")
     if not claude_pane_ready(bridge_dir):
         return _not_started("the Claude pane shows a dialog or picker")
     return send_mod_command(bridge_dir, operation, arguments, timeout_s=timeout_s)
@@ -5628,23 +5651,35 @@ def _unanswered(error: str) -> mod_channel.ModCommandOutcome:
     return mod_channel.ModCommandOutcome(status="unanswered", error=error)
 
 
+def _refusal_detail(status_code: int, raw: bytes) -> str:
+    """Name why the control server refused a command, from its JSON error when it sent one."""
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+        return payload["error"]
+    return f"the control server refused the command (HTTP {status_code})"
+
+
 def _outcome_from_wire(status_code: int, raw: bytes) -> mod_channel.ModCommandOutcome:
     """
     Turn the control server's answer to ``POST /mod/command`` into an outcome.
 
     :param status_code: HTTP status of the answer.
     :param raw: Response body.
-    :returns: The outcome; anything unreadable is ``unanswered``.
+    :returns: The outcome; a refusal before queueing is ``not_started``, and
+        any other unreadable answer is ``unanswered``.
     """
+    if status_code in _MOD_COMMAND_REFUSED_STATUSES:
+        # Refused before queueing: the mod never saw the command.
+        return _not_started(_refusal_detail(status_code, raw))
     try:
         payload = json.loads(raw)
     except ValueError:
         return _unanswered("the control server sent an unreadable answer")
     if not isinstance(payload, dict):
         return _unanswered("the control server sent an unexpected answer")
-    if status_code == HTTPStatus.BAD_REQUEST:
-        # Refused before queueing: the mod never saw the command.
-        return _not_started(str(payload.get("error", "refused by the control server")))
     status = payload.get("status")
     if status_code != HTTPStatus.OK or status not in mod_channel.MOD_COMMAND_STATUSES:
         return _unanswered(f"the control server answered HTTP {status_code}")
@@ -7317,6 +7352,7 @@ def _handler_factory(
         the ``/mod/*`` routes.
     :returns: A concrete :class:`BaseHTTPRequestHandler` subclass.
     """
+    expected_authorization = f"Bearer {token}".encode()
 
     class _ControlHandler(BaseHTTPRequestHandler):
         """HTTP handler for the local MCP control endpoint."""
@@ -7331,6 +7367,15 @@ def _handler_factory(
             :returns: None.
             """
             del format, args
+
+        def _authorized(self) -> bool:
+            """
+            Check the bearer token in constant time.
+
+            :returns: ``True`` when ``Authorization`` carries this server's token.
+            """
+            presented = (self.headers.get("Authorization") or "").encode()
+            return hmac.compare_digest(presented, expected_authorization)
 
         def do_GET(self) -> None:
             """
@@ -7352,7 +7397,7 @@ def _handler_factory(
 
             :returns: None.
             """
-            if self.headers.get("Authorization") != f"Bearer {token}":
+            if not self._authorized():
                 self.send_error(HTTPStatus.UNAUTHORIZED)
                 return
             pending = mod_host.take_command()
@@ -7377,7 +7422,7 @@ def _handler_factory(
             if self.path != "/tools-changed":
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            if self.headers.get("Authorization") != f"Bearer {token}":
+            if not self._authorized():
                 self.send_error(HTTPStatus.UNAUTHORIZED)
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -7403,15 +7448,19 @@ def _handler_factory(
 
             :returns: None.
             """
-            length = int(self.headers.get("Content-Length") or 0)
+            if not self._authorized():
+                self.send_error(HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self.send_error(HTTPStatus.BAD_REQUEST)
+                return
             if not 0 <= length <= mod_channel.MOD_MAX_BODY_BYTES:
                 self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
                 return
             # Drain before answering, for the same EPIPE reason as /tools-changed.
             raw = self.rfile.read(length)
-            if self.headers.get("Authorization") != f"Bearer {token}":
-                self.send_error(HTTPStatus.UNAUTHORIZED)
-                return
             try:
                 payload = json.loads(raw or b"null")
                 if self.path == "/mod/hello":

@@ -1937,7 +1937,7 @@ async def test_run_turn_logs_a_closed_terminal_below_error(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("delivery", ["message", "steering", "model"])
+@pytest.mark.parametrize("delivery", ["message", "steering", "model", "mod-message", "mod-model"])
 @pytest.mark.parametrize("watchdog", [False, True])
 async def test_cancelled_delivery_drains_worker_before_unlocking(
     monkeypatch: pytest.MonkeyPatch,
@@ -1955,6 +1955,15 @@ async def test_cancelled_delivery_drains_worker_before_unlocking(
         started.set()
         assert release.wait(5), "test did not release the in-flight capture"
         return "────────────────\n❯ \n────────────────\n"
+
+    def mod_command(bridge_dir: Path, operation: str, arguments: Any, **kwargs: Any) -> Any:
+        # A live mod still waiting on Claude when the turn is cancelled.
+        try:
+            started.set()
+            assert release.wait(5), "test did not release the in-flight mod command"
+            return _mod_outcome("ok")
+        finally:
+            finished.set()
 
     def inject(*args: Any, **kwargs: Any) -> None:
         try:
@@ -1977,9 +1986,13 @@ async def test_cancelled_delivery_drains_worker_before_unlocking(
     monkeypatch.setattr(claude_native_executor, "inject_user_message", inject)
     monkeypatch.setattr(claude_native_executor, "inject_slash_command", inject)
     monkeypatch.setattr(claude_native_executor, "kill_session", reap)
+    if delivery.startswith("mod-"):
+        monkeypatch.setattr(claude_native_executor, "send_mod_command_if_pane_ready", mod_command)
     executor = ClaudeNativeExecutor(tmp_path / "bridge")
     monkeypatch.setattr(
-        executor, "_model_command_arg", lambda model: "sonnet" if delivery == "model" else None
+        executor,
+        "_model_command_arg",
+        lambda model: "sonnet" if delivery in ("model", "mod-model") else None,
     )
 
     async def deliver() -> None:
@@ -2138,9 +2151,12 @@ def _mod_outcome(status: str, error: str | None = None) -> Any:
 
 
 def _record_mod_commands(
-    monkeypatch: pytest.MonkeyPatch, status: str = "ok"
+    monkeypatch: pytest.MonkeyPatch,
+    status: str = "ok",
+    *,
+    by_operation: dict[str, str] | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Replace the mod call with a recorder that answers *status*."""
+    """Replace the mod call with a recorder that answers *status*, or *by_operation*'s."""
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def fake_send(
@@ -2148,7 +2164,7 @@ def _record_mod_commands(
     ) -> Any:
         del bridge_dir, kwargs
         calls.append((operation, arguments))
-        return _mod_outcome(status)
+        return _mod_outcome((by_operation or {}).get(operation, status))
 
     monkeypatch.setattr(claude_native_executor, "send_mod_command_if_pane_ready", fake_send)
     return calls
@@ -2254,11 +2270,28 @@ async def test_mid_turn_steering_is_always_typed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_arg", "model_status", "sent_to_mod", "typed_switch", "recorded"),
+    [
+        ("sonnet", "ok", True, False, True),
+        ("sonnet", "not_started", True, True, True),
+        # It may have landed: the message still goes in, and the next turn retries.
+        ("sonnet", "unanswered", True, False, False),
+        # The mod's config row takes aliases only.
+        ("system.ai.claude-sonnet-5-5[1m]", "ok", False, True, True),
+    ],
+)
 async def test_routed_model_switch_goes_through_the_mod(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_arg: str,
+    model_status: str,
+    sent_to_mod: bool,
+    typed_switch: bool,
+    recorded: bool,
 ) -> None:
-    """A routed /model switch is sent to the mod, and the typed /model is skipped."""
-    calls = _record_mod_commands(monkeypatch, status="ok")
+    """An alias switch goes to the mod first; only one that landed counts as applied."""
+    calls = _record_mod_commands(monkeypatch, by_operation={"model": model_status})
     slashes: list[str] = []
 
     def fake_inject_slash_command(bridge_dir: Path, *, command: str, **kwargs: Any) -> None:
@@ -2267,9 +2300,12 @@ async def test_routed_model_switch_goes_through_the_mod(
 
     monkeypatch.setattr(claude_native_executor, "inject_slash_command", fake_inject_slash_command)
     typed = _forbid_tmux_typing(monkeypatch)
+    executor = ClaudeNativeExecutor(tmp_path)
 
-    await ClaudeNativeExecutor(tmp_path)._inject_turn("hi", [], None, "sonnet")
+    await executor._inject_turn("hi", [], "routed-model", model_arg)
 
-    assert calls == [("model", {"model": "sonnet"}), ("submit", {"text": "hi"})]
-    assert slashes == []
+    model_calls = [("model", {"model": model_arg})] if sent_to_mod else []
+    assert calls == [*model_calls, ("submit", {"text": "hi"})]
+    assert slashes == ([f"/model {model_arg}"] if typed_switch else [])
     assert typed == []
+    assert executor._applied_model == ("routed-model" if recorded else None)

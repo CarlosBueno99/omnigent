@@ -17,6 +17,9 @@ const ACK_AFTER_MS = 1_500
 // An abort is answered once the turn it cancelled has ended, so the caller knows
 // the turn stopped.
 const ABORT_END_WAIT_MS = 5_000
+// After a submit enters, the next command waits this long at most for its turn to
+// start, so a command that needs an idle session sees that turn as busy.
+const TURN_START_WAIT_MS = 5_000
 const ERROR_MAX_CHARS = 2_000
 const MOD_VERSION_FALLBACK = 'unknown'
 
@@ -36,11 +39,16 @@ interface Outgoing {
 
 interface ModState {
   readonly bridgeDir: string
-  readonly modVersion: string
+  modVersion: string
   mainTurnId: string | undefined
+  // Main-loop turns started so far, and the submits waiting for the next one.
+  mainTurnStarts: number
+  readonly turnStartWaiters: Set<() => void>
   readonly outbox: Outgoing[]
   helloPending: boolean
   wake: (() => void) | undefined
+  // Every command but abort runs after the one before it has finished.
+  commandChain: Promise<void>
 }
 
 interface Command {
@@ -62,7 +70,7 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     if (state !== undefined) {
-      if (e.agentId === undefined) state.mainTurnId = e.turnId
+      if (e.agentId === undefined) noteMainTurnStart(state, e.turnId)
       queueEvent(state, {
         kind: 'turn.start',
         turn_id: e.turnId,
@@ -95,20 +103,46 @@ export const register: Register = on => {
 
 async function startChannel($: EngineInterface): Promise<void> {
   if (state !== undefined) return
-  const bridgeDir = bridgeDirectoryOf($.plugin.root)
-  const modVersion = await readModVersion($, $.plugin.root)
+  // Set before the first await, so a turn that starts meanwhile is still tracked.
   const started: ModState = {
-    bridgeDir,
-    modVersion,
+    bridgeDir: bridgeDirectoryOf($.plugin.root),
+    modVersion: MOD_VERSION_FALLBACK,
     mainTurnId: undefined,
+    mainTurnStarts: 0,
+    turnStartWaiters: new Set(),
     outbox: [],
     helloPending: true,
     wake: undefined,
+    commandChain: Promise.resolve(),
   }
   state = started
+  started.modVersion = await readModVersion($, $.plugin.root)
   $.clock.every(HEARTBEAT_MS, () => requestHello(started))
   void drainOutbox($, started)
   void pollCommands($, started)
+}
+
+function noteMainTurnStart(state: ModState, turnId: string): void {
+  state.mainTurnId = turnId
+  state.mainTurnStarts += 1
+  for (const wake of state.turnStartWaiters) wake()
+  state.turnStartWaiters.clear()
+}
+
+// Resolves once a main-loop turn has started after *startsBefore*, or after the wait.
+async function waitForMainTurnStart(
+  $: EngineInterface,
+  state: ModState,
+  startsBefore: number,
+): Promise<void> {
+  if (state.mainTurnStarts > startsBefore) return
+  let wake: () => void = () => undefined
+  const turnStarted = new Promise<void>(resolve => {
+    wake = resolve
+  })
+  state.turnStartWaiters.add(wake)
+  await Promise.race([turnStarted, $.clock.sleep(TURN_START_WAIT_MS)])
+  state.turnStartWaiters.delete(wake)
 }
 
 // The mod is loaded from <bridge dir>/claude-mod, so the bridge dir is its parent.
@@ -268,7 +302,7 @@ async function pollCommands($: EngineInterface, state: ModState): Promise<void> 
     if (status === 200) {
       failures = 0
       try {
-        void runCommand($, state, channel, JSON.parse(text) as Command)
+        dispatchCommand($, state, channel, JSON.parse(text) as Command)
       } catch {
         // A malformed command has no id to answer; the harness times out on it.
       }
@@ -282,16 +316,36 @@ async function pollCommands($: EngineInterface, state: ModState): Promise<void> 
   }
 }
 
+// An abort runs at once, beside the turn it cancels. Every other command needs an
+// idle session, so they run one at a time and two of them never both pass requireIdle.
+function dispatchCommand(
+  $: EngineInterface,
+  state: ModState,
+  channel: Channel,
+  command: Command,
+): void {
+  if (command.op === 'abort') {
+    void runCommand($, state, channel, command)
+    return
+  }
+  state.commandChain = state.commandChain
+    .then(() => runCommand($, state, channel, command))
+    .catch(() => undefined)
+}
+
 async function runCommand(
   $: EngineInterface,
   state: ModState,
   channel: Channel,
   command: Command,
 ): Promise<void> {
+  const startsBefore = state.mainTurnStarts
   let reply: Json
+  let entered = false
   try {
     const result = await performOperation($, state, command.op, command.args)
     reply = { v: PROTOCOL_VERSION, id: command.id, ok: true, result }
+    entered = command.op === 'submit' && result.entered === true
   } catch (error) {
     reply = { v: PROTOCOL_VERSION, id: command.id, ok: false, error: describeError(error) }
   }
@@ -300,6 +354,8 @@ async function runCommand(
   } catch {
     // The harness gave up on the command; there is nobody left to answer.
   }
+  // Answered first, so the harness is not kept waiting on the turn's start.
+  if (entered) await waitForMainTurnStart($, state, startsBefore)
 }
 
 // Only the closed set of operations the server allowlists reaches this switch.
@@ -310,24 +366,29 @@ async function performOperation(
   args: Json,
 ): Promise<Json> {
   switch (operation) {
-    case 'submit':
+    case 'submit': {
       requireIdle(state)
       // asUser: the text is the person's own words, read bare by the model.
-      await $.prompt.submit({ text: String(args.text), asUser: true })
-      return {}
+      const submitted = await $.prompt.submit({ text: String(args.text), asUser: true })
+      return { entered: submitted.drop === undefined }
+    }
     case 'abort': {
       const turnId = state.mainTurnId
       if (turnId === undefined) throw new Error('no main-loop turn is running')
+      if (turnEndWaiters.has(turnId)) throw new Error('this turn is already being aborted')
       const turnEnded = new Promise<void>(resolve => {
         turnEndWaiters.set(turnId, resolve)
       })
-      await $.turn.abort({ turnId })
-      const ended = await Promise.race([
-        turnEnded.then(() => true),
-        $.clock.sleep(ABORT_END_WAIT_MS).then(() => false),
-      ])
-      turnEndWaiters.delete(turnId)
-      return { ended }
+      try {
+        await $.turn.abort({ turnId })
+        const ended = await Promise.race([
+          turnEnded.then(() => true),
+          $.clock.sleep(ABORT_END_WAIT_MS).then(() => false),
+        ])
+        return { ended }
+      } finally {
+        turnEndWaiters.delete(turnId)
+      }
     }
     case 'model': {
       requireIdle(state)
