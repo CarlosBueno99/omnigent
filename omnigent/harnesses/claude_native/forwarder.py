@@ -2880,10 +2880,11 @@ async def _forward_available_subagents(
                 _logger.warning(
                     "Cannot read claude-native transcripts to resolve sub-agent; still "
                     "retrying; parent_session=%s subagent_id=%s tool_use_id=%s "
-                    "transcripts=%s",
+                    "parent_subagent_id=%s transcripts=%s",
                     parent_session_id,
                     subagent_id,
                     tool_use_id,
+                    parent_subagent_id,
                     [path.name for path in unreadable_transcripts],
                 )
             return

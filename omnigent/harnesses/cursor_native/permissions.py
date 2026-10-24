@@ -48,6 +48,7 @@ import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -546,10 +547,11 @@ def _connect_store(store_path: Path) -> tuple[sqlite3.Connection, bool]:
     :raises sqlite3.Error: When neither connection can read the ``blobs`` table.
     """
     last_error: sqlite3.Error = sqlite3.OperationalError(f"cannot read {store_path}")
+    uri_path = quote(str(store_path), safe="/:\\")
     for mode in ("ro", "rw"):
         try:
             connection = sqlite3.connect(
-                f"file:{store_path}?mode={mode}",
+                f"file:{uri_path}?mode={mode}",
                 timeout=5.0,
                 uri=True,
                 isolation_level=None,

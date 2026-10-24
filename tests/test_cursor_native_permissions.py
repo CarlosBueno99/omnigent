@@ -474,6 +474,21 @@ def test_pending_scan_reports_no_calls_for_an_unreadable_store(tmp_path: Path) -
         scan.close()
 
 
+def test_pending_scan_reads_a_store_whose_path_has_uri_characters(tmp_path: Path) -> None:
+    """A ``#`` or ``%`` in the store path must not cut off its ``mode=ro`` URI."""
+    chat_dir = tmp_path / "chat #1 %3F"
+    chat_dir.mkdir()
+    store = chat_dir / "store.db"
+    scan = cnp.CursorPendingToolCallScan()
+    try:
+        assert read_cursor_pending_tool_calls(store, scan) == []
+        _write_store(store, [_framed(_pending_tool_call_obj("call_q", "Write", {}))])
+        assert [c.tool_call_id for c in read_cursor_pending_tool_calls(store, scan)] == ["call_q"]
+    finally:
+        scan.close()
+    assert [path.name for path in tmp_path.iterdir()] == [chat_dir.name]
+
+
 def test_pending_scan_reads_a_live_wal_store_without_holding_back_checkpoints(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

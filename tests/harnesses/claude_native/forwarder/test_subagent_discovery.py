@@ -1368,6 +1368,7 @@ async def test_unreadable_sibling_transcript_does_not_hold_back_a_resolved_child
             state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
 
     assert state.subagents["a-child"].child_conversation_id == ""
+    assert state.subagents["a-child"].parent_subagent_id == "z-parent"
     assert "Setting aside" in caplog.text and "a-child" in caplog.text
 
 

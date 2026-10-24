@@ -9892,14 +9892,16 @@ def test_compute_transcript_cumulative_cost_dedupes_inference_records(
     cost = claude_native_bridge.compute_transcript_cumulative_cost(path, include_sidechains=True)
     assert cost == pytest.approx(110.0)
 
-    # Tallying the same records one append at a time dedupes identically.
+    # Tallying the same records half a line at a time dedupes identically.
     incremental_path = tmp_path / "incremental.jsonl"
     incremental_path.touch()
     tally = claude_native_bridge.TranscriptCostTally(include_sidechains=True)
     for entry in entries:
-        with incremental_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry) + "\n")
-        incremental_cost = claude_native_bridge.tally_transcript_cost(incremental_path, tally)
+        line = json.dumps(entry) + "\n"
+        for chunk in (line[: len(line) // 2], line[len(line) // 2 :]):
+            with incremental_path.open("a", encoding="utf-8") as handle:
+                handle.write(chunk)
+            incremental_cost = claude_native_bridge.tally_transcript_cost(incremental_path, tally)
     assert incremental_cost == pytest.approx(cost)
 
 
