@@ -994,6 +994,15 @@ Request body matches `SessionEventInput`:
                                   Omnigent server runs the compaction itself
                                   (summarises history, persists a
                                   `compaction` item). Payload: `{}`.
+      - "clear"                 — run the harness's own `/clear` in a
+                                  native session's terminal. Forwarded to
+                                  the bound runner, which types `/clear`
+                                  for claude-native and codex-native
+                                  sessions (and relaunches opencode-native
+                                  in place); the harness then moves the
+                                  terminal onto a fresh session that live
+                                  viewers follow via `session.superseded`.
+                                  Other harnesses get a 400. Payload: `{}`.
       - "stop_session"          — terminate the live session without
                                   deleting the conversation (owner-only;
                                   requires LEVEL_OWNER). Forwarded
@@ -1014,7 +1023,12 @@ Request body matches `SessionEventInput`:
       - "external_conversation_item"
                                 — internal terminal-observed item
                                   envelope; appends/broadcasts without
-                                  starting a duplicate task
+                                  starting a duplicate task. Requires
+                                  LEVEL_OWNER or the session's bound
+                                  runner credential, also in batches;
+                                  editors and managers receive `403`.
+                                  Integrations that posted as an editor
+                                  must post as the owner or via the runner.
       - "external_output_text_delta"
                                 — internal terminal-observed assistant
                                   text delta; publishes a transient
