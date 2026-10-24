@@ -4237,11 +4237,11 @@ def register_core_routes(
         # clearing the binding also releases the claim.
         try:
             await asyncio.to_thread(conversation_store.clear_host_binding, session_id)
-            for key in stale_labels:
-                await asyncio.to_thread(conversation_store.delete_label, session_id, key)
         except ConversationNotFoundError as exc:
             raise _session_not_found() from exc
         try:
+            for key in stale_labels:
+                await asyncio.to_thread(conversation_store.delete_label, session_id, key)
             await _schedule_managed_launch(
                 request,
                 session_id=session_id,
@@ -4251,7 +4251,7 @@ def register_core_routes(
                 workspaces=[body.workspace] if body.workspace is not None else [],
                 requested_host_id=body.host_id,
             )
-        except Exception:
+        except Exception as exc:
             await _restore_host_binding(
                 session_id,
                 host_id=previous_host_id,
@@ -4259,6 +4259,8 @@ def register_core_routes(
                 git_branch=conv.git_branch,
                 labels=stale_labels,
             )
+            if isinstance(exc, ConversationNotFoundError):
+                raise _session_not_found() from exc
             raise
         _logger.info(
             "Session moving to a managed sandbox",

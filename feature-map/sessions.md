@@ -567,10 +567,13 @@ plain `uv run pytest`, which starts a private server for the test.
   `test_message_sent_while_a_moved_session_provisions_waits_for_the_sandbox`,
   `test_concurrent_sandbox_moves_launch_one_sandbox`,
   `test_runner_bound_during_a_sandbox_move_keeps_the_session`,
-  `test_refused_sandbox_move_restores_the_session_binding`, and
+  `test_refused_sandbox_move_restores_the_session_binding`,
+  `test_sandbox_move_failing_partway_restores_the_session_binding`, and
   `test_sandbox_move_refuses_without_touching_the_session` in the same file cover
-  the held message, racing moves and runner binds, the refused launch, and the
-  guards. The dialog's sandbox rows (hidden on servers without
+  the held message, racing moves and runner binds, refused or interrupted moves,
+  and the guards;
+  `tests/server/integration/test_sessions_permissions.py::test_move_to_managed_sandbox_requires_owner_access`
+  covers the owner-only gate. The dialog's sandbox rows (hidden on servers without
   `move_to_managed_sandbox`), repository validation, and refused-launch
   recovery have component coverage in `web/src/shell/SwitchHostDialog.test.tsx`;
   routing the move by the new sandbox's host id is covered in

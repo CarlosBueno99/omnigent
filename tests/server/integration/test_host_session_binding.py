@@ -1195,6 +1195,43 @@ async def test_refused_sandbox_move_restores_the_session_binding(
     assert env.app.state.managed_launches.get(session_id) is None
 
 
+async def test_sandbox_move_failing_partway_restores_the_session_binding(
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A store failure after the move cleared the binding, here while removing the
+    earlier sandbox's labels, still puts the old binding and labels back.
+    """
+    env = managed_session_env
+    session_id = await _session_released_from_laptop(env, agent_name="move-partway-agent")
+    env.conv_store.set_labels(session_id, _STALE_SANDBOX_LABELS)
+    delete_label = env.conv_store.delete_label
+    deleted: list[str] = []
+
+    def delete_one_label_then_fail(conversation_id: str, key: str) -> None:
+        if deleted:
+            raise RuntimeError("label store unavailable")
+        deleted.append(key)
+        delete_label(conversation_id, key)
+
+    monkeypatch.setattr(env.conv_store, "delete_label", delete_one_label_then_fail)
+
+    with pytest.raises(RuntimeError, match="label store unavailable"):
+        await env.client.post(f"/v1/sessions/{session_id}/managed-host", json={})
+
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None
+    assert (conv.host_id, conv.workspace, conv.git_branch, conv.runner_id) == (
+        _LAPTOP_HOST_ID,
+        "/Users/alice/repo",
+        "feature/x",
+        None,
+    )
+    assert {key: conv.labels.get(key) for key in _STALE_SANDBOX_LABELS} == _STALE_SANDBOX_LABELS
+    assert env.app.state.managed_launches.get(session_id) is None
+
+
 @pytest.mark.parametrize(
     ("reason", "expected_status"),
     [
