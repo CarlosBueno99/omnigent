@@ -59,6 +59,7 @@ from omnigent.models.pi_model_compatibility import (
     enrich_databricks_model_catalog,
     pi_generic_model_json_entry,
     pi_model_json_entry,
+    pi_model_with_thinking_defaults,
     unsupported_in_pi,
 )
 from omnigent.onboarding.provider_config import (
@@ -162,9 +163,6 @@ class _PiProviderCompat(TypedDict, total=False):
     supportsStrictMode: bool
     supportsReasoningEffort: bool
     supportsUsageInStreaming: bool
-    # Pi 0.84.2+: send thinking.type.adaptive + output_config.effort instead
-    # of thinking.type.enabled + budget_tokens. Required for claude-4+ / claude-5
-    # models which no longer accept thinking.type.enabled.
     forceAdaptiveThinking: bool
 
 
@@ -386,12 +384,10 @@ class PiProviderConfig:
         }
         if self.auth_header:
             provider["authHeader"] = True
-        # Claude 4+ / Claude 5 models require thinking.type.adaptive (not
-        # thinking.type.enabled). Pi 0.84.2+ sends adaptive when forceAdaptiveThinking
-        # is set in the compat block; reasoning:true on the model entry enables Pi's
-        # thinking level controls.
         if self.api == "anthropic-messages":
+            # Preserve the native default for unlisted models; model-level flags win.
             provider["compat"] = {"forceAdaptiveThinking": True}
+            provider["models"] = [pi_model_with_thinking_defaults(entry) for entry in models]
         providers = {self.provider_id: provider}
         providers.update(additional)
         for provider_id, payload in providers.items():
@@ -1697,10 +1693,14 @@ def resolve_pi_native_provider(
         _LOGGER.warning("pi-native: failed to read provider configuration", exc_info=True)
         return None
     config = load_runtime_inference_config(base_config)
+    binding = binding_for_harness(config, "pi-native")
     selection = _split_pi_native_model_selection(model)
     if selection is not None:
-        _, model = selection
-    binding = binding_for_harness(config, "pi-native")
+        _, stripped = selection
+        allowlist = binding.model_allowlist if binding is not None else None
+        # Prefer the picker target; retain an allowlisted literal only as a fallback.
+        if allowlist is None or stripped in allowlist or model not in allowlist:
+            model = stripped
     if binding is not None:
         entry = resolve_bound_provider(config, "pi-native", auth)
         selected = resolve_bound_model(config, "pi-native", model)
