@@ -1116,6 +1116,27 @@ def _parent_hook_payload(event_name: str, permission_mode: str) -> dict[str, str
     }
 
 
+async def _poll_hook_then_pane(
+    client: httpx.AsyncClient,
+    bridge_dir: Path,
+    dedupe: forwarder._ForwardDedupeState,
+) -> None:
+    """
+    Run one forwarder poll's hook relay and footer relay, in loop order.
+
+    :param client: Client whose transport stands in for the Sessions API.
+    :param bridge_dir: Bridge directory holding ``hooks.jsonl``.
+    :param dedupe: Per-session dedupe state shared across polls.
+    :returns: None.
+    """
+    await forwarder._forward_hook_permission_mode(
+        client, session_id="conv_abc", bridge_dir=bridge_dir, dedupe=dedupe
+    )
+    await forwarder._forward_pane_signals(
+        client, session_id="conv_abc", bridge_dir=bridge_dir, dedupe=dedupe
+    )
+
+
 @pytest.mark.asyncio
 async def test_hook_permission_mode_relays_while_the_pane_is_unreadable(
     tmp_path: Path,
@@ -1144,32 +1165,86 @@ async def test_hook_permission_mode_relays_while_the_pane_is_unreadable(
 
     transport = httpx.MockTransport(_handle_request)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-
-        async def _poll() -> None:
-            """Run one poll's hook relay and footer relay, in loop order."""
-            await forwarder._forward_hook_permission_mode(
-                client, session_id="conv_abc", bridge_dir=bridge_dir, dedupe=dedupe
-            )
-            await forwarder._forward_pane_signals(
-                client, session_id="conv_abc", bridge_dir=bridge_dir, dedupe=dedupe
-            )
-
         record_hook_event(bridge_dir, _parent_hook_payload("PostToolUse", "plan"))
-        await _poll()
+        await _poll_hook_then_pane(client, bridge_dir, dedupe)
         assert posts == []
 
         record_hook_event(bridge_dir, _parent_hook_payload("UserPromptSubmit", "auto"))
-        await _poll()
+        await _poll_hook_then_pane(client, bridge_dir, dedupe)
         assert posts == [{"permission_mode": "auto", "initial_observation": True}]
 
         record_hook_event(bridge_dir, _parent_hook_payload("PostToolUse", "acceptEdits"))
         record_hook_event(bridge_dir, _parent_hook_payload("Stop", "plan"))
-        await _poll()
+        await _poll_hook_then_pane(client, bridge_dir, dedupe)
         assert posts[-1] == {"permission_mode": "plan", "initial_observation": False}
 
         record_hook_event(bridge_dir, _parent_hook_payload("Stop", "plan"))
-        await _poll()
+        await _poll_hook_then_pane(client, bridge_dir, dedupe)
         assert len(posts) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "refusal", "paused"),
+    [
+        pytest.param("plan", 503, False, id="transient-failure"),
+        pytest.param("dontAsk", 400, True, id="rejected-until-the-pause"),
+    ],
+)
+async def test_hook_permission_mode_retries_a_refused_post_while_the_pane_is_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    refusal: int,
+    paused: bool,
+) -> None:
+    """
+    A hook-reported switch whose post is refused is posted by a later poll with no new record.
+
+    With the footer unreadable, no fresh observation arrives to carry the retry,
+    so the hook relay offers its last observation again. A mode the server
+    rejects stays quiet until the rejection pause passes. Once posted, polls are quiet.
+    """
+    from omnigent.harnesses.claude_native.bridge import PaneSignals
+
+    monkeypatch.setattr(forwarder, "read_pane_signals", lambda _bridge_dir: PaneSignals())
+    monkeypatch.setattr(forwarder, "_PANE_POLL_INTERVAL_S", 0.0)
+    bridge_dir = tmp_path / "bridge"
+    _pin_parent_session(bridge_dir)
+    dedupe = forwarder._ForwardDedupeState()
+    posts: list[dict[str, Any]] = []
+    refusals = [refusal]
+
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        """Refuse the first post of the switched-to mode; accept everything else."""
+        data = json.loads(request.content.decode("utf-8"))["data"]
+        posts.append(data)
+        if data["permission_mode"] == mode and refusals:
+            return httpx.Response(refusals.pop(), json={})
+        return httpx.Response(202, json={})
+
+    transport = httpx.MockTransport(_handle_request)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await _poll_hook_then_pane(client, bridge_dir, dedupe)
+        record_hook_event(bridge_dir, _parent_hook_payload("UserPromptSubmit", "auto"))
+        await _poll_hook_then_pane(client, bridge_dir, dedupe)
+        record_hook_event(bridge_dir, _parent_hook_payload("PostToolUse", mode))
+        await _poll_hook_then_pane(client, bridge_dir, dedupe)
+        assert dedupe.posted_permission_mode == "auto"
+
+        if paused:
+            await _poll_hook_then_pane(client, bridge_dir, dedupe)
+            assert len(posts) == 2
+            dedupe.rejected_permission_mode_retry_at = 0.0
+        await _poll_hook_then_pane(client, bridge_dir, dedupe)
+        await _poll_hook_then_pane(client, bridge_dir, dedupe)
+
+    assert posts == [
+        {"permission_mode": "auto", "initial_observation": True},
+        {"permission_mode": mode, "initial_observation": False},
+        {"permission_mode": mode, "initial_observation": False},
+    ]
+    assert dedupe.posted_permission_mode == mode
 
 
 @pytest.mark.asyncio

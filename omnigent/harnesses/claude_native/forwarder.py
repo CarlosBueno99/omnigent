@@ -6035,10 +6035,12 @@ async def _forward_hook_permission_mode(
     """
     Relay the permission mode carried by new main-thread hook records.
 
-    Every Claude hook payload names the mode it fired under, so a switch reaches
-    the web view at the next prompt or tool call even when the pane read fails
-    or lags. A shift+tab fires no hook, so :func:`_forward_pane_signals` still
-    polls the footer for switches that no later hook reports.
+    Every hook payload the bridge records names the mode it fired under, so a
+    switch reaches the web view by the next prompt or turn end even when the
+    pane read fails or lags; most tool calls are not recorded. A shift+tab fires
+    no hook, so :func:`_forward_pane_signals` still polls the footer. A poll with
+    no new record offers the last observation again, so a post that failed is
+    retried while the footer stays unreadable.
 
     :param client: Omnigent HTTP client.
     :param session_id: Omnigent session/conversation id.
@@ -6055,29 +6057,33 @@ async def _forward_hook_permission_mode(
         start_event_count=0,
     )
     dedupe.permission_hook_byte_offset = result.byte_offset
-    if not result.records:
-        return
-    parent_claude_session_ids = await asyncio.to_thread(read_seen_claude_session_ids, bridge_dir)
-    # Only the newest record matters: a footer poll would not see the modes in between.
-    newest: tuple[float, str] | None = None
-    for record in result.records:
-        # Subagents can run under their own permissionMode: background processes use an
-        # unpinned session id, in-process ones set agent_id. The status path uses the same check.
-        if record.recorded_at is None or record.permission_mode is None:
-            continue
-        if _is_subagent_hook_record(record, parent_claude_session_ids=parent_claude_session_ids):
-            continue
-        if newest is None or record.recorded_at >= newest[0]:
-            newest = (record.recorded_at, record.permission_mode)
-    if newest is not None:
-        observed_at, mode = newest
-        await _relay_permission_mode(
-            client,
-            session_id=session_id,
-            mode=mode,
-            dedupe=dedupe,
-            observed_at=observed_at,
+    # The relay skips a mode that already posted, so this re-offer only retries a failed post.
+    observed_at, mode = dedupe.observed_permission_mode_at, dedupe.observed_permission_mode
+    if result.records:
+        parent_claude_session_ids = await asyncio.to_thread(
+            read_seen_claude_session_ids, bridge_dir
         )
+        # Only the newest record matters: a footer poll would not see the modes in between.
+        newest: tuple[float, str] | None = None
+        for record in result.records:
+            if record.recorded_at is None or record.permission_mode is None:
+                continue
+            # Skip subagents: unpinned session id (background) or agent_id set (in-process).
+            if _is_subagent_hook_record(
+                record, parent_claude_session_ids=parent_claude_session_ids
+            ):
+                continue
+            if newest is None or record.recorded_at >= newest[0]:
+                newest = (record.recorded_at, record.permission_mode)
+        if newest is not None:
+            observed_at, mode = newest
+    await _relay_permission_mode(
+        client,
+        session_id=session_id,
+        mode=mode,
+        dedupe=dedupe,
+        observed_at=observed_at,
+    )
 
 
 async def _forward_pane_signals(
