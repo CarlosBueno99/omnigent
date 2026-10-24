@@ -96,6 +96,9 @@ async def test_info_returns_expected_fields(client: httpx.AsyncClient) -> None:
         "custom_agents_settings_ui": False,
         "sidebar_grouping_ui": False,
         "workspace_content_search": False,
+        "grid_sessions_display_ui": False,
+        "automations_v2": False,
+        "splittable_terminal_view_ui": False,
     }
     # Compatibility field for frontend builds predating the nested map.
     assert data["harness_install_enabled"] is False
