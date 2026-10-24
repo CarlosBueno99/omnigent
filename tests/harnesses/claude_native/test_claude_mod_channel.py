@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -83,7 +84,9 @@ def _request(
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = None if payload is None else json.dumps(payload)
     try:
-        connection.request(method, path, body=body, headers=headers)
+        # A refused request is answered and closed before its body is read.
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
         return response.status, response.read()
     finally:
@@ -443,6 +446,9 @@ def test_hello_writes_mod_json_and_marks_the_channel_live(mod_bridge: Path) -> N
 def test_mod_endpoints_refuse_a_wrong_token(mod_bridge: Path) -> None:
     status, _ = _request(mod_bridge, "POST", "/mod/hello", _HELLO, token="wrong")
     assert status == 401
+    # Larger than a socket buffer, so the refusal must come before the body is read.
+    padded = {**_HELLO, "padding": "x" * (mod_channel.MOD_MAX_BODY_BYTES - 1024)}
+    assert _request(mod_bridge, "POST", "/mod/hello", padded, token="wrong")[0] == 401
     assert not (mod_bridge / mod_channel.MOD_STATE_FILE).exists()
     assert _request(mod_bridge, "GET", "/mod/next", token="wrong")[0] == 401
 
