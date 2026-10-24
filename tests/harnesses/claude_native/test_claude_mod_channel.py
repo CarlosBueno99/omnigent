@@ -95,7 +95,12 @@ def _post_hello(bridge_dir: Path, **overrides: object) -> None:
     assert status == 200, body
 
 
-def _run_fake_mod(bridge_dir: Path, *, answer: dict[str, object]) -> threading.Thread:
+def _run_fake_mod(
+    bridge_dir: Path,
+    *,
+    answer: dict[str, object],
+    received: list[dict[str, object]] | None = None,
+) -> threading.Thread:
     """Start a thread that takes one command from the long poll and posts *answer* for it."""
 
     def run() -> None:
@@ -104,11 +109,13 @@ def _run_fake_mod(bridge_dir: Path, *, answer: dict[str, object]) -> threading.T
             status, body = _request(bridge_dir, "GET", "/mod/next")
             if status == 200:
                 command = json.loads(body)
+                if received is not None:
+                    received.append(command)
                 _request(
                     bridge_dir,
                     "POST",
                     "/mod/result",
-                    {"id": command["id"], **answer},
+                    {"v": 1, "id": command["id"], **answer},
                 )
                 return
 
@@ -196,18 +203,16 @@ def test_normalize_mod_event_checks_kind_and_reason() -> None:
         normalize_mod_event({**complete, "reason": "timeout"})
 
 
-def test_normalize_mod_result_checks_the_command_id_and_shape() -> None:
+def test_normalize_mod_result_checks_the_version_command_id_and_shape() -> None:
     command_id = "0" * 32
-    assert normalize_mod_result({"id": command_id, "ok": True, "result": {"ended": True}}) == (
-        command_id,
-        True,
-        {"ended": True},
-        None,
-    )
+    result = {"v": 1, "id": command_id, "ok": True, "result": {"ended": True}}
+    assert normalize_mod_result(result) == (command_id, True, {"ended": True}, None)
     with pytest.raises(ValueError):
-        normalize_mod_result({"id": "not-hex", "ok": True})
+        normalize_mod_result({**result, "id": "not-hex"})
     with pytest.raises(ValueError):
-        normalize_mod_result({"id": command_id, "ok": False})
+        normalize_mod_result({"v": 1, "id": command_id, "ok": False})
+    with pytest.raises(ValueError, match="version"):
+        normalize_mod_result({**result, "v": 2})
 
 
 @pytest.mark.parametrize(
@@ -320,10 +325,15 @@ def test_install_copies_only_the_shipped_plugin_files_and_writes_the_manifest(
     (package / "types" / "index.d.ts").write_text("")
     (package / "hooks" / "tsconfig.json").write_text("{}")
     monkeypatch.setattr(mod_channel, "MOD_PACKAGE_DIR", package)
+    # A copy an older install left behind.
+    earlier = tmp_path / "bridge" / "claude-mod" / "hooks"
+    earlier.mkdir(parents=True)
+    (earlier / "retired.ts").write_text("")
 
     installed = mod_channel.install_claude_mod(tmp_path / "bridge")
 
     assert installed == tmp_path / "bridge" / "claude-mod"
+    assert not (installed / "hooks" / "retired.ts").exists()
     manifest = json.loads((installed / ".claude-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "omnigent-bridge"
     assert set(manifest) == {"name", "version", "description"}
@@ -332,6 +342,30 @@ def test_install_copies_only_the_shipped_plugin_files_and_writes_the_manifest(
     assert not (installed / "tsconfig.json").exists()
     assert not (installed / "types").exists()
     assert not (installed / "hooks" / "tsconfig.json").exists()
+
+
+def test_launch_without_the_packaged_mod_files_skips_the_mod(
+    mod_bridge: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    package = tmp_path / "package"
+    (package / "hooks").mkdir(parents=True)
+    (package / "hooks" / "hooks.json").write_text("{}")
+    monkeypatch.setattr(mod_channel, "MOD_PACKAGE_DIR", package)
+    bridge_dir = mod_bridge / "partial-install"
+    bridge_dir.mkdir()
+
+    with pytest.raises(FileNotFoundError, match=r"register\.ts"):
+        mod_channel.install_claude_mod(bridge_dir)
+    with caplog.at_level("WARNING", logger=claude_bridge.__name__):
+        args = claude_bridge.augment_claude_args(
+            (), bridge_dir=bridge_dir, python_executable="/venv/bin/python", claude_mod=True
+        )
+
+    assert "--plugin-dir" not in args
+    assert "launching without the mod" in caplog.text
 
 
 def test_shipped_mod_has_no_dot_folder_for_git_to_ignore() -> None:
@@ -410,6 +444,22 @@ def test_mod_endpoints_refuse_a_wrong_token(mod_bridge: Path) -> None:
     status, _ = _request(mod_bridge, "POST", "/mod/hello", _HELLO, token="wrong")
     assert status == 401
     assert not (mod_bridge / mod_channel.MOD_STATE_FILE).exists()
+    assert _request(mod_bridge, "GET", "/mod/next", token="wrong")[0] == 401
+
+
+def test_mod_post_with_a_malformed_length_is_a_bad_request(mod_bridge: Path) -> None:
+    server = claude_bridge._read_json_file(mod_bridge / claude_bridge._SERVER_FILE)
+    connection = claude_bridge._control_connection(server, timeout=10.0)
+    try:
+        connection.putrequest("POST", "/mod/hello")
+        connection.putheader("Authorization", f"Bearer {_TOKEN}")
+        connection.putheader("Content-Length", "twelve")
+        connection.endheaders()
+        status = connection.getresponse().status
+    finally:
+        connection.close()
+
+    assert status == 400
 
 
 def test_events_are_appended_one_line_each_and_invalid_ones_refused(mod_bridge: Path) -> None:
@@ -521,8 +571,40 @@ def test_pane_is_captured_only_once_the_mod_is_live(
     assert probed == [mod_bridge]
 
 
+@pytest.mark.parametrize(
+    ("status_code", "body", "expected"),
+    [
+        (400, b'{"error":"unknown mod operation"}', "not_started"),
+        (401, b"<html>Unauthorized</html>", "not_started"),
+        (404, b"<html>Not Found</html>", "not_started"),
+        (413, b"<html>Request Entity Too Large</html>", "not_started"),
+        (200, b'{"status":"ok","result":{},"error":null}', "ok"),
+        (200, b"<html>torn</html>", "unanswered"),
+        (500, b"<html>Internal Server Error</html>", "unanswered"),
+    ],
+)
+def test_only_refusals_before_queueing_count_as_not_started(
+    status_code: int, body: bytes, expected: str
+) -> None:
+    assert claude_bridge._outcome_from_wire(status_code, body).status == expected
+
+
+def test_submit_of_non_ascii_text_near_the_cap_reaches_the_mod(mod_bridge: Path) -> None:
+    """Text inside the submit cap must fit the body cap, so it travels as raw UTF-8."""
+    text = "\U0001f600" * (mod_channel.MOD_SUBMIT_MAX_BYTES // 4)
+    _post_hello(mod_bridge)
+    received: list[dict[str, object]] = []
+    fake_mod = _run_fake_mod(mod_bridge, answer={"ok": True, "result": {}}, received=received)
+
+    outcome = claude_bridge.send_mod_command(mod_bridge, "submit", {"text": text}, timeout_s=5.0)
+
+    fake_mod.join(timeout=5)
+    assert outcome.status == "ok"
+    assert received[0]["args"] == {"text": text}
+
+
 def test_result_for_an_unknown_command_is_not_found(mod_bridge: Path) -> None:
-    status, _ = _request(mod_bridge, "POST", "/mod/result", {"id": "0" * 32, "ok": True})
+    status, _ = _request(mod_bridge, "POST", "/mod/result", {"v": 1, "id": "0" * 32, "ok": True})
     assert status == 404
 
 

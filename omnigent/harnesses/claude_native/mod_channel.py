@@ -216,24 +216,23 @@ def normalize_mod_result(payload: object) -> tuple[str, bool, JsonObject, str | 
     """Validate a ``POST /mod/result`` body.
 
     :param payload: Decoded request body, e.g.
-        ``{"id": "<32 hex digits>", "ok": true, "result": {}}``.
+        ``{"v": 1, "id": "<32 hex digits>", "ok": true, "result": {}}``.
     :returns: ``(command_id, ok, result, error)``.
-    :raises ValueError: If the body is malformed.
+    :raises ValueError: If the body is not a well-formed version 1 result.
     """
-    if not isinstance(payload, dict):
-        raise ValueError("result must be a JSON object")
-    command_id = payload.get("id")
+    body = _protocol_object(payload, "result")
+    command_id = body.get("id")
     if not isinstance(command_id, str) or not _COMMAND_ID_PATTERN.fullmatch(command_id):
         raise ValueError("result id is not a command id")
-    ok = payload.get("ok")
+    ok = body.get("ok")
     if not isinstance(ok, bool):
         raise ValueError("result ok must be a boolean")
     if ok:
-        result = payload.get("result", {})
+        result = body.get("result", {})
         if not isinstance(result, dict):
             raise ValueError("result payload must be a JSON object")
         return command_id, True, result, None
-    error = payload.get("error")
+    error = body.get("error")
     if not isinstance(error, str):
         raise ValueError("a failed result needs an error string")
     return command_id, False, {}, error[:_ERROR_MAX_CHARS]
@@ -292,6 +291,7 @@ def mod_event_record(event: JsonObject, *, now: float) -> JsonObject:
 
 
 _GENERATED_MOD_NAMES: Final = frozenset({"types", "tsconfig.json", "__pycache__", "node_modules"})
+_MOD_SHIPPED_FILES: Final = ("hooks/hooks.json", "hooks/register.ts")
 MOD_PLUGIN_MANIFEST: Final[JsonObject] = {
     "name": "omnigent-bridge",
     "version": "0.1.0",
@@ -312,12 +312,17 @@ def install_claude_mod(bridge_dir: Path) -> Path:
 
     :param bridge_dir: Session bridge directory, e.g. ``/tmp/.../<digest>``.
     :returns: ``<bridge_dir>/claude-mod``.
+    :raises FileNotFoundError: If this install lacks a file the mod ships with.
     """
+    missing = [name for name in _MOD_SHIPPED_FILES if not (MOD_PACKAGE_DIR / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Claude mod files missing from the package: {', '.join(missing)}")
     destination = bridge_dir / MOD_PLUGIN_DIR_NAME
+    # A copy left by an older install may hold files this version no longer ships.
+    shutil.rmtree(destination, ignore_errors=True)
     shutil.copytree(
         MOD_PACKAGE_DIR,
         destination,
-        dirs_exist_ok=True,
         ignore=lambda _directory, names: _GENERATED_MOD_NAMES.intersection(names),
     )
     manifest_dir = destination / ".claude-plugin"
