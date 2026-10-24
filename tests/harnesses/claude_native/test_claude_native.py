@@ -11584,25 +11584,31 @@ def test_catalog_fingerprint_changes_with_managed_gateway_settings(
     )
     gateway_only = claude_native.claude_catalog_fingerprint(None)
 
-    def pin_opus(model: str) -> None:
+    def pin_models(**model_env: str) -> None:
         managed_settings.write_text(
             json.dumps(
-                {
-                    "env": {
-                        "ANTHROPIC_BASE_URL": "https://gateway.example/anthropic",
-                        "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
-                    }
-                }
+                {"env": {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic", **model_env}}
             )
         )
 
-    pin_opus("databricks-claude-opus-4-8")
+    resolved = claude_native.ClaudeNativeUcodeConfig(
+        env={"ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-4-8"}
+    )
+    pin_models(ANTHROPIC_DEFAULT_OPUS_MODEL="databricks-claude-opus-4-8")
     previous_opus = claude_native.claude_catalog_fingerprint(None)
-    pin_opus("databricks-claude-opus-5-5")
+    previous_resolved = claude_native.claude_catalog_fingerprint(resolved)
+    pin_models(ANTHROPIC_DEFAULT_OPUS_MODEL="databricks-claude-opus-5-5")
+    new_opus = claude_native.claude_catalog_fingerprint(None)
+    pin_models(
+        ANTHROPIC_DEFAULT_OPUS_MODEL="databricks-claude-opus-5-5",
+        ANTHROPIC_CUSTOM_MODEL_OPTION="databricks-claude-fable-5-1",
+    )
 
     assert gateway_only != direct
     assert previous_opus != gateway_only
-    assert claude_native.claude_catalog_fingerprint(None) != previous_opus
+    assert new_opus != previous_opus
+    assert claude_native.claude_catalog_fingerprint(None) != new_opus
+    assert claude_native.claude_catalog_fingerprint(resolved) == previous_resolved
 
 
 def test_ambient_env_is_non_anthropic_gateway_detects_databricks(
