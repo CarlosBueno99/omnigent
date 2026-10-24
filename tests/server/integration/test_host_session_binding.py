@@ -46,6 +46,7 @@ from omnigent.server.startup_inputs import STARTUP_LABEL
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.comment_store.sqlalchemy_store import SqlAlchemyCommentStore
+from omnigent.stores.conversation_store import SIDE_CHAT_LABEL_KEY
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -956,6 +957,11 @@ async def test_managed_create_returns_during_provision_and_message_rendezvouses(
 
 _LAPTOP_HOST_ID = "4b1f2e3d4c5b6a798877665544332211"
 _MOVED_SANDBOX_HOST_ID = "0123456789abcdef0123456789abcdef"
+# Left by a sandbox the session ran in before it was resumed on the laptop.
+_STALE_SANDBOX_LABELS = {
+    "omnigent.sandbox.repo.0": "https://github.com/org/old-repo",
+    "omnigent.sandbox.requested_host_id": "feedfacefeedfacefeedfacefeedface",
+}
 
 
 async def _session_released_from_laptop(env: ManagedSessionEnv, *, agent_name: str) -> str:
@@ -990,7 +996,7 @@ async def test_session_moves_from_its_host_onto_a_new_managed_sandbox(
     onto a fresh sandbox through the same background launch a managed create
     uses: it returns hostless and provisioning, then the sandbox host registers
     over the real tunnel and the session binds to it with a runner. The machine
-    it left stays registered.
+    it left stays registered, and an earlier sandbox's labels don't follow.
     """
     import threading
 
@@ -1017,6 +1023,7 @@ async def test_session_moves_from_its_host_onto_a_new_managed_sandbox(
     fake = FakeSandboxLauncher(on_host_start=_start_fake_sandbox_host, provision_gate=provisioned)
     install_fake_modal_launcher(monkeypatch, fake)
     session_id = await _session_released_from_laptop(env, agent_name="move-to-sandbox-agent")
+    env.conv_store.set_labels(session_id, _STALE_SANDBOX_LABELS)
 
     resp = await env.client.post(
         f"/v1/sessions/{session_id}/managed-host",
@@ -1029,6 +1036,8 @@ async def test_session_moves_from_its_host_onto_a_new_managed_sandbox(
     assert body["workspace"] is None
     assert body["sandbox_status"]["stage"] == "provisioning"
     assert body["labels"]["omnigent.sandbox.requested_host_id"] == _MOVED_SANDBOX_HOST_ID
+    # No repository was asked for, so a relaunch must not clone the old one.
+    assert "omnigent.sandbox.repo.0" not in body["labels"]
     provisioned.set()
     conv = await _wait_for_managed_binding(env, session_id)
     tunnels = [await future for future in host_futures]
@@ -1097,16 +1106,76 @@ async def test_message_sent_while_a_moved_session_provisions_waits_for_the_sandb
     assert fake.terminated == ["sb-fake-1"]
 
 
+async def test_concurrent_sandbox_moves_launch_one_sandbox(
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Two moves racing for one session, such as from two tabs, launch a single
+    sandbox; the later one is told the session's binding changed.
+    """
+    import threading
+
+    env = managed_session_env
+    gate = threading.Event()
+    fake = FakeSandboxLauncher(provision_gate=gate, fail_on_host_start=True)
+    install_fake_modal_launcher(monkeypatch, fake)
+    session_id = await _session_released_from_laptop(env, agent_name="move-race-agent")
+
+    responses = await asyncio.gather(
+        *(env.client.post(f"/v1/sessions/{session_id}/managed-host", json={}) for _ in range(2))
+    )
+
+    assert sorted(r.status_code for r in responses) == [202, 409], [r.text for r in responses]
+    gate.set()
+    tracker = env.app.state.managed_launches
+    for _ in range(150):
+        launch = tracker.get(session_id)
+        if launch is not None and launch.settled.is_set():
+            break
+        await asyncio.sleep(0.1)
+    assert len(fake.provisioned_names) == 1
+
+
+async def test_runner_bound_during_a_sandbox_move_keeps_the_session(
+    managed_session_env: ManagedSessionEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A runner that binds after the move's checks but before it claims the
+    session, such as another tab resuming it, wins: the move is refused and the
+    runner keeps its binding.
+    """
+    env = managed_session_env
+    session_id = await _session_released_from_laptop(env, agent_name="move-toctou-agent")
+    get_host = env.host_store.get_host
+
+    def get_host_as_a_runner_binds(host_id: str) -> object:
+        env.conv_store.set_runner_id(session_id, "runner_other_tab")
+        return get_host(host_id)
+
+    monkeypatch.setattr(env.host_store, "get_host", get_host_as_a_runner_binds)
+
+    resp = await env.client.post(f"/v1/sessions/{session_id}/managed-host", json={})
+
+    assert resp.status_code == 409, resp.text
+    conv = env.conv_store.get_conversation(session_id)
+    assert conv is not None
+    assert (conv.host_id, conv.runner_id) == (_LAPTOP_HOST_ID, "runner_other_tab")
+    assert env.app.state.managed_launches.get(session_id) is None
+
+
 async def test_refused_sandbox_move_restores_the_session_binding(
     managed_session_env: ManagedSessionEnv,
 ) -> None:
     """
     A move the server can't launch (here, an unconfigured provider) fails the
-    POST and puts the old host, directory and branch back, so the session is
-    exactly where the runner release left it.
+    POST and puts the old host, directory, branch and sandbox labels back, so
+    the session is exactly where the runner release left it.
     """
     env = managed_session_env
     session_id = await _session_released_from_laptop(env, agent_name="move-refused-agent")
+    env.conv_store.set_labels(session_id, _STALE_SANDBOX_LABELS)
 
     resp = await env.client.post(
         f"/v1/sessions/{session_id}/managed-host", json={"sandbox_provider": "lakebox"}
@@ -1122,22 +1191,49 @@ async def test_refused_sandbox_move_restores_the_session_binding(
         "feature/x",
         None,
     )
+    assert {key: conv.labels.get(key) for key in _STALE_SANDBOX_LABELS} == _STALE_SANDBOX_LABELS
     assert env.app.state.managed_launches.get(session_id) is None
 
 
-@pytest.mark.parametrize("reason", ["runner still bound", "already in a sandbox"])
-async def test_sandbox_move_refuses_a_bound_or_sandboxed_session(
-    managed_session_env: ManagedSessionEnv, reason: str
+@pytest.mark.parametrize(
+    ("reason", "expected_status"),
+    [
+        ("runner still bound", 409),
+        ("no host to move from", 409),
+        ("requested host id taken", 409),
+        ("side chat", 400),
+        ("already in a sandbox", 400),
+    ],
+)
+async def test_sandbox_move_refuses_without_touching_the_session(
+    managed_session_env: ManagedSessionEnv, reason: str, expected_status: int
 ) -> None:
     """
-    A session whose runner was never released, or that already runs in a
-    sandbox nothing would tear down, is refused without touching its binding.
+    A session whose runner was never released, that has no host to leave, or
+    that is a side chat, or a move naming a taken host id, is refused without
+    touching the session. So is one already in a sandbox nothing would tear
+    down.
     """
     env = managed_session_env
     session_id = await _session_released_from_laptop(env, agent_name="move-guard-agent")
+    request: dict[str, str] = {}
     if reason == "runner still bound":
         assert env.conv_store.set_runner_id(session_id, "runner_laptop")
-        expected_status = 409
+    elif reason == "no host to move from":
+        env.conv_store.clear_host_binding(session_id)
+    elif reason == "side chat":
+        env.conv_store.set_labels(session_id, {SIDE_CHAT_LABEL_KEY: "1"})
+    elif reason == "requested host id taken":
+        env.host_store.register_managed_host(
+            host_id=_MOVED_SANDBOX_HOST_ID,
+            name="managed-01234567",
+            user_id=RESERVED_USER_LOCAL,
+            token="tok-taken",
+            provider="modal",
+            sandbox_id="sb-taken",
+            token_expires_at=9_999_999_999,
+        )
+        request = {"host_id": _MOVED_SANDBOX_HOST_ID}
     else:
         env.host_store.register_managed_host(
             host_id=_MOVED_SANDBOX_HOST_ID,
@@ -1149,10 +1245,9 @@ async def test_sandbox_move_refuses_a_bound_or_sandboxed_session(
             token_expires_at=9_999_999_999,
         )
         env.conv_store.set_host_id(session_id, _MOVED_SANDBOX_HOST_ID, "/root/workspace")
-        expected_status = 400
     before = env.conv_store.get_conversation(session_id)
 
-    resp = await env.client.post(f"/v1/sessions/{session_id}/managed-host", json={})
+    resp = await env.client.post(f"/v1/sessions/{session_id}/managed-host", json=request)
 
     assert resp.status_code == expected_status, resp.text
     assert env.conv_store.get_conversation(session_id) == before

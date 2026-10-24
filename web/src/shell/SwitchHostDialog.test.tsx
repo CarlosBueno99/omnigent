@@ -115,9 +115,11 @@ const launchRunnerMock = vi.mocked(launchRunner);
 const launchManagedHostMock = vi.mocked(launchManagedHost);
 const updateSessionMock = vi.mocked(updateSession);
 
-// A server that provisions Arclet sandboxes and lets the caller name the host.
+// A server that provisions Arclet sandboxes, moves sessions onto them, and lets
+// the caller name the new host.
 const ARCLET_SERVER: Partial<ServerInfo> = {
   managed_sandboxes_enabled: true,
+  move_to_managed_sandbox: true,
   sandbox_provider: "arclet",
   sandbox_providers: ["arclet"],
   request_managed_sandbox_host_id: true,
@@ -414,8 +416,14 @@ describe("SwitchHostDialog", () => {
   });
 
   describe("new sandbox target", () => {
-    it("lists a sandbox per provider only on a server that can launch one", () => {
+    it("lists a sandbox per provider only on a server that can move a session onto one", () => {
       renderDialog({ ...ARCLET_SERVER, managed_sandboxes_enabled: false });
+      expect(screen.queryByTestId("switch-host-sandbox-option-arclet")).toBeNull();
+      cleanup();
+
+      // An older server launches sandboxes but lacks the move, which would
+      // fail only after the switch has released the runner.
+      renderDialog({ ...ARCLET_SERVER, move_to_managed_sandbox: false });
       expect(screen.queryByTestId("switch-host-sandbox-option-arclet")).toBeNull();
       cleanup();
 

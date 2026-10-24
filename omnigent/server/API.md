@@ -1347,24 +1347,35 @@ it does on a `host_type: "managed"` fork:
   agent binding, already runs in a sandbox, or asks for a sandbox
   this server has not configured
 403 / 404 — the caller does not own the session
-409 Conflict — a runner is still bound, another sandbox launch for
-  the session is in flight, or host_id names a host already in use
+409 Conflict — a runner is still bound, the session has no host to
+  move from (it may already be moving), its host or runner changed
+  while the move ran, or host_id names a host already in use
 422 Unprocessable Entity — a malformed host_id, or a workspace that is
   not a repository URL
 ```
 
+Servers that support this route report `move_to_managed_sandbox` on
+`GET /v1/info`; clients should not release a session's runner for a
+move on a server that doesn't.
+
 Moves an existing session onto a new server-provisioned sandbox — the
 sandbox counterpart of `POST /v1/hosts/{host_id}/runners`. Release the
 session's runner first with `PATCH /v1/sessions/{id}` and
-`{"runner_id": ""}`. The call then clears the session's host,
-workspace and branch, and schedules the same background launch a
-`host_type: "managed"` create does, registering the sandbox to the
-caller. Until the sandbox host binds, the session behaves like an
-in-flight managed create: a message posted meanwhile is held for the
-launch, and a failed launch leaves the session unbound with the reason
-in `sandbox_status`. A request the server refuses restores the
-previous binding. Files don't move with the session; the transcript
-does.
+`{"runner_id": ""}`. The call then claims the session through the
+same `runner_id IS NULL` transition a host launch binds with, so a
+runner bound in the meantime, or a concurrent move, makes it fail with
+409. It clears the session's host, workspace and branch, plus any
+earlier sandbox's `omnigent.sandbox.repo*` and
+`omnigent.sandbox.requested_host_id` labels, and schedules the same
+background launch a `host_type: "managed"` create does, registering
+the sandbox to the caller. Like a managed fork, the request should be
+routed by the new sandbox's `host_id`, where the launch connects.
+Until the sandbox host binds, the session behaves like an in-flight
+managed create: a message posted meanwhile is held for the launch, and
+a failed launch leaves the session unbound with the reason in
+`sandbox_status`. A request the server refuses restores the previous
+binding and labels unless the session was rebound meanwhile. Files
+don't move with the session; the transcript does.
 
 ### Stream Session
 

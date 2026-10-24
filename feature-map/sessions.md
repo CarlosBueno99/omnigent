@@ -565,12 +565,17 @@ plain `uv run pytest`, which starts a private server for the test.
   moves a session from a connected host onto a fake-launched sandbox host that
   registers over the real tunnel;
   `test_message_sent_while_a_moved_session_provisions_waits_for_the_sandbox`,
+  `test_concurrent_sandbox_moves_launch_one_sandbox`,
+  `test_runner_bound_during_a_sandbox_move_keeps_the_session`,
   `test_refused_sandbox_move_restores_the_session_binding`, and
-  `test_sandbox_move_refuses_a_bound_or_sandboxed_session` in the same file cover
-  the held message, the refused launch, and the guards. The dialog's sandbox
-  rows, repository validation, and refused-launch recovery have component
-  coverage in `web/src/shell/SwitchHostDialog.test.tsx`. No browser test drives
-  the dialog into a live sandbox launch.
+  `test_sandbox_move_refuses_without_touching_the_session` in the same file cover
+  the held message, racing moves and runner binds, the refused launch, and the
+  guards. The dialog's sandbox rows (hidden on servers without
+  `move_to_managed_sandbox`), repository validation, and refused-launch
+  recovery have component coverage in `web/src/shell/SwitchHostDialog.test.tsx`;
+  routing the move by the new sandbox's host id is covered in
+  `web/src/lib/identity.test.ts`. No browser test drives the dialog into a live
+  sandbox launch.
 - **`reconnect`, spinner (own environment):**
   `tests/e2e_ui/chat/test_reconnecting_spinner.py::test_reconnecting_state_shows_spinner`
   seeds an error item directly into the spawned server's database.

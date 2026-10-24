@@ -27,8 +27,8 @@ import { WorkspacePathField } from "./WorkspacePathField";
 import { HostLabel } from "./HostLabel";
 import {
   composeSandboxWorkspace,
-  isValidSandboxRepoUrl,
   normalizeWorkspacePath,
+  sandboxRepoProblem,
 } from "./NewChatDialog";
 import { useHosts } from "@/hooks/useHosts";
 import { useHostFilesystem } from "@/hooks/useHostFilesystem";
@@ -146,12 +146,14 @@ function SupportedSwitchHostDialog({
   // old host is still serving it.
   const [stranded, setStranded] = useState(false);
 
-  // Sandbox rows appear only when the server can serve a managed launch;
-  // "loading" keeps them hidden until the boot probe resolves.
+  // Sandbox rows appear only when the server can launch a sandbox and move a
+  // session onto it; "loading" keeps them hidden until the boot probe resolves.
   const info = useServerInfo();
   const sandboxProviderRows = useMemo(
     () =>
-      info !== "loading" && info.managed_sandboxes_enabled ? sandboxProviderOptions(info) : [],
+      info !== "loading" && info.managed_sandboxes_enabled && info.move_to_managed_sandbox
+        ? sandboxProviderOptions(info)
+        : [],
     [info],
   );
 
@@ -268,18 +270,9 @@ function SupportedSwitchHostDialog({
     setBrowsing(false);
   }
 
-  // A blank repository is an empty sandbox, but a branch without one, or a
-  // malformed URL, blocks the switch — the same rule as the fork dialog.
-  const sandboxRepoProblem =
-    sandboxRepoUrl.trim() === ""
-      ? sandboxRepoBranch.trim() === ""
-        ? null
-        : "Add the repository this branch belongs to."
-      : isValidSandboxRepoUrl(sandboxRepoUrl)
-        ? null
-        : "Enter a repository URL like https://github.com/org/repo.";
+  const repoProblem = sandboxRepoProblem(sandboxRepoUrl, sandboxRepoBranch);
   const canSwitch = sandboxSelected
-    ? sandboxRepoProblem === null
+    ? repoProblem === null
     : selectedHostId !== null && workspaceValid;
 
   async function handleSwitch(): Promise<void> {
@@ -302,8 +295,7 @@ function SupportedSwitchHostDialog({
         await launchManagedHost(sessionId, {
           provider: sandboxProvider,
           workspace: composeSandboxWorkspace(sandboxRepoUrl, sandboxRepoBranch) ?? null,
-          // Keys the session's requests to the new host until it binds, as
-          // on a managed create.
+          // Route the launch by the new sandbox's host id.
           ...(info !== "loading" && info.request_managed_sandbox_host_id
             ? { hostId: randomUUID().replace(/-/g, "") }
             : {}),
@@ -420,16 +412,16 @@ function SupportedSwitchHostDialog({
                     onChange={(e) => setSandboxRepoUrl(e.target.value)}
                     placeholder="https://github.com/org/repo"
                     data-testid="switch-host-sandbox-repo-input"
-                    aria-invalid={sandboxRepoProblem !== null || undefined}
+                    aria-invalid={repoProblem !== null || undefined}
                     className="rounded-md border border-input aria-invalid:border-destructive bg-background px-3 py-2 font-mono text-xs outline-none transition-colors focus-visible:border-ring"
                   />
-                  {sandboxRepoProblem !== null ? (
+                  {repoProblem !== null ? (
                     <p
                       role="alert"
                       className="text-xs text-destructive"
                       data-testid="switch-host-sandbox-repo-error"
                     >
-                      {sandboxRepoProblem}
+                      {repoProblem}
                     </p>
                   ) : (
                     <p className="text-xs text-muted-foreground">
