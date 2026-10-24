@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import type { ComposerMicButtonProps } from "@/components/ComposerMicButton";
 import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { writeAlwaysSteer } from "@/lib/alwaysSteerPreferences";
 import * as filesApi from "@/lib/filesApi";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
@@ -798,7 +799,6 @@ describe("side-chat interrupt", () => {
     renderPane(<SideChatPane childId={childId} />);
     const input = screen.getByTestId("side-chat-input");
     fireEvent.change(input, { target: { value: "Keep this follow-up" } });
-    fireEvent.keyDown(input, { key: "Enter" });
     const interrupt = screen.getByRole("button", { name: "Interrupt side chat" });
     fireEvent.click(interrupt);
     fireEvent.click(interrupt);
@@ -819,6 +819,51 @@ describe("side-chat interrupt", () => {
       pinnedConversationId: childId,
     });
     expect(useChatStore.getState().sessionStatus).toBe("running");
+  });
+
+  it("steers a follow-up into the running side chat when Always steer is on", () => {
+    writeAlwaysSteer(true);
+    renderPane(<SideChatPane childId={childId} />);
+    const input = screen.getByTestId("side-chat-input");
+    fireEvent.change(input, { target: { value: "Steer this side answer" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(send).toHaveBeenCalledExactlyOnceWith(
+      "Steer this side answer",
+      "agent_side",
+      undefined,
+      expect.objectContaining({ pinnedConversationId: childId }),
+    );
+    expect(input).toHaveValue("");
+    expect(sessionsApi.interrupt).not.toHaveBeenCalled();
+  });
+
+  it("sends a follow-up from Send with Always steer off and keeps Interrupt available", () => {
+    renderPane(<SideChatPane childId={childId} />);
+    const input = screen.getByTestId("side-chat-input");
+    const sendButton = screen.getByRole("button", { name: "Send side question" });
+    expect(sendButton).toBeDisabled();
+    fireEvent.change(input, { target: { value: "Also check the tests" } });
+    fireEvent.click(sendButton);
+
+    expect(send).toHaveBeenCalledExactlyOnceWith("Also check the tests", "agent_side", undefined, {
+      pinnedConversationId: childId,
+    });
+    expect(input).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Interrupt side chat" })).toBeEnabled();
+    expect(sessionsApi.interrupt).not.toHaveBeenCalled();
+  });
+
+  it("keeps a running grid session's draft until its turn ends", () => {
+    renderPane(<SideChatPane childId={childId} fullSession />);
+    const input = screen.getByTestId("side-chat-input");
+    fireEvent.change(input, { target: { value: "Wait for this turn" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(input).toHaveValue("Wait for this turn");
+    expect(screen.queryByTestId("side-chat-send")).toBeNull();
+    expect(screen.getByRole("button", { name: "Interrupt session" })).toBeEnabled();
   });
 
   it("reports a failed interrupt and allows retry without clearing the draft", async () => {
