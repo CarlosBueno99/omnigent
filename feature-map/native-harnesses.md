@@ -52,10 +52,11 @@ implements them separately, so a fix for one harness does not reach the others.
   them, including delayed spawns; an unresolved spawn does not keep an idle
   runner re-reading unchanged conversations.
 - `claude-mod-channel`: with `claude_mod_channel` on and Claude 2.1.301 or
-  newer, idle sends, effort, compact, and model picks by alias (`sonnet`,
-  `opus`) use the Claude mod. A model picked by its full id, as the web picker
-  sends it, goes straight to tmux; the mod is not asked. The flag off or an
-  older Claude keeps every control on tmux.
+  newer, idle sends, effort, the session compact event, and model picks by
+  alias (`sonnet`, `opus`) use the Claude mod. A model picked by its full id, as
+  the web picker sends it, goes straight to tmux; the mod is not asked. The web
+  composer sends `/compact` as a message, so like other slash input it is typed
+  through tmux. The flag off or an older Claude keeps every control on tmux.
 - `claude-mod-fallback`: a missing mod, a busy mod, or a dialog on screen sends
   the control to tmux; without a live mod the pane is not even read. A send,
   effort change, compact, or model switch the mod took but did not confirm is
@@ -126,10 +127,13 @@ visible while the runner idles.
 runner's environment (web launches) or in the environment of `omnigent claude`
 (local launches), and Claude 2.1.301 or newer, these go through the mod:
 sending while the session is idle, a model picker choice that is an alias, the
-effort control, and `/compact` from the slash menu. A message sent through the
-mod appears in the Terminal view as a submitted prompt, not as text typed into
-the input box. Mid-turn sends, Escape interrupts, permission-mode switches,
-model picks by full id, `/btw`, and startup dialogs still use tmux.
+effort control, and a compact requested through the session events API
+(`POST /v1/sessions/{id}/events` with `{"type": "compact"}`). A message sent
+through the mod appears in the Terminal view under "Prompt from the
+omnigent-bridge plugin", not as text typed into the input box. `/compact` from
+the slash menu is sent as a message and typed like other slash input.
+Mid-turn sends, Escape interrupts, permission-mode switches, model picks by
+full id, `/btw`, and startup dialogs still use tmux.
 
 **Native Gemini setup:** run `omni setup` → Antigravity → Configure native agy
 API key / gateway. If existing providers conflict, choose the Gemini default
@@ -798,7 +802,10 @@ Cross-harness journeys:
   the Terminal view showing it as a submitted prompt. `mod.json` in the session's
   bridge directory gets a `main_turn_id` while the turn runs and `null` after it.
   A session launched with the flag off has no `claude-mod/` directory and types
-  the same message through tmux.
+  the same message through tmux. To tell the paths apart, read the Claude
+  config directory the runner uses: `history.jsonl` lists only input tmux typed,
+  and the session transcript gives a prompt or command the mod ran an `origin`
+  of kind `plugin`.
 - **`claude-mod-channel`, web model picker and effort control (component checks with a stubbed mod outcome):**
   `tests/runner/test_app_sessions_native_events_options.py::test_events_model_change_types_only_what_the_mod_cannot_or_did_not_take`
   and
@@ -818,14 +825,17 @@ Cross-harness journeys:
   covered by
   `tests/e2e_ui/chat/test_claude_model_picker.py::test_claude_native_alias_selection_persists`,
   which does not exercise the mod.
-- **`claude-mod-channel`, web `/compact`:**
+- **`claude-mod-channel`, compact:**
   `tests/runner/test_app_sessions_native_events_options.py::test_events_compact_on_native_session_types_slash_command`
-  runs each branch: with the mod confirming, nothing is typed; with the mod
-  silent after taking it, nothing is typed and the control fails; without a
-  mod, the tmux `/compact` is typed once. Live, on an idle session, run `/compact` from the
-  slash menu. Expect one compaction in the Terminal, no stray `/compact` left in
-  the input box, and a successful response. While a turn runs, the web refuses
-  compact.
+  runs each branch of the compact event: with the mod confirming, nothing is
+  typed; with the mod silent after taking it, nothing is typed and the control
+  fails; without a mod, the tmux `/compact` is typed once. Live, on an idle
+  session, post `{"type": "compact"}` to `/v1/sessions/{id}/events`. Expect a
+  202, one compaction, no `/compact` command record in the transcript, and no
+  `/compact` in `history.jsonl`. `/compact` from the web slash menu is a
+  message, which
+  `tests/inner/test_claude_native_executor.py::test_input_the_tui_expands_stays_on_tmux`
+  keeps on tmux, so expect it in `history.jsonl`.
 - **`claude-mod-fallback`, mod absent or busy:**
   `tests/harnesses/claude_native/test_claude_mod_channel.py::test_command_without_a_live_mod_never_connects`,
   `tests/harnesses/claude_native/test_claude_mod_channel.py::test_pane_is_captured_only_once_the_mod_is_live`,
