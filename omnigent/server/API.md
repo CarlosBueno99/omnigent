@@ -1310,6 +1310,62 @@ shape as `GET /v1/sessions/{id}` — with status `"idle"` and all
 copied items in chronological order. Clients must bind a runner
 before opening the fork's SSE stream or posting events.
 
+### Move Session to a New Sandbox
+
+```
+POST /v1/sessions/{session_id}/managed-host
+Content-Type: application/json
+
+{
+  "sandbox_provider": "modal",                          // optional
+  "host_id": "0123456789abcdef0123456789abcdef",        // optional
+  "workspace": "https://github.com/org/repo#main"       // optional
+}
+
+Request body matches `SessionManagedHostRequest`. Each field means what
+it does on a `host_type: "managed"` fork:
+
+  sandbox_provider (string | null, optional)
+    Which configured sandbox provider to provision; null takes the
+    server's first.
+
+  host_id (string | null, optional)
+    Id for the new sandbox host: 32 lowercase hex characters, sent
+    only when `GET /v1/info` reports `request_managed_sandbox_host_id`.
+    Recorded in the `omnigent.sandbox.requested_host_id` label until
+    the host binds; null lets the server mint one.
+
+  workspace (string | null, optional)
+    Git repository URL, optionally `#<branch>`, cloned into the
+    sandbox as the session's working directory; null gives the
+    session an empty sandbox.
+
+202 Accepted — body matches `SessionResponse`, with `host_id` and
+  `workspace` null and `sandbox_status` reporting the launch.
+
+400 Bad Request — the session is a sub-agent or side chat, has no
+  agent binding, already runs in a sandbox, or asks for a sandbox
+  this server has not configured
+403 / 404 — the caller does not own the session
+409 Conflict — a runner is still bound, another sandbox launch for
+  the session is in flight, or host_id names a host already in use
+422 Unprocessable Entity — a malformed host_id, or a workspace that is
+  not a repository URL
+```
+
+Moves an existing session onto a new server-provisioned sandbox — the
+sandbox counterpart of `POST /v1/hosts/{host_id}/runners`. Release the
+session's runner first with `PATCH /v1/sessions/{id}` and
+`{"runner_id": ""}`. The call then clears the session's host,
+workspace and branch, and schedules the same background launch a
+`host_type: "managed"` create does, registering the sandbox to the
+caller. Until the sandbox host binds, the session behaves like an
+in-flight managed create: a message posted meanwhile is held for the
+launch, and a failed launch leaves the session unbound with the reason
+in `sandbox_status`. A request the server refuses restores the
+previous binding. Files don't move with the session; the transcript
+does.
+
 ### Stream Session
 
 ```

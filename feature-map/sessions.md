@@ -63,6 +63,11 @@ the header menu), and each place is a separate entry point.
 - `unsupported-sandbox-actions`: Databricks Sandbox and Arclet fork and
   host-switch controls stay visible but disabled, with hover and keyboard
   explanations. Their forms cannot submit.
+- `switch-host-sandbox`: on a server that offers managed sandboxes, Switch host
+  on a session running on a connected machine also lists a new sandbox per
+  provider. Picking one asks for an optional repository and branch, then moves
+  the session there with the same launch progress a new sandbox session shows.
+  A refused launch keeps the dialog open, with the old host offered again.
 - `clone`: copy a session into a new workspace, including a typed `~` path.
 - `reconnect`: a stopped or stranded session shows a reconnect affordance and a
   dialog with the command to run; the desktop app can reconnect a local host
@@ -317,6 +322,14 @@ it selects Reconnect and explains the restriction.
 An open switch dialog closes when switching becomes unavailable and stays closed
 if support returns; choose Switch host again to reopen it.
 
+**Move to a new sandbox:** on a session running on one of your machines, open the
+composer's host menu and choose **Switch host…**. With managed sandboxes
+configured, the host picker lists a new sandbox per provider above your
+machines, and preselects one when no other machine is online. Enter an optional
+repository URL and branch and choose **Switch host**; the session shows the
+sandbox's launch progress and continues there. A message sent while it
+provisions waits for the sandbox.
+
 **Stop session:** open the parent's sidebar row menu or right-click the row and
 choose Stop session while a side chat or sub-agent is working. On mobile, open
 the sidebar drawer and long-press the row. The current-turn interrupt control is
@@ -547,6 +560,17 @@ plain `uv run pytest`, which starts a private server for the test.
   Supported host-switch UI coverage:
   `tests/e2e_ui/sessions/test_host_badge.py::test_host_badge_switches_the_session_to_another_host`
   checks the release/launch requests with stubbed host APIs.
+- **`switch-host-sandbox` (server integration, plain `uv run pytest`):**
+  `tests/server/integration/test_host_session_binding.py::test_session_moves_from_its_host_onto_a_new_managed_sandbox`
+  moves a session from a connected host onto a fake-launched sandbox host that
+  registers over the real tunnel;
+  `test_message_sent_while_a_moved_session_provisions_waits_for_the_sandbox`,
+  `test_refused_sandbox_move_restores_the_session_binding`, and
+  `test_sandbox_move_refuses_a_bound_or_sandboxed_session` in the same file cover
+  the held message, the refused launch, and the guards. The dialog's sandbox
+  rows, repository validation, and refused-launch recovery have component
+  coverage in `web/src/shell/SwitchHostDialog.test.tsx`. No browser test drives
+  the dialog into a live sandbox launch.
 - **`reconnect`, spinner (own environment):**
   `tests/e2e_ui/chat/test_reconnecting_spinner.py::test_reconnecting_state_shows_spinner`
   seeds an error item directly into the spawned server's database.
