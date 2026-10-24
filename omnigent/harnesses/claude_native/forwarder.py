@@ -2867,8 +2867,12 @@ async def _forward_available_subagents(
     ) -> None:
         """Count a poll without a resolved parent; park once the budget is spent."""
         nonlocal updated
-        if unreadable_transcripts:
-            # An unreadable transcript may hold the spawn record; retry uncharged.
+        if unreadable_transcripts and (
+            parent_subagent_id is None
+            or start_retry_tracker.has_retry_state(f"subagent_unreadable:{parent_subagent_id}")
+        ):
+            # An unreadable transcript may hold the spawn record of this sub-agent or
+            # of the parent it waits on; retry uncharged.
             unreadable_polls = start_retry_tracker.record_unresolved(
                 f"subagent_unreadable:{subagent_id}"
             )

@@ -1267,17 +1267,26 @@ async def test_unreadable_transcript_does_not_spend_the_resolve_budget(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Polls that cannot read a transcript holding the spawn record keep the
-    sub-agent pending instead of setting it aside, with one WARNING naming the
-    transcript; it registers once the read recovers."""
+    sub-agent and the child waiting on it pending instead of setting them aside,
+    with one WARNING each naming the transcript; both register once the read
+    recovers."""
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     transcript_path.write_text("", encoding="utf-8")
-    _seed_subagent_on_disk(
+    child_transcript = _seed_subagent_on_disk(
         transcript_path=transcript_path,
         subagent_id="a-child",
         agent_type="general-purpose",
         description="spawn behind an unreadable transcript",
         tool_use_id="toolu_child",
+    )
+    _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="b-grandchild",
+        agent_type="general-purpose",
+        description="nested under the unresolved sub-agent",
+        tool_use_id="toolu_grandchild",
+        spawn_transcript_path=child_transcript,
     )
     real_open = Path.open
     transcript_unreadable = [True]
@@ -1299,14 +1308,67 @@ async def test_unreadable_transcript_does_not_spend_the_resolve_budget(
             state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
         assert state.subagents == {}
         warnings = [record.getMessage() for record in caplog.records]
-        assert len(warnings) == 1, warnings
-        assert "a-child" in warnings[0] and transcript_path.name in warnings[0]
-        assert "Setting aside" not in warnings[0]
+        assert len(warnings) == 2, warnings
+        for subagent_id, warning in zip(["a-child", "b-grandchild"], warnings, strict=True):
+            assert subagent_id in warning and transcript_path.name in warning
+            assert "Setting aside" not in warning
 
         transcript_unreadable[0] = False
         state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
 
     assert state.subagents["a-child"].child_conversation_id == "conv_a-child"
+    assert state.subagents["b-grandchild"].child_conversation_id == "conv_b-grandchild"
+    assert state.subagents["b-grandchild"].parent_subagent_id == "a-child"
+
+
+async def test_unreadable_sibling_transcript_does_not_hold_back_a_resolved_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A child whose spawn record resolved, but whose parent never registers, is
+    still set aside on budget while an unrelated transcript stays unreadable."""
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    parent_transcript = _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="z-parent",
+        agent_type="general-purpose",
+        description="parent whose meta is gone",
+        tool_use_id="toolu_parent",
+    )
+    parent_transcript.with_name("agent-z-parent.meta.json").unlink()
+    _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="a-child",
+        agent_type="general-purpose",
+        description="nested child",
+        tool_use_id="toolu_child",
+        spawn_transcript_path=parent_transcript,
+    )
+    sibling_transcript = parent_transcript.with_name("agent-y-sibling.jsonl")
+    sibling_transcript.write_text("", encoding="utf-8")
+    real_open = Path.open
+
+    def failing_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == sibling_transcript:
+            raise OSError(errno.EIO, "transcript read failure")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    caplog.set_level(logging.WARNING, logger=forwarder.__name__)
+
+    async with _registering_client() as client:
+        poll_kwargs = _subagent_poll_kwargs(
+            client, bridge_dir=bridge_dir, transcript_path=transcript_path
+        )
+        state = forwarder.SubagentForwardState(subagents={})
+        for _ in range(forwarder._SUBAGENT_RESOLVE_MAX_ATTEMPTS):
+            state = await forwarder._forward_available_subagents(state=state, **poll_kwargs)
+
+    assert state.subagents["a-child"].child_conversation_id == ""
+    assert "Setting aside" in caplog.text and "a-child" in caplog.text
 
 
 async def test_parent_retrying_its_start_does_not_spend_its_child_budget(
