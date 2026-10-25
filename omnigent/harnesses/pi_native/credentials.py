@@ -713,9 +713,9 @@ def _databricks_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
     # fails (e.g. network blip, new workspace with no endpoints yet).
     #
     # Distinguish two failure modes so the caller can surface the fatal one:
-    #   * credential resolution fails (expired OAuth token) — Pi's per-request
-    #     ``!command`` apiKey will also fail, so the session dies silently. Carry
-    #     a ``credential_warning`` so the caller can tell the user to re-auth.
+    #   * neither the SDK nor Pi's per-request ``!command`` apiKey yields a token
+    #     (expired OAuth login) — the session would die silently. Carry a
+    #     ``credential_warning`` so the caller can tell the user to re-auth.
     #   * model-list fetch fails after creds resolved (network blip, empty
     #     workspace) — benign; just show the single default model.
     credential_warning: str | None = None
@@ -815,11 +815,9 @@ def _connect_broker_pi_provider(*, model: str | None) -> PiProviderConfig | None
     entry = ProviderEntry(name="databricks", kind=DATABRICKS_KIND, profile=HOST_DATABRICKS_PROFILE)
     resolved = _databricks_pi_provider(entry, model=served_model)
     if resolved is not None and resolved.credential_warning:
-        # The host-only [omnigent] profile deliberately carries no token — the
-        # bearer is minted from the broker by the !command apiKey at request time —
-        # so _databricks_pi_provider's live-credential probe is expected to fail
-        # here. Drop its "login expired" warning so it doesn't surface as a false
-        # error banner on a session that authenticates fine through the broker.
+        # The host-only [omnigent] profile carries no token; its !command apiKey mints
+        # through the broker. A warning here means the broker mint failed at launch,
+        # not that a login expired, so its "databricks auth login" advice would mislead.
         import dataclasses
 
         resolved = dataclasses.replace(resolved, credential_warning=None)

@@ -61,6 +61,7 @@ def test_resolves_databricks_default_to_anthropic_gateway(monkeypatch: pytest.Mo
         return "https://wkspc.example.com/"
 
     monkeypatch.setattr(databricks_executor, "_read_databrickscfg_host", _host)
+    monkeypatch.setattr(creds, "_run_auth_command", lambda command: None)
 
     provider = creds.resolve_pi_native_provider(config_loader=_databricks_config)
 
@@ -2081,6 +2082,7 @@ def test_model_override_beats_databricks_default(monkeypatch: pytest.MonkeyPatch
         "_read_databrickscfg_host",
         lambda profile: "https://wkspc.example.com/",
     )
+    monkeypatch.setattr(creds, "_run_auth_command", lambda command: None)
 
     provider = creds.resolve_pi_native_provider(
         model="databricks-claude-opus-4-7", config_loader=_databricks_config
@@ -4010,6 +4012,7 @@ def test_connect_broker_managed_host_resolves_without_configured_provider(
             agent=lambda name: SimpleNamespace(model="system.ai.claude-sonnet-4-6")
         ),
     )
+    monkeypatch.setattr(creds, "_run_auth_command", lambda command: None)
 
     provider = creds.resolve_pi_native_provider(config_loader=lambda: {"providers": {}})
 
