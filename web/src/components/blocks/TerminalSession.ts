@@ -16,6 +16,7 @@ import { type FontWeight, type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { withBasePath } from "@/lib/basePath";
 import { type CodeFont, codeFontFamilyForEditor, readCodeFont } from "@/lib/codeFontPreferences";
+import { parseHttpUrl } from "@/lib/openLinkInApp";
 import { splitWorkspaceFileCitation } from "@/components/ai-elements/streamdown-security";
 import { resolveChatFilePath } from "@/hooks/useWorkspaceChangedFiles";
 import { CodexTerminalPalette, codexTerminalTheme } from "./CodexTerminalPalette";
@@ -102,6 +103,7 @@ export type TerminalFileLinkListener = (uri: string) => boolean;
 export interface TerminalWorkspaceFileTarget {
   path: string;
   line: number | null;
+  endLine?: number;
 }
 
 /** Resolve an OSC 8 local-file URI to a workspace-relative viewer target. */
@@ -126,7 +128,8 @@ export function resolveTerminalWorkspaceFileLink(
   const citation = splitWorkspaceFileCitation(`${decodedPath}${url.hash}`);
   if (url.hash && !citation.hasPosition) return null;
   const path = resolveChatFilePath(citation.path, root, home)?.path ?? null;
-  return path === null || path.startsWith("/") ? null : { path, line: citation.line };
+  if (path === null || path.startsWith("/")) return null;
+  return { path, line: citation.line, ...(citation.endLine ? { endLine: citation.endLine } : {}) };
 }
 
 export function openTerminalLink(
@@ -149,13 +152,7 @@ export function openTerminalLink(
     }
     return;
   }
-  let url: URL;
-  try {
-    url = new URL(uri, window.location.href);
-  } catch {
-    return;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return;
+  if (!parseHttpUrl(uri)) return;
   window.open(uri, "_blank", "noopener,noreferrer");
 }
 
