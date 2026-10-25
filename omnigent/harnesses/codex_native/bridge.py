@@ -13,13 +13,12 @@ import stat
 import sys
 import tempfile
 import time
+import tomllib
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-import tomllib
+from typing import TYPE_CHECKING, Literal
 
 from omnigent.harnesses.codex_egress import CertificateFailure
 from omnigent.native import native_bridge_common
@@ -195,6 +194,23 @@ class CodexNativeBridgeState:
     codex_home: str
     active_turn_id: str | None = None
     cwd: str | None = None
+
+
+@dataclass(frozen=True)
+class CodexNativeBridgeStateRead:
+    """One state-file observation, with content-free evidence when unavailable."""
+
+    state: CodexNativeBridgeState | None
+    status: Literal[
+        "ready",
+        "missing",
+        "not_file",
+        "unreadable",
+        "invalid_encoding",
+        "invalid_json",
+        "invalid_state",
+    ]
+    os_errno: int | None = None
 
 
 def bridge_dir_for_bridge_id(bridge_id: str) -> Path:
@@ -1498,17 +1514,28 @@ def read_bridge_state(bridge_dir: Path) -> CodexNativeBridgeState | None:
     Read shared native Codex bridge state.
 
     :param bridge_dir: Native Codex bridge directory.
-    :returns: Parsed state, or ``None`` when no state exists.
+    :returns: Parsed state, or ``None`` when state is unavailable or malformed.
     """
+    return read_bridge_state_result(bridge_dir).state
+
+
+def read_bridge_state_result(bridge_dir: Path) -> CodexNativeBridgeStateRead:
+    """Read state once so failure diagnostics describe the delivery decision."""
     path = bridge_dir / _STATE_FILE
-    if not path.is_file():
-        return None
     try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            return CodexNativeBridgeStateRead(None, "not_file")
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    except FileNotFoundError as exc:
+        return CodexNativeBridgeStateRead(None, "missing", exc.errno)
+    except OSError as exc:
+        return CodexNativeBridgeStateRead(None, "unreadable", exc.errno)
+    except UnicodeDecodeError:
+        return CodexNativeBridgeStateRead(None, "invalid_encoding")
+    except json.JSONDecodeError:
+        return CodexNativeBridgeStateRead(None, "invalid_json")
     if not isinstance(raw, dict):
-        return None
+        return CodexNativeBridgeStateRead(None, "invalid_state")
     session_id = raw.get("session_id")
     socket_path = raw.get("socket_path")
     thread_id = raw.get("thread_id")
@@ -1525,17 +1552,20 @@ def read_bridge_state(bridge_dir: Path) -> CodexNativeBridgeState | None:
         or not isinstance(codex_home, str)
         or not codex_home
     ):
-        return None
+        return CodexNativeBridgeStateRead(None, "invalid_state")
     parsed_active_turn_id = (
         active_turn_id if isinstance(active_turn_id, str) and active_turn_id else None
     )
-    return CodexNativeBridgeState(
-        session_id=session_id,
-        socket_path=socket_path,
-        thread_id=thread_id,
-        codex_home=codex_home,
-        active_turn_id=parsed_active_turn_id,
-        cwd=cwd if isinstance(cwd, str) and cwd else None,
+    return CodexNativeBridgeStateRead(
+        CodexNativeBridgeState(
+            session_id=session_id,
+            socket_path=socket_path,
+            thread_id=thread_id,
+            codex_home=codex_home,
+            active_turn_id=parsed_active_turn_id,
+            cwd=cwd if isinstance(cwd, str) and cwd else None,
+        ),
+        "ready",
     )
 
 
@@ -1658,7 +1688,7 @@ def clear_active_turn_id_if_matches(
             return
         try:
             on_cleared()
-        except Exception:  # noqa: BLE001 - the clear is written; a retry cannot re-run it.
+        except Exception:  # the clear is written; a retry cannot re-run it.
             _logger.warning(
                 "Codex-native cleared-turn callback raised for %s", bridge_dir, exc_info=True
             )
