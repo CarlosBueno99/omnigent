@@ -117,28 +117,33 @@ class _AlwaysAnswers:
         return httpx.Response(self.status_code, headers=self.headers, json=self.body)
 
 
-class _AnswersOnceThenRefuses:
-    """MockTransport handler that answers one request, then refuses every connection.
+class _FirstThenRest:
+    """MockTransport handler whose first request and later requests differ.
 
-    :param status_code: HTTP status of the single answer, e.g. ``401``.
+    :param first_status: HTTP status for the first request, or ``None`` to
+        refuse the connection, e.g. ``401``.
+    :param rest_status: HTTP status for every later request, or ``None`` to
+        refuse those connections.
     """
 
-    def __init__(self, status_code: int) -> None:
-        self.status_code = status_code
+    def __init__(self, first_status: int | None, rest_status: int | None) -> None:
+        self.first_status = first_status
+        self.rest_status = rest_status
         self.requests_seen = 0
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         """
-        Answer the first request and refuse the rest.
+        Answer or refuse according to the request's position.
 
         :param request: The outgoing request the client built.
-        :returns: A bodiless response with the configured status, once.
-        :raises httpx.ConnectError: For every request after the first.
+        :returns: A bodiless response with the configured status.
+        :raises httpx.ConnectError: When the configured status is ``None``.
         """
         self.requests_seen += 1
-        if self.requests_seen > 1:
+        status = self.first_status if self.requests_seen == 1 else self.rest_status
+        if status is None:
             raise httpx.ConnectError("connection refused", request=request)
-        return httpx.Response(self.status_code)
+        return httpx.Response(status)
 
 
 class _HtmlThenOnline:
@@ -423,11 +428,11 @@ async def test_wait_for_host_online_deadline_names_host_owned_by_another_account
     assert suppresses_recovery_hint(excinfo.value)
 
 
-async def test_wait_for_host_online_deadline_reports_connect_error_after_sign_in_rejection(
+async def test_wait_for_host_online_deadline_reports_reachability_when_answers_stop(
     fast_poll: None,
 ) -> None:
-    """A sign-in rejection followed by refused connections reports both causes."""
-    handler = _AnswersOnceThenRefuses(401)
+    """Refused connections after an early sign-in rejection report reachability, not login."""
+    handler = _FirstThenRest(first_status=401, rest_status=None)
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="http://test"
     ) as client:
@@ -435,8 +440,27 @@ async def test_wait_for_host_online_deadline_reports_connect_error_after_sign_in
             await wait_for_host_online(client, "host_abc123", timeout_s=0.05)
     message = str(excinfo.value)
     assert handler.requests_seen > 1
-    assert "Last connection error" in message
-    assert "connection refused" in message
+    assert "Last connection error: ConnectError('connection refused')." in message
+    assert "Check that this machine can reach http://test" in message
+    assert "login" not in message
+    assert not suppresses_recovery_hint(excinfo.value)
+
+
+async def test_wait_for_host_online_deadline_drops_connect_error_once_server_answers(
+    fast_poll: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sign-in rejection after an early refused connection names only the login remedy."""
+    monkeypatch.delenv("OMNIGENT_WRAPPER_COMMAND", raising=False)
+    handler = _FirstThenRest(first_status=None, rest_status=401)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
+        with pytest.raises(click.ClickException) as excinfo:
+            await wait_for_host_online(client, "host_abc123", timeout_s=0.05)
+    message = str(excinfo.value)
+    assert handler.requests_seen > 1
+    assert "Last connection error" not in message
     assert "The server rejected this machine's sign-in (HTTP 401)." in message
     assert "Run `omnigent login http://test` and retry." in message
     assert suppresses_recovery_hint(excinfo.value)
