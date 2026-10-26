@@ -2647,51 +2647,64 @@ async def test_reattach_id_waiting_in_terminal_rejected_for_other_session(
         pending_elicitations.reset_for_tests()
 
 
-async def test_chat_answer_stranded_by_hook_exit_is_reported_undelivered(
+@pytest.mark.parametrize("answered_in_gap", [False, True])
+async def test_hook_retry_after_grace_takes_over_card_waiting_in_terminal(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    answered_in_gap: bool,
 ) -> None:
     """
-    An answer accepted after the hook exited is not left looking delivered.
+    A hook that retries after the grace still gets the prompt's answer.
 
-    A later re-park restores the normal card, and its own answer reaches
-    the hook.
+    A chat answer given in the gap shows as undelivered until the retry
+    delivers it; without one, the retry restores the normal card.
     """
     from omnigent.runtime import pending_elicitations
 
     session_id, payload, collector = await _sever_hook_mid_turn(
         client,
         monkeypatch,
-        "test-terminal-fallback-undelivered",
+        f"test-terminal-fallback-late-retry-{answered_in_gap}",
         sever_every_poll=False,
     )
     hook_task: asyncio.Task[httpx.Response] | None = None
     try:
-        gap_answer = await _post_approval(client, session_id, _REATTACH_ELICITATION_ID, "accept")
-        assert gap_answer.status_code == 202, gap_answer.text
-        accepted = await _next_elicitation_event(collector)
-        assert accepted["type"] == "response.elicitation_resolved"
-        assert accepted["action"] == "accept"
+        if answered_in_gap:
+            gap_answer = await _post_approval(
+                client, session_id, _REATTACH_ELICITATION_ID, "accept"
+            )
+            assert gap_answer.status_code == 202, gap_answer.text
+            accepted = await _next_elicitation_event(collector)
+            assert accepted["type"] == "response.elicitation_resolved"
+            assert accepted["action"] == "accept"
 
         waiting = await _next_elicitation_event(collector)
         assert waiting["type"] == "response.elicitation_request"
-        assert waiting["params"]["terminal_fallback"] == {"answer_undelivered": True}
+        assert waiting["params"]["terminal_fallback"] == {"answer_undelivered": answered_in_gap}
         assert pending_elicitations.count_for(session_id) == 1
-        assert _REATTACH_ELICITATION_ID not in _harness_pre_resolved_elicitations
 
         hook_task = asyncio.create_task(
             client.post(f"/v1/sessions/{session_id}/hooks/permission-request", json=payload)
         )
-        reparked = await _next_elicitation_event(collector)
-        assert reparked["type"] == "response.elicitation_request"
-        assert "terminal_fallback" not in reparked["params"]
-        await _finish_deferred_clears()
-        assert pending_elicitations.count_for(session_id) == 1
-
-        verdict = await _post_approval(client, session_id, _REATTACH_ELICITATION_ID, "accept")
-        assert verdict.status_code == 202, verdict.text
+        if answered_in_gap:
+            cleared = await _next_elicitation_event(collector)
+            assert cleared["type"] == "response.elicitation_resolved"
+            assert cleared["elicitation_id"] == _REATTACH_ELICITATION_ID
+            assert cleared["action"] == "accept"
+            assert pending_elicitations.count_for(session_id) == 0
+            assert _REATTACH_ELICITATION_ID not in _harness_pre_resolved_elicitations
+        else:
+            reparked = await _next_elicitation_event(collector)
+            assert reparked["type"] == "response.elicitation_request"
+            assert "terminal_fallback" not in reparked["params"]
+            await _finish_deferred_clears()
+            assert pending_elicitations.count_for(session_id) == 1
+            verdict = await _post_approval(client, session_id, _REATTACH_ELICITATION_ID, "accept")
+            assert verdict.status_code == 202, verdict.text
         response = await hook_task
         assert response.json()["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+        await _finish_deferred_clears()
+        assert _REATTACH_ELICITATION_ID not in _harness_unparked_elicitations
     finally:
         if hook_task is not None and not hook_task.done():
             hook_task.cancel()

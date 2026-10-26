@@ -537,8 +537,10 @@ async def _publish_and_wait_for_harness_elicitation(
     _harness_elicitation_owners[elicitation_id] = session_id
     _harness_parked_elicitations[elicitation_id] = parked
     unparked = _harness_unparked_elicitations.get(elicitation_id)
+    reclaimed_terminal_card = False
     if unparked is not None and unparked.session_id == session_id:
         _harness_unparked_elicitations.pop(elicitation_id, None)
+        reclaimed_terminal_card = unparked.in_terminal
     event_payload: dict[str, Any] | None = None
     # settled = verdict / terminal-resolved (clear the card now); a
     # severed wait instead defers the clear so a hook retry can re-park.
@@ -552,6 +554,10 @@ async def _publish_and_wait_for_harness_elicitation(
             session_id, elicitation_id, request_fingerprint
         )
         if tombstone is not None:
+            if reclaimed_terminal_card:
+                # The late retry delivers the gap answer; clear the terminal card.
+                published_request = settled = True
+                settled_action = getattr(tombstone.result, "action", None)
             # Verdict from the un-parked gap; None = terminal answered (fail-ask).
             return tombstone.result
         event = ElicitationRequestEvent(
@@ -757,9 +763,10 @@ async def _hold_elicitation_for_terminal_answer(
     holds chat messages until it is answered, so expiring the card would
     leave the user no visible way forward. Mid-turn, the card is instead
     re-published with a ``terminal_fallback`` param that points the user
-    to the terminal and says whether a chat answer given in the gap never
-    reached the agent. It clears once the terminal answers, a re-park takes
-    over, or the turn ends.
+    to the terminal and says whether a chat answer given in the gap has not
+    reached the agent. A late hook retry still delivers that answer. The
+    card clears once the terminal answers, a re-park takes over, or the
+    turn ends.
 
     :param session_id: Session that owns the prompt, e.g. ``"conv_abc123"``.
     :param elicitation_id: The prompt's id, e.g. ``"elicit_claude_0f3a..."``.
@@ -783,10 +790,10 @@ async def _hold_elicitation_for_terminal_answer(
                 and tombstone.result is not None
                 and tombstone.request_fingerprint == unparked.request_fingerprint
             )
-            if answer_undelivered:
-                # The card now asks for the terminal, so a late re-park must re-ask.
-                _harness_pre_resolved_elicitations.pop(elicitation_id, None)
-            elif pending_elicitations.lookup(elicitation_id, conversation_id=session_id) is None:
+            if (
+                not answer_undelivered
+                and pending_elicitations.lookup(elicitation_id, conversation_id=session_id) is None
+            ):
                 return False
             terminal_event = {
                 **unparked.event_payload,
