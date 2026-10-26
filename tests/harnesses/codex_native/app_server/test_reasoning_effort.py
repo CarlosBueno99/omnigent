@@ -8,7 +8,7 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 from cachetools import TTLCache
@@ -202,6 +202,26 @@ async def test_effort_diagnostics_preserve_safe_selection_evidence(
         "ConnectionError" if state == "discovery_failed" else None
     )
     assert "private" not in records[0].getMessage() + json.dumps(attributes)
+
+
+async def test_broken_effort_diagnostic_sink_does_not_change_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AsyncMock(spec=app_server.CodexAppServerClient)
+    client.request.return_value = {
+        "result": {
+            "data": [
+                {
+                    "id": "example-model",
+                    "supportedReasoningEfforts": [{"reasoningEffort": "xhigh"}],
+                }
+            ]
+        }
+    }
+    monkeypatch.setattr(app_server._logger, "info", Mock(side_effect=RuntimeError("broken sink")))
+    assert (
+        await app_server.resolve_codex_effort_for_model(client, "max", "example-model") == "xhigh"
+    )
 
 
 @pytest.mark.parametrize("default", ["high", None])

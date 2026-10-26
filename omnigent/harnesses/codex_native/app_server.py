@@ -830,59 +830,66 @@ def _log_effort_resolution(
     cli_version: tuple[int, int, int] | None = None,
 ) -> None:
     """Retain the capability decision without config, model names, or exception text."""
-    entry = _codex_model_catalog_entry(catalog, model) if model else None
-    levels = (
-        entry.get("supportedReasoningEfforts", entry.get("supported_reasoning_levels"))
-        if entry is not None
-        else None
-    )
-    advertised = (
-        [
-            level.get("reasoningEffort", level.get("effort"))
-            for level in levels
-            if isinstance(level, dict)
-        ]
-        if isinstance(levels, list)
-        else []
-    )
-    supported = [effort for effort in EFFORT_ORDER if effort in advertised]
-    if discovery_error is not None:
-        catalog_status = "discovery_failed"
-    elif model is None:
-        catalog_status = "model_unknown"
-    elif catalog is None:
-        catalog_status = "unavailable"
-    elif entry is None:
-        catalog_status = "model_missing"
-    else:
-        catalog_status = "matched" if supported else "capabilities_missing"
-    _logger.info(
-        "Codex reasoning effort capability decision",
-        extra=debug_event(
-            "codex_effort_resolution",
-            session_id=session_id,
-            diagnostic_version=1,
-            runtime_version=VERSION,
-            native_cli_version=_format_codex_version(cli_version),
-            phase=phase,
-            effort_source=effort_source,
-            requested_effort=requested
-            if requested in EFFORT_ORDER
-            else "default"
-            if requested is None
-            else "unrecognized",
-            effective_effort=effective
-            if effective in EFFORT_ORDER
-            else "unset"
-            if effective is None
-            else "unrecognized",
-            model_sha256=hashlib.sha256(model.encode()).hexdigest() if model else None,
-            catalog_source=catalog_source,
-            catalog_status=catalog_status,
-            supported_efforts=",".join(supported),
-            discovery_error_type=type(discovery_error).__name__ if discovery_error else None,
-        ),
-    )
+    with contextlib.suppress(Exception):
+        entry = _codex_model_catalog_entry(catalog, model) if model else None
+        levels = (
+            entry.get("supportedReasoningEfforts", entry.get("supported_reasoning_levels"))
+            if entry is not None
+            else None
+        )
+        advertised = (
+            [
+                level.get("reasoningEffort", level.get("effort"))
+                for level in levels
+                if isinstance(level, dict)
+            ]
+            if isinstance(levels, list)
+            else []
+        )
+        supported = [effort for effort in EFFORT_ORDER if effort in advertised]
+        if discovery_error is not None:
+            catalog_status = "discovery_failed"
+        elif model is None:
+            catalog_status = "model_unknown"
+        elif catalog is None:
+            catalog_status = "unavailable"
+        elif entry is None:
+            catalog_status = "model_missing"
+        else:
+            catalog_status = "matched" if supported else "capabilities_missing"
+        _logger.info(
+            "Codex reasoning effort capability decision",
+            extra=debug_event(
+                "codex_effort_resolution",
+                session_id=session_id,
+                diagnostic_version=1,
+                runtime_version=VERSION,
+                native_cli_version=_format_codex_version(cli_version),
+                phase=phase,
+                effort_source=effort_source,
+                requested_effort=requested
+                if requested in EFFORT_ORDER
+                else "default"
+                if requested is None
+                else "unrecognized",
+                effective_effort=effective
+                if effective in EFFORT_ORDER
+                else "unset"
+                if effective is None
+                else "unrecognized",
+                model_sha256=hashlib.sha256(model.encode()).hexdigest() if model else None,
+                catalog_source=catalog_source,
+                catalog_status=catalog_status,
+                supported_efforts=",".join(supported),
+                discovery_error_type=(
+                    type(discovery_error).__name__
+                    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", type(discovery_error).__name__)
+                    else "other"
+                )
+                if discovery_error
+                else None,
+            ),
+        )
 
 
 async def resolve_codex_effort_for_model(
