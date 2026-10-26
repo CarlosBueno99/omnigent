@@ -51,6 +51,9 @@ the header menu), and each place is a separate entry point.
   unread dot offers Mark as read instead. Bulk selection also offers these actions.
 - `project`: Add to project (Move session once filed) puts a session in a
   project folder from the row menu, the header menu, or the header's folder tag.
+- `project-static-default`: save a named static sandbox as a project default,
+  including offline boxes; wake on opening the project's new-session composer,
+  reuse for later sessions, and retain the selection after wake failure.
 - `project-rename`: the project menu opens a dialog with the name selected;
   typing replaces it without losing characters as the menu closes.
 - `bulk-actions`: select several rows, then mark as read or unread, archive,
@@ -204,6 +207,10 @@ session), archive or unarchive, and delete.
 
 **Project folder:** right-click its header or open its three-dot menu, then
 choose Rename project. Start typing as soon as the dialog opens.
+Choose **Project settings → Host** to save an attached static sandbox as the
+new-session default. Offline static boxes remain selectable; saving leaves them
+asleep. Use the project's **New session** button to wake and reuse the saved box.
+If wake fails, the box and draft remain selected; retry through its host-picker row.
 
 **Pinned section drag:** drag a pinned row onto another pinned row to reorder
 the Pinned section, or drop an unpinned row onto a pinned row to pin it into
@@ -397,6 +404,15 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
 Tests that stop a runner, restart the server, or read the database cannot run
 through `verify-env run`. They are marked "own environment" below; run them with
 plain `uv run pytest`, which starts a private server for the test.
+
+**`project-static-default`:**
+`tests/e2e_ui/sessions/test_project_settings_dialog.py::test_project_static_sandbox_default_wakes_and_reuses`
+opens Project settings, saves an offline box without waking it, reopens settings,
+then starts two sessions on the same target. Project persistence uses the real
+server; host inventory, wake, filesystem and session launch are mocked.
+`web/src/shell/NewChatDialog.projectPrefill.test.tsx` covers wake failure/retry
+without losing the selected box or draft. Existing tests retain ordinary-host
+fallback and project override coverage.
 
 - **`session-grid` (browser contract):**
   `tests/browser_ui/chat/test_session_grid.py` drives sidebar drops, previews,

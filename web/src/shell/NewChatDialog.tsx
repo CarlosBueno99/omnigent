@@ -366,7 +366,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { CreateAgentDialog } from "./CreateAgentDialog";
 import { buildAgentBundle, type AgentBundleInput } from "@/lib/agentBundle";
 import { installAgentBundle } from "@/lib/agentsApi";
-import { createBundledSession, launchRunner } from "@/lib/sessionsApi";
+import { createBundledSession, launchRunner, wakeSandboxHost } from "@/lib/sessionsApi";
 import { promoteSessionDraft, recoverFailedSessionDraft } from "@/lib/sessionDrafts";
 
 // Short picker-row blurbs — the spec descriptions are long paragraphs that
@@ -2440,6 +2440,7 @@ export function NewChatLandingScreen() {
   const skipDbcertCheckRef = useRef<(() => void) | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const [wakingHostId, setWakingHostId] = useState<string | null>(null);
+  const attemptedWake = useRef<string | null>(null);
   const [discoveryProvider, setDiscoveryProvider] = useState<string | null>(null);
   // "Connect a host" instructions modal, opened from the host dropdown.
   const [connectOpen, setConnectOpen] = useState(false);
@@ -4993,7 +4994,12 @@ export function NewChatLandingScreen() {
               { label: "Host", value: selectedHostDisplayName },
               {
                 label: "Status",
-                value: selectedHost?.status === "online" ? "Connected" : "Disconnected",
+                value:
+                  wakingHostId === selectedHostId
+                    ? "Waking…"
+                    : selectedHost?.status === "online"
+                      ? "Connected"
+                      : "Disconnected",
               },
             ]
           : [{ label: "Host", value: "None" }];
@@ -5102,26 +5108,35 @@ export function NewChatLandingScreen() {
     setPickedHarness(null);
   };
 
-  async function wakeAttachedHost(hostId: string) {
-    setWakingHostId(hostId);
-    setCreateError(null);
-    try {
-      const response = await authenticatedFetch(`/v1/hosts/${encodeURIComponent(hostId)}/wake`, {
-        method: "POST",
-      });
-      if (!response.ok) {
-        const body = await response.json();
-        throw new Error(body.detail || "Could not wake sandbox");
+  const wakeAttachedHost = useCallback(
+    async (hostId: string) => {
+      attemptedWake.current = hostId;
+      setWakingHostId(hostId);
+      setCreateError(null);
+      try {
+        await wakeSandboxHost(hostId);
+        await queryClient.invalidateQueries({ queryKey: ["hosts"] });
+        void queryClient.invalidateQueries({ queryKey: ["host-filesystem", hostId] });
+        void queryClient.invalidateQueries({ queryKey: ["host-worktrees", hostId] });
+        void queryClient.invalidateQueries({ queryKey: ["sandbox-discovery"] });
+      } catch (error) {
+        if (attemptedWake.current === hostId)
+          setCreateError(error instanceof Error ? error.message : "Could not wake sandbox");
+      } finally {
+        if (attemptedWake.current === hostId) setWakingHostId(null);
       }
-      await queryClient.invalidateQueries({ queryKey: ["hosts"] });
-      selectHost(hostId);
-      void queryClient.invalidateQueries({ queryKey: ["sandbox-discovery"] });
-    } catch (error) {
-      setCreateError(error instanceof Error ? error.message : "Could not wake sandbox");
-    } finally {
-      setWakingHostId(null);
-    }
-  }
+    },
+    [queryClient],
+  );
+  useEffect(() => {
+    if (
+      !sandboxSelected &&
+      selectedHost?.sandbox_attached &&
+      selectedHost.status === "offline" &&
+      attemptedWake.current !== selectedHost.host_id
+    )
+      void wakeAttachedHost(selectedHost.host_id);
+  }, [sandboxSelected, selectedHost, wakeAttachedHost]);
 
   function selectHost(hostId: string) {
     // Persist the explicit pick even when it matches the current selection, so
@@ -5970,8 +5985,10 @@ export function NewChatLandingScreen() {
       <DropdownMenuItem
         key={host.host_id}
         onSelect={() => {
-          if (wakeable) void wakeAttachedHost(host.host_id);
-          else if (reconnect) pendingConnectRef.current = true;
+          if (wakeable) {
+            selectHost(host.host_id);
+            void wakeAttachedHost(host.host_id);
+          } else if (reconnect) pendingConnectRef.current = true;
           else selectHost(host.host_id);
         }}
         disabled={

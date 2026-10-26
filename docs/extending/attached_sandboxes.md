@@ -92,6 +92,20 @@ only when creation is supported. Direct creation requests to a discovery-only
 provider are rejected without provisioning. A failed creation attempt does not
 disable discovery; discovery and attachment never call `provision`.
 
+## Project defaults
+
+After attaching a static sandbox, choose it in **Project settings → Host**.
+Saved boxes appear under their user-owned names even while offline; ordinary
+ad hoc sandbox hosts remain hidden. Saving the default stores the existing
+project `host_id` and does not wake or create a box.
+
+Opening **New session** for that project selects the saved box and, if offline,
+wakes it before loading its folders and models, matching manual host selection.
+A failed wake preserves the selected box and draft; select its row in the host
+picker to retry. It never falls back to a different host because the saved static
+box is offline. No new project field, controller method or HTTP endpoint is added.
+Repository/worktree preparation remains a per-session choice.
+
 ## Provider contract
 
 Keep the customer controller and HTTP client in the existing
