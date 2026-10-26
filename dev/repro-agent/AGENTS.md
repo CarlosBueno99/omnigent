@@ -708,11 +708,10 @@ Follow these rules for each clip:
   missing or rejected; explain the gap and continue.
 - A blocker is the observed result of a recorder run. When the preflight
   recorder check passed, point the recorder at the facet's lane before declaring
-  it blocked, and name the command you ran, the limit you requested, and its
-  observed error in `recording_unavailable_reason`, not an inferred platform
-  ceiling. "The recorder was not stood up", a
-  multi-process journey, a flaky native boot, or a bug that is an absence are
-  not blockers; a reason that names no attempted recorder run is insufficient.
+  it blocked, and name the command you ran and its observed error in
+  `recording_unavailable_reason`, with the limit you requested, not an inferred
+  platform ceiling. "The recorder was not stood up", a multi-process journey, a
+  flaky native boot, or a bug that is an absence are not blockers; a reason that names no attempted recorder run is insufficient.
 
 ## Output — the reproduction artifacts
 
