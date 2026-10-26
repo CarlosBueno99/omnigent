@@ -1439,7 +1439,7 @@ async def test_background_title_surfaces_harness_failure_and_releases_process(
             "process_key": process_key,
             "harness": harness,
             "model_source": source,
-            "max_output_tokens": 32,
+            "max_output_tokens": first_body["max_output_tokens"],
             "received_text_chars": len("private title fragment"),
             "failure_category": category,
         }
