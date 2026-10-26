@@ -267,7 +267,7 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
 - Background hosts capture their environment when started. A later CLI command
   that reuses one passes the runner credentials a fresh host would receive
   (forwarded harness credentials, `OMNIGENT_RUNNER_ENV_PASSTHROUGH` names, and
-  provider `env:` references) to the next runner the host launches.
+  provider `env:` references) to every runner the host launches afterwards.
   These values only add or change; removing one, or changing other host settings
   such as `PATH`, proxies, or Databricks sign-in, still needs a host restart.
   Foreground `host` processes, including `host enable` services, keep their own

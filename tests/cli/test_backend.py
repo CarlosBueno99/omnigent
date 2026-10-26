@@ -532,7 +532,7 @@ def test_reused_background_daemon_receives_only_approved_runner_values(
     path = runner_env_path(_REUSED_SERVER, base_dir=tmp_path)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert read_runner_env(_REUSED_SERVER, pid=4242, base_dir=tmp_path) == {
-        RUNNER_ENV_PASSTHROUGH_ENV_VAR: "ISAAC_LAUNCH_MODE,ANTHROPIC_CUSTOM_HEADERS",
+        RUNNER_ENV_PASSTHROUGH_ENV_VAR: "ANTHROPIC_CUSTOM_HEADERS,ISAAC_LAUNCH_MODE",
         "ISAAC_LAUNCH_MODE": "omni",
         "ANTHROPIC_CUSTOM_HEADERS": "X-Launch: first",
     }
@@ -551,11 +551,15 @@ def test_reused_daemon_keeps_earlier_published_values_and_takes_changed_ones(
     _ensure_host_daemon(_REUSED_SERVER)
 
     monkeypatch.delenv("ISAAC_LAUNCH_MODE")
+    monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ANTHROPIC_CUSTOM_HEADERS")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Launch: second")
     _ensure_host_daemon(_REUSED_SERVER)
 
     published = read_runner_env(_REUSED_SERVER, pid=4242, base_dir=tmp_path)
     assert published is not None
+    assert (
+        published[RUNNER_ENV_PASSTHROUGH_ENV_VAR] == "ANTHROPIC_CUSTOM_HEADERS,ISAAC_LAUNCH_MODE"
+    )
     assert published["ISAAC_LAUNCH_MODE"] == "omni"
     assert published["ANTHROPIC_CUSTOM_HEADERS"] == "X-Launch: second"
 
@@ -581,7 +585,7 @@ def test_runner_env_publish_failure_warns_without_values(
     def _fail(*_args: object, **_kwargs: object) -> None:
         raise PermissionError(errno.EACCES, "Permission denied")
 
-    monkeypatch.setattr(cli, "_write_runner_env_impl", _fail)
+    monkeypatch.setattr(cli, "_update_runner_env_impl", _fail)
 
     assert _ensure_host_daemon(_REUSED_SERVER) is False
 
@@ -654,6 +658,34 @@ def test_ensure_host_daemon_local_daemon_serves_requested_url_is_noop(
     _ensure_host_daemon("http://127.0.0.1:8123")
 
     assert "args" not in captured  # reused, not respawned
+
+
+def test_reused_local_daemon_serving_the_url_receives_runner_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+    _patch_daemon_spawn(monkeypatch, tmp_path, captured)
+    _write_daemon_registry_record(
+        tmp_path,
+        pid=4242,
+        target="local",
+        mode="local",
+        server_url=None,
+        log_path=str(tmp_path / "daemon.log"),
+    )
+    monkeypatch.setattr(cli, "_pid_is_recorded_daemon", lambda record: True)
+    monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(cli, "local_server_url_if_healthy", lambda: "http://127.0.0.1:8123")
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE")
+    monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
+
+    assert _ensure_host_daemon("http://127.0.0.1:8123") is False
+
+    assert "args" not in captured
+    published = read_runner_env("local", pid=4242, base_dir=tmp_path)
+    assert published is not None
+    assert published["ISAAC_LAUNCH_MODE"] == "omni"
 
 
 def test_ensure_host_daemon_reuses_healthy_background_daemon(

@@ -825,6 +825,19 @@ def _make_host_process() -> HostProcess:
     )
 
 
+def _make_background_host_process() -> HostProcess:
+    """Create a CLI-launched background HostProcess that owns the ``local`` target.
+
+    :returns: A :class:`HostProcess` that applies published runner env values.
+    """
+    return HostProcess(
+        identity=HostIdentity(host_id="host_test_connect", name="test-laptop"),
+        server_url="http://localhost:8000",
+        lifecycle_lock=DaemonLifecycleLock.for_target("local"),
+        apply_published_runner_env=True,
+    )
+
+
 def _cleanup_host(host: HostProcess) -> None:
     """Terminate a test host's spawned runners and exit watchers.
 
@@ -938,8 +951,7 @@ async def test_handle_launch_uses_runner_env_published_after_daemon_start(
     monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE")
     monkeypatch.delenv("ISAAC_LAUNCH_MODE", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-start-value")
-    host = _make_host_process()
-    host._lifecycle_lock = DaemonLifecycleLock.for_target("local")
+    host = _make_background_host_process()
     workspace = tmp_path / "project"
     workspace.mkdir()
     launched_envs: list[dict[str, str]] = []
@@ -989,15 +1001,14 @@ async def test_handle_launch_uses_runner_env_published_after_daemon_start(
 def test_runner_launch_base_env_refreshes_only_this_daemons_runner_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Published values cannot change host settings, add unlisted names, or reach other daemons."""
+    """Published values cannot change host settings, add unlisted names, or reach other hosts."""
     monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
     monkeypatch.setenv("PATH", "/daemon/bin")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-daemon")
     monkeypatch.delenv(LOG_TTY_FD_ENV_VAR, raising=False)
     monkeypatch.delenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, raising=False)
     monkeypatch.setattr("omnigent.onboarding.provider_config._load_config", dict)
-    host = _make_host_process()
-    host._lifecycle_lock = DaemonLifecycleLock.for_target("local")
+    host = _make_background_host_process()
     published = {
         "ANTHROPIC_API_KEY": "sk-published",
         "PATH": "/published/bin",
@@ -1015,8 +1026,39 @@ def test_runner_launch_base_env_refreshes_only_this_daemons_runner_credentials(
     assert base_env["PATH"] == "/daemon/bin"
     assert LOG_TTY_FD_ENV_VAR not in base_env
     assert "UNLISTED_SECRET" not in base_env
-    host._lifecycle_lock = None
-    assert host._runner_launch_base_env() is os.environ
+    foreground = HostProcess(
+        identity=HostIdentity(host_id="host_test_connect", name="test-laptop"),
+        server_url="http://localhost:8000",
+        lifecycle_lock=DaemonLifecycleLock.for_target("local"),
+    )
+    assert foreground._runner_launch_base_env() is os.environ
+
+
+def test_runner_launch_base_env_keeps_names_the_daemon_started_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "STARTUP_TOKEN")
+    monkeypatch.setenv("STARTUP_TOKEN", "from-start")
+    monkeypatch.setattr("omnigent.onboarding.provider_config._load_config", dict)
+    host = _make_background_host_process()
+    write_runner_env(
+        "local",
+        pid=os.getpid(),
+        env={RUNNER_ENV_PASSTHROUGH_ENV_VAR: "LATER_TOKEN", "LATER_TOKEN": "from-later"},
+    )
+
+    env = _build_runner_env(
+        host._runner_launch_base_env(),
+        server_url="http://server",
+        runner_id="runner_abc",
+        binding_token="tok",
+        workspace="/ws",
+        parent_pid=42,
+    )
+
+    assert env["STARTUP_TOKEN"] == "from-start"
+    assert env["LATER_TOKEN"] == "from-later"
 
 
 @pytest.mark.parametrize("binding_token", ["token_xyz", "", "   "])

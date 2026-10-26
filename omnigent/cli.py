@@ -94,8 +94,8 @@ from omnigent.host.daemon_lifecycle import (
 from omnigent.host.daemon_lifecycle import (
     record_flock_is_held as _record_flock_is_held,
 )
+from omnigent.host.daemon_lifecycle import update_runner_env as _update_runner_env_impl
 from omnigent.host.daemon_lifecycle import write_daemon_record as _write_daemon_record_impl
-from omnigent.host.daemon_lifecycle import write_runner_env as _write_runner_env_impl
 from omnigent.host.local_server import (
     _DEFAULT_LOCAL_PORT,
     LocalServerStartupError,
@@ -3800,29 +3800,25 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
 
 
 def _publish_runner_launch_env(record: _HostDaemonRecord | None) -> None:
-    """Hand this invocation's runner credentials to a reused background daemon.
-
-    A fresh daemon would give runners the approved credentials from this
-    invocation's environment; publishing them lets a reused daemon do the same
-    for its next launch. Values only add or replace earlier ones, so removing a
-    variable still needs a host restart. Foreground hosts keep their own env.
+    """Publish this invocation's approved runner credentials to a reused background daemon.
 
     :param record: Daemon record being reused, or ``None`` when it vanished.
     """
     if record is None or record.log_path is None:
         return
-    from omnigent.host.connect import refreshable_runner_env_names
-    from omnigent.host.daemon_lifecycle import read_runner_env
+    from omnigent.host.connect import overlay_runner_env, refreshable_runner_env_names
 
     daemon_env = _build_host_daemon_env(
         server_url=None if record.mode == "local" else record.server_url
     )
     refreshable = refreshable_runner_env_names(daemon_env)
-    base_dir = _HOST_PID_PATH.parent
-    published = read_runner_env(record.target, pid=record.pid, base_dir=base_dir) or {}
-    published.update({name: value for name, value in daemon_env.items() if name in refreshable})
     try:
-        _write_runner_env_impl(record.target, pid=record.pid, env=published, base_dir=base_dir)
+        _update_runner_env_impl(
+            record.target,
+            pid=record.pid,
+            merge=lambda published: overlay_runner_env(published, daemon_env, refreshable),
+            base_dir=_HOST_PID_PATH.parent,
+        )
     except OSError as exc:
         click.echo(
             f"Warning: could not update runner settings for the running host "

@@ -548,10 +548,13 @@ def write_runner_env(
 
     path = runner_env_path(target, base_dir=base_dir)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
     fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=".runner-env-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump({"pid": pid, "env": dict(env)}, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temp_name, path)
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -567,10 +570,17 @@ def read_runner_env(
     :param pid: Daemon process the values must belong to.
     :param base_dir: Data-directory override; defaults to :func:`data_dir`.
     :returns: Published values, or ``None`` when absent, unreadable, malformed,
-        or written for another process.
+        not owner-only, or written for another process.
     """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
-        payload = json.loads(runner_env_path(target, base_dir=base_dir).read_text("utf-8"))
+        fd = os.open(runner_env_path(target, base_dir=base_dir), flags)
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            info = os.fstat(handle.fileno())
+            # The file can approve its own passthrough names, so trust only an owner-only file.
+            if hasattr(os, "getuid") and (info.st_uid != os.getuid() or info.st_mode & 0o077):
+                return None
+            payload = json.load(handle)
     except (OSError, ValueError):
         return None
     if not isinstance(payload, dict) or payload.get("pid") != pid:
@@ -581,14 +591,46 @@ def read_runner_env(
     return {name: value for name, value in env.items() if isinstance(value, str)}
 
 
-def delete_runner_env(target: str, *, pid: int, base_dir: Path | None = None) -> None:
+def update_runner_env(
+    target: str,
+    *,
+    pid: int,
+    merge: Callable[[dict[str, str]], Mapping[str, str]],
+    base_dir: Path | None = None,
+) -> None:
+    """Replace the values published for the daemon process *pid* with ``merge(current)``.
+
+    Publishers serialize on a sidecar lock so concurrent updates cannot drop each other's names.
+
+    :param target: Normalized daemon target, e.g. ``"local"``.
+    :param pid: Daemon process the values apply to.
+    :param merge: Builds the new values from the current ones (``{}`` when none).
+    :param base_dir: Data-directory override; defaults to :func:`data_dir`.
+    :raises OSError: When the lock or file cannot be opened or written.
+    """
+    path = runner_env_path(target, base_dir=base_dir)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_fd = os.open(
+        path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600
+    )
+    try:
+        if fcntl is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        current = read_runner_env(target, pid=pid, base_dir=base_dir) or {}
+        write_runner_env(target, pid=pid, env=merge(current), base_dir=base_dir)
+    finally:
+        os.close(lock_fd)
+
+
+def delete_runner_env(target: str, *, pid: int | None, base_dir: Path | None = None) -> None:
     """Remove runner env values published for the daemon process *pid*, if any.
 
     :param target: Normalized daemon target, e.g. ``"local"``.
     :param pid: Daemon process whose values to remove; another daemon's are kept.
+        ``None`` removes values regardless of the process they were published for.
     :param base_dir: Data-directory override; defaults to :func:`data_dir`.
     """
-    if read_runner_env(target, pid=pid, base_dir=base_dir) is not None:
+    if pid is None or read_runner_env(target, pid=pid, base_dir=base_dir) is not None:
         with contextlib.suppress(OSError):
             runner_env_path(target, base_dir=base_dir).unlink()
 

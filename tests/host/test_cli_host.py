@@ -21,6 +21,8 @@ from click.testing import CliRunner
 from omnigent import cli as cli_module
 from omnigent.cli import _add_daemon_host_status, _ensure_host_daemon, _host_daemon_alive, cli
 from omnigent.cli_diagnostics import suppresses_recovery_hint
+from omnigent.host.connect import RUNNER_ENV_PASSTHROUGH_ENV_VAR
+from omnigent.host.daemon_lifecycle import read_runner_env
 from omnigent.host.local_server import LocalServerStartup
 
 
@@ -1556,6 +1558,8 @@ def test_host_background_reuses_daemon_on_another_url_for_the_workspace(
         "omnigent.cli._pid_alive", lambda checked: checked in {4242, _SAME_WORKSPACE_PID}
     )
     _seed_same_workspace_daemon(monkeypatch, tmp_path)
+    monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE")
+    monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
 
     result = CliRunner().invoke(cli, ["host", "--background", "--server", _VANITY_API])
 
@@ -1563,6 +1567,9 @@ def test_host_background_reuses_daemon_on_another_url_for_the_workspace(
     assert spawned_args == [], "the workspace's daemon must not get a second one"
     assert f"already running (pid {_SAME_WORKSPACE_PID})" in result.output
     assert "same workspace through another URL" in result.output
+    published = read_runner_env(_WORKSPACE_API, pid=_SAME_WORKSPACE_PID, base_dir=tmp_path)
+    assert published is not None
+    assert published["ISAAC_LAUNCH_MODE"] == "omni"
     # Reported under the daemon's own URL, not the one requested.
     server_lines = [line.split() for line in result.output.splitlines() if "server:" in line]
     assert server_lines == [["server:", "https://dbc-1.cloud.databricks.com/omnigent?o=1"]]

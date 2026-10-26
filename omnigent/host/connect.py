@@ -866,6 +866,29 @@ def refreshable_runner_env_names(*envs: Mapping[str, str]) -> frozenset[str]:
     return frozenset(refreshable)
 
 
+def overlay_runner_env(
+    base_env: Mapping[str, str],
+    updates: Mapping[str, str],
+    refreshable: frozenset[str],
+) -> dict[str, str]:
+    """Return *base_env* with the *refreshable* names from *updates* added or replaced.
+
+    The passthrough list becomes the union of both lists, so names approved
+    earlier keep forwarding after a later invocation approves different ones.
+
+    :param base_env: Environment being refreshed, e.g. the daemon's ``os.environ``.
+    :param updates: Newer runner values, e.g. a CLI invocation's credentials.
+    :param refreshable: Names allowed to change, from :func:`refreshable_runner_env_names`.
+    :returns: The refreshed environment.
+    """
+    merged = dict(base_env)
+    merged.update({name: value for name, value in updates.items() if name in refreshable})
+    passthrough = runner_env_passthrough_names(base_env) | runner_env_passthrough_names(updates)
+    if passthrough:
+        merged[RUNNER_ENV_PASSTHROUGH_ENV_VAR] = ",".join(sorted(passthrough))
+    return merged
+
+
 # HTTP statuses on the WebSocket upgrade that are worth retrying. Everything
 # else in the 4xx range is a permanent client error (auth, authorization,
 # wrong/old server) where reconnecting can never succeed — those fail loud.
@@ -1229,6 +1252,7 @@ class HostProcess:
         server_url: str,
         lifecycle_lock: DaemonLifecycleLock | None = None,
         interactive_shells: list[str] | None = None,
+        apply_published_runner_env: bool = False,
     ) -> None:
         """Initialize the host process.
 
@@ -1239,6 +1263,8 @@ class HostProcess:
             and self-terminates once the record is deleted or reassigned.
         :param interactive_shells: Optional shell inventory override for tests.
             By default the host discovers its installed shells once at startup.
+        :param apply_published_runner_env: Whether runner launches use values that
+            later CLI invocations publish for this background daemon.
         """
         self._identity = identity
         self._server_url = server_url.rstrip("/")
@@ -1407,6 +1433,7 @@ class HostProcess:
         self._lifecycle_lock = lifecycle_lock
         self._lifecycle_task: asyncio.Task[None] | None = None
         self._lifecycle_lost = asyncio.Event()
+        self._apply_published_runner_env = apply_published_runner_env
 
     def _tracked_runner_pids(self) -> set[int]:
         """Return child PIDs whose exit status still belongs to a process handle.
@@ -1932,21 +1959,16 @@ class HostProcess:
     def _runner_launch_base_env(self) -> Mapping[str, str]:
         """Return this daemon's environment updated with runner values published since start.
 
-        A reused background daemon keeps its start-time ``os.environ``, so later
-        CLI invocations publish their approved runner credentials for this pid.
-        Published values add or replace refreshable names only.
-
         :returns: Base environment for :func:`_build_runner_env`.
         """
-        if self._lifecycle_lock is None:
+        if not self._apply_published_runner_env or self._lifecycle_lock is None:
             return os.environ
         published = read_runner_env(self._lifecycle_lock.target, pid=os.getpid())
         if not published:
             return os.environ
-        refreshable = refreshable_runner_env_names(os.environ, published)
-        base_env = dict(os.environ)
-        base_env.update({name: value for name, value in published.items() if name in refreshable})
-        return base_env
+        return overlay_runner_env(
+            os.environ, published, refreshable_runner_env_names(os.environ, published)
+        )
 
     async def _handle_launch_impl(
         self,
@@ -5605,6 +5627,8 @@ def _serve_host_until_exit(
     configure_host_databricks(server_url, identity.host_id)
     _generate_ucode_configs()
 
+    # Only a CLI-launched daemon arrives holding its lock; the CLI publishes only to those.
+    launched_in_background = lifecycle_lock is not None
     if lifecycle_lock is None and daemon_target is not None:
         lifecycle_lock = DaemonLifecycleLock.for_target(daemon_target)
     host = HostProcess(
@@ -5612,6 +5636,7 @@ def _serve_host_until_exit(
         server_url,
         lifecycle_lock=lifecycle_lock,
         interactive_shells=interactive_shells,
+        apply_published_runner_env=launched_in_background,
     )
     try:
         asyncio.run(host.run())

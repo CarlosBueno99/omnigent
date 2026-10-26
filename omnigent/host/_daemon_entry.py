@@ -97,6 +97,8 @@ def main() -> None:
             "Another host daemon already claimed target %s; exiting", daemon_target
         )
         return
+    # Values left by a crashed owner would otherwise reach this daemon if it reuses that pid.
+    delete_runner_env(daemon_target, pid=None)
 
     workspace_lock: DaemonLifecycleLock | None = None
     try:
