@@ -121,12 +121,38 @@ def _persistent_ucode_executable(executable: str) -> str:
     # Do not try the other alias: ug can be an unrelated ugrep executable.
     for directory in os.get_exec_path():
         candidate = shutil.which(path.name, path=directory)
+        # Relative PATH entries depend on the launcher's working directory.
         if candidate is None or not Path(candidate).is_absolute():
             continue
-        if Path(candidate).parent.parent.parent.name != "archive-v0":
-            _logger.debug("Using %s for unavailable ucode auth helper %s", candidate, executable)
-            return candidate
+        if "archive-v0" in Path(candidate).resolve().parts:
+            continue
+        if path.name == "ug":
+            # uv's ucode console scripts import ucode; ugrep's ug does not.
+            try:
+                with open(candidate, "rb") as launcher:
+                    if b"from ucode." not in launcher.read(4096):
+                        continue
+            except OSError:
+                continue
+        _logger.debug("Using %s for unavailable ucode auth helper %s", candidate, executable)
+        return candidate
     return executable
+
+
+def _persistent_ucode_auth_argv(argv: list[str]) -> list[str]:
+    """Apply the same generated-helper grammar to shell and structured auth."""
+    if len(argv) < 2 or argv[1] != "auth-token":
+        return argv
+    index = 2
+    while index < len(argv):
+        if argv[index] in {"--host", "--profile"} and index + 1 < len(argv):
+            index += 2
+        elif argv[index] in {"--use-pat", "--browser-login"}:
+            index += 1
+        else:
+            return argv
+    executable = _persistent_ucode_executable(argv[0])
+    return [executable, *argv[1:]] if executable != argv[0] else argv
 
 
 def _persistent_ucode_auth_command(command: str) -> str:
@@ -137,18 +163,8 @@ def _persistent_ucode_auth_command(command: str) -> str:
         argv = shlex.split(command)
     except ValueError:
         return command
-    if len(argv) < 2 or argv[1] != "auth-token":
-        return command
-    index = 2
-    while index < len(argv):
-        if argv[index] in {"--host", "--profile"} and index + 1 < len(argv):
-            index += 2
-        elif argv[index] in {"--use-pat", "--browser-login"}:
-            index += 1
-        else:
-            return command
-    executable = _persistent_ucode_executable(argv[0])
-    return shlex.join([executable, *argv[1:]]) if executable != argv[0] else command
+    repaired = _persistent_ucode_auth_argv(argv)
+    return shlex.join(repaired) if repaired != argv else command
 
 
 def _parse_agent_state(raw: object) -> UcodeAgentState:
@@ -168,6 +184,18 @@ def _parse_agent_state(raw: object) -> UcodeAgentState:
     if refresh_raw is None and isinstance(auth_raw, dict):
         # ucode writes Codex's cadence inside its ``auth`` table.
         refresh_raw = auth_raw.get("refresh_interval_ms")
+    auth = dict(auth_raw) if isinstance(auth_raw, dict) else {}
+    command = auth.get("command")
+    args = auth.get("args")
+    if (
+        isinstance(command, str)
+        and isinstance(args, list)
+        and all(isinstance(arg, str) for arg in args)
+    ):
+        if command in {"sh", "/bin/sh"} and len(args) == 2 and args[0] == "-c":
+            auth["args"] = ["-c", _persistent_ucode_auth_command(args[1])]
+        else:
+            auth["command"] = _persistent_ucode_auth_argv([command, *args])[0]
     return UcodeAgentState(
         model=raw.get("model") if isinstance(raw.get("model"), str) else None,
         base_url=raw.get("base_url") if isinstance(raw.get("base_url"), str) else None,
@@ -184,7 +212,7 @@ def _parse_agent_state(raw: object) -> UcodeAgentState:
         auth_refresh_interval_ms=(
             refresh_raw if type(refresh_raw) is int and refresh_raw > 0 else None
         ),
-        auth=dict(auth_raw) if isinstance(auth_raw, dict) else {},
+        auth=auth,
         env={str(key): str(value) for key, value in env_raw.items()}
         if isinstance(env_raw, dict)
         else {},
