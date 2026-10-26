@@ -499,11 +499,7 @@ async def test_plan_mode_create_refuses_a_host_that_would_start_codex_in_default
     store = SqlAlchemyConversationStore(db_uri)
     existing_ids = {conv.id for conv in store.list_conversations().data}
 
-    responder = (
-        asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
-        if expected_status == 201
-        else None
-    )
+    responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
     resp = await client.post(
         "/v1/sessions",
         json={
@@ -513,14 +509,19 @@ async def test_plan_mode_create_refuses_a_host_that_would_start_codex_in_default
             "labels": {"omnigent.codex_native.collaboration_mode": mode},
         },
     )
-    if responder is not None:
+    if expected_status == 201:
         await responder
+    else:
+        launched, _ = await asyncio.wait({responder}, timeout=0.2)
+        responder.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await responder
+        assert not launched
 
     assert resp.status_code == expected_status, resp.text
     if expected_status == 409:
         assert "too old to start a Codex session in Plan mode" in resp.text
         assert {conv.id for conv in store.list_conversations().data} == existing_ids
-        assert not await _expect_no_launch(comm, budget_s=0.2)
 
 
 async def test_inline_launch_stamps_terminal_view_label_at_creation(

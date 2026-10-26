@@ -7006,6 +7006,12 @@ export function NewChatLandingScreen() {
                               : "Enter Plan mode"
                             : undefined
                         }
+                        planUnavailableReason={
+                          selectedNativeHarness === "codex-native" &&
+                          effectiveAgentId === PENDING_AGENT_ID
+                            ? "Turn Plan mode on after this custom agent's session starts"
+                            : undefined
+                        }
                         projects={projectList ?? []}
                         onProjectSelect={(name) => {
                           const params = new URLSearchParams(searchParams);

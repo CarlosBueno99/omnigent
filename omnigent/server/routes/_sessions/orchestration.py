@@ -11589,9 +11589,15 @@ async def _create_session_from_existing_agent(
         )
 
     from omnigent.server.routes._session_harness_readiness import (
+        require_codex_plan_launch_support,
         validate_create_harness_readiness,
     )
 
+    require_codex_plan_launch_support(
+        host_id=body.host_id,
+        labels=body.labels,
+        host_registry=getattr(request.app.state, "host_registry", None),
+    )
     require_registry_mcp_runtime(
         selected_registry_services,
         host_id=body.host_id,

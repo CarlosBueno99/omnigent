@@ -44,6 +44,8 @@ implements them separately, so a fix for one harness does not reach the others.
   turn and reconnect must not leave a stale idle or working state.
 - `side-chat`: Codex forks an ephemeral native thread through `/side`; follow-ups
   stay in that thread, and closing it leaves the parent usable.
+- `codex-plan-mode`: Codex starts in, or switches to, its own Plan mode from the
+  composer's Plan row; see `plan-mode` in [composer.md](./composer.md).
 - `cleanup`: stopping, cancelling, or idling a session reaps the harness's
   helper processes and per-session files.
 - `idle-reap`: a finished native pane left alone past the idle window closes

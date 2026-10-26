@@ -6122,9 +6122,7 @@ async def _apply_codex_launch_plan_mode(
     """
     Switch a launching session's Codex thread into Plan mode.
 
-    The Plan label is persisted before the runner acts on it, so a failed
-    switch reports Default back; otherwise the composer would claim Plan mode
-    while Codex runs Default.
+    Reports Default if the switch fails, so the UI never shows Plan while Codex runs Default.
 
     :param thread_id: Loaded Codex thread id, e.g. ``"019e96aa-..."``.
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
@@ -6163,7 +6161,7 @@ async def _apply_codex_launch_plan_mode(
                 "type": "external_codex_collaboration_mode_change",
                 "data": {"mode": "default"},
             },
-            timeout=30.0,
+            timeout=10.0,
         )
         resp.raise_for_status()
     except httpx.HTTPError:

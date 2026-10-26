@@ -4824,10 +4824,7 @@ async def apply_codex_thread_collaboration_mode(
     """
     Set a loaded thread's collaboration mode via ``thread/settings/update``.
 
-    ``settings.developer_instructions`` stays null: a value there replaces the
-    mode's built-in prompt (Codex's Plan Mode instructions), while the agent's
-    own instructions already reach the thread through the additive top-level
-    ``developer_instructions`` config key.
+    Null ``developer_instructions`` keeps the mode's built-in prompt.
 
     :param transport: App-server transport, e.g. ``"ws://127.0.0.1:9876"``.
     :param thread_id: Loaded Codex thread id, e.g. ``"019e96aa-..."``.

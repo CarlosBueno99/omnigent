@@ -9812,7 +9812,7 @@ describe("NewChatLandingScreen custom-agent sandbox gating", () => {
 
   // Switch the target to the connected host, then create + submit a pending
   // custom agent from the dialog so it becomes the selected agent.
-  async function createAndSelectPendingAgentOnHost(): Promise<void> {
+  async function createAndSelectPendingAgentOnHost(harnessLabel?: string): Promise<void> {
     await waitFor(() =>
       expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
         "Sandbox",
@@ -9833,11 +9833,43 @@ describe("NewChatLandingScreen custom-agent sandbox gating", () => {
     fireEvent.change(screen.getByTestId("create-agent-model"), {
       target: { value: "claude-sonnet-4-20250514" },
     });
+    if (harnessLabel) {
+      fireEvent.click(screen.getByTestId("create-agent-harness"));
+      fireEvent.click(screen.getByRole("option", { name: harnessLabel }));
+    }
     fireEvent.click(screen.getByTestId("create-agent-submit"));
+    // A native-harness agent's trigger shows its model rather than its name.
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-agent-select").textContent).toContain("my-agent"),
+      harnessLabel
+        ? expect(screen.queryByTestId("create-agent-dialog")).toBeNull()
+        : expect(screen.getByTestId("new-chat-landing-agent-select").textContent).toContain(
+            "my-agent",
+          ),
     );
   }
+
+  it("tells an unsaved custom Codex agent to turn Plan mode on after launch", async () => {
+    const agentLabels = await import("@/lib/agentLabels");
+    const catalog = vi.spyOn(agentLabels, "useBrainHarnessLabels").mockReturnValue({
+      ...agentLabels.BRAIN_HARNESS_LABELS,
+      "codex-native": "Codex CLI",
+    });
+    try {
+      renderLanding({ managed_sandboxes_enabled: true });
+      await createAndSelectPendingAgentOnHost("Codex CLI");
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Add" }), { button: 0 });
+      const plan = within(screen.getByRole("menu", { name: "Add" })).getByTestId(
+        "composer-plan-action",
+      );
+      expect(plan).toHaveAttribute("aria-disabled", "true");
+      expect(plan).toHaveAttribute(
+        "title",
+        "Turn Plan mode on after this custom agent's session starts",
+      );
+    } finally {
+      catalog.mockRestore();
+    }
+  });
 
   it("drops a selected pending custom agent when the target switches to a sandbox", async () => {
     renderLanding({ managed_sandboxes_enabled: true });

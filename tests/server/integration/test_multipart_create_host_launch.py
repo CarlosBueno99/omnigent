@@ -311,6 +311,31 @@ async def test_multipart_create_host_id_requires_workspace(
     assert "workspace required" in resp.text
 
 
+async def test_multipart_plan_mode_create_refuses_a_host_that_would_start_codex_in_default(
+    register_host: RegisterHost,
+    client: httpx.AsyncClient,
+    conv_store: SqlAlchemyConversationStore,
+) -> None:
+    """A bundled Plan create on a host without ``codex_plan_at_launch`` creates no row."""
+    cap = register_host()
+    existing_ids = {conv.id for conv in conv_store.list_conversations().data}
+
+    resp = await _multipart_create(
+        client,
+        {
+            "host_id": _HOST_ID,
+            "workspace": _WORKSPACE,
+            "labels": {"omnigent.codex_native.collaboration_mode": "plan"},
+        },
+        agent_name="bundle-host-plan-agent",
+    )
+
+    assert resp.status_code == 409, resp.text
+    assert "too old to start a Codex session in Plan mode" in resp.text
+    assert {conv.id for conv in conv_store.list_conversations().data} == existing_ids
+    assert cap.launch == []
+
+
 async def test_multipart_create_rejects_workspace_missing_on_host(
     register_host: RegisterHost,
     app: FastAPI,

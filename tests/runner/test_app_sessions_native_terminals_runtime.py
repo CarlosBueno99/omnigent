@@ -4761,27 +4761,29 @@ async def test_codex_discover_thread_and_forward_persists_workspace_as_bridge_cw
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model", "config_model", "apply_fails", "expected_model"),
+    ("model", "config_model", "apply_fails", "report_status", "expected_model"),
     [
-        pytest.param("gpt-5.4-mini", "gpt-5.5", False, "gpt-5.4-mini", id="launch-model"),
-        pytest.param(None, "gpt-5.5", False, "gpt-5.5", id="config-model"),
-        pytest.param("gpt-5.4-mini", None, True, "gpt-5.4-mini", id="apply-fails"),
-        pytest.param(None, None, False, None, id="no-model"),
+        pytest.param("gpt-5.4-mini", "gpt-5.5", False, 202, "gpt-5.4-mini", id="launch-model"),
+        pytest.param(None, "gpt-5.5", False, 202, "gpt-5.5", id="config-model"),
+        pytest.param("gpt-5.4-mini", None, True, 202, "gpt-5.4-mini", id="apply-fails"),
+        pytest.param("gpt-5.4-mini", None, True, 503, "gpt-5.4-mini", id="report-fails"),
+        pytest.param(None, None, False, 202, None, id="no-model"),
     ],
 )
-async def test_apply_codex_launch_plan_mode_reports_default_when_switch_fails(
+async def test_apply_codex_launch_plan_mode_switches_or_reports_default(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     model: str | None,
     config_model: str | None,
     apply_fails: bool,
+    report_status: int,
     expected_model: str | None,
 ) -> None:
     """
-    A launch whose Plan switch fails reports Default mode for the session.
+    A launch switches its Codex thread to Plan, or reports Default for the session.
 
     The Plan label is already persisted, so leaving it would show Plan mode in
-    the composer while Codex runs Default.
+    the composer while Codex runs Default. A failed report must not sink the launch.
     """
     import omnigent.harnesses.codex_native.app_server as codex_app_mod
     from omnigent.runner.native import orchestration
@@ -4804,7 +4806,7 @@ async def test_apply_codex_launch_plan_mode_reports_default_when_switch_fails(
 
     def _handle(request: httpx.Request) -> httpx.Response:
         posted.append((request.url.path, json.loads(request.content)))
-        return httpx.Response(202, json={})
+        return httpx.Response(report_status, json={})
 
     monkeypatch.setattr(codex_app_mod, "apply_codex_thread_collaboration_mode", _fake_apply)
     async with httpx.AsyncClient(

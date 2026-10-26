@@ -444,23 +444,6 @@ def register_core_routes(
                 "initial_files must contain uploaded files", code=ErrorCode.INVALID_INPUT
             )
 
-    def _check_codex_plan_launch(host_id: str | None, labels: dict[str, str]) -> None:
-        """Refuse a Plan-mode create on a connected host whose runner would start in Default."""
-        from omnigent.host.frames import CAP_CODEX_PLAN_AT_LAUNCH
-
-        if (
-            host_id is None
-            or host_registry is None
-            or labels.get(_CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY) != "plan"
-        ):
-            return
-        if not host_registry.host_may_support(host_id, CAP_CODEX_PLAN_AT_LAUNCH):
-            raise OmnigentError(
-                "This host is too old to start a Codex session in Plan mode. Update "
-                "omnigent on the host and reconnect it, or turn Plan mode off, then try again.",
-                code=ErrorCode.CONFLICT,
-            )
-
     async def _accept_initial_input(
         request: Request, session_id: str, event: SessionEventInput | None, user_id: str | None
     ) -> None:
@@ -957,7 +940,6 @@ def register_core_routes(
         # Checked before the session exists so a rejected create leaves nothing
         # behind.
         await _check_initial_input(request, body.initial_input)
-        _check_codex_plan_launch(body.host_id, body.labels)
         if body.requested_host_id is not None:
             await _check_requested_host_id(request, body.requested_host_id, user_id)
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
@@ -1241,6 +1223,9 @@ def register_core_routes(
             from omnigent.server.routes._session_create_validation import (
                 validate_uploaded_bundle_host_workspace,
             )
+            from omnigent.server.routes._session_harness_readiness import (
+                require_codex_plan_launch_support,
+            )
 
             os_env = getattr(spec, "os_env", None)
             canonical_workspace = await validate_uploaded_bundle_host_workspace(
@@ -1252,6 +1237,11 @@ def register_core_routes(
                 host_registry=getattr(request.app.state, "host_registry", None),
             )
             parsed_metadata = parsed_metadata.model_copy(update={"workspace": canonical_workspace})
+            require_codex_plan_launch_support(
+                host_id=parsed_metadata.host_id,
+                labels=parsed_metadata.labels,
+                host_registry=getattr(request.app.state, "host_registry", None),
+            )
 
         from omnigent.server.mcp_compatibility import (
             registry_services,
