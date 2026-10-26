@@ -4581,6 +4581,8 @@ def _run_unknown_command_injection(
     *,
     content: str,
     reject_name: str | None,
+    clipped_after_rejection: bool = False,
+    initially_clipped: bool = False,
 ) -> list[bytes]:
     """
     Drive ``inject_user_message`` against a fake TUI, optionally rejecting.
@@ -4594,6 +4596,8 @@ def _run_unknown_command_injection(
     :param monkeypatch: Pytest monkeypatch for subprocess + timeouts.
     :param content: User text to inject.
     :param reject_name: Command name the fake TUI rejects, or ``None``.
+    :param clipped_after_rejection: Hide the closing rule until the pane expands.
+    :param initially_clipped: Start with a pane too short to show a rejection above the box.
     :returns: The byte payloads delivered via ``load-buffer``, in order.
     """
     bridge_dir = tmp_path / "bridge"
@@ -4610,7 +4614,11 @@ def _run_unknown_command_injection(
     )
 
     loaded_payloads: list[bytes] = []
-    tui: dict[str, Any] = {"pane": _composer_pane(), "submits": 0}
+    tui: dict[str, Any] = {
+        "pane": _composer_pane(),
+        "submits": 0,
+        "clipped": initially_clipped,
+    }
 
     def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         """
@@ -4622,7 +4630,18 @@ def _run_unknown_command_injection(
         """
         del kwargs
         if "capture-pane" in cmd:
+            if tui["clipped"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=("" if initially_clipped else f"● Unknown command: /{reject_name}\n")
+                    + "──────\n❯ \n",
+                    stderr="",
+                )
             return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "display-message" in cmd:
+            return SimpleNamespace(returncode=0, stdout="120 7 latest\n", stderr="")
+        if "resize-window" in cmd:
+            tui["clipped"] = cmd[cmd.index("-y") + 1] != "24"
         if "load-buffer" in cmd:
             loaded_payloads.append(Path(cmd[-1]).read_bytes())
         if "paste-buffer" in cmd:
@@ -4631,6 +4650,7 @@ def _run_unknown_command_injection(
             tui["submits"] += 1
             if reject_name is not None and tui["submits"] == 1:
                 tui["pane"] = _rejection_pane(reject_name)
+                tui["clipped"] = clipped_after_rejection
             else:
                 tui["pane"] = _composer_pane()
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -4640,9 +4660,11 @@ def _run_unknown_command_injection(
     return loaded_payloads
 
 
+@pytest.mark.parametrize("clipped", [False, True], ids=["normal", "clipped-after-rejection"])
 def test_unknown_command_rejection_redelivers_escaped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    clipped: bool,
 ) -> None:
     """
     A message rejected as "Unknown command" is re-delivered escaped.
@@ -4658,6 +4680,7 @@ def test_unknown_command_rejection_redelivers_escaped(
         monkeypatch,
         content="/not-a-real-skill hello world",
         reject_name="not-a-real-skill",
+        clipped_after_rejection=clipped,
     )
     assert len(payloads) == 2, (
         f"Expected the rejected message to be pasted twice (raw, then escaped); "
@@ -4665,6 +4688,62 @@ def test_unknown_command_rejection_redelivers_escaped(
     )
     assert payloads[0].startswith(b"/not-a-real-skill")
     assert payloads[1].startswith(b" /not-a-real-skill hello world")
+
+
+def test_unknown_command_watch_keeps_the_recovered_pane_height(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restoring a tiny pane before the rejection watch would hide the rejection."""
+    payloads = _run_unknown_command_injection(
+        tmp_path,
+        monkeypatch,
+        content="/not-a-real-skill hello world",
+        reject_name="not-a-real-skill",
+        initially_clipped=True,
+    )
+
+    assert payloads == [b"/not-a-real-skill hello world\r", b" /not-a-real-skill hello world\r"]
+
+
+@pytest.mark.parametrize("clipped", [False, True], ids=["normal", "clipped-after-rejection"])
+def test_unknown_command_fallback_preserves_a_new_terminal_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clipped: bool
+) -> None:
+    """The fallback must not clear a terminal edit made after the rejected submit."""
+    content = "/not-a-real-skill hello world"
+    draft = ("\n" if clipped else "") + "a new terminal draft"
+    composer = _EditableComposer("", cursor=0)
+    composer.install(monkeypatch)
+    sizes: list[str] = []
+
+    def run_tmux(socket_path: str, *args: str, **kwargs: object) -> None:
+        if args[0] == "resize-window":
+            height = args[args.index("-y") + 1]
+            sizes.append(height)
+            composer._visible_rows = None if height == "24" else 1
+        else:
+            composer._run_tmux(socket_path, *args)
+            if args[-1] == "Enter" and len(composer.submitted) == 1:
+                composer._insert(draft)
+                composer._visible_rows = 1 if clipped else None
+
+    def capture_pane(*args: str) -> str:
+        rejection = "● Unknown command: /not-a-real-skill\n" if composer.submitted else ""
+        return rejection + composer._capture_pane(*args)
+
+    monkeypatch.setattr(claude_native_bridge, "_run_tmux", run_tmux)
+    monkeypatch.setattr(claude_native_bridge, "_capture_pane", capture_pane)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="120 7 latest\n", stderr=""),
+    )
+    with pytest.raises(claude_native_bridge.ClaudeMessageNotAccepted, match="input changed"):
+        inject_user_message(_picker_bridge_dir(tmp_path), content=content)
+
+    assert composer.text == draft
+    assert composer.submitted == [content + "\n"]
+    assert sizes == (["24", "7"] if clipped else [])
 
 
 def test_unknown_name_accepted_as_skill_is_not_redelivered(
@@ -11621,6 +11700,7 @@ def test_composer_recovery_rechecks_the_surface_before_typing(
 
     assert composer.submitted == []
     assert not resized
+    assert claude_native_bridge.time.monotonic() < 2, "recovery must retain the caller's budget"
     if pane != _REVERSE_SEARCH_PANE:
         assert recovery_keys == []
 
