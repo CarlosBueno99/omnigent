@@ -241,8 +241,15 @@ first group's header. The Select sessions button sits beside it and selects
 project, Shared and Sessions rows together; the Sessions header keeps only New
 session. Hovering a row opens
 its tooltip; the repo and PR rows load from the session's GitHub info only once
-the tooltip opens. With the flag off, the funnel sits on the Sessions header and
-offers Display only.
+the tooltip opens, and fall back to the PR the server stored for the session
+while its host is offline. With the flag off, the funnel sits on the Sessions
+header and offers Display only.
+
+**Offline pull requests:** link a PR to a session, then stop its host. The
+session's Pull Requests tab still lists the PR with its title, link, and status,
+plus "Last sync time" and a note to reconnect the host (or, for a sleeping
+sandbox, to send a message). Link a PR is disabled; Unlink PR still works and
+holds once the host reconnects.
 
 **Canvas:** choose Canvas in the sidebar, select Main or a project, and click
 a session card once. Expand navigation manually to keep it open while switching
@@ -253,6 +260,7 @@ restore the default split. Focus the session to use the full area; Escape
 restores the board. Close the session to return to the board. Opening, closing,
 or maximizing Workspace keeps the canvas visible. Session focus is independent: Show canvas
 restores the board without closing Workspace. Each card remembers whether Workspace is open.
+A card's PR link comes from the session list, so it stays while the host is offline.
 On mobile, the top-left hamburger opens the sidebar from the board or a selected
 session. Back to canvas returns to the selected project. A Canvas session link
 opens the same layout directly. If a session is replaced, for example after `/clear`,
