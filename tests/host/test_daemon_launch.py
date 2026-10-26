@@ -91,14 +91,15 @@ class _AlwaysAnswers:
 
     :param status_code: HTTP status to answer, e.g. ``302``.
     :param headers: Response headers, e.g. a sign-in ``location``.
-    :param body: Optional JSON body, e.g. ``{"status": "offline"}``.
+    :param body: Optional JSON body, e.g. ``{"status": "offline"}``, or a
+        plain-text body, e.g. ``"Invalid Token"``.
     """
 
     def __init__(
         self,
         status_code: int,
         headers: dict[str, str],
-        body: dict[str, object] | None,
+        body: dict[str, object] | str | None,
     ) -> None:
         self.status_code = status_code
         self.headers = headers
@@ -111,7 +112,33 @@ class _AlwaysAnswers:
         :param request: The outgoing request the client built.
         :returns: The fixed response.
         """
+        if isinstance(self.body, str):
+            return httpx.Response(self.status_code, headers=self.headers, text=self.body)
         return httpx.Response(self.status_code, headers=self.headers, json=self.body)
+
+
+class _AnswersOnceThenRefuses:
+    """MockTransport handler that answers one request, then refuses every connection.
+
+    :param status_code: HTTP status of the single answer, e.g. ``401``.
+    """
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.requests_seen = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        """
+        Answer the first request and refuse the rest.
+
+        :param request: The outgoing request the client built.
+        :returns: A bodiless response with the configured status, once.
+        :raises httpx.ConnectError: For every request after the first.
+        """
+        self.requests_seen += 1
+        if self.requests_seen > 1:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(self.status_code)
 
 
 class _HtmlThenOnline:
@@ -329,13 +356,14 @@ async def test_wait_for_host_online_deadline_reports_last_connect_error(
 
 
 @pytest.mark.parametrize(
-    ("status_code", "headers"),
+    ("status_code", "headers", "body"),
     [
-        pytest.param(401, {}, id="unauthorized"),
-        pytest.param(403, {}, id="invalid-token"),
+        pytest.param(401, {}, None, id="unauthorized"),
+        pytest.param(403, {}, "Invalid Token", id="invalid-token"),
         pytest.param(
             302,
             {"location": "https://ws.cloud.databricks.com/oidc/v1/authorize?client_id=app"},
+            None,
             id="sign-in-redirect",
         ),
     ],
@@ -345,6 +373,7 @@ async def test_wait_for_host_online_deadline_names_rejected_sign_in(
     monkeypatch: pytest.MonkeyPatch,
     status_code: int,
     headers: dict[str, str],
+    body: str | None,
 ) -> None:
     """A host poll rejected for sign-in names the login remedy, not reachability.
 
@@ -354,7 +383,7 @@ async def test_wait_for_host_online_deadline_names_rejected_sign_in(
     """
     monkeypatch.setenv("OMNIGENT_WRAPPER_COMMAND", "isaac omni")
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(_AlwaysAnswers(status_code, headers, None)),
+        transport=httpx.MockTransport(_AlwaysAnswers(status_code, headers, body)),
         base_url="https://ws.cloud.databricks.com/api/2.0/omnigent",
     ) as client:
         with pytest.raises(click.ClickException) as excinfo:
@@ -364,6 +393,52 @@ async def test_wait_for_host_online_deadline_names_rejected_sign_in(
     assert f"The server rejected this machine's sign-in (HTTP {status_code})." in message
     assert "Run `isaac omni login https://ws.cloud.databricks.com/omnigent` and retry." in message
     assert "can reach" not in message
+    assert "another account" not in message
+    assert suppresses_recovery_hint(excinfo.value)
+
+
+async def test_wait_for_host_online_deadline_names_host_owned_by_another_account(
+    fast_poll: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host registered by a different account names the ownership remedies.
+
+    Signing in again as the same account cannot help, and restarting the
+    daemon cannot change who owns the host id.
+    """
+    monkeypatch.setenv("OMNIGENT_WRAPPER_COMMAND", "isaac omni")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_AlwaysAnswers(403, {}, {"detail": "not your host"})),
+        base_url="https://ws.cloud.databricks.com/api/2.0/omnigent",
+    ) as client:
+        with pytest.raises(click.ClickException) as excinfo:
+            await wait_for_host_online(client, "host_abc123", timeout_s=0.05)
+    message = str(excinfo.value)
+    assert "The server says another account owns this host (HTTP 403)." in message
+    assert (
+        "Run `isaac omni login https://ws.cloud.databricks.com/omnigent` as the account"
+        " that registered it, or run `isaac omni host reset-id`"
+    ) in message
+    assert "rejected this machine's sign-in" not in message
+    assert suppresses_recovery_hint(excinfo.value)
+
+
+async def test_wait_for_host_online_deadline_reports_connect_error_after_sign_in_rejection(
+    fast_poll: None,
+) -> None:
+    """A sign-in rejection followed by refused connections reports both causes."""
+    handler = _AnswersOnceThenRefuses(401)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
+        with pytest.raises(click.ClickException) as excinfo:
+            await wait_for_host_online(client, "host_abc123", timeout_s=0.05)
+    message = str(excinfo.value)
+    assert handler.requests_seen > 1
+    assert "Last connection error" in message
+    assert "connection refused" in message
+    assert "The server rejected this machine's sign-in (HTTP 401)." in message
+    assert "Run `omnigent login http://test` and retry." in message
     assert suppresses_recovery_hint(excinfo.value)
 
 

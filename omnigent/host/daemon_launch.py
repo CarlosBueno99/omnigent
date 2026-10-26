@@ -140,8 +140,9 @@ async def wait_for_host_online(
     as "not online yet" and polled through; only the deadline fails the
     wait, with the last transport error included in the message. The
     message's remedy follows the server's last answer: a sign-in rejection
-    names the login command, any other answer points at the daemon's logs,
-    and no answer at all asks the user to check reachability.
+    (or a host owned by another account) names the login command, any other
+    answer points at the daemon's logs, and no answer at all asks the user
+    to check reachability.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param host_id: This machine's host id, e.g. ``"host_abc123"``.
@@ -169,13 +170,21 @@ async def wait_for_host_online(
     if last_error is not None:
         message += f" Last connection error: {last_error!r}."
     if last_response is not None and _is_login_redirect_or_unauthorized(last_response):
-        login_url = display_server_url(str(client.base_url))
-        message += (
-            f" The server rejected this machine's sign-in (HTTP {last_response.status_code})."
-            f" Run `{cli_invocation()} login {login_url}` and retry."
-        )
+        login = f"`{cli_invocation()} login {display_server_url(str(client.base_url))}`"
+        if _json_body(last_response).get("detail") == "not your host":
+            message += (
+                " The server says another account owns this host (HTTP 403)."
+                f" Run {login} as the account that registered it, or run"
+                f" `{cli_invocation()} host reset-id` to register this machine as a new host,"
+                " then retry."
+            )
+        else:
+            message += (
+                f" The server rejected this machine's sign-in (HTTP {last_response.status_code})."
+                f" Run {login} and retry."
+            )
         exc = click.ClickException(message)
-        # Restarting stale host processes cannot fix this CLI's own credential.
+        # Restarting stale host processes cannot fix this CLI's credential or host ownership.
         setattr(exc, SUPPRESS_RECOVERY_HINT_ATTR, True)
         raise exc
     if last_response is not None:
