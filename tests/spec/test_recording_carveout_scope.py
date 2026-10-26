@@ -85,6 +85,8 @@ def test_repro_agent_does_not_report_a_chosen_limit_failure_as_likely_repro() ->
     assert "A stand-in replaces an environment you cannot drive" in instructions
     assert "it must not supply the failure" in instructions
     assert "or one only your chosen limit produced), the overall verdict is" in instructions
+    assert "A limit is given, not chosen, when its value comes from the report" in instructions
+    assert "Shortening a product timeout the report names, only to reach it sooner" in instructions
 
 
 def test_repro_agent_requires_a_recorder_attempt_once_the_preflight_check_passed() -> None:
