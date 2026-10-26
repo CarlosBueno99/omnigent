@@ -519,6 +519,80 @@ def daemon_record_path(target: str, *, base_dir: Path | None = None) -> Path:
     return daemon_registry_dir(base_dir) / f"{_target_digest(target)}.json"
 
 
+def runner_env_path(target: str, *, base_dir: Path | None = None) -> Path:
+    """Return the owner-only file holding runner credentials published to *target*'s daemon.
+
+    :param target: Normalized daemon target, e.g. ``"local"``.
+    :param base_dir: Data-directory override; defaults to :func:`data_dir`.
+    :returns: ``<base>/daemons/runner-env/<target-hash>.json``.
+    """
+    return daemon_registry_dir(base_dir) / "runner-env" / f"{_target_digest(target)}.json"
+
+
+def write_runner_env(
+    target: str,
+    *,
+    pid: int,
+    env: Mapping[str, str],
+    base_dir: Path | None = None,
+) -> None:
+    """Atomically publish runner env values for the daemon process *pid*.
+
+    :param target: Normalized daemon target, e.g. ``"local"``.
+    :param pid: Daemon process the values apply to; other processes ignore them.
+    :param env: Approved runner env values, e.g. ``{"OPENAI_API_KEY": "..."}``.
+    :param base_dir: Data-directory override; defaults to :func:`data_dir`.
+    :raises OSError: When the file cannot be written.
+    """
+    import tempfile
+
+    path = runner_env_path(target, base_dir=base_dir)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=".runner-env-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"pid": pid, "env": dict(env)}, handle, sort_keys=True)
+        os.replace(temp_name, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_name)
+
+
+def read_runner_env(
+    target: str, *, pid: int, base_dir: Path | None = None
+) -> dict[str, str] | None:
+    """Return runner env values published for the daemon process *pid*.
+
+    :param target: Normalized daemon target, e.g. ``"local"``.
+    :param pid: Daemon process the values must belong to.
+    :param base_dir: Data-directory override; defaults to :func:`data_dir`.
+    :returns: Published values, or ``None`` when absent, unreadable, malformed,
+        or written for another process.
+    """
+    try:
+        payload = json.loads(runner_env_path(target, base_dir=base_dir).read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("pid") != pid:
+        return None
+    env = payload.get("env")
+    if not isinstance(env, dict):
+        return None
+    return {name: value for name, value in env.items() if isinstance(value, str)}
+
+
+def delete_runner_env(target: str, *, pid: int, base_dir: Path | None = None) -> None:
+    """Remove runner env values published for the daemon process *pid*, if any.
+
+    :param target: Normalized daemon target, e.g. ``"local"``.
+    :param pid: Daemon process whose values to remove; another daemon's are kept.
+    :param base_dir: Data-directory override; defaults to :func:`data_dir`.
+    """
+    if read_runner_env(target, pid=pid, base_dir=base_dir) is not None:
+        with contextlib.suppress(OSError):
+            runner_env_path(target, base_dir=base_dir).unlink()
+
+
 def write_daemon_record(
     record: HostDaemonRecord,
     *,

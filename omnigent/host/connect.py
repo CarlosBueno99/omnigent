@@ -61,7 +61,7 @@ from omnigent.gateway_inference import gateway_inference_map
 from omnigent.harness_aliases import canonicalize_harness, is_claude_sdk_harness_name
 from omnigent.harness_availability import HARNESS_BINARY_MISSING, HarnessAvailability
 from omnigent.host import HOST_FATAL_EXIT_CODE
-from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
+from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, read_runner_env
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_CAPABILITIES,
@@ -821,6 +821,51 @@ HARNESS_CREDENTIAL_ENV_VARS: frozenset[str] = frozenset(
 # their runners need; everything unnamed stays behind the allowlist.
 RUNNER_ENV_PASSTHROUGH_ENV_VAR: str = "OMNIGENT_RUNNER_ENV_PASSTHROUGH"
 
+
+def runner_env_passthrough_names(env: Mapping[str, str]) -> frozenset[str]:
+    """Return the extra runner env names listed in :data:`RUNNER_ENV_PASSTHROUGH_ENV_VAR`.
+
+    :param env: Environment to read, e.g. ``os.environ``.
+    :returns: Stripped, non-empty names, e.g. ``frozenset({"MY_GATEWAY_TOKEN"})``.
+    """
+    return frozenset(
+        name.strip()
+        for name in env.get(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "").split(",")
+        if name.strip()
+    )
+
+
+def refreshable_runner_env_names(*envs: Mapping[str, str]) -> frozenset[str]:
+    """Return the runner credential names a reused host daemon takes from later invocations.
+
+    These are the names :func:`_build_runner_env` forwards beyond its
+    allowlist: harness credentials, passthrough names listed in any of
+    *envs*, and saved provider ``env:`` references. Allowlisted host settings
+    such as ``PATH`` or ``OMNIGENT_LOG_TTY_FD`` stay with the daemon process.
+
+    :param envs: Environments whose passthrough lists apply, e.g. the daemon's
+        ``os.environ`` and a newer invocation's published values.
+    :returns: Names safe to refresh, always including
+        :data:`RUNNER_ENV_PASSTHROUGH_ENV_VAR`.
+    """
+    from omnigent.errors import OmnigentError as _OmnigentError
+    from omnigent.onboarding.provider_config import _load_config, provider_credential_env_vars
+
+    names = set(HARNESS_CREDENTIAL_ENV_VARS)
+    for env in envs:
+        names |= runner_env_passthrough_names(env)
+    with contextlib.suppress(OSError, _OmnigentError):
+        names |= provider_credential_env_vars(_load_config())
+    refreshable = {
+        name
+        for name in names
+        if name not in _RUNNER_ENV_ALLOWLIST
+        and not name.startswith(_RUNNER_ENV_ALLOWLIST_PREFIXES)
+    }
+    refreshable.add(RUNNER_ENV_PASSTHROUGH_ENV_VAR)
+    return frozenset(refreshable)
+
+
 # HTTP statuses on the WebSocket upgrade that are worth retrying. Everything
 # else in the 4xx range is a permanent client error (auth, authorization,
 # wrong/old server) where reconnecting can never succeed — those fail loud.
@@ -913,11 +958,7 @@ def _build_runner_env(
         host janitor. ``None`` preserves the standalone runner default.
     :returns: The runner subprocess environment.
     """
-    extra_names = {
-        name.strip()
-        for name in base_env.get(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "").split(",")
-        if name.strip()
-    }
+    extra_names = runner_env_passthrough_names(base_env)
     # Forward env vars that the providers config references via
     # ``api_key_ref: env:VAR`` or ``api_key: $VAR``. Without this, a user
     # who configures a gateway provider with a custom env var (e.g.
@@ -1888,6 +1929,25 @@ class HostProcess:
             )
             return await self._handle_launch_impl(frame)
 
+    def _runner_launch_base_env(self) -> Mapping[str, str]:
+        """Return this daemon's environment updated with runner values published since start.
+
+        A reused background daemon keeps its start-time ``os.environ``, so later
+        CLI invocations publish their approved runner credentials for this pid.
+        Published values add or replace refreshable names only.
+
+        :returns: Base environment for :func:`_build_runner_env`.
+        """
+        if self._lifecycle_lock is None:
+            return os.environ
+        published = read_runner_env(self._lifecycle_lock.target, pid=os.getpid())
+        if not published:
+            return os.environ
+        refreshable = refreshable_runner_env_names(os.environ, published)
+        base_env = dict(os.environ)
+        base_env.update({name: value for name, value in published.items() if name in refreshable})
+        return base_env
+
     async def _handle_launch_impl(
         self,
         frame: HostLaunchRunnerFrame,
@@ -1973,8 +2033,9 @@ class HostProcess:
             self._current_auth_token,
             initialize=False,
         )
+        base_env = await asyncio.to_thread(self._runner_launch_base_env)
         env = _build_runner_env(
-            os.environ,
+            base_env,
             server_url=self._server_url,
             runner_id=runner_id,
             binding_token=frame.binding_token,

@@ -75,6 +75,7 @@ def main() -> None:
         DaemonLifecycleLock,
         HostDaemonRecord,
         daemon_target_server_url,
+        delete_runner_env,
         normalize_daemon_target,
         write_daemon_record,
     )
@@ -140,6 +141,7 @@ def main() -> None:
             lifecycle_lock=lifecycle_lock,
         )
     finally:
+        delete_runner_env(daemon_target, pid=os.getpid())
         if workspace_lock is not None:
             workspace_lock.release()
         lifecycle_lock.release()

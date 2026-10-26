@@ -84,6 +84,7 @@ from omnigent.host.daemon_lifecycle import (
 from omnigent.host.daemon_lifecycle import (
     daemon_target_server_url as _daemon_target_server_url,
 )
+from omnigent.host.daemon_lifecycle import delete_runner_env as _delete_runner_env_impl
 from omnigent.host.daemon_lifecycle import (
     find_same_workspace_daemon as _find_same_workspace_daemon,
 )
@@ -94,6 +95,7 @@ from omnigent.host.daemon_lifecycle import (
     record_flock_is_held as _record_flock_is_held,
 )
 from omnigent.host.daemon_lifecycle import write_daemon_record as _write_daemon_record_impl
+from omnigent.host.daemon_lifecycle import write_runner_env as _write_runner_env_impl
 from omnigent.host.local_server import (
     _DEFAULT_LOCAL_PORT,
     LocalServerStartupError,
@@ -2827,6 +2829,7 @@ def _delete_daemon_record(record: _HostDaemonRecord) -> None:
     """
     with contextlib.suppress(OSError):
         _daemon_record_path(record.target).unlink()
+    _delete_runner_env_impl(record.target, pid=record.pid, base_dir=_HOST_PID_PATH.parent)
     legacy = _read_host_pid_file()
     if legacy is not None and legacy[1] == record.target:
         with contextlib.suppress(OSError):
@@ -3720,9 +3723,11 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
 
     decision = _reuse_existing_daemon_record(target)
     if decision.reuse:
+        _publish_runner_launch_env(_find_daemon_record(target))
         _record_host_state("reused")
         return False
     if not decision.config_changed and _local_daemon_serves_target(target, server_url):
+        _publish_runner_launch_env(_find_daemon_record(_LOCAL_DAEMON_MARKER))
         _record_host_state("reused_local_daemon", running_before=True)
         return False
     sibling = _same_workspace_daemon(server_url)
@@ -3731,6 +3736,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         if reason is not None:
             _record_host_state("same_workspace_daemon_offline", running_before=True)
             raise _offline_same_workspace_daemon_error(sibling, reason)
+        _publish_runner_launch_env(sibling)
         _record_host_state("reused_same_workspace_daemon", running_before=True)
         # Report the config change even when an existing workspace daemon is reused.
         return decision.config_changed
@@ -3755,6 +3761,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         if reason is not None:
             _record_host_state("same_workspace_daemon_offline", running_before=True)
             raise _offline_same_workspace_daemon_error(claimed, reason)
+        _publish_runner_launch_env(claimed)
         _record_host_state("reused_same_workspace_daemon", running_before=True)
         return decision.config_changed
     if claimed is None:
@@ -3792,6 +3799,38 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     return decision.config_changed
 
 
+def _publish_runner_launch_env(record: _HostDaemonRecord | None) -> None:
+    """Hand this invocation's runner credentials to a reused background daemon.
+
+    A fresh daemon would give runners the approved credentials from this
+    invocation's environment; publishing them lets a reused daemon do the same
+    for its next launch. Values only add or replace earlier ones, so removing a
+    variable still needs a host restart. Foreground hosts keep their own env.
+
+    :param record: Daemon record being reused, or ``None`` when it vanished.
+    """
+    if record is None or record.log_path is None:
+        return
+    from omnigent.host.connect import refreshable_runner_env_names
+    from omnigent.host.daemon_lifecycle import read_runner_env
+
+    daemon_env = _build_host_daemon_env(
+        server_url=None if record.mode == "local" else record.server_url
+    )
+    refreshable = refreshable_runner_env_names(daemon_env)
+    base_dir = _HOST_PID_PATH.parent
+    published = read_runner_env(record.target, pid=record.pid, base_dir=base_dir) or {}
+    published.update({name: value for name, value in daemon_env.items() if name in refreshable})
+    try:
+        _write_runner_env_impl(record.target, pid=record.pid, env=published, base_dir=base_dir)
+    except OSError as exc:
+        click.echo(
+            f"Warning: could not update runner settings for the running host "
+            f"({exc.strerror or type(exc).__name__}); restart the host to apply them.",
+            err=True,
+        )
+
+
 def _build_host_daemon_env(
     *,
     server_url: str | None,
@@ -3819,7 +3858,7 @@ def _build_host_daemon_env(
     from omnigent.host.connect import (
         _RUNNER_ENV_ALLOWLIST,
         _RUNNER_ENV_ALLOWLIST_PREFIXES,
-        RUNNER_ENV_PASSTHROUGH_ENV_VAR,
+        runner_env_passthrough_names,
     )
     from omnigent.host.identity import (
         HOST_ID_ENV_VAR,
@@ -3828,11 +3867,7 @@ def _build_host_daemon_env(
     )
     from omnigent.onboarding.provider_config import _load_config, provider_credential_env_vars
 
-    forwarded_names = {
-        name.strip()
-        for name in os.environ.get(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "").split(",")
-        if name.strip()
-    }
+    forwarded_names = set(runner_env_passthrough_names(os.environ))
     with contextlib.suppress(OSError, OmnigentError):
         # A reusable daemon must use host config, independent of session overlays.
         forwarded_names.update(provider_credential_env_vars(_load_config()))

@@ -7,6 +7,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import stat
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,11 +23,16 @@ from omnigent.host.daemon_lifecycle import (
     HostDaemonRecord,
     daemon_record_path,
     daemon_target_server_url,
+    delete_runner_env,
     find_same_workspace_daemon,
     normalize_daemon_target,
     probe_workspace_id,
+    read_daemon_records,
+    read_runner_env,
     record_flock_is_held,
+    runner_env_path,
     write_daemon_record,
+    write_runner_env,
 )
 from omnigent.host.identity import HostIdentity
 from omnigent.util.tls import client_ssl_context
@@ -240,6 +246,25 @@ def test_still_owner_delete_and_mismatch(tmp_path: Path) -> None:
     assert lock.still_owner() is True
 
 
+def test_runner_env_is_owner_only_and_bound_to_its_daemon_pid(tmp_path: Path) -> None:
+    write_runner_env("local", pid=4242, env={"OPENAI_API_KEY": "sk-test"}, base_dir=tmp_path)
+
+    path = runner_env_path("local", base_dir=tmp_path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert read_runner_env("local", pid=4242, base_dir=tmp_path) == {"OPENAI_API_KEY": "sk-test"}
+    assert read_runner_env("local", pid=4243, base_dir=tmp_path) is None
+    assert read_daemon_records(tmp_path) == []
+
+    delete_runner_env("local", pid=4243, base_dir=tmp_path)
+    assert path.exists()
+    delete_runner_env("local", pid=4242, base_dir=tmp_path)
+    assert not path.exists()
+
+    path.write_text("not json")
+    assert read_runner_env("local", pid=4242, base_dir=tmp_path) is None
+
+
 def test_record_flock_is_held_states(tmp_path: Path) -> None:
     record = daemon_record_path("local", base_dir=tmp_path)
 
@@ -296,11 +321,13 @@ def test_background_daemon_claims_record_before_connecting(
         other = DaemonLifecycleLock.for_workspace(_HOST_ID, "7", base_dir=tmp_path)
         assert other.try_acquire() is False
         connected.append(f"{server_url}|{daemon_target}")
+        write_runner_env(target, pid=os.getpid(), env={"OPENAI_API_KEY": "sk-test"})
 
     monkeypatch.setattr("omnigent.host.connect.run_host_process", _run)
 
     _daemon_entry.main()
 
+    assert not runner_env_path(target, base_dir=tmp_path).exists()
     payload = json.loads(daemon_record_path(target, base_dir=tmp_path).read_text())
     assert payload["pid"] == os.getpid()
     assert payload["host_id"] == _HOST_ID

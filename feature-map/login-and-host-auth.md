@@ -264,9 +264,16 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
 
 ## Gotchas
 
-- Background hosts capture their environment when started; restart the host after
-  changing forwarded credentials. `host enable` saves explicitly forwarded values
-  in plaintext in the per-user service definition, readable only by its owner
+- Background hosts capture their environment when started. A later CLI command
+  that reuses one passes the runner credentials a fresh host would receive
+  (forwarded harness credentials, `OMNIGENT_RUNNER_ENV_PASSTHROUGH` names, and
+  provider `env:` references) to the next runner the host launches.
+  These values only add or change; removing one, or changing other host settings
+  such as `PATH`, proxies, or Databricks sign-in, still needs a host restart.
+  Foreground `host` processes, including `host enable` services, keep their own
+  environment; `tests/e2e/omnigent/test_host_daemon_env_refresh_e2e.py` drives
+  the background path. `host enable` saves explicitly forwarded values in
+  plaintext in the per-user service definition, readable only by its owner
   (0600), so the service can retain them across logins.
 - **Find out which credential kind the reporter's host uses before trusting a
   root cause.** A user OAuth login refreshes itself and a personal access
