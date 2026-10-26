@@ -528,6 +528,24 @@ def test_materialize_cache_opens_windows_descriptors_in_binary_mode(
     assert all(flags & windows_os.O_BINARY for flags in windows_os.open_flags)
 
 
+class _WindowsFullDiskOsApi(_WindowsOsApi):
+    """The Windows ``os`` API on a disk that fills after a few bytes."""
+
+    def write(self, fd: int, data: memoryview) -> int:
+        os.write(fd, data[:8])
+        raise OSError("disk full")
+
+
+def test_materialize_cache_removes_partial_windows_file_when_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that fails part-way leaves no truncated attachment to reuse later."""
+    monkeypatch.setattr("omnigent.inner.native_attachments.os", _WindowsFullDiskOsApi("os"))
+
+    assert materialize_attachment(_zip_block(), tmp_path) is None
+    assert list(attachment_cache_dir(tmp_path).iterdir()) == []
+
+
 def test_materialize_cache_does_not_overwrite_when_both_names_taken(
     tmp_path: Path,
 ) -> None:

@@ -332,7 +332,7 @@ def _open_cache_dir(attachments_dir: Path) -> int | Path:
     """
     attachments_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not _dir_fd_supported():
-        # Check the parent first so a linked parent never receives the new directory.
+        # Check the parent first so a pre-existing linked parent gets no new directory.
         _require_unlinked_dir(attachments_dir.parent)
         with contextlib.suppress(FileExistsError):
             attachments_dir.mkdir(mode=0o700)
