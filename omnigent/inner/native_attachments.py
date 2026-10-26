@@ -41,12 +41,6 @@ _logger = logging.getLogger(__name__)
 _ATTACHMENT_READ_ATTEMPTS = 3
 _ATTACHMENT_RESOLVE_TIMEOUT_S = 60.0
 _ATTACHMENT_RETRY_STATUSES = frozenset({408, 500, 502, 503, 504})
-# Windows has no ``dir_fd`` or ``O_NOFOLLOW``; the cache checks each entry with
-# ``lstat`` there, and its descriptors need ``O_BINARY`` to keep bytes untranslated.
-_DIR_FD_SUPPORTED = (
-    os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
-)
-_OPEN_FLAGS = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
 
 # Characters that would corrupt a "[Attached: ...]" / "[Attachment ...]"
 # marker line for the consumers that regex-match it (forwarders, title
@@ -337,13 +331,12 @@ def _open_cache_dir(attachments_dir: Path) -> int | Path:
     :raises OSError: When the directory cannot be created or is a link.
     """
     attachments_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if not _DIR_FD_SUPPORTED:
+    if not _dir_fd_supported():
+        # Check the parent first so a linked parent never receives the new directory.
+        _require_unlinked_dir(attachments_dir.parent)
         with contextlib.suppress(FileExistsError):
             attachments_dir.mkdir(mode=0o700)
-        for path in (attachments_dir.parent, attachments_dir):
-            info = os.lstat(path)
-            if _is_link(info) or not stat.S_ISDIR(info.st_mode):
-                raise OSError(errno.ELOOP, "Attachment cache is a link", str(path))
+        _require_unlinked_dir(attachments_dir)
         return attachments_dir
     root_fd = os.open(attachments_dir.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -356,6 +349,27 @@ def _open_cache_dir(attachments_dir: Path) -> int | Path:
         )
     finally:
         os.close(root_fd)
+
+
+def _dir_fd_supported() -> bool:
+    """Whether the cache can open through no-follow directory descriptors (not on Windows)."""
+    return (
+        all(function in os.supports_dir_fd for function in (os.open, os.mkdir, os.unlink))
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+    )
+
+
+def _file_open_flags() -> int:
+    """Flags for attachment files: no-follow where available, binary on Windows."""
+    return getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+
+
+def _require_unlinked_dir(path: Path) -> None:
+    """Raise unless *path* is a directory rather than a link or reparse point."""
+    info = os.lstat(path)
+    if _is_link(info) or not stat.S_ISDIR(info.st_mode):
+        raise OSError(errno.ELOOP, "Attachment cache is a link", str(path))
 
 
 def _is_link(info: os.stat_result) -> bool:
@@ -461,7 +475,7 @@ def _place_by_path(path: Path, raw_bytes: bytes) -> Literal["placed", "taken", "
         return "symlink"
     if not stat.S_ISREG(entry.st_mode) or entry.st_size != len(raw_bytes):
         return "taken"
-    fd = os.open(path, os.O_RDONLY | _OPEN_FLAGS)
+    fd = os.open(path, os.O_RDONLY | _file_open_flags())
     try:
         same = os.path.samestat(entry, os.fstat(fd)) and _read_fd(fd, entry.st_size) == raw_bytes
     finally:
@@ -486,7 +500,7 @@ def _create_no_follow(
     try:
         # Private, non-executable files; existing entries are never overwritten.
         fd = os.open(
-            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _OPEN_FLAGS, 0o600, dir_fd=dir_fd
+            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _file_open_flags(), 0o600, dir_fd=dir_fd
         )
     except FileExistsError:
         return "taken"
