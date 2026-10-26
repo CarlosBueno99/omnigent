@@ -568,13 +568,14 @@ retryable rather than becoming a product verdict.
   for example a per-file write cap set between the passing and failing input
   sizes → **`needs_manual_review`**, not `likely_repro`. A stand-in replaces an
   environment you cannot drive; it must not supply the failure. A tuned cap
-  shows only that your value separates the inputs. Use a limit only when its
-  value comes from the report, the product's code or configuration, or the
-  reported environment's documentation, and cite that source in `evidence`.
-  Shortening a product timeout the report names, only to reach it sooner, is
-  not this case; disclose it. Otherwise name the unknown limit in `evidence`,
-  keep the suspected code path as a hypothesis, and say what a human must
-  measure in the reported environment.
+  shows only that your value separates the inputs. A limit is given, not
+  chosen, when its value comes from the report, the product's code or
+  configuration, or the reported environment's documentation and you cite that
+  source in `evidence`. Shortening a product timeout the report names, only to
+  reach it sooner, is not this case when the failure is what happens once it
+  expires rather than whether work finishes in time; disclose it. For a chosen
+  limit, name it in `evidence`, keep the suspected code path as a hypothesis,
+  and say what a human must measure in the reported environment.
 - Behaves correctly on the running build, on an environment that *can* exhibit
   the reported failure → that sub-symptom does **not** reproduce here. If the
   report was against an older version and a later commit clearly fixed it, hunt
@@ -834,7 +835,8 @@ Field meanings:
   get a verdict from it: that is `needs_manual_review`, and you name the
   engine/device profile driven in the facet `evidence` rather than here. A
   failure that only a limit you chose produced is not a stand-in reproduction
-  either; it is `needs_manual_review` per Step 2.)
+  either; it is `needs_manual_review` per Step 2, and this field still names the
+  environment you drove.)
 - `session_id` — **this session** (in the app), from `sys_session_get_info`, so
   the fix step can replay how you reproduced it and you can browse it at
   `<server>/c/<session_id>`.
