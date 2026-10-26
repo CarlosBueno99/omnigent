@@ -71,12 +71,12 @@ async def test_resolve_of_live_future_also_tombstones_the_verdict():
         assert tomb.result.content == {"ok": "go"}
         # The answered question's fingerprint rides along for reuse safety.
         assert tomb.request_fingerprint == fingerprint
-        # The hook abandons the zombie only when its read cap expires, so a
-        # verdict that landed early in that poll must survive until the re-park.
+        # The hook abandons the zombie only when its read cap expires, and a lapsed
+        # token costs one more connect after the re-mint; the verdict must outlive both.
         repark_delay_s = (
             claude_native_hook._PERMISSION_POLL_READ_TIMEOUT_S
             + claude_native_hook._PERMISSION_RETRY_INITIAL_BACKOFF_S
-            + claude_native_hook._PERMISSION_CONNECT_TIMEOUT_S
+            + 2 * claude_native_hook._PERMISSION_CONNECT_TIMEOUT_S
         )
         S._harness_pre_resolved_elicitations[eid] = dataclasses.replace(
             tomb, created_at=tomb.created_at - repark_delay_s

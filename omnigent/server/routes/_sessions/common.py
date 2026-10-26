@@ -511,7 +511,8 @@ _PI_EXTENSION_UI_HOOK_TIMEOUT_S = 86400.0
 
 
 # Outlive the slowest harness re-park: the claude-native hook re-POSTs a silently
-# dead poll only after its 330s read cap, then a backoff, connect and token re-mint.
+# dead poll only after its 330s read cap, a backoff and connect, plus a reconnect
+# if its token must be re-minted.
 _HARNESS_PRE_RESOLVED_ELICITATION_TTL_S = 420.0
 
 
