@@ -563,6 +563,18 @@ retryable rather than becoming a product verdict.
   substitute that can never show the failure has not cleared it; a human on the
   real device must decide. Name the engine/device profile you drove in
   `evidence` (e.g. "desktop Chromium at an iPhone viewport").
+- The failure appears only under a limit you chose for the environment — a
+  disk, file-size, memory, time, or rate cap whose real value you do not know,
+  for example a per-file write cap set between the passing and failing input
+  sizes → **`needs_manual_review`**, not `likely_repro`. A stand-in replaces an
+  environment you cannot drive; it must not supply the failure. A tuned cap
+  shows only that your value separates the inputs. Use a limit only when its
+  value comes from the report, the product's code or configuration, or the
+  reported environment's documentation, and cite that source in `evidence`.
+  Shortening a product timeout the report names, only to reach it sooner, is
+  not this case; disclose it. Otherwise name the unknown limit in `evidence`,
+  keep the suspected code path as a hypothesis, and say what a human must
+  measure in the reported environment.
 - Behaves correctly on the running build, on an environment that *can* exhibit
   the reported failure → that sub-symptom does **not** reproduce here. If the
   report was against an older version and a later commit clearly fixed it, hunt
@@ -576,9 +588,10 @@ retryable rather than becoming a product verdict.
 when other facets are already fixed. Report the per-facet breakdown in the output
 (see below) so a partial fix is visible, not averaged away. When nothing
 reproduced but a sub-symptom is **`needs_manual_review`** (a native-only failure
-you could not exercise), the overall verdict is `needs_manual_review` — a
-`not_reproduced` you could confirm never outranks a facet you could not. Only
-when *every* sub-symptom is fixed is the overall verdict `already_fixed`.
+you could not exercise, or one only your chosen limit produced), the overall
+verdict is `needs_manual_review` — a `not_reproduced` you could confirm never
+outranks a facet you could not. Only when *every* sub-symptom is fixed is the
+overall verdict `already_fixed`.
 
 ## Step 3 — Identify the smallest reliable regression coverage
 
@@ -751,8 +764,9 @@ choice:
   `needs_more_info` are defined in Step 2; `needs_manual_review` is allowed
   **only** when a facet's failure depends on native behaviour this environment
   cannot exercise (for example the iOS soft keyboard, or WebKit-only rendering
-  when only desktop Chromium is available) so you can neither confirm nor clear
-  it — state that native dependency in `evidence`. It is not a substitute for
+  when only desktop Chromium is available), or only a limit you chose produced
+  it (Step 2), so you can neither confirm nor clear it — state that native
+  dependency or unknown limit in `evidence`. It is not a substitute for
   finishing the investigation, and never stands in for a workflow failure
   (those stay retryable, per the `needs_more_info` rule).
 
@@ -818,7 +832,9 @@ Field meanings:
   say the same in `journey` and `evidence`. (When the stand-in *cannot exhibit*
   the reported failure at all — a native-chrome bug on the web SPA — you do not
   get a verdict from it: that is `needs_manual_review`, and you name the
-  engine/device profile driven in the facet `evidence` rather than here.)
+  engine/device profile driven in the facet `evidence` rather than here. A
+  failure that only a limit you chose produced is not a stand-in reproduction
+  either; it is `needs_manual_review` per Step 2.)
 - `session_id` — **this session** (in the app), from `sys_session_get_info`, so
   the fix step can replay how you reproduced it and you can browse it at
   `<server>/c/<session_id>`.
