@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from omnigent.cli_auth import OMNIGENT_SLICE_KEY_HEADER
+from omnigent.cli_diagnostics import suppresses_recovery_hint
 from omnigent.host import daemon_launch
 from omnigent.host.daemon_launch import (
     open_daemon_client,
@@ -23,6 +24,7 @@ from omnigent.host.daemon_launch import (
     wait_for_host_online,
     wait_for_runner_online,
 )
+from omnigent.process_logging import process_log_dir_reference
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +84,34 @@ class _AlwaysRefuses:
         :raises httpx.ConnectError: Always.
         """
         raise httpx.ConnectError("connection refused", request=request)
+
+
+class _AlwaysAnswers:
+    """MockTransport handler that answers every request with one fixed response.
+
+    :param status_code: HTTP status to answer, e.g. ``302``.
+    :param headers: Response headers, e.g. a sign-in ``location``.
+    :param body: Optional JSON body, e.g. ``{"status": "offline"}``.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        headers: dict[str, str],
+        body: dict[str, object] | None,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers
+        self.body = body
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        """
+        Answer with the configured response.
+
+        :param request: The outgoing request the client built.
+        :returns: The fixed response.
+        """
+        return httpx.Response(self.status_code, headers=self.headers, json=self.body)
 
 
 class _HtmlThenOnline:
@@ -295,6 +325,80 @@ async def test_wait_for_host_online_deadline_reports_last_connect_error(
     assert "host_abc123" in message
     assert "Last connection error" in message
     assert "connection refused" in message
+    assert "Check that this machine can reach http://test" in message
+
+
+@pytest.mark.parametrize(
+    ("status_code", "headers"),
+    [
+        pytest.param(401, {}, id="unauthorized"),
+        pytest.param(403, {}, id="invalid-token"),
+        pytest.param(
+            302,
+            {"location": "https://ws.cloud.databricks.com/oidc/v1/authorize?client_id=app"},
+            id="sign-in-redirect",
+        ),
+    ],
+)
+async def test_wait_for_host_online_deadline_names_rejected_sign_in(
+    fast_poll: None,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    headers: dict[str, str],
+) -> None:
+    """A host poll rejected for sign-in names the login remedy, not reachability.
+
+    The Databricks Apps front door answers a missing or expired bearer with
+    401/403 or a 302 to its OAuth login flow. The server was reachable, so
+    the reachability and stale-host hints would misdirect the user.
+    """
+    monkeypatch.setenv("OMNIGENT_WRAPPER_COMMAND", "isaac omni")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_AlwaysAnswers(status_code, headers, None)),
+        base_url="https://ws.cloud.databricks.com/api/2.0/omnigent",
+    ) as client:
+        with pytest.raises(click.ClickException) as excinfo:
+            await wait_for_host_online(client, "host_abc123", timeout_s=0.05)
+    message = str(excinfo.value)
+    assert "host_abc123" in message
+    assert f"The server rejected this machine's sign-in (HTTP {status_code})." in message
+    assert "Run `isaac omni login https://ws.cloud.databricks.com/omnigent` and retry." in message
+    assert "can reach" not in message
+    assert suppresses_recovery_hint(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "headers", "body"),
+    [
+        pytest.param(200, {}, {"status": "offline"}, id="registered-offline"),
+        pytest.param(404, {}, {"detail": "host not found"}, id="not-registered"),
+        pytest.param(307, {"location": "/v1/hosts/host_abc123/"}, None, id="unrelated-redirect"),
+    ],
+)
+async def test_wait_for_host_online_deadline_points_at_host_logs_when_server_answers(
+    fast_poll: None,
+    status_code: int,
+    headers: dict[str, str],
+    body: dict[str, object] | None,
+) -> None:
+    """A server that answers while the daemon stays offline points at the daemon's logs.
+
+    The daemon writes its own tunnel failures (including its auth rejections)
+    to the host log, so that is where the cause is, not this machine's reachability.
+    """
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_AlwaysAnswers(status_code, headers, body)),
+        base_url="http://test",
+    ) as client:
+        with pytest.raises(click.ClickException) as excinfo:
+            await wait_for_host_online(client, "host_abc123", timeout_s=0.05)
+    message = str(excinfo.value)
+    assert "host_abc123" in message
+    assert f"The server answered (HTTP {status_code})" in message
+    assert f"logs under {process_log_dir_reference('host')}" in message
+    assert "can reach" not in message
+    assert "login" not in message
+    assert not suppresses_recovery_hint(excinfo.value)
 
 
 async def test_wait_for_runner_online_tolerates_html_fallback_then_online(

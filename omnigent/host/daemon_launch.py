@@ -20,8 +20,12 @@ from collections.abc import Iterator
 import click
 import httpx
 
+from omnigent.cli_diagnostics import SUPPRESS_RECOVERY_HINT_ATTR
+from omnigent.cli_invocation import cli_invocation
 from omnigent.harnesses.claude_native.bridge import url_component
-from omnigent.process_logging import display_log_path, process_log_dir
+from omnigent.native.native_policy_hook import _is_login_redirect_or_unauthorized
+from omnigent.process_logging import display_log_path, process_log_dir, process_log_dir_reference
+from omnigent.util.server_url import display_server_url
 
 # Steady-state poll cadence while waiting for a daemon-spawned runner to
 # connect its tunnel or for a resource to appear.
@@ -134,7 +138,10 @@ async def wait_for_host_online(
     Transient transport errors (connection refused while a local server
     is still binding its socket, a dropped keepalive, etc.) are treated
     as "not online yet" and polled through; only the deadline fails the
-    wait, with the last transport error included in the message.
+    wait, with the last transport error included in the message. The
+    message's remedy follows the server's last answer: a sign-in rejection
+    names the login command, any other answer points at the daemon's logs,
+    and no answer at all asks the user to check reachability.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param host_id: This machine's host id, e.g. ``"host_abc123"``.
@@ -145,6 +152,7 @@ async def wait_for_host_online(
     deadline = asyncio.get_event_loop().time() + timeout_s
     intervals = daemon_poll_intervals()
     last_error: httpx.TransportError | None = None
+    last_response: httpx.Response | None = None
     while asyncio.get_event_loop().time() < deadline:
         try:
             resp = await client.get(f"/v1/hosts/{url_component(host_id)}")
@@ -153,13 +161,30 @@ async def wait_for_host_online(
         else:
             if resp.status_code == 200 and _json_body(resp).get("status") == "online":
                 return
+            last_response = resp
         await asyncio.sleep(next(intervals))
     message = (
         f"The connect daemon for host {host_id!r} did not come online within {timeout_s:.0f}s."
     )
     if last_error is not None:
         message += f" Last connection error: {last_error!r}."
-    message += f" Check that this machine can reach {client.base_url}."
+    if last_response is not None and _is_login_redirect_or_unauthorized(last_response):
+        login_url = display_server_url(str(client.base_url))
+        message += (
+            f" The server rejected this machine's sign-in (HTTP {last_response.status_code})."
+            f" Run `{cli_invocation()} login {login_url}` and retry."
+        )
+        exc = click.ClickException(message)
+        # Restarting stale host processes cannot fix this CLI's own credential.
+        setattr(exc, SUPPRESS_RECOVERY_HINT_ATTR, True)
+        raise exc
+    if last_response is not None:
+        message += (
+            f" The server answered (HTTP {last_response.status_code}), but the daemon has not"
+            f" connected; check its logs under {process_log_dir_reference('host')}."
+        )
+    else:
+        message += f" Check that this machine can reach {client.base_url}."
     raise click.ClickException(message)
 
 
