@@ -18,6 +18,7 @@ import type {
   CompactionInProgress,
   ElicitationRequest,
   ElicitationResolved,
+  ElicitationTerminalFallback,
   ErrorEvent,
   MessageDone,
   ReasoningDone,
@@ -376,6 +377,12 @@ export function parseBackgroundTasks(raw: unknown): BackgroundTaskInfo[] | undef
     if (Object.keys(info).length > 0) tasks.push(info);
   }
   return tasks.length > 0 ? tasks : undefined;
+}
+
+/** Parse an elicitation's `terminal_fallback` param; `undefined` when absent or malformed. */
+export function parseTerminalFallback(raw: unknown): ElicitationTerminalFallback | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  return { answerUndelivered: (raw as Record<string, unknown>).answer_undelivered === true };
 }
 
 /**
@@ -1102,21 +1109,13 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
         ),
       ),
     ];
+    const terminalFallback = parseTerminalFallback(p.terminal_fallback);
     return {
       type: "elicitation_request",
       ...(p.native_delivery
         ? { nativeDelivery: parseNativePermissionDelivery(p.native_delivery) }
         : {}),
-      ...(p.terminal_fallback &&
-      typeof p.terminal_fallback === "object" &&
-      !Array.isArray(p.terminal_fallback)
-        ? {
-            terminalFallback: {
-              answerUndelivered:
-                (p.terminal_fallback as Record<string, unknown>).answer_undelivered === true,
-            },
-          }
-        : {}),
+      ...(terminalFallback ? { terminalFallback } : {}),
       elicitationId,
       targetSessionId:
         typeof targetSessionId === "string" && targetSessionId ? targetSessionId : null,

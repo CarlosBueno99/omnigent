@@ -759,14 +759,10 @@ async def _hold_elicitation_for_terminal_answer(
     """
     Keep an unanswered prompt's card up while the terminal still shows it.
 
-    Claude keeps its own picker open after the hook exits, and the runner
-    holds chat messages until it is answered, so expiring the card would
-    leave the user no visible way forward. Mid-turn, the card is instead
-    re-published with a ``terminal_fallback`` param that points the user
-    to the terminal and says whether a chat answer given in the gap has not
-    reached the agent. A late hook retry still delivers that answer. The
-    card clears once the terminal answers, a re-park takes over, or the
-    turn ends.
+    Claude keeps its picker open after the hook exits and the runner holds
+    chat messages behind it, so mid-turn the card is re-published with a
+    ``terminal_fallback`` param instead of expiring. It clears once the
+    terminal answers, a re-park takes over, or the turn ends.
 
     :param session_id: Session that owns the prompt, e.g. ``"conv_abc123"``.
     :param elicitation_id: The prompt's id, e.g. ``"elicit_claude_0f3a..."``.
@@ -839,12 +835,20 @@ async def _hold_elicitation_for_terminal_answer(
     # A mirrored tool result proved the terminal answered the prompt.
     _publish_elicitation_resolved(session_id, elicitation_id)
     if conversation_store is not None:
-        await asyncio.to_thread(
-            _publish_elicitation_resolved_to_ancestors,
-            conversation_store,
-            session_id,
-            elicitation_id,
-        )
+        try:
+            await asyncio.to_thread(
+                _publish_elicitation_resolved_to_ancestors,
+                conversation_store,
+                session_id,
+                elicitation_id,
+            )
+        except Exception:  # noqa: BLE001 — the session's own card already cleared
+            _logger.warning(
+                "Could not clear terminal prompt %s from ancestors of %s",
+                elicitation_id,
+                session_id,
+                exc_info=True,
+            )
     return True
 
 
@@ -925,6 +929,17 @@ def _cancel_runner_relays(session_ids: list[str]) -> None:
         handle = _runner_relay_tasks.get(session_id)
         if handle is not None and not handle.task.done():
             handle.task.cancel()
+
+
+def _release_unparked_elicitations(session_ids: list[str]) -> None:
+    """Stop holding deleted sessions' prompts for their terminals.
+
+    A deleted session's status may never leave mid-turn, so its hold would poll forever.
+    """
+    deleted = set(session_ids)
+    for elicitation_id, unparked in _harness_unparked_elicitations.items():
+        if unparked.session_id in deleted:
+            _harness_unparked_elicitations.pop(elicitation_id, None)
 
 
 # Strong references to detached archive stops so the tasks can't be
@@ -13755,6 +13770,7 @@ __all__ = [
     "_recover_subagent_status_forward_via_parent",
     "_register_policy_elicitation",
     "_relay_runner_stream",
+    "_release_unparked_elicitations",
     "_resolve_elicitation",
     "_run_managed_launch",
     "_run_managed_wake",

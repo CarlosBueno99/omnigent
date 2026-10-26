@@ -6685,10 +6685,11 @@ export function isStaleCompletedResponse(s: { activeResponse: ActiveResponse | n
  * an id whose card was already flipped to "Resolved elsewhere" (the
  * deferred clear after a severed harness wait fired before the retry
  * re-parked) — the re-publish proves the prompt is parked again and
- * still waiting for a verdict. Only an `auto_resolved` card is
- * revived: a card carrying a real user verdict means an answer is
+ * still waiting for a verdict. Otherwise only an `auto_resolved` card
+ * is revived: a card carrying a real user verdict means an answer is
  * already in flight, and `submitApproval` owns rolling that back if
- * its POST fails.
+ * its POST fails. A re-publish entering or leaving the terminal hold
+ * replaces any card, since the server re-asks only while unanswered.
  */
 function revivePendingElicitationBlock(
   set: Setter,
@@ -6933,7 +6934,7 @@ export async function pumpStreamEvents(
       // id must not append a second card: a pending card (or one
       // carrying an in-flight user verdict) stays untouched, and a card
       // the deferred clear flipped to "Resolved elsewhere" is revived
-      // to answerable in place.
+      // to answerable in place. A terminal-hold re-publish replaces it.
       if (block.type === "elicitation") {
         const eid = block.elicitationId;
         const buffered = buffer.findIndex(

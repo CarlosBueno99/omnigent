@@ -111,10 +111,6 @@ class _UnparkedHarnessElicitation:
     """
     A published prompt whose hook stopped waiting without an answer.
 
-    The harness may still show the prompt in its terminal, so when the
-    re-park grace lapses mid-turn the card is re-published as waiting in
-    the terminal instead of expiring.
-
     :param session_id: Conversation id that issued the prompt, e.g.
         ``"conv_abc123"``.
     :param tool_name: Gated tool name, e.g. ``"AskUserQuestion"``, or

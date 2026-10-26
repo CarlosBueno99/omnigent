@@ -264,6 +264,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _persist_host_launch_failure_turn,
     _persist_native_terminal_failure,
     _recover_side_chat_runner_via_source,
+    _release_unparked_elicitations,
     _resolve_elicitation,
     _runner_live_on_another_replica_from_conversations,
     _side_chat_source_id,
@@ -3705,6 +3706,7 @@ def register_events_routes(
         # A relay still inside an offline runner's reconnect grace must not
         # fail the deleted turns when that grace expires.
         _cancel_runner_relays([session_id, *descendant_ids])
+        _release_unparked_elicitations([session_id, *descendant_ids])
         # The session is gone, so is its launch-progress state. Failed
         # launches are retained in the cache for reload visibility while
         # the session exists; without this eviction every deleted

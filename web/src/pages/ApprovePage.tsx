@@ -21,6 +21,8 @@ import {
   parseNativePermissionDelivery,
   type NativePermissionDelivery,
 } from "@/lib/nativePermissionDelivery";
+import { parseTerminalFallback } from "@/lib/sse";
+import type { ElicitationTerminalFallback } from "@/lib/events";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "@/lib/routing";
 import { CheckIcon, MessageCircleQuestionMark, XIcon } from "lucide-react";
@@ -39,7 +41,7 @@ interface ElicitationData {
   content_preview?: string;
   native_delivery?: NativePermissionDelivery;
   permission_directories?: string[];
-  terminal_fallback?: { answer_undelivered?: boolean };
+  terminal_fallback?: ElicitationTerminalFallback;
 }
 
 type PageState =
@@ -85,9 +87,11 @@ export function ApprovePage() {
         const data: ElicitationData = await res.json();
         if (cancelled) return;
         data.native_delivery = parseNativePermissionDelivery(data.native_delivery);
+        data.terminal_fallback = parseTerminalFallback(data.terminal_fallback);
         nativeDeliverySeen ||= Boolean(data.native_delivery) || data.resolution === "unanswered";
         polling =
           (nativeDeliverySeen && data.resolution !== "confirmed") ||
+          Boolean(data.terminal_fallback) ||
           (data.status !== "resolved" && revision !== submission.current.revision);
         if (data.status === "resolved") {
           submission.current = { revision: submission.current.revision + 1, pending: false };
@@ -237,11 +241,7 @@ export function ApprovePage() {
             response={null}
             nativeDelivery={state.data.native_delivery}
             permissionDirectories={state.data.permission_directories}
-            terminalFallback={
-              state.data.terminal_fallback && {
-                answerUndelivered: state.data.terminal_fallback.answer_undelivered === true,
-              }
-            }
+            terminalFallback={state.data.terminal_fallback}
             onSubmit={(_id, action, content, meta) => void submit(action, content, meta)}
           />
         )}

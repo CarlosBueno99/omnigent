@@ -1885,12 +1885,11 @@ describe("ApprovalCard — prompt waiting in the terminal", () => {
         </QueryClientProvider>,
       );
 
-      const openTerminal = screen.queryByTestId("approval-card-open-terminal");
       if (!opensTerminal) {
-        expect(openTerminal).toBeNull();
+        expect(screen.queryByTestId("approval-card-open-terminal")).toBeNull();
         return;
       }
-      fireEvent.click(openTerminal!);
+      fireEvent.click(screen.getByTestId("approval-card-open-terminal"));
       expect(setView).toHaveBeenCalledExactlyOnceWith("terminal");
     },
   );

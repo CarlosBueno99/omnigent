@@ -2712,23 +2712,38 @@ async def test_hook_retry_after_grace_takes_over_card_waiting_in_terminal(
         pending_elicitations.reset_for_tests()
 
 
-@pytest.mark.parametrize("answered_during_grace", [False, True])
+@pytest.mark.parametrize(
+    ("answered_during_grace", "ancestor_clear_fails"),
+    [(False, False), (True, False), (False, True)],
+)
 async def test_terminal_answer_clears_card_waiting_in_terminal(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     answered_during_grace: bool,
+    ancestor_clear_fails: bool,
 ) -> None:
     """
     The gated tool's mirrored result clears the card as answered.
 
     An answer given during the re-park grace never points the card to the terminal.
+    A failed clear in ancestor sessions must not fail the session's own clear.
     """
     from omnigent.runtime import pending_elicitations
 
+    if ancestor_clear_fails:
+
+        def _ancestor_clear_fails(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("ancestor lookup failed")
+
+        monkeypatch.setattr(
+            sessions_orchestration,
+            "_publish_elicitation_resolved_to_ancestors",
+            _ancestor_clear_fails,
+        )
     session_id, payload, collector = await _sever_hook_mid_turn(
         client,
         monkeypatch,
-        f"test-terminal-fallback-answered-{answered_during_grace}",
+        f"test-terminal-fallback-answered-{answered_during_grace}-{ancestor_clear_fails}",
         grace_s=1.0 if answered_during_grace else 0.2,
     )
     try:
@@ -2746,6 +2761,30 @@ async def test_terminal_answer_clears_card_waiting_in_terminal(
         }
         assert pending_elicitations.count_for(session_id) == 0
         await _finish_deferred_clears()
+    finally:
+        await collector.stop()
+        pending_elicitations.reset_for_tests()
+
+
+async def test_deleting_session_releases_prompt_waiting_in_terminal(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deleted session's status can stay mid-turn, so delete ends its terminal hold."""
+    from omnigent.runtime import pending_elicitations
+
+    session_id, _payload, collector = await _sever_hook_mid_turn(
+        client, monkeypatch, "test-terminal-fallback-deleted"
+    )
+    try:
+        waiting = await _next_elicitation_event(collector)
+        assert waiting["params"]["terminal_fallback"] == {"answer_undelivered": False}
+
+        deleted = await client.delete(f"/v1/sessions/{session_id}")
+        assert deleted.status_code == 200, deleted.text
+        assert sessions_route._session_status_cache.get(session_id) == "running"
+        await _finish_deferred_clears()
+        assert _REATTACH_ELICITATION_ID not in _harness_unparked_elicitations
     finally:
         await collector.stop()
         pending_elicitations.reset_for_tests()

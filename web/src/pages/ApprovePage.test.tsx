@@ -140,6 +140,40 @@ describe("ApprovePage states", () => {
     expect(screen.queryByRole("button", { name: /Approve|Reject/ })).not.toBeInTheDocument();
   });
 
+  it.each([
+    { label: "the terminal answers", next: { status: "resolved" } },
+    { label: "the hook asks in chat again", next: { status: "pending", message: "Approve pwd" } },
+  ])("refreshes a prompt waiting in the terminal when $label", async ({ next }) => {
+    vi.useFakeTimers();
+    const fetch = vi.mocked(identity.authenticatedFetch);
+    fetch.mockResolvedValue(
+      jsonResponse({
+        status: "pending",
+        message: "Approve pwd",
+        terminal_fallback: { answer_undelivered: false },
+      }),
+    );
+    try {
+      await act(async () => {
+        renderPage();
+      });
+      expect(screen.getByText("Answer in the terminal")).toBeInTheDocument();
+      fetch.mockResolvedValue(jsonResponse(next));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(screen.queryByText("Answer in the terminal")).not.toBeInTheDocument();
+      if (next.status === "resolved") {
+        expect(screen.getByText("Elicitation resolved")).toBeInTheDocument();
+      } else {
+        expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
+      }
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
   it("shows the resolved state when the elicitation is no longer pending", async () => {
     // WHY: a `status: "resolved"` payload means the prompt was already
     // resolved/timed-out/cancelled — no buttons, just an informational alert.

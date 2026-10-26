@@ -44,8 +44,8 @@ with their own terminal retain the switcher.
 - On a phone, use the view mode choice in the header menu.
 - Choose Resume when the terminal shows as stopped.
 - Choose Open terminal on a chat card that says "Answer in the terminal". It
-  shows only in the session's own chat, not in Inbox, approval links, side
-  chats, or a parent session's view.
+  shows only in a terminal-first session's own chat, not in Inbox, approval
+  links, side chats, or a parent session's view.
 - On desktop with `grid_sessions_display_ui` enabled, use each grid cell's header switch.
   The shortcut targets the active cell; shells remain in the shared Workspace.
 - On desktop with `splittable_terminal_view_ui` enabled, use the header's "Split
