@@ -12313,6 +12313,52 @@ describe("chatStore — pumpStreamEvents frame batching", () => {
     controller.abort();
   });
 
+  it("shows the terminal state of a card re-published while it is still buffered", async () => {
+    useChatStore.setState({ conversationId: "conv_buffered_terminal", blocks: [] });
+    const sink = pushableStream();
+    const controller = new AbortController();
+    const manual = manualScheduler();
+    void pumpStreamEvents(
+      "conv_buffered_terminal",
+      sink.stream,
+      controller,
+      setState,
+      getState,
+      manual.scheduler,
+    );
+
+    sink.push(sse("response.created", { id: "resp_terminal", status: "in_progress", output: [] }));
+    sink.push(delta("A"));
+    await tick();
+
+    const params = {
+      mode: "form",
+      message: "Claude wants to call **Bash**",
+      phase: "pre_tool_use",
+      policy_name: "claude_native_permission",
+      content_preview: "",
+    };
+    sink.push(sse("response.elicitation_request", { elicitation_id: "elic_buffered", params }));
+    sink.push(
+      sse("response.elicitation_request", {
+        elicitation_id: "elic_buffered",
+        params: { ...params, terminal_fallback: { answer_undelivered: false } },
+      }),
+    );
+    await tick();
+
+    expect(manual.pending()).toBe(true);
+    manual.fire();
+
+    const cards = useChatStore
+      .getState()
+      .blocks.filter((block): block is ElicitationBlock => block.type === "elicitation");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.terminalFallback).toEqual({ answerUndelivered: false });
+
+    controller.abort();
+  });
+
   it("appends live command output to the running tool card", async () => {
     useChatStore.setState({ conversationId: "conv_tool_delta", blocks: [] });
     const sink = pushableStream();
@@ -17499,6 +17545,24 @@ describe("chatStore — elicitations across stream drops and re-publishes", () =
         response: null,
         terminalFallback: { answerUndelivered: true },
       });
+
+      // A re-park and a later hold with no chat answer can both fall in one gap.
+      const heldAgain = {
+        ...raw,
+        params: {
+          ...(raw.params as Record<string, unknown>),
+          terminal_fallback: { answer_undelivered: false },
+        },
+      };
+      if (recovery === "live") {
+        sinks.at(-1)!.push(sse("response.elicitation_request", heldAgain));
+      } else {
+        seedPendingElicitations(sid, [heldAgain]);
+        sinks.at(-1)!.error();
+      }
+      await drainAsync();
+      expect(elicitationCards()).toHaveLength(1);
+      expect(elicitationCards()[0]!.terminalFallback).toEqual({ answerUndelivered: false });
 
       // A hook that re-parks makes the prompt answerable from chat again.
       if (recovery === "live") {

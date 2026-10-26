@@ -771,57 +771,64 @@ async def _hold_elicitation_for_terminal_answer(
     """
     from omnigent.server.routes import sessions as _facade
 
-    if not unparked.resolved_elsewhere.is_set():
-        if _session_status_cache.get(session_id) not in _MID_TURN_STATUSES:
-            _harness_unparked_elicitations.pop(elicitation_id, None)
-            return False
-        tombstone = _harness_pre_resolved_elicitations.get(elicitation_id)
-        answer_undelivered = (
-            tombstone is not None
-            and tombstone.session_id == session_id
-            and tombstone.result is not None
-            and tombstone.request_fingerprint == unparked.request_fingerprint
-        )
-        if answer_undelivered:
-            # The card now asks for the terminal, so a late re-park must re-ask.
-            _harness_pre_resolved_elicitations.pop(elicitation_id, None)
-        elif pending_elicitations.lookup(elicitation_id, conversation_id=session_id) is None:
-            _harness_unparked_elicitations.pop(elicitation_id, None)
-            return False
-        terminal_event = {
-            **unparked.event_payload,
-            "params": {
-                **unparked.event_payload["params"],
-                "terminal_fallback": {"answer_undelivered": answer_undelivered},
-            },
-        }
-        unparked.in_terminal = True
-        session_stream.publish(session_id, terminal_event)
-        if conversation_store is not None:
-            await asyncio.to_thread(
-                _publish_elicitation_request_to_ancestors,
-                conversation_store,
-                session_id,
-                terminal_event,
+    try:
+        if not unparked.resolved_elsewhere.is_set():
+            if _session_status_cache.get(session_id) not in _MID_TURN_STATUSES:
+                return False
+            tombstone = _harness_pre_resolved_elicitations.get(elicitation_id)
+            answer_undelivered = (
+                tombstone is not None
+                and tombstone.session_id == session_id
+                and tombstone.result is not None
+                and tombstone.request_fingerprint == unparked.request_fingerprint
             )
-    while not unparked.resolved_elsewhere.is_set():
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(
-                unparked.resolved_elsewhere.wait(),
-                timeout=_facade._HARNESS_TERMINAL_FALLBACK_POLL_S,
-            )
-        if _harness_unparked_elicitations.get(elicitation_id) is not unparked:
-            return True  # A re-park took over this prompt.
-        if unparked.resolved_elsewhere.is_set():
-            break
-        if pending_elicitations.lookup(elicitation_id, conversation_id=session_id) is None:
+            if answer_undelivered:
+                # The card now asks for the terminal, so a late re-park must re-ask.
+                _harness_pre_resolved_elicitations.pop(elicitation_id, None)
+            elif pending_elicitations.lookup(elicitation_id, conversation_id=session_id) is None:
+                return False
+            terminal_event = {
+                **unparked.event_payload,
+                "params": {
+                    **unparked.event_payload["params"],
+                    "terminal_fallback": {"answer_undelivered": answer_undelivered},
+                },
+            }
+            unparked.in_terminal = True
+            session_stream.publish(session_id, terminal_event)
+            if conversation_store is not None:
+                try:
+                    await asyncio.to_thread(
+                        _publish_elicitation_request_to_ancestors,
+                        conversation_store,
+                        session_id,
+                        terminal_event,
+                    )
+                except Exception:  # noqa: BLE001 — the session's own card still works
+                    _logger.warning(
+                        "Could not mirror terminal prompt %s to ancestors of %s",
+                        elicitation_id,
+                        session_id,
+                        exc_info=True,
+                    )
+        while not unparked.resolved_elsewhere.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    unparked.resolved_elsewhere.wait(),
+                    timeout=_facade._HARNESS_TERMINAL_FALLBACK_POLL_S,
+                )
+            if _harness_unparked_elicitations.get(elicitation_id) is not unparked:
+                return True  # A re-park took over this prompt.
+            if unparked.resolved_elsewhere.is_set():
+                break
+            if pending_elicitations.lookup(elicitation_id, conversation_id=session_id) is None:
+                return True  # Already cleared elsewhere.
+            if _session_status_cache.get(session_id) not in _MID_TURN_STATUSES:
+                return False
+    finally:
+        if _harness_unparked_elicitations.get(elicitation_id) is unparked:
             _harness_unparked_elicitations.pop(elicitation_id, None)
-            return True  # Already cleared, e.g. by a stop.
-        if _session_status_cache.get(session_id) not in _MID_TURN_STATUSES:
-            _harness_unparked_elicitations.pop(elicitation_id, None)
-            return False
     # A mirrored tool result proved the terminal answered the prompt.
-    _harness_unparked_elicitations.pop(elicitation_id, None)
     _publish_elicitation_resolved(session_id, elicitation_id)
     if conversation_store is not None:
         await asyncio.to_thread(

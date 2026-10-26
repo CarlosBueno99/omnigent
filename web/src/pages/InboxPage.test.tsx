@@ -30,12 +30,12 @@ import {
   seedReadState,
 } from "@/hooks/useUnseenConversations";
 
-// Keep real controls for native delivery and directory grants.
+// Keep real controls for native delivery, directory grants and terminal-only prompts.
 vi.mock("@/components/blocks/ApprovalCard", async (importActual) => {
   const actual = await importActual<typeof approvalCard>();
   return {
     ApprovalCard: (props: ComponentProps<typeof actual.ApprovalCard>) => {
-      if (props.nativeDelivery || props.permissionDirectories)
+      if (props.nativeDelivery || props.permissionDirectories || props.terminalFallback)
         return <actual.ApprovalCard {...props} />;
       const { elicitationId, message, status, allowAutoMode, onSubmit, requester } = props;
       return (
@@ -476,6 +476,27 @@ describe("InboxPage approval items", () => {
 
     expect(await screen.findByRole("button", { name: "Stub Accept" })).toBeInTheDocument();
     expect(screen.queryByTestId("approval-card-requester")).toBeNull();
+  });
+
+  it("shows a prompt waiting in the agent's terminal without chat answer controls", async () => {
+    const row = conversation({ id: "sess_terminal" });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.getSession).mockResolvedValue({
+      pendingElicitations: [
+        rawElicitation("eli_terminal", "Claude wants to call **Bash**", {
+          terminal_fallback: { answer_undelivered: true },
+        }),
+      ],
+    } as unknown as Awaited<ReturnType<typeof sessionsApi.getSession>>);
+    renderPage();
+
+    const card = await screen.findByTestId("approval-card");
+    expect(card).toHaveAttribute("data-state", "terminal");
+    expect(within(card).getByTestId("approval-card-terminal-hint")).toHaveTextContent(
+      "Your answer didn't reach the agent.",
+    );
+    expect(within(card).queryByRole("button", { name: /approve|reject/i })).toBeNull();
+    expect(within(card).queryByTestId("approval-card-open-terminal")).toBeNull();
   });
 });
 

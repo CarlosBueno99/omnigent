@@ -1159,7 +1159,7 @@ def _client_supplied_hook_elicitation_id(
     :returns: The validated id, or ``None`` when the client supplied
         none (the wait mints a random id as before).
     :raises OmnigentError: 400 when the id is malformed or is
-        currently parked by a different session.
+        currently parked or held for its terminal by a different session.
     """
     raw = payload.get("_omnigent_elicitation_id")
     if raw is None:
@@ -1171,7 +1171,10 @@ def _client_supplied_hook_elicitation_id(
             code=ErrorCode.INVALID_INPUT,
         )
     owner = _harness_elicitation_owners.get(raw)
-    if owner is not None and owner != session_id:
+    unparked = _harness_unparked_elicitations.get(raw)
+    if (owner is not None and owner != session_id) or (
+        unparked is not None and unparked.session_id != session_id
+    ):
         raise OmnigentError(
             "Elicitation id belongs to a different session.",
             code=ErrorCode.INVALID_INPUT,

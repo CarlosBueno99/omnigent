@@ -42,10 +42,12 @@ from omnigent.harnesses.codex_native.elicitation import codex_elicitation_id
 from omnigent.runtime import session_stream
 from omnigent.server._elicitation_registry import (
     _harness_pre_resolved_elicitations,
+    _harness_unparked_elicitations,
     _PreResolvedHarnessElicitation,
 )
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
 from omnigent.server.routes import sessions as sessions_route
+from omnigent.server.routes._sessions import orchestration as sessions_orchestration
 from tests.server.helpers import create_session_for_agent as _create_session
 from tests.server.helpers import create_test_agent, start_session_stream_collector
 
@@ -2536,20 +2538,40 @@ async def _finish_deferred_clears() -> None:
         await asyncio.wait_for(task, timeout=5.0)
 
 
+@pytest.mark.parametrize("ancestor_mirror_fails", [False, True])
 async def test_unanswered_claude_prompt_waits_in_terminal_until_turn_ends(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    ancestor_mirror_fails: bool,
 ) -> None:
     """
     A Claude prompt whose hook exited mid-turn points the user to the terminal.
 
     Claude keeps its own picker open and the runner holds chat messages
     behind it, so an expired card left the user no visible way forward.
+    A failed mirror into ancestor sessions must not strand the session's card.
     """
     from omnigent.runtime import pending_elicitations
 
+    failed_mirrors: list[str] = []
+    if ancestor_mirror_fails:
+        mirror = sessions_orchestration._publish_elicitation_request_to_ancestors
+
+        def _mirror_fails_for_terminal_card(
+            store: Any, mirrored_session_id: str, event: dict[str, Any]
+        ) -> None:
+            if "terminal_fallback" in event["params"]:
+                failed_mirrors.append(event["elicitation_id"])
+                raise RuntimeError("ancestor lookup failed")
+            mirror(store, mirrored_session_id, event)
+
+        monkeypatch.setattr(
+            sessions_orchestration,
+            "_publish_elicitation_request_to_ancestors",
+            _mirror_fails_for_terminal_card,
+        )
     session_id, _payload, collector = await _sever_claude_hook_mid_turn(
-        client, monkeypatch, "test-terminal-fallback-unanswered"
+        client, monkeypatch, f"test-terminal-fallback-unanswered-{ancestor_mirror_fails}"
     )
     try:
         waiting = await _next_elicitation_event(collector)
@@ -2560,6 +2582,10 @@ async def test_unanswered_claude_prompt_waits_in_terminal_until_turn_ends(
         assert [event["params"].get("terminal_fallback") for event in snapshot] == [
             {"answer_undelivered": False}
         ]
+        approval_page = await client.get(
+            f"/v1/sessions/{session_id}/elicitations/{_REATTACH_ELICITATION_ID}"
+        )
+        assert approval_page.json()["terminal_fallback"] == {"answer_undelivered": False}
 
         # No live hook can carry a chat answer to Claude now.
         refused = await _post_approval(client, session_id, _REATTACH_ELICITATION_ID, "accept")
@@ -2575,6 +2601,40 @@ async def test_unanswered_claude_prompt_waits_in_terminal_until_turn_ends(
             "reason": "unanswered",
         }
         assert pending_elicitations.count_for(session_id) == 0
+        await _finish_deferred_clears()
+        assert _REATTACH_ELICITATION_ID not in _harness_unparked_elicitations
+        assert failed_mirrors == ([_REATTACH_ELICITATION_ID] if ancestor_mirror_fails else [])
+    finally:
+        await collector.stop()
+        pending_elicitations.reset_for_tests()
+
+
+async def test_reattach_id_waiting_in_terminal_rejected_for_other_session(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another session cannot adopt the id of a prompt waiting in a terminal."""
+    from omnigent.runtime import pending_elicitations
+
+    session_id, payload, collector = await _sever_claude_hook_mid_turn(
+        client, monkeypatch, "test-terminal-fallback-id-owner"
+    )
+    try:
+        waiting = await _next_elicitation_event(collector)
+        assert waiting["params"]["terminal_fallback"] == {"answer_undelivered": False}
+
+        other_agent = await create_test_agent(client, "test-terminal-fallback-id-other")
+        other_session = await _create_session(client, other_agent["id"])
+        resp = await client.post(
+            f"/v1/sessions/{other_session}/hooks/permission-request", json=payload
+        )
+        assert resp.status_code == 400, resp.text
+        assert "different session" in resp.text
+        assert _harness_unparked_elicitations[_REATTACH_ELICITATION_ID].session_id == session_id
+
+        sessions_route._session_status_cache[session_id] = "idle"
+        expired = await _next_elicitation_event(collector)
+        assert expired["reason"] == "unanswered"
         await _finish_deferred_clears()
     finally:
         await collector.stop()

@@ -39,6 +39,7 @@ interface ElicitationData {
   content_preview?: string;
   native_delivery?: NativePermissionDelivery;
   permission_directories?: string[];
+  terminal_fallback?: { answer_undelivered?: boolean };
 }
 
 type PageState =
@@ -222,7 +223,9 @@ export function ApprovePage() {
       )}
 
       {state.kind === "pending" &&
-        (state.data.native_delivery || Boolean(state.data.permission_directories?.length)) && (
+        (state.data.native_delivery ||
+          Boolean(state.data.permission_directories?.length) ||
+          state.data.terminal_fallback) && (
           <ApprovalCard
             elicitationId={elicitationId!}
             message={state.data.message ?? ""}
@@ -234,12 +237,18 @@ export function ApprovePage() {
             response={null}
             nativeDelivery={state.data.native_delivery}
             permissionDirectories={state.data.permission_directories}
+            terminalFallback={
+              state.data.terminal_fallback && {
+                answerUndelivered: state.data.terminal_fallback.answer_undelivered === true,
+              }
+            }
             onSubmit={(_id, action, content, meta) => void submit(action, content, meta)}
           />
         )}
       {state.kind === "pending" &&
         !state.data.native_delivery &&
-        !state.data.permission_directories?.length && (
+        !state.data.permission_directories?.length &&
+        !state.data.terminal_fallback && (
           <Alert className="flex flex-col gap-3 py-4 px-5">
             <AlertTitle className="flex items-center gap-2 text-ui">
               <MessageCircleQuestionMark className="size-4 text-yellow-600 dark:text-yellow-400" />

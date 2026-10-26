@@ -76,7 +76,7 @@ import {
   ElicitationSchemaForm,
   schemaFields,
 } from "./ElicitationSchemaForm";
-import { ExitPlanModeReview } from "./ExitPlanModeReview";
+import { ExitPlanModeReview, PlanMarkdown } from "./ExitPlanModeReview";
 
 const AUTO_RESOLVED_DETAIL =
   "This request was answered outside this view, for example in the " +
@@ -671,10 +671,12 @@ export function ApprovalCard({
           {isAskUserQuestion ? (
             <AskUserQuestionForm
               questions={askPayload.questions}
-              onSubmit={submitAnswers}
-              onReject={() => submitBinary("decline")}
+              onSubmit={() => {}}
+              onReject={() => {}}
               readOnly
             />
+          ) : isExitPlanMode ? (
+            <PlanMarkdown plan={planMarkdown} />
           ) : (
             <>
               <ElicitationMessage message={message} className="whitespace-pre-line" />

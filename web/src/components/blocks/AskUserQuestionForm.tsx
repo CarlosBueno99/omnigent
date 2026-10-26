@@ -2,7 +2,7 @@
 // isOther controls custom input; submit requires an answer to every question.
 
 import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
-import { type ChangeEvent, useState } from "react";
+import { type ChangeEvent, Fragment, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { ClaudeQuestion } from "@/lib/askUserQuestion";
 
@@ -189,8 +189,9 @@ export function AskUserQuestionForm({
         selections[currentKey]
       ? [selections[currentKey] as string]
       : [];
+  // A read-only form cannot select, so it shows every option's preview.
   const previewsToShow = current.options.filter(
-    (opt) => selectedLabels.includes(opt.label) && opt.preview,
+    (opt) => (readOnly || selectedLabels.includes(opt.label)) && opt.preview,
   );
 
   const allowCustomInput = current.isOther !== false && !readOnly;
@@ -313,12 +314,12 @@ export function AskUserQuestionForm({
         {previewsToShow.length > 0 && (
           <div className="flex flex-col gap-1" data-testid="ask-user-question-previews">
             {previewsToShow.map((opt) => (
-              <pre
-                key={opt.label}
-                className="overflow-x-auto rounded bg-muted px-2 py-1 font-mono text-sm whitespace-pre-wrap"
-              >
-                {opt.preview}
-              </pre>
+              <Fragment key={opt.label}>
+                {readOnly && <span className="text-sm text-muted-foreground">{opt.label}</span>}
+                <pre className="overflow-x-auto rounded bg-muted px-2 py-1 font-mono text-sm whitespace-pre-wrap">
+                  {opt.preview}
+                </pre>
+              </Fragment>
             ))}
           </div>
         )}

@@ -36,6 +36,20 @@ interface ExitPlanModeReviewProps {
   onReject: (feedback: string) => void;
 }
 
+/** The plan body without the review actions. */
+export function PlanMarkdown({ plan }: { plan: string }) {
+  // text-foreground: the plan body is the card's primary content, so it
+  // renders in normal text color like a regular assistant message —
+  // escaping AlertDescription's muted default (which otherwise washes
+  // the whole plan out). The short lead-in caption above stays muted
+  // for hierarchy, matching the Codex command card.
+  return (
+    <div className="text-ui text-foreground">
+      <FilePathAwareMessageResponse>{plan}</FilePathAwareMessageResponse>
+    </div>
+  );
+}
+
 export function ExitPlanModeReview({
   plan,
   onAcceptAuto,
@@ -47,14 +61,7 @@ export function ExitPlanModeReview({
 
   return (
     <div className="flex flex-col gap-2" data-testid="exit-plan-mode-review">
-      {/* text-foreground: the plan body is the card's primary content, so it
-          renders in normal text color like a regular assistant message —
-          escaping AlertDescription's muted default (which otherwise washes
-          the whole plan out). The short lead-in caption above stays muted
-          for hierarchy, matching the Codex command card. */}
-      <div className="text-ui text-foreground">
-        <FilePathAwareMessageResponse>{plan}</FilePathAwareMessageResponse>
-      </div>
+      <PlanMarkdown plan={plan} />
       {rejecting ? (
         <div className="flex flex-col gap-2 pt-1" data-testid="exit-plan-mode-feedback">
           <Textarea

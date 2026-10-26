@@ -43,6 +43,7 @@ with their own terminal retain the switcher.
   off while a rail-opened shell owns the main view.
 - On a phone, use the view mode choice in the header menu.
 - Choose Resume when the terminal shows as stopped.
+- Choose Open terminal on a chat card that says "Answer in the terminal".
 - On desktop with `grid_sessions_display_ui` enabled, use each grid cell's header switch.
   The shortcut targets the active cell; shells remain in the shared Workspace.
 - On desktop with `splittable_terminal_view_ui` enabled, use the header's "Split

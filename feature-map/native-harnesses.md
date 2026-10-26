@@ -24,7 +24,8 @@ implements them separately, so a fix for one harness does not reach the others.
 - `smart-routing`: Pi applies the chosen route before inference from the
   composer or native terminal; a tool turn and follow-up retain history.
 - `approvals`: tool calls the harness gates show an approval card in chat, and
-  the answer reaches the harness.
+  the answer reaches the harness. If Claude's permission hook exits mid-turn,
+  the card stays, read-only, and says to answer in the terminal.
 - `resume`: resume a previous conversation from the CLI (`--resume`, or a bare
   `--resume` picker that lists only this host's sessions) or by reopening it.
 - `pi-rebuilt-tool-names`: Pi forks and cold resumes keep matching tool names
@@ -117,12 +118,14 @@ before entering the harness menu. Then start a new CLI or web session.
 
 **Approval inbox:** open Inbox in the sidebar to answer a pending permission
 without opening its session. Antigravity's Chat and Inbox cards both offer
-the advertised session and saved-rule choices.
+the advertised session and saved-rule choices. A Claude prompt waiting in its
+terminal shows read-only there too.
 
 **Approval links:** open a pending permission's standalone approval link.
 Claude directory requests show the exact directories in Chat, Inbox, and the
 standalone page. Approve once, reject, or allow those directories for the
-session; the directory choice preserves the current permission mode.
+session; the directory choice preserves the current permission mode. A Claude
+prompt waiting in its terminal shows read-only on the standalone page.
 
 **Skill contents:** Settings → Harnesses → configured harness card (or gear),
 then Skills → a skill, or Plugins → a plugin → a skill. Back returns to the
@@ -492,6 +495,12 @@ Cross-harness journeys:
   worktree symlink pointing outside that home, request two edits in that
   worktree, and approve directory access on the first prompt. The second edit
   in the granted directory should proceed with Auto still enabled.
+- **`approvals`, Claude prompt after its hook exits:**
+  `tests/server/integration/test_sessions_permission_request_hook.py::test_unanswered_claude_prompt_waits_in_terminal_until_turn_ends`
+  and the "prompt waiting in the terminal" cases in
+  `web/src/components/blocks/ApprovalCard.test.tsx`. To verify Claude itself,
+  kill the hook process while a question is open mid-turn; after about 30
+  seconds the card should switch to "Answer in the terminal".
 - **`approvals`, Kiro delivery and manual retry:**
   `tests/e2e_ui/messages/test_kiro_permission_retry.py::test_kiro_manual_retry`
   (own environment, real browser/server/runner/tmux, fake Kiro) drops the first

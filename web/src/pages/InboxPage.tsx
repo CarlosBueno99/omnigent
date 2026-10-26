@@ -413,6 +413,7 @@ export function InboxPage() {
             rememberScope={item.elicitation.rememberScope}
             codexPersistModes={item.elicitation.codexPersistModes}
             agyPermission={item.elicitation.agyPermission}
+            terminalFallback={item.elicitation.terminalFallback}
             onSubmit={makeSubmit(item)}
             requester={
               item.resolveSessionId !== item.row.id

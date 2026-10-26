@@ -5430,10 +5430,11 @@ function reconcileElicitationBlocks(
       changed = true;
       return { ...currentDelivery, ctx: b.ctx };
     }
-    // The prompt moved to the agent's terminal, or back to chat, during the gap.
+    // The prompt moved between chat and the agent's terminal, or was re-held, during the gap.
     if (
       currentDelivery &&
-      Boolean(currentDelivery.terminalFallback) !== Boolean(b.terminalFallback) &&
+      currentDelivery.terminalFallback?.answerUndelivered !==
+        b.terminalFallback?.answerUndelivered &&
       preGapCards.get(b.elicitationId) === b &&
       !b.nativeDeliveryResolved
     ) {

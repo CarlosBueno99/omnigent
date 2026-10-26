@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ConversationScopeContext } from "@/components/chat/conversationScope";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { childSessionsQueryKey, type ChildSessionInfo } from "@/hooks/useChildSessions";
 import { BlockStream } from "@/lib/blockStream";
@@ -1822,47 +1823,77 @@ describe("ApprovalCard — prompt waiting in the terminal", () => {
     return item;
   }
 
-  it("shows the question's options read-only and points to the terminal", () => {
-    render(<ElicitationCard item={terminalCardItem(false)} />);
+  it.each([
+    { answerUndelivered: false, hint: "waiting for this answer in its terminal" },
+    { answerUndelivered: true, hint: "Your answer didn't reach the agent" },
+  ])(
+    "shows the question's options read-only and points to the terminal (undelivered: $answerUndelivered)",
+    ({ answerUndelivered, hint }) => {
+      render(<ElicitationCard item={terminalCardItem(answerUndelivered)} />);
 
-    const card = screen.getByTestId("approval-card");
-    expect(card.getAttribute("data-state")).toBe("terminal");
-    expect(within(card).getByText("Answer in the terminal")).toBeDefined();
-    expect(within(card).getByText(question.question)).toBeDefined();
-    const staging = within(card).getByRole("radio", { name: /Staging/ });
-    expect(staging).toBeDisabled();
-    expect(within(card).queryByTestId("ask-user-question-submit")).toBeNull();
-    expect(within(card).queryByTestId("ask-user-question-custom-input")).toBeNull();
-    expect(within(card).queryByRole("button", { name: /cancel/i })).toBeNull();
-    expect(screen.getByTestId("approval-card-terminal-hint").textContent).toContain(
-      "waiting for this answer in its terminal",
-    );
-    expect(screen.queryByTestId("approval-card-open-terminal")).toBeNull();
-  });
+      const card = screen.getByTestId("approval-card");
+      expect(card.getAttribute("data-state")).toBe("terminal");
+      expect(within(card).getByText("Answer in the terminal")).toBeDefined();
+      expect(within(card).getByText(question.question)).toBeDefined();
+      const staging = within(card).getByRole("radio", { name: /Staging/ });
+      expect(staging).toBeDisabled();
+      expect(within(card).queryByTestId("ask-user-question-submit")).toBeNull();
+      expect(within(card).queryByTestId("ask-user-question-custom-input")).toBeNull();
+      expect(within(card).queryByRole("button", { name: /cancel/i })).toBeNull();
+      expect(screen.getByTestId("approval-card-terminal-hint").textContent).toContain(hint);
+      expect(screen.queryByTestId("approval-card-open-terminal")).toBeNull();
+    },
+  );
 
-  it("says when an answer given in chat never reached the agent", () => {
-    render(<ElicitationCard item={terminalCardItem(true)} />);
+  it.each([
+    { viewer: "the session itself", requester: null, sideChatId: null, opensTerminal: true },
+    {
+      viewer: "an ancestor of the sub-agent",
+      requester: { sessionId: "conv_child", ancestorSessionId: "conv_parent" },
+      sideChatId: null,
+      opensTerminal: false,
+    },
+    { viewer: "a side chat", requester: null, sideChatId: "conv_child", opensTerminal: false },
+  ])(
+    "offers Open terminal when viewed from $viewer: $opensTerminal",
+    ({ requester, sideChatId, opensTerminal }) => {
+      const setView = vi.fn();
+      const terminalFirst = {
+        isTerminalFirst: true,
+        setView,
+      } as unknown as TerminalFirstContextValue;
+      render(
+        <QueryClientProvider client={new QueryClient()}>
+          <MemoryRouter>
+            <ConversationScopeContext.Provider value={sideChatId}>
+              <TerminalFirstContextProvider value={terminalFirst}>
+                <ApprovalCard
+                  elicitationId="elic_terminal_open"
+                  message="Claude wants to call **Bash**"
+                  phase="pre_tool_use"
+                  policyName="claude_native_permission"
+                  contentPreview="ls -la"
+                  requestedSchema={{}}
+                  status="pending"
+                  response={null}
+                  requester={requester}
+                  terminalFallback={{ answerUndelivered: false }}
+                />
+              </TerminalFirstContextProvider>
+            </ConversationScopeContext.Provider>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
 
-    expect(screen.getByTestId("approval-card-terminal-hint").textContent).toContain(
-      "Your answer didn't reach the agent",
-    );
-  });
-
-  it("opens this session's terminal view", () => {
-    const setView = vi.fn();
-    const terminalFirst = {
-      isTerminalFirst: true,
-      setView,
-    } as unknown as TerminalFirstContextValue;
-    render(
-      <TerminalFirstContextProvider value={terminalFirst}>
-        <ElicitationCard item={terminalCardItem(false)} />
-      </TerminalFirstContextProvider>,
-    );
-
-    fireEvent.click(screen.getByTestId("approval-card-open-terminal"));
-    expect(setView).toHaveBeenCalledExactlyOnceWith("terminal");
-  });
+      const openTerminal = screen.queryByTestId("approval-card-open-terminal");
+      if (!opensTerminal) {
+        expect(openTerminal).toBeNull();
+        return;
+      }
+      fireEvent.click(openTerminal!);
+      expect(setView).toHaveBeenCalledExactlyOnceWith("terminal");
+    },
+  );
 
   it("shows a tool approval without Approve or Reject buttons", () => {
     render(
@@ -1883,6 +1914,63 @@ describe("ApprovalCard — prompt waiting in the terminal", () => {
     expect(screen.getByText("ls -la")).toBeDefined();
     expect(screen.queryByRole("button", { name: /approve/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /reject/i })).toBeNull();
+  });
+
+  it("shows the plan under review without the plan actions", async () => {
+    render(
+      <ApprovalCard
+        elicitationId="elic_terminal_plan"
+        message="Claude wants to call **ExitPlanMode**"
+        phase="pre_tool_use"
+        policyName="claude_native_permission"
+        contentPreview={`ExitPlanMode({"plan": "# Migration plan"})`}
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+        exitPlanMode={{ plan: "# Migration plan\n\n- move the parser\n" }}
+        terminalFallback={{ answerUndelivered: false }}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Migration plan" })).toBeDefined();
+    expect(screen.getByText("move the parser")).toBeDefined();
+    expect(screen.queryByRole("button", { name: /yes, and use auto mode/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /reject with feedback/i })).toBeNull();
+  });
+
+  it("shows every option's preview, since its options cannot be selected", () => {
+    render(
+      <ApprovalCard
+        elicitationId="elic_terminal_previews"
+        message="Claude wants to call **AskUserQuestion**"
+        phase="pre_tool_use"
+        policyName="claude_native_permission"
+        contentPreview=""
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            {
+              question: "Layout?",
+              header: "",
+              options: [
+                { label: "Two-pane", description: "Side-by-side", preview: "[editor] | [output]" },
+                { label: "Single", description: "One pane", preview: "[editor only]" },
+              ],
+              multiSelect: false,
+            },
+          ],
+        }}
+        terminalFallback={{ answerUndelivered: false }}
+      />,
+    );
+
+    const previews = screen.getByTestId("ask-user-question-previews");
+    expect(within(previews).getByText("Two-pane")).toBeDefined();
+    expect(within(previews).getByText("[editor] | [output]")).toBeDefined();
+    expect(within(previews).getByText("Single")).toBeDefined();
+    expect(within(previews).getByText("[editor only]")).toBeDefined();
   });
 });
 

@@ -124,6 +124,22 @@ describe("ApprovePage states", () => {
     ).toBeInTheDocument();
   });
 
+  it("points to the agent's terminal instead of offering approve/reject there", async () => {
+    vi.mocked(identity.authenticatedFetch).mockResolvedValue(
+      jsonResponse({
+        status: "pending",
+        message: "Claude wants to call **Bash**",
+        terminal_fallback: { answer_undelivered: false },
+      }),
+    );
+    renderPage();
+    expect(await screen.findByText("Answer in the terminal")).toBeInTheDocument();
+    expect(screen.getByTestId("approval-card-terminal-hint")).toHaveTextContent(
+      "The agent is waiting for this answer in its terminal, not in chat.",
+    );
+    expect(screen.queryByRole("button", { name: /Approve|Reject/ })).not.toBeInTheDocument();
+  });
+
   it("shows the resolved state when the elicitation is no longer pending", async () => {
     // WHY: a `status: "resolved"` payload means the prompt was already
     // resolved/timed-out/cancelled — no buttons, just an informational alert.
