@@ -1,8 +1,9 @@
-"""Browser journey: a New Chat on a managed sandbox whose repository has a large history.
+"""Browser journey: a New Chat on a Databricks Sandbox whose repository has a large history.
 
-A real server, the production managed-launch pipeline and the real ``omnigent host`` run
-against a storage-bounded local sandbox (see ``_local_exec_sandbox_server``); the remotes
-are generated repositories behind ``https://`` aliases. No browser, API or SSE traffic is mocked.
+The server, managed-launch pipeline, ``DatabricksSandboxLauncher``, ``databricks-sdk`` and
+``omnigent host`` are real; the Sandbox API is local (see ``_databricks_sandbox_server``)
+and the remotes are generated repositories behind ``https://`` aliases. No browser, API
+or SSE traffic is mocked.
 """
 
 from __future__ import annotations
@@ -26,42 +27,42 @@ from playwright.async_api import Page, async_playwright, expect
 
 from tests._helpers.async_thread import run_in_fresh_loop
 from tests.e2e_ui.conftest import _find_free_port, configure_mock_llm, set_fallback_mock_llm
-from tests.e2e_ui.start_session._local_exec_sandbox_server import COMMANDS_LOG
+from tests.e2e_ui.start_session._databricks_sandbox_server import COMMANDS_LOG
 from tests.e2e_ui.start_session._managed_replica_server import terminate
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WEB_UI_INDEX = _REPO_ROOT / "omnigent" / "server" / "static" / "web-ui" / "index.html"
 
-# The sandbox can hold the small repository, the monorepo's current tree and the
-# host's own files, but not the monorepo's complete history.
+# Room for the small repository, the monorepo's current tree and the host's own
+# files, but not the monorepo's complete history.
 SANDBOX_FILE_SIZE_KIB = 12 * 1024
 MONOREPO_REVISIONS = 8
 MONOREPO_REVISION_BYTES = 4 * 1024 * 1024
 MONOREPO_SMALL_FILES = 1500
 
-MONOREPO_URL = "https://monorepo.test/asana/monorepo.git"
-SMALL_REPO_URL = "https://monorepo.test/asana/small-repo.git"
+MONOREPO_URL = "https://monorepo.test/example/monorepo.git"
+SMALL_REPO_URL = "https://monorepo.test/example/small-repo.git"
 AGENT_NAME = "sandbox_probe"
+OWNER_TOKEN = "owner-oauth-placeholder"
 LAUNCH_TIMEOUT_S = 240
+# Keeps each New Chat choice on screen long enough to follow in a recording.
+STEP_PAUSE_MS = 1500
 
 
 @dataclass(frozen=True)
-class BoundedSandboxServer:
+class DatabricksSandboxServer:
     url: str
-    root: Path
+    api_url: str
+    sandboxes: Path
     evidence: Path
 
-    @property
-    def commands(self) -> list[tuple[str, str]]:
-        log = self.root / "sandboxes" / COMMANDS_LOG
-        if not log.exists():
-            return []
-        rows = [line.split("\t", 1) for line in log.read_text().splitlines()]
-        return [(sandbox_id, command) for sandbox_id, command in rows]
+    def commands(self) -> list[str]:
+        log = self.sandboxes / COMMANDS_LOG
+        return log.read_text().splitlines() if log.exists() else []
 
 
 def _git(*args: str, cwd: Path) -> str:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
         GIT_AUTHOR_NAME="Fixture",
@@ -101,11 +102,35 @@ def write_remote_aliases(path: Path, aliases: dict[str, Path]) -> Path:
     return path
 
 
+def _start(
+    argv: list[str], *, env: dict[str, str], log_path: Path, ready_url: str
+) -> subprocess.Popen[bytes]:
+    with log_path.open("w") as log:
+        process = subprocess.Popen(
+            argv,
+            cwd=_REPO_ROOT,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    with httpx.Client(timeout=1, trust_env=False) as client:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            assert process.poll() is None, log_path.read_text()[-4000:]
+            with contextlib.suppress(httpx.HTTPError):
+                if client.get(ready_url).status_code == 200:
+                    return process
+            time.sleep(0.1)
+    terminate(process)
+    pytest.fail(f"{argv[3]} did not start:\n{log_path.read_text()[-4000:]}")
+
+
 @pytest.fixture
-def bounded_sandbox_server(
+def databricks_sandbox_server(
     tmp_path: Path, mock_llm_server_url: str
-) -> Iterator[BoundedSandboxServer]:
-    """Generate the remotes and start the product server on the bounded local sandbox."""
+) -> Iterator[DatabricksSandboxServer]:
+    """Generate the remotes and start the Sandbox API and the `databricks` product server."""
     if not _WEB_UI_INDEX.is_file():
         pytest.skip("web SPA bundle is not built")
     remotes = tmp_path / "remotes"
@@ -129,17 +154,19 @@ def bounded_sandbox_server(
         "executor:\n  model: gpt-4o-mini\n  harness: openai-agents\n"
         "os_env:\n  type: caller_process\n  cwd: .\n  sandbox:\n    type: none\n"
     )
-    port = _find_free_port()
-    url = f"http://127.0.0.1:{port}"
-    root = tmp_path / "server"
-    root.mkdir()
+    api_port, server_port = _find_free_port(), _find_free_port()
+    api_url = f"http://127.0.0.1:{api_port}"
+    url = f"http://127.0.0.1:{server_port}"
+    sandboxes = tmp_path / "sandboxes"
+    server_root = tmp_path / "server"
+    server_root.mkdir()
     evidence = tmp_path / "evidence"
     evidence.mkdir()
     env = {
         **{
             key: value
             for key, value in os.environ.items()
-            if not key.startswith(("OMNIGENT_RUNNER_", "OMNIGENT_HOST_"))
+            if not key.startswith(("OMNIGENT_RUNNER_", "OMNIGENT_HOST_", "DATABRICKS_"))
         },
         "PYTHONPATH": str(_REPO_ROOT),
         "OMNIGENT_CONFIG_HOME": str(config),
@@ -154,50 +181,65 @@ def bounded_sandbox_server(
         "ANTHROPIC_API_KEY": "",
     }
     set_fallback_mock_llm(mock_llm_server_url, "_policy_llm_", '{"action": "allow", "reason": ""}')
-    log_path = evidence / "server.log"
-    with log_path.open("w") as log:
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "tests.e2e_ui.start_session._local_exec_sandbox_server",
-                "--port",
-                str(port),
-                "--root",
-                str(root),
-                "--file-size-kib",
-                str(SANDBOX_FILE_SIZE_KIB),
-                "--git-config",
-                str(git_config),
-            ],
-            cwd=_REPO_ROOT,
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+    module = "tests.e2e_ui.start_session._databricks_sandbox_server"
+    processes: list[subprocess.Popen[bytes]] = []
     try:
-        with httpx.Client(timeout=1, trust_env=False) as client:
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline:
-                assert process.poll() is None, log_path.read_text()[-4000:]
-                with contextlib.suppress(httpx.HTTPError):
-                    if client.get(f"{url}/health").status_code == 200:
-                        break
-                time.sleep(0.1)
-            else:
-                pytest.fail(f"server did not start:\n{log_path.read_text()[-4000:]}")
-        yield BoundedSandboxServer(url, root, evidence)
+        processes.append(
+            _start(
+                [
+                    sys.executable,
+                    "-m",
+                    module,
+                    "api",
+                    "--port",
+                    str(api_port),
+                    "--root",
+                    str(sandboxes),
+                    "--owner-token",
+                    OWNER_TOKEN,
+                    "--file-size-kib",
+                    str(SANDBOX_FILE_SIZE_KIB),
+                    "--git-config",
+                    str(git_config),
+                ],
+                env=env,
+                log_path=evidence / "sandbox-api.log",
+                ready_url=f"{api_url}/.well-known/databricks-config",
+            )
+        )
+        processes.append(
+            _start(
+                [
+                    sys.executable,
+                    "-m",
+                    module,
+                    "server",
+                    "--port",
+                    str(server_port),
+                    "--root",
+                    str(server_root),
+                    "--owner-token",
+                    OWNER_TOKEN,
+                    "--workspace-host",
+                    api_url,
+                ],
+                env=env,
+                log_path=evidence / "server.log",
+                ready_url=f"{url}/health",
+            )
+        )
+        yield DatabricksSandboxServer(url, api_url, sandboxes, evidence)
     finally:
         with contextlib.suppress(httpx.HTTPError):
-            httpx.post(f"{url}/__test/hosts/stop", timeout=20, trust_env=False)
-        terminate(process)
+            httpx.post(f"{api_url}/__test/sandboxes/stop", timeout=20, trust_env=False)
+        for process in reversed(processes):
+            terminate(process)
 
 
 async def _create_sandbox_session(
-    page: Page, rig: BoundedSandboxServer, repo_url: str, prompt: str
+    page: Page, rig: DatabricksSandboxServer, repo_url: str, prompt: str
 ) -> str:
-    """Drive New Chat: agent, sandbox host, repository, first message. Returns the session id."""
+    """Drive New Chat: agent, Databricks Sandbox host, repository, first message."""
     async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         agents = (await client.get(f"{rig.url}/v1/agents")).json()["data"]
     agent_id = next(agent["id"] for agent in agents if agent["name"] == AGENT_NAME)
@@ -206,11 +248,13 @@ async def _create_sandbox_session(
     await page.goto(rig.url)
     await expect(page.get_by_test_id("new-chat-landing-input")).to_be_visible(timeout=30_000)
     await page.get_by_test_id("new-chat-landing-agent-select").click()
+    await page.wait_for_timeout(STEP_PAUSE_MS)
     await page.get_by_test_id(f"new-chat-landing-agent-{agent_id}").click()
     host_chip = page.get_by_test_id("new-chat-landing-host-chip")
     await host_chip.click()
     sandbox_option = page.get_by_test_id("new-chat-landing-sandbox-option")
     await expect(sandbox_option).to_be_visible(timeout=15_000)
+    await page.wait_for_timeout(STEP_PAUSE_MS)
     await sandbox_option.click()
     await expect(host_chip).to_have_attribute("aria-label", re.compile(r"^Host: .*Sandbox"))
     await expect(page.get_by_test_id("new-chat-landing-host-menu")).to_be_hidden()
@@ -220,6 +264,7 @@ async def _create_sandbox_session(
     await repository.click()
     repo_input = page.get_by_test_id("new-chat-landing-repo-input")
     await repo_input.fill(repo_url)
+    await page.wait_for_timeout(STEP_PAUSE_MS)
     await repo_input.press("Enter")
     await expect(repository).to_have_attribute("aria-label", f"Sandbox repositories: {repo_name}")
     await page.keyboard.press("Escape")
@@ -227,13 +272,14 @@ async def _create_sandbox_session(
 
     await page.get_by_test_id("new-chat-landing-input").fill(prompt)
     await expect(page.get_by_test_id("new-chat-landing-submit")).to_be_enabled()
+    await page.wait_for_timeout(STEP_PAUSE_MS)
     await page.get_by_test_id("new-chat-landing-submit").click()
     await expect(page).to_have_url(re.compile(r"/c/[a-f0-9]+"), timeout=30_000)
     return page.url.rsplit("/", 1)[-1]
 
 
 async def _await_launch_outcome(
-    page: Page, rig: BoundedSandboxServer, session_id: str, reply: str
+    page: Page, rig: DatabricksSandboxServer, session_id: str, reply: str
 ) -> tuple[str, list[str]]:
     """Watch the launch band until the sandbox fails or the agent replies."""
     tag = session_id[:8]
@@ -252,13 +298,18 @@ async def _await_launch_outcome(
                     stages.append(label)
                     await page.screenshot(path=str(rig.evidence / f"{tag}-{len(stages)}.png"))
             if await failed.count() and await failed.first.is_visible():
-                await expect(failed.first).to_contain_text("Sandbox launch failed")
+                band = failed.first
+                await expect(band).to_contain_text("Sandbox launch failed")
                 await page.screenshot(path=str(rig.evidence / f"{tag}-failed.png"))
+                await band.locator("button[aria-expanded]").first.click()
+                reason = band.get_by_text(re.compile("failed to clone repository")).first
+                await reason.scroll_into_view_if_needed()
+                await expect(reason).to_be_visible()
+                await asyncio.sleep(5)
+                await page.screenshot(path=str(rig.evidence / f"{tag}-failed-reason.png"))
                 snapshot = (await client.get(f"{rig.url}/v1/sessions/{session_id}")).json()
                 (rig.evidence / f"{tag}-session.json").write_text(json.dumps(snapshot, indent=2))
-                # Hold the terminal state so a recording of the journey stays readable.
-                await asyncio.sleep(3)
-                return (await failed.first.inner_text()).strip(), stages
+                return (await band.inner_text()).strip(), stages
             if await assistant.count() and await assistant.first.is_visible():
                 await page.screenshot(path=str(rig.evidence / f"{tag}-reply.png"))
                 await asyncio.sleep(3)
@@ -271,18 +322,18 @@ async def _await_launch_outcome(
     )
 
 
-async def _drive(rig: BoundedSandboxServer, repo_url: str, prompt: str, reply: str) -> None:
+async def _drive(rig: DatabricksSandboxServer, repo_url: str, prompt: str, reply: str) -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
-        context = await browser.new_context(viewport={"width": 1024, "height": 680})
+        viewport = {"width": 1024, "height": 680}
+        context = await browser.new_context(viewport=viewport, record_video_size=viewport)
         page = await context.new_page()
         try:
             session_id = await _create_sandbox_session(page, rig, repo_url, prompt)
             failure, stages = await _await_launch_outcome(page, rig, session_id, reply)
-            clones = [command for _, command in rig.commands if command.startswith("git clone")]
-            (rig.evidence / "clone-commands.txt").write_text("\n".join(clones) + "\n")
+            clones = [row for row in rig.commands() if "git clone" in row]
             (rig.evidence / f"{session_id[:8]}-stages.txt").write_text(
-                "\n".join([*stages, f"failure: {failure or '-'}"]) + "\n"
+                "\n".join([*stages, f"failure: {failure or '-'}", *clones]) + "\n"
             )
             assert clones, "the managed spin-up never ran git clone"
             assert failure == "", (
@@ -296,24 +347,24 @@ async def _drive(rig: BoundedSandboxServer, repo_url: str, prompt: str, reply: s
 
 
 @pytest.mark.timeout(600)
-def test_managed_sandbox_launch_clones_small_repository(
-    bounded_sandbox_server: BoundedSandboxServer, mock_llm_server_url: str
+def test_databricks_sandbox_launch_clones_small_repository(
+    databricks_sandbox_server: DatabricksSandboxServer, mock_llm_server_url: str
 ) -> None:
     prompt = "Confirm the small repository sandbox is ready."
     reply = "The small repository sandbox is ready."
     configure_mock_llm(
         mock_llm_server_url, [{"text": reply}], key="small-repo-sandbox", match=prompt
     )
-    run_in_fresh_loop(_drive(bounded_sandbox_server, SMALL_REPO_URL, prompt, reply))
+    run_in_fresh_loop(_drive(databricks_sandbox_server, SMALL_REPO_URL, prompt, reply))
 
 
 @pytest.mark.timeout(600)
-def test_managed_sandbox_launch_clones_large_monorepo(
-    bounded_sandbox_server: BoundedSandboxServer, mock_llm_server_url: str
+def test_databricks_sandbox_launch_clones_large_monorepo(
+    databricks_sandbox_server: DatabricksSandboxServer, mock_llm_server_url: str
 ) -> None:
     prompt = "Confirm the monorepo sandbox is ready."
     reply = "The monorepo sandbox is ready."
     configure_mock_llm(
         mock_llm_server_url, [{"text": reply}], key="monorepo-sandbox", match=prompt
     )
-    run_in_fresh_loop(_drive(bounded_sandbox_server, MONOREPO_URL, prompt, reply))
+    run_in_fresh_loop(_drive(databricks_sandbox_server, MONOREPO_URL, prompt, reply))
