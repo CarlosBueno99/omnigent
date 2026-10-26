@@ -14,7 +14,9 @@
 //
 // 2. Turn folding: once settled, each work run collapses behind a
 //    "Worked" row. Assistant messages remain visible in order;
-//    pending elicitations and routing cards stay visible too.
+//    pending elicitations and routing cards stay visible too. With
+//    the opt-in `foldNarration`, earlier messages fold with the work
+//    and only the turn's last message stays visible.
 
 import type { ReactNode } from "react";
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -106,6 +108,8 @@ interface BlockRendererProps {
   showsWorking?: boolean;
   /** Start a fold containing a mid-turn user interjection open. */
   defaultExpanded?: boolean;
+  /** Opt-in: fold all but the turn's last assistant message with the work. */
+  foldNarration?: boolean;
 }
 
 /** The subset of {@link BlockRendererProps} the fold decision reads. */
@@ -119,6 +123,7 @@ type FoldInputs = Pick<
   | "hasPendingElicitation"
   | "showsWorking"
   | "defaultExpanded"
+  | "foldNarration"
 >;
 
 /**
@@ -136,7 +141,7 @@ function turnLiveness({
   isLastAssistant = false,
   hasPendingElicitation = false,
   showsWorking = false,
-}: Omit<FoldInputs, "items" | "continued">): {
+}: Omit<FoldInputs, "items" | "continued" | "foldNarration">): {
   isOwnTurnLive: boolean;
   possiblyLive: boolean;
   isTurnLive: boolean;
@@ -177,7 +182,10 @@ export function rendersOnlyWorkedFold(inputs: FoldInputs): boolean {
   if (inputs.defaultExpanded) return false;
   const { isOwnTurnLive, possiblyLive } = turnLiveness(inputs);
   if (isOwnTurnLive || possiblyLive) return false;
-  const partition = partitionTurn(inputs.items);
+  const partition = partitionTurn(inputs.items, {
+    foldNarration: inputs.foldNarration,
+    continued: inputs.continued,
+  });
   return (
     hasFoldableShape(inputs.items, partition, inputs.continued) &&
     partition.segments.every((segment) => segment.kind === "work")
@@ -206,6 +214,7 @@ export function BlockRenderer({
   lastActivityAtS,
   showsWorking = false,
   defaultExpanded = false,
+  foldNarration = false,
   onRetryError,
 }: BlockRendererProps) {
   const { isOwnTurnLive, possiblyLive, isTurnLive } = turnLiveness({
@@ -217,8 +226,9 @@ export function BlockRenderer({
   });
 
   // A native assistant message has no reliable final-answer marker.
-  // Keep each message visible even when a later tool call follows it.
-  const partition = partitionTurn(items);
+  // Keep each message visible even when a later tool call follows it,
+  // unless the user opted into folding all but the last message.
+  const partition = partitionTurn(items, { foldNarration, continued });
   const workRunCount = partition.segments.filter((segment) => segment.kind === "work").length;
   // Once the fold has SHOWN on a settled bubble, possibly-live no
   // longer reopens it. A scheduled wake (a /loop cron or wakeup
@@ -435,9 +445,16 @@ function isTrailingWrapup(item: RenderItem): boolean {
 
 /**
  * Split work from assistant text while preserving order. Text lacks a
- * reliable final-answer marker, so every completed message stays visible.
+ * reliable final-answer marker, so every completed message stays visible
+ * unless `foldNarration` asks to keep only the last one.
  */
-function partitionTurn(items: RenderItem[]): TurnPartition {
+function partitionTurn(
+  items: RenderItem[],
+  {
+    foldNarration = false,
+    continued = false,
+  }: { foldNarration?: boolean; continued?: boolean } = {},
+): TurnPartition {
   let end = items.length;
   const wrapup: RenderItem[] = [];
   while (end > 0 && isTrailingWrapup(items[end - 1]!)) {
@@ -466,7 +483,40 @@ function partitionTurn(items: RenderItem[]): TurnPartition {
     if (lastWork?.kind === "work") lastWork.items.push(...wrapup);
     else segments.push({ kind: "work", items: wrapup, startIndex: end });
   }
-  return { segments };
+  return { segments: foldNarration ? foldNarrationIntoWork(segments, continued) : segments };
+}
+
+/**
+ * Fold every message but the turn's last into the adjacent work runs. A
+ * continued bubble's answer lands in a later bubble, so all of it folds.
+ */
+function foldNarrationIntoWork(segments: TurnSegment[], continued: boolean): TurnSegment[] {
+  const finalTextSegment = continued
+    ? -1
+    : segments.findLastIndex((segment) => segment.kind === "text");
+  const folded: TurnSegment[] = [];
+  const appendWork = (items: RenderItem[], startIndex: number) => {
+    if (items.length === 0) return;
+    const previous = folded[folded.length - 1];
+    if (previous?.kind === "work") previous.items.push(...items);
+    else folded.push({ kind: "work", items: [...items], startIndex });
+  };
+  segments.forEach((segment, position) => {
+    if (segment.kind === "exempt") {
+      folded.push(segment);
+    } else if (segment.kind === "work" || position !== finalTextSegment) {
+      appendWork(segment.items, segment.startIndex);
+    } else {
+      const finalIndex = segment.items.length - 1;
+      appendWork(segment.items.slice(0, finalIndex), segment.startIndex);
+      folded.push({
+        kind: "text",
+        items: [segment.items[finalIndex]!],
+        startIndex: segment.startIndex + finalIndex,
+      });
+    }
+  });
+  return folded;
 }
 
 function isPendingElicitation(item: RenderItem): boolean {
