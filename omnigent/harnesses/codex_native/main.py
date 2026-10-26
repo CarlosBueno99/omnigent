@@ -104,7 +104,7 @@ from omnigent.native.native_terminal import (
 from omnigent.native.native_terminal import (
     normalize_extra_args as _normalize_extra_args,
 )
-from omnigent.native.native_terminal import request_with_429_retry
+from omnigent.native.native_terminal import post_initial_prompt, request_with_429_retry
 from omnigent.native.native_terminal import (
     terminal_attach_url as _attach_url,
 )
@@ -302,7 +302,7 @@ def _codex_auth_unavailable_reason() -> HarnessUnavailableReason | None:
             or native_codex_launch_base_url(launch) is not None
         )
         defers_to_codex_config = not native_codex_launch_pins_model_provider(launch)
-    except Exception:  # noqa: BLE001 - readiness must never raise; fail onto auth.json.
+    except Exception:  # readiness must never raise; fail onto auth.json.
         _logger.debug("codex readiness: launch resolve failed; using auth.json", exc_info=True)
         routes_through_provider = False
     if routes_through_provider and not defers_to_codex_config:
@@ -321,7 +321,7 @@ def _codex_auth_unavailable_reason() -> HarnessUnavailableReason | None:
         if not _codex_auth_json_has_available_credential(source.auth_path):
             return HARNESS_NEEDS_AUTH
         return None
-    except Exception:  # noqa: BLE001 - readiness must never raise.
+    except Exception:  # readiness must never raise.
         _logger.debug("codex readiness: local auth check failed", exc_info=True)
         return HARNESS_NEEDS_AUTH
 
@@ -663,7 +663,7 @@ def _wrapper_spec_raw_instructions(spec_path: Path) -> str | None:
 
     try:
         spec = load_agent_spec(spec_path, expand_env=False)
-    except Exception:  # noqa: BLE001 — best-effort; never block the launch
+    except Exception:  # best-effort; never block the launch
         _logger.warning(
             "Could not resolve raw instructions from wrapper spec %s",
             spec_path,
@@ -864,12 +864,13 @@ def _run_with_remote_server(
                 headers.update(new_headers)
 
             if prompt:
-                await _post_initial_prompt(
+                await post_initial_prompt(
                     base_url=base_url,
                     headers=headers,
                     session_id=prepared.session_id,
                     prompt=prompt,
                     auth=attach_auth,
+                    harness_name="Codex",
                 )
                 record_startup_event("initial_prompt_submitted")
             await _attach_terminal_resource(
@@ -1099,50 +1100,6 @@ async def _wait_for_codex_terminal_ready(
     raise click.ClickException(
         f"The runner did not create the Codex terminal for {session_id!r} within {timeout_s:.0f}s."
     )
-
-
-async def _post_initial_prompt(
-    *,
-    base_url: str,
-    headers: dict[str, str],
-    session_id: str,
-    prompt: str,
-    auth: httpx.Auth | None,
-) -> None:
-    """
-    Send the first Codex prompt through Omnigent instead of the app-server.
-
-    :param base_url: Omnigent server base URL.
-    :param headers: HTTP auth headers for Omnigent requests.
-    :param session_id: Session id, e.g. ``"conv_abc123"``.
-    :param prompt: User prompt text.
-    :param auth: Optional refresh-capable HTTP auth for long-lived
-        Databricks-backed sessions.
-    :returns: None.
-    :raises click.ClickException: If Omnigent rejects the prompt.
-    """
-    from omnigent.cli_auth import open_server_client
-
-    async with open_server_client(
-        base_url,
-        headers=headers,
-        auth=auth,
-        timeout=httpx.Timeout(30.0),
-    ) as client:
-        resp = await client.post(
-            f"/v1/sessions/{url_component(session_id)}/events",
-            json={
-                "type": "message",
-                "data": {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": prompt}],
-                },
-            },
-        )
-    if resp.status_code >= 400:
-        raise click.ClickException(
-            f"Codex initial prompt failed ({resp.status_code}): {error_text(resp)}"
-        )
 
 
 async def _prepare_codex_terminal(
@@ -2311,10 +2268,10 @@ def _codex_rollout_records_from_session_items(
         items,
         interrupted_response_ids=interrupted_response_ids,
     )
-    items = _codex_items_with_outputs_in_call_order(items)
+    items = _codex_items_with_outputs_in_call_order(
+        [item for item in items if _session_item_response_id(item) not in interrupted_response_ids]
+    )
     for index, item in enumerate(items):
-        if _session_item_response_id(item) in interrupted_response_ids:
-            continue
         item_call_id = item.get("call_id")
         if (
             item.get("type") == "function_call_output"

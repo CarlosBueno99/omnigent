@@ -38,6 +38,7 @@ from omnigent.runner.transports.ws_tunnel.serve import (
     RUNNER_TUNNEL_REJECTION_PREFIX,
     RunnerTunnelAuthRejectedError,
 )
+from omnigent.util.event_loop_watchdog import monitor_event_loop
 from omnigent.util.threaded_auth import ThreadedAuth
 from omnigent.version import VERSION
 
@@ -381,8 +382,13 @@ class _RunnerDatabricksAuth(ThreadedAuth):
         # none recorded. Set once here; it persists across the retry yield.
         if self._server_url:
             from omnigent.cli_auth import databricks_request_headers
+            from omnigent.runner.session_requests import REQUEST_HOST_EXTENSION
 
-            request.headers.update(databricks_request_headers(self._server_url))
+            request.headers.update(
+                databricks_request_headers(
+                    self._server_url, host_id=request.extensions.get(REQUEST_HOST_EXTENSION)
+                )
+            )
         if self._factory is not None:
             token, declined = _call_factory_with_declined(self._factory)
             if not token:
@@ -1609,7 +1615,7 @@ def create_app(
                     "Reaped %d orphaned native bridge dir(s) from prior runs",
                     _reaped_bridge_dirs,
                 )
-        except Exception:  # noqa: BLE001 — housekeeping must never block startup
+        except Exception:  # housekeeping must never block startup
             _logger.debug("native bridge-dir orphan sweep failed", exc_info=True)
 
     # Reuse the tunnel binding token for runner-side request auth.
@@ -1717,7 +1723,8 @@ def create_app(
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await _start_pm()
         try:
-            yield
+            with monitor_event_loop(process_role="runner"):
+                yield
         finally:
             await _stop_pm()
 
@@ -1804,7 +1811,7 @@ async def _run_tunnel_from_env() -> None:
         from omnigent.runtime import telemetry
 
         telemetry.init("omni-runner")
-    except Exception:  # noqa: BLE001 — best-effort; tracing failure must not crash the runner
+    except Exception:  # best-effort; tracing failure must not crash the runner
         _logger.debug(
             "telemetry init failed in runner",
             exc_info=True,
@@ -1925,7 +1932,7 @@ async def _run_tunnel_from_env() -> None:
                         allowed_origins=frozenset({allowed_origin}),
                     )
                 )
-        except Exception:  # noqa: BLE001 — optimization only; never block the tunnel
+        except Exception:  # optimization only; never block the tunnel
             _logger.warning(
                 "direct-attach listener setup failed",
                 exc_info=True,
