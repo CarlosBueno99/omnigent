@@ -119,11 +119,11 @@ describe("PullRequestStrip", () => {
     const onUnlink = vi.fn();
     const strip = renderStrip({ onSelect, onUnlink });
     const unlinkTwo = strip.getByRole("button", { name: `Unlink ${TWO_LABEL}` });
-    // Hidden until its card is hovered or focused; always shown for touch input.
+    // Hidden until its card is hovered or keyboard-focused; always shown for touch input.
     expect(unlinkTwo).toHaveClass(
       "opacity-0",
       "group-hover/card:opacity-100",
-      "group-focus-within/card:opacity-100",
+      "group-has-[:focus-visible]/card:opacity-100",
       "pointer-coarse:opacity-100",
     );
     await userEvent.hover(unlinkTwo);

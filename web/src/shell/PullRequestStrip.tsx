@@ -157,8 +157,9 @@ function PullRequestCard({
             aria-label={`Unlink ${label}`}
             disabled={unlinkDisabled}
             onClick={onUnlink}
-            // Touch screens can't hover, so the button stays visible there.
-            className="absolute top-1 right-1 size-5 text-muted-foreground opacity-0 group-focus-within/card:opacity-100 group-hover/card:opacity-100 pointer-coarse:opacity-100"
+            // Shown on hover and keyboard focus only: a clicked card keeps focus, so
+            // focus-within would pin it on the selected card. Touch can't hover.
+            className="absolute top-1 right-1 size-5 text-muted-foreground opacity-0 group-hover/card:opacity-100 group-has-[:focus-visible]/card:opacity-100 pointer-coarse:opacity-100"
           >
             <Trash2Icon className="size-3" aria-hidden />
           </Button>

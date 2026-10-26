@@ -199,9 +199,13 @@ def test_session_pr_selection_and_unlink(
     expect(page.get_by_role("tooltip")).to_have_count(0)
     page.screenshot(path=str(tmp_path / "session-pr-strip.png"), animations="disabled")
 
-    # Keyboard focus reveals a card's tooltip and unlink button; Enter selects it.
+    # Tabbing to a card reveals its tooltip and unlink button; Enter selects it.
     page.mouse.move(0, 0)
-    second_card.focus()
+    first_card.focus()
+    page.keyboard.press("Tab")
+    expect(unlink_first).to_be_focused()
+    page.keyboard.press("Tab")
+    expect(second_card).to_be_focused()
     _expect_pr_tooltip(page, two_label, second_card)
     expect(unlink_second).to_have_css("opacity", "1")
     expect(unlink_first).to_have_css("opacity", "0")
@@ -224,6 +228,10 @@ def test_session_pr_selection_and_unlink(
     first_card.click()
     expect(first_card).to_have_attribute("aria-current", "true")
     expect(first_title).to_be_visible()
+    # A clicked card keeps focus, but its unlink button hides once the pointer leaves.
+    page.mouse.move(0, 0)
+    expect(first_card).to_be_focused()
+    expect(unlink_first).to_have_css("opacity", "0")
     second_card.click()
     expect(second_card).to_have_attribute("aria-current", "true")
     expect(second_title).to_be_visible()
