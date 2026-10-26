@@ -1613,6 +1613,7 @@ async def test_codex_model_catalog_writeback_uses_session_provider(
 ) -> None:
     """Session rows stay in their provider's shared cache, including across sessions."""
     from omnigent.harnesses.codex_native import app_server as codex
+    from omnigent.harnesses.codex_native.databricks import resolve_model
     from omnigent.models import model_catalog_store
     from omnigent.runner.session_init_protocol import (
         RunnerSessionInitEnvelope,
@@ -1755,9 +1756,7 @@ async def test_codex_model_catalog_writeback_uses_session_provider(
                 ("other", "https://b.example"),
             ):
                 assert (
-                    codex._resolve_databricks_codex_model(
-                        host, provider, "shared-picker", codex_path=sys.executable
-                    )
+                    resolve_model(host, provider, "shared-picker", codex_path=sys.executable)
                     == f"{provider}.schema.model"
                 )
             credentials.assert_not_called()

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 import types
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -16,6 +18,7 @@ from omnigent.onboarding.ucode_setup import (
     configure_ucode_for_workspace,
     find_ucode_command,
     model_gateway_workspace_urls,
+    refresh_ucode_auth_command,
     ucode_workspace_exists,
 )
 
@@ -60,6 +63,52 @@ def test_find_ucode_command_raises_when_no_runner_exists() -> None:
             assert "uvx is not on PATH" in str(exc)
         else:
             raise AssertionError("expected ClickException")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "existing",
+        "custom",
+        "relative",
+        "shell",
+        "no-helper",
+        "empty",
+        "malformed",
+        "subcommand",
+        "quoting",
+    ],
+)
+def test_ucode_auth_repair_preserves_other_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    binary = tmp_path / "archive-v0" / "entry" / "bin" / "ucode"
+    if case == "existing":
+        binary.parent.mkdir(parents=True)
+        binary.write_text("installed helper")
+    elif case == "custom":
+        binary = tmp_path / "custom" / "ucode"
+    command = shlex.join([str(binary), "auth-token", "--host", "https://gateway.example.com"])
+    if case == "relative":
+        command = "ucode auth-token --host https://gateway.example.com"
+    elif case == "shell":
+        command += " | custom-filter"
+    elif case == "empty":
+        command = ""
+    elif case == "malformed":
+        command += " '"
+    elif case == "subcommand":
+        command = shlex.join([str(binary), "configure"])
+    elif case == "quoting":
+        command = f'"{binary}" auth-token'
+
+    def helper_prefix() -> list[str]:
+        if case != "no-helper":
+            raise AssertionError("preserved commands must not trigger helper discovery")
+        raise ClickException("helper not installed")
+
+    monkeypatch.setattr("omnigent.onboarding.ucode_setup.find_ucode_command", helper_prefix)
+    assert refresh_ucode_auth_command(command) == command
 
 
 def test_build_ucode_configure_command_uses_workspaces() -> None:

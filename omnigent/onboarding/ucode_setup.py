@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import threading
@@ -35,6 +36,33 @@ _UCODE_AGENT_NAMES: tuple[str, ...] = ("claude", "codex", "pi")
 # defeat a mutable branch's stale cache.
 _UCODE_GIT_REF = "304e4a29c5ca73b3bfaaf1911e38d0080833fda4"
 _UCODE_UVX_SOURCE = f"git+https://github.com/databricks/ucode@{_UCODE_GIT_REF}"
+
+
+def refresh_ucode_auth_command(command: str) -> str:
+    """Replace a deleted uv archive helper while retaining its auth-token arguments."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return command
+    if len(argv) < 2 or argv[1] != "auth-token":
+        return command
+    executable = Path(argv[0])
+    if (
+        not executable.is_absolute()
+        or executable.name != "ucode"
+        or executable.parent.name != "bin"
+        or executable.parent.parent.parent.name != "archive-v0"
+        or executable.exists()
+    ):
+        return command
+    # Only ucode's generated, literal auth-token argv is eligible, never a shell pipeline.
+    if shlex.join(argv) != command:
+        return command
+    try:
+        prefix = find_ucode_command()
+    except click.ClickException:
+        return command
+    return shlex.join([*prefix, *argv[1:]])
 
 
 def model_gateway_workspace_urls() -> list[str]:
