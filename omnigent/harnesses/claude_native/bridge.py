@@ -74,11 +74,12 @@ from omnigent.harnesses.claude_native.failure_telemetry import claude_failure_co
 from omnigent.harnesses.claude_native.message_display_hook import MESSAGE_DELTAS_FILE
 from omnigent.harnesses.claude_native.status import CONTEXT_RAW_FILE
 from omnigent.harnesses.claude_native.submit_verification import (
-    QueueReplay,
+    PromptQueue,
     SubmitBoundary,
+    advance_prompt_queue,
     capture_submit_boundary,
     has_matching_hook_refusal,
-    replay_prompt_queue,
+    start_prompt_queue,
 )
 from omnigent.harnesses.diagnostics import (
     detect_sign_in_prompt,
@@ -4441,7 +4442,13 @@ def _paste_and_submit(
             "Claude is waiting for an explicit answer; message not sent."
         )
     delivery_diagnostics.set_stage("submitting")
-    submit_boundary = capture_transcript_boundary(bridge_dir)
+    transcript_path = read_transcript_path(bridge_dir)
+    native_session_id = read_claude_session_id(bridge_dir)
+    submit_boundary = (
+        capture_submit_boundary(transcript_path, native_session_id)
+        if transcript_path is not None and native_session_id is not None
+        else None
+    )
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
     delivery_diagnostics.record_details(submit_sent=True)
     if not draft_seen:
@@ -5832,28 +5839,35 @@ def has_pending_user_prompt(bridge_dir: Path) -> bool:
     return _user_prompt_visible(_capture_pane(socket_path, target))
 
 
-def capture_transcript_boundary(bridge_dir: Path) -> SubmitBoundary | None:
-    """Pin the end of the session's native transcript, or ``None`` before hooks name it."""
+def start_queued_prompts(bridge_dir: Path) -> PromptQueue | None:
+    """
+    Start following Claude Code's prompt queue at the end of the session's transcript.
+
+    :param bridge_dir: The session's native bridge directory.
+    :returns: The queue, or ``None`` before hooks name the session and transcript.
+    :raises OSError: When the transcript cannot be read now.
+    """
     transcript_path = read_transcript_path(bridge_dir)
     native_session_id = read_claude_session_id(bridge_dir)
     if transcript_path is None or native_session_id is None:
         return None
-    return capture_submit_boundary(transcript_path, native_session_id)
+    return start_prompt_queue(transcript_path, native_session_id)
 
 
-def replay_queued_prompts(bridge_dir: Path, boundary: SubmitBoundary) -> QueueReplay:
+def advance_queued_prompts(bridge_dir: Path, queue: PromptQueue) -> PromptQueue | None:
     """
-    Replay the prompts queued in Claude Code after *boundary* that it may not have taken.
+    Follow Claude Code's prompt queue past *queue*'s boundary.
 
-    Empty once the session or transcript changed, or the pane's process exited:
+    ``None`` once the session or transcript changed, or the pane's process exited:
     the queue lives only in that process.
 
     :param bridge_dir: The session's native bridge directory.
-    :param boundary: Transcript boundary from :func:`capture_transcript_boundary`.
-    :returns: The replayed queue; non-text entries have ``None`` text.
+    :param queue: The queue followed so far, from :func:`start_queued_prompts`.
+    :returns: The advanced queue; non-text entries have ``None`` text.
+    :raises OSError: When the transcript cannot be read now.
     """
-    if not _boundary_is_current(bridge_dir, boundary):
-        return QueueReplay(prompts=[], counted=True)
+    if not _boundary_is_current(bridge_dir, queue.boundary):
+        return None
     info = _read_json_file(bridge_dir / _TMUX_FILE)
     socket_path, target = info.get("socket_path"), info.get("tmux_target")
     if (
@@ -5861,8 +5875,8 @@ def replay_queued_prompts(bridge_dir: Path, boundary: SubmitBoundary) -> QueueRe
         and isinstance(target, str)
         and _claude_pane_state(socket_path, target).alive is False
     ):
-        return QueueReplay(prompts=[], counted=True)
-    return replay_prompt_queue(boundary)
+        return None
+    return advance_prompt_queue(queue)
 
 
 def auto_mode_billing_notice_visible(pane: str) -> bool:

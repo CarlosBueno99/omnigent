@@ -23,8 +23,8 @@ from omnigent.harnesses.claude_native.bridge import (
     ClaudeTerminalExited,
     ClaudeUserPromptPending,
     TmuxSessionNotAdvertised,
+    advance_queued_prompts,
     cancellable_injection,
-    capture_transcript_boundary,
     has_pending_user_prompt,
     inject_slash_command,
     inject_user_message,
@@ -36,9 +36,9 @@ from omnigent.harnesses.claude_native.bridge import (
     read_launch_model,
     read_model_env,
     read_model_picker_values,
-    replay_queued_prompts,
+    start_queued_prompts,
 )
-from omnigent.harnesses.claude_native.submit_verification import QueueReplay, SubmitBoundary
+from omnigent.harnesses.claude_native.submit_verification import PromptQueue
 from omnigent.inner.executor import (
     EnqueuedContent,
     Executor,
@@ -59,10 +59,8 @@ from omnigent.models.claude_model_vocabulary import claude_model_command_arg, no
 
 _logger = logging.getLogger(__name__)
 
-# How long a turn holds its message before anything is typed: behind a /-led
-# message queued in Claude Code, then for the person to answer a Claude question
-# or permission prompt. Inside the server's 600 s pending-input lifetime, so a
-# message still held at the end is reported.
+# Longest a message is held untyped, behind a queued /-led message or a Claude prompt;
+# inside the server's 600 s pending-input lifetime, so a message still held is reported.
 _ANSWER_HOLD_S = 8 * 60.0
 _ANSWER_POLL_S = 1.0
 _INACTIVE_SESSION_MESSAGE = (
@@ -106,9 +104,8 @@ class ClaudeNativeExecutor(Executor):
         # ``/model`` when the model actually changes. Seeded lazily from the
         # spawn ``launch_model`` on the first turn (``None`` = not yet known).
         self._applied_model: str | None = None
-        # Transcript end captured while Claude Code's queue was empty; its queue
-        # log since then is replayed before typing.
-        self._queue_boundary: SubmitBoundary | None = None
+        # Claude Code's prompt queue, followed through its transcript log.
+        self._prompt_queue: PromptQueue | None = None
         # Queued prompts already held for as long as allowed.
         self._released_prompts: set[int] = set()
 
@@ -224,64 +221,66 @@ class ClaudeNativeExecutor(Executor):
         """
         Hold the next message while a message starting with ``/`` may wait in Claude's queue.
 
-        While a turn runs, Claude Code folds queued prompts into it at the next tool
-        call but keeps a ``/``-led one (a command, skill or absolute path) for the
-        turn's end, so a message typed now would overtake it. Past *deadline* the
-        message is delivered anyway, and the prompts it waited for hold nothing more.
+        Claude folds later queued messages into the running turn ahead of it. Past
+        *deadline* the message is delivered anyway, and the prompts it waited for
+        hold nothing more.
 
         :param deadline: Event-loop time the hold ends at.
         :returns: Whether this session still owns the pane after the hold.
         """
         loop = asyncio.get_running_loop()
-        replay = await self._replay_queue()
-        held_session = self._queue_boundary.native_session_id if self._queue_boundary else None
-        held = self._holds(replay)
+        queue = await self._follow_queue()
+        held_session = queue.boundary.native_session_id if queue else None
+        held = self._holds(queue)
         if held:
             _logger.info(
                 "claude-native: holding the message until Claude takes a queued /-led message",
                 extra={"session_id": self._request_session_id},
             )
-            while self._holds(replay) and loop.time() < deadline:
+            while self._holds(queue) and loop.time() < deadline:
                 await asyncio.sleep(_ANSWER_POLL_S)
-                replay = await self._replay_queue()
-            if self._holds(replay):
+                queue = await self._follow_queue()
+            if queue is not None and self._holds(queue):
                 _logger.warning(
                     "claude-native: a queued /-led message is still waiting; delivering anyway",
                     extra={"session_id": self._request_session_id},
                 )
-                self._released_prompts.update(prompt.record_index for prompt in replay.prompts)
-        if replay.counted and not replay.prompts:
-            try:
-                boundary = await asyncio.to_thread(capture_transcript_boundary, self._bridge_dir)
-            except (OSError, ValueError):
-                boundary = None
-            self._queue_boundary = boundary
-            self._released_prompts.clear()
-        if held:
+                self._released_prompts.update(prompt.offset for prompt in queue.prompts)
             # /clear starts a new native session before this session gives up the pane.
             native_session = await asyncio.to_thread(read_claude_session_id, self._bridge_dir)
             if native_session != held_session:
                 return False
         return _session_is_active(self._bridge_dir, self._request_session_id)
 
-    async def _replay_queue(self) -> QueueReplay:
-        """Replay Claude's queue since :attr:`_queue_boundary`; empty before one is captured."""
-        if self._queue_boundary is None:
-            return QueueReplay(prompts=[], counted=True)
-        try:
-            return await asyncio.to_thread(
-                replay_queued_prompts, self._bridge_dir, self._queue_boundary
-            )
-        except (OSError, ValueError):
-            return QueueReplay(prompts=[], counted=False)
+    async def _follow_queue(self) -> PromptQueue | None:
+        """Advance :attr:`_prompt_queue`, starting at the transcript's end when there is none."""
+        if self._prompt_queue is not None:
+            try:
+                self._prompt_queue = await asyncio.to_thread(
+                    advance_queued_prompts, self._bridge_dir, self._prompt_queue
+                )
+            except (OSError, ValueError, RuntimeError):
+                # Unreadable for now: keep what the log showed last.
+                return self._prompt_queue
+        if self._prompt_queue is None:
+            try:
+                self._prompt_queue = await asyncio.to_thread(
+                    start_queued_prompts, self._bridge_dir
+                )
+            except (OSError, ValueError, RuntimeError):
+                self._prompt_queue = None
+        queue = self._prompt_queue
+        if queue is None or not queue.prompts:
+            self._released_prompts.clear()
+        return queue
 
-    def _holds(self, replay: QueueReplay) -> bool:
+    def _holds(self, queue: PromptQueue | None) -> bool:
         """Whether a ``/``-led prompt that may still be queued holds the next message."""
-        return any(
-            prompt.record_index not in self._released_prompts
+        return queue is not None and any(
+            prompt.offset not in self._released_prompts
             and prompt.text is not None
             and prompt.text.strip().startswith("/")
-            for prompt in replay.prompts
+            for prompt in queue.prompts
         )
 
     async def _inject_prompt(self, text: str, notices: list[str]) -> None:

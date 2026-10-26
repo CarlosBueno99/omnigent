@@ -152,7 +152,7 @@ async def _turn(executor: ClaudeNativeExecutor, text: str) -> None:
     assert await _turn_events(executor, text) == [TurnComplete(response=None)]
 
 
-async def _settle(claude: _ClaudeCode, task: asyncio.Future[object]) -> None:
+async def _settle(claude: _ClaudeCode, task: asyncio.Future[_Result]) -> None:
     """Return once *task* finished or the executor read Claude's queue a few more times."""
     replays = claude.replays
     for _ in range(200):
@@ -285,6 +285,68 @@ async def test_a_message_held_past_the_limit_is_delivered(
     claude.tool_call()
 
     assert claude.model_saw == ["bravo", "charlie", _SLASH_LED, _SECOND_SLASH_LED, "delta"]
+
+
+@pytest.mark.parametrize("disruption", ["large-tool-output", "unreadable-transcript"])
+@pytest.mark.asyncio
+async def test_the_hold_outlasts_a_log_it_cannot_read_at_once(
+    claude: _ClaudeCode, tmp_path: Path, disruption: str
+) -> None:
+    """A large or briefly unreadable transcript does not count as an empty queue."""
+    executor = ClaudeNativeExecutor(tmp_path / "bridge")
+    claude.busy = True
+    await _steer(executor, _SLASH_LED)
+    if disruption == "large-tool-output":
+        output = {"type": "user", "sessionId": _SESSION, "content": "x" * (17 * 1024 * 1024)}
+        with claude.transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(output) + "\n")
+        bravo = await _held_send(claude, _steer(executor, "bravo"))
+    else:
+        bravo = await _held_send(claude, _steer(executor, "bravo"))
+        moved = claude.transcript.rename(tmp_path / "moved.jsonl")
+        claude.transcript.mkdir()
+        await _settle(claude, bravo)
+        claude.transcript.rmdir()
+        moved.rename(claude.transcript)
+    assert claude.typed == [_SLASH_LED], "bravo must wait while the /-led message is queued"
+
+    claude.tool_call()
+    claude.end_turn()
+    await asyncio.wait_for(bravo, timeout=5)
+    claude.tool_call()
+
+    assert claude.model_saw == [_SLASH_LED, "bravo"]
+
+
+@pytest.mark.parametrize(
+    "earlier,taken_at_turn_end",
+    [("typed into the pane", False), ("/home/me/earlier.txt read this first", True)],
+    ids=["folded", "taken-at-turn-end"],
+)
+@pytest.mark.asyncio
+async def test_a_message_queued_before_the_executor_leaves_later_holds_working(
+    claude: _ClaudeCode, tmp_path: Path, earlier: str, taken_at_turn_end: bool
+) -> None:
+    """Claude taking a message queued before the executor followed its log is not a stuck entry."""
+    claude.busy = True
+    claude.submit(earlier)
+    executor = ClaudeNativeExecutor(tmp_path / "bridge")
+    await _steer(executor, "alpha")
+    claude.tool_call()
+    if taken_at_turn_end:
+        claude.end_turn()
+    await _steer(executor, _SLASH_LED)
+
+    bravo = await _held_send(claude, _steer(executor, "bravo"))
+    assert claude.typed == ["alpha", _SLASH_LED], (
+        "bravo must wait while the /-led message is queued"
+    )
+    claude.tool_call()
+    claude.end_turn()
+    await asyncio.wait_for(bravo, timeout=5)
+    claude.tool_call()
+
+    assert claude.model_saw[-2:] == [_SLASH_LED, "bravo"]
 
 
 @pytest.mark.parametrize("path", ["steer", "queued-turn"])
