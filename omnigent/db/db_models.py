@@ -1113,6 +1113,117 @@ class SqlComment(OmnigentBase):
     __table_args__ = (CheckConstraint("status IN (1, 2)", name="ck_comments_status"),)
 
 
+def pull_request_url_cksum(url: str) -> bytes:
+    """Return the sha256 digest a session pull request row keys on instead of its URL."""
+    return hashlib.sha256(url.encode("utf-8")).digest()
+
+
+class SqlSessionPullRequest(OmnigentBase):
+    """SQLAlchemy model for the ``session_pull_requests`` table.
+
+    The pull requests linked to a session, with the last state its host
+    fetched, so they stay visible while the host is offline. The host remains
+    the only forge client; the server stores what it reports. Unlinking deletes
+    the row and records a :class:`SqlSessionPullRequestUnlink`. The store caps
+    rows per session. Cleaned up with the conversation.
+
+    :param url_cksum: sha256 of ``url``. It keys the row because a URL of up to
+        2048 characters is too long for a MySQL primary key.
+    :param url: The PR's canonical URL as the host's git provider normalized it.
+    :param provider: Git provider id, e.g. ``"github"``.
+    :param host: Forge host, e.g. ``"github.com"``.
+    :param repository: Base repository, e.g. ``"owner/repo"``.
+    :param number: The PR number.
+    :param relationship: How the PR joined the session, an int code (see
+        :data:`omnigent.db.enum_codecs.SESSION_PR_RELATIONSHIP`): the agent created
+        or worked on it, the user attached it, or it matches the checked-out branch
+        (inferred). Inferred PRs list after the others and read "(from branch)";
+        a later report never downgrades it.
+    :param first_seen_at: Epoch microseconds the session first saw the PR. Orders
+        inferred PRs, whose ``last_seen_at`` moves on every branch check.
+    :param last_seen_at: Epoch microseconds of the PR's latest activity in the
+        session (a tool call or branch check, not a fetch). Orders the other PRs,
+        most recent first.
+    :param display_rank: The PR's position in the session's list, derived from the
+        three columns above so the list and the session's primary (first) PR read
+        in index order: ``-last_seen_at`` for PRs the session worked on or the
+        user attached, then ``first_seen_at`` for inferred PRs.
+    :param title: The latest title the host reported, or ``None`` until it has one.
+    :param state: The PR's state, an int code (see
+        :data:`omnigent.db.enum_codecs.SESSION_PR_STATE`), or ``None`` until fetched.
+    :param is_draft: Whether the PR was a draft when its state was fetched.
+    :param state_checked_at: Epoch microseconds of the request that last fetched
+        the PR's details, shown as the last sync time; an older fetch never
+        overwrites a newer one. ``None`` until the PR is selected while the host
+        is online.
+    """
+
+    __tablename__ = "session_pull_requests"
+
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, nullable=False, default=current_workspace_id
+    )
+    conversation_id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    url_cksum: Mapped[bytes] = mapped_column(_CKSUM32, primary_key=True)
+    url: Mapped[str] = mapped_column(String(2048))
+    provider: Mapped[str] = mapped_column(String(64))
+    host: Mapped[str] = mapped_column(String(255))
+    repository: Mapped[str] = mapped_column(String(512))
+    number: Mapped[int] = mapped_column(BigInteger)
+    # Enum stored as a stable int code (see omnigent.db.enum_codecs
+    # SESSION_PR_RELATIONSHIP: inferred=1, worked_on=2, attached=3, created=4).
+    relationship: Mapped[int] = mapped_column(SmallInteger)
+    first_seen_at: Mapped[int] = mapped_column(BigInteger)
+    last_seen_at: Mapped[int] = mapped_column(BigInteger)
+    display_rank: Mapped[int] = mapped_column(BigInteger)
+    title: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Enum stored as a stable int code (see omnigent.db.enum_codecs
+    # SESSION_PR_STATE: OPEN=1, CLOSED=2, MERGED=3).
+    state: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    is_draft: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    state_checked_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "relationship IN (1, 2, 3, 4)", name="ck_session_pull_requests_relationship"
+        ),
+        CheckConstraint("state IN (1, 2, 3)", name="ck_session_pull_requests_state"),
+        Index(
+            "ix_session_pull_requests_display",
+            "workspace_id",
+            "conversation_id",
+            "display_rank",
+            "url_cksum",
+        ),
+    )
+
+
+class SqlSessionPullRequestUnlink(OmnigentBase):
+    """SQLAlchemy model for the ``session_pull_request_unlinks`` table.
+
+    A PR the user unlinked from a session. Reports of it are ignored, and the
+    server sends its URL to the host so the host drops it too. The row is
+    deleted once the host stops reporting the PR, or with the conversation;
+    the store caps rows per session.
+
+    :param url_cksum: sha256 of ``url``, as in :class:`SqlSessionPullRequest`.
+    :param url: The unlinked PR's URL.
+    :param unlinked_at: Epoch microseconds of the unlink.
+    """
+
+    __tablename__ = "session_pull_request_unlinks"
+
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, nullable=False, default=current_workspace_id
+    )
+    conversation_id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    url_cksum: Mapped[bytes] = mapped_column(_CKSUM32, primary_key=True)
+    url: Mapped[str] = mapped_column(String(2048))
+    unlinked_at: Mapped[int] = mapped_column(BigInteger)
+
+
 def policy_name_cksum(name: str) -> bytes:
     """Return the sha256 digest of a policy name.
 
