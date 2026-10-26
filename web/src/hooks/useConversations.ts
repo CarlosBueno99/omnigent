@@ -43,6 +43,7 @@ import {
   PINNED_LABEL_KEY,
   PROJECT_FOLDER_FILTERS,
   PROJECT_LABEL_KEY,
+  isOwnedByViewer,
   recentlyCreatedSessions,
   removeIdsFromPages,
   unmarkRecentlyCreated,
@@ -438,18 +439,19 @@ function withRecentlyCreated(
   queryClient: QueryClient,
   visibility?: "mine" | "shared" | "archived",
 ): ConversationsPage {
-  // Recently-created sessions are always owned (active, not archived), so skip
-  // injection for "shared" and "archived" filters where they would not belong.
+  // Kept-alive rows are active (never archived): your own creates/forks, and
+  // sessions newly shared with you, so the "mine" and "shared" tabs each take
+  // only the rows on their side of ownership.
   if (
     after !== undefined ||
     searchQuery ||
     project ||
-    visibility === "shared" ||
     visibility === "archived" ||
     recentlyCreatedSessions.size === 0
   ) {
     return page;
   }
+  const viewerId = visibility ? getCurrentUserId() : null;
   const present = new Set(page.data.map((c) => c.id));
   const inject: Conversation[] = [];
   for (const [id, snapshot] of recentlyCreatedSessions) {
@@ -462,6 +464,8 @@ function withRecentlyCreated(
     // isn't reverted by re-injecting stale data.
     const row = findCachedConversationRow(queryClient, id) ?? snapshot;
     if (row.archived && !includeArchived) continue;
+    if (visibility === "mine" && !isOwnedByViewer(row, viewerId)) continue;
+    if (visibility === "shared" && isOwnedByViewer(row, viewerId)) continue;
     inject.push(row);
   }
   if (inject.length === 0) return page;
