@@ -598,9 +598,8 @@ def _runner_env_lock(path: Path) -> Iterator[None]:
     :param path: Runner env file from :func:`runner_env_path`.
     :raises OSError: When the lock file cannot be opened, e.g. its directory is missing.
     """
-    lock_fd = os.open(
-        path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600
-    )
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    lock_fd = os.open(path.with_suffix(".lock"), flags, 0o600)
     try:
         if fcntl is not None:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)

@@ -1954,6 +1954,7 @@ def _seed_yielding_spawn(
 def test_ensure_host_daemon_reuses_the_daemon_a_spawned_daemon_yielded_to(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
     registered_late: bool,
     requested_login: bool,
     failed_probes: int,
@@ -1963,7 +1964,8 @@ def test_ensure_host_daemon_reuses_the_daemon_a_spawned_daemon_yielded_to(
 
     The daemon itself makes the final check, so a launch on another URL that
     raced the first daemon's start still ends with one daemon. Only a
-    successful probe of the requested URL is remembered.
+    successful probe of the requested URL is remembered. The kept daemon
+    receives this invocation's runner values.
     """
     probed = _seed_yielding_spawn(
         monkeypatch,
@@ -1972,12 +1974,23 @@ def test_ensure_host_daemon_reuses_the_daemon_a_spawned_daemon_yielded_to(
         requested_login=requested_login,
         failed_probes=failed_probes,
     )
+    owner = DaemonLifecycleLock.for_target(
+        _WORKSPACE_API, base_dir=tmp_path, pid=_SAME_WORKSPACE_PID
+    )
+    assert owner.try_acquire() is True
+    request.addfinalizer(owner.release)
+    monkeypatch.delenv(RUNNER_PARENT_PID_ENV_VAR, raising=False)
+    monkeypatch.setenv(RUNNER_ENV_PASSTHROUGH_ENV_VAR, "ISAAC_LAUNCH_MODE")
+    monkeypatch.setenv("ISAAC_LAUNCH_MODE", "omni")
 
     assert _ensure_host_daemon(_VANITY_API) is False
     assert cli_module._find_daemon_record(_VANITY_API) is None
     kept = cli_module._find_daemon_record(_WORKSPACE_API)
     assert kept is not None and kept.pid == _SAME_WORKSPACE_PID
     assert probed.count(_VANITY_API) == failed_probes + 1
+    published = read_runner_env(_WORKSPACE_API, pid=_SAME_WORKSPACE_PID, base_dir=tmp_path)
+    assert published is not None
+    assert published["ISAAC_LAUNCH_MODE"] == "omni"
 
 
 def test_ensure_host_daemon_refuses_an_offline_daemon_a_spawned_daemon_yielded_to(

@@ -265,19 +265,23 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
 ## Gotchas
 
 - Background hosts capture their environment when started. A later CLI command
-  that reuses one publishes what a fresh host would forward to runners
-  (`OMNIGENT_RUNNER_ENV_PASSTHROUGH` names, provider `env:` references, and a
-  local host's harness API keys); later runners use it, and the last command
-  wins host-wide. Values only add or change: removals, empty values, and other
-  settings such as `PATH`, proxies, or Databricks sign-in need a host restart.
-  Commands run by session tools publish nothing. The owner-only file under
-  `daemons/runner-env/` stays until the host exits cleanly, `host stop`, or the
-  next command or host start that finds the host gone. Foreground `host`
-  processes, including `host enable` services, keep their own environment;
-  `tests/e2e/omnigent/test_host_daemon_env_refresh_e2e.py` drives the
-  background path. `host enable` saves explicitly forwarded values in
-  plaintext in the per-user service definition, readable only by its owner
-  (0600), so the service can retain them across logins.
+  that reuses one publishes what a fresh host would forward to runners:
+  `OMNIGENT_RUNNER_ENV_PASSTHROUGH` names, provider `env:` references, and a
+  local host's harness API keys.
+  - Later runners use the published values, and the last command wins
+    host-wide. Values only add or change; removals, empty values, and other
+    settings such as `PATH`, proxies, or Databricks sign-in need a host
+    restart. Provider `env:` names follow the config at each launch.
+  - Commands run by session tools publish nothing. On Windows, concurrent
+    publishes are not serialized and the file has no owner check.
+  - The owner-only file under `daemons/runner-env/` stays until the host exits
+    cleanly, `host stop`, or the next command or host start that finds the
+    host gone.
+  - Foreground `host` processes, including `host enable` services, keep their
+    own environment; `tests/e2e/omnigent/test_host_daemon_env_refresh_e2e.py`
+    drives the background path. `host enable` saves explicitly forwarded
+    values in plaintext in the per-user service definition, readable only by
+    its owner (0600), so the service can retain them across logins.
 - **Find out which credential kind the reporter's host uses before trusting a
   root cause.** A user OAuth login refreshes itself and a personal access
   token does not, so a story about a "stale pinned token" can be true for one

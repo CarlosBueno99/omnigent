@@ -282,6 +282,12 @@ def test_runner_env_ignores_shared_or_linked_files(tmp_path: Path) -> None:
 
     runner_env_path("linked", base_dir=tmp_path).symlink_to(path)
     assert read_runner_env("linked", pid=4242, base_dir=tmp_path) is None
+    stray = tmp_path / "stray.lock"
+    runner_env_path("linked", base_dir=tmp_path).with_suffix(".lock").symlink_to(stray)
+    with pytest.raises(OSError):
+        update_runner_env("linked", pid=4242, merge=dict, base_dir=tmp_path)
+    delete_runner_env("linked", pid=None, base_dir=tmp_path)
+    assert not stray.exists()
     path.chmod(0o640)
     assert read_runner_env("local", pid=4242, base_dir=tmp_path) is None
 
