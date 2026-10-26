@@ -112,6 +112,24 @@ class TestPromptExtraction(unittest.TestCase):
             "Second question",
         )
 
+    def test_tool_history_replays_only_into_a_fresh_session(self):
+        executor = self._make_executor()
+        messages = [
+            {"role": "user", "content": "Weather in SF?"},
+            {"role": "tool_call", "content": {"tool": "weather", "args": {"city": "SF"}}},
+            {"role": "tool_result", "content": "SF: 61F"},
+            {"role": "assistant", "content": "61F."},
+            {"role": "user", "content": "Warmer than NYC?"},
+            {"role": "tool_call", "content": {"tool": "weather", "args": {"city": "NYC"}}},
+        ]
+        self.assertTrue(executor.replays_tool_history())
+        fresh = executor._build_prompt(messages, resume_session=False)
+        self.assertIn('tool call: {"tool": "weather", "args": {"city": "SF"}}', fresh)
+        self.assertIn("tool result: SF: 61F", fresh)
+        self.assertIn('tool call: {"tool": "weather", "args": {"city": "NYC"}}', fresh)
+        self.assertEqual(fresh.count("Warmer than NYC?"), 1)
+        self.assertEqual(executor._build_prompt(messages, resume_session=True), "Warmer than NYC?")
+
     def test_resumed_session_includes_all_trailing_user_messages(self):
         """Batched buffered steers: all trailing user messages must reach the SDK.
 
@@ -6146,3 +6164,23 @@ async def test_effort_changes_rebuild_client_with_history(initial_effort, compac
 
     assert len(fake_sdk.created_clients) == 3
     assert [call.args[0] for call in close.await_args_list] == fake_sdk.created_clients[:2]
+
+
+def test_tool_call_metadata_marks_only_omnigent_mcp_tools_as_dispatched() -> None:
+    """Only the in-process ``omnigent`` MCP server's tools come back for dispatch.
+
+    Claude Code's own tools and other MCP servers' tools run inside the CLI, so
+    they are ``internally_executed`` and stay out of dispatch correlation.
+    """
+    from types import SimpleNamespace
+
+    from omnigent.inner.claude_sdk_executor import _tool_call_metadata
+
+    for name, internal in (
+        ("mcp__omnigent__sys_os_shell", False),
+        ("Skill", True),
+        ("ToolSearch", True),
+        ("mcp__github__create_issue", True),
+    ):
+        metadata = _tool_call_metadata(SimpleNamespace(id="toolu_1", name=name))  # type: ignore[arg-type]
+        assert metadata == {"call_id": "toolu_1", "internally_executed": internal}, name
