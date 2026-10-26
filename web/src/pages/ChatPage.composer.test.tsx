@@ -1036,6 +1036,34 @@ describe("Composer slash-command menu", () => {
     expect(props.onSend).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["accepts", { clear_event: true }],
+    ["predates", {}],
+  ] as const)("claude-native /clear when the server %s the clear control", (_label, advertised) => {
+    const { sessionHarness } = useChatStore.getState();
+    onTestFinished(() => useChatStore.setState({ sessionHarness }));
+    useChatStore.setState({ sessionHarness: "claude-native" });
+    const clearContext = vi.spyOn(useChatStore.getState(), "clearContext").mockResolvedValue();
+    const props = composerProps({ isNativeWrapper: true });
+    render(
+      <CapabilitiesProvider info={{ ...FALLBACK_SERVER_INFO, ...advertised }}>
+        <Composer {...props} />
+      </CapabilitiesProvider>,
+    );
+    fireEvent.change(textarea(), { target: { value: "/cle" } });
+    if ("clear_event" in advertised) {
+      fireEvent.click(screen.getByTestId("slash-menu-item-clear"));
+      expect(clearContext).toHaveBeenCalledOnce();
+      expect(props.onSend).not.toHaveBeenCalled();
+      return;
+    }
+    expect(screen.queryByTestId("slash-menu-item-clear")).toBeNull();
+    fireEvent.change(textarea(), { target: { value: "/clear" } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(clearContext).not.toHaveBeenCalled();
+    expect(props.onSend).toHaveBeenCalledExactlyOnceWith("/clear", undefined);
+  });
+
   it("Tab completes a match found only mid-name (exercises menuMatches, not just the render filter)", () => {
     render(<Composer {...composerProps()} />);
     const ta = textarea();

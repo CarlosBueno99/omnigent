@@ -112,6 +112,8 @@ async def test_info_returns_expected_fields(client: httpx.AsyncClient) -> None:
     assert data["session_search_scope"] is True
     assert data["agent_detail"] is True
     assert data["agent_config_edit"] is True
+    # Gates the web's /clear for native sessions; older servers reject it.
+    assert data["clear_event"] is True
     # single_user reflects OMNIGENT_LOCAL_SINGLE_USER, which the suite's
     # conftest sets to "1" (the default local-dev posture), so it's true here.
     # The multi-user (marker-off) case is covered below.
@@ -122,6 +124,8 @@ async def test_info_returns_expected_fields(client: httpx.AsyncClient) -> None:
     assert ServerInfoResponse.model_validate(data).agent_detail is False
     del data["agent_config_edit"]
     assert ServerInfoResponse.model_validate(data).agent_config_edit is False
+    del data["clear_event"]
+    assert ServerInfoResponse.model_validate(data).clear_event is False
 
 
 async def test_info_disables_config_edit_for_unsupported_store(

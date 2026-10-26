@@ -239,6 +239,8 @@ export interface ServerInfo {
   agent_detail?: boolean;
   /** Owner-only configuration reads and conditional PATCH updates. */
   agent_config_edit?: boolean;
+  /** Session events accept the ``clear`` control; older servers reject it. */
+  clear_event?: boolean;
   /**
    * Which uploads Claude Code and Codex sessions receive as files. Null on
    * older servers, whose policy is the default extension list.
@@ -441,6 +443,7 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
           agent_install: data.agent_install === true,
           agent_detail: data.agent_detail === true,
           agent_config_edit: data.agent_config_edit === true,
+          clear_event: data.clear_event === true,
           filesystem_attachments: parseFilesystemAttachments(data.filesystem_attachments),
           branding: parseBranding(data.branding),
         };

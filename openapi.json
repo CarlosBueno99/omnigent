@@ -5856,6 +5856,11 @@
           "branding": {
             "$ref": "#/components/schemas/BrandingInfo"
           },
+          "clear_event": {
+            "default": false,
+            "title": "Clear Event",
+            "type": "boolean"
+          },
           "databricks_features": {
             "title": "Databricks Features",
             "type": "boolean"

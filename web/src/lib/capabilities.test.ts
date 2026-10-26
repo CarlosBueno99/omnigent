@@ -218,6 +218,12 @@ describe("resolveServerInfo request_managed_sandbox_host_id", () => {
   });
 });
 
+describe("resolveServerInfo clear_event", () => {
+  it.each([undefined, false, "true", true])("parses %s strictly", async (advertised) => {
+    expect((await probe({ clear_event: advertised })).clear_event).toBe(advertised === true);
+  });
+});
+
 describe("resolveServerInfo smart_routing_sources", () => {
   it("reads an explicit field verbatim", async () => {
     const parsed = await probe({
