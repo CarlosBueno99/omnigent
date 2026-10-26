@@ -467,6 +467,17 @@ class HostConnection:
     pending_harness_refreshes: dict[str, asyncio.Future[dict[str, Any]]] = field(
         default_factory=dict,
     )
+    pending_harness_login_starts: dict[str, asyncio.Future[dict[str, Any]]] = field(
+        default_factory=dict,
+    )
+    pending_harness_login_cancels: dict[str, asyncio.Future[dict[str, Any]]] = field(
+        default_factory=dict,
+    )
+    pending_harness_logouts: dict[str, asyncio.Future[dict[str, Any]]] = field(
+        default_factory=dict,
+    )
+    harness_logins: dict[str, dict[str, Any]] = field(default_factory=dict)
+    active_harness_logins: dict[str, str] = field(default_factory=dict)
     inflight_installs: dict[str, asyncio.Task[dict[str, Any]]] = field(
         default_factory=dict,
     )

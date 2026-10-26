@@ -178,6 +178,34 @@ def test_upsert_persists_configured_harnesses(host_store: HostStore) -> None:
     assert fetched.configured_harnesses == {"claude-sdk": True, "codex": "needs-auth"}
 
 
+def test_upsert_and_refresh_persist_harness_accounts(host_store: HostStore) -> None:
+    host_id = "00000000000000000000000000000093"
+    accounts = {
+        "codex": {
+            "kind": "chatgpt",
+            "email": "person@example.test",
+            "plan": "pro",
+            "expired": False,
+        }
+    }
+    host_store.upsert_on_connect(
+        host_id,
+        "account-host",
+        "user-1",
+        configured_harnesses={"codex": True},
+        harness_accounts=accounts,
+    )
+    assert host_store.get_host(host_id).harness_accounts == accounts  # type: ignore[union-attr]
+
+    expired = {"codex": {"kind": "unknown", "expired": True}}
+    host_store.update_harness_readiness(
+        host_id,
+        {"codex": "needs-auth"},
+        expired,
+    )
+    assert host_store.get_host(host_id).harness_accounts == expired  # type: ignore[union-attr]
+
+
 def test_upsert_reconnect_overwrites_and_nulls_configured_harnesses(
     host_store: HostStore,
 ) -> None:

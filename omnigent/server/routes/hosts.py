@@ -38,11 +38,15 @@ from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.host.frames import (
+    CAP_HARNESS_LOGIN,
     CAP_REFRESH_HARNESSES,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     WORKSPACE_MISSING_ERROR_CODE,
     HostCreateDirFrame,
     HostDetectCredentialsFrame,
+    HostHarnessLoginCancelFrame,
+    HostHarnessLoginFrame,
+    HostHarnessLogoutFrame,
     HostInstallHarnessFrame,
     HostLaunchRunnerFrame,
     HostListDirFrame,
@@ -128,6 +132,7 @@ _MODEL_OPTIONS_TIMEOUT_S = 15.0
 _INSTALL_HARNESS_TIMEOUT_S = 420.0
 # A refresh only probes local CLI state; keep the UI responsive if a host stalls.
 _REFRESH_HARNESSES_TIMEOUT_S = 30.0
+_HARNESS_LOGIN_RPC_TIMEOUT_S = 15.0
 
 
 # ``/v1/hosts/{id}/*`` routes share the wrong-replica-vs-offline classification
@@ -448,6 +453,83 @@ async def _proxy_refresh_harnesses(
         host_conn.pending_harness_refreshes.pop(request_id, None)
 
 
+async def _proxy_harness_login_start(
+    *, host_registry: HostRegistry, host_conn: HostConnection, harness: str
+) -> dict[str, Any]:
+    """Start a host-owned device login and await its public device fields."""
+    request_id = secrets.token_hex(8)
+    future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+    host_conn.pending_harness_login_starts[request_id] = future
+    try:
+        host_registry.send_text(
+            host_conn,
+            encode_host_frame(HostHarnessLoginFrame(request_id=request_id, harness=harness)),
+        )
+        return await asyncio.wait_for(future, timeout=_HARNESS_LOGIN_RPC_TIMEOUT_S)
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"host '{host_conn.host_id}' connection lost"
+        ) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504, detail="host did not start harness login in time"
+        ) from exc
+    finally:
+        host_conn.pending_harness_login_starts.pop(request_id, None)
+
+
+async def _proxy_harness_login_cancel(
+    *, host_registry: HostRegistry, host_conn: HostConnection, login_id: str
+) -> dict[str, Any]:
+    """Cancel a host-owned device login."""
+    request_id = secrets.token_hex(8)
+    future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+    host_conn.pending_harness_login_cancels[request_id] = future
+    try:
+        host_registry.send_text(
+            host_conn,
+            encode_host_frame(
+                HostHarnessLoginCancelFrame(request_id=request_id, login_id=login_id)
+            ),
+        )
+        return await asyncio.wait_for(future, timeout=_HARNESS_LOGIN_RPC_TIMEOUT_S)
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"host '{host_conn.host_id}' connection lost"
+        ) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504, detail="host did not cancel harness login in time"
+        ) from exc
+    finally:
+        host_conn.pending_harness_login_cancels.pop(request_id, None)
+
+
+async def _proxy_harness_logout(
+    *, host_registry: HostRegistry, host_conn: HostConnection, harness: str
+) -> dict[str, Any]:
+    """Log a harness out on the host and await refreshed account state."""
+    request_id = secrets.token_hex(8)
+    future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+    host_conn.pending_harness_logouts[request_id] = future
+    try:
+        host_registry.send_text(
+            host_conn,
+            encode_host_frame(HostHarnessLogoutFrame(request_id=request_id, harness=harness)),
+        )
+        return await asyncio.wait_for(future, timeout=_REFRESH_HARNESSES_TIMEOUT_S)
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"host '{host_conn.host_id}' connection lost"
+        ) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504, detail="host did not log the harness out in time"
+        ) from exc
+    finally:
+        host_conn.pending_harness_logouts.pop(request_id, None)
+
+
 # The credential write is local keychain/file I/O on the host — fast, unlike the
 # npm install — so a short timeout is plenty and surfaces a hung host quickly.
 _STORE_SECRET_TIMEOUT_S = 30.0
@@ -759,6 +841,7 @@ def create_hosts_router(
                     # user-connectable machines.
                     "sandbox_provider": host.sandbox_provider,
                     "configured_harnesses": host.configured_harnesses,
+                    "harness_accounts": host.harness_accounts,
                     # Held in memory from the host's connect handshake, not the
                     # hosts row. ``None`` means this replica has no report yet —
                     # emitted as-is so a client can tell "unknown" from "not
@@ -804,6 +887,7 @@ def create_hosts_router(
             # server-managed sandbox host (e.g. "modal").
             "sandbox_provider": host.sandbox_provider,
             "configured_harnesses": host.configured_harnesses,
+            "harness_accounts": host.harness_accounts,
             # Same semantics as list_hosts: reported on connect and held in
             # memory, so ``None`` is "no report on this replica yet".
             "gateway_inference": host_registry.gateway_inference(host.host_id),
@@ -1539,10 +1623,190 @@ def create_hosts_router(
         refreshed_gateway = optional_str_bool_map(result, "gateway_inference")
         if refreshed_gateway is not None:
             host_registry.record_gateway_inference(host.host_id, refreshed_gateway)
+        refreshed_configured = result.get("configured_harnesses") or {}
+        refreshed_accounts = result.get("harness_accounts") or {}
+        await asyncio.to_thread(
+            host_store.update_harness_readiness,
+            host.host_id,
+            refreshed_configured,
+            refreshed_accounts,
+        )
         return {
-            "configured_harnesses": result.get("configured_harnesses") or {},
+            "configured_harnesses": refreshed_configured,
+            "harness_accounts": refreshed_accounts,
             "gateway_inference": refreshed_gateway,
         }
+
+    @router.post("/hosts/{host_id}/harnesses/{harness}/login")
+    async def start_host_harness_login(
+        request: Request, host_id: str, harness: str
+    ) -> dict[str, Any]:
+        """Start a Codex device-code login on a connected host."""
+        if not flags.enabled(Feature.HARNESS_INSTALL):
+            raise HTTPException(status_code=404, detail="not found")
+        if harness != "codex":
+            raise HTTPException(status_code=400, detail="device login is supported only for codex")
+        user_id = require_user(request, auth_provider)
+        host = await asyncio.to_thread(host_store.get_host, host_id)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        if user_id is not None and host.user_id != user_id:
+            raise HTTPException(status_code=403, detail="not your host")
+        conn = host_registry.get(host.host_id)
+        if conn is None:
+            raise _host_absent_error(host)
+        if CAP_HARNESS_LOGIN not in conn.hello.capabilities:
+            raise OmnigentError(
+                "this host does not support harness login",
+                code=ErrorCode.LOGIN_UNSUPPORTED,
+            )
+        if harness in conn.active_harness_logins:
+            raise HTTPException(status_code=409, detail="a login is already active")
+        reservation = f"starting:{secrets.token_hex(8)}"
+        conn.active_harness_logins[harness] = reservation
+        try:
+            result = await _proxy_harness_login_start(
+                host_registry=host_registry, host_conn=conn, harness=harness
+            )
+            if result.get("status") == "busy":
+                raise HTTPException(status_code=409, detail="a login is already active")
+            if result.get("status") != "ok":
+                raise HTTPException(status_code=502, detail=result.get("error") or "login failed")
+            login_id = result.get("login_id")
+            verification_url = result.get("verification_url")
+            user_code = result.get("user_code")
+            expires_at = result.get("expires_at")
+            if not (
+                isinstance(login_id, str)
+                and isinstance(verification_url, str)
+                and isinstance(user_code, str)
+                and isinstance(expires_at, int)
+            ):
+                raise HTTPException(
+                    status_code=502, detail="host returned incomplete login details"
+                )
+            conn.harness_logins[login_id] = {
+                "harness": harness,
+                "status": "pending",
+                "error": None,
+                "expires_at": expires_at,
+            }
+            conn.active_harness_logins[harness] = login_id
+            return {
+                "login_id": login_id,
+                "verification_url": verification_url,
+                "user_code": user_code,
+                "expires_at": expires_at,
+            }
+        finally:
+            if conn.active_harness_logins.get(harness) == reservation:
+                conn.active_harness_logins.pop(harness, None)
+
+    @router.get("/hosts/{host_id}/harnesses/{harness}/login/{login_id}")
+    async def get_host_harness_login(
+        request: Request, host_id: str, harness: str, login_id: str
+    ) -> dict[str, Any]:
+        """Return the current device-login status without exposing its code."""
+        if not flags.enabled(Feature.HARNESS_INSTALL):
+            raise HTTPException(status_code=404, detail="not found")
+        user_id = require_user(request, auth_provider)
+        host = await asyncio.to_thread(host_store.get_host, host_id)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        if user_id is not None and host.user_id != user_id:
+            raise HTTPException(status_code=403, detail="not your host")
+        conn = host_registry.get(host.host_id)
+        if conn is None:
+            raise _host_absent_error(host)
+        if CAP_HARNESS_LOGIN not in conn.hello.capabilities:
+            raise OmnigentError(
+                "this host does not support harness login", code=ErrorCode.LOGIN_UNSUPPORTED
+            )
+        state = conn.harness_logins.get(login_id)
+        if state is None or state.get("harness") != harness:
+            raise HTTPException(status_code=404, detail="login not found")
+        if state.get("status") == "pending" and now_epoch() >= state.get("expires_at", 0):
+            state["status"] = "expired"
+            state["error"] = "login expired"
+            conn.active_harness_logins.pop(harness, None)
+        response: dict[str, Any] = {
+            "status": state["status"],
+            "error": state.get("error"),
+        }
+        for key in ("configured_harnesses", "harness_accounts"):
+            if state.get(key) is not None:
+                response[key] = state[key]
+        return response
+
+    @router.delete("/hosts/{host_id}/harnesses/{harness}/login/{login_id}")
+    async def cancel_host_harness_login(
+        request: Request, host_id: str, harness: str, login_id: str
+    ) -> dict[str, Any]:
+        """Cancel an active device login."""
+        if not flags.enabled(Feature.HARNESS_INSTALL):
+            raise HTTPException(status_code=404, detail="not found")
+        user_id = require_user(request, auth_provider)
+        host = await asyncio.to_thread(host_store.get_host, host_id)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        if user_id is not None and host.user_id != user_id:
+            raise HTTPException(status_code=403, detail="not your host")
+        conn = host_registry.get(host.host_id)
+        if conn is None:
+            raise _host_absent_error(host)
+        if CAP_HARNESS_LOGIN not in conn.hello.capabilities:
+            raise OmnigentError(
+                "this host does not support harness login", code=ErrorCode.LOGIN_UNSUPPORTED
+            )
+        state = conn.harness_logins.get(login_id)
+        if state is None or state.get("harness") != harness:
+            raise HTTPException(status_code=404, detail="login not found")
+        if state.get("status") == "pending":
+            result = await _proxy_harness_login_cancel(
+                host_registry=host_registry, host_conn=conn, login_id=login_id
+            )
+            if result.get("status") != "ok":
+                raise HTTPException(status_code=502, detail=result.get("error") or "cancel failed")
+            state["status"] = "cancelled"
+            state["error"] = None
+            conn.active_harness_logins.pop(harness, None)
+        return {"status": state["status"], "error": state.get("error")}
+
+    @router.post("/hosts/{host_id}/harnesses/{harness}/logout")
+    async def logout_host_harness(request: Request, host_id: str, harness: str) -> dict[str, Any]:
+        """Log Codex or Claude out and return freshly probed account state."""
+        if not flags.enabled(Feature.HARNESS_INSTALL):
+            raise HTTPException(status_code=404, detail="not found")
+        if harness not in {"codex", "claude"}:
+            raise HTTPException(
+                status_code=400, detail="logout is supported only for codex and claude"
+            )
+        user_id = require_user(request, auth_provider)
+        host = await asyncio.to_thread(host_store.get_host, host_id)
+        if host is None:
+            raise HTTPException(status_code=404, detail="host not found")
+        if user_id is not None and host.user_id != user_id:
+            raise HTTPException(status_code=403, detail="not your host")
+        conn = host_registry.get(host.host_id)
+        if conn is None:
+            raise _host_absent_error(host)
+        if CAP_HARNESS_LOGIN not in conn.hello.capabilities:
+            raise OmnigentError(
+                "this host does not support harness login", code=ErrorCode.LOGIN_UNSUPPORTED
+            )
+        result = await _proxy_harness_logout(
+            host_registry=host_registry, host_conn=conn, harness=harness
+        )
+        if result.get("status") != "ok":
+            raise HTTPException(status_code=502, detail=result.get("error") or "logout failed")
+        configured = result.get("configured_harnesses") or {}
+        accounts = result.get("harness_accounts") or {}
+        await asyncio.to_thread(
+            host_store.update_harness_readiness, host.host_id, configured, accounts
+        )
+        conn.hello.configured_harnesses = dict(configured)
+        conn.hello.harness_accounts = dict(accounts)
+        return {"configured_harnesses": configured, "harness_accounts": accounts}
 
     @router.post("/hosts/{host_id}/harnesses/{harness}/install")
     async def install_host_harness(
@@ -1651,11 +1915,20 @@ def create_hosts_router(
         installed_gateway = optional_str_bool_map(result, "gateway_inference")
         if installed_gateway is not None:
             host_registry.record_gateway_inference(host.host_id, installed_gateway)
+        installed_configured = result.get("configured_harnesses") or {}
+        installed_accounts = result.get("harness_accounts") or {}
+        await asyncio.to_thread(
+            host_store.update_harness_readiness,
+            host.host_id,
+            installed_configured,
+            installed_accounts,
+        )
 
         return {
             "object": "harness_install",
             "harness": harness,
-            "configured_harnesses": result.get("configured_harnesses") or {},
+            "configured_harnesses": installed_configured,
+            "harness_accounts": installed_accounts,
             "version": result.get("version"),
             # Passed through as-is: ``None`` is "unknown", not "none backed".
             "gateway_inference": installed_gateway,
@@ -1764,11 +2037,20 @@ def create_hosts_router(
         written_gateway = optional_str_bool_map(result, "gateway_inference")
         if written_gateway is not None:
             host_registry.record_gateway_inference(host.host_id, written_gateway)
+        written_configured = result.get("configured_harnesses") or {}
+        written_accounts = result.get("harness_accounts") or {}
+        await asyncio.to_thread(
+            host_store.update_harness_readiness,
+            host.host_id,
+            written_configured,
+            written_accounts,
+        )
 
         return {
             "object": "harness_credential",
             "harness": harness,
-            "configured_harnesses": result.get("configured_harnesses") or {},
+            "configured_harnesses": written_configured,
+            "harness_accounts": written_accounts,
             # Passed through as-is: ``None`` is "unknown", not "none backed".
             "gateway_inference": written_gateway,
         }

@@ -47,6 +47,10 @@ from omnigent.host.frames import (
     HostDetectCredentialsFrame,
     HostDetectCredentialsResultFrame,
     HostFsRequestFrame,
+    HostHarnessLoginCancelFrame,
+    HostHarnessLoginCancelResultFrame,
+    HostHarnessLoginFrame,
+    HostHarnessLoginResultFrame,
     HostHarnessReadinessFrame,
     HostHarnessStartupFrame,
     HostHarnessStartupResultFrame,
@@ -88,6 +92,7 @@ from omnigent.host.frames import (
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteUnavailable
+from omnigent.onboarding.harness_login import CodexDeviceLogin
 from omnigent.runner.identity import (
     RUNNER_CONNECT_MARKER_ENV_VAR,
     RUNNER_DELEGATED_AUTH_ENV_VAR,
@@ -1524,6 +1529,7 @@ async def test_live_host_refreshes_harness_readiness_without_reconnect(
     """
     readiness = iter(({"pi": True},))
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", lambda: {"codex": True})
+    monkeypatch.setattr("omnigent.host.connect.harness_account_map", dict)
     monkeypatch.setattr(
         "omnigent.host.connect.configured_harness_map",
         lambda: next(readiness),
@@ -1538,6 +1544,7 @@ async def test_live_host_refreshes_harness_readiness_without_reconnect(
     )
     host = _make_host_process()
     host._configured_harnesses = {"pi": False}
+    host._harness_accounts = {}
     host._gateway_inference = {"codex": True}
     ws = _RecordingWS()
 
@@ -1560,6 +1567,7 @@ async def test_live_host_full_refresh_detects_auth_completion(
     """The full-refresh fallback catches readiness changes beyond binary installs."""
     readiness = iter(({"codex": True},))
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", lambda: {"codex": True})
+    monkeypatch.setattr("omnigent.host.connect.harness_account_map", dict)
     monkeypatch.setattr(
         "omnigent.host.connect.configured_harness_map",
         lambda: next(readiness),
@@ -1570,6 +1578,7 @@ async def test_live_host_full_refresh_detects_auth_completion(
     )
     host = _make_host_process()
     host._configured_harnesses = {"codex": "needs-auth"}
+    host._harness_accounts = {}
     host._gateway_inference = {"codex": True}
     ws = _RecordingWS()
 
@@ -1597,6 +1606,7 @@ async def test_live_host_does_not_repeat_unchanged_readiness(
         return {"codex": "needs-auth"}
 
     monkeypatch.setattr("omnigent.host.connect.configured_harness_map", _unchanged_map)
+    monkeypatch.setattr("omnigent.host.connect.harness_account_map", dict)
     monkeypatch.setattr("omnigent.host.connect.gateway_inference_map", lambda: {"codex": True})
     monkeypatch.setattr(
         "omnigent.host.connect.HARNESS_READINESS_FULL_REFRESH_INTERVAL_S",
@@ -1604,6 +1614,7 @@ async def test_live_host_does_not_repeat_unchanged_readiness(
     )
     host = _make_host_process()
     host._configured_harnesses = {"codex": "needs-auth"}
+    host._harness_accounts = {}
     host._gateway_inference = {"codex": True}
     ws = _RecordingWS()
 
@@ -1631,6 +1642,7 @@ async def test_live_host_repushes_when_only_gateway_inference_changes(
         "omnigent.host.connect.configured_harness_map",
         lambda: {"codex": True},
     )
+    monkeypatch.setattr("omnigent.host.connect.harness_account_map", dict)
     monkeypatch.setattr(
         "omnigent.host.connect.gateway_inference_map",
         lambda: next(gateway, {"codex": True}),
@@ -1641,6 +1653,7 @@ async def test_live_host_repushes_when_only_gateway_inference_changes(
     )
     host = _make_host_process()
     host._configured_harnesses = {"codex": True}
+    host._harness_accounts = {}
     host._gateway_inference = {"codex": False}
     ws = _RecordingWS()
 
@@ -2671,6 +2684,11 @@ async def test_incomplete_startup_capabilities_preserve_registration_fallback(
         "_probe_gateway_inference",
         lambda *, startup: asyncio.sleep(0, result=gateway),
     )
+    monkeypatch.setattr(
+        host,
+        "_probe_harness_accounts",
+        lambda *, startup: asyncio.sleep(0, result=None),
+    )
     tunnel = _FakeTunnel()
 
     with pytest.raises(ConnectionError, match="test disconnect"):
@@ -2701,6 +2719,11 @@ async def test_incomplete_startup_discovery_is_reused_across_reconnects(
         host,
         "_probe_configured_harnesses",
         lambda *, startup: asyncio.sleep(0, result={"codex-native": True}),
+    )
+    monkeypatch.setattr(
+        host,
+        "_probe_harness_accounts",
+        lambda *, startup: asyncio.sleep(0, result=None),
     )
     monkeypatch.setattr(host, "_probe_gateway_inference", _gateway)
     first = _FakeTunnel()
@@ -4948,9 +4971,14 @@ async def test_handle_refresh_harnesses_bypasses_cache_and_returns_fresh_maps(
         calls.append("gateway")
         return {"codex-native": False}
 
+    def _accounts() -> dict[str, object]:
+        calls.append("accounts")
+        return {}
+
     monkeypatch.setattr(connect, "invalidate_harness_login_probe_cache", _invalidate)
     monkeypatch.setattr(connect, "configured_harness_map", _configured)
     monkeypatch.setattr(connect, "gateway_inference_map", _gateway)
+    monkeypatch.setattr(connect, "harness_account_map", _accounts)
 
     result = _make_host_process()._handle_refresh_harnesses(
         HostRefreshHarnessesFrame(request_id="refresh-1")
@@ -4960,7 +4988,7 @@ async def test_handle_refresh_harnesses_bypasses_cache_and_returns_fresh_maps(
     assert result.status == "ok"
     assert result.configured_harnesses == {"codex-native": True}
     assert result.gateway_inference == {"codex-native": False}
-    assert calls == ["invalidate", "configured", "gateway"]
+    assert calls == ["invalidate", "accounts", "configured", "gateway"]
 
 
 async def test_dispatch_refresh_harnesses_uses_guard_and_updates_capabilities(
@@ -4993,6 +5021,54 @@ async def test_dispatch_refresh_harnesses_uses_guard_and_updates_capabilities(
     assert decode_host_frame(tunnel.sent[0]) == result
     assert host._configured_harnesses == {"codex-native": True}
     assert host._gateway_inference == {"codex-native": False}
+
+
+async def test_dispatch_codex_login_start_and_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dispatch path retains one app-server and cancels it by login id."""
+    import omnigent.host.connect as connect
+
+    completed = asyncio.Event()
+
+    class _FakeLoginSession:
+        cancelled: list[str] = []
+
+        async def start(self) -> CodexDeviceLogin:
+            return CodexDeviceLogin("login-1", "https://example.test/device", "ABCD-EFGH")
+
+        async def wait_completed(self, login_id: str) -> tuple[bool, str | None]:
+            assert login_id == "login-1"
+            await completed.wait()
+            return True, None
+
+        async def cancel(self, login_id: str) -> None:
+            self.cancelled.append(login_id)
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(connect, "CodexLoginSession", _FakeLoginSession)
+    host = _make_host_process()
+    tunnel = _FakeTunnel()
+
+    await host._dispatch_host_frame(  # type: ignore[arg-type]
+        tunnel, HostHarnessLoginFrame(request_id="start-1", harness="codex")
+    )
+    started = decode_host_frame(tunnel.sent.pop())
+    assert isinstance(started, HostHarnessLoginResultFrame)
+    assert started.status == "ok"
+    assert started.login_id == "login-1"
+
+    await host._dispatch_host_frame(  # type: ignore[arg-type]
+        tunnel,
+        HostHarnessLoginCancelFrame(request_id="cancel-1", login_id="login-1"),
+    )
+    cancelled = decode_host_frame(tunnel.sent.pop())
+    assert isinstance(cancelled, HostHarnessLoginCancelResultFrame)
+    assert cancelled.status == "ok"
+    assert _FakeLoginSession.cancelled == ["login-1"]
+    assert host._active_harness_logins == {}
 
 
 def test_handle_install_harness_success_returns_refreshed_readiness(

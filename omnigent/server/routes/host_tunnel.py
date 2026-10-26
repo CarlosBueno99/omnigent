@@ -39,6 +39,10 @@ from omnigent.host.frames import (
     HostCreateWorktreeResultFrame,
     HostDetectCredentialsResultFrame,
     HostFsResultFrame,
+    HostHarnessLoginCancelResultFrame,
+    HostHarnessLoginCompletedFrame,
+    HostHarnessLoginResultFrame,
+    HostHarnessLogoutResultFrame,
     HostHarnessReadinessFrame,
     HostHarnessStartupResultFrame,
     HostHelloFrame,
@@ -379,6 +383,7 @@ def create_host_tunnel_router(
                 user_id=tunnel_owner,
                 allow_host_id_reown=allow_host_id_reown,
                 configured_harnesses=frame.configured_harnesses,
+                harness_accounts=frame.harness_accounts,
                 managed_token=managed_token,
             )
             host_persisted = True
@@ -809,8 +814,12 @@ async def _receive_loop(
                 host_store.update_harness_readiness,
                 host_id,
                 frame.configured_harnesses,
+                frame.harness_accounts,
             )
             conn.hello.configured_harnesses = dict(frame.configured_harnesses)
+            conn.hello.harness_accounts = (
+                dict(frame.harness_accounts) if frame.harness_accounts is not None else None
+            )
             conn.hello.gateway_inference = (
                 dict(frame.gateway_inference) if frame.gateway_inference is not None else None
             )
@@ -961,6 +970,7 @@ async def _receive_loop(
                     {
                         "status": frame.status,
                         "configured_harnesses": frame.configured_harnesses,
+                        "harness_accounts": frame.harness_accounts,
                         "version": frame.version,
                         "gateway_inference": frame.gateway_inference,
                         "error": frame.error,
@@ -975,7 +985,78 @@ async def _receive_loop(
                     {
                         "status": frame.status,
                         "configured_harnesses": frame.configured_harnesses,
+                        "harness_accounts": frame.harness_accounts,
                         "gateway_inference": frame.gateway_inference,
+                        "error": frame.error,
+                    }
+                )
+            continue
+
+        if isinstance(frame, HostHarnessLoginResultFrame):
+            login_future = conn.pending_harness_login_starts.pop(frame.request_id, None)
+            if login_future is not None and not login_future.done():
+                login_future.set_result(
+                    {
+                        "status": frame.status,
+                        "login_id": frame.login_id,
+                        "verification_url": frame.verification_url,
+                        "user_code": frame.user_code,
+                        "expires_at": frame.expires_at,
+                        "error": frame.error,
+                    }
+                )
+            continue
+
+        if isinstance(frame, HostHarnessLoginCancelResultFrame):
+            cancel_future = conn.pending_harness_login_cancels.pop(frame.request_id, None)
+            if cancel_future is not None and not cancel_future.done():
+                cancel_future.set_result({"status": frame.status, "error": frame.error})
+            continue
+
+        if isinstance(frame, HostHarnessLoginCompletedFrame):
+            state = conn.harness_logins.get(frame.login_id)
+            if state is not None and state.get("status") == "pending":
+                state["status"] = (
+                    "succeeded"
+                    if frame.success
+                    else "expired"
+                    if frame.error == "login expired"
+                    else "failed"
+                )
+                state["error"] = frame.error
+                state["configured_harnesses"] = frame.configured_harnesses
+                state["harness_accounts"] = frame.harness_accounts
+                harness = state.get("harness")
+                if isinstance(harness, str):
+                    conn.active_harness_logins.pop(harness, None)
+                if frame.configured_harnesses is not None:
+                    await asyncio.to_thread(
+                        host_store.update_harness_readiness,
+                        host_id,
+                        frame.configured_harnesses,
+                        frame.harness_accounts,
+                    )
+                    conn.hello.configured_harnesses = dict(frame.configured_harnesses)
+                    conn.hello.harness_accounts = (
+                        dict(frame.harness_accounts)
+                        if frame.harness_accounts is not None
+                        else None
+                    )
+                    if on_host_update is not None:
+                        try:
+                            await on_host_update(host_id, conn.owner)
+                        except Exception:
+                            _logger.exception("on_host_update callback failed for %s", host_id)
+            continue
+
+        if isinstance(frame, HostHarnessLogoutResultFrame):
+            logout_future = conn.pending_harness_logouts.pop(frame.request_id, None)
+            if logout_future is not None and not logout_future.done():
+                logout_future.set_result(
+                    {
+                        "status": frame.status,
+                        "configured_harnesses": frame.configured_harnesses,
+                        "harness_accounts": frame.harness_accounts,
                         "error": frame.error,
                     }
                 )
@@ -988,6 +1069,7 @@ async def _receive_loop(
                     {
                         "status": frame.status,
                         "configured_harnesses": frame.configured_harnesses,
+                        "harness_accounts": frame.harness_accounts,
                         "gateway_inference": frame.gateway_inference,
                         "error": frame.error,
                     }
