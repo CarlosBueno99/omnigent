@@ -529,8 +529,8 @@ describe("Harness details", () => {
       ),
     ).toBeTruthy();
     expect(screen.getByText("Not signed in")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Reconfigure" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Reconfigure credential" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Reconfigure" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Reconfigure credential" })).toBeNull();
     expect(screen.getByRole("tab", { name: /MCP servers/ })).toBeTruthy();
   });
 
@@ -538,7 +538,7 @@ describe("Harness details", () => {
     hosts = [ONLINE];
     renderHarnesses("codex-native");
 
-    fireEvent.click(screen.getByRole("button", { name: "Reconfigure credential" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reconfigure" }));
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "reconfigure");
   });
 
@@ -591,15 +591,16 @@ describe("Harness details", () => {
     expect(screen.queryByText("Needs reconfiguration")).toBeNull();
   });
 
-  it("treats an unconfigured credential family as a credential problem", () => {
+  it("keeps an unconfigured credential family on the install path", () => {
     hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": false } }];
     renderHarnesses("codex-native");
 
-    expect(screen.getByText("Not configured")).toBeTruthy();
-    expect(screen.queryByText(/Codex isn’t set up on my-laptop/)).toBeNull();
-    expect(screen.getByText(/No ChatGPT account or API key on my-laptop/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Reconfigure" }));
-    expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "reconfigure");
+    expect(screen.getAllByText("Not configured")).toHaveLength(2);
+    expect(screen.getByText(/Codex isn’t set up on my-laptop/)).toBeTruthy();
+    expect(screen.queryByText("Not signed in")).toBeNull();
+    expect(screen.queryByText(/No ChatGPT account or API key on my-laptop/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Install" }));
+    expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "install");
   });
 
   it("uses dedicated recovery copy for a readiness error", () => {

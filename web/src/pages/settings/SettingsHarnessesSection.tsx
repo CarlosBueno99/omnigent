@@ -34,6 +34,7 @@ import {
   harnessInstallableOnHost,
   harnessReadinessOnHost,
   harnessWarningBadgeText,
+  isCodexHarness,
   type HarnessCredentialKind,
 } from "@/lib/harnessSetup";
 import { NATIVE_CODING_AGENTS } from "@/lib/nativeCodingAgents";
@@ -593,7 +594,7 @@ function HarnessDetail({
   onFix: (mode: HarnessFixMode) => void;
 }) {
   const status = harnessStatus(entry.harness, host);
-  const credentialProblem = isCredentialProblem(status.reason, entry.harness);
+  const credentialProblem = isCredentialProblem(status.reason);
   const mode = credentialProblem ? "reconfigure" : fixMode(status.reason);
   const canFix = canSetup && !!host && !host.sandbox_provider;
   const gateway = host?.gateway_inference?.[entry.harness] === true;
@@ -717,18 +718,15 @@ function fixMode(reason: string | null): HarnessFixMode {
   return "reconfigure";
 }
 
-function isCredentialProblem(reason: string | null, harness: string): boolean {
-  return (
-    reason === "needs-auth" ||
-    (reason === "unconfigured" && harnessCredentialFamily(harness) !== null)
-  );
+function isCredentialProblem(reason: string | null): boolean {
+  return reason === "needs-auth";
 }
 
 function missingCredentialCopy(entry: HarnessEntry, host: Host): string {
   const family = harnessCredentialFamily(entry.harness);
-  const credential = entry.harness.includes("codex")
+  const credential = isCodexHarness(entry.harness)
     ? "ChatGPT account or API key"
-    : entry.harness.includes("claude")
+    : family === "anthropic"
       ? "Claude subscription or API key"
       : family !== null
         ? "API key or gateway credential"
@@ -990,6 +988,8 @@ function CredentialCard({
           <button
             type="button"
             aria-label="Reconfigure credential"
+            aria-hidden
+            tabIndex={-1}
             className="absolute inset-0 rounded-xl focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
             onClick={onClick}
           />
