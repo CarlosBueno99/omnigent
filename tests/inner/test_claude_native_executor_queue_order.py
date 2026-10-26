@@ -24,6 +24,7 @@ from omnigent.inner.executor import ExecutorError, ExecutorEvent, TurnComplete
 
 _SESSION = "11111111-2222-4333-8444-555555555555"
 _SLASH_LED = "/home/me/notes.txt summarize these notes"
+_SECOND_SLASH_LED = "/home/me/todo.txt add these to the list"
 _Result = TypeVar("_Result")
 
 
@@ -51,6 +52,11 @@ class _ClaudeCode:
         del bridge_dir, timeout_s
         with self._lock:
             self.typed.append(content)
+        self.submit(content)
+
+    def submit(self, content: str) -> None:
+        """Submit *content* in the pane: queued while a turn runs, else a new turn."""
+        with self._lock:
             if self.busy:
                 self.queue.append(content)
                 self._log("enqueue", content=content)
@@ -66,11 +72,13 @@ class _ClaudeCode:
                 self._log("remove", content=prompt, reason="absorbed_mid_turn")
                 self.model_saw.append(prompt)
 
-    def end_turn(self) -> None:
-        """Start the next turn with the oldest queued message, or go idle."""
+    def end_turn(self, take: str | None = None) -> None:
+        """Start the next turn with *take*, by default the oldest queued message, or go idle."""
         with self._lock:
             if self.queue:
-                self.model_saw.append(self.queue.pop(0))
+                taken = take if take is not None else self.queue[0]
+                self.queue.remove(taken)
+                self.model_saw.append(taken)
                 self._log("dequeue")
             else:
                 self.busy = False
@@ -144,14 +152,19 @@ async def _turn(executor: ClaudeNativeExecutor, text: str) -> None:
     assert await _turn_events(executor, text) == [TurnComplete(response=None)]
 
 
-async def _held_send(claude: _ClaudeCode, send: Awaitable[_Result]) -> asyncio.Task[_Result]:
-    """Start *send* and return once it is typed or the queue was read a few times."""
-    task = asyncio.ensure_future(send)
+async def _settle(claude: _ClaudeCode, task: asyncio.Future[object]) -> None:
+    """Return once *task* finished or the executor read Claude's queue a few more times."""
     replays = claude.replays
     for _ in range(200):
-        if len(claude.typed) > 1 or claude.replays >= replays + 3 or task.done():
-            break
+        if task.done() or claude.replays >= replays + 3:
+            return
         await asyncio.sleep(0.01)
+
+
+async def _held_send(claude: _ClaudeCode, send: Awaitable[_Result]) -> asyncio.Task[_Result]:
+    """Start *send* and return once it is done or the queue was read a few times."""
+    task = asyncio.ensure_future(send)
+    await _settle(claude, task)
     return task
 
 
@@ -181,6 +194,27 @@ async def test_a_message_waits_for_the_queued_slash_led_message(
 
 
 @pytest.mark.asyncio
+async def test_a_message_waits_while_claude_may_still_hold_the_slash_led_message(
+    claude: _ClaudeCode, send: Send, tmp_path: Path
+) -> None:
+    """Claude can take a later message first, and its log does not say which one it took."""
+    executor = ClaudeNativeExecutor(tmp_path / "bridge")
+    claude.busy = True
+    await send(executor, _SLASH_LED)
+    claude.submit("typed into the pane")
+
+    bravo = await _held_send(claude, send(executor, "bravo"))
+    claude.end_turn(take="typed into the pane")
+    await _settle(claude, bravo)
+    claude.tool_call()
+    claude.end_turn()
+    await asyncio.wait_for(bravo, timeout=5)
+    claude.tool_call()
+
+    assert claude.model_saw == ["typed into the pane", _SLASH_LED, "bravo"]
+
+
+@pytest.mark.asyncio
 async def test_plain_messages_are_not_held(
     claude: _ClaudeCode, send: Send, tmp_path: Path
 ) -> None:
@@ -194,12 +228,12 @@ async def test_plain_messages_are_not_held(
     assert claude.model_saw == ["alpha", "bravo", "charlie"]
 
 
-@pytest.mark.parametrize("loss", ["new-session", "new-transcript", "pane-exited"])
+@pytest.mark.parametrize("loss", ["new-transcript", "pane-exited"])
 @pytest.mark.asyncio
 async def test_the_hold_ends_when_claude_loses_its_queue(
     claude: _ClaudeCode, tmp_path: Path, loss: str
 ) -> None:
-    """A restarted session, a new transcript or an exited Claude process drops the queue."""
+    """A new transcript or an exited Claude process drops the queue."""
     executor = ClaudeNativeExecutor(tmp_path / "bridge")
     claude.busy = True
     await _steer(executor, _SLASH_LED)
@@ -213,9 +247,7 @@ async def test_the_hold_ends_when_claude_loses_its_queue(
             tmp_path / "bridge",
             {
                 "hook_event_name": "SessionStart",
-                "session_id": (
-                    "22222222-2222-4333-8444-555555555555" if loss == "new-session" else _SESSION
-                ),
+                "session_id": _SESSION,
                 "transcript_path": str(tmp_path / "restarted.jsonl"),
             },
         )
@@ -228,7 +260,11 @@ async def test_the_hold_ends_when_claude_loses_its_queue(
 async def test_a_message_held_past_the_limit_is_delivered(
     claude: _ClaudeCode, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A ``/``-led message Claude never takes delays only the next message, up to the limit."""
+    """
+    A ``/``-led message Claude does not take delays only the next message, up to the limit.
+
+    A later ``/``-led message still holds the messages after it once Claude takes the first.
+    """
     monkeypatch.setattr(claude_native_executor, "_ANSWER_HOLD_S", 0.05)
     executor = ClaudeNativeExecutor(tmp_path / "bridge")
     claude.busy = True
@@ -237,8 +273,18 @@ async def test_a_message_held_past_the_limit_is_delivered(
     await asyncio.wait_for(_steer(executor, "bravo"), timeout=5)
     monkeypatch.setattr(claude_native_executor, "_ANSWER_HOLD_S", 60.0)
     await asyncio.wait_for(_steer(executor, "charlie"), timeout=5)
+    await asyncio.wait_for(_steer(executor, _SECOND_SLASH_LED), timeout=5)
+    assert claude.typed == [_SLASH_LED, "bravo", "charlie", _SECOND_SLASH_LED]
 
-    assert claude.typed == [_SLASH_LED, "bravo", "charlie"]
+    claude.tool_call()
+    claude.end_turn()
+    delta = await _held_send(claude, _steer(executor, "delta"))
+    claude.tool_call()
+    claude.end_turn()
+    await asyncio.wait_for(delta, timeout=5)
+    claude.tool_call()
+
+    assert claude.model_saw == ["bravo", "charlie", _SLASH_LED, _SECOND_SLASH_LED, "delta"]
 
 
 @pytest.mark.parametrize("path", ["steer", "queued-turn"])
@@ -246,7 +292,11 @@ async def test_a_message_held_past_the_limit_is_delivered(
 async def test_a_message_held_through_clear_is_not_typed_into_the_new_conversation(
     claude: _ClaudeCode, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
-    """``/clear`` during the hold hands the pane to a new conversation, so nothing is typed."""
+    """
+    ``/clear`` during the hold hands the pane to a new conversation, so nothing is typed.
+
+    Claude starts its new session before Omnigent switches the pane's active session.
+    """
     bridge_dir = tmp_path / "bridge"
     (bridge_dir / "bridge.json").write_text('{"active_session_id": "conv_old"}', encoding="utf-8")
     monkeypatch.setenv(claude_bridge.REQUEST_SESSION_ID_ENV_VAR, "conv_old")
@@ -269,7 +319,6 @@ async def test_a_message_held_through_clear_is_not_typed_into_the_new_conversati
             "transcript_path": str(tmp_path / "cleared.jsonl"),
         },
     )
-    claude_bridge.write_active_session_id(bridge_dir, "conv_new")
     result = await asyncio.wait_for(held, timeout=5)
 
     assert claude.typed == [_SLASH_LED]
@@ -280,6 +329,7 @@ async def test_a_message_held_through_clear_is_not_typed_into_the_new_conversati
         assert len(result) == 1
         assert isinstance(result[0], ExecutorError)
         assert "no longer active after /clear" in result[0].message
+        assert result[0].undelivered is True
 
 
 @pytest.mark.asyncio

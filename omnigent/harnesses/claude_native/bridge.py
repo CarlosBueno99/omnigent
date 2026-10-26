@@ -74,10 +74,11 @@ from omnigent.harnesses.claude_native.failure_telemetry import claude_failure_co
 from omnigent.harnesses.claude_native.message_display_hook import MESSAGE_DELTAS_FILE
 from omnigent.harnesses.claude_native.status import CONTEXT_RAW_FILE
 from omnigent.harnesses.claude_native.submit_verification import (
+    QueueReplay,
     SubmitBoundary,
     capture_submit_boundary,
     has_matching_hook_refusal,
-    queued_prompts,
+    replay_prompt_queue,
 )
 from omnigent.harnesses.diagnostics import (
     detect_sign_in_prompt,
@@ -5840,19 +5841,19 @@ def capture_transcript_boundary(bridge_dir: Path) -> SubmitBoundary | None:
     return capture_submit_boundary(transcript_path, native_session_id)
 
 
-def unstarted_queued_prompts(bridge_dir: Path, boundary: SubmitBoundary) -> list[str | None]:
+def replay_queued_prompts(bridge_dir: Path, boundary: SubmitBoundary) -> QueueReplay:
     """
-    List prompts queued in Claude Code after *boundary* that it has not taken yet.
+    Replay the prompts queued in Claude Code after *boundary* that it may not have taken.
 
     Empty once the session or transcript changed, or the pane's process exited:
     the queue lives only in that process.
 
     :param bridge_dir: The session's native bridge directory.
     :param boundary: Transcript boundary from :func:`capture_transcript_boundary`.
-    :returns: Queued prompt texts, oldest first; ``None`` for non-text entries.
+    :returns: The replayed queue; non-text entries have ``None`` text.
     """
     if not _boundary_is_current(bridge_dir, boundary):
-        return []
+        return QueueReplay(prompts=[], counted=True)
     info = _read_json_file(bridge_dir / _TMUX_FILE)
     socket_path, target = info.get("socket_path"), info.get("tmux_target")
     if (
@@ -5860,8 +5861,8 @@ def unstarted_queued_prompts(bridge_dir: Path, boundary: SubmitBoundary) -> list
         and isinstance(target, str)
         and _claude_pane_state(socket_path, target).alive is False
     ):
-        return []
-    return queued_prompts(boundary)
+        return QueueReplay(prompts=[], counted=True)
+    return replay_prompt_queue(boundary)
 
 
 def auto_mode_billing_notice_visible(pane: str) -> bool:

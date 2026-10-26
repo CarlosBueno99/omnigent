@@ -90,30 +90,63 @@ def read_fresh_submit_records(boundary: SubmitBoundary) -> list[JsonObject]:
         return []
 
 
-def queued_prompts(boundary: SubmitBoundary) -> list[str | None]:
-    """
-    Replay Claude Code's queue log after *boundary*: prompts still queued, oldest first.
+@dataclass(frozen=True)
+class QueuedPrompt:
+    """A prompt Claude Code may still hold in its queue."""
 
-    A ``dequeue`` names no prompt and takes the oldest one. Prompts queued before
-    the boundary are unknown here; an entry without text content is ``None``.
+    # Position of its ``enqueue`` record after the boundary, so the same entry
+    # is recognized on every replay from that boundary.
+    record_index: int
+    text: str | None
+
+
+@dataclass(frozen=True)
+class QueueReplay:
+    """What Claude Code's queue log after a boundary shows."""
+
+    # Prompts that may still be queued, oldest first.
+    prompts: list[QueuedPrompt]
+    # Whether the log agrees with an empty queue at the boundary; only then can
+    # dequeues show which prompts are gone.
+    counted: bool
+
+
+def replay_prompt_queue(boundary: SubmitBoundary) -> QueueReplay:
     """
-    queued: list[str | None] = []
-    for entry in read_fresh_submit_records(boundary):
+    Replay Claude Code's queue log after *boundary*, captured when the queue was empty.
+
+    A ``dequeue`` names no prompt, and Claude picks it by priority or filter, so
+    dequeues only show the queue empty once they cover every outstanding prompt.
+    ``remove``, ``popAll`` and ``popOne`` name the prompt they take out.
+    """
+    prompts: list[QueuedPrompt] = []
+    dequeued = 0
+    counted = True
+    for index, entry in enumerate(read_fresh_submit_records(boundary)):
         if (
             entry.get("type") != "queue-operation"
             or entry.get("sessionId") != boundary.native_session_id
         ):
             continue
         content = entry.get("content")
-        prompt = content if isinstance(content, str) else None
+        text = content if isinstance(content, str) else None
         operation = entry.get("operation")
         if operation == "enqueue":
-            queued.append(prompt)
-        elif operation == "dequeue" and queued:
-            queued.pop(0)
-        elif operation in ("remove", "popAll") and prompt in queued:
-            queued.remove(prompt)
-    return queued
+            prompts.append(QueuedPrompt(index, text))
+        elif operation == "dequeue":
+            dequeued += 1
+        elif operation in ("remove", "popAll", "popOne"):
+            named = next((prompt for prompt in prompts if prompt.text == text), None)
+            if named is None:
+                counted = False
+            else:
+                prompts.remove(named)
+        if counted and dequeued >= len(prompts):
+            # More dequeues than prompts means some were queued before the boundary.
+            counted = dequeued == len(prompts)
+            if counted:
+                prompts, dequeued = [], 0
+    return QueueReplay(prompts, counted)
 
 
 def has_matching_hook_refusal(

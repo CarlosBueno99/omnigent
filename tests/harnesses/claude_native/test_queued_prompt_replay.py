@@ -1,4 +1,4 @@
-"""Claude Code's queue log replays to the prompts it has not taken yet."""
+"""Claude Code's queue log replays to the prompts it may not have taken yet."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 
 from omnigent.harnesses.claude_native.submit_verification import (
     capture_submit_boundary,
-    queued_prompts,
+    replay_prompt_queue,
 )
 from omnigent.util.json_types import JsonObject
 
@@ -24,31 +24,40 @@ def _queue(operation: str, content: str | None = None, **fields: str) -> JsonObj
 
 
 @pytest.mark.parametrize(
-    "before,after,expected",
+    "before,after,expected,counted",
     [
         pytest.param(
             [],
             [_queue("enqueue", "/a"), _queue("enqueue", "b"), _queue("remove", "b")],
             ["/a"],
+            True,
             id="absorbed",
         ),
         pytest.param(
             [],
+            [_queue("enqueue", "/a"), _queue("dequeue")],
+            [],
+            True,
+            id="dequeued",
+        ),
+        pytest.param(
+            [],
             [_queue("enqueue", "/a"), _queue("enqueue", "b"), _queue("dequeue")],
-            ["b"],
-            id="dequeue-takes-oldest",
+            ["/a", "b"],
+            True,
+            id="dequeue-by-priority-names-neither",
         ),
         pytest.param(
             [],
-            [_queue("enqueue", "/a"), _queue("enqueue", "b"), _queue("popAll", "/a")],
-            ["b"],
-            id="pop-all",
-        ),
-        pytest.param(
+            [
+                _queue("enqueue", "/a"),
+                _queue("enqueue", "b"),
+                _queue("dequeue"),
+                _queue("remove", "b"),
+            ],
             [],
-            [_queue("enqueue", "/a"), _queue("remove", "/a")],
-            [],
-            id="slash-led-removed",
+            True,
+            id="removal-shows-what-was-dequeued",
         ),
         pytest.param(
             [],
@@ -59,30 +68,52 @@ def _queue(operation: str, content: str | None = None, **fields: str) -> JsonObj
                 _queue("popAll", "b"),
             ],
             [],
-            id="pop-all-entries",
+            True,
+            id="pop-all",
+        ),
+        pytest.param(
+            [],
+            [_queue("enqueue", "/a"), _queue("enqueue", "b"), _queue("popOne", "/a")],
+            ["b"],
+            True,
+            id="pop-one",
         ),
         pytest.param(
             [],
             [_queue("enqueue", "/a"), {**_queue("enqueue", "/b"), "sessionId": "other"}],
             ["/a"],
+            True,
             id="other-session",
         ),
         pytest.param(
-            [_queue("enqueue", "/a")],
-            [_queue("remove", "/a"), _queue("enqueue", "/b")],
+            [_queue("enqueue", "x")],
+            [_queue("remove", "x"), _queue("enqueue", "/b"), _queue("dequeue")],
             ["/b"],
-            id="before-boundary",
+            False,
+            id="removal-from-before-the-boundary",
+        ),
+        pytest.param(
+            [_queue("enqueue", "x")],
+            [_queue("dequeue"), _queue("enqueue", "/b"), _queue("dequeue")],
+            ["/b"],
+            False,
+            id="dequeue-from-before-the-boundary",
         ),
         pytest.param(
             [],
             [_queue("enqueue"), _queue("enqueue", "/b"), _queue("remove")],
             ["/b"],
+            True,
             id="non-text",
         ),
     ],
 )
-def test_queued_prompts_replays_the_log_after_the_boundary(
-    tmp_path: Path, before: list[JsonObject], after: list[JsonObject], expected: list[str]
+def test_replay_keeps_every_prompt_the_log_cannot_rule_out(
+    tmp_path: Path,
+    before: list[JsonObject],
+    after: list[JsonObject],
+    expected: list[str],
+    counted: bool,
 ) -> None:
     transcript = tmp_path / "native.jsonl"
     transcript.write_text("".join(json.dumps(r) + "\n" for r in before), encoding="utf-8")
@@ -91,4 +122,7 @@ def test_queued_prompts_replays_the_log_after_the_boundary(
     with transcript.open("a", encoding="utf-8") as handle:
         handle.writelines(json.dumps(r) + "\n" for r in after)
 
-    assert queued_prompts(boundary) == expected
+    replay = replay_prompt_queue(boundary)
+
+    assert [prompt.text for prompt in replay.prompts] == expected
+    assert replay.counted is counted

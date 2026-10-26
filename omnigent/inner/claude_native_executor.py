@@ -31,13 +31,14 @@ from omnigent.harnesses.claude_native.bridge import (
     is_auth_slash_command,
     kill_session,
     read_active_session_id,
+    read_claude_session_id,
     read_claude_status_model,
     read_launch_model,
     read_model_env,
     read_model_picker_values,
-    unstarted_queued_prompts,
+    replay_queued_prompts,
 )
-from omnigent.harnesses.claude_native.submit_verification import SubmitBoundary
+from omnigent.harnesses.claude_native.submit_verification import QueueReplay, SubmitBoundary
 from omnigent.inner.executor import (
     EnqueuedContent,
     Executor,
@@ -58,9 +59,10 @@ from omnigent.models.claude_model_vocabulary import claude_model_command_arg, no
 
 _logger = logging.getLogger(__name__)
 
-# How long a turn waits for the person to answer a Claude question or permission
-# prompt that held its message before anything was typed. Inside the server's
-# 600 s pending-input lifetime, so a message still held at the end is reported.
+# How long a turn holds its message before anything is typed: behind a /-led
+# message queued in Claude Code, then for the person to answer a Claude question
+# or permission prompt. Inside the server's 600 s pending-input lifetime, so a
+# message still held at the end is reported.
 _ANSWER_HOLD_S = 8 * 60.0
 _ANSWER_POLL_S = 1.0
 _INACTIVE_SESSION_MESSAGE = (
@@ -104,9 +106,11 @@ class ClaudeNativeExecutor(Executor):
         # ``/model`` when the model actually changes. Seeded lazily from the
         # spawn ``launch_model`` on the first turn (``None`` = not yet known).
         self._applied_model: str | None = None
-        # Transcript end captured while none of this executor's messages sat in
-        # Claude Code's queue; its queue log since then is replayed before typing.
+        # Transcript end captured while Claude Code's queue was empty; its queue
+        # log since then is replayed before typing.
         self._queue_boundary: SubmitBoundary | None = None
+        # Queued prompts already held for as long as allowed.
+        self._released_prompts: set[int] = set()
 
     def supports_streaming(self) -> bool:
         """:returns: ``False`` because output is emitted by the transcript forwarder."""
@@ -140,9 +144,10 @@ class ClaudeNativeExecutor(Executor):
             # run_turn's short-circuit answers it with the `omni setup`
             # guidance instead of spending a model turn on it.
             return False
+        deadline = asyncio.get_running_loop().time() + _ANSWER_HOLD_S
         try:
             async with self._inject_lock:
-                if not await self._wait_for_queued_slash_prompt():
+                if not await self._wait_for_queued_slash_prompt(deadline):
                     return False
                 await self._inject_prompt(text, framework_notices(content))
         except RuntimeError:
@@ -155,6 +160,7 @@ class ClaudeNativeExecutor(Executor):
         notices: list[str],
         wanted_model: str | None,
         wanted_model_arg: str | None,
+        hold_deadline: float,
     ) -> bool:
         """
         Apply a routed ``/model`` switch, then inject the message, in one lock hold.
@@ -162,7 +168,7 @@ class ClaudeNativeExecutor(Executor):
         :returns: ``False``, with nothing typed, once this session no longer owns the pane.
         """
         async with self._inject_lock:
-            if not await self._wait_for_queued_slash_prompt():
+            if not await self._wait_for_queued_slash_prompt(hold_deadline):
                 return False
             context_path = self._bridge_dir / CLAUDE_FRAMEWORK_CONTEXT_FILE
             context_path.unlink(missing_ok=True)
@@ -214,53 +220,69 @@ class ClaudeNativeExecutor(Executor):
                 return True
         return False
 
-    async def _wait_for_queued_slash_prompt(self) -> bool:
+    async def _wait_for_queued_slash_prompt(self, deadline: float) -> bool:
         """
-        Hold the next message while a message starting with ``/`` waits in Claude's queue.
+        Hold the next message while a message starting with ``/`` may wait in Claude's queue.
 
         While a turn runs, Claude Code folds queued prompts into it at the next tool
         call but keeps a ``/``-led one (a command, skill or absolute path) for the
-        turn's end, so a message typed now would overtake it. Each hold is limited
-        to :data:`_ANSWER_HOLD_S`; past it the message is delivered anyway.
+        turn's end, so a message typed now would overtake it. Past *deadline* the
+        message is delivered anyway, and the prompts it waited for hold nothing more.
 
+        :param deadline: Event-loop time the hold ends at.
         :returns: Whether this session still owns the pane after the hold.
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + _ANSWER_HOLD_S
-        queued = await self._unstarted_queued_prompts()
-        if _has_slash_led_prompt(queued):
+        replay = await self._replay_queue()
+        held_session = self._queue_boundary.native_session_id if self._queue_boundary else None
+        held = self._holds(replay)
+        if held:
             _logger.info(
                 "claude-native: holding the message until Claude takes a queued /-led message",
                 extra={"session_id": self._request_session_id},
             )
-            while _has_slash_led_prompt(queued) and loop.time() < deadline:
+            while self._holds(replay) and loop.time() < deadline:
                 await asyncio.sleep(_ANSWER_POLL_S)
-                queued = await self._unstarted_queued_prompts()
-            if _has_slash_led_prompt(queued):
+                replay = await self._replay_queue()
+            if self._holds(replay):
                 _logger.warning(
                     "claude-native: a queued /-led message is still waiting; delivering anyway",
                     extra={"session_id": self._request_session_id},
                 )
-                # Forget the stuck entry so it cannot hold later messages too.
-                queued = []
-        if not queued:
+                self._released_prompts.update(prompt.record_index for prompt in replay.prompts)
+        if replay.counted and not replay.prompts:
             try:
                 boundary = await asyncio.to_thread(capture_transcript_boundary, self._bridge_dir)
             except (OSError, ValueError):
                 boundary = None
             self._queue_boundary = boundary
+            self._released_prompts.clear()
+        if held:
+            # /clear starts a new native session before this session gives up the pane.
+            native_session = await asyncio.to_thread(read_claude_session_id, self._bridge_dir)
+            if native_session != held_session:
+                return False
         return _session_is_active(self._bridge_dir, self._request_session_id)
 
-    async def _unstarted_queued_prompts(self) -> list[str | None]:
-        """Prompts this executor's messages left in Claude's queue; empty when unknown."""
+    async def _replay_queue(self) -> QueueReplay:
+        """Replay Claude's queue since :attr:`_queue_boundary`; empty before one is captured."""
         if self._queue_boundary is None:
-            return []
+            return QueueReplay(prompts=[], counted=True)
         try:
             return await asyncio.to_thread(
-                unstarted_queued_prompts, self._bridge_dir, self._queue_boundary
+                replay_queued_prompts, self._bridge_dir, self._queue_boundary
             )
         except (OSError, ValueError):
-            return []
+            return QueueReplay(prompts=[], counted=False)
+
+    def _holds(self, replay: QueueReplay) -> bool:
+        """Whether a ``/``-led prompt that may still be queued holds the next message."""
+        return any(
+            prompt.record_index not in self._released_prompts
+            and prompt.text is not None
+            and prompt.text.strip().startswith("/")
+            for prompt in replay.prompts
+        )
 
     async def _inject_prompt(self, text: str, notices: list[str]) -> None:
         """Inject user text with one-shot context while holding the injection lock."""
@@ -356,22 +378,20 @@ class ClaudeNativeExecutor(Executor):
         # custom slot; anything else is ignored and the pane keeps its model.
         wanted_model_arg = self._model_command_arg(wanted_model)
         delivered = False
+        hold_deadline = asyncio.get_running_loop().time() + _ANSWER_HOLD_S
         try:
             with telemetry.span("claude_native.inject"):
-                answer_deadline: float | None = None
                 while True:
                     try:
                         delivered = await self._inject_turn(
-                            text, notices, wanted_model, wanted_model_arg
+                            text, notices, wanted_model, wanted_model_arg, hold_deadline
                         )
                         break
                     except ClaudeUserPromptPending as exc:
                         # Refused before anything was typed: wait for the answer and retry.
                         if not exc.nothing_typed:
                             raise
-                        if answer_deadline is None:
-                            answer_deadline = asyncio.get_running_loop().time() + _ANSWER_HOLD_S
-                        if not await self._wait_for_answer(answer_deadline):
+                        if not await self._wait_for_answer(hold_deadline):
                             raise
                         wanted_model_arg = self._model_command_arg(wanted_model)
         except ClaudeTerminalExited as exc:
@@ -456,7 +476,7 @@ class ClaudeNativeExecutor(Executor):
             yield ExecutorError(message=describe_exception(exc))
             return
         if not delivered:
-            yield ExecutorError(message=_INACTIVE_SESSION_MESSAGE)
+            yield ExecutorError(message=_INACTIVE_SESSION_MESSAGE, undelivered=True)
             return
         yield TurnComplete(response=None)
 
@@ -697,11 +717,6 @@ def _content_to_text(content: EnqueuedContent, bridge_dir: Path) -> str:
         parts = attachment_lines + text_parts
         return "\n\n".join(parts)
     return ""
-
-
-def _has_slash_led_prompt(prompts: list[str | None]) -> bool:
-    """Whether Claude Code withholds any of *prompts* from a running turn."""
-    return any(prompt is not None and prompt.strip().startswith("/") for prompt in prompts)
 
 
 def _latest_framework_notices(messages: list[Message]) -> list[str]:
