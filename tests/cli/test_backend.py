@@ -541,7 +541,16 @@ def test_reused_background_daemon_receives_only_approved_runner_values(
     monkeypatch.setenv("SESSION_TOKEN", "session-only-credential")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "remote-daemons-never-get-ambient-keys")
     profile = {
-        "providers": {"session": {"kind": "key", "openai": {"api_key_ref": "env:SESSION_TOKEN"}}}
+        "providers": {
+            "session": {
+                "kind": "gateway",
+                "openai": {
+                    "api_key_ref": "env:SESSION_TOKEN",
+                    "base_url": "https://gateway.example.com/v1",
+                    "models": {"default": "m"},
+                },
+            }
+        }
     }
 
     with inference_config_scope(profile):

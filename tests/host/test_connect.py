@@ -36,6 +36,8 @@ from omnigent.host.connect import (
     _build_runner_env,
     _runner_exit_error,
     _RunnerHandle,
+    overlay_runner_env,
+    refreshable_runner_env_names,
     run_host_process,
 )
 from omnigent.host.daemon_lifecycle import DaemonLifecycleLock, write_runner_env
@@ -1059,6 +1061,75 @@ def test_runner_launch_base_env_keeps_names_the_daemon_started_with(
 
     assert env["STARTUP_TOKEN"] == "from-start"
     assert env["LATER_TOKEN"] == "from-later"
+
+
+def test_refreshable_runner_env_names_cover_credentials_but_not_host_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "omnigent.onboarding.provider_config._load_config",
+        lambda: {
+            "providers": {
+                "saved": {
+                    "kind": "gateway",
+                    "openai": {
+                        "api_key_ref": "env:SAVED_PROVIDER_KEY",
+                        "base_url": "https://gateway.example.com/v1",
+                        "models": {"default": "m"},
+                    },
+                }
+            }
+        },
+    )
+
+    names = refreshable_runner_env_names(
+        {RUNNER_ENV_PASSTHROUGH_ENV_VAR: "DAEMON_TOKEN,PATH"},
+        {RUNNER_ENV_PASSTHROUGH_ENV_VAR: "LATER_TOKEN,MLFLOW_TRACKING_URI"},
+    )
+
+    assert {
+        "ANTHROPIC_API_KEY",
+        "SAVED_PROVIDER_KEY",
+        "DAEMON_TOKEN",
+        "LATER_TOKEN",
+        RUNNER_ENV_PASSTHROUGH_ENV_VAR,
+    } <= names
+    assert not names & {"PATH", "MLFLOW_TRACKING_URI"}
+
+
+def test_overlay_runner_env_adds_or_replaces_only_non_empty_refreshable_values() -> None:
+    merged = overlay_runner_env(
+        {
+            RUNNER_ENV_PASSTHROUGH_ENV_VAR: "DAEMON_TOKEN",
+            "ANTHROPIC_API_KEY": "sk-old",
+            "SAVED_PROVIDER_KEY": "kept",
+            "PATH": "/daemon/bin",
+        },
+        {
+            RUNNER_ENV_PASSTHROUGH_ENV_VAR: "LATER_TOKEN",
+            "ANTHROPIC_API_KEY": "sk-new",
+            "LATER_TOKEN": "added",
+            "SAVED_PROVIDER_KEY": "",
+            "PATH": "/published/bin",
+            "UNLISTED_SECRET": "dropped",
+        },
+        frozenset(
+            {
+                RUNNER_ENV_PASSTHROUGH_ENV_VAR,
+                "ANTHROPIC_API_KEY",
+                "LATER_TOKEN",
+                "SAVED_PROVIDER_KEY",
+            }
+        ),
+    )
+
+    assert merged == {
+        RUNNER_ENV_PASSTHROUGH_ENV_VAR: "DAEMON_TOKEN,LATER_TOKEN",
+        "ANTHROPIC_API_KEY": "sk-new",
+        "LATER_TOKEN": "added",
+        "SAVED_PROVIDER_KEY": "kept",
+        "PATH": "/daemon/bin",
+    }
 
 
 @pytest.mark.parametrize("binding_token", ["token_xyz", "", "   "])

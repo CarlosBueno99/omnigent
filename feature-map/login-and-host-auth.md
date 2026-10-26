@@ -272,8 +272,9 @@ Never run these commands against the real `~/.omnigent` or `~/.databrickscfg`.
     host-wide. Values only add or change; removals, empty values, and other
     settings such as `PATH`, proxies, or Databricks sign-in need a host
     restart. Provider `env:` names follow the config at each launch.
-  - Commands run by session tools publish nothing. On Windows, concurrent
-    publishes are not serialized and the file has no owner check.
+  - Commands run by session tools, which inherit `OMNIGENT_RUNNER_PARENT_PID`,
+    publish nothing. On Windows, concurrent publishes are not serialized and
+    the file has no owner check.
   - The owner-only file under `daemons/runner-env/` stays until the host exits
     cleanly, `host stop`, or the next command or host start that finds the
     host gone.
