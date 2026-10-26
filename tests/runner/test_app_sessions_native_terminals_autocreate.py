@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -6017,18 +6018,11 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_canonical_overrid
 
 
 @pytest.mark.asyncio
-async def test_auto_create_claude_terminal_unserved_pick_resets_to_the_catalog_default(
+async def test_auto_create_claude_terminal_unserved_pick_resets_to_native_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    A pick no row can serve launches on the catalog's default and resets the pick.
-
-    The pick outlives the provider it was made under, so a relaunch that
-    cannot honor it must still bring the session back: it takes the Default
-    launch (the fresh catalog's ``isDefault`` row) and clears the persisted
-    pick, so the picker shows the Default the session now runs.
-    """
+    """An unserved pick resets to Default without overriding Claude's own settings."""
     monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
@@ -6082,7 +6076,7 @@ async def test_auto_create_claude_terminal_unserved_pick_resets_to_the_catalog_d
         resolve_launch_config=_resolve,
     )
     args = captured["spec"].args
-    assert args[args.index("--model") + 1] == "claude-opus-4-8[1m]"
+    assert "--model" not in args
     assert [body for body in patches if "model_override" in body] == [
         {"model_override": "default"}
     ]
@@ -6258,7 +6252,7 @@ async def test_auto_create_claude_terminal_refreshes_a_stale_catalog_before_rese
         assert pick_resets == []
     elif refresh == "lacks_pick":
         assert model_catalog_store.read_catalog("claude-native", fingerprint) == refreshed_rows
-        assert args[args.index("--model") + 1] == "claude-opus-4-8[1m]"
+        assert "--model" not in args
         assert pick_resets == [{"model_override": "default"}]
     else:
         # No fresh rows: the stale entry stays, the Default launch of a stale
@@ -6365,14 +6359,14 @@ async def test_auto_create_claude_terminal_launch_gate_folds_a_gateway_namespace
 @pytest.mark.parametrize(
     ("pick", "expected_model", "reset_pick"),
     [
-        ("claude-opus-4-8", "system.ai.claude-opus-5-5[1m]", True),
+        ("claude-opus-4-8", None, True),
         ("claude-sonnet-5-5[1m]", "system.ai.claude-sonnet-5-5[1m]", False),
         ("system.ai.claude-sonnet-5-5[1m]", "system.ai.claude-sonnet-5-5[1m]", False),
     ],
 )
 async def test_auto_create_claude_terminal_validates_managed_gateway_pick(
     pick: str,
-    expected_model: str,
+    expected_model: str | None,
     reset_pick: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6429,7 +6423,10 @@ async def test_auto_create_claude_terminal_validates_managed_gateway_pick(
         resolve_launch_config=_resolve,
     )
     args = captured["spec"].args
-    assert args[args.index("--model") + 1] == expected_model
+    if expected_model is None:
+        assert "--model" not in args
+    else:
+        assert args[args.index("--model") + 1] == expected_model
     assert [body for body in patches if "model_override" in body] == (
         [{"model_override": "default"}] if reset_pick else []
     )
@@ -6438,24 +6435,23 @@ async def test_auto_create_claude_terminal_validates_managed_gateway_pick(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("freshness", ["fresh", "stale"])
+@pytest.mark.parametrize("configured", [False, True], ids=["claude-owned", "provider"])
+@pytest.mark.parametrize("resume", [False, True], ids=["new", "resume"])
 async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     freshness: str,
+    configured: bool,
+    resume: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    A Default launch pins the stored default only while the entry is fresh.
-
-    The store never forgets an entry, so its ``isDefault`` row can outlive
-    the model it names (a retirement or an entitlement change); pinning it
-    as ``--model`` then hard-fails every Default launch on the host. A
-    stale entry defers to the CLI's own default — no ``--model`` at all —
-    while the store re-probes in the background.
-    """
+    """Discovery must not override Claude-owned defaults, including on cold resume."""
     import os
     import time
 
-    from omnigent.harnesses.claude_native.main import claude_catalog_fingerprint
+    from omnigent.harnesses.claude_native.main import (
+        ClaudeNativeUcodeConfig,
+        claude_catalog_fingerprint,
+    )
     from omnigent.models import model_catalog_store
     from tests.runner.conftest import REAL_CLAUDE_LAUNCH_CATALOG
 
@@ -6481,16 +6477,21 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.main.claude_model_catalog", _fake_probe_catalog
     )
-    fingerprint = claude_catalog_fingerprint(None)
+    config = (
+        ClaudeNativeUcodeConfig(env={"ANTHROPIC_BASE_URL": "https://api.anthropic.com"})
+        if configured
+        else None
+    )
+    fingerprint = claude_catalog_fingerprint(config)
     model_catalog_store.write_catalog(
         "claude-native",
         fingerprint,
         [
             {"id": "opus", "model": "claude-opus-5", "displayName": "Opus 5"},
             {
-                "id": "claude-3-5-sonnet-20241022",
-                "model": "claude-3-5-sonnet-20241022",
-                "displayName": "Claude 3.5 Sonnet",
+                "id": "claude-opus-5-5",
+                "model": "claude-opus-5-5",
+                "displayName": "Opus 5.5",
                 "isDefault": True,
             },
         ],
@@ -6501,17 +6502,27 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         os.utime(path, (old, old))
 
     captured: dict[str, Any] = {}
+    external_id = "02857840-6362-408f-b41f-309e396ed7c6"
+    transcript = tmp_path / "resume.jsonl"
+    transcript.touch()
+    synthesize = AsyncMock(return_value=transcript)
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.main._ensure_local_claude_resume_transcript",
+        synthesize,
+    )
 
     def _handle_request(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"labels": {}})
+        return httpx.Response(
+            200, json={"labels": {}, "external_session_id": external_id if resume else None}
+        )
 
     fake_client = httpx.AsyncClient(
         base_url="http://test-server",
         transport=httpx.MockTransport(_handle_request),
     )
 
-    async def _resolve() -> None:
-        return None
+    async def _resolve() -> ClaudeNativeUcodeConfig | None:
+        return config
 
     await _auto_create_claude_terminal(
         "9b1d2c3e4f5a6b7c8d9e0f1a2b3c4d5e",
@@ -6519,12 +6530,18 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         lambda _sid, _evt: None,
         server_client=fake_client,
         resolve_launch_config=_resolve,
+        auth_token_factory=lambda: None,
     )
     args = captured["spec"].args
-    if freshness == "fresh":
-        assert args[args.index("--model") + 1] == "claude-3-5-sonnet-20241022"
+    assert ("--resume" in args) is resume
+    assert synthesize.await_count == int(resume)
+    if resume:
+        assert args[args.index("--resume") + 1] == external_id
+    if configured and freshness == "fresh":
+        assert args[args.index("--model") + 1] == "claude-opus-5-5"
     else:
-        assert "--model" not in args, f"a stale default was still pinned: {args}"
+        assert "--model" not in args, f"discovery overrode Claude's own default: {args}"
+    if freshness == "stale":
         task = model_catalog_store._inflight.get(("claude-native", fingerprint))
         if task is not None:
             await task

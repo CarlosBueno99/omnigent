@@ -9104,10 +9104,8 @@ async def _auto_create_claude_terminal(
     # A pick the provider cannot serve is dropped only once the fallback
     # terminal is actually up, so a failed launch never loses it.
     reset_pick_after_launch = False
-    # Explicit launches (model-flows design §4): consult the shared catalog
-    # only when it can change the outcome — to validate an explicit request,
-    # or to resolve a Default launch that would otherwise pass no ``--model``
-    # and leave the model to invisible CLI-private state.
+    # Validate explicit picks and discover provider defaults. Claude-owned
+    # defaults stay with the CLI's settings, which may differ from discovery.
     # Bound here so the vocabulary record below reads the same rows the
     # launch validated against, whether or not that validation ran.
     launch_catalog: list[dict[str, object]] | None = None
@@ -9223,7 +9221,7 @@ async def _auto_create_claude_terminal(
                         extra={"session_id": session_id},
                     )
                     launch_model = unpinned_launch_model
-        if launch_model is None and launch_catalog:
+        if claude_config is not None and launch_model is None and launch_catalog:
             # A stale entry's default is yesterday's answer: pinning it as
             # ``--model`` turns a provider-side retirement or entitlement
             # change into a hard launch failure. Launch bare instead — the

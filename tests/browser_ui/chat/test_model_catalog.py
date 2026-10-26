@@ -54,17 +54,21 @@ def test_catalog_rows_render_for_every_native_picker(
         expect(rows.nth(1)).to_contain_text("Alternate")
 
 
+@pytest.mark.parametrize("viewport", [(1600, 900), (390, 844)], ids=["desktop", "mobile"])
 def test_reported_model_highlights_only_an_exact_catalog_match(
     page: Page,
     chat_session_contract: ChatSessionContract,
+    viewport: tuple[int, int],
 ) -> None:
     """Reported provider IDs select exact rows; unknown reports stay honest."""
     chat = chat_session_contract
+    page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+    chat.update_session(labels={"omnigent.wrapper": "claude-code-native-ui"})
     chat.set_catalog(
         harness="claude-native",
         models=[
             model_option("sonnet", model="system.ai.claude-sonnet-5", display_name="Sonnet 5"),
-            model_option("opus", model="system.ai.claude-opus-4-10", display_name="Opus 4.10"),
+            model_option("opus", model="system.ai.claude-opus-5-5[1m]", display_name="Opus 5.5"),
         ],
         selected_model="system.ai.claude-sonnet-5",
     )
@@ -73,18 +77,19 @@ def test_reported_model_highlights_only_an_exact_catalog_match(
     expect(page.locator('[data-model-id="sonnet"]')).to_have_attribute("aria-checked", "true")
     expect(page.locator('[data-model-id="opus"]')).to_have_attribute("aria-checked", "false")
 
-    chat.set_catalog(
-        harness="claude-native",
-        models=chat.models,
-        selected_model="claude-opus-4-8[1m]",
-    )
-    page.goto(chat.url)
-    _open_models(page)
-    current = page.locator('[data-model-id="claude-opus-4-8[1m]"]')
-    expect(current).to_have_count(1)
-    expect(current).to_contain_text("(current)")
-    expect(current).to_have_attribute("aria-checked", "true")
-    expect(page.locator('[data-model-id="opus"]')).to_have_attribute("aria-checked", "false")
+    for reported_model in ("claude-opus-4-8[1m]", "claude-opus-5-5"):
+        chat.set_catalog(
+            harness="claude-native",
+            models=chat.models,
+            selected_model=reported_model,
+        )
+        page.goto(chat.url)
+        _open_models(page)
+        current = page.locator(f'[data-model-id="{reported_model}"]')
+        expect(current).to_have_count(1)
+        expect(current).to_contain_text(f"{reported_model} (current)")
+        expect(current).to_have_attribute("aria-checked", "true")
+        expect(page.locator('[data-model-id="opus"]')).to_have_attribute("aria-checked", "false")
 
 
 def test_selecting_a_catalog_row_patches_its_exact_id(

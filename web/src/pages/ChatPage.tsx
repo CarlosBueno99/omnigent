@@ -5463,13 +5463,14 @@ function useResolvedComposerModel(
   // request (`sessionModelOverride`) is input, never display state — rendering
   // a request as if it were truth is exactly how a record/pane divergence hides.
   const isReportedModelPicker = modelPickerKind === "claude" || modelPickerKind === "codex";
-  // The row the reported model maps to: its catalog row when one matches
-  // exactly (by id or wire model), else the raw reported value itself — the
-  // modal appends that as its own honest row rather than relabeling it onto
-  // a same-family row of a different generation.
+  // Claude's reported ID must match exactly: gateway prefixes and context
+  // markers affect requests. Codex keeps its equivalent catalog spellings.
   const reportedRowId =
     isReportedModelPicker && llmModel
-      ? (findNativeModelOption(codexModelOptions, llmModel)?.id ?? llmModel)
+      ? ((modelPickerKind === "claude"
+          ? codexModelOptions.find((row) => row.id === llmModel || row.model === llmModel)
+          : findNativeModelOption(codexModelOptions, llmModel)
+        )?.id ?? llmModel)
       : null;
   // Before the harness has reported anything (a routed session whose pane
   // has not started, a reload of one), the gear seeds from the session's

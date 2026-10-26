@@ -6901,32 +6901,45 @@ describe("Composer config gear", () => {
     },
   );
 
-  it("appends an unknown reported Codex model as the checked current row", async () => {
-    useChatStore.setState({
-      llmModel: "gpt-unlisted",
-      sessionModelOverride: null,
-      sessionModelSeeded: false,
-    });
-    renderWithTooltips(
-      <Composer
-        {...composerProps({
-          showEffort: false,
-          showModels: true,
-          modelPickerKind: "codex",
-          codexModelOptions: [{ id: "gpt-5.5", displayName: "Codex Pretty 5.5" }],
-        })}
-      />,
-    );
+  it.each([
+    ["codex", "gpt-unlisted", "gpt-5.5", "gpt-5.5", false],
+    ["claude", "claude-opus-5-5", "opus", "system.ai.claude-opus-5-5[1m]", false],
+    ["claude", "claude-opus-5-5[1m]", "opus", "system.ai.claude-opus-5-5[1m]", false],
+    ["claude", "system.ai.claude-opus-5-5", "opus", "system.ai.claude-opus-5-5[1m]", false],
+    ["claude", "system.ai.claude-opus-5-5[1m]", "opus", "system.ai.claude-opus-5-5[1m]", true],
+    ["claude", "opus", "opus", "system.ai.claude-opus-5-5[1m]", true],
+    ["codex", "databricks-gpt-5-6-luna", "gpt-5.6-luna", "gpt-5.6-luna", true],
+  ] as const)(
+    "matches the reported %s model %s without hiding an unmatched Claude model",
+    async (modelPickerKind, reportedModel, rowId, rowModel, matchesCatalog) => {
+      useChatStore.setState({
+        llmModel: reportedModel,
+        sessionModelOverride: null,
+        sessionModelSeeded: false,
+      });
+      renderWithTooltips(
+        <Composer
+          {...composerProps({
+            showEffort: false,
+            showModels: true,
+            modelPickerKind,
+            codexModelOptions: [{ id: rowId, model: rowModel, displayName: "Catalog model" }],
+          })}
+        />,
+      );
 
-    await openSessionModels();
-    expect(
-      screen.getByRole("menuitemcheckbox", { name: "gpt-unlisted (current)" }),
-    ).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByRole("menuitemcheckbox", { name: "Codex Pretty 5.5" })).toHaveAttribute(
-      "aria-checked",
-      "false",
-    );
-  });
+      await openSessionModels();
+      expect(screen.getByRole("menuitemcheckbox", { name: "Catalog model" })).toHaveAttribute(
+        "aria-checked",
+        String(matchesCatalog),
+      );
+      const current = screen.queryByRole("menuitemcheckbox", {
+        name: `${reportedModel} (current)`,
+      });
+      if (matchesCatalog) expect(current).toBeNull();
+      else expect(current).toHaveAttribute("aria-checked", "true");
+    },
+  );
 
   it("names the model Codex's Default resolves to, like the new-session gear", async () => {
     const options = [
