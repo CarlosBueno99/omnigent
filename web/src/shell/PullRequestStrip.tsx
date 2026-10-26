@@ -1,6 +1,7 @@
-// PullRequestStrip — the PR panel's picker when a session tracks several PRs: a
+// PullRequestStrip — the PR panel's picker for a session's tracked PRs: a
 // horizontally scrolling row of cards (state glyph, number, CI counts, title),
-// with chevrons that page through the row while it overflows.
+// with chevrons that page through the row while it overflows. Each card reveals
+// its own unlink button on hover, so it's clear which PR gets unlinked.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -10,6 +11,7 @@ import {
   CircleDotIcon,
   CircleXIcon,
   GitPullRequestIcon,
+  Trash2Icon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -19,7 +21,7 @@ import {
   type PullRequestAssociation,
 } from "@/hooks/usePullRequests";
 import { gitProviderCopy } from "@/lib/gitProviders";
-import { pullRequestLabel, pullRequestStatus } from "@/lib/pullRequestDisplay";
+import { pullRequestStatus } from "@/lib/pullRequestDisplay";
 import { cn } from "@/lib/utils";
 
 /** Share of the visible row one chevron click scrolls by. */
@@ -63,6 +65,16 @@ function CheckCounts({ checks }: { checks: PullRequest["checks"] }) {
   );
 }
 
+/** A PR's card label, in its own provider's copy (else the session's). */
+function pullRequestLabel(pr: PullRequestAssociation, sessionProvider?: string | null): string {
+  const copy = gitProviderCopy(pr.provider ?? sessionProvider, undefined, pr.provider_display);
+  const host = pr.host === copy.defaultHost ? "" : `${pr.host}/`;
+  const inferred = pr.relationship === "inferred" ? " (from branch)" : "";
+  const identity = `${host}${pr.repository} ${copy.prNumberPrefix}${pr.number}${inferred}`;
+  const title = pr.title?.trim();
+  return title ? `${identity} — ${title}` : identity;
+}
+
 /** "Open · 1 failed · 100 passed" for the card's tooltip. */
 function statusSummary(pr: PullRequest): string {
   const { checks } = pr;
@@ -78,14 +90,18 @@ function PullRequestCard({
   details,
   selected,
   sessionProvider,
+  unlinkDisabled,
   onSelect,
+  onUnlink,
 }: {
   association: PullRequestAssociation;
   /** The PR's resolved state and checks; absent until its info loads. */
   details: PullRequest | null | undefined;
   selected: boolean;
   sessionProvider?: string | null;
+  unlinkDisabled: boolean;
   onSelect: () => void;
+  onUnlink: () => void;
 }) {
   const copy = gitProviderCopy(
     association.provider ?? sessionProvider,
@@ -97,37 +113,59 @@ function PullRequestCard({
   const label = pullRequestLabel(association, sessionProvider);
   const title = association.title?.trim() || details?.title?.trim() || association.repository;
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          aria-label={label}
-          aria-current={selected ? "true" : undefined}
-          onClick={onSelect}
-          className={cn(
-            "flex w-48 shrink-0 cursor-pointer flex-col gap-0.5 rounded-md px-2 py-1.5 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring",
-            selected && "bg-muted hover:bg-muted",
-          )}
-        >
-          <span className="flex min-w-0 items-center gap-1 text-ui tabular-nums">
-            <StateIcon
-              className={cn("size-3.5 shrink-0", status?.className ?? "text-muted-foreground")}
-              aria-hidden
-            />
-            <span className="font-medium">
-              {copy.prNumberPrefix}
-              {association.number}
+    // Buttons can't nest, so the unlink button overlays the card as a sibling.
+    <div
+      className={cn(
+        "group/card relative w-48 shrink-0 rounded-md hover:bg-muted/60",
+        selected && "bg-muted hover:bg-muted",
+      )}
+    >
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={label}
+            aria-current={selected ? "true" : undefined}
+            onClick={onSelect}
+            className="flex w-full cursor-pointer flex-col gap-0.5 rounded-md px-2 py-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {/* Right padding keeps the counts clear of the unlink button. */}
+            <span className="flex min-w-0 items-center gap-1 pr-5 text-ui tabular-nums">
+              <StateIcon
+                className={cn("size-3.5 shrink-0", status?.className ?? "text-muted-foreground")}
+                aria-hidden
+              />
+              <span className="font-medium">
+                {copy.prNumberPrefix}
+                {association.number}
+              </span>
+              {details && <CheckCounts checks={details.checks} />}
             </span>
-            {details && <CheckCounts checks={details.checks} />}
-          </span>
-          <span className="truncate text-xs text-muted-foreground">{title}</span>
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom" className="flex-col items-start gap-0.5 wrap-anywhere">
-        <span>{label}</span>
-        {details && <span className="opacity-70">{statusSummary(details)}</span>}
-      </TooltipContent>
-    </Tooltip>
+            <span className="truncate text-xs text-muted-foreground">{title}</span>
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="flex-col items-start gap-0.5 wrap-anywhere">
+          <span>{label}</span>
+          {details && <span className="opacity-70">{statusSummary(details)}</span>}
+        </TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={`Unlink ${label}`}
+            disabled={unlinkDisabled}
+            onClick={onUnlink}
+            // Touch screens can't hover, so the button stays visible there.
+            className="absolute top-1 right-1 size-5 text-muted-foreground opacity-0 group-focus-within/card:opacity-100 group-hover/card:opacity-100 pointer-coarse:opacity-100"
+          >
+            <Trash2Icon className="size-3" aria-hidden />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">Unlink PR</TooltipContent>
+      </Tooltip>
+    </div>
   );
 }
 
@@ -136,13 +174,18 @@ export function PullRequestStrip({
   prs,
   selectedUrl,
   sessionProvider,
+  unlinkDisabled = false,
   onSelect,
+  onUnlink,
 }: {
   conversationId: string;
   prs: PullRequestAssociation[];
   selectedUrl: string | undefined;
   sessionProvider?: string | null;
+  /** Disables every card's unlink button, e.g. while an unlink is in flight. */
+  unlinkDisabled?: boolean;
   onSelect: (url: string) => void;
+  onUnlink: (url: string) => void;
 }) {
   const infos = usePullRequestInfos(
     conversationId,
@@ -175,11 +218,12 @@ export function PullRequestStrip({
     const scroller = scrollerRef.current;
     const card = scroller?.querySelector<HTMLElement>('[aria-current="true"]');
     if (!scroller || !card) return;
-    const cardEnd = card.offsetLeft + card.offsetWidth;
-    if (card.offsetLeft < scroller.scrollLeft) {
-      scroller.scrollLeft = card.offsetLeft;
-    } else if (cardEnd > scroller.scrollLeft + scroller.clientWidth) {
-      scroller.scrollLeft = cardEnd - scroller.clientWidth;
+    const cardBox = card.getBoundingClientRect();
+    const rowBox = scroller.getBoundingClientRect();
+    if (cardBox.left < rowBox.left) {
+      scroller.scrollLeft += cardBox.left - rowBox.left;
+    } else if (cardBox.right > rowBox.right) {
+      scroller.scrollLeft += cardBox.right - rowBox.right;
     }
   }, [selectedUrl, prs.length]);
 
@@ -209,7 +253,7 @@ export function PullRequestStrip({
           role="group"
           aria-label="Session pull requests"
           onScroll={measure}
-          className="relative flex min-w-0 flex-1 gap-1 overflow-x-auto scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="flex min-w-0 flex-1 gap-1 overflow-x-auto scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
           {prs.map((pr, index) => (
             <PullRequestCard
@@ -218,7 +262,9 @@ export function PullRequestStrip({
               details={infos[index]?.data?.pr}
               selected={pr.url === selectedUrl}
               sessionProvider={sessionProvider}
+              unlinkDisabled={unlinkDisabled}
               onSelect={() => onSelect(pr.url)}
+              onUnlink={() => onUnlink(pr.url)}
             />
           ))}
         </div>

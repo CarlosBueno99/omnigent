@@ -2,7 +2,7 @@
 // hooks and the heavy MonacoDiffViewer are mocked; IntersectionObserver (absent
 // in jsdom) is stubbed to fire immediately so lazy sections mount.
 
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { act, render, screen, fireEvent, within } from "@testing-library/react";
 import { parsePatchFiles } from "@pierre/diffs";
 import type * as DiffsModule from "@pierre/diffs";
 import userEvent from "@testing-library/user-event";
@@ -65,8 +65,9 @@ const state = vi.hoisted(() => ({
     error: null as Error | null,
   },
   updateReviewers: { mutate: vi.fn(), isError: false, error: null as Error | null },
-  // Each tracked PR's resolved details for the multi-PR strip, keyed by URL.
+  // Each tracked PR's resolved details for the strip, keyed by URL.
   stripPrs: {} as Record<string, PullRequest>,
+  updateSessionPr: { mutate: vi.fn(), isPending: false, isError: false },
 }));
 
 vi.mock("@/hooks/usePullRequests", async (importOriginal) => {
@@ -106,7 +107,7 @@ vi.mock("@/hooks/usePullRequests", async (importOriginal) => {
     fetchPullRequestFileContents: async () => ({ before: "old", after: "new" }),
     // The account selector (shown in the repo-unresolved empty state) calls this;
     // stub the mutation shape it reads.
-    useUpdateSessionPr: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+    useUpdateSessionPr: () => state.updateSessionPr,
     useSetPullRequestPreference: () => ({
       mutate: () => {},
       isPending: false,
@@ -299,6 +300,7 @@ beforeEach(() => {
   state.repoLabels = { data: undefined, isPending: true, isError: false, error: null };
   state.updateLabels = { mutate: vi.fn(), isError: false, error: null };
   state.stripPrs = {};
+  state.updateSessionPr = { mutate: vi.fn(), isPending: false, isError: false };
 });
 
 afterEach(() => {
@@ -1376,10 +1378,9 @@ describe("PullRequestPanel", () => {
       const heading = screen.getByRole("heading", { name: "Pull Requests" });
       expect(heading.querySelector("svg")).toHaveClass("lucide-git-pull-request");
       expect(screen.queryByRole("heading", { name: "GitHub" })).toBeNull();
-      // The picker names the PR in its own provider's style; the header does not.
-      expect(screen.getByRole("combobox", { name: "Session pull request" })).toHaveTextContent(
-        "acme/app #6000",
-      );
+      // The card names the PR in its own provider's style; the header does not.
+      const strip = screen.getByRole("group", { name: "Session pull requests" });
+      expect(within(strip).getByRole("button", { name: "acme/app #6000" })).toBeInTheDocument();
     });
 
     it("keeps naming GitHub for a host that omits the provider", () => {
@@ -1411,11 +1412,12 @@ describe("PullRequestPanel", () => {
         ],
       };
       const { rerender } = renderPanel();
-      expect(screen.getByRole("heading", { name: "Example Forge" })).toBeInTheDocument();
+      const heading = () => screen.getByRole("heading", { name: "Pull Requests" });
+      expect(heading()).toHaveAttribute("title", "Example Forge");
       state.info = { isLoading: true, error: null, isFetching: true };
       rerender(<PullRequestPanel conversationId="conv_1" />);
       expect(screen.getByText("Loading pull requests…")).toBeInTheDocument();
-      expect(screen.getByRole("heading", { name: "Example Forge" })).toBeInTheDocument();
+      expect(heading()).toHaveAttribute("title", "Example Forge");
     });
   });
 
@@ -2124,8 +2126,6 @@ describe("session PR selection", () => {
       },
     };
     const { rerender } = renderPanel();
-    // Several PRs swap the dropdown for the card strip under a titled header.
-    expect(screen.queryByRole("combobox", { name: "Session pull request" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Pull Requests" })).toBeInTheDocument();
     const strip = screen.getByRole("group", { name: "Session pull requests" });
     const card = (name: string) => within(strip).getByRole("button", { name });
@@ -2146,7 +2146,7 @@ describe("session PR selection", () => {
     expect(screen.getByText("Loading pull requests…")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /First repository/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Link a PR" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Unlink PR" })).toBeEnabled();
+    expect(card(`Unlink ${twoLabel}`)).toBeEnabled();
     expect(screen.getByRole("button", { name: "Refresh" })).toHaveTextContent(/^$/);
     expect(screen.queryByRole("link", { name: "Open the PR on GitHub" })).toBeNull();
 
@@ -2185,11 +2185,11 @@ describe("session PR selection", () => {
         ],
       });
       renderPanel();
-      const picker = screen.getByRole("combobox", { name: "Session pull request" });
-      expect(picker).toHaveTextContent(/^example\/one #42$/);
-      expect(picker).not.toHaveAttribute("title");
-      fireEvent.click(picker);
-      expect(screen.getByRole("option", { name: "example/one #42" })).toBeVisible();
+      const strip = screen.getByRole("group", { name: "Session pull requests" });
+      const card = within(strip).getByRole("button", { name: "example/one #42" });
+      // Without a title, the card's second line names the repository instead.
+      expect(card).toHaveTextContent(/^#42example\/one$/);
+      expect(card).not.toHaveAttribute("title");
     },
   );
 
@@ -2210,15 +2210,50 @@ describe("session PR selection", () => {
       ],
     });
     renderPanel();
-    const picker = screen.getByRole("combobox", { name: "Session pull request" });
+    const strip = screen.getByRole("group", { name: "Session pull requests" });
     const label = "github.example.com/example/one #42 (from branch) — Fix session selection";
-    expect(picker).toHaveTextContent(label);
-    expect(picker).not.toHaveAttribute("title");
-    await userEvent.hover(picker);
+    const card = within(strip).getByRole("button", { name: label });
+    expect(card).toHaveTextContent(/^#42Fix session selection$/);
+    expect(card).not.toHaveAttribute("title");
+    await userEvent.hover(card);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
-    await userEvent.unhover(picker);
-    fireEvent.click(picker);
-    expect(screen.getByRole("option", { name: label })).toBeVisible();
+  });
+
+  it("unlinks each PR from its own card, moving the selection only when it was in view", async () => {
+    const user = userEvent.setup();
+    const one = "https://github.com/example/one/pull/1";
+    const two = "https://github.com/example/one/pull/2";
+    Object.assign(state.info!.data!, {
+      tracking_available: true,
+      selected_pr_url: one,
+      prs: [one, two].map((url, index) => ({
+        url,
+        host: "github.com",
+        repository: "example/one",
+        number: index + 1,
+        relationship: "created",
+      })),
+    });
+    renderPanel();
+    expect(screen.queryByRole("button", { name: "Unlink PR" })).toBeNull();
+    const strip = screen.getByRole("group", { name: "Session pull requests" });
+    const { mutate } = state.updateSessionPr;
+    interface Options {
+      onSuccess: (data: Partial<PullRequestInfo>) => void;
+    }
+    const succeed = (data: Partial<PullRequestInfo>) =>
+      act(() => (mutate.mock.lastCall![1] as Options).onSuccess(data));
+
+    await user.click(within(strip).getByRole("button", { name: "Unlink example/one #2" }));
+    expect(mutate).toHaveBeenLastCalledWith({ url: two, action: "remove" }, expect.anything());
+    // The host's default for the remaining PRs must not replace the PR in view.
+    succeed({ selected_pr_url: "https://github.com/example/one/pull/3" });
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: one });
+
+    await user.click(within(strip).getByRole("button", { name: "Unlink example/one #1" }));
+    expect(mutate).toHaveBeenLastCalledWith({ url: one, action: "remove" }, expect.anything());
+    succeed({ selected_pr_url: two });
+    expect(usePullRequestInfo).toHaveBeenLastCalledWith("conv_1", { poll: true, prUrl: two });
   });
 
   it("passes the selected PR and revisions into file queries", () => {

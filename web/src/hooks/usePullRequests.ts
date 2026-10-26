@@ -703,6 +703,13 @@ export function useUpdateSessionPr(conversationId: string) {
     },
     onSuccess: async (info, body) => {
       await queryClient.cancelQueries({ queryKey: ["github-info", conversationId] });
+      // Every cached PR's info carries the session's PR list, so the strip updates at once.
+      if (info.prs) {
+        queryClient.setQueriesData<PullRequestInfo>(
+          { queryKey: ["github-info", conversationId] },
+          (cached) => cached && { ...cached, prs: info.prs },
+        );
+      }
       queryClient.setQueryData(["github-info", conversationId], info);
       if (info.selected_pr_url) {
         queryClient.setQueryData(["github-info", conversationId, info.selected_pr_url], info);

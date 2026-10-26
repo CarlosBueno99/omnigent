@@ -86,15 +86,17 @@ function seededClient(fixtures: Fixture[]): QueryClient {
 
 function StatefulStrip({ fixtures }: { fixtures: Fixture[] }) {
   const [client] = useState(() => seededClient(fixtures));
+  const [linked, setLinked] = useState(fixtures);
   const [selected, setSelected] = useState(url(fixtures[0].number));
   return (
     <QueryClientProvider client={client}>
       <div className="w-[420px] rounded-lg border border-border bg-background">
         <PullRequestStrip
           conversationId={CONVERSATION_ID}
-          prs={fixtures.map(association)}
+          prs={linked.map(association)}
           selectedUrl={selected}
           onSelect={setSelected}
+          onUnlink={(prUrl) => setLinked(linked.filter((fixture) => url(fixture.number) !== prUrl))}
         />
       </div>
     </QueryClientProvider>
@@ -115,4 +117,8 @@ export const Overflowing: Story = {
 
 export const FitsWithoutChevrons: Story = {
   args: { fixtures: FIXTURES.slice(0, 2) },
+};
+
+export const SinglePullRequest: Story = {
+  args: { fixtures: FIXTURES.slice(0, 1) },
 };
