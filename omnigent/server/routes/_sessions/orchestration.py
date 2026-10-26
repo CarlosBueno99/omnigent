@@ -3643,6 +3643,8 @@ async def _enrich_terminal_status_with_subagent_output(
     over the store for failures; fallback text must belong to the current
     response or follow the latest user message when no response id is present.
     A turn stopped before any output must not borrow an earlier turn's reply.
+    Explicit confirmed output, including an empty string, is authoritative
+    for native and ACP callers.
 
     :param data: The ``external_session_status`` ``data`` to enrich, e.g.
         ``{"status": "idle"}``.
@@ -3659,23 +3661,24 @@ async def _enrich_terminal_status_with_subagent_output(
     if status == "failed":
         context = normalize_failure_context(data.get("failure_context"))
         context.setdefault("failure_source", "external_status")
-        wire_detail = data.get("output")
+        wire_detail = data.get("failure_detail")
         if not isinstance(wire_detail, str) or not wire_detail.strip():
-            wire_detail = data.get("failure_detail")
+            wire_detail = data.get("output")
         for key, value in provider_error_context_from_text(wire_detail).items():
             context.setdefault(key, value)
         data = {**data, "failure_context": context}
     current_turn_only = status == "failed" or data.get("turn_outcome") == "cancelled"
-    existing = data.get("output")
-    if current_turn_only and isinstance(existing, str) and existing.strip():
-        if status == "failed":
-            context.setdefault("detail_source", "external_status_output")
-        return data
-    # The store's latest assistant text can be prose that preceded the error.
     failure_detail = data.get("failure_detail") if status == "failed" else None
     if isinstance(failure_detail, str) and failure_detail.strip():
         context.setdefault("detail_source", "external_status_failure_detail")
         return {**data, "output": failure_detail.strip()}
+    existing = data.get("output")
+    if status == "idle" and data.get("turn_completed") is True and isinstance(existing, str):
+        return data
+    if current_turn_only and isinstance(existing, str) and existing.strip():
+        if status == "failed":
+            context.setdefault("detail_source", "external_status_output")
+        return data
     raw_response_id = data.get("response_id") if current_turn_only else None
     response_id = raw_response_id if isinstance(raw_response_id, str) and raw_response_id else None
     output = await asyncio.to_thread(
@@ -4099,6 +4102,8 @@ async def _mark_runner_sessions_offline_once(
                 if _intentional_stop_sessions.get(conv.id) == stopped_runner_id:
                     _intentional_stop_sessions.pop(conv.id, None)
             continue
+        turn_id = _session_active_response_cache.get(conv.id)
+        decision_stop_runner_id = _intentional_stop_sessions.get(conv.id)
         if not await _runner_disconnect_requires_failure(
             conv.id,
             conversation_store,
@@ -4108,7 +4113,32 @@ async def _mark_runner_sessions_offline_once(
             error_code=error.code,
         ):
             continue
-        turn_id = _session_active_response_cache.get(conv.id)
+        decision_status = _session_status_cache.get(conv.id)
+        binding_unavailable = False
+        try:
+            binding = await asyncio.to_thread(conversation_store.get_runner_liveness, conv.id)
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "Cannot confirm runner ownership for %s during offline sweep",
+                conv.id,
+                exc_info=True,
+                extra={"session_id": conv.id},
+            )
+            binding_unavailable = True
+            binding = None
+        # A status read or ownership check can yield to a replacement turn or Stop.
+        if (
+            _runner_relay_tasks.get(conv.id) is not handle
+            or _session_active_response_cache.get(conv.id) != turn_id
+            or _intentional_stop_sessions.get(conv.id) != decision_stop_runner_id
+            or _session_status_cache.get(conv.id) != decision_status
+        ):
+            continue
+        if binding_unavailable:
+            retry.append(conv)
+            continue
+        if binding is None or binding[0] != conv.runner_id:
+            continue
         _publish_status(conv.id, "failed", error, failure_origin="runner_offline_sweep")
         await record_subagent_activity(
             conv.id, "returned", conversation_store, turn_id=turn_id, status="failed"
@@ -4645,6 +4675,7 @@ async def _maybe_relaunch_managed_sandbox(
                 conversation_store=conversation_store,
                 host_store=host_store,
                 app_state=app_state,
+                provider=host.sandbox_provider,
             )
         else:
             _kick_managed_relaunch(
@@ -5276,7 +5307,7 @@ def _kick_managed_relaunch(
     tracker.begin(session_id)
     # Seed the relaunch's progress indicator immediately — the user is
     # typically watching the session page when "wake the sandbox" runs.
-    _publish_sandbox_status(session_id, "provisioning")
+    _publish_sandbox_status(session_id, "provisioning", provider=host.sandbox_provider)
     agent_store = getattr(app_state, "agent_store", None)
     if agent_store is None:
         _logger.warning(
@@ -5313,6 +5344,7 @@ def _kick_managed_wake(
     conversation_store: ConversationStore,
     host_store: HostStore,
     app_state: Any,
+    provider: str | None = None,
 ) -> None:
     """
     Spawn the background wake for a dormant resumable host.
@@ -5330,6 +5362,7 @@ def _kick_managed_wake(
         conversation_store=conversation_store,
         host_store=host_store,
         app_state=app_state,
+        provider=provider,
     )
 
 
@@ -5342,6 +5375,7 @@ def _kick_managed_wake_impl(
     conversation_store: ConversationStore,
     host_store: HostStore,
     app_state: Any,
+    provider: str | None = None,
 ) -> None:
     """
     Register and spawn the background WAKE for a dormant resumable host.
@@ -5360,6 +5394,8 @@ def _kick_managed_wake_impl(
     :param conversation_store: Store holding the session row.
     :param host_store: Persistent host registrations.
     :param app_state: ``request.app.state`` — supplies the registries.
+    :param provider: The dormant host's sandbox provider, e.g. ``"arclet"``,
+        which the seeded launch status names.
     """
     _logger.info(
         "Managed host %s (session %s) is dormant but resumable; waking in background",
@@ -5371,7 +5407,7 @@ def _kick_managed_wake_impl(
     # Seed the progress indicator immediately — the user is watching the
     # session page when the wake fires (the composer let them send into a
     # host_asleep session).
-    _publish_sandbox_status(session_id, "provisioning")
+    _publish_sandbox_status(session_id, "provisioning", provider=provider)
     wake_agent_store = getattr(app_state, "agent_store", None)
     if wake_agent_store is None:
         _logger.warning(
@@ -5460,7 +5496,7 @@ async def _run_managed_wake(
         _publish_sandbox_status(session_id, "failed", reason)
         return
 
-    def _on_stage(stage: str) -> None:
+    def _on_stage(stage: str, details: str | None = None) -> None:
         """Relay the wake's launch-pipeline stage to the session's progress surface.
 
         Without it the wake shows the single ``"provisioning"`` band that
@@ -5468,8 +5504,11 @@ async def _run_managed_wake(
         is already re-execing. resume_managed_host may invoke this from the
         worker thread its ``start_host`` runs on; ``_publish_sandbox_status`` is
         thread-safe.
+
+        :param stage: The stage just entered, e.g. ``"starting"``.
+        :param details: What the user needs to do, for ``"action_required"``.
         """
-        _publish_sandbox_status(session_id, stage)
+        _publish_sandbox_status(session_id, stage, details=details)
 
     try:
         # Wake the same sandbox in place; resume_managed_host is single-flight
@@ -5631,6 +5670,7 @@ async def _ensure_runner_session_initialized(
     *,
     suppress_recovery_turn: bool = False,
     require_success: bool = False,
+    trigger: str = "session_ensure",
 ) -> bool:
     """
     Drive — and wait for — the runner's session-init handshake.
@@ -5691,6 +5731,7 @@ async def _ensure_runner_session_initialized(
                 runner_client,
                 timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
                 suppress_recovery_turn=suppress_recovery_turn,
+                trigger=trigger,
             )
         else:
             from omnigent.version import VERSION
@@ -9867,7 +9908,7 @@ async def _ensure_runner_relay_ready_impl(
             handle.ready.wait(),
             timeout=_RUNNER_RELAY_READY_TIMEOUT_S,
         )
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         if handle.task.done():
             raise OmnigentError(
                 "Runner stream relay exited before becoming ready",
@@ -13118,7 +13159,7 @@ async def _run_runner_status_probe(
                 ),
                 timeout=_RUNNER_STATUS_PROBE_TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             failure = f"no answer within {_RUNNER_STATUS_PROBE_TIMEOUT_S:g}s"
         except (httpx.HTTPError, ConnectionError) as exc:
             failure = f"{type(exc).__name__}: {exc}"

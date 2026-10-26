@@ -716,9 +716,15 @@ def _remote_headers(
     # source per branch), then merge the workspace-routing header.
     headers: dict[str, str] = {}
     token = os.environ.get(_REMOTE_AUTH_TOKEN_ENV)
+    from omnigent.util.proxy_bearer import read_proxy_bearer
+
     if token and (token := token.strip()):
         # 1. Explicit env-var token.
         headers["Authorization"] = f"Bearer {token}"
+    elif server_url and (proxy_bearer := read_proxy_bearer(server_url)):
+        # 1b. A managed sandbox host behind an authenticating front door: the
+        # launcher-refreshed proxy bearer (see omnigent.util.proxy_bearer).
+        headers["Authorization"] = f"Bearer {proxy_bearer}"
     elif server_url:
         from omnigent.cli_auth import load_token
 
@@ -1914,7 +1920,7 @@ def _stop_headless_session(*, base_url: str, session_id: str) -> None:
     # Teardown must never turn a completed run into a failed one.
     try:
         _stop_session_on_server(base_url=base_url, session_id=session_id)
-    except Exception:  # noqa: BLE001 — best-effort cleanup
+    except Exception:  # best-effort cleanup
         logger.debug("could not stop session %s after one-shot run", session_id, exc_info=True)
 
 
@@ -2651,7 +2657,7 @@ async def _stop_launched_session(client: OmnigentClient, session_id: str) -> Non
     # Teardown must never turn a completed run into a failed one.
     try:
         await client.sessions.post_event(session_id, {"type": "stop_session", "data": {}})
-    except Exception:  # noqa: BLE001 — best-effort cleanup
+    except Exception:  # best-effort cleanup
         logger.debug("could not stop session %s after one-shot run", session_id, exc_info=True)
 
 
@@ -2820,7 +2826,7 @@ async def _run_bound_turn(
     try:
         async with asyncio.timeout(_LOOP_TIMEOUT_S):
             await _drain_extra_turns()
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "headless -p timed out after %.0fs waiting for session %s to complete",
             _LOOP_TIMEOUT_S,
@@ -3302,6 +3308,15 @@ def _materialize_override_bundle(source: Path, overrides: ChatOverrides) -> Path
             raise click.ClickException(
                 f"{source}: expected YAML mapping at top level, got {type(raw).__name__}"
             )
+        if source.is_file() and isinstance(raw.get("instructions"), str):
+            from omnigent.inner.loader import _resolve_instructions
+
+            instructions = _resolve_instructions(raw["instructions"], source.parent)
+            if instructions is not None and instructions != raw["instructions"]:
+                # A newline marks one-line file contents as inline text on reload.
+                if instructions and "\n" not in instructions:
+                    instructions += "\n"
+                raw["instructions"] = instructions
         _apply_overrides_to_raw(raw, overrides)
         target.write_text(yaml.safe_dump(raw, default_flow_style=False), encoding="utf-8")
         materialized = target if source.is_file() else target.parent
