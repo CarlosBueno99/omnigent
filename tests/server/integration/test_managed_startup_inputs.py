@@ -17,7 +17,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from starlette.datastructures import Headers
 
-from omnigent.entities.conversation import ErrorData
+from omnigent.entities.conversation import ErrorData, MessageData, NewConversationItem
 from omnigent.harness_plugins import CLAUDE_NATIVE_CODING_AGENT, CODEX_NATIVE_CODING_AGENT
 from omnigent.host.frames import HostHelloFrame
 from omnigent.runtime import pending_inputs
@@ -410,6 +410,7 @@ async def test_uncertain_native_submission_is_not_retried_on_restart(startup_env
     indirect=["auth_app"],
     ids=["named-user", "revoked-user", "local-user"],
 )
+@pytest.mark.parametrize("delivery", ["immediate", "queued"])
 async def test_queued_input_preserves_identity_and_rechecks_access(
     auth_app: FastAPI,
     auth_client: httpx.AsyncClient,
@@ -417,6 +418,7 @@ async def test_queued_input_preserves_identity_and_rechecks_access(
     monkeypatch: pytest.MonkeyPatch,
     user_id: str,
     revoke_access: bool,
+    delivery: str,
 ) -> None:
     if user_id != "local":
         auth_client.headers["X-Forwarded-Email"] = user_id
@@ -426,8 +428,13 @@ async def test_queued_input_preserves_identity_and_rechecks_access(
     session_id = response.json()["id"]
     startup = auth_app.state.startup_inputs
     startup.conversations.set_labels(session_id, {STARTUP_LABEL: "pending"})
-    response = await auth_client.post(f"/v1/sessions/{session_id}/events", json=_INPUT)
+    monkeypatch.setattr(startup, "_queue_ready", AsyncMock(return_value=False))
+    response = await auth_client.post(
+        f"/v1/sessions/{session_id}/events", json={**_INPUT, "delivery": delivery}
+    )
     assert response.status_code == 202, response.text
+    await startup.shutdown()
+    monkeypatch.setattr(startup, "_queue_ready", AsyncMock(return_value=True))
     [entry] = startup.conversations.list_pending_inputs(session_id)
     if revoke_access:
         startup_permissions.revoke(user_id, session_id)
@@ -439,7 +446,10 @@ async def test_queued_input_preserves_identity_and_rechecks_access(
         await runner.aclose()
     if revoke_access:
         assert not forwarded
-        assert startup.conversations.list_pending_inputs(session_id)[0].status == "failed"
+        [refused] = startup.conversations.list_pending_inputs(session_id)
+        assert refused.status == ("completed" if delivery == "queued" else "failed")
+        if delivery == "queued":
+            assert refused.data.startup_options.requires_retry
     else:
         turns = [event for event in forwarded if event.get("type") == "message"]
         assert len(turns) == 1 and _TEXT in json.dumps(turns[0])
@@ -447,15 +457,28 @@ async def test_queued_input_preserves_identity_and_rechecks_access(
         history = (await auth_client.get(f"/v1/sessions/{session_id}/items")).json()["data"]
         [message] = [item for item in history if item["type"] == "message"]
         assert message.get("created_by") == (None if user_id == "local" else user_id)
+        if delivery == "queued":
+            retry = await auth_client.post(
+                f"/v1/sessions/{session_id}/queue",
+                json={**_INPUT, "data": {**_INPUT["data"], "stable_id": entry.id}},
+            )
+            assert retry.status_code == 202, retry.text
+            assert startup.conversations.list_pending_inputs(session_id) == []
     assert entry.created_by == user_id
 
 
 @pytest.mark.parametrize("with_first", [True, False])
+@pytest.mark.parametrize("deferred", [False, True])
 async def test_accepts_followups_before_provisioning_and_delivers_in_order(
-    startup_env: _Env, monkeypatch: pytest.MonkeyPatch, with_first: bool
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch, with_first: bool, deferred: bool
 ) -> None:
     env = startup_env
     session_id = await _create(env, initial_input=_INPUT if with_first else None)
+    startup = env.app.state.startup_inputs
+    deliver = startup._deliver
+    premature_delivery = AsyncMock()
+    monkeypatch.setattr(startup, "_deliver", premature_delivery)
+    endpoint = f"/v1/sessions/{session_id}/{'queue' if deferred else 'events'}"
     texts = [_TEXT] if with_first else []
     for text in ("Second startup instruction", "Third startup instruction"):
         event = {
@@ -466,15 +489,22 @@ async def test_accepts_followups_before_provisioning_and_delivers_in_order(
                 "stable_id": uuid4().hex,
             },
         }
-        response = await env.client.post(f"/v1/sessions/{session_id}/events", json=event)
+        response = await env.client.post(endpoint, json=event)
         assert response.status_code == 202, response.text
-        assert response.json()["pending_id"]
-        retry = await env.client.post(f"/v1/sessions/{session_id}/events", json=event)
+        assert response.json()["queue_id" if deferred else "pending_id"]
+        retry = await env.client.post(endpoint, json=event)
         assert retry.json() == response.json()
         texts.append(text)
     snapshot = (await env.client.get(f"/v1/sessions/{session_id}")).json()
     assert snapshot["host_id"] is None and snapshot["runner_id"] is None
-    assert [item["content"][-1]["text"] for item in snapshot["pending_inputs"]] == texts
+    assert [item["content"][-1]["text"] for item in snapshot["pending_inputs"]] == (
+        ([_TEXT] if with_first else []) if deferred else texts
+    )
+    await startup._recover_session(env.app, session_id)
+    premature_delivery.assert_not_called()
+    await startup.shutdown()
+    monkeypatch.setattr(startup, "_deliver", deliver)
+    monkeypatch.setattr(startup, "_queue_ready", AsyncMock(return_value=True))
     _bind(env, session_id)
     forwarded: list[dict[str, Any]] = []
     runner = _stub_runner(monkeypatch, forwarded)
@@ -588,8 +618,9 @@ async def test_host_refusal_keeps_startup_input_without_repeated_launches(
     assert (detail or "The host refused to launch the session") in error.data.message
 
 
+@pytest.mark.parametrize("deferred", [False, True])
 async def test_saved_sdk_skill_resolves_after_launch_and_replaces_pending_bubble(
-    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch, deferred: bool
 ) -> None:
     env = startup_env
     calls: list[tuple[str, dict[str, Any]]] = []
@@ -613,30 +644,45 @@ async def test_saved_sdk_skill_resolves_after_launch_and_replaces_pending_bubble
             env.client,
             skills=[{"name": "review", "description": "Review a change", "content": meta_text}],
         )
+        event = {
+            "type": "slash_command",
+            "data": {
+                "kind": "skill",
+                "name": "review",
+                "arguments": "the startup flow",
+                "stable_id": uuid4().hex,
+            },
+        }
         response = await env.client.post(
             "/v1/sessions",
             json={
                 "agent_id": agent["id"],
                 "host_type": "managed",
-                "initial_input": {
-                    "type": "slash_command",
-                    "data": {
-                        "kind": "skill",
-                        "name": "review",
-                        "arguments": "the startup flow",
-                    },
-                },
+                "initial_input": None if deferred else event,
             },
         )
         assert response.status_code == 201, response.text
         session_id = response.json()["id"]
+        if deferred:
+            accepted = await env.client.post(f"/v1/sessions/{session_id}/queue", json=event)
+            assert accepted.status_code == 202, accepted.text
+        startup = env.app.state.startup_inputs
+        await startup.shutdown()
         saved = _bind(env, session_id)
         assert not [path for path, _ in calls if path.endswith(("/skills/resolve", "/events"))], (
             "skill resolution and delivery must wait for the host"
         )
-        startup = env.app.state.startup_inputs
+        monkeypatch.setattr(startup, "_queue_ready", AsyncMock(return_value=True))
         await startup._deliver(env.app, session_id, saved)
         await startup._deliver(env.app, session_id, saved)
+        if deferred:
+            repeated = await env.client.post(f"/v1/sessions/{session_id}/queue", json=event)
+            assert repeated.status_code == 202, repeated.text
+            changed = await env.client.post(
+                f"/v1/sessions/{session_id}/queue",
+                json={**event, "data": {**event["data"], "arguments": "a different instruction"}},
+            )
+            assert changed.status_code == 409, changed.text
 
     assert len([path for path, _ in calls if path.endswith("/skills/resolve")]) == 1
     [turn] = [body for path, body in calls if path.endswith("/events")]
@@ -1033,3 +1079,523 @@ async def test_waking_a_host_worker_sets_its_event(startup_env: _Env) -> None:
     finally:
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    "name,native",
+    [
+        ("queued-sdk", False),
+        (CLAUDE_NATIVE_CODING_AGENT.agent_name, True),
+        (CODEX_NATIVE_CODING_AGENT.agent_name, True),
+    ],
+)
+async def test_deferred_queue_survives_restart_and_waits_for_each_turn(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch, name: str, native: bool
+) -> None:
+    env = startup_env
+    agent = await create_test_agent(env.client, name=name)
+    created = await env.client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    session_id = created.json()["id"]
+    startup = env.app.state.startup_inputs
+    running = True
+    forwarded: list[dict[str, Any]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal running
+        if request.method == "GET":
+            return httpx.Response(200, json={"status": "running" if running else "idle"})
+        body = json.loads(request.content)
+        forwarded.append(body)
+        if body.get("type") == "message":
+            running = True
+        return httpx.Response(202, json={"queued": True})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="http://runner"
+    ) as runner:
+        monkeypatch.setattr(
+            "omnigent.server.routes.sessions._get_runner_client", AsyncMock(return_value=runner)
+        )
+        requests = [
+            {
+                **_INPUT,
+                "delivery": "queued",
+                "data": {
+                    **_INPUT["data"],
+                    "stable_id": uuid4().hex,
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            }
+            for text in ("First queued turn", "Second queued turn")
+        ]
+        for body in requests:
+            response = await env.client.post(f"/v1/sessions/{session_id}/queue", json=body)
+            assert response.status_code == 202, response.text
+            assert response.json()["queue_id"] == body["data"]["stable_id"]
+        await startup.shutdown()
+        entries = env.conv_store.list_pending_inputs(session_id)
+        assert [item.status for item in entries] == ["completed", "completed"]
+        assert env.conv_store.list_items(session_id).data == []
+        assert await startup.pending_snapshot(session_id) == []
+        assert not [event for event in forwarded if event.get("type") == "message"]
+
+        restarted = ManagedStartupInputs(env.conv_store, startup.hosts)
+        restarted.dispatch = startup.dispatch
+        await restarted._deliver(env.app, session_id, entries[0])
+        assert env.conv_store.list_pending_inputs(session_id)[0].status == "completed"
+        from omnigent.server.routes._sessions.helpers import (
+            _publish_compaction_completed,
+            _publish_compaction_in_progress,
+        )
+
+        running = False
+        _publish_compaction_in_progress(session_id)
+        await restarted._deliver(env.app, session_id, entries[0])
+        assert env.conv_store.list_pending_inputs(session_id)[0].status == "completed"
+        _publish_compaction_completed(session_id, None)
+        for entry, body in zip(entries, requests, strict=True):
+            running = False
+            await restarted._deliver(env.app, session_id, entry)
+            turns = [event for event in forwarded if event.get("type") == "message"]
+            assert turns[-1]["content"][-1]["text"] == body["data"]["content"][-1]["text"]
+            if native:
+                assert env.conv_store.get_item(session_id, entry.id).status == "incomplete"
+                pending_inputs.reset_for_tests()
+                await _simulate_transcript_forwarder_echo(
+                    env.client, session_id, body["data"]["content"][-1]["text"]
+                )
+            await restarted._deliver(env.app, session_id, entries[-1])
+            assert len([event for event in forwarded if event.get("type") == "message"]) == len(
+                turns
+            )
+        # An acknowledgement lost after consumption must not recreate or resend the input.
+        retry = await env.client.post(f"/v1/sessions/{session_id}/queue", json=requests[0])
+        assert retry.status_code == 202, (
+            retry.text,
+            env.conv_store.get_item(session_id, entries[0].id).data.model_dump(),
+        )
+        assert env.conv_store.list_pending_inputs(session_id) == []
+        assert len([event for event in forwarded if event.get("type") == "message"]) == 2
+        await restarted.shutdown()
+
+
+async def test_deferred_failure_retry_and_steer_remain_parked_for_old_servers(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    agent = await create_test_agent(env.client)
+    created = await env.client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    session_id = created.json()["id"]
+    startup = env.app.state.startup_inputs
+    monkeypatch.setattr(startup, "_queue_ready", AsyncMock(return_value=True))
+    entry = await startup.enqueue(
+        session_id,
+        SessionEventInput(**_INPUT, delivery="queued"),
+        user_id=None,
+        headers=Headers(),
+        first=False,
+    )
+    assert entry.status == "completed"
+
+    async def refuse(*_: Any) -> dict[str, bool | str]:
+        raise ValueError("Dispatch refused before submission")
+
+    startup.dispatch = refuse
+    await startup._deliver(env.app, session_id, entry)
+    [failed] = env.conv_store.list_pending_inputs(session_id)
+    assert failed.status == "completed" and failed.data.startup_options.requires_retry
+    assert await startup.retry(session_id)
+    [retry] = env.conv_store.list_pending_inputs(session_id)
+    assert retry.status == "completed" and not retry.data.startup_options.requires_retry
+    response = await env.client.patch(
+        f"/v1/sessions/{session_id}/queue/{entry.id}", json={"action": "steer"}
+    )
+    assert response.status_code == 200, response.text
+    [steered] = env.conv_store.list_pending_inputs(session_id)
+    assert steered.status == "completed"
+    assert not steered.data.startup_options.wait_for_idle
+    assert not any(
+        item.status in ("in_progress", "failed")
+        for item in env.conv_store.list_pending_inputs(session_id)
+    ), "old startup delivery and retry must never select a deferred queue entry"
+
+
+@pytest.mark.parametrize("host_bound", [False, True])
+async def test_deferred_worker_recovers_without_a_browser(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch, host_bound: bool
+) -> None:
+    from omnigent.server.routes.sessions import _publish_status
+    from tests._helpers.polling import poll_until_async
+
+    env = startup_env
+    agent = await create_test_agent(env.client)
+    created = await env.client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    session_id = created.json()["id"]
+    runner_id = uuid4().hex
+    env.conv_store.set_runner_id(session_id, runner_id)
+    if host_bound:
+        host_id = uuid4().hex
+        env.conv_store.set_host_id(session_id, host_id, "/tmp/queued-workspace")
+        env.app.state.host_registry.register(
+            host_id,
+            AsyncMock(),
+            HostHelloFrame(version="test", frame_protocol_version=1, name="local", runners=[]),
+            owner=None,
+            registered_with_managed_token=False,
+        )
+    original = env.app.state.startup_inputs
+    entry = await original.enqueue(
+        session_id,
+        SessionEventInput(**_INPUT, delivery="queued"),
+        user_id=None,
+        headers=Headers(),
+        first=False,
+    )
+    await original.shutdown()
+    restarted = ManagedStartupInputs(env.conv_store, original.hosts)
+    delivered = asyncio.Event()
+
+    async def dispatch(context: StartupInputContext, session_id: str, event: SessionEventInput):
+        assert event.data["content"] == _INPUT["data"]["content"]
+        assert await context.claim(env.conv_store, session_id)
+        delivered.set()
+        return {"queued": True}
+
+    restarted.dispatch = dispatch
+    idle = False
+
+    async def ready(*_: Any) -> bool:
+        return idle
+
+    monkeypatch.setattr(restarted, "_queue_ready", ready)
+    try:
+        if host_bound:
+            restarted.host_changed(env.app, host_id)
+        else:
+            await restarted.runner_changed(env.app, [env.conv_store.get_conversation(session_id)])
+        await poll_until_async(lambda: bool(restarted._session_workers), timeout_s=3)
+        assert not delivered.is_set()
+        idle = True
+        _publish_status(session_id, "idle")
+        await asyncio.wait_for(delivered.wait(), timeout=3)
+        await poll_until_async(
+            lambda: not env.conv_store.list_pending_inputs(session_id), timeout_s=3
+        )
+        assert env.conv_store.get_item(session_id, entry.id).response_id == "startup_command"
+    finally:
+        await restarted.shutdown()
+
+
+async def test_queue_after_stop_preserves_canceled_native_receipts(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    agent = await create_test_agent(env.client, name=CODEX_NATIVE_CODING_AGENT.agent_name)
+    created = await env.client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    session_id = created.json()["id"]
+    startup = env.app.state.startup_inputs
+    monkeypatch.setattr(startup, "_queue_ready", AsyncMock(return_value=True))
+    first = await startup.enqueue(
+        session_id,
+        SessionEventInput(**_INPUT, delivery="queued"),
+        user_id=None,
+        headers=Headers(),
+        first=False,
+    )
+
+    async def dispatch(context: StartupInputContext, session_id: str, _: SessionEventInput):
+        assert await context.claim(env.conv_store, session_id)
+        return {"queued": True, "pending_id": context.input_id}
+
+    startup.dispatch = dispatch
+    await startup._deliver(env.app, session_id, first)
+    await startup.cancel(session_id)
+    [cancelled] = env.conv_store.list_pending_inputs(session_id)
+    assert cancelled.status == "incomplete" and cancelled.data.startup_options.cancelled
+    second = await startup.enqueue(
+        session_id,
+        SessionEventInput(
+            type="message",
+            delivery="queued",
+            data={"role": "user", "content": [{"type": "input_text", "text": "after stop"}]},
+        ),
+        user_id=None,
+        headers=Headers(),
+        first=False,
+    )
+    await startup._deliver(env.app, session_id, second)
+    assert env.conv_store.get_item(session_id, second.id).status == "incomplete"
+    pending_inputs.reset_for_tests()
+    await _simulate_transcript_forwarder_echo(env.client, session_id, _TEXT)
+    assert env.conv_store.get_item(session_id, first.id).response_id != "pending_input"
+    assert env.conv_store.get_item(session_id, second.id).response_id == "pending_input"
+    assert len(await startup.pending_snapshot(session_id)) == 1
+
+
+@pytest.mark.parametrize(
+    "name,harness",
+    [
+        (CLAUDE_NATIVE_CODING_AGENT.agent_name, CLAUDE_NATIVE_CODING_AGENT.harness),
+        (CODEX_NATIVE_CODING_AGENT.agent_name, CODEX_NATIVE_CODING_AGENT.harness),
+    ],
+)
+async def test_queued_compact_keeps_draft_metadata_and_uses_the_control_path(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch, name: str, harness: str
+) -> None:
+    env = startup_env
+    agent = await create_test_agent(
+        env.client, name=name, executor={"type": "omnigent", "config": {"harness": harness}}
+    )
+    created = await env.client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    session_id = created.json()["id"]
+    startup = env.app.state.startup_inputs
+    monkeypatch.setattr(startup, "_queue_ready", AsyncMock(return_value=False))
+    reply = {"itemId": "prior-message", "text": "earlier question"}
+    request = {
+        "type": "compact",
+        "data": {"stable_id": uuid4().hex, "agent_id": agent["id"], "reply_draft": reply},
+    }
+    accepted = await env.client.post(f"/v1/sessions/{session_id}/queue", json=request)
+    assert accepted.status_code == 202, accepted.text
+    await startup.shutdown()
+    [entry] = env.conv_store.list_pending_inputs(session_id)
+    options = entry.data.startup_options
+    assert options.event_type == "compact" and options.reply_draft == reply
+    assert options.agent_id == agent["id"]
+    forwarded = AsyncMock(return_value=httpx.Response(200))
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.routes_events._forward_session_change_to_runner",
+        forwarded,
+    )
+    monkeypatch.setattr(startup, "_queue_ready", AsyncMock(return_value=True))
+    await startup._deliver(env.app, session_id, entry)
+    assert forwarded.await_args.args[2] == {"type": "compact"}
+    if name == CLAUDE_NATIVE_CODING_AGENT.agent_name:
+        assert env.conv_store.list_items(session_id).data == []
+        pending_inputs.reset_for_tests()
+        echoed = await env.client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": "slash_command",
+                    "item_data": {
+                        "agent": name,
+                        "kind": "command",
+                        "name": "compact",
+                        "arguments": "",
+                    },
+                    "response_id": "compact-echo",
+                },
+            },
+        )
+        assert echoed.status_code == 202, echoed.text
+    assert env.conv_store.list_pending_inputs(session_id) == []
+    [receipt] = env.conv_store.list_items(session_id).data
+    assert receipt.type == "slash_command" and receipt.data.name == "compact"
+    repeated = await env.client.post(f"/v1/sessions/{session_id}/queue", json=request)
+    assert repeated.status_code == 202, repeated.text
+    assert forwarded.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": "interrupt"},
+        {"type": "message", "data": {"role": "assistant", "content": []}},
+        {"type": "slash_command", "data": {"kind": "command", "name": "clear"}},
+        {**_INPUT, "data": {**_INPUT["data"], "reply_draft": "bad metadata"}},
+    ],
+)
+async def test_queue_rejects_control_and_malformed_inputs(
+    startup_env: _Env, event: dict[str, Any]
+) -> None:
+    env = startup_env
+    agent = await create_test_agent(env.client)
+    created = await env.client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    session_id = created.json()["id"]
+    rejected = await env.client.post(f"/v1/sessions/{session_id}/queue", json=event)
+    assert rejected.status_code == 400, rejected.text
+    assert env.conv_store.list_pending_inputs(session_id) == []
+
+
+async def test_queue_retains_input_when_the_bound_agent_changed(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    agent = await create_test_agent(env.client)
+    created = await env.client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    session_id = created.json()["id"]
+    startup = env.app.state.startup_inputs
+    monkeypatch.setattr(startup, "_queue_ready", AsyncMock(return_value=True))
+    entry = await startup.enqueue(
+        session_id,
+        SessionEventInput(
+            **{**_INPUT, "data": {**_INPUT["data"], "agent_id": "previous-agent"}},
+            delivery="queued",
+        ),
+        user_id=None,
+        headers=Headers(),
+        first=False,
+    )
+    dispatch = AsyncMock()
+    startup.dispatch = dispatch
+    await startup._deliver(env.app, session_id, entry)
+    dispatch.assert_not_called()
+    [retained] = env.conv_store.list_pending_inputs(session_id)
+    assert retained.status == "completed" and retained.data.startup_options.requires_retry
+
+
+@pytest.mark.parametrize("skill", [False, True])
+@pytest.mark.parametrize("status", [202, 503])
+async def test_deferred_sdk_input_blocks_other_replicas_until_runner_accepts(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch, skill: bool, status: int
+) -> None:
+    env = startup_env
+    meta_text = "<skill>Review the current change.</skill>"
+    agent = await create_test_agent(
+        env.client,
+        skills=[{"name": "review", "description": "Review a change", "content": meta_text}],
+    )
+    created = await env.client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    session_id = created.json()["id"]
+    startup = env.app.state.startup_inputs
+    other_replica = ManagedStartupInputs(env.conv_store, startup.hosts)
+    other_replica.dispatch = startup.dispatch
+    for service in (startup, other_replica):
+        monkeypatch.setattr(service, "_queue_ready", AsyncMock(return_value=True))
+    entries = [
+        await startup.enqueue(
+            session_id,
+            SessionEventInput(
+                type="slash_command" if skill and index == 0 else "message",
+                delivery="queued",
+                data=(
+                    {"kind": "skill", "name": "review", "arguments": ""}
+                    if skill and index == 0
+                    else {"role": "user", "content": [{"type": "input_text", "text": text}]}
+                ),
+            ),
+            user_id=None,
+            headers=Headers(),
+            first=False,
+        )
+        for index, text in enumerate(("First queued turn", "Second queued turn"))
+    ]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    forwarded: list[dict[str, Any]] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"status": "idle"})
+        if request.url.path.endswith("/skills/resolve"):
+            return httpx.Response(200, json={"meta_text": meta_text})
+        body = json.loads(request.content)
+        if body.get("type") == "message":
+            forwarded.append(body)
+            entered.set()
+            await release.wait()
+        return httpx.Response(status, json={"queued": status == 202})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="http://runner"
+    ) as runner:
+        monkeypatch.setattr(
+            "omnigent.server.routes.sessions._get_runner_client", AsyncMock(return_value=runner)
+        )
+        delivery = asyncio.create_task(startup._deliver(env.app, session_id, entries[0]))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            pending = env.conv_store.get_item(session_id, entries[0].id)
+            assert pending.response_id == "pending_input" and pending.status == "incomplete"
+            await other_replica._deliver(env.app, session_id, entries[1])
+            assert len(forwarded) == 1
+            env.conv_store.append(
+                session_id,
+                [
+                    NewConversationItem(
+                        type="message",
+                        response_id="fast-response",
+                        data=MessageData(
+                            role="assistant",
+                            agent="test-agent",
+                            content=[{"type": "output_text", "text": "Already responding"}],
+                        ),
+                    )
+                ],
+            )
+            release.set()
+            await delivery
+            transcript = [
+                item
+                for item in env.conv_store.list_items(session_id).data
+                if not getattr(item.data, "is_meta", False)
+            ]
+            if status == 202:
+                assert [item.type for item in transcript] == [
+                    "slash_command" if skill else "message",
+                    "message",
+                ]
+                assert transcript[0].id == entries[0].id
+                assert transcript[-1].data.role == "assistant"
+                assert [item.id for item in env.conv_store.list_pending_inputs(session_id)] == [
+                    entries[1].id
+                ]
+            else:
+                assert env.conv_store.get_item(session_id, entries[0].id).status == "incomplete"
+                assert all(item.id != entries[0].id for item in transcript)
+                await other_replica._deliver(env.app, session_id, entries[1])
+                assert len(forwarded) == 1
+        finally:
+            release.set()
+            await asyncio.gather(delivery, return_exceptions=True)
+            await other_replica.shutdown()
+
+
+async def test_stop_retains_cancellation_if_another_replica_claims_after_snapshot(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    agent = await create_test_agent(env.client)
+    created = await env.client.post("/v1/sessions", json={"agent_id": agent["id"]})
+    session_id = created.json()["id"]
+    startup = env.app.state.startup_inputs
+    entry = await startup.enqueue(
+        session_id,
+        SessionEventInput(**_INPUT, delivery="queued"),
+        user_id=None,
+        headers=Headers(),
+        first=False,
+    )
+    list_pending = env.conv_store.list_pending_inputs
+    snapshot_taken = False
+
+    def claim_after_snapshot(conversation_id: str):
+        nonlocal snapshot_taken
+        items = list_pending(conversation_id)
+        if not snapshot_taken:
+            snapshot_taken = True
+            assert env.conv_store.transition_pending_input(
+                conversation_id,
+                entry.id,
+                expected="completed",
+                status="incomplete",
+                expected_options=entry.data.startup_options,
+                require_head=True,
+            )
+        return items
+
+    monkeypatch.setattr(env.conv_store, "list_pending_inputs", claim_after_snapshot)
+    await startup.cancel(session_id)
+    [cancelled] = list_pending(session_id)
+    assert cancelled.status == "incomplete" and cancelled.data.startup_options.cancelled
+    await startup.enqueue(
+        session_id,
+        SessionEventInput(**_INPUT, delivery="queued"),
+        user_id=None,
+        headers=Headers(),
+        first=False,
+    )
+    assert env.conv_store.get_conversation(session_id).labels.get(STARTUP_LABEL) != "cancelled"
+    assert env.conv_store.get_item(session_id, entry.id).data.startup_options.cancelled

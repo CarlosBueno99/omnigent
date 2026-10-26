@@ -159,6 +159,10 @@ class _ConversationStore:
             return self.persisted_by_stable_id[item_id]
         return next((item for item in self.appended_items if item.id == item_id), None)
 
+    def list_pending_inputs(self, conversation_id: str) -> list[ConversationItem]:
+        del conversation_id
+        return []
+
     def list_conversations(
         self,
         *,

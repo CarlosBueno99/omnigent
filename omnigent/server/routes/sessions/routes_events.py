@@ -15,6 +15,7 @@ from typing import Any, Literal, cast
 import httpx
 from fastapi import (
     APIRouter,
+    Depends,
     HTTPException,
     Request,
 )
@@ -116,6 +117,7 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._auth_helpers import (
     require_user as _require_user,
 )
+from omnigent.server.routes._content_type import require_json_content_type
 from omnigent.server.routes._errors import session_not_found as _session_not_found
 from omnigent.server.routes._sessions.common import (
     _ALLOWED_EVENT_TYPES,
@@ -912,6 +914,22 @@ def register_events_routes(
                 in_flight=in_flight if body.type in {"message", "session_message"} else None,
             )
 
+    @event_router.post(
+        "/sessions/{session_id}/queue",
+        status_code=202,
+        response_model=None,
+        dependencies=[Depends(require_json_content_type)],
+    )
+    async def queue_event(
+        request: Request, session_id: str, body: SessionEventInput
+    ) -> dict[str, bool | str]:
+        """Save an input for a later turn, even after every client disconnects."""
+        response = await _post_event_impl(
+            request, session_id, body.model_copy(update={"delivery": "queued"})
+        )
+        response["item_id"] = response["queue_id"]
+        return response
+
     router.include_router(event_router)
 
     async def ingest_runner_batch(
@@ -1164,6 +1182,15 @@ def register_events_routes(
                 f"Allowed types: {sorted(_ALLOWED_EVENT_TYPES)}",
                 code=ErrorCode.INVALID_INPUT,
             )
+        if body.delivery == "queued" and not (
+            (body.type == "message" and body.data.get("role") == "user")
+            or (body.type == _SLASH_COMMAND_TYPE and body.data.get("kind") == "skill")
+            or body.type == _COMPACT_TYPE
+        ):
+            raise OmnigentError(
+                "Only user messages, skills, and compaction can be queued",
+                code=ErrorCode.INVALID_INPUT,
+            )
         # Tag the audit envelope end-event with the event kind so a message,
         # interrupt, approval, stop, … are distinguishable in the audit table.
         # Transient per-chunk echoes suppress the row entirely (they are the
@@ -1334,8 +1361,7 @@ def register_events_routes(
                 permission_store=permission_store,
             )
             if startup is not None and await startup.retry(session_id):
-                if conv.host_id is not None:
-                    startup.host_changed(request.app, conv.host_id)
+                await startup.wake_session(request.app, conv)
                 return {**result, "queued": True}
             return result
         # Refuse input the session's saved provider can't serve before saving it.
@@ -1353,9 +1379,15 @@ def register_events_routes(
             and (
                 (body.type == "message" and body.data.get("role") == "user")
                 or (body.type == _SLASH_COMMAND_TYPE and body.data.get("kind") == "skill")
+                or (body.type == _COMPACT_TYPE and body.delivery == "queued")
             )
-            and await startup.accepts(conv, request.app)
+            and (body.delivery == "queued" or await startup.accepts(conv, request.app))
         ):
+            if is_session_closed(conv.labels, conv.title):
+                raise OmnigentError(
+                    "Session is closed. Start a new sub-agent session to continue.",
+                    code=ErrorCode.CONFLICT,
+                )
             if peer_message:
                 await asyncio.to_thread(
                     require_orchestration_source,
@@ -1370,11 +1402,14 @@ def register_events_routes(
             saved = await startup.enqueue(
                 session_id, body, user_id=user_id, headers=request.headers, first=False
             )
-            if conv.host_id is not None:
-                startup.host_changed(request.app, conv.host_id)
+            await startup.wake_session(request.app, conv)
             return {
                 "queued": True,
-                "pending_id": pending_inputs.make_pending_id(session_id, saved.id),
+                **(
+                    {"queue_id": saved.id}
+                    if body.delivery == "queued"
+                    else {"pending_id": pending_inputs.make_pending_id(session_id, saved.id)}
+                ),
             }
         # ── Policy evaluation (path-agnostic) ────────────────
         # Evaluate policies BEFORE persistence/runner forwarding so
@@ -1946,6 +1981,23 @@ def register_events_routes(
             )
             return {"queued": False, "elicitation_id": elicit_id}
         if body.type == _COMPACT_TYPE:
+            compact_pending_id = None
+            if isinstance(request, StartupInputContext) and not await request.claim(
+                conversation_store, session_id
+            ):
+                return {"queued": False}
+            if isinstance(request, StartupInputContext) and (
+                await asyncio.to_thread(
+                    _native_pane_harness, conv, agent_store=agent_store, agent_cache=agent_cache
+                )
+                == "claude-native"
+            ):
+                compact_pending_id = pending_inputs.record(
+                    session_id,
+                    [{"type": "input_text", "text": "/compact"}],
+                    stable_id=request.input_id,
+                    created_by=created_by,
+                )
             # Unified control dispatch (designs/CLAUDE_NATIVE.md
             # "Control events dispatch on the runner"): forward /compact
             # to the bound runner first, regardless of harness. The
@@ -1964,7 +2016,10 @@ def register_events_routes(
                 timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
             )
             if runner_result is not None and runner_result.status_code == 200:
-                return {"queued": False}
+                return {
+                    "queued": False,
+                    **({"pending_id": compact_pending_id} if compact_pending_id else {}),
+                }
             if runner_result is not None and runner_result.status_code != 204:
                 raise OmnigentError(
                     f"Compaction failed: runner returned {runner_result.status_code}",
@@ -1994,7 +2049,10 @@ def register_events_routes(
                         timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
                     )
                     if runner_result is not None and runner_result.status_code == 200:
-                        return {"queued": False}
+                        return {
+                            "queued": False,
+                            **({"pending_id": compact_pending_id} if compact_pending_id else {}),
+                        }
                     if runner_result is not None and runner_result.status_code != 204:
                         raise OmnigentError(
                             f"Compaction failed: runner returned {runner_result.status_code}",

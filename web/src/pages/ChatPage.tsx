@@ -2510,6 +2510,7 @@ function ComposerImpl(
   const boundAgentId = useChatStore((s) => s.boundAgentId);
   const maybeFlushQueuedHead = useChatStore((s) => s.maybeFlushQueuedHead);
   const dequeueMessage = useChatStore((s) => s.dequeueMessage);
+  const recallQueuedMessage = useChatStore((s) => s.recallQueuedMessage);
   const steerMessage = useChatStore((s) => s.steerMessage);
   const steerAllQueuedMessages = useChatStore((s) => s.steerAllQueuedMessages);
   const reorderQueuedMessage = useChatStore((s) => s.reorderQueuedMessage);
@@ -3794,10 +3795,12 @@ function ComposerImpl(
           const target = queuedMessages.findLast((m) => m.conversationId === conversationId);
           if (target !== undefined) {
             e.preventDefault();
-            resetCursor();
-            restoreFiles(target.files ?? []);
-            dequeueMessage(target.queueId);
-            applyRecall(ta, target);
+            recallQueuedMessage(target.queueId, (recalled) => {
+              if (useChatStore.getState().conversationId !== conversationId) return;
+              resetCursor();
+              restoreFiles(recalled.files ?? []);
+              applyRecall(ta, recalled);
+            });
             return;
           }
         }
@@ -3877,16 +3880,16 @@ function ComposerImpl(
             // replace the composer's text + attachments with the queued
             // message's, remove it from the queue, and focus the textarea.
             // Re-sending re-queues it (busy) or sends it (idle).
-            const target = queuedMessages.find((m) => m.queueId === queueId);
-            if (!target) return;
-            replaceText(target.text, target.replyDraft);
-            dirtyRef.current = true;
-            resetCursor();
-            recallingRef.current = false;
-            textareaRef.current = tailTextareaRef.current;
-            restoreFiles(target.files ?? []);
-            dequeueMessage(queueId);
-            textareaRef.current?.focus();
+            recallQueuedMessage(queueId, (target) => {
+              if (useChatStore.getState().conversationId !== conversationId) return;
+              replaceText(target.text, target.replyDraft);
+              dirtyRef.current = true;
+              resetCursor();
+              recallingRef.current = false;
+              textareaRef.current = tailTextareaRef.current;
+              restoreFiles(target.files ?? []);
+              textareaRef.current?.focus();
+            });
           }}
           onSteer={(queueId) => steerMessage(queueId)}
           onReorder={reorderQueuedMessage}

@@ -547,6 +547,11 @@ export interface SessionStatusEvent {
   error?: ErrorInfo;
 }
 
+export interface SessionQueueUpdatedEvent {
+  type: "session_queue_updated";
+  conversationId: string;
+}
+
 /**
  * `session.usage` — token-usage update from a terminal-backed runtime.
  *
@@ -1024,6 +1029,7 @@ export type StreamEvent =
   | ElicitationResolved
   | PolicyDenied
   | SessionStatusEvent
+  | SessionQueueUpdatedEvent
   | SessionUsageEvent
   | SessionModelEvent
   | SessionTitleEvent

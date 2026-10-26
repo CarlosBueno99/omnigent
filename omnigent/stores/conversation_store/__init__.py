@@ -15,10 +15,12 @@ from omnigent.entities import (
     NewConversationItem,
     PagedList,
 )
+from omnigent.entities.conversation import StartupInputOptions
 from omnigent.session_import import IMPORT_PROVENANCE_LABEL_KEYS
 
 # Pending inputs share the item store, but are not harness transcript history yet.
 PENDING_INPUT_RESPONSE_ID = "pending_input"
+STARTUP_INPUT_LABEL = "omnigent.startup"
 MAX_PENDING_INPUTS = 100
 
 if TYPE_CHECKING:
@@ -204,7 +206,7 @@ _INSTANCE_SCOPED_LABEL_KEYS = frozenset(
         "omnigent.codex_native.bridge_id",
         "omnigent.last_context_tokens",
         "omnigent.last_context_window",
-        "omnigent.startup",
+        STARTUP_INPUT_LABEL,
         CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
     }
 )
@@ -455,8 +457,18 @@ class ConversationStore(ABC):
         *,
         expected: str,
         status: str | None,
+        queued_only: bool = False,
+        expected_options: StartupInputOptions | None = None,
+        options: StartupInputOptions | None = None,
+        require_head: bool = False,
     ) -> bool:
         """Compare-and-set delivery state; None discards a canceled, unsent input."""
+        raise NotImplementedError
+
+    def reorder_pending_input(
+        self, conversation_id: str, item_id: str, *, before_id: str | None = None
+    ) -> bool:
+        """Move an unsent queued input before another, or to the end when omitted."""
         raise NotImplementedError
 
     def list_host_conversation_ids(

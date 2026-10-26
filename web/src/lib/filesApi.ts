@@ -40,3 +40,17 @@ export async function uploadFile(sessionId: string, file: File): Promise<Uploade
     created_at: resource.metadata?.created_at ?? 0,
   };
 }
+
+/** Restore a saved queue attachment before returning it to the composer. */
+export async function downloadFile(
+  sessionId: string,
+  fileId: string,
+  filename: string,
+): Promise<File> {
+  const response = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/resources/files/${encodeURIComponent(fileId)}/content`,
+  );
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  const blob = await response.blob();
+  return new File([blob], filename, { type: blob.type });
+}

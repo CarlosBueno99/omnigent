@@ -302,7 +302,11 @@ from omnigent.server.schemas import (
     ToolOutputDeltaEvent,
 )
 from omnigent.server.session_metadata_logging import harness_attributes
-from omnigent.server.startup_inputs import ManagedStartupInputs, StartupInputContext
+from omnigent.server.startup_inputs import (
+    ManagedStartupInputs,
+    StartupInputContext,
+    wake_queued_input_worker,
+)
 from omnigent.spec.types import (
     AgentSpec,
     Phase,
@@ -1831,6 +1835,7 @@ def _publish_compaction_completed(session_id: str, total_tokens: int | None) -> 
     if total_tokens is not None:
         payload["total_tokens"] = total_tokens
     session_stream.publish(session_id, payload)
+    wake_queued_input_worker(session_id)
 
 
 def _publish_compaction_failed(session_id: str) -> None:
@@ -1848,6 +1853,7 @@ def _publish_compaction_failed(session_id: str) -> None:
     """
     _compaction_started_at.pop(session_id, None)
     session_stream.publish(session_id, {"type": "response.compaction.failed"})
+    wake_queued_input_worker(session_id)
 
 
 def _publish_external_assistant_message(
@@ -5146,6 +5152,7 @@ def _publish_status(
     if blocked_on is None:
         payload.pop("blocked_on", None)
     session_stream.publish(session_id, payload)
+    wake_queued_input_worker(session_id)
 
 
 def reconcile_orphaned_running_status(
@@ -7890,9 +7897,8 @@ async def _dispatch_skill_slash_command_to_runner(
     persisted_items = await asyncio.to_thread(
         conversation_store.append,
         session_id,
-        [visible_item, meta_item],
+        [meta_item] if startup_input_id is not None else [visible_item, meta_item],
     )
-    visible = persisted_items[0]
 
     # Mirror the plain-message path's title seeding: a session whose FIRST
     # message is a skill invocation (web landing composer, REPL) would
@@ -7918,10 +7924,10 @@ async def _dispatch_skill_slash_command_to_runner(
         # the turn when no renderer is subscribed to the session stream.
         "browser_renderer_available": session_stream.has_subscribers(session_id),
         # The forwarded message carries ``meta_content`` — i.e. the
-        # META item (persisted_items[1]), not the user-visible item.
+        # META item, not the user-visible item.
         # Hand the runner that id so a cold-cache reload drops the
         # right persisted copy (see _forward_event_to_runner).
-        "persisted_item_id": persisted_items[1].id,
+        "persisted_item_id": persisted_items[-1].id,
     }
     effective_runner_override = (
         body.model_override if body.model_override is not None else conv.model_override
@@ -7936,11 +7942,24 @@ async def _dispatch_skill_slash_command_to_runner(
         runner_body["harness_override"] = conv.harness_override
 
     try:
-        await runner_client.post(
+        response = await runner_client.post(
             f"/v1/sessions/{session_id}/events",
             json=runner_body,
             timeout=_RUNNER_FORWARD_TIMEOUT,
         )
+        if response.status_code >= 400:
+            from omnigent.server.routes._sessions.orchestration import _runner_reject_detail
+
+            raise OmnigentError(
+                f"Runner rejected the skill: {_runner_reject_detail(response)}",
+                code=ErrorCode.RUNNER_UNAVAILABLE,
+            )
+        if startup_input_id is not None:
+            [visible] = await asyncio.to_thread(
+                conversation_store.append, session_id, [visible_item]
+            )
+        else:
+            visible = persisted_items[0]
         event = OutputItemDoneEvent(type="response.output_item.done", item=visible.to_api_dict())
         session_stream.publish(session_id, event.model_dump())
     except (httpx.HTTPError, ConnectionError) as exc:

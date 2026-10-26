@@ -538,3 +538,11 @@ describe("parseEvent — response.elicitation_resolved", () => {
     } satisfies ElicitationResolved);
   });
 });
+
+it("parses queue updates only with a session identifier", () => {
+  expect(parseEvent("session.queue.updated", { conversation_id: "session" })).toEqual({
+    type: "session_queue_updated",
+    conversationId: "session",
+  });
+  expect(parseEvent("session.queue.updated", {})).toBeNull();
+});

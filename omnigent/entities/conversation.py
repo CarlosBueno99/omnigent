@@ -282,11 +282,18 @@ class Conversation:
 
 
 class StartupInputOptions(BaseModel):
-    """Request options retained only while a startup input awaits delivery."""
+    """Request options retained while a saved input awaits delivery."""
 
     model_override: str | None = None
     tools: list[dict[str, Any]] | None = None
     background_titles_enabled: bool = False
+    queued: bool = False
+    wait_for_idle: bool = False
+    requires_retry: bool = False
+    cancelled: bool = False
+    event_type: Literal["compact"] | None = None
+    agent_id: str | None = None
+    reply_draft: dict[str, Any] | None = None
 
 
 class MessageData(BaseModel):

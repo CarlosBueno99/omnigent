@@ -3,26 +3,34 @@ import { useEffect } from "react";
 import type { ReactNode } from "react";
 
 import { useChatStore } from "@/store/chatStore";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
 
 /**
- * Drives the background flush of the client-side message queue.
- *
- * The composer's own effect flushes the queue for the conversation the user is
- * *viewing*. This provider covers the rest: a message queued in a conversation
- * the user has navigated away from (whose SSE stream is gone) still needs to
- * send when that conversation next goes idle.
- *
- * It calls `flushBackgroundQueues` — which reads each queued conversation's
- * status from the live `["conversations"]` cache and POSTs the head of any that
- * are idle — whenever either the queue or that cache changes. Mounted app-wide
- * so it fires regardless of the current route. Level-triggered and idempotent
- * (the action skips the active conversation and no-ops when nothing is ready),
- * so over-firing is harmless.
+ * Refresh the active server queue and drain legacy browser queues when their
+ * sessions become idle. Server-owned rows are never dispatched by the browser.
  */
 export function QueueFlushProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
+  const info = useServerInfo();
+  const conversationId = useChatStore((s) => s.conversationId);
+  const refreshQueuedMessages = useChatStore((s) => s.refreshQueuedMessages);
   const queuedMessages = useChatStore((s) => s.queuedMessages);
   const flushBackgroundQueues = useChatStore((s) => s.flushBackgroundQueues);
+
+  // Polling also observes changes made through another server replica.
+  useEffect(() => {
+    if (info === "loading" || !info.durable_send_queue || conversationId === null) return;
+    const refresh = () => {
+      void refreshQueuedMessages(conversationId);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 2_000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [conversationId, info, refreshQueuedMessages]);
 
   // Re-evaluate whenever the queue itself changes (e.g. a message enqueued in
   // another conversation, or one drained here).

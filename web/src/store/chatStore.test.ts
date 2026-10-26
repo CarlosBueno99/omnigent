@@ -20,6 +20,8 @@ import type * as IdentityModule from "@/lib/identity";
 import { type InfiniteData, QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { toast } from "sonner";
+import * as capabilities from "@/lib/capabilities";
+import type { QueuedInput } from "@/lib/types";
 import type { Conversation, ConversationsPage } from "@/hooks/useConversations";
 import type {
   AnyBlock,
@@ -20662,3 +20664,339 @@ it.each(["restore", "newer", "foreign", "delivered", "no-id", "refused", "unsett
     if (scenario !== "foreign") expect(takeFailedSendDraft(id, false)).toBeNull();
   },
 );
+
+describe("chatStore — durable server queue", () => {
+  const sessionId = "conv_server_queue";
+  const queueUrl = `/v1/sessions/${sessionId}/queue`;
+  let saved: QueuedInput[];
+
+  const entry = (id: string, text = id): QueuedInput => ({
+    id,
+    type: "message",
+    data: { stable_id: id, agent_id: "agent_one", content: [{ type: "input_text", text }] },
+    status: "queued",
+  });
+
+  beforeEach(() => {
+    saved = [];
+    const info = vi.spyOn(capabilities, "getCachedServerInfo").mockReturnValue({
+      ...capabilities.FALLBACK_SERVER_INFO,
+      durable_send_queue: true,
+    });
+    onTestFinished(() => info.mockRestore());
+    bindConversationForTest(sessionId, {
+      boundAgentId: "agent_one",
+      status: "streaming",
+      sessionStatus: "running",
+    });
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).startsWith(`${queueUrl}?`)) {
+        return Promise.resolve(mockResponse({ data: saved, next_cursor: null }));
+      }
+      return defaultFetchHandler(input as RequestInfo, init as RequestInit);
+    });
+  });
+
+  it.each(["message", "compact"] as const)(
+    "saves %s while busy and never browser-drains it",
+    async (type) => {
+      useChatStore.setState({ sessionHarness: "claude-sdk" });
+      const file = new File(["image"], "shot.png", { type: "image/png" });
+      const text = type === "compact" ? "/compact" : "Look at this";
+      let acknowledge: (() => void) | undefined;
+      const handler = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation((input, init) => {
+        if (String(input).endsWith("/resources/files")) {
+          return Promise.resolve(
+            mockResponse({ id: "file_queue", metadata: { filename: "shot.png" } }),
+          );
+        }
+        if (String(input).endsWith("/queue")) {
+          const body = JSON.parse((init as RequestInit).body as string);
+          expect(body.delivery).toBe("queued");
+          expect(body.type).toBe(type);
+          saved = [{ ...entry(body.data.stable_id, text), type, data: body.data }];
+          return new Promise<Response>((resolve) => {
+            acknowledge = () => resolve(mockResponse({ queued: true, item_id: saved[0]!.id }));
+          });
+        }
+        return handler(input, init);
+      });
+      useChatStore.getState().enqueueMessage(text, type === "message" ? [file] : undefined);
+      await vi.waitFor(() => expect(acknowledge).toBeDefined());
+      expect(useChatStore.getState().queuedMessages[0]).toMatchObject({
+        saving: true,
+        serverBacked: true,
+      });
+      useChatStore.setState({ status: "idle", sessionStatus: "idle" });
+      useChatStore.getState().maybeFlushQueuedHead();
+      expect(useChatStore.getState().queuedMessages).toHaveLength(1);
+      acknowledge!();
+      await vi.waitFor(() =>
+        expect(useChatStore.getState().queuedMessages[0]?.serverSaved).toBe(true),
+      );
+      await useChatStore.getState().refreshQueuedMessages(sessionId);
+      useChatStore.getState().maybeFlushQueuedHead();
+      if (type === "message") {
+        expect(saved[0]!.data.content).toEqual([
+          { type: "input_image", file_id: "file_queue", filename: "shot.png" },
+          { type: "input_text", text },
+        ]);
+      }
+      bindConversationForTest("conv_other", { boundAgentId: "agent_one" });
+      seedConversationsCache([conv(sessionId, "idle")]);
+      useChatStore.getState().flushBackgroundQueues();
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/queue"))).toHaveLength(
+        1,
+      );
+      expect(useChatStore.getState().queuedMessages).toHaveLength(1);
+      saved = [];
+      await useChatStore.getState().refreshQueuedMessages(sessionId);
+      expect(useChatStore.getState().queuedMessages).toEqual([]);
+    },
+  );
+
+  it("hydrates another client's queue, reorders and bulk steers through the server", async () => {
+    saved = [entry("first"), entry("second")];
+    await useChatStore.getState().refreshQueuedMessages(sessionId);
+    const updates: unknown[] = [];
+    const handler = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) => {
+      if ((init as RequestInit)?.method === "PATCH" && String(input).startsWith(queueUrl)) {
+        const body = JSON.parse((init as RequestInit).body as string);
+        updates.push([input, body]);
+        if (body.action === "reorder") saved.reverse();
+        else saved = saved.filter((message) => !String(input).endsWith(`/${message.id}`));
+        return Promise.resolve(mockResponse({}));
+      }
+      return handler(input, init);
+    });
+    useChatStore.getState().reorderQueuedMessage("second", "first");
+    await vi.waitFor(() =>
+      expect(useChatStore.getState().queuedMessages.map((message) => message.queueId)).toEqual([
+        "second",
+        "first",
+      ]),
+    );
+    useChatStore.getState().steerAllQueuedMessages(sessionId);
+    await vi.waitFor(() => expect(useChatStore.getState().queuedMessages).toEqual([]));
+    expect(updates).toEqual([
+      [`${queueUrl}/second`, { action: "reorder", before_id: "first" }],
+      [`${queueUrl}/second`, { action: "steer" }],
+      [`${queueUrl}/first`, { action: "steer" }],
+    ]);
+  });
+
+  it("downloads remote attachments and waits for atomic removal before editing", async () => {
+    const replyDraft = {
+      version: 1 as const,
+      quotes: [{ before: "", text: "quoted" }],
+      text: "reply",
+    };
+    saved = [
+      {
+        ...entry("remote", "> quoted\n\nreply"),
+        data: {
+          ...entry("remote").data,
+          reply_draft: replyDraft,
+          content: [
+            { type: "input_image", file_id: "image", filename: "shot.png" },
+            { type: "input_text", text: "> quoted\n\nreply" },
+          ],
+        },
+      },
+    ];
+    await useChatStore.getState().refreshQueuedMessages(sessionId);
+    const recalled = vi.fn();
+    let remove: (() => void) | undefined;
+    const handler = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/files/image/content")) {
+        return Promise.resolve({
+          ...mockResponse(null),
+          blob: async () => new Blob(["bytes"], { type: "image/png" }),
+        });
+      }
+      if ((init as RequestInit)?.method === "DELETE") {
+        return new Promise<Response>((resolve) => {
+          remove = () => {
+            const deleted = saved[0];
+            saved = [];
+            resolve(mockResponse(deleted));
+          };
+        });
+      }
+      return handler(input, init);
+    });
+    useChatStore.getState().recallQueuedMessage("remote", recalled);
+    await vi.waitFor(() => expect(remove).toBeDefined());
+    expect(recalled).not.toHaveBeenCalled();
+    expect(useChatStore.getState().queuedMessages).toHaveLength(1);
+    remove!();
+    await vi.waitFor(() => expect(recalled).toHaveBeenCalledOnce());
+    const restored = recalled.mock.calls[0]![0];
+    expect(restored.replyDraft).toEqual(replyDraft);
+    expect(restored.files[0]).toMatchObject({ name: "shot.png", size: 5, type: "image/png" });
+    expect(getSessionDraft(sessionId)?.files[0]).toBe(restored.files[0]);
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+  });
+
+  it("keeps a dispatched row out of the composer when removal conflicts", async () => {
+    saved = [entry("claimed")];
+    await useChatStore.getState().refreshQueuedMessages(sessionId);
+    const recalled = vi.fn();
+    const error = vi.spyOn(toast, "error").mockReturnValue("queue-conflict");
+    onTestFinished(() => error.mockRestore());
+    const handler = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) => {
+      if ((init as RequestInit)?.method === "DELETE") {
+        saved = [];
+        return Promise.resolve(
+          mockResponse({ detail: "Message is already dispatching" }, { ok: false, status: 409 }),
+        );
+      }
+      return handler(input, init);
+    });
+    useChatStore.getState().recallQueuedMessage("claimed", recalled);
+    await vi.waitFor(() => expect(error).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(useChatStore.getState().queuedMessages).toEqual([]));
+    expect(recalled).not.toHaveBeenCalled();
+  });
+
+  it("retains a failed save and reuses its stable ID for retry", async () => {
+    const events: { data: { stable_id: string } }[] = [];
+    const error = vi.spyOn(toast, "error").mockReturnValue("queue-save");
+    onTestFinished(() => error.mockRestore());
+    const handler = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/queue")) {
+        const body = JSON.parse((init as RequestInit).body as string);
+        events.push(body);
+        if (events.length === 1) return Promise.reject(new TypeError("offline"));
+        saved = [{ ...entry(body.data.stable_id), data: body.data }];
+        return Promise.resolve(mockResponse({ queued: true, item_id: body.data.stable_id }));
+      }
+      if ((init as RequestInit)?.method === "PATCH" && String(input).startsWith(queueUrl)) {
+        saved = [];
+        return Promise.resolve(mockResponse({}));
+      }
+      return handler(input, init);
+    });
+    useChatStore.getState().enqueueMessage("keep me");
+    await vi.waitFor(() =>
+      expect(useChatStore.getState().queuedMessages[0]?.requiresRetry).toBe(true),
+    );
+    useChatStore.getState().steerMessage(useChatStore.getState().queuedMessages[0]!.queueId);
+    await vi.waitFor(() => expect(useChatStore.getState().queuedMessages).toEqual([]));
+    expect(events).toHaveLength(2);
+    expect(events[1]!.data.stable_id).toBe(events[0]!.data.stable_id);
+  });
+
+  it("reconciles a saved message whose acknowledgement was lost without duplicating it", async () => {
+    const error = vi.spyOn(toast, "error").mockReturnValue("queue-save");
+    onTestFinished(() => error.mockRestore());
+    const handler = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/queue")) {
+        const body = JSON.parse((init as RequestInit).body as string);
+        saved = [{ ...entry(body.data.stable_id), data: body.data }];
+        return Promise.reject(new TypeError("acknowledgement lost"));
+      }
+      return handler(input, init);
+    });
+    useChatStore.getState().enqueueMessage("already saved");
+    await vi.waitFor(() =>
+      expect(useChatStore.getState().queuedMessages).toMatchObject([
+        { queueId: saved[0]?.id, serverSaved: true, requiresRetry: false },
+      ]),
+    );
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/queue"))).toHaveLength(1);
+  });
+
+  it("ignores a queue read started before a local submission", async () => {
+    let finishRead: (() => void) | undefined;
+    const handler = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          finishRead = () => resolve(mockResponse({ data: [], next_cursor: null }));
+        }),
+    );
+    const staleRead = useChatStore.getState().refreshQueuedMessages(sessionId);
+    await vi.waitFor(() => expect(finishRead).toBeDefined());
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/queue")) {
+        const body = JSON.parse((init as RequestInit).body as string);
+        saved = [{ ...entry(body.data.stable_id), data: body.data }];
+        return Promise.resolve(mockResponse({ queued: true, item_id: saved[0]!.id }));
+      }
+      return handler(input, init);
+    });
+    useChatStore.getState().enqueueMessage("new submission");
+    await vi.waitFor(() =>
+      expect(useChatStore.getState().queuedMessages[0]?.serverSaved).toBe(true),
+    );
+    finishRead!();
+    await staleRead;
+    expect(useChatStore.getState().queuedMessages).toMatchObject([
+      { text: "new submission", serverSaved: true },
+    ]);
+  });
+
+  it("restores saved queue rows from the session snapshot after a reload", async () => {
+    saved = [entry("persisted")];
+    seedSession(sessionId, []);
+    const handler = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input, init) => {
+      const response = await handler(input, init);
+      if (String(input).split("?")[0] === `/v1/sessions/${sessionId}` && !init?.method) {
+        return mockResponse({ ...(await response.json()), queued_inputs: saved });
+      }
+      return response;
+    });
+    bindConversationForTest(null);
+    releaseConversation(sessionId);
+    await useChatStore.getState().switchTo(sessionId);
+    expect(useChatStore.getState().queuedMessages).toMatchObject([
+      { queueId: "persisted", serverSaved: true },
+    ]);
+  });
+
+  it.each([404, 409])(
+    "preserves an unacknowledged removal until explicit recovery (%s)",
+    async (status) => {
+      saved = [entry("uncertain", "keep this draft")];
+      await useChatStore.getState().refreshQueuedMessages(sessionId);
+      const error = vi.spyOn(toast, "error").mockReturnValue("queue-remove");
+      onTestFinished(() => error.mockRestore());
+      const handler = fetchMock.getMockImplementation()!;
+      let attempts = 0;
+      fetchMock.mockImplementation((input, init) => {
+        if ((init as RequestInit)?.method === "DELETE") {
+          attempts += 1;
+          saved = [];
+          return attempts === 1
+            ? Promise.reject(new TypeError("connection lost"))
+            : Promise.resolve(mockResponse({ detail: "no longer queued" }, { ok: false, status }));
+        }
+        return handler(input, init);
+      });
+      const recovered = vi.fn();
+      useChatStore.getState().recallQueuedMessage("uncertain", recovered);
+      await vi.waitFor(() =>
+        expect(useChatStore.getState().queuedMessages[0]?.removalUnconfirmed).toBe(true),
+      );
+      await useChatStore.getState().refreshQueuedMessages(sessionId);
+      expect(useChatStore.getState().queuedMessages).toMatchObject([
+        { text: "keep this draft", removalUnconfirmed: true },
+      ]);
+      expect(recovered).not.toHaveBeenCalled();
+      useChatStore.getState().steerMessage("uncertain");
+      expect(attempts).toBe(1);
+      useChatStore.getState().recallQueuedMessage("uncertain", recovered);
+      await vi.waitFor(() => expect(useChatStore.getState().queuedMessages).toEqual([]));
+      expect(recovered).toHaveBeenCalledTimes(status === 404 ? 1 : 0);
+      if (status === 404) expect(getSessionDraft(sessionId)?.text).toBe("keep this draft");
+    },
+  );
+});

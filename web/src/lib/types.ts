@@ -13,6 +13,7 @@
 import type { ConversationItem } from "./conversationItems";
 import type { McpServerStartup } from "./events";
 import type { MessageContentBlock } from "./blocks";
+import type { StoredReplyDraft } from "./replyDraft";
 
 /** Reference to a conversation, as returned on response objects. */
 export interface ConversationRef {
@@ -185,7 +186,7 @@ export type SessionStatus = "idle" | "launching" | "running" | "waiting" | "fail
  *
  * Mirrors `omnigent.server.schemas.SessionEventInput`.
  */
-export type SessionEventInput =
+export type SessionEventInput = (
   | { type: "message"; data: { role: "user"; content: ContentBlock[] } }
   | { type: "function_call_output"; data: Record<string, unknown> }
   | { type: "approval"; data: Record<string, unknown> }
@@ -193,7 +194,22 @@ export type SessionEventInput =
   | { type: "stop_session"; data?: Record<string, unknown> }
   | { type: "retry_session"; data?: Record<string, unknown> }
   | { type: "slash_command"; data: { kind: "skill"; name: string; arguments: string } }
-  | { type: string; data: Record<string, unknown> };
+  | { type: string; data: Record<string, unknown> }
+) & { delivery?: "queued" };
+
+/** A saved composer input waiting for its turn on the server. */
+export interface QueuedInput {
+  id: string;
+  type: "message" | "compact";
+  data: {
+    content?: ContentBlock[];
+    stable_id?: string;
+    agent_id?: string;
+    reply_draft?: StoredReplyDraft;
+  };
+  status: string;
+  created_by?: string;
+}
 
 /**
  * A session snapshot item.
@@ -457,6 +473,7 @@ export interface Session {
    * for non-native sessions (their message is already in `items`).
    */
   pendingInputs?: PendingInput[];
+  queuedInputs?: QueuedInput[];
   /**
    * Requesting user's numeric permission level on this session
    * (1=read, 2=edit, 3=manage, 4=owner). ``null`` when permissions

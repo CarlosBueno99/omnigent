@@ -994,6 +994,7 @@ function* processEvent(state: ReducerState, event: StreamEvent): Generator<AnyBl
     case "compaction_failed":
     case "client_task_cancel":
     case "session_usage":
+    case "session_queue_updated":
     case "session_todos":
     case "session_terminal_pending":
     case "session_sandbox_status":

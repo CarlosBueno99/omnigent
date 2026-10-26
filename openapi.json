@@ -5055,6 +5055,35 @@
         "title": "ProjectOrderResponse",
         "type": "object"
       },
+      "QueueAction": {
+        "properties": {
+          "action": {
+            "enum": [
+              "steer",
+              "retry",
+              "reorder"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "before_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before Id"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "QueueAction",
+        "type": "object"
+      },
       "QueuedEvent": {
         "description": "Optional event emitted between `created` and `in_progress`\nfor background tasks that are queued before they start.\n\nForeground streaming responses skip this event.",
         "properties": {
@@ -5869,6 +5898,11 @@
             "title": "Durable Initial Input",
             "type": "boolean"
           },
+          "durable_send_queue": {
+            "default": false,
+            "title": "Durable Send Queue",
+            "type": "boolean"
+          },
           "enabled_connections": {
             "items": {
               "type": "string"
@@ -6594,6 +6628,76 @@
           "child_session_id"
         ],
         "title": "SessionCreatedEvent",
+        "type": "object"
+      },
+      "SessionEventInput": {
+        "description": "A single client-submitted event/input item for a session.\n\nUsed both as an element of `initial_items` on session\ncreation and as the body of `POST /v1/sessions/{id}/events`.\nCarries a discriminator (`type`) and a free-form `data`\npayload whose shape is interpreted by the route layer based\non `type` (e.g. user message, function-call output,\napproval, interrupt).",
+        "properties": {
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional internal attribution actor for runner- originated events that are triggered by a prior human turn.",
+            "title": "Created By"
+          },
+          "data": {
+            "additionalProperties": true,
+            "description": "Type-specific payload. Shape varies by `type`; for `\"message\"` this looks like `{\"role\": \"user\", \"content\": [{\"type\": \"input_text\", \"text\": \"Hello\"}]}`. For `\"interrupt\"` this is typically `{}`.",
+            "title": "Data",
+            "type": "object"
+          },
+          "delivery": {
+            "default": "immediate",
+            "enum": [
+              "immediate",
+              "queued"
+            ],
+            "title": "Delivery",
+            "type": "string"
+          },
+          "model_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional per-event LLM model override used when this event starts a fresh agent turn. Distinct from the session's bound agent; it substitutes for the agent spec's `llm.model` for that turn.",
+            "title": "Model Override"
+          },
+          "tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional OpenAI function-tool dicts registered when this event creates a new task. Mirrors `CreateResponseRequest.tools`, e.g. `[{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"...\", \"parameters\": {...}}}]`. Ignored when the event steers into an active task: that task's tools are fixed at start time.",
+            "title": "Tools"
+          },
+          "type": {
+            "description": "Discriminator for the event/input kind, e.g. `\"message\"`, `\"function_call_output\"`, `\"interrupt\"`.",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "SessionEventInput",
         "type": "object"
       },
       "SessionForkRequest": {
@@ -8167,6 +8271,14 @@
             ],
             "title": "Project Id"
           },
+          "queued_inputs": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Queued Inputs",
+            "type": "array"
+          },
           "reasoning_effort": {
             "anyOf": [
               {
@@ -9255,12 +9367,40 @@
         "type": "object"
       },
       "StartupInputOptions": {
-        "description": "Request options retained only while a startup input awaits delivery.",
+        "description": "Request options retained while a saved input awaits delivery.",
         "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
           "background_titles_enabled": {
             "default": false,
             "title": "Background Titles Enabled",
             "type": "boolean"
+          },
+          "cancelled": {
+            "default": false,
+            "title": "Cancelled",
+            "type": "boolean"
+          },
+          "event_type": {
+            "anyOf": [
+              {
+                "const": "compact",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Type"
           },
           "model_override": {
             "anyOf": [
@@ -9272,6 +9412,28 @@
               }
             ],
             "title": "Model Override"
+          },
+          "queued": {
+            "default": false,
+            "title": "Queued",
+            "type": "boolean"
+          },
+          "reply_draft": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply Draft"
+          },
+          "requires_retry": {
+            "default": false,
+            "title": "Requires Retry",
+            "type": "boolean"
           },
           "tools": {
             "anyOf": [
@@ -9287,6 +9449,11 @@
               }
             ],
             "title": "Tools"
+          },
+          "wait_for_idle": {
+            "default": false,
+            "title": "Wait For Idle",
+            "type": "boolean"
           }
         },
         "title": "StartupInputOptions",
@@ -15408,6 +15575,244 @@
         "summary": "Update Policy",
         "tags": [
           "session_policies"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/queue": {
+      "get": {
+        "operationId": "list_queue_v1_sessions__session_id__queue_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 32,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Queue V1 Sessions  Session Id  Queue Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Queue",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "description": "Save an input for a later turn, even after every client disconnects.",
+        "operationId": "queue_event_v1_sessions__session_id__queue_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionEventInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Queue Event",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/queue/{item_id}": {
+      "delete": {
+        "operationId": "remove_queue_item_v1_sessions__session_id__queue__item_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Remove Queue Item V1 Sessions  Session Id  Queue  Item Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Queue Item",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "patch": {
+        "operationId": "change_queue_item_v1_sessions__session_id__queue__item_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueueAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Change Queue Item V1 Sessions  Session Id  Queue  Item Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Change Queue Item",
+        "tags": [
+          "sessions"
         ]
       }
     },

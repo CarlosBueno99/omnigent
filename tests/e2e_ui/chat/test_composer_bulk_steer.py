@@ -1,4 +1,4 @@
-"""Bulk steering preserves queued messages for an explicit retry after failure."""
+"""Legacy-server bulk steering preserves queued messages after a send failure."""
 
 from __future__ import annotations
 
@@ -22,6 +22,12 @@ def test_bulk_steer_retries_the_whole_queue(
     )
     posted: list[tuple[str, str]] = []
     fail_posts = True
+
+    def legacy_info(route: Route) -> None:
+        response = route.fetch()
+        route.fulfill(response=response, json={**response.json(), "durable_send_queue": False})
+
+    page.route("**/v1/info", legacy_info)
 
     def respond_to_send(route: Route) -> None:
         data = route.request.post_data_json["data"]

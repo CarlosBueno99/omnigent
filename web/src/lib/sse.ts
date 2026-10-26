@@ -546,6 +546,11 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
   }
 
   // Session lifecycle (session.*).
+  if (eventType === "session.queue.updated") {
+    return typeof data.conversation_id === "string" && data.conversation_id
+      ? { type: "session_queue_updated", conversationId: data.conversation_id }
+      : null;
+  }
   if (eventType === "session.status") {
     const conversationId = data.conversation_id;
     const status = data.status;

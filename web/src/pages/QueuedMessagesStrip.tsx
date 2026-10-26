@@ -121,9 +121,16 @@ function QueuedRow({
     setDropRef(node);
   };
   const hasText = message.text.trim().length > 0;
-  const files = message.files ?? [];
-  const attachmentNames = files.map(attachmentFilename);
-  const AttachmentIcon = files.every((file) => file.type.startsWith("image/"))
+  const files = message.files;
+  const fileBlocks = message.fileBlocks?.filter((block) => block.type !== "input_text") ?? [];
+  const attachmentNames = files
+    ? files.map(attachmentFilename)
+    : fileBlocks.map((block) => block.filename ?? block.file_id);
+  const AttachmentIcon = (
+    files
+      ? files.every((file) => file.type.startsWith("image/"))
+      : fileBlocks.every((block) => block.type === "input_image")
+  )
     ? ImageIcon
     : PaperclipIcon;
 
@@ -196,9 +203,13 @@ function QueuedRow({
           </Badge>
         )}
       </div>
-      {message.requiresRetry && (
+      {message.removalUnconfirmed && (
+        <span className="shrink-0 text-xs text-destructive">Removal unconfirmed</span>
+      )}
+      {message.requiresRetry && !message.removalUnconfirmed && (
         <span className="shrink-0 text-xs text-destructive">Send failed</span>
       )}
+      {message.saving && <span className="shrink-0 text-xs text-muted-foreground">Saving…</span>}
       {message.waitingForHost && !message.requiresRetry && (
         <span className="shrink-0 text-xs text-muted-foreground">Waiting for host</span>
       )}
@@ -209,13 +220,13 @@ function QueuedRow({
           type="button"
           variant="ghost"
           size="icon-xs"
-          aria-label="Edit queued message"
+          aria-label={message.removalUnconfirmed ? "Recover draft" : "Edit queued message"}
           className={ACTION_BUTTON_CLASS}
           onClick={() => onEdit(message.queueId)}
         >
           <PencilIcon className={ACTION_ICON_CLASS} aria-hidden="true" />
         </Button>
-        {onSteer ? (
+        {onSteer && !message.removalUnconfirmed ? (
           <Tooltip>
             <TooltipTrigger asChild>
               <Button

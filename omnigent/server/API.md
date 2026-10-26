@@ -506,8 +506,16 @@ Fields:
     message round-trips back (the matching `session.input.consumed`
     carries `cleared_pending_id`). Messages still queued when an
     `interrupt` cancelled the turn are left out, so a reload does not
-    redraw a bubble the person stopped. Empty for non-native sessions,
-    which already carry the message in `items`.
+    redraw a bubble the person stopped. Durable startup and queued inputs
+    also appear here while awaiting runner acceptance or a native transcript
+    receipt. Once accepted, non-native inputs move into `items`.
+
+  queued_inputs (array, default `[]`)
+    Durable inputs waiting for a later turn, shared by all clients with
+    session read access. Each entry has `id`, `type`, `status`, `created_by`,
+    and `data`, matching the Send Queue endpoint below. These inputs are
+    excluded from conversation history until dispatch. Failed inputs remain
+    here for explicit retry, editing, or removal.
 
   todos (array, default `[]`)
     Current native Plan/TODO list reported by a harness.
@@ -1178,6 +1186,54 @@ creating a task or item. Runner-hosted native sub-agent sessions also
 mirror that status into the parent stream as `session.child_session.updated`
 when the child is registered for fan-out. New user-facing event types should
 default to the queue.
+
+### Send Queue
+
+Servers advertise `durable_send_queue: true` in `GET /v1/info`.
+`POST /v1/sessions/{session_id}/queue` accepts the same single event body as
+`POST /events`, limited to user messages, skill invocations, and `compact`.
+Send `data.stable_id` as a fresh 32-character lowercase hex UUID and retain it
+on retries. The server commits the input before returning `202` with
+`{"queued": true, "item_id": "...", "queue_id": "..."}`; both IDs identify
+the same input. Attachments must first be uploaded through the session file
+API. Submission and delivery both check the sender's session edit access.
+
+The server dispatches one queued input after the current turn finishes,
+without requiring an open browser. Waiting on tools, approvals, or
+compaction does not end the current turn. Queues recover when the session's
+host or runner reconnects. Failed inputs hold later automatic delivery until
+retried or removed. Inputs already submitted to a native harness wait for
+its transcript receipt and are never automatically replayed after an
+ambiguous transport failure.
+
+- `GET /queue?limit=32&after=<cursor>` returns
+  `{"data": [...], "next_cursor": null}`. `limit` is 1–100; pass a non-null
+  `next_cursor` as `after` for the next page. Entries contain the original
+  event `type` and `data`, an `id`, `created_by`, and `status` (`in_progress`
+  while queued, `failed` when explicit retry is needed).
+- `PATCH /queue/{id}` with `{"action":"steer"}` or `{"action":"retry"}`
+  requests immediate delivery. An already submitted input still waits for
+  acknowledgement before another queue entry is dispatched.
+- `PATCH /queue/{id}` with `{"action":"reorder","before_id":"..."}`
+  moves an unsent entry before another. `before_id: null` moves it to the end.
+- `DELETE /queue/{id}` atomically removes an unsent entry and returns its
+  original content for editing. A concurrent dispatch returns `409`, and a
+  missing entry returns `404`. Clients must wait for removal acknowledgement
+  before treating an edit as a replacement.
+
+These paths are relative to `/v1/sessions/{session_id}`. Reads require session
+read access; mutations require edit access. `session.queue.updated` SSE events
+invalidate a client's queue view; polling also synchronizes clients on separate
+replicas. The queue shares the existing hard limit of 100 pending inputs per
+session with managed startup inputs.
+
+No schema migration or backfill is required. Queue entries use the existing
+pending-input storage, payload encoding, and conversation transaction lock.
+Deferred entries stay in a state older server workers do not dispatch, including
+failed entries awaiting retry. Use the dedicated `POST /queue` endpoint:
+older replicas reject it instead of interpreting a queued send as steering.
+During rollback, accepted queues remain stored but require a queue-capable server
+to resume; drain queues before a full downgrade if continued execution is needed.
 
 ### Resolve Elicitation (URL-based)
 

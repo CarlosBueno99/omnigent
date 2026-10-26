@@ -86,6 +86,7 @@ from omnigent.entities import (
     PagedList,
     parse_item_data,
 )
+from omnigent.entities.conversation import MessageData, SlashCommandData, StartupInputOptions
 from omnigent.errors import ErrorCode, OmnigentError, StaleCursorError
 from omnigent.native.native_coding_agents import native_coding_agent_for_wrapper_label
 from omnigent.native.session_todos import validate_session_todos
@@ -102,6 +103,7 @@ from omnigent.stores.conversation_store import (
     PENDING_INPUT_RESPONSE_ID,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
+    STARTUP_INPUT_LABEL,
     ConversationAlreadyExistsError,
     ConversationNotFoundError,
     ConversationStore,
@@ -2186,6 +2188,24 @@ class SqlAlchemyConversationStore(ConversationStore):
         with self._session("list_host_conversations") as session:
             return list(session.scalars(query.order_by(SqlConversationMetadata.id).limit(limit)))
 
+    def _pending_input_query(self, conversation_id: str) -> Select[tuple[SqlConversationItem]]:
+        # SQL ordering can select the full transcript's position index instead.
+        # Fetch the capped response-id range and order those rows in memory.
+        return (
+            select(SqlConversationItem)
+            .where(
+                SqlConversationItem.workspace_id == current_workspace_id(),
+                SqlConversationItem.conversation_id == conversation_id,
+                SqlConversationItem.response_id == PENDING_INPUT_RESPONSE_ID,
+            )
+            .with_hint(
+                SqlConversationItem,
+                "FORCE INDEX (ix_conversation_items_response_id)",
+                dialect_name="mysql",
+            )
+            .limit(MAX_PENDING_INPUTS)
+        )
+
     def list_pending_inputs_page(
         self,
         conversation_id: str,
@@ -2193,24 +2213,15 @@ class SqlAlchemyConversationStore(ConversationStore):
         after: int | None = None,
         limit: int = MAX_PENDING_INPUTS,
     ) -> tuple[list[ConversationItem], int | None]:
-        # The cursor is the last returned position. The response-id index bounds
-        # the read to the conversation's pending rows (append caps them at
-        # MAX_PENDING_INPUTS), so ordering them by position stays small.
-        query = select(SqlConversationItem).where(
-            SqlConversationItem.workspace_id == current_workspace_id(),
-            SqlConversationItem.conversation_id == conversation_id,
-            SqlConversationItem.response_id == PENDING_INPUT_RESPONSE_ID,
-        )
-        if after is not None:
-            query = query.where(SqlConversationItem.position > after)
+        if type(limit) is not int or not 1 <= limit <= MAX_PENDING_INPUTS:
+            raise ValueError(f"limit must be between 1 and {MAX_PENDING_INPUTS}")
         with self._conv_session("list_pending_inputs") as session:
-            rows = list(
-                session.scalars(
-                    query.order_by(SqlConversationItem.position, SqlConversationItem.id).limit(
-                        limit + 1
-                    )
-                )
+            rows = sorted(
+                session.scalars(self._pending_input_query(conversation_id)),
+                key=lambda row: (row.position, row.id),
             )
+        if after is not None:
+            rows = [row for row in rows if row.position > after]
         more = len(rows) > limit
         rows = rows[:limit]
         decoded = self._decode_item_data_batch([row.data for row in rows])
@@ -2224,6 +2235,10 @@ class SqlAlchemyConversationStore(ConversationStore):
         *,
         expected: str,
         status: str | None,
+        queued_only: bool = False,
+        expected_options: StartupInputOptions | None = None,
+        options: StartupInputOptions | None = None,
+        require_head: bool = False,
     ) -> bool:
         item = self.get_item(conversation_id, item_id)
         if item is None or item.response_id != PENDING_INPUT_RESPONSE_ID:
@@ -2246,15 +2261,149 @@ class SqlAlchemyConversationStore(ConversationStore):
                 or row.status != encode_item_status(expected)
             ):
                 return False
+            claiming = status == "incomplete" and expected != "incomplete"
+            current_options = None
+            encoded_data = None
+            if claiming or queued_only or expected_options is not None or options is not None:
+                [decoded] = self._decode_item_data_batch([row.data])
+                data = _to_item(row, decoded).data
+                if not isinstance(data, (MessageData, SlashCommandData)):
+                    return False
+                current_options = data.startup_options
+                if queued_only and (
+                    row.status != encode_item_status("completed")
+                    or current_options is None
+                    or not current_options.queued
+                ):
+                    return False
+                if expected_options is not None and current_options != expected_options:
+                    return False
+                if options is not None:
+                    data.startup_options = options
+                    [encoded_data] = self._encode_item_data_batch(
+                        [strip_nul_bytes(json.dumps(data.model_dump(exclude_none=True)))]
+                    )
+            if claiming and (
+                (current_options and current_options.cancelled)
+                or session.scalar(
+                    select(SqlConversationLabel.value).where(
+                        SqlConversationLabel.workspace_id == current_workspace_id(),
+                        SqlConversationLabel.conversation_id == conversation_id,
+                        SqlConversationLabel.key == STARTUP_INPUT_LABEL,
+                    )
+                )
+                == "cancelled"
+            ):
+                return False
+            queued_claim = claiming and current_options is not None and current_options.queued
+            if require_head or queued_claim:
+                candidates = list(session.scalars(self._pending_input_query(conversation_id)))
+                payloads = self._decode_item_data_batch(
+                    [candidate.data for candidate in candidates]
+                )
+                active = []
+                for candidate, payload in zip(candidates, payloads, strict=True):
+                    saved_options = getattr(
+                        _to_item(candidate, payload).data, "startup_options", None
+                    )
+                    if candidate.status != encode_item_status("failed") and not (
+                        saved_options and saved_options.cancelled
+                    ):
+                        active.append(candidate)
+                if queued_claim and any(
+                    candidate.id != item_id
+                    and candidate.status == encode_item_status("incomplete")
+                    for candidate in active
+                ):
+                    return False
+                if require_head:
+                    head = min(
+                        active,
+                        key=lambda candidate: (
+                            candidate.status != encode_item_status("incomplete"),
+                            candidate.position,
+                            candidate.id,
+                        ),
+                        default=None,
+                    )
+                    if head is None or head.id != item_id:
+                        return False
+            if queued_claim:
+                conversation = session.get(
+                    SqlConversation, (current_workspace_id(), conversation_id)
+                )
+                if conversation is None:
+                    return False
+                row.position = self._next_item_position(session, conversation_id, conversation)
+                conversation.next_position = row.position + 1
             if status is None:
                 session.delete(row)
             else:
                 row.status = encode_item_status(status)
+                if encoded_data is not None:
+                    row.data = encoded_data
             return True
 
         return run_write_transaction(
             self._conv_session_immediate, "transition_pending_input", write
         )
+
+    def _next_item_position(
+        self, session: Session, conversation_id: str, conversation: SqlConversation | None
+    ) -> int:
+        """Read the allocator while holding the conversation lock; initialize legacy rows."""
+        if conversation is not None and conversation.next_position is not None:
+            return conversation.next_position
+        latest = session.scalar(
+            select(SqlConversationItem.position)
+            .where(
+                SqlConversationItem.workspace_id == current_workspace_id(),
+                SqlConversationItem.conversation_id == conversation_id,
+            )
+            .order_by(SqlConversationItem.position.desc())
+            .limit(1)
+        )
+        return 0 if latest is None else latest + 1
+
+    def reorder_pending_input(
+        self, conversation_id: str, item_id: str, *, before_id: str | None = None
+    ) -> bool:
+        def write(session: Session) -> bool:
+            self._lock_conversation(session, conversation_id)
+            rows = sorted(
+                session.scalars(self._pending_input_query(conversation_id)),
+                key=lambda row: (row.position, row.id),
+            )
+            decoded = self._decode_item_data_batch([row.data for row in rows])
+            movable = []
+            for row, payload in zip(rows, decoded, strict=True):
+                data = _to_item(row, payload).data
+                if (
+                    row.status == encode_item_status("completed")
+                    and isinstance(data, (MessageData, SlashCommandData))
+                    and data.startup_options is not None
+                    and data.startup_options.queued
+                ):
+                    movable.append(row)
+            target = next((row for row in movable if row.id == item_id), None)
+            if target is None or (
+                before_id is not None and not any(row.id == before_id for row in movable)
+            ):
+                return False
+            if before_id == item_id:
+                return True
+            positions = [row.position for row in movable]
+            movable.remove(target)
+            destination = next(
+                (index for index, row in enumerate(movable) if row.id == before_id), len(movable)
+            )
+            movable.insert(destination, target)
+            # Reuse pending slots: transcript rows and immutable item keys stay unchanged.
+            for row, position in zip(movable, positions, strict=True):
+                row.position = position
+            return True
+
+        return run_write_transaction(self._conv_session_immediate, "reorder_pending_input", write)
 
     def get_item(self, conversation_id: str, item_id: str) -> ConversationItem | None:
         """
@@ -2695,31 +2844,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             if conv_row is not None and has_new_conversation_activity:
                 conv_row.updated_at = now
 
-            # Allocate item positions from the conversation's maintained
-            # next_position counter instead of running a MAX(position) aggregate
-            # on every append. Reading + advancing the counter under
-            # _lock_conversation keeps allocation O(1), drops a query per write,
-            # and stays collision-free. The aggregate is an index lookup on this
-            # schema (ix_conversation_items_conversation_id_position), but a
-            # maintained counter avoids the per-append round-trip regardless and
-            # scales to backends where that same allocation is a full scan.
-            #
-            # Backwards compatibility: conversations created before this counter
-            # existed have next_position = NULL; fall back to a one-time
-            # MAX(position) scan (coalesce to -1 so the first item gets 0), then
-            # persist the counter below so every later append is scan-free.
-            if conv_row is not None and conv_row.next_position is not None:
-                next_pos = conv_row.next_position
-            else:
-                next_pos = (
-                    session.execute(
-                        select(func.coalesce(func.max(SqlConversationItem.position), -1)).where(
-                            SqlConversationItem.workspace_id == current_workspace_id(),
-                            SqlConversationItem.conversation_id == conversation_id,
-                        )
-                    ).scalar_one()
-                    + 1
-                )
+            next_pos = self._next_item_position(session, conversation_id, conv_row)
 
             fts_rows: list[tuple[str, str, str]] = []
             row_values: list[dict[str, object]] = []

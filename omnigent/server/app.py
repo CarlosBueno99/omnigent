@@ -206,6 +206,7 @@ class ServerInfoResponse(BaseModel):
     databricks_features: bool
     managed_sandboxes_enabled: bool
     durable_initial_input: bool = False
+    durable_send_queue: bool = False
     sandbox_provider: str | None
     sandbox_providers: list[str]
     # UI-relevant capability flags per launchable provider, e.g.
@@ -2029,13 +2030,7 @@ def create_app(
     app.state.host_registry = host_registry
     from omnigent.server.startup_inputs import ManagedStartupInputs
 
-    # Only managed creates accept a durable first input, and only managed hosts
-    # need their startup recovered on the replica holding the tunnel.
-    startup_inputs = (
-        ManagedStartupInputs(conversation_store, host_registry)
-        if sandbox_config is not None and sandbox_config.managed_launch_supported
-        else None
-    )
+    startup_inputs = ManagedStartupInputs(conversation_store, host_registry)
     app.state.startup_inputs = startup_inputs
     app.state.host_store = host_store
     app.state.mcp_gateway_backend = mcp_gateway_backend
@@ -3338,7 +3333,10 @@ def create_app(
                 "needs_setup": needs_setup,
                 "databricks_features": databricks_features,
                 "managed_sandboxes_enabled": managed_sandboxes_enabled,
-                "durable_initial_input": startup_inputs is not None,
+                "durable_initial_input": bool(
+                    sandbox_config is not None and sandbox_config.managed_launch_supported
+                ),
+                "durable_send_queue": True,
                 "sandbox_provider": sandbox_provider,
                 "sandbox_providers": sandbox_providers,
                 "sandbox_provider_capabilities": sandbox_provider_capabilities,
@@ -4493,6 +4491,8 @@ def create_app(
         async with asyncio.TaskGroup() as recoveries:
             for conv, client in roots:
                 recoveries.create_task(recover_root(conv, client), name=f"recover-root-{conv.id}")
+
+        await startup_inputs.runner_changed(app, convs)
 
     def _mint_managed_runner_token(runner_id: str, ttl_seconds: int) -> str | None:
         assert runner_account_store is not None and auth_provider is not None

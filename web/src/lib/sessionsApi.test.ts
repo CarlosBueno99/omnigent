@@ -18,6 +18,7 @@ import {
   fetchSessionItemsPage,
   forkSession,
   getSession,
+  getQueuedInputs,
   getSessionSlim,
   getSessionUsage,
   importLocalSessions,
@@ -1895,5 +1896,44 @@ describe("importLocalSessions", () => {
     // First the stream endpoint (404), then the buffered fallback.
     expect(fetchMock.mock.calls[0][0]).toBe("/v1/imports/local/stream");
     expect(fetchMock.mock.calls[1][0]).toBe("/v1/imports/local");
+  });
+});
+
+describe("getQueuedInputs", () => {
+  it("submits queued input on a path older replicas cannot mistake for steering", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ queued: true, item_id: "saved" }));
+    const event = {
+      type: "message",
+      delivery: "queued" as const,
+      data: { role: "user" as const, content: [] },
+    };
+    expect(await postEvent("session", event)).toMatchObject({ itemId: "saved" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/sessions/session/queue",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(event),
+      }),
+    );
+  });
+
+  it("reads every page using the server's cursor", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ data: [{ id: "first" }], next_cursor: 17 }));
+    fetchMock.mockResolvedValueOnce(
+      mockJsonResponse({ data: [{ id: "last" }], next_cursor: null }),
+    );
+    expect(await getQueuedInputs("session/1")).toEqual([{ id: "first" }, { id: "last" }]);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/sessions/session%2F1/queue?limit=32",
+      "/v1/sessions/session%2F1/queue?limit=32&after=17",
+    ]);
+  });
+
+  it("rejects a failed later page instead of returning a partial queue", async () => {
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ data: [{ id: "first" }], next_cursor: 17 }));
+    fetchMock.mockResolvedValueOnce(
+      mockJsonResponse({ detail: "unavailable" }, { ok: false, status: 503 }),
+    );
+    await expect(getQueuedInputs("session")).rejects.toThrow("unavailable");
   });
 });

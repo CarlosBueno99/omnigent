@@ -66,6 +66,8 @@ import {
   approve as approveElicitation,
   bindOnlyOnlineRunner,
   createSession,
+  deleteQueuedInput,
+  getQueuedInputs,
   getSessionSlim,
   getSessionUsage,
   fetchSessionItemsPage,
@@ -76,6 +78,7 @@ import {
   postEvent,
   type SessionItemsPage,
   updateSession,
+  updateQueuedInput,
 } from "@/lib/sessionsApi";
 import { isStaleCursorError } from "@/lib/staleCursor";
 import type {
@@ -125,11 +128,13 @@ import type {
   ModelUsage,
   NativeModelOption,
   PendingInput,
+  QueuedInput,
   SandboxStatus,
   Session,
   SessionStatus,
 } from "@/lib/types";
-import { uploadFile } from "@/lib/filesApi";
+import { downloadFile, uploadFile } from "@/lib/filesApi";
+import { getCachedServerInfo } from "@/lib/capabilities";
 import { attachmentKey } from "@/lib/attachments";
 import type { ActiveResponse } from "./types";
 import { supportsEffortControl } from "@/lib/sessionCapabilities";
@@ -599,19 +604,20 @@ export interface PendingUserMessage {
 }
 
 /**
- * A message the user submitted while the agent was busy. It is held
- * client-side — NOT yet POSTed — and shown in the docked queue strip above
- * the composer until the agent goes idle, when the head is flushed FIFO (one
- * per turn). This is the opposite of {@link PendingUserMessage}, which is
- * already POSTed and renders as an optimistic bubble in the transcript.
- *
- * In-memory only: a hard reload clears the queue, so `files` can be held
- * directly (no serialization concern).
+ * A composer input waiting for its turn. Supported servers persist and drain
+ * these inputs; older servers retain the browser's FIFO queue.
  */
 export interface QueuedMessage {
+  serverBacked?: boolean;
+  serverSaved?: boolean;
+  saving?: boolean;
+  /** A lost removal acknowledgement leaves a local copy for explicit recovery. */
+  removalUnconfirmed?: boolean;
+  /** Uploaded attachments restored from another client or a reload. */
+  fileBlocks?: ContentBlock[];
   /** Captured at enqueue time so background dispatch preserves the control. */
   command?: "compact";
-  /** Client-only id, e.g. `q_1`. */
+  /** Server item id after saving; a temporary `q_*` id while uploading. */
   queueId: string;
   /** Fully-assembled message text (mentions/quotes already applied). */
   text: string;
@@ -1157,14 +1163,8 @@ export interface AppChatState {
    */
   sideChatComposers: Record<string, SideChatComposerDraft>;
   /**
-   * Messages submitted while the agent is busy, held client-side (not yet
-   * POSTed) and shown in the composer's queue strip. The head is flushed
-   * FIFO — one per turn — when the session goes idle. In-memory only.
-   *
-   * One flat array across ALL conversations (each entry carries its
-   * `conversationId`), so it is app-global rather than per-conversation:
-   * `flushBackgroundQueues` drains conversations the user has navigated
-   * away from.
+   * Waiting composer inputs across conversations. Server-owned entries are
+   * snapshots; only legacy browser entries are drained by this store.
    */
   queuedMessages: QueuedMessage[];
   /** Bubble that should pulse briefly (highlight on nav jump). */
@@ -1210,15 +1210,17 @@ export interface ChatActions {
   /** Drop a side chat's unsent composer state (sent, or the tab was closed). */
   clearSideChatComposer: (childSessionId: string) => void;
   /**
-   * Queue a message client-side instead of POSTing it now, for a send made
-   * while the agent is busy. The head is flushed automatically (FIFO, one per
-   * turn) when the session next goes idle — see the `session_status` handler.
+   * Save a follow-up for the next idle turn, retaining browser queueing only
+   * when the server does not advertise durable_send_queue.
    */
   enqueueMessage: (text: string, files?: File[], replyDraft?: StoredReplyDraft) => void;
   /** Let a conversation's messages held for an offline host flush again. */
   releaseHostHeldMessages: (conversationId: string) => void;
   /** Remove a queued message by id (the strip's per-row delete). */
   dequeueMessage: (queueId: string) => void;
+  /** Remove a row atomically before returning its text and files for editing. */
+  recallQueuedMessage: (queueId: string, onRecalled: (message: QueuedMessage) => void) => void;
+  refreshQueuedMessages: (conversationId: string) => Promise<void>;
   /**
    * Reorder a queued message within its own conversation (the strip's
    * drag-to-reorder). Moves `queueId` so it sits before `beforeQueueId`, or to
@@ -1848,6 +1850,212 @@ async function uploadFileBlocks(
   return blocks;
 }
 
+const serverQueueOperations = new Map<string, Promise<void>>();
+const serverQueueReads = new Map<string, Promise<void>>();
+const serverQueueRevisions = new Map<string, number>();
+
+function queuedMessageFromInput(
+  conversationId: string,
+  input: QueuedInput,
+  local?: QueuedMessage,
+): QueuedMessage {
+  const content = input.data.content ?? [];
+  return {
+    queueId: input.id,
+    conversationId,
+    text:
+      input.type === "compact"
+        ? "/compact"
+        : content.flatMap((block) => (block.type === "input_text" ? [block.text] : [])).join("\n"),
+    ...(input.type === "compact" ? { command: "compact" as const } : {}),
+    stableId: input.data.stable_id,
+    agentId: input.data.agent_id,
+    replyDraft: input.data.reply_draft ?? local?.replyDraft,
+    files: local?.files,
+    fileBlocks: content.filter((block) => block.type !== "input_text"),
+    serverBacked: true,
+    serverSaved: true,
+    requiresRetry: input.status === "failed" || local?.removalUnconfirmed === true,
+    removalUnconfirmed: local?.removalUnconfirmed,
+  };
+}
+
+function syncServerQueue(conversationId: string, inputs: QueuedInput[]): void {
+  useChatStore.setState((state) => {
+    const local = state.queuedMessages.filter(
+      (message) => message.conversationId === conversationId,
+    );
+    const saved = inputs.map((input) =>
+      queuedMessageFromInput(
+        conversationId,
+        input,
+        local.find(
+          (message) =>
+            message.queueId === input.id ||
+            (message.stableId !== undefined && message.stableId === input.data.stable_id),
+        ),
+      ),
+    );
+    return {
+      queuedMessages: [
+        ...state.queuedMessages.filter((message) => message.conversationId !== conversationId),
+        ...saved,
+        ...local.filter(
+          (message) =>
+            (!message.serverSaved || message.removalUnconfirmed) &&
+            !saved.some(
+              (entry) =>
+                entry.queueId === message.queueId ||
+                (message.stableId !== undefined && entry.stableId === message.stableId),
+            ),
+        ),
+      ],
+    };
+  });
+}
+
+function currentQueuedMessage(message: QueuedMessage): QueuedMessage | undefined {
+  return useChatStore
+    .getState()
+    .queuedMessages.find(
+      (entry) =>
+        entry.queueId === message.queueId ||
+        (message.stableId !== undefined && entry.stableId === message.stableId),
+    );
+}
+
+function runServerQueueOperation(conversationId: string, operation: () => Promise<void>): void {
+  serverQueueRevisions.set(conversationId, (serverQueueRevisions.get(conversationId) ?? 0) + 1);
+  const prior = serverQueueOperations.get(conversationId) ?? Promise.resolve();
+  const pending = prior
+    .then(operation)
+    .catch((error: unknown) => {
+      toast.error(error instanceof Error ? error.message : "Could not update the queued message");
+    })
+    .finally(() => {
+      if (serverQueueOperations.get(conversationId) === pending) {
+        serverQueueOperations.delete(conversationId);
+        void useChatStore.getState().refreshQueuedMessages(conversationId);
+      }
+    });
+  serverQueueOperations.set(conversationId, pending);
+}
+
+async function saveQueuedMessage(message: QueuedMessage): Promise<QueuedMessage> {
+  const current = currentQueuedMessage(message) ?? message;
+  if (current.serverSaved) return current;
+  useChatStore.setState((state) => ({
+    queuedMessages: state.queuedMessages.map((entry) =>
+      entry.queueId === current.queueId ? { ...entry, saving: true, requiresRetry: false } : entry,
+    ),
+  }));
+  try {
+    const fileBlocks =
+      current.fileBlocks ?? (await uploadFileBlocks(current.conversationId, current.files ?? []));
+    const content: ContentBlock[] = [
+      ...fileBlocks,
+      ...(current.text.trim() ? [{ type: "input_text" as const, text: current.text }] : []),
+    ];
+    const response = await postEvent(current.conversationId, {
+      type: current.command ?? "message",
+      delivery: "queued",
+      data: {
+        ...(current.command ? {} : { role: "user", content }),
+        stable_id: current.stableId,
+        agent_id: current.agentId,
+        ...(current.replyDraft ? { reply_draft: current.replyDraft } : {}),
+      },
+    });
+    if (!response.itemId) throw new Error("The server did not confirm saving the queued message");
+    const saved = {
+      ...current,
+      queueId: response.itemId,
+      fileBlocks,
+      serverSaved: true,
+      saving: false,
+      requiresRetry: false,
+    };
+    useChatStore.setState((state) => ({
+      queuedMessages: state.queuedMessages.map((entry) =>
+        entry.queueId === current.queueId ? saved : entry,
+      ),
+    }));
+    return saved;
+  } catch (error) {
+    useChatStore.setState((state) => ({
+      queuedMessages: state.queuedMessages.map((entry) =>
+        entry.queueId === current.queueId
+          ? { ...entry, saving: false, requiresRetry: true }
+          : entry,
+      ),
+    }));
+    throw error;
+  }
+}
+
+function removeServerQueuedMessage(
+  message: QueuedMessage,
+  onRecalled?: (message: QueuedMessage) => void,
+): void {
+  runServerQueueOperation(message.conversationId, async () => {
+    const current = currentQueuedMessage(message);
+    if (!current) return;
+    const saved = await saveQueuedMessage(current);
+    const files = saved.files ?? [];
+    if (onRecalled && !saved.files) {
+      for (const block of saved.fileBlocks ?? []) {
+        if (block.type === "input_text") continue;
+        // Download before removing the row so a failed download cannot lose it.
+        // oxlint-disable-next-line no-await-in-loop
+        const file = await downloadFile(
+          saved.conversationId,
+          block.file_id,
+          block.filename ?? block.file_id,
+        );
+        uploadedFileBlockCache.set(file, new Map([[saved.conversationId, block]]));
+        files.push(file);
+      }
+    }
+    let recalled = { ...saved, files };
+    try {
+      const removed = await deleteQueuedInput(saved.conversationId, saved.queueId);
+      recalled = { ...queuedMessageFromInput(saved.conversationId, removed, saved), files };
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status >= 500) {
+        useChatStore.setState((state) => ({
+          queuedMessages: state.queuedMessages.map((entry) =>
+            entry.queueId === saved.queueId
+              ? { ...saved, files, removalUnconfirmed: true, requiresRetry: true }
+              : entry,
+          ),
+        }));
+        throw new Error("Could not confirm removal. Use Recover draft to retrieve your message.", {
+          cause: error,
+        });
+      }
+      if (error.status !== 404 || !saved.removalUnconfirmed) {
+        if (error.status === 409) {
+          useChatStore.setState((state) => ({
+            queuedMessages: state.queuedMessages.filter((entry) => entry.queueId !== saved.queueId),
+          }));
+        }
+        throw error;
+      }
+    }
+    useChatStore.setState((state) => ({
+      queuedMessages: state.queuedMessages.filter((entry) => entry.queueId !== saved.queueId),
+    }));
+    if (onRecalled) {
+      setSessionDraft(saved.conversationId, {
+        text: recalled.text,
+        files,
+        replyDraft: recalled.replyDraft,
+      });
+      onRecalled(recalled);
+    }
+  });
+}
+
 // Must match the message-highlight animation duration in index.css.
 const FLASH_DURATION_MS = 1500;
 const WORKSPACE_INVALIDATION_DEBOUNCE_MS = 750;
@@ -1928,6 +2136,9 @@ export function initChatStore(client: QueryClient): void {
   // the next one (production calls this once at boot; tests call it per case).
   // The send latch is per-conversation state now, cleared with the registry above.
   sendChains.clear();
+  serverQueueOperations.clear();
+  serverQueueReads.clear();
+  serverQueueRevisions.clear();
   queryClient = client;
 }
 
@@ -2162,6 +2373,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     queueSeq += 1;
     const queueId = `q_${queueSeq}`;
     const stableId = randomUUID().replace(/-/g, "");
+    const serverBacked = getCachedServerInfo()?.durable_send_queue === true;
     setActive((s) => ({
       // Queueing consumes the composer like a send does: a restored failed
       // send is no longer what the composer holds, and the queued message
@@ -2174,6 +2386,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         {
           queueId,
           text,
+          ...(serverBacked ? { serverBacked: true, saving: true } : {}),
           ...(isCompactControl(sessionHarness, text, files) ? { command: "compact" as const } : {}),
           stableId,
           conversationId,
@@ -2183,6 +2396,13 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         },
       ],
     }));
+    if (serverBacked) {
+      const message = get().queuedMessages.find((entry) => entry.queueId === queueId)!;
+      runServerQueueOperation(conversationId, async () => {
+        await saveQueuedMessage(message);
+      });
+      return;
+    }
     // A message queued while the agent is idle (a race where the send routed
     // to the queue but the turn had already ended) would otherwise wait for an
     // idle edge that never comes — flush now.
@@ -2190,9 +2410,53 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   },
 
   dequeueMessage: (queueId) => {
+    const message = get().queuedMessages.find((entry) => entry.queueId === queueId);
+    if (message?.serverBacked) {
+      removeServerQueuedMessage(message);
+      return;
+    }
     setActive((s) => ({
       queuedMessages: s.queuedMessages.filter((m) => m.queueId !== queueId),
     }));
+  },
+
+  recallQueuedMessage: (queueId, onRecalled) => {
+    const message = get().queuedMessages.find((entry) => entry.queueId === queueId);
+    if (!message) return;
+    if (message.serverBacked) {
+      removeServerQueuedMessage(message, onRecalled);
+    } else {
+      get().dequeueMessage(queueId);
+      onRecalled(message);
+    }
+  },
+
+  refreshQueuedMessages: async (conversationId) => {
+    if (
+      getCachedServerInfo()?.durable_send_queue !== true ||
+      serverQueueOperations.has(conversationId)
+    )
+      return;
+    const inFlight = serverQueueReads.get(conversationId);
+    if (inFlight) return inFlight;
+    const revision = serverQueueRevisions.get(conversationId);
+    const pending = getQueuedInputs(conversationId)
+      .then((inputs) => {
+        if (
+          serverQueueOperations.has(conversationId) ||
+          serverQueueRevisions.get(conversationId) !== revision
+        )
+          return;
+        syncServerQueue(conversationId, inputs);
+      })
+      .catch(() => {
+        // Keep the last confirmed queue when a poll fails; the next poll retries.
+      })
+      .finally(() => {
+        serverQueueReads.delete(conversationId);
+      });
+    serverQueueReads.set(conversationId, pending);
+    return pending;
   },
 
   releaseHostHeldMessages: (conversationId) => {
@@ -2211,6 +2475,23 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   },
 
   reorderQueuedMessage: (queueId, beforeQueueId) => {
+    const message = get().queuedMessages.find((entry) => entry.queueId === queueId);
+    if (message?.serverBacked) {
+      const before = get().queuedMessages.find((entry) => entry.queueId === beforeQueueId);
+      runServerQueueOperation(message.conversationId, async () => {
+        const current = currentQueuedMessage(message);
+        if (!current) return;
+        const saved = await saveQueuedMessage(current);
+        const target = before ? currentQueuedMessage(before) : undefined;
+        if (beforeQueueId !== null && (!target || target.conversationId !== saved.conversationId))
+          return;
+        await updateQueuedInput(saved.conversationId, saved.queueId, {
+          action: "reorder",
+          before_id: target?.queueId ?? null,
+        });
+      });
+      return;
+    }
     setActive((s) => {
       const moved = s.queuedMessages.find((m) => m.queueId === queueId);
       if (moved === undefined || queueId === beforeQueueId) return {};
@@ -2244,10 +2525,28 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     const target = s.queuedMessages.find((m) => m.queueId === queueId);
     const agentId = target?.agentId ?? s.boundAgentId;
     if (target === undefined || agentId === null) return;
+    if (target.removalUnconfirmed) {
+      toast.error("Use Recover draft to retrieve this message before sending it again.");
+      return;
+    }
     if (target.command === "compact" && rejectBusyCompact(target.conversationId)) return;
     // Nothing can be steered past a first message still held for startup; it stays queued.
     const targetState = setterForState(target.conversationId);
     if (targetState !== null && holdsInitialDraft(targetState)) return;
+    if (target.serverBacked) {
+      runServerQueueOperation(target.conversationId, async () => {
+        const current = currentQueuedMessage(target);
+        if (!current) return;
+        const saved = await saveQueuedMessage(current);
+        await updateQueuedInput(saved.conversationId, saved.queueId, { action: "steer" });
+        useChatStore.setState((state) => ({
+          queuedMessages: state.queuedMessages.filter(
+            (message) => message.queueId !== saved.queueId,
+          ),
+        }));
+      });
+      return;
+    }
     // Remove BEFORE the POST so a concurrent flush can't also send it.
     setActive({ queuedMessages: s.queuedMessages.filter((m) => m.queueId !== queueId) });
     void s.send(target.text, agentId, target.files, queuedSendOptions(target));
@@ -2276,6 +2575,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     }
     const batch = compactIndex < 0 ? own : own.slice(0, compactIndex);
     if (batch.some((m) => (m.agentId ?? s.boundAgentId) === null)) return;
+    if (batch.some((message) => message.serverBacked)) {
+      for (const message of batch) s.steerMessage(message.queueId);
+      return;
+    }
     const batchOrder = new Map(batch.map((m, index) => [m.queueId, index]));
     // Remove BEFORE the POSTs so a concurrent flush can't also send one.
     setActive({
@@ -2334,7 +2637,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // so an undrained message from another conversation can sit at index 0; a
     // head-only guard would let it block this conversation's messages forever.
     const head = s.queuedMessages.find((m) => m.conversationId === s.conversationId);
-    if (head === undefined || head.requiresRetry || head.waitingForHost) return;
+    if (head === undefined || head.serverBacked || head.requiresRetry || head.waitingForHost)
+      return;
     // Remove it BEFORE the POST so a re-entrant flush can't double-send.
     setActive({ queuedMessages: s.queuedMessages.filter((m) => m.queueId !== head.queueId) });
     void s.send(head.text, head.agentId ?? s.boundAgentId, head.files, queuedSendOptions(head));
@@ -2397,7 +2701,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       const cooldownUntil = backgroundFlushCooldownUntil.get(conversationId);
       if (cooldownUntil !== undefined && cooldownUntil > now) continue;
       const head = get().queuedMessages.find((m) => m.conversationId === conversationId);
-      if (head === undefined || head.requiresRetry || head.waitingForHost) continue;
+      if (head === undefined || head.serverBacked || head.requiresRetry || head.waitingForHost)
+        continue;
       const compactAgentId = head.agentId ?? local?.boundAgentId;
       if (head.command === "compact" && !compactAgentId) continue;
 
@@ -4764,6 +5069,7 @@ async function bindStream(
   }
   const stateBeforeFetch = get();
   const launchBeforeFetch = mcpStartupBeforeSnapshot(id, stateBeforeFetch);
+  const queueRevisionBeforeFetch = serverQueueRevisions.get(id);
   try {
     // One larger page, so opening a session is a single round trip that then
     // stays still — rather than a small page followed by background growth
@@ -4778,6 +5084,13 @@ async function bindStream(
       fetchSessionItemsPage(id, { limit: INITIAL_WINDOW_ITEMS }),
     ]);
     if (isConversationDisposed(id)) return;
+    if (
+      session.queuedInputs !== undefined &&
+      !serverQueueOperations.has(id) &&
+      serverQueueRevisions.get(id) === queueRevisionBeforeFetch
+    ) {
+      syncServerQueue(id, session.queuedInputs);
+    }
     const items = page.items;
     const snapshotNativeMessageIds = nativeCompletedMessageIds(items);
     snapshotNativeMessageIds.forEach((messageId) => ignoredNativeMessageIds.add(messageId));
@@ -7757,6 +8070,11 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
   };
 
   switch (event.type) {
+    case "session_queue_updated":
+      if (event.conversationId === sourceConversationId) {
+        void useChatStore.getState().refreshQueuedMessages(event.conversationId);
+      }
+      return;
     case "response_completed":
     case "response_failed":
       // Prefer contextTokens (last sub-call total) for the context ring — on

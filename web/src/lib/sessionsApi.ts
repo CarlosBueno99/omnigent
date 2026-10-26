@@ -22,6 +22,7 @@ import type {
   BackgroundTaskInfo,
   ModelUsage,
   NativeModelOption,
+  QueuedInput,
   NestedSessionItem,
   SandboxStatus,
   Session,
@@ -221,6 +222,7 @@ interface SessionResponseWire {
     content: MessageContentBlock[];
     created_by?: string;
   }[];
+  queued_inputs?: QueuedInput[];
   /**
    * Numeric permission level (1=read, 2=edit, 3=manage, 4=owner) the
    * authenticated user holds on this session. Optional on the wire
@@ -360,6 +362,7 @@ function sessionFromWire(wire: SessionResponseWire): Session {
       content: p.content,
       ...(p.created_by !== undefined ? { createdBy: p.created_by } : {}),
     })),
+    ...(wire.queued_inputs !== undefined ? { queuedInputs: wire.queued_inputs } : {}),
     permissionLevel: wire.permission_level ?? null,
     parentSessionId: wire.parent_session_id ?? null,
     subAgentName: wire.sub_agent_name ?? null,
@@ -1397,15 +1400,20 @@ export async function postEvent(
   event: SessionEventInput,
   opts?: { holdWhenHostOffline?: boolean },
 ): Promise<PostEventResponse> {
-  const res = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sessionId)}/events`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...backgroundSessionTitlesRequestHeaders(),
-      ...(opts?.holdWhenHostOffline ? { [HOST_OFFLINE_HOLD_HEADER]: "on" } : {}),
+  // A distinct path makes an older replica reject queueing instead of steering it.
+  const endpoint = event.delivery === "queued" ? "queue" : "events";
+  const res = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/${endpoint}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...backgroundSessionTitlesRequestHeaders(),
+        ...(opts?.holdWhenHostOffline ? { [HOST_OFFLINE_HOLD_HEADER]: "on" } : {}),
+      },
+      body: JSON.stringify(event),
     },
-    body: JSON.stringify(event),
-  });
+  );
   // Throw a typed ApiError (not the bare status line) so callers can branch
   // on `code` — e.g. surface a friendly "runner didn't come online" message
   // for the 503 the server returns when a host-bound runner never connects.
@@ -1420,6 +1428,51 @@ export async function postEvent(
       recovery?: PostEventResponse["recovery"];
     },
   );
+}
+
+export async function getQueuedInputs(sessionId: string): Promise<QueuedInput[]> {
+  const entries: QueuedInput[] = [];
+  let after: number | null = null;
+  do {
+    const query = new URLSearchParams({ limit: "32" });
+    if (after !== null) query.set("after", String(after));
+    // oxlint-disable-next-line no-await-in-loop
+    const response = await authenticatedFetch(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/queue?${query}`,
+    );
+    // oxlint-disable-next-line no-await-in-loop
+    if (!response.ok) throw await apiErrorFromResponse(response);
+    // oxlint-disable-next-line no-await-in-loop
+    const page = (await response.json()) as { data: QueuedInput[]; next_cursor: number | null };
+    entries.push(...page.data);
+    after = page.next_cursor;
+  } while (after !== null);
+  return entries;
+}
+
+export async function updateQueuedInput(
+  sessionId: string,
+  id: string,
+  update: { action: "steer" | "retry" | "reorder"; before_id?: string | null },
+): Promise<void> {
+  const response = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(update),
+    },
+  );
+  if (!response.ok) throw await apiErrorFromResponse(response);
+}
+
+export async function deleteQueuedInput(sessionId: string, id: string): Promise<QueuedInput> {
+  const response = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.json() as Promise<QueuedInput>;
 }
 
 /**

@@ -68,7 +68,10 @@ def _record_message_posts(page: Page, session_id: str) -> list[str]:
     def record(request: Request) -> None:
         if request.method != "POST":
             return
-        if urlparse(request.url).path != f"/v1/sessions/{session_id}/events":
+        if urlparse(request.url).path not in (
+            f"/v1/sessions/{session_id}/events",
+            f"/v1/sessions/{session_id}/queue",
+        ):
             return
         body = request.post_data_json
         if not isinstance(body, dict) or body.get("type") != "message":
@@ -153,7 +156,7 @@ def test_existing_queue_still_drains_in_order_after_enabling_always_steer(
     _send(page, _EARLIER_QUEUED)
     queue = page.get_by_test_id("composer-queued-strip")
     expect(queue).to_contain_text(_EARLIER_QUEUED)
-    assert posts == [_INITIAL_ORDERING]
+    _wait_for(page, lambda: posts == [_INITIAL_ORDERING, _EARLIER_QUEUED])
 
     toggle = _open_general_settings(page, base_url, from_chat=True)
     expect(toggle).to_have_attribute("aria-checked", "false")
@@ -165,15 +168,16 @@ def test_existing_queue_still_drains_in_order_after_enabling_always_steer(
 
     _send(page, _LATER_QUEUED)
     expect(queue).to_contain_text(_LATER_QUEUED)
-    page.wait_for_timeout(300)
-    assert posts == [_INITIAL_ORDERING]
-
-    _release_gate(mock_url)
     _wait_for(
         page,
         lambda: posts == [_INITIAL_ORDERING, _EARLIER_QUEUED, _LATER_QUEUED],
-        timeout_s=90.0,
     )
+    response = httpx.get(f"{base_url}/v1/sessions/{session_id}/queue", timeout=10.0)
+    response.raise_for_status()
+    assert len(response.json()["data"]) == 2
+    assert not _items_contain(base_url, session_id, _EARLIER_QUEUED)
+
+    _release_gate(mock_url)
     _wait_for(
         page,
         lambda: _items_contain(base_url, session_id, _EARLIER_QUEUED, _LATER_QUEUED),

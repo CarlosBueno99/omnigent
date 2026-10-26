@@ -384,9 +384,9 @@ from omnigent.server.schemas import (
     SessionUsageEvent,
 )
 from omnigent.server.startup_inputs import (
-    STARTUP_LABEL,
     StartupInputContext,
     restore_pending_inputs,
+    wake_queued_input_worker,
     wake_startup_worker,
 )
 from omnigent.server.subagent_activity import (
@@ -3045,8 +3045,8 @@ async def _persist_external_conversation_item_unlocked(
         existing = await asyncio.to_thread(conversation_store.get_item, session_id, item.stable_id)
         if existing is not None:
             return existing.id
-    if _drains_pending_inputs(item) and STARTUP_LABEL in conv.labels:
-        await restore_pending_inputs(conversation_store, session_id)
+    if _drains_pending_inputs(item):
+        await restore_pending_inputs(conversation_store, session_id, conversation=conv)
     # A native user message round-tripping back from the transcript:
     # drain its optimistic pending-input entry and fold the entry's file
     # blocks (image / file) into the item BEFORE persisting. The transcript
@@ -3196,9 +3196,10 @@ async def _persist_external_conversation_item_unlocked(
     # go back into play.
     _release_drained_inputs(session_id, [*skipped_pending, *uncertain_pending, drained])
     _restore_drained_inputs(session_id, held_older, None)
-    if item.replaces_pending_id is not None and conv.host_id is not None:
-        # A saved startup input's receipt frees the next one queued behind it.
-        wake_startup_worker(conv.host_id)
+    if item.replaces_pending_id is not None:
+        wake_queued_input_worker(session_id)
+        if conv.host_id is not None:
+            wake_startup_worker(conv.host_id)
     # Not a duplicate: publish side effects for each skipped pair. Items are
     # [user0, error0, user1, error1, ...]; 2 per skipped entry. The consumed
     # event names each skipped entry so clients settle those bubbles in order
@@ -6949,13 +6950,16 @@ async def _forward_event_to_runner(
     # A web send is persisted under its client stable id (see _web_send_stable_id).
     item = _build_new_item(body, turn_id, created_by=created_by, adopt_stable_id=True)
     item = item.model_copy(update={"replaces_pending_id": startup_input_id})
-    persisted_items = await asyncio.to_thread(
-        conversation_store.append,
-        session_id,
-        [item],
+    # Saved input is already durable. Keep its pending row as the cross-replica
+    # delivery guard until the runner accepts it, then promote it to history.
+    persisted_items = (
+        []
+        if startup_input_id is not None
+        else await asyncio.to_thread(conversation_store.append, session_id, [item])
     )
     if (
-        item.stable_id is not None
+        persisted_items
+        and item.stable_id is not None
         and persisted_items[0].deduplicated
         and not _stable_id_reuse_is_exact_retry(persisted_items[0], item)
     ):
@@ -6970,6 +6974,7 @@ async def _forward_event_to_runner(
             session_id,
             [item],
         )
+    persisted_item_id = startup_input_id or persisted_items[0].id
     await _seed_missing_title_from_user_message(
         conv,
         item,
@@ -7054,7 +7059,7 @@ async def _forward_event_to_runner(
         # cache the runner reloads history (which includes this item in
         # PRE-resolution form) and drops it by id, appending its own
         # resolved copy — id-based dedup, not a role/content guess.
-        "persisted_item_id": persisted_items[0].id,
+        "persisted_item_id": persisted_item_id,
     }
     if agent_revision is not None:
         runner_body["agent_revision"] = agent_revision
@@ -7437,7 +7442,7 @@ async def _forward_event_to_runner(
                 _reject_error,
                 conversation_store,
                 owner_runner_id=conv.runner_id,
-                item_id=persisted_items[0].id,
+                item_id=persisted_item_id,
             )
             _publish_status(
                 session_id,
@@ -7448,6 +7453,10 @@ async def _forward_event_to_runner(
             raise OmnigentError(
                 f"Runner rejected the message: {_reject_detail}",
                 code=ErrorCode.RUNNER_UNAVAILABLE,
+            )
+        if startup_input_id is not None:
+            persisted_items = await asyncio.to_thread(
+                conversation_store.append, session_id, [item]
             )
         # Publish input.consumed AFTER the forward succeeds —
         # the runner has the message and will start the turn.
@@ -7709,6 +7718,9 @@ async def _forward_codex_side_chat_turn(
     conv: Conversation,
     body: SessionEventInput,
     runner_client: httpx.AsyncClient,
+    *,
+    startup_input: StartupInputContext | None = None,
+    conversation_store: ConversationStore | None = None,
 ) -> _SessionEventDispatchResult | None:
     """
     Forward a Codex ``/side`` child's user turn to the PARENT runner.
@@ -7735,6 +7747,17 @@ async def _forward_codex_side_chat_turn(
     child_thread_id = (conv.labels or {}).get(_CODEX_NATIVE_SUBAGENT_THREAD_ID_LABEL_KEY)
     if not parent_id or not child_thread_id:
         return None
+    pending_id = None
+    if startup_input is not None:
+        assert conversation_store is not None
+        if not await startup_input.claim(conversation_store, conv.id):
+            return _SessionEventDispatchResult(item_id=None, pending_id=None)
+        pending_id = pending_inputs.record(
+            conv.id,
+            body.data.get("content", []),
+            stable_id=startup_input.input_id,
+            created_by=startup_input.user_id,
+        )
     resp = await runner_client.post(
         f"/v1/sessions/{url_component(parent_id)}/events",
         json={
@@ -7745,7 +7768,7 @@ async def _forward_codex_side_chat_turn(
     )
     if resp.status_code >= 400:
         raise _codex_side_chat_runner_error(resp)
-    return _SessionEventDispatchResult(item_id=None, pending_id=None)
+    return _SessionEventDispatchResult(item_id=None, pending_id=pending_id)
 
 
 def _codex_side_chat_runner_error(resp: httpx.Response) -> OmnigentError:
@@ -7882,7 +7905,13 @@ async def _dispatch_session_event_to_runner_impl(
         # Codex /side follow-up: drive the child on its own Codex thread via the
         # parent's runner/bridge; do not persist AP-side (the forwarder mirrors
         # the child thread echo, staying the single writer).
-        side_result = await _forward_codex_side_chat_turn(conv, body, runner_client)
+        side_result = await _forward_codex_side_chat_turn(
+            conv,
+            body,
+            runner_client,
+            startup_input=startup_input,
+            conversation_store=conversation_store,
+        )
         if side_result is not None:
             return side_result
     if body.type == "message" and _is_native_terminal_session(conv):
@@ -13560,10 +13589,19 @@ async def _get_session_snapshot(
     response.inference_error = inference_error
     response.usage_included = include_usage
     startup = getattr(request.app.state, "startup_inputs", None) if request is not None else None
-    if startup is not None and STARTUP_LABEL in conv.labels:
-        queued = await startup.pending_snapshot(session_id)
+    if startup is not None:
+        from omnigent.server.routes.sessions.routes_queue import queue_item
+        from omnigent.server.startup_inputs import is_queued_input
+
+        saved = await asyncio.to_thread(conv_store.list_pending_inputs, session_id)
+        queued = await startup.pending_snapshot(session_id, items=saved, conversation=conv)
         known = {item["pending_id"] for item in response.pending_inputs}
         response.pending_inputs.extend(item for item in queued if item["pending_id"] not in known)
+        response.queued_inputs = [
+            queue_item(item)
+            for item in saved
+            if is_queued_input(item) and item.status == "completed"
+        ]
     return response
 
 

@@ -1,6 +1,6 @@
 """E2E: steering a queued message sends it NOW, mid-turn.
 
-Guards the steer affordance of the client-side queue:
+Guards the steer affordance against servers without durable queue support:
 
     A first message is sent (and acked), but no ``session.status`` event
     ever follows, so the session's local status stays "streaming"
@@ -63,6 +63,14 @@ async def _drive_steer(base_url: str, session_id: str) -> None:
         browser = await pw.chromium.launch()
         page = await browser.new_page()
         try:
+
+            async def legacy_info(route: Route) -> None:
+                response = await route.fetch()
+                body = await response.json()
+                body["durable_send_queue"] = False
+                await route.fulfill(response=response, json=body)
+
+            await page.route("**/v1/info", legacy_info)
             # Every (session_id, text) POSTed to a /events endpoint. Each is
             # acked immediately; no session.status event ever follows, so the
             # session's local status stays "streaming" (busy) after msg1 —

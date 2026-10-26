@@ -490,3 +490,47 @@ describe("QueuedMessagesStrip", () => {
     );
   });
 });
+
+it("shows uploaded attachments restored from another client", () => {
+  render(
+    <QueuedMessagesStrip
+      messages={[
+        {
+          ...msg("saved", "Inspect these"),
+          serverBacked: true,
+          fileBlocks: [
+            { type: "input_image", file_id: "image", filename: "shot.png" },
+            { type: "input_file", file_id: "document", filename: "notes.txt" },
+          ],
+        },
+      ]}
+      onDelete={vi.fn()}
+      onEdit={vi.fn()}
+    />,
+  );
+  expect(screen.getByTestId("queued-message-attachments")).toHaveAttribute(
+    "title",
+    "shot.png\nnotes.txt",
+  );
+});
+
+it("offers draft recovery without steering when removal was not acknowledged", () => {
+  render(
+    <QueuedMessagesStrip
+      messages={[
+        {
+          ...msg("saved", "Keep this"),
+          serverBacked: true,
+          removalUnconfirmed: true,
+          requiresRetry: true,
+        },
+      ]}
+      onDelete={vi.fn()}
+      onEdit={vi.fn()}
+      onSteer={vi.fn()}
+    />,
+  );
+  expect(screen.getByText("Removal unconfirmed")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Recover draft" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Retry queued message" })).toBeNull();
+});

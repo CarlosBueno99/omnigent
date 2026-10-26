@@ -125,8 +125,8 @@ and steers messages while the agent is busy.
 - `new-session-hotkey`: ⌘+Shift+O on macOS or Ctrl+Shift+O on Windows/Linux
   opens and focuses the new-session composer in browsers. Native shells retain
   ⌘/Ctrl+Alt+N. Embedded apps require focus inside the app.
-- `queue-and-steer`: messages sent while the agent is busy wait in a queue and
-  can be steered into the running turn.
+- `queue-and-steer`: messages sent while the agent is busy wait in a shared
+  server queue, survive closing the app, and can be steered into the running turn.
 - `browser-pointer-queue`: desktop Design-mode instructions follow the same queue
   and always-steer preference, keeping their element screenshots.
 - `pi-compact`: `/compact` follows the normal queue/Always steer preference.
@@ -552,6 +552,10 @@ Other connection providers alone do not enable the managed MCP picker.
   launch; reload the session to check persistence. The fork dialog has no composer cycle shortcuts; mobile
   without a physical keyboard continues to use the pickers.
 - **`queue-and-steer`:**
+  `tests/e2e_ui/chat/test_durable_send_queue.py::test_shared_queue_runs_after_browsers_close`
+  queues from desktop, observes the same queue in a phone viewport, closes both
+  browsers, and verifies ordered delivery before reopening. The older-server
+  fallback is covered by
   `tests/e2e_ui/chat/test_queue_steer.py::test_steer_sends_queued_message_while_busy`,
   `tests/e2e_ui/chat/test_composer_bulk_steer.py::test_bulk_steer_retries_the_whole_queue`
 - **`browser-pointer-queue`, desktop:** manually hold an agent turn open, then

@@ -1394,6 +1394,7 @@ class SessionEventInput(BaseModel):
     model_override: str | None = None
     tools: list[dict[str, Any]] | None = None
     created_by: str | None = None
+    delivery: Literal["immediate", "queued"] = "immediate"
 
     @field_validator("data")
     @classmethod
@@ -2432,6 +2433,7 @@ class SessionResponse(BaseModel):
     # Durable startup inputs plus ordinary native inputs awaiting a receipt.
     # Each {"pending_id", "content"} restores a pending bubble on reconnect.
     pending_inputs: list[dict[str, Any]] = Field(default_factory=list)
+    queued_inputs: list[dict[str, Any]] = Field(default_factory=list)
     workspace: str | None = None
     git_branch: str | None = None
     archived: bool = False

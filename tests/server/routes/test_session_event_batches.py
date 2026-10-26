@@ -103,6 +103,10 @@ class _RecordingStore:
         del session_id, item_id
         return None
 
+    def list_pending_inputs(self, session_id: str) -> list[ConversationItem]:
+        del session_id
+        return []
+
     def append(
         self,
         session_id: str,
